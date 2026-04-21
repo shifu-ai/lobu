@@ -17,6 +17,7 @@ import {
   type DataSourceInput,
   executeDataSources,
 } from '../utils/execute-data-sources';
+import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
 import { RESERVED_PATHS } from '../utils/reserved';
 import { getWorkspaceProvider } from '../workspace';
 import type { ToolContext } from './registry';
@@ -456,13 +457,34 @@ async function _resolvePath(
     );
     const mergedTabs = mergeTabs(entityTabs, entityTypeTabs);
     const processedEntityTabs = await processTabsDataSources(mergedTabs, entityDataCtx, sql);
+    if (entityRow.entity_type === '$member' && !ctx.memberRole) {
+      throw new Error(
+        'Member details are only visible to members of this workspace. Join the workspace to see members.'
+      );
+    }
+    const rawEntityMetadata = entityRow.metadata ?? {};
+    let safeEntityMetadata = rawEntityMetadata;
+    const canSeeEmail = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+    if (entityRow.entity_type === '$member' && !canSeeEmail) {
+      const schemaRow = await simpleQuery(sql`
+        SELECT metadata_schema FROM entity_types
+        WHERE slug = '$member' AND organization_id = ${workspace.id} AND deleted_at IS NULL
+        LIMIT 1
+      `);
+      const memberSchema = (schemaRow[0]?.metadata_schema as Record<string, unknown> | null) ?? null;
+      const { emailField } = resolveMemberSchemaFieldsFromSchema(memberSchema);
+      if (emailField in safeEntityMetadata) {
+        const { [emailField]: _drop, ...rest } = safeEntityMetadata;
+        safeEntityMetadata = rest;
+      }
+    }
     resolvedEntity = {
       id: entityRow.id,
       entity_type: entityRow.entity_type,
       slug: entityRow.slug,
       name: entityRow.name,
       parent_id: entityRow.parent_id,
-      metadata: entityRow.metadata ?? {},
+      metadata: safeEntityMetadata,
       json_template: entityCleanTpl,
       json_template_version: toVersionNumber(entityRow.json_template_version),
       template_data: entityTemplateData,

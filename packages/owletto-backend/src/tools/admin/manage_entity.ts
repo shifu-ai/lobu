@@ -39,6 +39,7 @@ import {
   validateSource,
   validateTypeRule,
 } from '../../utils/relationship-validation';
+import { resolveMemberSchemaFieldsFromSchema } from '../../utils/member-entity-type';
 import { validateEntityMetadata } from '../../utils/schema-validation';
 import {
   buildEntityUrl,
@@ -664,11 +665,40 @@ async function handleUpdate(
   };
 }
 
+// Access policy for the built-in $member entity type:
+//  - Anyone who isn't a member of the org cannot see the member list at all.
+//  - Members who aren't admin/owner see names + non-PII metadata, but not the
+//    email address.
+//  - Only admin/owner see the email field.
+function canSeeMemberList(ctx: ToolContext): boolean {
+  return !!ctx.memberRole;
+}
+
+function canSeeMemberEmail(ctx: ToolContext): boolean {
+  return ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+}
+
+function redactMemberEmail(
+  metadata: Record<string, unknown>,
+  schema: Record<string, unknown> | null | undefined
+): Record<string, unknown> {
+  const { emailField } = resolveMemberSchemaFieldsFromSchema(schema);
+  if (!(emailField in metadata)) return metadata;
+  const { [emailField]: _removed, ...rest } = metadata;
+  return rest;
+}
+
 async function handleList(
   args: ManageEntityArgs,
   env: Env,
   ctx: ToolContext
 ): Promise<ManageEntityResult> {
+  if (args.entity_type === '$member' && !canSeeMemberList(ctx)) {
+    throw new Error(
+      'The member list is only visible to members of this workspace. Join the workspace to see members.'
+    );
+  }
+
   const sql = getDb();
 
   // Run list query and entity type schema fetch in parallel
@@ -709,6 +739,7 @@ async function handleList(
 
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
   const ownerSlug = await getOrganizationSlug(ctx.organizationId);
+  const hideMemberEmail = !canSeeMemberEmail(ctx);
 
   return {
     action: 'list',
@@ -722,6 +753,11 @@ async function handleList(
             parentSlug: e.parent_slug ?? null,
           }
         : null;
+      const rawMetadata = e.metadata ?? {};
+      const metadata =
+        hideMemberEmail && e.entity_type === '$member'
+          ? redactMemberEmail(rawMetadata, schema)
+          : rawMetadata;
       return {
         id: e.id,
         entity_type: e.entity_type,
@@ -731,7 +767,7 @@ async function handleList(
         parent_name: e.parent_name,
         parent_slug: e.parent_slug,
         parent_entity_type: e.parent_entity_type,
-        metadata: e.metadata ?? {},
+        metadata,
         enabled_classifiers: e.enabled_classifiers,
         created_at: e.created_at,
         total_content: e.total_content,
@@ -766,7 +802,25 @@ async function handleGet(
     throw new Error(`Entity with ID ${entityId} not found`);
   }
 
+  if (entity.entity_type === '$member' && !canSeeMemberList(ctx)) {
+    throw new Error(
+      'Member details are only visible to members of this workspace. Join the workspace to see members.'
+    );
+  }
+
   const viewUrl = await buildEntityViewUrl(ctx, entity);
+
+  let metadata = entity.metadata ?? {};
+  if (entity.entity_type === '$member' && !canSeeMemberEmail(ctx)) {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT metadata_schema FROM entity_types
+      WHERE slug = '$member' AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      LIMIT 1
+    `;
+    const memberSchema = (rows[0]?.metadata_schema as Record<string, unknown> | null) ?? null;
+    metadata = redactMemberEmail(metadata, memberSchema);
+  }
 
   return {
     action: 'get',
@@ -778,7 +832,7 @@ async function handleGet(
       parent_id: entity.parent_id,
       parent_name: entity.parent_name,
       parent_slug: entity.parent_slug ?? null,
-      metadata: entity.metadata ?? {},
+      metadata,
       enabled_classifiers: entity.enabled_classifiers,
       created_at: toIsoStringOrNow(entity.created_at),
       view_url: viewUrl,

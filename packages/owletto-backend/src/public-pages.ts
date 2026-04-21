@@ -107,6 +107,7 @@ function buildToolContext(requestUrl: string, organizationId: string): ToolConte
   return {
     organizationId,
     userId: null,
+    memberRole: null,
     isAuthenticated: false,
     requestUrl,
     baseUrl: getPublicOrigin(requestUrl),

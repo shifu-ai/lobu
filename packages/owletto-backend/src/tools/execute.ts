@@ -201,6 +201,7 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
   return {
     organizationId: authCtx.organizationId,
     userId: authCtx.userId,
+    memberRole: authCtx.memberRole,
     agentId: authCtx.agentId,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,

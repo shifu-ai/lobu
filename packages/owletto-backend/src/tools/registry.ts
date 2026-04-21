@@ -50,6 +50,8 @@ export interface ToolContext {
   organizationId: string;
   /** User ID from OAuth token, PAT, or session (null for anonymous public reads) */
   userId: string | null;
+  /** Caller's role in the organization (null for non-members reading a public workspace). */
+  memberRole: string | null;
   /** Durable Owletto/Lobu agent identity bound to this MCP session, when provided. */
   agentId?: string | null;
   /** Whether request was authenticated */
