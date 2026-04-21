@@ -12,6 +12,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import { type DbClient, getDb } from '../../db/client';
 import type { Env } from '../../index';
 import logger from '../../utils/logger';
+import { ensureMemberEntityType } from '../../utils/member-entity-type';
 import { RESERVED_ENTITY_TYPES } from '../../utils/reserved';
 import { resolveUsernames } from '../../utils/resolve-usernames';
 import type { ToolContext } from '../registry';
@@ -369,14 +370,22 @@ async function etHandleGet(
   if (!slug) throw new Error('slug is required for get action');
 
   const sql = getDb();
-  const rows = await sql.unsafe(
-    `SELECT ${ENTITY_TYPE_COLUMNS} FROM entity_types
-     WHERE slug = $1
-       AND deleted_at IS NULL
-       AND organization_id = $2
-     LIMIT 1`,
-    [slug, ctx.organizationId]
-  );
+  const fetchRow = () =>
+    sql.unsafe(
+      `SELECT ${ENTITY_TYPE_COLUMNS} FROM entity_types
+       WHERE slug = $1
+         AND deleted_at IS NULL
+         AND organization_id = $2
+       LIMIT 1`,
+      [slug, ctx.organizationId]
+    );
+
+  let rows = await fetchRow();
+
+  if (rows.length === 0 && slug === '$member') {
+    await ensureMemberEntityType(ctx.organizationId);
+    rows = await fetchRow();
+  }
 
   if (rows.length === 0) {
     return { schema_type: 'entity_type', action: 'get', entity_type: null };
