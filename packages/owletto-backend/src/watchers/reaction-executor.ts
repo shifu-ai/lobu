@@ -35,7 +35,12 @@ function buildReactionSDK(
   const windowId = window.id;
   // userId=null + isAuthenticated=true signals a system/internal call (e.g. reaction scripts).
   // canWriteEntity() in organization-access.ts grants write access on org match alone for this case.
-  const toolCtx = { organizationId: organization_id, userId: null, isAuthenticated: true };
+  const toolCtx = {
+    organizationId: organization_id,
+    userId: null,
+    memberRole: null,
+    isAuthenticated: true,
+  };
   const entityIds = context.entities.map((e) => e.id);
 
   function track(

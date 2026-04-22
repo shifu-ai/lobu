@@ -71,6 +71,7 @@ function publicToolContext(requestUrl: string, organizationId: string) {
   return {
     organizationId,
     userId: null,
+    memberRole: null,
     isAuthenticated: false,
     clientId: null,
     requestUrl,

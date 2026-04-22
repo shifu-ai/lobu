@@ -43,6 +43,7 @@ export async function createProvisionedConnection(
       {
         organizationId: params.organizationId,
         userId: params.userId,
+        memberRole: null,
         isAuthenticated: true,
         requestUrl: params.requestUrl,
         baseUrl: getConfiguredPublicOrigin() ?? undefined,
