@@ -77,8 +77,13 @@ export function HeroSection(props: {
           style={{ color: "var(--color-page-text)" }}
         >
           <HighlightedText
-            text="AI agents that remember everything"
-            highlight="remember everything"
+            text="The agent that never forgets."
+            highlight="never forgets"
+          />
+          <br />
+          <HighlightedText
+            text="And never waits to be asked."
+            highlight="never waits"
           />
         </h1>
         {props.heroCopy ? (
@@ -93,8 +98,9 @@ export function HeroSection(props: {
             class="hero-rise hero-rise-3 text-lg mx-auto mb-4 leading-relaxed max-w-3xl"
             style={{ color: "var(--color-page-text-muted)" }}
           >
-            Deploy AI agents with long-term memory, secure access to your tools,
-            and the same context everywhere they run.
+            Ingests any data, connects any tool, and ships in your chat.
+            <br />
+            Sandboxed on the OpenClaw runtime and fully self-hostable.
           </p>
         )}
         {/* CTA buttons */}
