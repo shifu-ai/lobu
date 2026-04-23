@@ -13,7 +13,12 @@ const logger = createLogger("claude-oauth-module");
 
 // pi-ai detects Anthropic OAuth by `sk-ant-oat` in the value, so OAuth
 // placeholders must keep that marker while the proxy swaps in the real token.
+const OAUTH_TOKEN_MARKER = "sk-ant-oat";
 const OAUTH_PROXY_PLACEHOLDER = "sk-ant-oat01-lobu-proxy";
+
+function isAnthropicOAuthCredential(credential?: string | null): boolean {
+  return credential?.includes(OAUTH_TOKEN_MARKER) ?? false;
+}
 
 /**
  * Claude OAuth Module - Handles credential injection and model preferences for Claude.
@@ -60,13 +65,17 @@ export class ClaudeOAuthModule extends BaseProviderModule {
 
   // ---- Overrides for multi-env-var logic ----
 
-  override hasSystemKey(): boolean {
-    return !!(
-      resolveEnv("ANTHROPIC_API_KEY") ||
-      resolveEnv("ANTHROPIC_AUTH_TOKEN") ||
+  private resolveSystemCredential(): string | undefined {
+    return (
       resolveEnv("ANTHROPIC_OAUTH_TOKEN") ||
-      resolveEnv("CLAUDE_CODE_OAUTH_TOKEN")
+      resolveEnv("CLAUDE_CODE_OAUTH_TOKEN") ||
+      resolveEnv("ANTHROPIC_AUTH_TOKEN") ||
+      resolveEnv("ANTHROPIC_API_KEY")
     );
+  }
+
+  override hasSystemKey(): boolean {
+    return !!this.resolveSystemCredential();
   }
 
   override injectSystemKeyFallback(
@@ -74,11 +83,7 @@ export class ClaudeOAuthModule extends BaseProviderModule {
   ): Record<string, string> {
     if (envVars.ANTHROPIC_API_KEY) return envVars;
     // Prefer explicit OAuth tokens and still expose them through pi-ai's key slot.
-    const systemKey =
-      resolveEnv("ANTHROPIC_OAUTH_TOKEN") ||
-      resolveEnv("CLAUDE_CODE_OAUTH_TOKEN") ||
-      resolveEnv("ANTHROPIC_AUTH_TOKEN") ||
-      resolveEnv("ANTHROPIC_API_KEY");
+    const systemKey = this.resolveSystemCredential();
     if (systemKey) {
       envVars.ANTHROPIC_API_KEY = systemKey;
     }
@@ -121,8 +126,8 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     );
     // lobu.toml providers are seeded as api-key profiles, so mirror pi-ai's
     // value-based OAuth detection when choosing the proxy placeholder.
-    const cred = profile?.credential ?? "";
-    if (cred.includes("sk-ant-oat")) return OAUTH_PROXY_PLACEHOLDER;
+    const credential = profile?.credential || this.resolveSystemCredential();
+    if (isAnthropicOAuthCredential(credential)) return OAUTH_PROXY_PLACEHOLDER;
     return "lobu-proxy";
   }
 
@@ -248,12 +253,15 @@ export class ClaudeOAuthModule extends BaseProviderModule {
       this.providerId
     );
 
-    const oauthToken =
-      profile?.authType === "oauth" ? profile.credential : undefined;
-    const apiKey =
-      profile?.authType !== "oauth"
-        ? profile?.credential
-        : process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
+    const profileCredential = profile?.credential;
+    const systemCredential = this.resolveSystemCredential();
+    const credential = profileCredential || systemCredential;
+    const shouldUseOAuth = profileCredential
+      ? profile.authType === "oauth" ||
+        isAnthropicOAuthCredential(profileCredential)
+      : isAnthropicOAuthCredential(systemCredential);
+    const oauthToken = credential && shouldUseOAuth ? credential : undefined;
+    const apiKey = credential && !shouldUseOAuth ? credential : undefined;
 
     const headers: Record<string, string> = {
       Accept: "application/json",
