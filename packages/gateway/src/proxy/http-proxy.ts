@@ -265,6 +265,13 @@ function isBlockedIpAddress(ip: string): boolean {
   return false;
 }
 
+type DnsLookupAllFn = (
+  hostname: string,
+  options: { all: true; verbatim: true }
+) => Promise<LookupAddress[]>;
+
+let dnsLookupOverride: DnsLookupAllFn | null = null;
+
 export const __testOnly = {
   isBlockedIpAddress,
   /** Reset cached global config + module-level stores so tests can rebuild them. */
@@ -273,12 +280,32 @@ export const __testOnly = {
     proxyGrantStore = null;
     proxyPolicyStore = null;
     proxyEgressJudge = null;
+    dnsLookupOverride = null;
+  },
+  setDnsLookup(fn: DnsLookupAllFn | null): void {
+    dnsLookupOverride = fn;
   },
 };
 
+/**
+ * Strip surrounding brackets from an IPv6 literal so `net.isIP()` can
+ * recognise it. WHATWG URL parsing returns `parsedUrl.hostname` with
+ * brackets for IPv6 (e.g. `[::1]`), and `net.isIP("[::1]")` returns 0,
+ * which would cause the IP-blocklist check to be skipped and the value
+ * to fall through to DNS lookup — bypassing the loopback/private-IP
+ * guards. Normalising to the bare address closes that hole.
+ */
+function stripIpv6Brackets(host: string): string {
+  if (host.length >= 2 && host.startsWith("[") && host.endsWith("]")) {
+    return host.slice(1, -1);
+  }
+  return host;
+}
+
 async function resolveAndValidateTarget(
-  hostname: string
+  rawHostname: string
 ): Promise<TargetResolutionResult> {
+  const hostname = stripIpv6Brackets(rawHostname);
   const ipFamily = net.isIP(hostname);
   if (ipFamily !== 0) {
     if (isBlockedIpAddress(hostname)) {
@@ -294,7 +321,9 @@ async function resolveAndValidateTarget(
 
   let addresses: LookupAddress[];
   try {
-    addresses = await dns.lookup(hostname, { all: true, verbatim: true });
+    addresses = dnsLookupOverride
+      ? await dnsLookupOverride(hostname, { all: true, verbatim: true })
+      : await dns.lookup(hostname, { all: true, verbatim: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown error";
     return {

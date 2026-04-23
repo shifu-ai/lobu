@@ -42,6 +42,7 @@ services:
       # to empty strings and are ignored by the agent runtime.
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_CLI_OAUTH_KEY: ${GEMINI_CLI_OAUTH_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       Z_AI_API_KEY: ${Z_AI_API_KEY:-}

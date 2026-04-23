@@ -16,7 +16,7 @@ const logger = createLogger("chat-interaction-bridge");
 const PENDING_TOOL_KEY_PREFIX = "pending-tool:";
 
 /** Signature for the direct tool execution function injected from the MCP proxy. */
-export type ExecuteToolDirectFn = (
+type ExecuteToolDirectFn = (
   agentId: string,
   userId: string,
   mcpId: string,
@@ -224,6 +224,21 @@ export function registerInteractionBridge(
       pendingQuestionTimers.delete(questionId);
     }
     return entry;
+  }
+  /**
+   * Put a previously-claimed entry back. Used when a click is rejected
+   * (e.g. wrong user) so the rightful owner can still answer later.
+   */
+  function restashQuestion(
+    questionId: string,
+    entry: PendingQuestionEntry
+  ): void {
+    if (pendingQuestions.has(questionId)) return;
+    trackQuestion(entry);
+    if (entry.question.id !== questionId) {
+      pendingQuestions.delete(entry.question.id);
+      pendingQuestions.set(questionId, entry);
+    }
   }
   const onQuestionCreated = async (event: PostedQuestion) => {
     try {
@@ -449,6 +464,28 @@ export function registerInteractionBridge(
       }
 
       const { question } = entry;
+
+      // Only the user who was originally asked may answer. Without this,
+      // anyone in a Slack/Telegram channel could click another user's
+      // approval/question buttons and silently impersonate them. Re-stash
+      // the entry so the rightful owner can still click later.
+      if (
+        author?.userId &&
+        question.userId &&
+        author.userId !== question.userId
+      ) {
+        logger.warn(
+          {
+            connectionId,
+            questionId,
+            clickerUserId: author.userId,
+            originalUserId: question.userId,
+          },
+          "Question click ignored: clicker is not the original requester"
+        );
+        restashQuestion(questionId, entry);
+        return;
+      }
       const receiptText = value
         ? `*You submitted:* ${value}`
         : "*You submitted a response.*";
@@ -541,7 +578,7 @@ export function registerInteractionBridge(
  * enqueue-into-worker pipeline; `registerActionHandlers` just dispatches
  * the raw click through.
  */
-export type OnQuestionClickFn = (
+type OnQuestionClickFn = (
   questionId: string,
   value: string,
   thread: any,

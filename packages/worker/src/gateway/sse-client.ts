@@ -269,7 +269,7 @@ export class GatewayClient {
               logger.error(
                 `❌ Event error threshold reached (${this.eventErrorCount} errors). Triggering cleanup...`
               );
-              this.cleanupOnEventError(eventType, error).catch((cleanupErr) => {
+              this.cleanupOnEventError(eventType).catch((cleanupErr) => {
                 logger.error(
                   "Failed to cleanup after event errors:",
                   cleanupErr
@@ -762,14 +762,12 @@ export class GatewayClient {
         }
 
         // Set processedMessageIds directly on the integration instance
-        const messageIds =
+        workerTransport.processedMessageIds =
           processedIds && processedIds.length > 0
             ? processedIds
-            : message?.payload?.messageId
+            : message.payload.messageId
               ? [message.payload.messageId]
               : [];
-
-        workerTransport.processedMessageIds = messageIds;
       }
 
       await this.currentWorker.execute();
@@ -889,10 +887,7 @@ export class GatewayClient {
   /**
    * Cleanup resources after event handling errors exceed threshold
    */
-  private async cleanupOnEventError(
-    eventType: string,
-    _error: unknown
-  ): Promise<void> {
+  private async cleanupOnEventError(eventType: string): Promise<void> {
     logger.warn(
       `Cleaning up after ${this.eventErrorCount} event handling errors (last: ${eventType})`
     );
@@ -902,7 +897,7 @@ export class GatewayClient {
       if (this.currentWorker) {
         logger.info("Cleaning up current worker due to event errors");
         try {
-          await this.currentWorker.cleanup?.();
+          await this.currentWorker.cleanup();
         } catch (cleanupError) {
           logger.error("Worker cleanup failed:", cleanupError);
         }

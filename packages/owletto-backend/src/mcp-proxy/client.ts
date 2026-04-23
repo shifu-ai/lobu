@@ -6,7 +6,6 @@
  * Tool discovery cache is stored in-process with a short TTL.
  */
 
-import { getDb } from '../db/client';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import { TtlCache } from '../utils/ttl-cache';
@@ -298,42 +297,6 @@ export async function callTool(
     content: response.result?.content ?? [],
     isError: response.result?.isError ?? false,
   };
-}
-
-/**
- * Get all connectors with mcp_config for a given organization.
- */
-export async function getProxyConnectors(
-  orgId: string
-): Promise<Array<{ key: string; config: McpProxyConfig }>> {
-  const sql = getDb();
-  const rows = await sql`
-    SELECT key, mcp_config
-    FROM connector_definitions
-    WHERE mcp_config IS NOT NULL
-      AND status = 'active'
-      AND organization_id = ${orgId}
-    ORDER BY key ASC
-  `;
-
-  return (rows as Array<{ key: string; mcp_config: McpProxyConfig }>).map((row) => ({
-    key: row.key,
-    config: row.mcp_config,
-  }));
-}
-
-/**
- * Discover tools from all proxy-enabled connectors in an organization.
- */
-export async function discoverAllProxyTools(orgId: string): Promise<DiscoveredTool[]> {
-  const connectors = await getProxyConnectors(orgId);
-  if (connectors.length === 0) return [];
-
-  const results = await Promise.allSettled(
-    connectors.map(({ key, config }) => discoverTools(key, config, orgId))
-  );
-
-  return results.flatMap((r) => (r.status === 'fulfilled' ? r.value : []));
 }
 
 /**

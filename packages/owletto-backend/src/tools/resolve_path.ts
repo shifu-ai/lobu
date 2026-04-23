@@ -18,6 +18,7 @@ import {
   executeDataSources,
 } from '../utils/execute-data-sources';
 import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type';
+import { stripMemberEmailsFromRows } from '../utils/member-redaction';
 import { RESERVED_PATHS } from '../utils/reserved';
 import { getWorkspaceProvider } from '../workspace';
 import type { ToolContext } from './registry';
@@ -36,7 +37,7 @@ export const ResolvePathSchema = Type.Object({
   ),
 });
 
-export type ResolvePathArgs = Static<typeof ResolvePathSchema>;
+type ResolvePathArgs = Static<typeof ResolvePathSchema>;
 
 export interface ResolvedWorkspace {
   slug: string;
@@ -52,7 +53,7 @@ export interface ResolvedPathEntity {
   name: string;
 }
 
-export interface ViewTemplateTab {
+interface ViewTemplateTab {
   tab_name: string;
   tab_order: number;
   json_template: Record<string, any>;
@@ -112,7 +113,7 @@ export interface ResolvePathResult {
   bootstrap: ResolvePathBootstrap | null;
 }
 
-export interface BootstrapEntityTypeSummary {
+interface BootstrapEntityTypeSummary {
   id: number;
   slug: string;
   name: string;
@@ -122,13 +123,13 @@ export interface BootstrapEntityTypeSummary {
   entity_count: number;
 }
 
-export interface BootstrapScopeSummary {
+interface BootstrapScopeSummary {
   total_content: number;
   active_connections: number;
   watchers_count: number;
 }
 
-export interface BootstrapContentItem {
+interface BootstrapContentItem {
   id: number;
   entity_ids: number[];
   platform: string;
@@ -141,7 +142,7 @@ export interface BootstrapContentItem {
   occurred_at: string | null;
 }
 
-export interface BootstrapFeedItem {
+interface BootstrapFeedItem {
   id: number;
   connection_id: number;
   connector_key: string;
@@ -155,7 +156,7 @@ export interface BootstrapFeedItem {
   updated_at: string;
 }
 
-export interface BootstrapWatcherItem {
+interface BootstrapWatcherItem {
   watcher_id: string;
   name: string;
   status: string;
@@ -172,7 +173,7 @@ export interface BootstrapWatcherItem {
   updated_at: string;
 }
 
-export interface BootstrapConnectorDefinition {
+interface BootstrapConnectorDefinition {
   key: string;
   name: string;
   description: string | null;
@@ -456,7 +457,8 @@ async function _resolvePath(
       ])
     );
     const mergedTabs = mergeTabs(entityTabs, entityTypeTabs);
-    const processedEntityTabs = await processTabsDataSources(mergedTabs, entityDataCtx, sql);
+    let processedEntityTabs = await processTabsDataSources(mergedTabs, entityDataCtx, sql);
+    let redactedTemplateData = entityTemplateData;
     if (entityRow.entity_type === '$member' && !ctx.memberRole) {
       throw new Error(
         'Member details are only visible to members of this workspace. Join the workspace to see members.'
@@ -465,7 +467,7 @@ async function _resolvePath(
     const rawEntityMetadata = entityRow.metadata ?? {};
     let safeEntityMetadata = rawEntityMetadata;
     const canSeeEmail = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
-    if (entityRow.entity_type === '$member' && !canSeeEmail) {
+    if (!canSeeEmail) {
       const schemaRow = await simpleQuery(sql`
         SELECT metadata_schema FROM entity_types
         WHERE slug = '$member' AND organization_id = ${workspace.id} AND deleted_at IS NULL
@@ -473,10 +475,19 @@ async function _resolvePath(
       `);
       const memberSchema = (schemaRow[0]?.metadata_schema as Record<string, unknown> | null) ?? null;
       const { emailField } = resolveMemberSchemaFieldsFromSchema(memberSchema);
-      if (emailField in safeEntityMetadata) {
+      if (entityRow.entity_type === '$member' && emailField in safeEntityMetadata) {
         const { [emailField]: _drop, ...rest } = safeEntityMetadata;
         safeEntityMetadata = rest;
       }
+      // Also strip member emails that surface via template data sources or tabs
+      // (e.g. a dashboard tab that lists members). Without this, a data-source
+      // query like `SELECT * FROM entities WHERE entity_type='$member'` would
+      // leak emails even when the single-entity redaction above is not tripped.
+      redactedTemplateData = stripMemberEmailsFromRows(entityTemplateData, emailField);
+      processedEntityTabs = processedEntityTabs.map((tab) => ({
+        ...tab,
+        template_data: stripMemberEmailsFromRows(tab.template_data, emailField),
+      }));
     }
     resolvedEntity = {
       id: entityRow.id,
@@ -487,7 +498,7 @@ async function _resolvePath(
       metadata: safeEntityMetadata,
       json_template: entityCleanTpl,
       json_template_version: toVersionNumber(entityRow.json_template_version),
-      template_data: entityTemplateData,
+      template_data: redactedTemplateData,
       tabs: processedEntityTabs,
       created_at: createdAt,
       total_content: Number(eventsCount?.cnt) || 0,

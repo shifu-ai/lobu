@@ -43,6 +43,23 @@
       ]
     },
     {
+      "id": "gemini-cli",
+      "name": "Gemini CLI (OAuth)",
+      "description": "Free Gemini access via Google Code Assist using the Gemini CLI's OAuth credentials (~/.gemini/oauth_creds.json)",
+      "providers": [
+        {
+          "displayName": "Gemini CLI (OAuth)",
+          "iconUrl": "https://www.google.com/s2/favicons?domain=gemini.google.com&sz=128",
+          "envVarName": "GEMINI_CLI_OAUTH_KEY",
+          "upstreamBaseUrl": "https://cloudcode-pa.googleapis.com",
+          "apiKeyInstructions": "Paste the contents of <code>~/.gemini/oauth_creds.json</code> (the JSON file the Gemini CLI stores after you run <code>gemini auth login</code>).",
+          "apiKeyPlaceholder": "{\"access_token\":\"...\",\"refresh_token\":\"...\"}",
+          "defaultModel": "gemini-2.5-flash",
+          "registryAlias": "google-gemini-cli"
+        }
+      ]
+    },
+    {
       "id": "together-ai",
       "name": "Together AI",
       "description": "Open-source models hosted by Together",

@@ -2,7 +2,7 @@
  * Owner-level route segments that map to real app pages under /$owner/.
  * Entity type slugs must never collide with these.
  */
-export const OWNER_ROUTE_SEGMENTS = [
+const OWNER_ROUTE_SEGMENTS = [
   'agents',
   'connectors',
   'events',
@@ -47,12 +47,3 @@ export const RESERVED_ENTITY_TYPES = [
   'connector',
 ];
 
-const RESERVED_SEGMENTS = new Set<string>([...RESERVED_ENTITY_TYPES, ...RESERVED_PATHS]);
-
-/**
- * Check if a URL segment is reserved (i.e. it's a known route name or system path).
- * Used by resolve_path to distinguish reserved routes from entity types.
- */
-export function isReservedSegment(segment: string): boolean {
-  return RESERVED_SEGMENTS.has(segment);
-}

@@ -776,6 +776,7 @@ export class CoreServices {
       conversationId,
       teamId,
       connectionId,
+      platform,
       approver
     ) => {
       // Scheduled fires: prefer the schedule's `approver` target if set,
@@ -796,6 +797,7 @@ export class CoreServices {
             approver.channelId,
             approver.teamId,
             approver.connectionId,
+            approver.platform || platform || "unknown",
             mcpId,
             toolName,
             args,
@@ -817,6 +819,7 @@ export class CoreServices {
         channelId,
         teamId,
         connectionId,
+        platform || "unknown",
         mcpId,
         toolName,
         args,

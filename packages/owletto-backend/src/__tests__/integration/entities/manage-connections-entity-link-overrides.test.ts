@@ -134,4 +134,49 @@ describe('manage_connections > set_connector_entity_link_overrides', () => {
 
     expect(result.error).toMatch(/not found/);
   });
+
+  it('accepts retargetEntityType pointing at an existing user-defined entity type', async () => {
+    const sql = getTestDb();
+    await sql`
+      INSERT INTO entity_types (organization_id, slug, name, metadata_schema, created_at, updated_at)
+      VALUES (${org.id}, 'contact', 'Contact', ${sql.json({})}, NOW(), NOW())
+      ON CONFLICT DO NOTHING
+    `;
+
+    const result = (await manageConnections(
+      {
+        action: 'set_connector_entity_link_overrides',
+        connector_key: 'whatsapp',
+        overrides: { $member: { retargetEntityType: 'contact' } },
+      },
+      env,
+      ctx
+    )) as { success?: boolean; overrides?: unknown; error?: string };
+
+    expect(result.error).toBeUndefined();
+    expect(result.success).toBe(true);
+
+    const rows = await sql<{ entity_link_overrides: Record<string, unknown> | null }[]>`
+      SELECT entity_link_overrides FROM connector_definitions
+      WHERE key = 'whatsapp' AND organization_id = ${org.id}
+    `;
+    expect(rows[0].entity_link_overrides).toEqual({
+      $member: { retargetEntityType: 'contact' },
+    });
+  });
+
+  it('rejects retargetEntityType pointing at an entity type that does not exist in the org', async () => {
+    const result = (await manageConnections(
+      {
+        action: 'set_connector_entity_link_overrides',
+        connector_key: 'whatsapp',
+        overrides: { $member: { retargetEntityType: 'nonexistent_type' } },
+      },
+      env,
+      ctx
+    )) as { error?: string };
+
+    expect(result.error).toMatch(/nonexistent_type/);
+    expect(result.error).toMatch(/does not exist/);
+  });
 });

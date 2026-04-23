@@ -181,6 +181,7 @@ export class McpProxy {
     conversationId: string,
     teamId: string | undefined,
     connectionId: string | undefined,
+    platform: string | undefined,
     approver?: {
       channelId?: string;
       conversationId?: string;
@@ -705,6 +706,7 @@ export class McpProxy {
               auth.tokenData.conversationId || "",
               auth.tokenData.teamId,
               auth.tokenData.connectionId,
+              auth.tokenData.platform,
               {
                 channelId: auth.tokenData.approverChannelId,
                 conversationId: auth.tokenData.approverConversationId,
@@ -1065,6 +1067,12 @@ export class McpProxy {
           if (jsonRpc.method === "tools/call" && jsonRpc.params?.name) {
             const toolName = jsonRpc.params.name;
             const toolArgs = jsonRpc.params.arguments || {};
+            // TODO(#254): pre-tool-stage guardrail hook. Before the existing
+            // approval check below, call runGuardrails("pre-tool", registry,
+            // settings.guardrails, { toolName, arguments: toolArgs, agentId, ...}).
+            // On trip: reuse the onToolBlocked path to return a JSON-RPC error
+            // with trip.reason. Wiring deferred to the PR that registers the
+            // first real pre-tool guardrail.
             const { found, annotations } = await this.getToolAnnotations(
               mcpId!,
               toolName,
@@ -1120,6 +1128,7 @@ export class McpProxy {
                     tokenData.conversationId || "",
                     tokenData.teamId,
                     tokenData.connectionId,
+                    tokenData.platform,
                     {
                       channelId: tokenData.approverChannelId,
                       conversationId: tokenData.approverConversationId,

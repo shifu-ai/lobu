@@ -39,7 +39,7 @@ const SECRET_PLACEHOLDER_TTL_SECONDS = 7 * 24 * 60 * 60;
  */
 const GRANT_SYNC_CACHE_MAX = 1000;
 
-export interface DeploymentIdentity {
+interface DeploymentIdentity {
   conversationId: string;
   channelId?: string;
   platform?: string;
@@ -647,6 +647,10 @@ export abstract class BaseDeploymentManager {
       HTTP_PROXY: proxyUrl,
       HTTPS_PROXY: proxyUrl,
       NO_PROXY: `${dispatcherHost},gateway,redis,localhost,127.0.0.1`,
+      // Pin HOME inside the persistent workspace so per-tool caches
+      // (~/.npm, ~/.cache, ~/.config, ~/.local/share) survive scale-to-zero
+      // restarts and don't blow up the worker container's root layer.
+      HOME: "/workspace",
       // Route temporary files and cache to persistent workspace storage.
       TMPDIR: "/workspace/.tmp",
       TMP: "/workspace/.tmp",

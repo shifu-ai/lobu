@@ -74,6 +74,11 @@ export class ChatResponseBridge implements ResponseRenderer {
 
   constructor(private manager: ChatInstanceManager) {}
 
+  // TODO(#254): output-stage guardrail hook. Before emitting a delta to the
+  // platform strategy, call runGuardrails("output", registry, settings.guardrails,
+  // { text: payload.delta, ... }). On trip: redact or replace the delta per
+  // guardrail policy. Wiring deferred to the PR that registers the first
+  // real output guardrail (#253 secret/PII scan).
   private extractResponseContext(
     payload: ThreadResponsePayload
   ): ResponseContext | null {
@@ -187,13 +192,23 @@ export class ChatResponseBridge implements ResponseRenderer {
     const conversationState =
       this.manager.getInstance(connectionId)?.conversationState;
 
-    // Gap 1: Store outgoing response in history
+    // Gap 1: Store outgoing response in history. Wrap so that a Redis
+    // outage doesn't fail the whole response delivery — the user has
+    // already seen the message; missing history is recoverable, a 500
+    // here is not.
     if (stream?.buffer.trim() && conversationState) {
-      await conversationState.appendHistory(connectionId, channelId, {
-        role: "assistant",
-        content: stream.buffer,
-        timestamp: Date.now(),
-      });
+      try {
+        await conversationState.appendHistory(connectionId, channelId, {
+          role: "assistant",
+          content: stream.buffer,
+          timestamp: Date.now(),
+        });
+      } catch (error) {
+        logger.warn(
+          { connectionId, channelId, error: String(error) },
+          "Failed to persist assistant response to history (continuing)"
+        );
+      }
     }
 
     // Session reset: clear history and delete session file

@@ -13,12 +13,12 @@ import { formatAjvError, getAjv } from './ajv-singleton';
 // Types
 // ============================================
 
-export interface ValidationError {
+interface ValidationError {
   path: string;
   message: string;
 }
 
-export interface ValidationResult {
+interface ValidationResult {
   valid: boolean;
   errors?: ValidationError[];
 }

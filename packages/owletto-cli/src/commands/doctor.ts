@@ -38,7 +38,7 @@ async function checkUrl(name: string, url: string): Promise<Check> {
     const res = await fetch(url, { signal: controller.signal });
     clearTimeout(timeout);
     return { name, status: res.ok ? 'ok' : 'warn', detail: `${res.status} ${url}` };
-  } catch (_err) {
+  } catch {
     return { name, status: 'fail', detail: `unreachable: ${url}` };
   }
 }
@@ -52,9 +52,7 @@ export default defineCommand({
     const checks: Check[] = [];
 
     checks.push(checkNodeVersion());
-    for (const bin of ['docker']) {
-      checks.push(checkBinaryExists(bin));
-    }
+    checks.push(checkBinaryExists('docker'));
 
     // Check active server connectivity
     const { session } = getActiveSession();

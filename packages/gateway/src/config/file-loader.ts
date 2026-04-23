@@ -326,7 +326,22 @@ async function buildAgentConfig(
       mergedNixPackages.push(...skill.nixPackages);
     }
     if (skill.networkConfig?.allowedDomains?.length) {
-      mergedAllowedDomains.push(...skill.networkConfig.allowedDomains);
+      // Reject `*` from skill-declared allowlists. A wildcard from a single
+      // SKILL.md frontmatter would silently grant unrestricted egress to
+      // every worker for this agent — that escalation must require an
+      // explicit operator decision in `lobu.toml`, not a skill author.
+      const safe: string[] = [];
+      for (const domain of skill.networkConfig.allowedDomains) {
+        if (domain === "*" || domain.trim() === "*") {
+          logger.warn(
+            { skill: skill.name },
+            "Ignoring wildcard '*' in skill-declared allowedDomains; configure unrestricted egress in lobu.toml instead"
+          );
+          continue;
+        }
+        safe.push(domain);
+      }
+      mergedAllowedDomains.push(...safe);
     }
     if (skill.networkConfig?.deniedDomains?.length) {
       mergedDeniedDomains.push(...skill.networkConfig.deniedDomains);
@@ -400,6 +415,12 @@ async function buildAgentConfig(
   // Apply agent-level tool configuration (worker-side policy + operator
   // pre-approvals that bypass the in-thread approval gate).
   applyAgentToolsConfig(settings, agentConfig.tools);
+
+  // Agent-level guardrail enable list. Names resolve against the gateway's
+  // GuardrailRegistry at runtime — see packages/core/src/guardrails.
+  if (agentConfig.guardrails?.length) {
+    settings.guardrails = [...new Set(agentConfig.guardrails)];
+  }
 
   // Apply merged MCP servers
   if (Object.keys(mcpServers).length > 0) {
