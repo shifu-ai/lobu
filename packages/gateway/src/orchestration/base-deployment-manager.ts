@@ -449,8 +449,44 @@ export abstract class BaseDeploymentManager {
   }
 
   /**
+   * Sync per-agent egress judge policies (judgedDomains + named judges +
+   * operator extra_policy) into the policy store so the HTTP proxy can
+   * resolve them at request time.
+   */
+  private syncEgressPolicy(
+    messageData: MessagePayload,
+    deploymentName?: string
+  ): void {
+    const agentId = messageData.agentId;
+    if (!this.policyStore || !agentId) return;
+
+    const bundle = buildPolicyBundle({
+      judgedDomains: messageData.networkConfig?.judgedDomains,
+      judges: messageData.networkConfig?.judges,
+      egressConfig: messageData.egressConfig,
+    });
+    if (bundle) {
+      this.policyStore.set(agentId, bundle);
+      if (deploymentName) {
+        logger.info(
+          `Synced egress judge policy for ${deploymentName}: ${bundle.judgedDomains.length} rule(s), ${Object.keys(bundle.judges).length} judge(s)`
+        );
+      } else {
+        logger.debug("Synced egress judge policy", {
+          agentId,
+          rules: bundle.judgedDomains.length,
+          judges: Object.keys(bundle.judges).length,
+        });
+      }
+    } else {
+      this.policyStore.clear(agentId);
+    }
+  }
+
+  /**
    * Auto-add Nix cache domains as grants, sync per-agent grants (network +
-   * pre-approved MCP tools), and persist MCP configs for the deployment.
+   * pre-approved MCP tools) and egress judge policy, and persist MCP configs
+   * for the deployment.
    */
   private async storeDeploymentConfigs(
     deploymentName: string,
@@ -482,24 +518,7 @@ export abstract class BaseDeploymentManager {
       );
     }
 
-    // Sync per-agent egress judge policies (judgedDomains + named judges +
-    // operator extra_policy) into the policy store so the HTTP proxy can
-    // resolve them at request time.
-    if (this.policyStore && agentId) {
-      const bundle = buildPolicyBundle({
-        judgedDomains: messageData.networkConfig?.judgedDomains,
-        judges: messageData.networkConfig?.judges,
-        egressConfig: messageData.egressConfig,
-      });
-      if (bundle) {
-        this.policyStore.set(agentId, bundle);
-        logger.info(
-          `Synced egress judge policy for ${deploymentName}: ${bundle.judgedDomains.length} rule(s), ${Object.keys(bundle.judges).length} judge(s)`
-        );
-      } else {
-        this.policyStore.clear(agentId);
-      }
-    }
+    this.syncEgressPolicy(messageData, deploymentName);
 
     // Auto-add Nix cache domains as permanent grants when Nix packages are configured
     if (
@@ -525,7 +544,9 @@ export abstract class BaseDeploymentManager {
   /**
    * Sync per-agent grants (network domains + pre-approved MCP tool patterns)
    * to the grant store for a running worker. Called on every message so
-   * config changes pick up without redeploying.
+   * config changes pick up without redeploying. Also refreshes the in-memory
+   * egress judge policy store, which is read by the shared HTTP proxy rather
+   * than by the worker process.
    *
    * Computes the diff against the last-synced set per agent:
    *   - patterns in the new set but not the previous are `grant()`-ed
@@ -536,7 +557,11 @@ export abstract class BaseDeploymentManager {
    */
   async syncNetworkConfigGrants(messageData: MessagePayload): Promise<void> {
     const agentId = messageData.agentId;
-    if (!this.grantStore || !agentId) return;
+    if (!agentId) return;
+
+    this.syncEgressPolicy(messageData);
+
+    if (!this.grantStore) return;
 
     const nextPatterns = new Set<string>();
     for (const domain of messageData.networkConfig?.allowedDomains ?? []) {
