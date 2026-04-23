@@ -39,8 +39,7 @@ import {
 } from '../../utils/auth-profiles';
 import { createConnectToken } from '../../utils/connect-tokens';
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
-import { clearEntityLinkRulesCache } from '../../utils/entity-link-upsert';
-import { validateEntityLinkOverrides } from '../../utils/entity-link-validation';
+import { applyEntityLinkOverrides } from '../../utils/entity-link-overrides';
 import { recordChangeEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
 import { syncOAuthConnectionsForAuthProfile } from '../../utils/oauth-connection-state';
@@ -109,6 +108,25 @@ const ListConnectorDefinitionsAction = Type.Object({
   ),
 });
 
+const EntityLinkOverridesSchema = Type.Union(
+  [
+    Type.Null(),
+    Type.Record(
+      Type.String(),
+      Type.Object({
+        disable: Type.Optional(Type.Boolean()),
+        retargetEntityType: Type.Optional(Type.String()),
+        autoCreate: Type.Optional(Type.Boolean()),
+        maskIdentities: Type.Optional(Type.Array(Type.String())),
+      })
+    ),
+  ],
+  {
+    description:
+      "Per-entityType override of the connector's declared entityLinks rules (keyed by the rule's entityType). Applies at the connector-definition level for this org.",
+  }
+);
+
 const CreateAction = Type.Object({
   action: Type.Literal('create'),
   connector_key: Type.String({ description: 'Connector key (e.g. google.gmail)' }),
@@ -127,6 +145,7 @@ const CreateAction = Type.Object({
       description: 'Override the connection owner (admin/owner only). Defaults to current user.',
     })
   ),
+  entity_link_overrides: Type.Optional(EntityLinkOverridesSchema),
 });
 
 const UpdateAction = Type.Object({
@@ -183,6 +202,7 @@ const InstallConnectorAction = Type.Object({
         'Reusable auth values for env_keys and OAuth client keys. Stored as auth profiles.',
     })
   ),
+  entity_link_overrides: Type.Optional(EntityLinkOverridesSchema),
 });
 
 const UninstallConnectorAction = Type.Object({
@@ -205,6 +225,7 @@ const ConnectAction = Type.Object({
   config: Type.Optional(
     Type.Record(Type.String(), Type.Any(), { description: 'Connection config' })
   ),
+  entity_link_overrides: Type.Optional(EntityLinkOverridesSchema),
 });
 
 const ToggleConnectorLoginAction = Type.Object({
@@ -232,24 +253,7 @@ const UpdateConnectorDefaultConfigAction = Type.Object({
 const SetConnectorEntityLinkOverridesAction = Type.Object({
   action: Type.Literal('set_connector_entity_link_overrides'),
   connector_key: Type.String({ description: 'Connector key' }),
-  overrides: Type.Union(
-    [
-      Type.Null(),
-      Type.Record(
-        Type.String(),
-        Type.Object({
-          disable: Type.Optional(Type.Boolean()),
-          retargetEntityType: Type.Optional(Type.String()),
-          autoCreate: Type.Optional(Type.Boolean()),
-          maskIdentities: Type.Optional(Type.Array(Type.String())),
-        })
-      ),
-    ],
-    {
-      description:
-        "Per-entityType override of this connector's declared entityLinks. Use null to clear overrides and use connector defaults.",
-    }
-  ),
+  overrides: EntityLinkOverridesSchema,
 });
 
 export const ManageConnectionsSchema = Type.Union([
@@ -656,6 +660,15 @@ async function handleCreate(
     return { error: `Connector '${args.connector_key}' not found or not active` };
   }
 
+  if (args.entity_link_overrides !== undefined) {
+    const err = await applyEntityLinkOverrides(
+      organizationId,
+      args.connector_key,
+      args.entity_link_overrides
+    );
+    if (err) return { error: err };
+  }
+
   // No-auth connectors: one connection per user
   const authMethods =
     (connector.auth_schema as { methods?: Array<{ type: string }> })?.methods ?? [];
@@ -869,6 +882,15 @@ async function handleConnect(
       error: `Connector '${args.connector_key}' not found. Install it first from the connections page.`,
       setup_url: buildSetupUrl({ install: args.connector_key }),
     };
+  }
+
+  if (args.entity_link_overrides !== undefined) {
+    const err = await applyEntityLinkOverrides(
+      organizationId,
+      args.connector_key,
+      args.entity_link_overrides
+    );
+    if (err) return { error: err };
   }
 
   const setupUrl = buildSetupUrl({ connectorKey: args.connector_key });
@@ -1598,6 +1620,15 @@ async function handleInstallConnector(
 
     await maybeUpsertAuthAfterInstall(installed, args.auth_values, ctx);
 
+    if (args.entity_link_overrides !== undefined) {
+      const err = await applyEntityLinkOverrides(
+        ctx.organizationId,
+        installed.connectorKey,
+        args.entity_link_overrides
+      );
+      if (err) return { error: err };
+    }
+
     return {
       action: 'install_connector',
       installed: true,
@@ -1754,30 +1785,12 @@ async function handleSetConnectorEntityLinkOverrides(
   args: Extract<ConnectionsArgs, { action: 'set_connector_entity_link_overrides' }>,
   ctx: ToolContext
 ): Promise<ManageConnectionsResult> {
-  const sql = getDb();
-  const { organizationId } = ctx;
-
-  const errors = validateEntityLinkOverrides(args.overrides);
-  if (errors.length > 0) {
-    return { error: `Invalid overrides:\n  - ${errors.join('\n  - ')}` };
-  }
-
-  const updated = await sql`
-    UPDATE connector_definitions
-    SET entity_link_overrides = ${args.overrides ? sql.json(args.overrides) : null},
-        updated_at = NOW()
-    WHERE key = ${args.connector_key}
-      AND organization_id = ${organizationId}
-      AND status = 'active'
-    RETURNING key
-  `;
-
-  if (updated.length === 0) {
-    return { error: `Connector '${args.connector_key}' not found` };
-  }
-
-  // Invalidate cached resolved rules so the next ingestion batch sees the change.
-  clearEntityLinkRulesCache();
+  const err = await applyEntityLinkOverrides(
+    ctx.organizationId,
+    args.connector_key,
+    args.overrides
+  );
+  if (err) return { error: err };
 
   return {
     action: 'set_connector_entity_link_overrides',

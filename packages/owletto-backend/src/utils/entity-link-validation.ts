@@ -5,6 +5,7 @@
  * overrides (which arrive via MCP as untrusted JSON).
  */
 import type { EntityLinkOverrides, EntityLinkRule } from '@lobu/owletto-sdk';
+import { getDb } from '../db/client';
 
 export function validateEntityLinkOverrides(overrides: unknown): string[] {
   if (overrides === null || overrides === undefined) return [];
@@ -36,6 +37,39 @@ export function validateEntityLinkOverrides(overrides: unknown): string[] {
     }
   }
   return errors;
+}
+
+/**
+ * Verify that every `retargetEntityType` in the overrides points to an
+ * existing entity type in the given org. Returns an array of error messages
+ * (empty if all targets resolve). The caller is expected to have already
+ * passed the overrides through `validateEntityLinkOverrides` for structural
+ * checks.
+ */
+export async function verifyEntityLinkOverrideTargets(
+  overrides: EntityLinkOverrides | null | undefined,
+  organizationId: string
+): Promise<string[]> {
+  if (!overrides) return [];
+  const targets = new Set<string>();
+  for (const override of Object.values(overrides)) {
+    if (override?.retargetEntityType) targets.add(override.retargetEntityType);
+  }
+  if (targets.size === 0) return [];
+
+  const sql = getDb();
+  const rows = await sql`
+    SELECT slug FROM entity_types
+    WHERE organization_id = ${organizationId}
+      AND deleted_at IS NULL
+      AND slug = ANY(${Array.from(targets)})
+  `;
+  const found = new Set(rows.map((r) => r.slug as string));
+  const missing = Array.from(targets).filter((slug) => !found.has(slug));
+  return missing.map(
+    (slug) =>
+      `entity_link_overrides retargetEntityType '${slug}' does not exist in this organization. Create the entity type first.`
+  );
 }
 
 /**
