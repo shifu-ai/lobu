@@ -9,8 +9,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { startDaemon } from './daemon';
-import type { Env } from './types';
+import { startDaemon } from './daemon/index.js';
+import type { Env } from './types.js';
 
 function printUsage(): void {
   console.log(`

@@ -65,7 +65,7 @@ const ALLOWED_SCHEMA_KEYS = new Set<string>([
   "title",
 ]);
 
-function sanitizeToolSchema(node: unknown): unknown {
+export function sanitizeToolSchema(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(sanitizeToolSchema);
   if (!node || typeof node !== "object") return node;
   const obj = node as Record<string, unknown>;
@@ -75,6 +75,15 @@ function sanitizeToolSchema(node: unknown): unknown {
   }
   for (const [k, v] of Object.entries(obj)) {
     if (!ALLOWED_SCHEMA_KEYS.has(k)) continue;
+    if (k === "properties" && v && typeof v === "object" && !Array.isArray(v)) {
+      out.properties = Object.fromEntries(
+        Object.entries(v as Record<string, unknown>).map(([name, schema]) => [
+          name,
+          sanitizeToolSchema(schema),
+        ])
+      );
+      continue;
+    }
     out[k] = sanitizeToolSchema(v);
   }
   return out;

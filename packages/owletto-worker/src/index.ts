@@ -19,12 +19,12 @@ export type {
   PollResponse,
   StreamBatch,
   WorkerCapabilities,
-} from './daemon';
+} from './daemon/index.js';
 // Worker Daemon
-export { executeRun, startDaemon, WorkerClient, WorkerDaemon } from './daemon';
+export { executeRun, startDaemon, WorkerClient, WorkerDaemon } from './daemon/index.js';
 
 // Types
-export type { Env } from './types';
+export type { Env } from './types.js';
 
 // ---------- Lobu embedded worker bootstrap ----------
 // The orchestrator spawns this file as a subprocess with DEPLOYMENT_MODE=embedded.

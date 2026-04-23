@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createLogger } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import { CliTokenService } from "../../auth/cli/token-service.js";
@@ -226,9 +226,19 @@ export function createCliAuthRoutes(config: CliAuthRoutesConfig): Hono {
   }
 
   function verifyPassword(input: string, expected: string): boolean {
-    const a = createHash("sha256").update(input).digest();
-    const b = createHash("sha256").update(expected).digest();
-    return timingSafeEqual(a, b);
+    const inputBuffer = Buffer.from(input);
+    const expectedBuffer = Buffer.from(expected);
+    const compareLength = Math.max(inputBuffer.length, expectedBuffer.length);
+    const paddedInput = Buffer.alloc(compareLength);
+    const paddedExpected = Buffer.alloc(compareLength);
+
+    inputBuffer.copy(paddedInput);
+    expectedBuffer.copy(paddedExpected);
+
+    return (
+      inputBuffer.length === expectedBuffer.length &&
+      timingSafeEqual(paddedInput, paddedExpected)
+    );
   }
 
   async function startBrowserRequest(c: Context) {

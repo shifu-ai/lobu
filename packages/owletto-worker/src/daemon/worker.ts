@@ -4,9 +4,9 @@
  * Main daemon loop that polls for jobs and executes them.
  */
 
-import type { Env } from '../types';
-import { type WorkerCapabilities, WorkerClient } from './client';
-import { type ExecutorConfig, executeRun } from './executor';
+import type { Env } from '../types.js';
+import { type WorkerCapabilities, WorkerClient } from './client.js';
+import { type ExecutorConfig, executeRun } from './executor.js';
 
 export interface DaemonConfig {
   apiUrl: string;
