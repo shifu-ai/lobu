@@ -113,12 +113,19 @@ export function buildPolicyBundle(input: {
   judges?: Record<string, string>;
   egressConfig?: AgentEgressConfig;
 }): JudgePolicyBundle | undefined {
-  const judgedDomains = (input.judgedDomains ?? [])
-    .filter((r): r is DomainJudgeRule => !!r?.domain)
-    .map((r) => ({
-      domain: normalizeDomainPattern(r.domain),
+  // Normalize first, then dedupe by normalized domain. Equivalent rules
+  // (e.g. `*.slack.com` and `.slack.com`, or case variants) collapse to one;
+  // last declaration wins so operator-level rules can override skill-level.
+  const dedupedByDomain = new Map<string, DomainJudgeRule>();
+  for (const r of input.judgedDomains ?? []) {
+    if (!r?.domain) continue;
+    const normalized = normalizeDomainPattern(r.domain);
+    dedupedByDomain.set(normalized, {
+      domain: normalized,
       ...(r.judge ? { judge: r.judge } : {}),
-    }));
+    });
+  }
+  const judgedDomains = Array.from(dedupedByDomain.values());
 
   if (judgedDomains.length === 0) return undefined;
 

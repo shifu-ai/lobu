@@ -352,7 +352,20 @@ async function buildAgentConfig(
       }
     }
     if (skill.networkConfig?.judges) {
-      Object.assign(mergedJudges, skill.networkConfig.judges);
+      for (const [judgeName, policy] of Object.entries(
+        skill.networkConfig.judges
+      )) {
+        if (
+          mergedJudges[judgeName] !== undefined &&
+          mergedJudges[judgeName] !== policy
+        ) {
+          logger.warn(
+            { judgeName, skill: skill.name },
+            "Skill defines judge name that conflicts with an earlier skill; later skill wins (sorted by name)"
+          );
+        }
+        mergedJudges[judgeName] = policy;
+      }
     }
     // Merge skill-level MCP servers
     if (skill.mcpServers?.length) {
@@ -693,7 +706,7 @@ async function loadSkillFiles(dirs: string[]): Promise<LoadedSkillFile[]> {
     const resolvedDir = resolve(dir);
     let entries: string[];
     try {
-      entries = await readdir(resolvedDir);
+      entries = (await readdir(resolvedDir)).sort();
     } catch {
       continue;
     }
