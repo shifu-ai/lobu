@@ -31,7 +31,10 @@ export class WorkerDaemon {
   private client: WorkerClient;
   private env: Env;
   private config: Required<
-    Omit<DaemonConfig, 'apiUrl' | 'workerId' | 'capabilities' | 'executor' | 'version'>
+    Omit<
+      DaemonConfig,
+      'apiUrl' | 'workerId' | 'workerApiToken' | 'capabilities' | 'executor' | 'version'
+    >
   > & {
     executor: Partial<ExecutorConfig>;
   };
