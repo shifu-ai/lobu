@@ -212,11 +212,43 @@ export async function uploadUserFile(
         `Error: Cannot resolve relative file path "${args.file_path}" — workspaceDir not set. This is a wiring bug; pass an absolute path or ensure the worker was started with a workspace.`
       );
     }
-    const filePath = path.isAbsolute(args.file_path)
+    const requestedPath = path.isAbsolute(args.file_path)
       ? args.file_path
       : path.join(gw.workspaceDir as string, args.file_path);
 
-    const stats = await fs.stat(filePath).catch(() => null);
+    // Containment check: resolve the real path (following any symlinks) and
+    // ensure it stays inside the worker's workspace. Without this, an agent
+    // can hand us `../../etc/passwd` (or a symlink that points there) and we
+    // would happily upload it to the user.
+    let filePath: string;
+    if (gw.workspaceDir) {
+      try {
+        const workspaceReal = await fs.realpath(gw.workspaceDir);
+        const requestedReal = await fs.realpath(requestedPath);
+        const withSep = workspaceReal.endsWith(path.sep)
+          ? workspaceReal
+          : workspaceReal + path.sep;
+        if (
+          requestedReal !== workspaceReal &&
+          !requestedReal.startsWith(withSep)
+        ) {
+          return textResult(
+            `Error: Refusing to upload file outside workspace: ${args.file_path}`
+          );
+        }
+        filePath = requestedReal;
+      } catch {
+        return textResult(
+          `Error: Cannot show file - not found or is not a file: ${args.file_path}`
+        );
+      }
+    } else {
+      filePath = requestedPath;
+    }
+
+    // Use lstat so we don't dereference symlinks for the file-type check —
+    // realpath above already proved the resolved target is in-workspace.
+    const stats = await fs.lstat(filePath).catch(() => null);
     if (!stats?.isFile()) {
       return textResult(
         `Error: Cannot show file - not found or is not a file: ${args.file_path}`
