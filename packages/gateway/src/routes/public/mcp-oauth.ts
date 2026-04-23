@@ -9,13 +9,13 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type Redis from "ioredis";
-import { completeAuthCodeFlow } from "../../auth/mcp/oauth-flow";
-import { postOAuthCompletionPrompt } from "../../auth/mcp/resume-after-oauth";
-import { escapeHtml } from "../../auth/oauth-templates";
-import type { ChatInstanceManager } from "../../connections/chat-instance-manager";
-import type { CoreServices } from "../../platform";
-import type { WritableSecretStore } from "../../secrets";
+import type { Redis } from "ioredis";
+import { completeAuthCodeFlow } from "../../auth/mcp/oauth-flow.js";
+import { postOAuthCompletionPrompt } from "../../auth/mcp/resume-after-oauth.js";
+import { escapeHtml } from "../../auth/oauth-templates.js";
+import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
+import type { CoreServices } from "../../platform.js";
+import type { WritableSecretStore } from "../../secrets/index.js";
 
 const logger = createLogger("mcp-oauth-callback");
 

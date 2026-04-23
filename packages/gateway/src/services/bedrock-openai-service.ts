@@ -4,12 +4,12 @@ import type { Model } from "@mariozechner/pi-ai/dist/types.js";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { createLogger } from "@lobu/core";
-import { authenticateWorker } from "../routes/internal/middleware";
+import { authenticateWorker } from "../routes/internal/middleware.js";
 import {
   BedrockModelCatalog,
   buildDynamicBedrockModel,
   resolveAwsRegion,
-} from "./bedrock-model-catalog";
+} from "./bedrock-model-catalog.js";
 
 const logger = createLogger("bedrock-openai-service");
 

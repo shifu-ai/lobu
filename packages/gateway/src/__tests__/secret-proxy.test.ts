@@ -6,8 +6,8 @@ import {
   SecretProxy,
   type SecretMapping,
   storeSecretMapping,
-} from "../proxy/secret-proxy";
-import type { SecretStore } from "../secrets";
+} from "../proxy/secret-proxy.js";
+import type { SecretStore } from "../secrets/index.js";
 
 describe("storeSecretMapping", () => {
   let redis: MockRedisClient;

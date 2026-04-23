@@ -6,9 +6,9 @@
  */
 
 import type { AgentConfigStore } from "@lobu/core";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import { verifyOwnedAgentAccess } from "./agent-ownership";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import { verifyOwnedAgentAccess } from "./agent-ownership.js";
 
 interface TokenVerifierConfig {
   userAgentsStore?: UserAgentsStore;

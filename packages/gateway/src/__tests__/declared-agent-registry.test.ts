@@ -4,7 +4,7 @@ import {
   DeclaredAgentRegistry,
   entryFromAgentConfig,
   entryFromFileLoadedAgent,
-} from "../services/declared-agent-registry";
+} from "../services/declared-agent-registry.js";
 
 describe("DeclaredAgentRegistry", () => {
   test("starts empty", () => {

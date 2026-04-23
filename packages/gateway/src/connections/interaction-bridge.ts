@@ -1,15 +1,15 @@
 import { createLogger } from "@lobu/core";
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
 import type {
   InteractionService,
   PostedLinkButton,
   PostedQuestion,
   PostedStatusMessage,
   PostedToolApproval,
-} from "../interactions";
-import type { GrantStore } from "../permissions/grant-store";
-import type { ChatInstanceManager } from "./chat-instance-manager";
-import type { PlatformConnection } from "./types";
+} from "../interactions.js";
+import type { GrantStore } from "../permissions/grant-store.js";
+import type { ChatInstanceManager } from "./chat-instance-manager.js";
+import type { PlatformConnection } from "./types.js";
 
 const logger = createLogger("chat-interaction-bridge");
 

@@ -6,8 +6,8 @@ import {
   type InstructionContext,
   type InstructionProvider,
 } from "@lobu/core";
-import type { McpConfigService } from "../auth/mcp/config-service";
-import type { AgentSettingsStore } from "../auth/settings/agent-settings-store";
+import type { McpConfigService } from "../auth/mcp/config-service.js";
+import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 
 const logger = createLogger("instruction-service");
 

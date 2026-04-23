@@ -10,12 +10,12 @@ import type { AgentConfigStore } from "@lobu/core";
 import { createLogger } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import type { ChatInstanceManager } from "../../connections/chat-instance-manager";
-import type { WorkerConnectionManager } from "../../gateway/connection-manager";
-import { errorResponse } from "../shared/helpers";
-import { createTokenVerifier } from "../shared/token-verifier";
-import { verifySettingsSession } from "./settings-auth";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
+import type { WorkerConnectionManager } from "../../gateway/connection-manager.js";
+import { errorResponse } from "../shared/helpers.js";
+import { createTokenVerifier } from "../shared/token-verifier.js";
+import { verifySettingsSession } from "./settings-auth.js";
 
 const logger = createLogger("agent-history-routes");
 

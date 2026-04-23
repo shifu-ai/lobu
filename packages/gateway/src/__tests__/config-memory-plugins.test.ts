@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { buildMemoryPlugins } from "../config";
+import { buildMemoryPlugins } from "../config/index.js";
 
 const originalMemoryUrl = process.env.MEMORY_URL;
 const originalDispatcherServiceName = process.env.DISPATCHER_SERVICE_NAME;

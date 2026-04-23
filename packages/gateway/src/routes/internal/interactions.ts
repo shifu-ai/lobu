@@ -2,10 +2,10 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { InteractionService } from "../../interactions";
-import { errorResponse, getVerifiedWorker } from "../shared/helpers";
-import { authenticateWorker } from "./middleware";
-import type { WorkerContext } from "./types";
+import type { InteractionService } from "../../interactions.js";
+import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
+import { authenticateWorker } from "./middleware.js";
+import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("internal-interaction-routes");
 

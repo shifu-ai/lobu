@@ -1,7 +1,7 @@
 import type { ConfigProviderMeta } from "@lobu/core";
-import type { ModelOption } from "../modules/module-system";
-import { BaseProviderModule } from "./base-provider-module";
-import type { AuthProfilesManager } from "./settings/auth-profiles-manager";
+import type { ModelOption } from "../modules/module-system.js";
+import { BaseProviderModule } from "./base-provider-module.js";
+import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
 
 interface ApiKeyProviderConfig {
   providerId: string;
@@ -73,7 +73,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
   override getProxyBaseUrlMappings(
     proxyUrl: string,
     agentId?: string,
-    context?: import("../embedded").ProviderCredentialContext
+    context?: import("../embedded.js").ProviderCredentialContext
   ): Record<string, string> {
     const mappings = super.getProxyBaseUrlMappings(proxyUrl, agentId, context);
     if (this.apiKeyConfig.sdkCompat === "openai") {

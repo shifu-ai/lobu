@@ -6,9 +6,9 @@
  */
 
 import { createLogger } from "@lobu/core";
-import type { ThreadResponsePayload } from "../infrastructure/queue/types";
-import type { ResponseRenderer } from "../platform/response-renderer";
-import type { SseManager } from "../services/sse-manager";
+import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
+import type { ResponseRenderer } from "../platform/response-renderer.js";
+import type { SseManager } from "../services/sse-manager.js";
 
 const logger = createLogger("api-response-renderer");
 

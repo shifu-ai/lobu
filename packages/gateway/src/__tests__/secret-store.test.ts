@@ -16,7 +16,7 @@ import {
   type SecretPutOptions,
   type SecretStore,
   type WritableSecretStore,
-} from "../secrets";
+} from "../secrets/index.js";
 
 const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

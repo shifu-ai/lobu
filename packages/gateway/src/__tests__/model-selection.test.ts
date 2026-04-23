@@ -3,7 +3,7 @@ import {
   getModelSelectionState,
   reconcileModelSelectionForInstalledProviders,
   resolveEffectiveModelRef,
-} from "../auth/settings/model-selection";
+} from "../auth/settings/model-selection.js";
 
 describe("model-selection", () => {
   test("uses legacy model as pinned fallback", () => {

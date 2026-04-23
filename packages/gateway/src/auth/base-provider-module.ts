@@ -1,13 +1,13 @@
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { ProviderCredentialContext } from "../embedded";
+import type { ProviderCredentialContext } from "../embedded.js";
 import {
   BaseModule,
   type ModelProviderModule,
   type ProviderUpstreamConfig,
-} from "../modules/module-system";
-import { resolveEnv } from "./mcp/string-substitution";
-import type { AuthProfilesManager } from "./settings/auth-profiles-manager";
+} from "../modules/module-system.js";
+import { resolveEnv } from "./mcp/string-substitution.js";
+import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
 
 const logger = createLogger("base-provider-module");
 

@@ -1,27 +1,31 @@
-export * from "./base-deployment-manager";
-export * from "./deployment-utils";
-export * from "./impl";
+export * from "./base-deployment-manager.js";
+export * from "./deployment-utils.js";
+export * from "./impl/index.js";
 
+import { execSync } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { createLogger, moduleRegistry } from "@lobu/core";
-import type Redis from "ioredis";
-import type { ProviderCatalogService } from "../auth/provider-catalog";
+import type { Redis } from "ioredis";
+import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import {
   getModelProviderModules,
   type ModelProviderModule,
-} from "../modules/module-system";
-import type { GrantStore } from "../permissions/grant-store";
-import type { WritableSecretStore } from "../secrets";
+} from "../modules/module-system.js";
+import type { GrantStore } from "../permissions/grant-store.js";
+import type { WritableSecretStore } from "../secrets/index.js";
 import type {
   BaseDeploymentManager,
   OrchestratorConfig,
-} from "./base-deployment-manager";
-import { buildModuleEnvVars } from "./deployment-utils";
+} from "./base-deployment-manager.js";
+import { buildModuleEnvVars } from "./deployment-utils.js";
 import {
   DockerDeploymentManager,
   EmbeddedDeploymentManager,
   K8sDeploymentManager,
-} from "./impl";
-import { MessageConsumer } from "./message-consumer";
+} from "./impl/index.js";
+import { MessageConsumer } from "./message-consumer.js";
 
 const logger = createLogger("orchestrator");
 
@@ -153,18 +157,14 @@ export class Orchestrator {
         return true;
       }
 
-      const fs = require("node:fs");
-      const os = require("node:os");
-      const path = require("node:path");
-
       const kubeconfigPaths = [
         process.env.KUBECONFIG,
-        path.join(os.homedir(), ".kube", "config"),
-      ].filter(Boolean);
+        join(homedir(), ".kube", "config"),
+      ].filter((p): p is string => Boolean(p));
 
       return kubeconfigPaths.some((configPath) => {
         try {
-          return fs.existsSync(configPath) && fs.statSync(configPath).isFile();
+          return existsSync(configPath) && statSync(configPath).isFile();
         } catch {
           return false;
         }
@@ -176,7 +176,6 @@ export class Orchestrator {
 
   private isDockerAvailable(): boolean {
     try {
-      const { execSync } = require("node:child_process");
       execSync("docker version", {
         stdio: "ignore",
         timeout: 5000,

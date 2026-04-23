@@ -6,33 +6,36 @@
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AgentConfigStore, SkillConfig } from "@lobu/core";
-import type { ProviderCatalogService } from "../../auth/provider-catalog";
-import { collectProviderModelOptions } from "../../auth/provider-model-options";
+import type { ProviderCatalogService } from "../../auth/provider-catalog.js";
+import { collectProviderModelOptions } from "../../auth/provider-model-options.js";
 
-import type { AgentSettings, AgentSettingsStore } from "../../auth/settings";
-import type { AuthProfilesManager } from "../../auth/settings/auth-profiles-manager";
-import { getModelSelectionState } from "../../auth/settings/model-selection";
+import type {
+  AgentSettings,
+  AgentSettingsStore,
+} from "../../auth/settings/index.js";
+import type { AuthProfilesManager } from "../../auth/settings/auth-profiles-manager.js";
+import { getModelSelectionState } from "../../auth/settings/model-selection.js";
 import {
   canEditSettingsSection,
   type ResolvedProviderView,
   type ResolvedSectionView,
   SETTINGS_SECTION_KEYS,
   type SettingsSectionKey,
-} from "../../auth/settings/resolved-settings-view";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import type { WorkerConnectionManager } from "../../gateway/connection-manager";
-import type { IMessageQueue } from "../../infrastructure/queue";
+} from "../../auth/settings/resolved-settings-view.js";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import type { WorkerConnectionManager } from "../../gateway/connection-manager.js";
+import type { IMessageQueue } from "../../infrastructure/queue/index.js";
 import {
   getModelProviderModules,
   type ModelOption,
   type ModelProviderModule,
-} from "../../modules/module-system";
-import type { ScheduleService } from "../../orchestration/scheduled-wakeup";
-import type { GrantStore } from "../../permissions/grant-store";
-import { errorResponse } from "../shared/helpers";
-import { createTokenVerifier } from "../shared/token-verifier";
-import { verifySettingsSessionOrToken } from "./settings-auth";
+} from "../../modules/module-system.js";
+import type { ScheduleService } from "../../orchestration/scheduled-wakeup.js";
+import type { GrantStore } from "../../permissions/grant-store.js";
+import { errorResponse } from "../shared/helpers.js";
+import { createTokenVerifier } from "../shared/token-verifier.js";
+import { verifySettingsSessionOrToken } from "./settings-auth.js";
 
 const TAG = "Configuration";
 const ErrorResponse = z.object({ error: z.string() });

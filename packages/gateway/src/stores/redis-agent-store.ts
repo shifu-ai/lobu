@@ -14,13 +14,13 @@ import type {
   Grant,
   StoredConnection,
 } from "@lobu/core";
-import type Redis from "ioredis";
-import type { AgentMetadataStore } from "../auth/agent-metadata-store";
-import type { AgentSettingsStore } from "../auth/settings";
-import type { UserAgentsStore } from "../auth/user-agents-store";
-import type { ChannelBindingService } from "../channels";
-import type { GrantStore } from "../permissions/grant-store";
-import { BaseAgentStore } from "./base-agent-store";
+import type { Redis } from "ioredis";
+import type { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import type { AgentSettingsStore } from "../auth/settings/index.js";
+import type { UserAgentsStore } from "../auth/user-agents-store.js";
+import type { ChannelBindingService } from "../channels/index.js";
+import type { GrantStore } from "../permissions/grant-store.js";
+import { BaseAgentStore } from "./base-agent-store.js";
 
 export class RedisAgentStore extends BaseAgentStore {
   constructor(

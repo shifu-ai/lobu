@@ -1,6 +1,6 @@
 import { DEFAULTS } from "@lobu/core";
 import type { StateAdapter } from "chat";
-import type { ThreadSession } from "../session";
+import type { ThreadSession } from "../session.js";
 
 interface SessionThreadIndex {
   sessionKey: string;

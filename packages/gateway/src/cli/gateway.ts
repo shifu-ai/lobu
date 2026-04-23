@@ -1,17 +1,56 @@
 #!/usr/bin/env bun
 
+import { randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import { createServer } from "node:http";
 import { getRequestListener } from "@hono/node-server";
 import { OpenAPIHono } from "@hono/zod-openapi";
-import { createLogger } from "@lobu/core";
+import { createLogger, moduleRegistry as coreModuleRegistry } from "@lobu/core";
 import { apiReference } from "@scalar/hono-api-reference";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
-import type { AgentMetadata } from "../auth/agent-metadata-store";
-import type { GatewayConfig } from "../config";
-import { getModelProviderModules } from "../modules/module-system";
-import { registerAutoOpenApiRoutes } from "../routes/openapi-auto";
+import type { AgentMetadata } from "../auth/agent-metadata-store.js";
+import { CliTokenService } from "../auth/cli/token-service.js";
+import { setEnvResolver } from "../auth/mcp/string-substitution.js";
+import { OAuthClient } from "../auth/oauth/client.js";
+import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
+import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
+import { SystemEnvStore } from "../auth/system-env-store.js";
+import type { GatewayConfig } from "../config/index.js";
+import { getModelProviderModules } from "../modules/module-system.js";
+import { createGeminiOAuthProxyApp } from "../proxy/gemini-oauth/proxy.js";
+import { createAudioRoutes } from "../routes/internal/audio.js";
+import { createDeviceAuthRoutes } from "../routes/internal/device-auth.js";
+import { createFileRoutes } from "../routes/internal/files.js";
+import { createHistoryRoutes } from "../routes/internal/history.js";
+import { createImageRoutes } from "../routes/internal/images.js";
+import { createInteractionRoutes } from "../routes/internal/interactions.js";
+import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
+import { createAgentApi } from "../routes/public/agent.js";
+import { createAgentConfigRoutes } from "../routes/public/agent-config.js";
+import { createAgentHistoryRoutes } from "../routes/public/agent-history.js";
+import { createAgentRoutes } from "../routes/public/agents.js";
+import { createChannelBindingRoutes } from "../routes/public/channels.js";
+import {
+  createCliAuthRoutes,
+  createConnectAuthRoutes,
+} from "../routes/public/cli-auth.js";
+import {
+  createConnectionCrudRoutes,
+  createConnectionWebhookRoutes,
+} from "../routes/public/connections.js";
+import { createPublicFileRoutes } from "../routes/public/files.js";
+import { createLandingRoutes } from "../routes/public/landing.js";
+import { createMcpOAuthRoutes } from "../routes/public/mcp-oauth.js";
+import {
+  createOAuthRoutes,
+  type ProviderCredentialStore,
+} from "../routes/public/oauth.js";
+import {
+  setAuthProvider,
+  verifySettingsSessionOrToken,
+} from "../routes/public/settings-auth.js";
+import { createSlackRoutes } from "../routes/public/slack.js";
 
 const logger = createLogger("gateway-startup");
 
@@ -24,9 +63,11 @@ interface CreateGatewayAppOptions {
   interactionService?: any;
   platformRegistry?: any;
   coreServices?: any;
-  chatInstanceManager?: import("../connections").ChatInstanceManager | null;
+  chatInstanceManager?:
+    | import("../connections/index.js").ChatInstanceManager
+    | null;
   /** Custom auth provider for embedded mode. When set, gateway delegates auth to this function instead of using cookie-based sessions. */
-  authProvider?: import("../routes/public/settings-auth").AuthProvider;
+  authProvider?: import("../routes/public/settings-auth.js").AuthProvider;
 }
 
 /**
@@ -49,7 +90,6 @@ export function createGatewayApp(
   } = options;
 
   if (authProvider) {
-    const { setAuthProvider } = require("../routes/public/settings-auth");
     setAuthProvider(authProvider);
   }
 
@@ -107,9 +147,8 @@ export function createGatewayApp(
 
   app.get("/ready", (c) => c.json({ ready: true }));
 
-  const crypto = require("node:crypto");
   const adminPassword: string =
-    process.env.ADMIN_PASSWORD || crypto.randomBytes(16).toString("base64url");
+    process.env.ADMIN_PASSWORD || randomBytes(16).toString("base64url");
 
   // Metrics auth is optional so existing ServiceMonitor configs continue to scrape.
   app.get("/metrics", async (c) => {
@@ -120,7 +159,7 @@ export function createGatewayApp(
         return c.text("Unauthorized", 401);
       }
     }
-    const { getMetricsText } = await import("../metrics/prometheus");
+    const { getMetricsText } = await import("../metrics/prometheus.js");
     c.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
     return c.text(getMetricsText());
   });
@@ -132,9 +171,6 @@ export function createGatewayApp(
   if (coreServices?.getAuthProfilesManager) {
     const authProfilesManager = coreServices.getAuthProfilesManager();
     if (authProfilesManager) {
-      const {
-        createGeminiOAuthProxyApp,
-      } = require("../proxy/gemini-oauth/proxy");
       const geminiOAuthApp = createGeminiOAuthProxyApp({
         authProfilesManager,
       });
@@ -161,19 +197,13 @@ export function createGatewayApp(
     logger.debug("Worker gateway routes enabled at :8080/worker/*");
   }
 
-  const { moduleRegistry: coreModuleRegistry } = require("@lobu/core");
-  if (coreModuleRegistry.registerHonoEndpoints) {
-    coreModuleRegistry.registerHonoEndpoints(app);
-  } else {
-    const expressApp = createExpressAdapter(app);
-    coreModuleRegistry.registerEndpoints(expressApp);
-  }
+  const expressApp = createExpressAdapter(app);
+  coreModuleRegistry.registerEndpoints(expressApp);
   logger.debug("Module endpoints registered");
 
   // MCP OAuth callback MUST register before the MCP proxy mount at /mcp,
   // otherwise the proxy's `/:mcpId/*` route swallows /mcp/oauth/callback.
   if (coreServices) {
-    const { createMcpOAuthRoutes } = require("../routes/public/mcp-oauth");
     const mcpOAuthRouter = createMcpOAuthRoutes({
       redis: coreServices.getQueue().getRedisClient(),
       secretStore: coreServices.getSecretStore(),
@@ -200,7 +230,6 @@ export function createGatewayApp(
 
   if (platformRegistry && coreServices) {
     const artifactStore = coreServices.getArtifactStore();
-    const { createFileRoutes } = require("../routes/internal/files");
     const fileRouter = createFileRoutes(
       platformRegistry,
       artifactStore,
@@ -208,7 +237,6 @@ export function createGatewayApp(
     );
     app.route("/internal/files", fileRouter);
 
-    const { createPublicFileRoutes } = require("../routes/public/files");
     app.route("", createPublicFileRoutes(artifactStore));
     logger.debug(
       "File routes enabled at :8080/internal/files/* and /api/v1/files/*"
@@ -216,16 +244,12 @@ export function createGatewayApp(
   }
 
   {
-    const { createHistoryRoutes } = require("../routes/internal/history");
     const historyRouter = createHistoryRoutes();
     app.route("/internal", historyRouter);
     logger.debug("History routes enabled at :8080/internal/history");
   }
 
   if (coreServices) {
-    const {
-      createDeviceAuthRoutes,
-    } = require("../routes/internal/device-auth");
     const redisClient = coreServices.getQueue().getRedisClient();
     const mcpConfigService = coreServices.getMcpConfigService();
     if (mcpConfigService) {
@@ -244,7 +268,6 @@ export function createGatewayApp(
   if (coreServices) {
     const transcriptionService = coreServices.getTranscriptionService();
     if (transcriptionService) {
-      const { createAudioRoutes } = require("../routes/internal/audio");
       const audioRouter = createAudioRoutes(transcriptionService);
       app.route("", audioRouter);
       logger.debug("Audio routes enabled at :8080/internal/audio/*");
@@ -254,7 +277,6 @@ export function createGatewayApp(
   if (coreServices) {
     const imageGenerationService = coreServices.getImageGenerationService();
     if (imageGenerationService) {
-      const { createImageRoutes } = require("../routes/internal/images");
       const imageRouter = createImageRoutes(imageGenerationService);
       app.route("", imageRouter);
       logger.debug("Image routes enabled at :8080/internal/images/*");
@@ -262,9 +284,6 @@ export function createGatewayApp(
   }
 
   if (interactionService) {
-    const {
-      createInteractionRoutes,
-    } = require("../routes/internal/interactions");
     const internalRouter = createInteractionRoutes(interactionService);
     app.route("", internalRouter);
     logger.debug("Internal interaction routes enabled");
@@ -272,7 +291,6 @@ export function createGatewayApp(
 
   let cliTokenService: any;
   if (coreServices) {
-    const { CliTokenService } = require("../auth/cli/token-service");
     const redisClient = coreServices.getQueue().getRedisClient();
     cliTokenService = new CliTokenService(redisClient);
   }
@@ -284,7 +302,6 @@ export function createGatewayApp(
     const publicUrl = coreServices.getPublicGatewayUrl();
 
     if (queueProducer && sessionMgr && interactionSvc) {
-      const { createAgentApi } = require("../routes/public/agent");
       const approveRedis = coreServices.getQueue().getRedisClient();
       const approveGrantStore = coreServices.getGrantStore();
       const approveMcpProxy = coreServices.getMcpProxy();
@@ -357,10 +374,6 @@ export function createGatewayApp(
     const registeredProviders: string[] = [];
 
     {
-      const {
-        createCliAuthRoutes,
-        createConnectAuthRoutes,
-      } = require("../routes/public/cli-auth");
       const cliAuthRouter = createCliAuthRoutes({
         queue: coreServices.getQueue(),
         externalAuthClient: coreServices.getExternalAuthClient(),
@@ -382,12 +395,6 @@ export function createGatewayApp(
 
     const authProfilesManager = coreServices.getAuthProfilesManager();
     if (authProfilesManager) {
-      const {
-        verifySettingsSessionOrToken,
-      } = require("../routes/public/settings-auth");
-      const {
-        createAuthProfileLabel,
-      } = require("../auth/settings/auth-profiles-manager");
       const agentMetadataStore = coreServices.getAgentMetadataStore();
       const userAgentsStore = coreServices.getUserAgentsStore();
 
@@ -619,8 +626,6 @@ export function createGatewayApp(
     const providerRegistryService = coreServices.getProviderRegistryService();
 
     if (providerRegistryService) {
-      const { SystemEnvStore } = require("../auth/system-env-store");
-      const { setEnvResolver } = require("../auth/mcp/string-substitution");
       const systemEnvStore = new SystemEnvStore(coreServices.getSecretStore());
       systemEnvStore.refreshCache().catch((e: any) => {
         logger.error("Failed to refresh system env cache", { error: e });
@@ -635,7 +640,6 @@ export function createGatewayApp(
     }
 
     {
-      const { createLandingRoutes } = require("../routes/public/landing");
       const landingRouter = createLandingRoutes();
       app.route("", landingRouter);
       logger.debug("Landing page enabled at :8080/");
@@ -646,9 +650,6 @@ export function createGatewayApp(
         .getWorkerGateway()
         ?.getConnectionManager();
       if (connectionManager) {
-        const {
-          createAgentHistoryRoutes,
-        } = require("../routes/public/agent-history");
         const agentHistoryRouter = createAgentHistoryRoutes({
           connectionManager,
           chatInstanceManager: chatInstanceManager ?? undefined,
@@ -663,10 +664,6 @@ export function createGatewayApp(
     }
 
     if (agentSettingsStore) {
-      const {
-        createAgentConfigRoutes,
-      } = require("../routes/public/agent-config");
-
       const agentConfigRouter = createAgentConfigRoutes({
         agentSettingsStore,
         agentConfigStore: coreServices.getConfigStore()!,
@@ -690,13 +687,12 @@ export function createGatewayApp(
     }
 
     if (agentSettingsStore) {
-      const { createOAuthRoutes } = require("../routes/public/oauth");
-      const { OAuthClient } = require("../auth/oauth/client");
-      const { CLAUDE_PROVIDER } = require("../auth/oauth/providers");
       const claudeOAuthClient = new OAuthClient(CLAUDE_PROVIDER);
       const oauthRouter = createOAuthRoutes({
         providerStores:
-          Object.keys(providerStores).length > 0 ? providerStores : undefined,
+          Object.keys(providerStores).length > 0
+            ? (providerStores as Record<string, ProviderCredentialStore>)
+            : undefined,
         oauthClients: { claude: claudeOAuthClient },
         oauthStateStore: claudeOAuthStateStore,
       });
@@ -713,9 +709,6 @@ export function createGatewayApp(
 
     const channelBindingService = coreServices.getChannelBindingService();
     if (channelBindingService) {
-      const {
-        createChannelBindingRoutes,
-      } = require("../routes/public/channels");
       const channelBindingRouter = createChannelBindingRoutes({
         channelBindingService,
         userAgentsStore: coreServices.getUserAgentsStore(),
@@ -730,7 +723,6 @@ export function createGatewayApp(
     {
       const userAgentsStore = coreServices.getUserAgentsStore();
       const agentMetadataStore = coreServices.getAgentMetadataStore();
-      const { createAgentRoutes } = require("../routes/public/agents");
       const agentManagementRouter = createAgentRoutes({
         userAgentsStore,
         agentMetadataStore,
@@ -743,14 +735,6 @@ export function createGatewayApp(
   }
 
   if (chatInstanceManager) {
-    const {
-      createSlackRoutes,
-      createConnectionWebhookRoutes,
-      createConnectionCrudRoutes,
-    } = {
-      ...require("../routes/public/slack"),
-      ...require("../routes/public/connections"),
-    };
     app.route("", createSlackRoutes(chatInstanceManager));
     app.route("", createConnectionWebhookRoutes(chatInstanceManager));
     app.route(
@@ -1188,11 +1172,11 @@ function createExpressAdapter(honoApp: any) {
 export async function startGateway(config: GatewayConfig): Promise<void> {
   logger.info("Starting Lobu Gateway");
 
-  const { startFilteringProxy } = await import("../proxy/proxy-manager");
+  const { startFilteringProxy } = await import("../proxy/proxy-manager.js");
   await startFilteringProxy();
 
-  const { Orchestrator } = await import("../orchestration");
-  const { Gateway } = await import("../gateway-main");
+  const { Orchestrator } = await import("../orchestration/index.js");
+  const { Gateway } = await import("../gateway-main.js");
 
   logger.debug("Creating orchestrator", { mode: process.env.DEPLOYMENT_MODE });
   const orchestrator = new Orchestrator(config.orchestration);
@@ -1201,7 +1185,7 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
 
   const gateway = new Gateway(config);
 
-  const { ApiPlatform } = await import("../api");
+  const { ApiPlatform } = await import("../api/index.js");
   const apiPlatform = new ApiPlatform();
   gateway.registerPlatform(apiPlatform);
   logger.debug("API platform registered");
@@ -1215,7 +1199,7 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
   // Wire grant store to HTTP proxy for domain grant checks
   const grantStore = coreServices.getGrantStore();
   if (grantStore) {
-    const { setProxyGrantStore } = await import("../proxy/http-proxy");
+    const { setProxyGrantStore } = await import("../proxy/http-proxy.js");
     setProxyGrantStore(grantStore);
     logger.debug("Grant store connected to HTTP proxy");
   }
@@ -1243,7 +1227,7 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
   });
 
   const { ChatInstanceManager, ChatResponseBridge } = await import(
-    "../connections"
+    "../connections/index.js"
   );
   const chatInstanceManager = new ChatInstanceManager();
   try {

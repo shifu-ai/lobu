@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import type { MessagePayload } from "../infrastructure/queue/queue-producer";
+import type { MessagePayload } from "../infrastructure/queue/queue-producer.js";
 import {
   BaseDeploymentManager,
   type DeploymentInfo,
   type OrchestratorConfig,
-} from "../orchestration/base-deployment-manager";
-import { GrantStore } from "../permissions/grant-store";
+} from "../orchestration/base-deployment-manager.js";
+import { GrantStore } from "../permissions/grant-store.js";
 
 /** Minimal concrete subclass — only exists so we can test grant syncing. */
 class TestDeploymentManager extends BaseDeploymentManager {

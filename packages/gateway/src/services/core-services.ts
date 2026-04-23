@@ -9,76 +9,79 @@ import {
   moduleRegistry,
   type ProviderRegistryEntry,
 } from "@lobu/core";
-import { AgentMetadataStore } from "../auth/agent-metadata-store";
-import { ApiKeyProviderModule } from "../auth/api-key-provider-module";
-import { BedrockProviderModule } from "../auth/bedrock/provider-module";
-import { ChatGPTOAuthModule } from "../auth/chatgpt";
-import { ClaudeOAuthModule } from "../auth/claude/oauth-module";
-import { ExternalAuthClient } from "../auth/external/client";
-import { McpConfigService } from "../auth/mcp/config-service";
-import { McpProxy } from "../auth/mcp/proxy";
-import { McpToolCache } from "../auth/mcp/tool-cache";
-import { OAuthClient } from "../auth/oauth/client";
-import { CLAUDE_PROVIDER } from "../auth/oauth/providers";
+import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
+import { BedrockProviderModule } from "../auth/bedrock/provider-module.js";
+import { ChatGPTOAuthModule } from "../auth/chatgpt/index.js";
+import { ClaudeOAuthModule } from "../auth/claude/oauth-module.js";
+import { ExternalAuthClient } from "../auth/external/client.js";
+import { McpConfigService } from "../auth/mcp/config-service.js";
+import { McpProxy } from "../auth/mcp/proxy.js";
+import { McpToolCache } from "../auth/mcp/tool-cache.js";
+import { OAuthClient } from "../auth/oauth/client.js";
+import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
 import {
   createOAuthStateStore,
   type ProviderOAuthStateStore,
-} from "../auth/oauth/state-store";
-import { ProviderCatalogService } from "../auth/provider-catalog";
-import { AgentSettingsStore, AuthProfilesManager } from "../auth/settings";
-import { ModelPreferenceStore } from "../auth/settings/model-preference-store";
-import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store";
-import { UserAgentsStore } from "../auth/user-agents-store";
-import { ChannelBindingService } from "../channels";
-import { ConversationStateStore } from "../connections/conversation-state-store";
-import { createGatewayStateAdapter } from "../connections/state-adapter";
-import { registerBuiltInCommands } from "../commands/built-in-commands";
-import type { AgentConfig, GatewayConfig } from "../config";
-import type { RuntimeProviderCredentialResolver } from "../embedded";
+} from "../auth/oauth/state-store.js";
+import { ProviderCatalogService } from "../auth/provider-catalog.js";
+import {
+  AgentSettingsStore,
+  AuthProfilesManager,
+} from "../auth/settings/index.js";
+import { ModelPreferenceStore } from "../auth/settings/model-preference-store.js";
+import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
+import { UserAgentsStore } from "../auth/user-agents-store.js";
+import { ChannelBindingService } from "../channels/index.js";
+import { ConversationStateStore } from "../connections/conversation-state-store.js";
+import { createGatewayStateAdapter } from "../connections/state-adapter.js";
+import { registerBuiltInCommands } from "../commands/built-in-commands.js";
+import type { AgentConfig, GatewayConfig } from "../config/index.js";
+import type { RuntimeProviderCredentialResolver } from "../embedded.js";
 import {
   applyOwlettoMemoryEnvFromProject,
   type FileLoadedAgent,
   loadAgentConfigFromFiles,
-} from "../config/file-loader";
-import { ArtifactStore } from "../files/artifact-store";
-import { WorkerGateway } from "../gateway";
-import type { IMessageQueue } from "../infrastructure/queue";
+} from "../config/file-loader.js";
+import { ArtifactStore } from "../files/artifact-store.js";
+import { WorkerGateway } from "../gateway/index.js";
+import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import {
   QueueProducer,
   RedisQueue,
   type RedisQueueConfig,
-} from "../infrastructure/queue";
-import { InteractionService } from "../interactions";
-import { getModelProviderModules } from "../modules/module-system";
+} from "../infrastructure/queue/index.js";
+import { InteractionService } from "../interactions.js";
+import { getModelProviderModules } from "../modules/module-system.js";
 import {
   ScheduleService,
   setScheduleServiceInstance,
-} from "../orchestration/scheduled-wakeup";
-import { GrantStore } from "../permissions/grant-store";
-import { SecretProxy } from "../proxy/secret-proxy";
-import { TokenRefreshJob } from "../proxy/token-refresh-job";
+} from "../orchestration/scheduled-wakeup.js";
+import { GrantStore } from "../permissions/grant-store.js";
+import { SecretProxy } from "../proxy/secret-proxy.js";
+import { TokenRefreshJob } from "../proxy/token-refresh-job.js";
 import {
   AwsSecretsManagerSecretStore,
   RedisSecretStore,
   SecretStoreRegistry,
-} from "../secrets";
-import { InMemoryAgentStore } from "../stores/in-memory-agent-store";
-import { RedisAgentStore } from "../stores/redis-agent-store";
-import { BedrockModelCatalog } from "./bedrock-model-catalog";
-import { BedrockOpenAIService } from "./bedrock-openai-service";
+} from "../secrets/index.js";
+import { InMemoryAgentStore } from "../stores/in-memory-agent-store.js";
+import { RedisAgentStore } from "../stores/redis-agent-store.js";
+import { BedrockModelCatalog } from "./bedrock-model-catalog.js";
+import { BedrockOpenAIService } from "./bedrock-openai-service.js";
 import {
   buildRegistryMap,
   DeclaredAgentRegistry,
   entryFromAgentConfig,
-} from "./declared-agent-registry";
-import { ImageGenerationService } from "./image-generation-service";
-import { InstructionService } from "./instruction-service";
-import { SessionManager, StateAdapterSessionStore } from "./session-manager";
-import { SettingsResolver } from "./settings-resolver";
-import { SseManager } from "./sse-manager";
-import { ProviderConfigResolver } from "./provider-config-resolver";
-import { ProviderRegistryService } from "./provider-registry-service";
-import { TranscriptionService } from "./transcription-service";
+} from "./declared-agent-registry.js";
+import { ImageGenerationService } from "./image-generation-service.js";
+import { InstructionService } from "./instruction-service.js";
+import { SessionManager, StateAdapterSessionStore } from "./session-manager.js";
+import { SettingsResolver } from "./settings-resolver.js";
+import { SseManager } from "./sse-manager.js";
+import { ProviderConfigResolver } from "./provider-config-resolver.js";
+import { ProviderRegistryService } from "./provider-registry-service.js";
+import { TranscriptionService } from "./transcription-service.js";
 
 const logger = createLogger("core-services");
 

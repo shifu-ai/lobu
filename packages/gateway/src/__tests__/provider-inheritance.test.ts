@@ -10,21 +10,21 @@ import { MockRedisClient } from "@lobu/core/testing";
 import {
   ProviderCatalogService,
   resolveInstalledProviders,
-} from "../auth/provider-catalog";
+} from "../auth/provider-catalog.js";
 import {
   AgentSettingsStore,
   EphemeralAuthProfileRegistry,
-} from "../auth/settings/agent-settings-store";
-import { AuthProfilesManager } from "../auth/settings/auth-profiles-manager";
+} from "../auth/settings/agent-settings-store.js";
+import { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import {
   canEditSettingsSection,
   canViewSettingsSection,
   resolveSettingsView,
-} from "../auth/settings/resolved-settings-view";
-import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store";
-import { RedisSecretStore } from "../secrets";
-import { DeclaredAgentRegistry } from "../services/declared-agent-registry";
-import { hasConfiguredProvider } from "../services/platform-helpers";
+} from "../auth/settings/resolved-settings-view.js";
+import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
+import { RedisSecretStore } from "../secrets/index.js";
+import { DeclaredAgentRegistry } from "../services/declared-agent-registry.js";
+import { hasConfiguredProvider } from "../services/platform-helpers.js";
 
 const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { decrypt } from "@lobu/core";
-import { MockRedisClient } from "../../../../core/src/__tests__/fixtures/mock-redis";
+import { MockRedisClient } from "../../../../core/src/__tests__/fixtures/mock-redis.js";
 import {
   createCliAuthRoutes,
   createConnectAuthRoutes,
-} from "../../routes/public/cli-auth";
+} from "../../routes/public/cli-auth.js";
 
 describe("cli auth routes", () => {
   let originalKey: string | undefined;

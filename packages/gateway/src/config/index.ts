@@ -14,7 +14,7 @@ import {
   TIME,
 } from "@lobu/core";
 import { config as dotenvConfig } from "dotenv";
-import type { OrchestratorConfig } from "../orchestration/base-deployment-manager";
+import type { OrchestratorConfig } from "../orchestration/base-deployment-manager.js";
 
 const logger = createLogger("cli-config");
 const OWLETTO_PLUGIN_SOURCE = "@lobu/owletto-openclaw";

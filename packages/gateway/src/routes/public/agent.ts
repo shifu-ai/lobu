@@ -15,25 +15,25 @@ import {
 import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { z } from "zod";
-import type { AgentMetadataStore } from "../../auth/agent-metadata-store";
+import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
 import {
   createApiAuthMiddleware,
   TOKEN_EXPIRATION_MS,
-} from "../../auth/api-auth-middleware";
-import type { CliTokenService } from "../../auth/cli/token-service";
-import type { ExternalAuthClient } from "../../auth/external/client";
-import type { AgentSettingsStore } from "../../auth/settings/agent-settings-store";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import type { QueueProducer } from "../../infrastructure/queue/queue-producer";
-import { getModelProviderModules } from "../../modules/module-system";
-import type { PlatformRegistry } from "../../platform";
-import { resolveAgentOptions } from "../../services/platform-helpers";
-import type { SseManager } from "../../services/sse-manager";
-import type { ISessionManager, ThreadSession } from "../../session";
-import { verifyOwnedAgentAccess } from "../shared/agent-ownership";
-import { errorResponse } from "../shared/helpers";
-import { verifySettingsSession } from "./settings-auth";
+} from "../../auth/api-auth-middleware.js";
+import type { CliTokenService } from "../../auth/cli/token-service.js";
+import type { ExternalAuthClient } from "../../auth/external/client.js";
+import type { AgentSettingsStore } from "../../auth/settings/agent-settings-store.js";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import type { QueueProducer } from "../../infrastructure/queue/queue-producer.js";
+import { getModelProviderModules } from "../../modules/module-system.js";
+import type { PlatformRegistry } from "../../platform.js";
+import { resolveAgentOptions } from "../../services/platform-helpers.js";
+import type { SseManager } from "../../services/sse-manager.js";
+import type { ISessionManager, ThreadSession } from "../../session.js";
+import { verifyOwnedAgentAccess } from "../shared/agent-ownership.js";
+import { errorResponse } from "../shared/helpers.js";
+import { verifySettingsSession } from "./settings-auth.js";
 
 const logger = createLogger("agent-api");
 

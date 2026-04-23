@@ -14,15 +14,15 @@
 import { unlink } from "node:fs/promises";
 import { resolve } from "node:path";
 import { createLogger } from "@lobu/core";
-import type { ThreadResponsePayload } from "../infrastructure/queue";
-import { extractSettingsLinkButtons } from "../platform/link-buttons";
-import type { ResponseRenderer } from "../platform/response-renderer";
-import type { ChatInstanceManager } from "./chat-instance-manager";
+import type { ThreadResponsePayload } from "../infrastructure/queue/index.js";
+import { extractSettingsLinkButtons } from "../platform/link-buttons.js";
+import type { ResponseRenderer } from "../platform/response-renderer.js";
+import type { ChatInstanceManager } from "./chat-instance-manager.js";
 import {
   getResponseStrategy,
   type PlatformResponseStrategy,
   type StreamState,
-} from "./platform-strategies";
+} from "./platform-strategies/index.js";
 
 const logger = createLogger("chat-response-bridge");
 

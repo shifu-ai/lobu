@@ -5,7 +5,7 @@ import {
   setJsonValue,
   type Logger,
 } from "@lobu/core";
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
 
 /**
  * Generic OAuth state store for CSRF protection

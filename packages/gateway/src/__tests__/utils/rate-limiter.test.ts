@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { MockRedisClient } from "../../../../core/src/__tests__/fixtures/mock-redis";
+import { MockRedisClient } from "../../../../core/src/__tests__/fixtures/mock-redis.js";
 import {
   getClientIp,
   RedisFixedWindowRateLimiter,
-} from "../../utils/rate-limiter";
+} from "../../utils/rate-limiter.js";
 
 describe("RedisFixedWindowRateLimiter", () => {
   test("allows requests within the window and blocks after the limit", async () => {

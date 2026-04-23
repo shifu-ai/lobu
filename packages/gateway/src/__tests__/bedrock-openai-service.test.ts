@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
 import type { Model } from "@mariozechner/pi-ai/dist/types.js";
-import { BedrockModelCatalog } from "../services/bedrock-model-catalog";
-import { BedrockOpenAIService } from "../services/bedrock-openai-service";
+import { BedrockModelCatalog } from "../services/bedrock-model-catalog.js";
+import { BedrockOpenAIService } from "../services/bedrock-openai-service.js";
 
 process.env.ENCRYPTION_KEY ??=
   "0000000000000000000000000000000000000000000000000000000000000000";

@@ -1,13 +1,13 @@
 import { describe, expect, mock, test } from "bun:test";
 import { Chat } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
-import { registerActionHandlers } from "../connections/interaction-bridge";
-import type { PlatformConnection } from "../connections/types";
-import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter";
+import { registerActionHandlers } from "../connections/interaction-bridge.js";
+import type { PlatformConnection } from "../connections/types.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import {
   blockActionsPayload,
   buildSignedBlockActionsRequest,
-} from "./fixtures/slack-signing";
+} from "./fixtures/slack-signing.js";
 
 const SIGNING_SECRET = "test-signing-secret-0123456789ab";
 const BOT_TOKEN = "xoxb-test-token";

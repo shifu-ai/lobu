@@ -1,1 +1,1 @@
-export { ApiPlatform, type ApiPlatformConfig } from "./platform";
+export { ApiPlatform, type ApiPlatformConfig } from "./platform.js";

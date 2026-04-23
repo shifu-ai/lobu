@@ -1,13 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import { createSlackInstallStateStore } from "../../auth/oauth/state-store";
+import { createSlackInstallStateStore } from "../../auth/oauth/state-store.js";
 import {
   renderOAuthErrorPage,
   renderOAuthSuccessPage,
-} from "../../auth/oauth-templates";
-import type { ChatInstanceManager } from "../../connections/chat-instance-manager";
-import { resolvePublicUrl } from "../../utils/public-url";
+} from "../../auth/oauth-templates.js";
+import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
+import { resolvePublicUrl } from "../../utils/public-url.js";
 
 const logger = createLogger("slack-routes");
 

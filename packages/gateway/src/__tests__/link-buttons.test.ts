@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { extractSettingsLinkButtons } from "../platform/link-buttons";
+import { extractSettingsLinkButtons } from "../platform/link-buttons.js";
 
 describe("extractSettingsLinkButtons", () => {
   test("extracts settings link and replaces with label", () => {

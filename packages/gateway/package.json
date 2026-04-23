@@ -8,6 +8,7 @@
     "url": "git+https://github.com/lobu-ai/lobu.git",
     "directory": "packages/gateway"
   },
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -16,18 +17,15 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.js"
+      "import": "./dist/index.js"
     },
     "./dist/connections": {
       "types": "./dist/connections/index.d.ts",
-      "import": "./dist/connections/index.js",
-      "require": "./dist/connections/index.js"
+      "import": "./dist/connections/index.js"
     },
     "./dist/api": {
       "types": "./dist/api/index.d.ts",
-      "import": "./dist/api/index.js",
-      "require": "./dist/api/index.js"
+      "import": "./dist/api/index.js"
     }
   },
   "scripts": {

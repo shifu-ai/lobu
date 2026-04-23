@@ -1,10 +1,10 @@
 import { createLogger } from "@lobu/core";
-import type { PlatformAdapterConfig, PlatformConnection } from "./types";
+import type { PlatformAdapterConfig, PlatformConnection } from "./types.js";
 import {
   parseSlackTeamJoinEvent,
   postSlackTeamJoinWelcome,
   type ParsedSlackTeamJoinEvent,
-} from "./slack-platform-bridge";
+} from "./slack-platform-bridge.js";
 
 const logger = createLogger("slack-connection-coordinator");
 const SLACK_SYSTEM_AGENT_PREFIX = "system:connection:slack";

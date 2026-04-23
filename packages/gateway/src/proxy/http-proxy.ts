@@ -10,8 +10,8 @@ import {
   isUnrestrictedMode,
   loadAllowedDomains,
   loadDisallowedDomains,
-} from "../config/network-allowlist";
-import type { GrantStore } from "../permissions/grant-store";
+} from "../config/network-allowlist.js";
+import type { GrantStore } from "../permissions/grant-store.js";
 
 const logger = createLogger("http-proxy");
 

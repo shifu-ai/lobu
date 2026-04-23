@@ -6,7 +6,7 @@ import {
   type NetworkConfig,
   type NixConfig,
 } from "@lobu/core";
-import type { IMessageQueue } from "./types";
+import type { IMessageQueue } from "./types.js";
 
 const logger = createLogger("queue-producer");
 

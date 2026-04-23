@@ -14,7 +14,7 @@ import { ErrorCode, OrchestratorError } from "@lobu/core";
 import type {
   MessagePayload,
   OrchestratorConfig,
-} from "../orchestration/base-deployment-manager";
+} from "../orchestration/base-deployment-manager.js";
 
 // ---------------------------------------------------------------------------
 // Mock child_process.spawn to return a fake ChildProcess
@@ -53,7 +53,7 @@ mock.module("node:child_process", () => ({
 // ---------------------------------------------------------------------------
 // Now import the class under test
 // ---------------------------------------------------------------------------
-import { EmbeddedDeploymentManager } from "../orchestration/impl/embedded-deployment";
+import { EmbeddedDeploymentManager } from "../orchestration/impl/embedded-deployment.js";
 
 // ---------------------------------------------------------------------------
 // Test config & helpers

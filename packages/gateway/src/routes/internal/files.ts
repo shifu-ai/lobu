@@ -3,12 +3,12 @@
 import { Readable } from "node:stream";
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { ArtifactStore } from "../../files/artifact-store";
-import type { PlatformRegistry } from "../../platform";
-import type { IFileHandler } from "../../platform/file-handler";
-import { errorResponse, getVerifiedWorker } from "../shared/helpers";
-import { authenticateWorker } from "./middleware";
-import type { WorkerContext } from "./types";
+import type { ArtifactStore } from "../../files/artifact-store.js";
+import type { PlatformRegistry } from "../../platform.js";
+import type { IFileHandler } from "../../platform/file-handler.js";
+import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
+import { authenticateWorker } from "./middleware.js";
+import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("file-routes");
 

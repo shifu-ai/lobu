@@ -11,8 +11,8 @@
  */
 
 import { createLogger } from "@lobu/core";
-import type { ThreadResponsePayload } from "../../infrastructure/queue";
-import { AsyncPushIterator } from "./async-push-iterator";
+import type { ThreadResponsePayload } from "../../infrastructure/queue/index.js";
+import { AsyncPushIterator } from "./async-push-iterator.js";
 
 const logger = createLogger("platform-response-strategies");
 
@@ -474,4 +474,4 @@ export function getResponseStrategy(
   }
 }
 
-export { AsyncPushIterator } from "./async-push-iterator";
+export { AsyncPushIterator } from "./async-push-iterator.js";

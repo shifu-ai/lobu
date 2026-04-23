@@ -1,13 +1,13 @@
 #!/usr/bin/env bun
 
 import { createLogger } from "@lobu/core";
-import type { ConversationStateStore } from "../connections/conversation-state-store";
+import type { ConversationStateStore } from "../connections/conversation-state-store.js";
 import {
   computeSessionKey,
   type ISessionManager,
   type SessionStore,
   type ThreadSession,
-} from "../session";
+} from "../session.js";
 
 const logger = createLogger("session-manager");
 
