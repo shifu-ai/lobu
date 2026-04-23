@@ -61,6 +61,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         SELECT r.id
         FROM runs r
         WHERE r.status = 'pending'
+          AND r.run_type <> 'watcher'
           AND (r.approval_status = 'auto' OR r.approval_status = 'approved')
           AND (${hasBrowser} OR COALESCE((SELECT cd.api_type FROM connector_definitions cd WHERE cd.key = r.connector_key LIMIT 1), 'api') = 'api')
         ORDER BY
