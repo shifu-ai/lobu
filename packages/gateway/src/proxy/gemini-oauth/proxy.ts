@@ -65,6 +65,45 @@ const ALLOWED_SCHEMA_KEYS = new Set<string>([
   "title",
 ]);
 
+function sanitizeRequiredFields(
+  required: unknown,
+  properties: unknown
+): string[] | undefined {
+  if (!Array.isArray(required)) return undefined;
+  if (
+    !properties ||
+    typeof properties !== "object" ||
+    Array.isArray(properties)
+  ) {
+    return undefined;
+  }
+
+  const propertyNames = new Set(Object.keys(properties));
+  const filtered = required.filter(
+    (field): field is string =>
+      typeof field === "string" && propertyNames.has(field)
+  );
+  return filtered.length > 0 ? filtered : undefined;
+}
+
+function sanitizeProperties(
+  properties: unknown
+): Record<string, unknown> | undefined {
+  if (
+    !properties ||
+    typeof properties !== "object" ||
+    Array.isArray(properties)
+  ) {
+    return undefined;
+  }
+
+  const sanitized: Record<string, unknown> = {};
+  for (const [name, schema] of Object.entries(properties)) {
+    sanitized[name] = sanitizeToolSchema(schema);
+  }
+  return sanitized;
+}
+
 function sanitizeToolSchema(node: unknown): unknown {
   if (Array.isArray(node)) return node.map(sanitizeToolSchema);
   if (!node || typeof node !== "object") return node;
@@ -75,8 +114,22 @@ function sanitizeToolSchema(node: unknown): unknown {
   }
   for (const [k, v] of Object.entries(obj)) {
     if (!ALLOWED_SCHEMA_KEYS.has(k)) continue;
+    if (k === "required") continue;
+    if (k === "properties") {
+      const properties = sanitizeProperties(v);
+      if (properties) {
+        out.properties = properties;
+      }
+      continue;
+    }
     out[k] = sanitizeToolSchema(v);
   }
+
+  const required = sanitizeRequiredFields(obj.required, out.properties);
+  if (required) {
+    out.required = required;
+  }
+
   return out;
 }
 
@@ -290,5 +343,10 @@ export function createGeminiOAuthProxyApp(
 
   return app;
 }
+
+export const __testOnly = {
+  sanitizeRequestBody,
+  sanitizeToolSchema,
+};
 
 export { PROVIDER_ID as GEMINI_OAUTH_PROVIDER_ID };
