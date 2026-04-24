@@ -1690,6 +1690,7 @@ async function handleCompleteWindow(
             error_message = NULL
         WHERE id = ${watcherRunId}
           AND run_type = 'watcher'
+          AND status IN ('running', 'claimed')
       `;
     }
 

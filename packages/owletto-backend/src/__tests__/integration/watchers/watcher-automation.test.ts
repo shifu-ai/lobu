@@ -221,7 +221,7 @@ describe('watcher automation', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('marks watcher runs completed when an external completion already created the queued window', async () => {
+  it('marks watcher runs completed when a correlated window already exists', async () => {
     const { sql, dbClient, org, watcher, agent } = await createAutomatedWatcher();
     const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
     const { windowStart, windowEnd } = await computePendingWindow(
@@ -249,6 +249,7 @@ describe('watcher automation', () => {
         content_analyzed,
         model_used,
         run_metadata,
+        run_id,
         created_at
       ) VALUES (
         ${watcher.id},
@@ -258,7 +259,8 @@ describe('watcher automation', () => {
         ${sql.json({ summary: 'External completion' })},
         1,
         'external-client',
-        ${sql.json({ source: 'external' })},
+        ${sql.json({ source: 'external', watcher_run_id: queued.runId })},
+        ${queued.runId},
         NOW()
       )
       RETURNING id
@@ -276,7 +278,7 @@ describe('watcher automation', () => {
     expect(Number(run.window_id)).toBe(Number(window.id));
   });
 
-  it('times out stalled watcher runs and retries the same queued window', async () => {
+  it('times out stale watcher runs after the coarse ttl without creating a retry', async () => {
     const { sql, dbClient, org, watcher, agent } = await createAutomatedWatcher();
     const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
     const { windowStart, windowEnd } = await computePendingWindow(
@@ -297,27 +299,24 @@ describe('watcher automation', () => {
     await sql`
       UPDATE runs
       SET status = 'running',
-          claimed_at = NOW() - INTERVAL '10 minutes',
-          last_heartbeat_at = NOW() - INTERVAL '10 minutes'
+          claimed_at = NOW() - INTERVAL '3 hours',
+          last_heartbeat_at = NOW() - INTERVAL '3 hours'
       WHERE id = ${queued.runId}
     `;
 
     await checkStalledExecutions({} as Env);
 
     const runs = await sql`
-      SELECT id, status, approved_input
+      SELECT id, status, error_message
       FROM runs
       WHERE watcher_id = ${watcher.id}
         AND run_type = 'watcher'
       ORDER BY id ASC
     `;
 
-    expect(runs).toHaveLength(2);
+    expect(runs).toHaveLength(1);
     expect(String(runs[0].status)).toBe('timeout');
-    expect(String(runs[1].status)).toBe('pending');
-    expect((runs[0] as { approved_input: unknown }).approved_input).toEqual(
-      (runs[1] as { approved_input: unknown }).approved_input
-    );
+    expect(String((runs[0] as { error_message: unknown }).error_message)).toContain('2 hours');
   });
 
   it('completes the queued watcher run from complete_window provenance and advances next_run_at', async () => {
@@ -390,6 +389,81 @@ describe('watcher automation', () => {
     expect(String(run.status)).toBe('completed');
     expect(Number(run.window_id)).toBe(completion.window_id);
     expect(watcherRow.next_run_at).not.toBeNull();
+  });
+
+  it('does not reopen a timed out watcher run when complete_window arrives late', async () => {
+    const { sql, dbClient, org, entity, watcher, agent, token } = await createAutomatedWatcher();
+
+    await createTestEvent({
+      entity_id: entity.id,
+      organization_id: org.id,
+      content: 'Late watcher completion content.',
+      occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+    });
+
+    const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
+    const { windowStart, windowEnd } = await computePendingWindow(
+      dbClient,
+      watcher.id,
+      granularity
+    );
+
+    const queued = await createWatcherRun({
+      organizationId: org.id,
+      watcherId: watcher.id,
+      agentId: agent.agentId,
+      windowStart: windowStart.toISOString(),
+      windowEnd: windowEnd.toISOString(),
+      dispatchSource: 'scheduled',
+    });
+
+    await sql`
+      UPDATE runs
+      SET status = 'timeout',
+          completed_at = NOW(),
+          error_message = 'Watcher run exceeded 2 hours without reaching terminal state'
+      WHERE id = ${queued.runId}
+    `;
+
+    const content = await mcpToolsCall<{
+      window_token: string;
+    }>('read_knowledge', { watcher_id: watcher.id }, { token });
+
+    const completion = await mcpToolsCall<{
+      action: 'complete_window';
+      watcher_id: string;
+      window_id: number;
+    }>(
+      'manage_watchers',
+      {
+        action: 'complete_window',
+        window_token: content.window_token,
+        extracted_data: { summary: 'Late watcher completion summary' },
+        run_metadata: {
+          executor: 'lobu-agent',
+          agent_id: agent.agentId,
+          watcher_run_id: queued.runId,
+          dispatch_source: 'scheduled',
+        },
+      },
+      { token }
+    );
+
+    const [run] = await sql`
+      SELECT status, window_id
+      FROM runs
+      WHERE id = ${queued.runId}
+    `;
+    const [window] = await sql`
+      SELECT run_id
+      FROM watcher_windows
+      WHERE id = ${completion.window_id}
+    `;
+
+    expect(completion.action).toBe('complete_window');
+    expect(String(run.status)).toBe('timeout');
+    expect(run.window_id).toBeNull();
+    expect(Number(window.run_id)).toBe(queued.runId);
   });
 
   it('triggers an assigned watcher through manage_watchers(trigger)', async () => {

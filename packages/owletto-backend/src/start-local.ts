@@ -245,6 +245,27 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
         REFERENCES public.runs(id) ON DELETE SET NULL
       `);
       await sql.unsafe(`
+        WITH correlated_windows AS (
+          SELECT ww.id,
+                 (btrim(ww.run_metadata->>'watcher_run_id'))::bigint AS correlated_run_id
+          FROM public.watcher_windows ww
+          WHERE ww.run_id IS NULL
+            AND ww.run_metadata ? 'watcher_run_id'
+            AND jsonb_typeof(ww.run_metadata->'watcher_run_id') IN ('number', 'string')
+            AND btrim(ww.run_metadata->>'watcher_run_id') ~ '^[0-9]+$'
+        )
+        UPDATE public.watcher_windows ww
+        SET run_id = cw.correlated_run_id
+        FROM correlated_windows cw
+        WHERE ww.id = cw.id
+          AND EXISTS (
+            SELECT 1
+            FROM public.runs r
+            WHERE r.id = cw.correlated_run_id
+              AND r.run_type = 'watcher'
+          )
+      `);
+      await sql.unsafe(`
         CREATE INDEX IF NOT EXISTS idx_watcher_windows_run_id
         ON public.watcher_windows (run_id)
         WHERE run_id IS NOT NULL
