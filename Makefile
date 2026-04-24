@@ -17,6 +17,7 @@ help:
 	@echo "Available commands:"
 	@echo "  make setup                                 - Setup development environment (run once)"
 	@echo "  make dev                                   - Start dev environment (Docker Compose Watch)"
+	@echo "  make dev-native                            - Native foreground dev (host redis, remote Postgres, Vite HMR)"
 	@echo "  make build-packages                        - Build all TypeScript packages"
 	@echo "  make build-worker                          - Build worker Docker image"
 	@echo "  make deploy                                - Deploy to K8s using values-local.yaml"
@@ -40,6 +41,10 @@ build-packages:
 # Start dev environment with Docker Compose Watch
 dev:
 	docker compose --env-file .env -f docker/docker-compose.yml watch
+
+# Native foreground dev: embedded gateway + workers + Vite HMR, against host redis + remote Postgres.
+dev-native:
+	@./scripts/dev-native.sh
 
 # Setup development environment (run once)
 setup:
