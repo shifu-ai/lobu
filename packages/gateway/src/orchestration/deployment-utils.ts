@@ -1,11 +1,11 @@
-import type { ProviderCredentialContext } from "../embedded";
-import { getOrchestratorModules } from "../modules/module-system";
-import { platformRegistry } from "../platform";
+import type { ProviderCredentialContext } from "../embedded.js";
+import { getOrchestratorModules } from "../modules/module-system.js";
+import { platformRegistry } from "../platform.js";
 import type {
   DeploymentInfo,
   MessagePayload,
   OrchestratorConfig,
-} from "./base-deployment-manager";
+} from "./base-deployment-manager.js";
 
 /**
  * Shared types and utilities for deployment managers

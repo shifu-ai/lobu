@@ -10,8 +10,8 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { SyncResult } from '@lobu/owletto-sdk';
-import type { FeedSyncResult } from './interface';
-import { normalizeEventEnvelope } from './runtime';
+import type { FeedSyncResult } from './interface.js';
+import { normalizeEventEnvelope } from './runtime.js';
 
 const CONTENT_CHUNK_SIZE = 100;
 

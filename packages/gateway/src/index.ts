@@ -9,26 +9,26 @@
 
 // ── Primary API ─────────────────────────────────────────────────────────────
 
-export { Lobu, type LobuAgentConfig, type LobuConfig } from "./lobu";
+export { Lobu, type LobuAgentConfig, type LobuConfig } from "./lobu.js";
 
 // ── Advanced (for custom setups) ────────────────────────────────────────────
 
-export { createGatewayApp, startGatewayServer } from "./cli/gateway";
+export { createGatewayApp, startGatewayServer } from "./cli/gateway.js";
 export {
   type AgentConfig,
   buildGatewayConfig,
   type GatewayConfig,
-} from "./config";
+} from "./config/index.js";
 export type {
   EmbeddedAuthProvider,
   ProviderCredentialContext,
   RuntimeProviderCredentialLookup,
   RuntimeProviderCredentialResolver,
   RuntimeProviderCredentialResult,
-} from "./embedded";
-export { Gateway, type GatewayOptions } from "./gateway-main";
-export { CoreServices } from "./services/core-services";
-export { InMemoryAgentStore } from "./stores/in-memory-agent-store";
+} from "./embedded.js";
+export { Gateway, type GatewayOptions } from "./gateway-main.js";
+export { CoreServices } from "./services/core-services.js";
+export { InMemoryAgentStore } from "./stores/in-memory-agent-store.js";
 export {
   AwsSecretsManagerSecretStore,
   RedisSecretStore,
@@ -36,7 +36,7 @@ export {
   type SecretStore,
   type SecretStoreRegistryOptions,
   type WritableSecretStore,
-} from "./secrets";
+} from "./secrets/index.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 

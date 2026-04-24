@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { MockRedisClient } from "@lobu/core/testing";
-import { AgentMetadataStore } from "../auth/agent-metadata-store";
-import { UserAgentsStore } from "../auth/user-agents-store";
-import { createAgentHistoryRoutes } from "../routes/public/agent-history";
-import { setAuthProvider } from "../routes/public/settings-auth";
+import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import { UserAgentsStore } from "../auth/user-agents-store.js";
+import { createAgentHistoryRoutes } from "../routes/public/agent-history.js";
+import { setAuthProvider } from "../routes/public/settings-auth.js";
 
 describe("agent history routes", () => {
   let redis: MockRedisClient;

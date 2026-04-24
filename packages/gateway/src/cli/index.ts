@@ -6,8 +6,8 @@ import {
   buildGatewayConfig,
   displayGatewayConfig,
   loadEnvFile,
-} from "../config";
-import { startGateway } from "./gateway";
+} from "../config/index.js";
+import { startGateway } from "./gateway.js";
 
 const logger = createLogger("cli");
 

@@ -11,7 +11,7 @@ import fs from "node:fs";
 import type {
   MessagePayload,
   OrchestratorConfig,
-} from "../orchestration/base-deployment-manager";
+} from "../orchestration/base-deployment-manager.js";
 
 // ---------------------------------------------------------------------------
 // Mock dockerode
@@ -75,7 +75,7 @@ mock.module("dockerode", () => ({
 
 // Must import after mocks are set up
 const { DockerDeploymentManager } = await import(
-  "../orchestration/impl/docker-deployment"
+  "../orchestration/impl/docker-deployment.js"
 );
 
 // ---------------------------------------------------------------------------

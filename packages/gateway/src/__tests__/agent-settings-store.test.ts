@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import { AgentSettingsStore } from "../auth/settings/agent-settings-store";
+import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 
 function createStore(redis?: MockRedisClient) {
   const r = redis ?? new MockRedisClient();

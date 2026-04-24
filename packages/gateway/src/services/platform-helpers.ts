@@ -8,14 +8,14 @@ import {
   type PluginConfig,
   type PluginsConfig,
 } from "@lobu/core";
-import type { AgentSettingsStore } from "../auth/settings";
-import { resolveEffectiveModelRef } from "../auth/settings/model-selection";
-import type { ChannelBindingService } from "../channels";
-import { buildMemoryPlugins, getInternalGatewayUrl } from "../config";
-import type { MessagePayload } from "../infrastructure/queue/queue-producer";
-import { getModelProviderModules } from "../modules/module-system";
-import type { DeclaredAgentRegistry } from "./declared-agent-registry";
-import { platformAgentId } from "../spaces";
+import type { AgentSettingsStore } from "../auth/settings/index.js";
+import { resolveEffectiveModelRef } from "../auth/settings/model-selection.js";
+import type { ChannelBindingService } from "../channels/index.js";
+import { buildMemoryPlugins, getInternalGatewayUrl } from "../config/index.js";
+import type { MessagePayload } from "../infrastructure/queue/queue-producer.js";
+import { getModelProviderModules } from "../modules/module-system.js";
+import type { DeclaredAgentRegistry } from "./declared-agent-registry.js";
+import { platformAgentId } from "../spaces/index.js";
 
 const logger = createLogger("platform-helpers");
 const OWLETTO_PLUGIN_SOURCE = "@lobu/owletto-openclaw";
@@ -165,6 +165,9 @@ export async function resolveAgentOptions(
   if (settings.networkConfig) {
     mergedOptions.networkConfig = settings.networkConfig;
   }
+  if (settings.egressConfig) {
+    mergedOptions.egressConfig = settings.egressConfig;
+  }
   if (settings.nixConfig) {
     mergedOptions.nixConfig = settings.nixConfig;
   }
@@ -240,6 +243,7 @@ export function buildMessagePayload(params: {
 }): MessagePayload {
   const {
     networkConfig,
+    egressConfig,
     nixConfig,
     mcpServers,
     preApprovedTools,
@@ -259,6 +263,7 @@ export function buildMessagePayload(params: {
     platformMetadata: params.platformMetadata,
     agentOptions: remainingOptions,
     networkConfig,
+    egressConfig,
     nixConfig,
     mcpConfig: mcpServers ? { mcpServers } : undefined,
     preApprovedTools,

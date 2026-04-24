@@ -4,13 +4,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { WorkerConnectionManager } from "../gateway/connection-manager";
+import { WorkerConnectionManager } from "../gateway/connection-manager.js";
 import {
   cleanupTestEnv,
   MockResponse,
   setupTestEnv,
   TestHelpers,
-} from "./setup";
+} from "./setup.js";
 
 describe("WorkerConnectionManager", () => {
   let manager: WorkerConnectionManager;

@@ -14,7 +14,11 @@ import {
   type Grant,
   type StoredConnection,
 } from "@lobu/core";
-import { BaseAgentStore, buildKey, getOrCreateSet } from "./base-agent-store";
+import {
+  BaseAgentStore,
+  buildKey,
+  getOrCreateSet,
+} from "./base-agent-store.js";
 
 export class InMemoryAgentStore extends BaseAgentStore {
   private settings = new Map<string, AgentSettings>();

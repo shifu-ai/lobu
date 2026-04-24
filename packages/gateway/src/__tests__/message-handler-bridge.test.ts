@@ -1,18 +1,18 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { ConversationStateStore } from "../connections/conversation-state-store";
+import { ConversationStateStore } from "../connections/conversation-state-store.js";
 import {
   type InboundAttachmentLike,
   ingestInboundAttachments,
   isSenderAllowed,
   MessageHandlerBridge,
-} from "../connections/message-handler-bridge";
-import type { PlatformConnection } from "../connections/types";
-import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter";
+} from "../connections/message-handler-bridge.js";
+import type { PlatformConnection } from "../connections/types.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import {
   type ArtifactTestEnv,
   createArtifactTestEnv,
   TEST_GATEWAY_URL,
-} from "./setup";
+} from "./setup.js";
 
 describe("isSenderAllowed", () => {
   test.each([

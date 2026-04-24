@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
-import { createAudioRoutes } from "../../routes/internal/audio";
-import { createImageRoutes } from "../../routes/internal/images";
+import { createAudioRoutes } from "../../routes/internal/audio.js";
+import { createImageRoutes } from "../../routes/internal/images.js";
 
 describe("internal media routes", () => {
   let originalKey: string | undefined;

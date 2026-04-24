@@ -1,10 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import { AgentMetadataStore } from "../auth/agent-metadata-store";
-import { AgentSettingsStore } from "../auth/settings/agent-settings-store";
-import { UserAgentsStore } from "../auth/user-agents-store";
-import { createAgentRoutes } from "../routes/public/agents";
-import { setAuthProvider } from "../routes/public/settings-auth";
+import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { UserAgentsStore } from "../auth/user-agents-store.js";
+import { createAgentRoutes } from "../routes/public/agents.js";
+import { setAuthProvider } from "../routes/public/settings-auth.js";
 
 describe("agent routes", () => {
   let redis: MockRedisClient;

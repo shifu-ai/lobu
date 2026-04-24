@@ -21,7 +21,7 @@
 import { createLogger } from "@lobu/core";
 import type { DeclaredSchedule, ScheduleConcurrency } from "@lobu/core";
 import { CronExpressionParser } from "cron-parser";
-import type { IMessageQueue } from "../infrastructure/queue";
+import type { IMessageQueue } from "../infrastructure/queue/index.js";
 
 const logger = createLogger("schedule-service");
 

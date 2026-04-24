@@ -2,20 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import { createLogger, ErrorCode, OrchestratorError } from "@lobu/core";
 import Docker from "dockerode";
-import type { ModelProviderModule } from "../../modules/module-system";
+import type { ModelProviderModule } from "../../modules/module-system.js";
 import {
   BaseDeploymentManager,
   type DeploymentInfo,
   type MessagePayload,
   type ModuleEnvVarsBuilder,
   type OrchestratorConfig,
-} from "../base-deployment-manager";
+} from "../base-deployment-manager.js";
 import {
   BASE_WORKER_LABELS,
   buildDeploymentInfoSummary,
   getVeryOldThresholdDays,
   resolvePlatformDeploymentMetadata,
-} from "../deployment-utils";
+} from "../deployment-utils.js";
 
 class ResourceParser {
   static parseMemory(memoryStr: string): number {

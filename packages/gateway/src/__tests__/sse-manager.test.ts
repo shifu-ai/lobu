@@ -5,7 +5,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import { SseManager, type SseConnection } from "../services/sse-manager";
+import { SseManager, type SseConnection } from "../services/sse-manager.js";
 
 function fakeStream(): SseConnection & {
   events: Array<{ event: string; data: string }>;

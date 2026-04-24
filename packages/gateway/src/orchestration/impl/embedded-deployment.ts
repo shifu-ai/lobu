@@ -2,18 +2,18 @@ import { type ChildProcess, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createLogger, ErrorCode, OrchestratorError } from "@lobu/core";
-import type { ModelProviderModule } from "../../modules/module-system";
+import type { ModelProviderModule } from "../../modules/module-system.js";
 import {
   BaseDeploymentManager,
   type DeploymentInfo,
   type MessagePayload,
   type ModuleEnvVarsBuilder,
   type OrchestratorConfig,
-} from "../base-deployment-manager";
+} from "../base-deployment-manager.js";
 import {
   buildDeploymentInfoSummary,
   getVeryOldThresholdDays,
-} from "../deployment-utils";
+} from "../deployment-utils.js";
 
 const logger = createLogger("orchestrator");
 

@@ -1,5 +1,5 @@
-import { BaseOAuth2Client } from "../oauth/base-client";
-import type { OAuthCredentials } from "../oauth/credentials";
+import { BaseOAuth2Client } from "../oauth/base-client.js";
+import type { OAuthCredentials } from "../oauth/credentials.js";
 
 export const DEVICE_CODE_GRANT_TYPE =
   "urn:ietf:params:oauth:grant-type:device_code";

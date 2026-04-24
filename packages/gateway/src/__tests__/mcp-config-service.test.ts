@@ -4,7 +4,7 @@ process.env.ENCRYPTION_KEY =
 
 import { describe, expect, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
-import { McpConfigService } from "../auth/mcp/config-service";
+import { McpConfigService } from "../auth/mcp/config-service.js";
 
 function makeToken(agentId = "agent1") {
   return generateWorkerToken("user1", "conv1", "deploy1", {

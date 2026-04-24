@@ -1,1 +1,1 @@
-export { K8sDeploymentManager } from "./deployment";
+export { K8sDeploymentManager } from "./deployment.js";

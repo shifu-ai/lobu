@@ -1,19 +1,19 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createLogger } from "@lobu/core";
 import { type Context, Hono } from "hono";
-import { CliTokenService } from "../../auth/cli/token-service";
-import type { ExternalAuthClient } from "../../auth/external/client";
-import type { IMessageQueue } from "../../infrastructure/queue";
-import { resolvePublicUrl } from "../../utils/public-url";
+import { CliTokenService } from "../../auth/cli/token-service.js";
+import type { ExternalAuthClient } from "../../auth/external/client.js";
+import type { IMessageQueue } from "../../infrastructure/queue/index.js";
+import { resolvePublicUrl } from "../../utils/public-url.js";
 import {
   getClientIp,
   RedisFixedWindowRateLimiter,
-} from "../../utils/rate-limiter";
+} from "../../utils/rate-limiter.js";
 import {
   setSettingsSessionCookie,
   verifySettingsSession,
   verifySettingsToken,
-} from "./settings-auth";
+} from "./settings-auth.js";
 
 const logger = createLogger("cli-auth-routes");
 const AUTH_REQUEST_TTL_SECONDS = 10 * 60;

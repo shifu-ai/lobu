@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
 
 import {
+  type AgentEgressConfig,
   type AgentMcpConfig,
   createLogger,
   type NetworkConfig,
   type NixConfig,
 } from "@lobu/core";
-import type { IMessageQueue } from "./types";
+import type { IMessageQueue } from "./types.js";
 
 const logger = createLogger("queue-producer");
 
@@ -45,6 +46,9 @@ export interface MessagePayload {
 
   // Per-agent network configuration for sandbox isolation
   networkConfig?: NetworkConfig;
+
+  // Per-agent egress judge configuration (operator-level overrides for the LLM egress judge).
+  egressConfig?: AgentEgressConfig;
 
   // Per-agent MCP configuration (additive to global MCPs)
   mcpConfig?: AgentMcpConfig;

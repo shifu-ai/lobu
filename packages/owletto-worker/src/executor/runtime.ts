@@ -1,6 +1,6 @@
 import type { Checkpoint, Content, FeedOptions, SessionState } from '@lobu/owletto-sdk';
-import type { ExecutionHooks, FeedSyncResult, SyncContext, SyncExecutor } from './interface';
-import { SubprocessExecutor } from './subprocess';
+import type { ExecutionHooks, FeedSyncResult, SyncContext, SyncExecutor } from './interface.js';
+import { SubprocessExecutor } from './subprocess.js';
 
 interface ConnectorOAuthCredentials {
   provider: string;

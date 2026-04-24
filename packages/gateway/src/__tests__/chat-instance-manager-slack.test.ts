@@ -14,7 +14,7 @@ const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 async function loadChatInstanceManager() {
-  const mod = await import("../connections/chat-instance-manager");
+  const mod = await import("../connections/chat-instance-manager.js");
   return mod.ChatInstanceManager;
 }
 
@@ -74,7 +74,7 @@ describe("ChatInstanceManager Slack marketplace support", () => {
     try {
       const ChatInstanceManager = await loadChatInstanceManager();
       const { RedisSecretStore, SecretStoreRegistry } = await import(
-        "../secrets"
+        "../secrets/index.js"
       );
 
       const redis = new MockRedisClient();

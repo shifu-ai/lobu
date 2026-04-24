@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   applyOwlettoMemoryEnvFromProject,
   loadAgentConfigFromFiles,
-} from "../config/file-loader";
+} from "../config/file-loader.js";
 
 const originalMemoryUrl = process.env.MEMORY_URL;
 

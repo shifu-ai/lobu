@@ -1,8 +1,8 @@
 import type { ConfigProviderMeta } from "@lobu/core";
-import type { ModelOption } from "../../modules/module-system";
-import type { BedrockModelCatalog } from "../../services/bedrock-model-catalog";
-import { BaseProviderModule } from "../base-provider-module";
-import type { AuthProfilesManager } from "../settings/auth-profiles-manager";
+import type { ModelOption } from "../../modules/module-system.js";
+import type { BedrockModelCatalog } from "../../services/bedrock-model-catalog.js";
+import { BaseProviderModule } from "../base-provider-module.js";
+import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
 
 const BEDROCK_ROUTE_PREFIX = "/api/bedrock/openai";
 const BEDROCK_BASE_URL_ENV = "AMAZON_BEDROCK_BASE_URL";
@@ -83,7 +83,7 @@ export class BedrockProviderModule extends BaseProviderModule {
   override getProxyBaseUrlMappings(
     proxyUrl: string,
     agentId?: string,
-    context?: import("../../embedded").ProviderCredentialContext
+    context?: import("../../embedded.js").ProviderCredentialContext
   ): Record<string, string> {
     const gatewayBase = proxyUrl.replace(/\/api\/proxy\/?$/, "");
     const base = `${gatewayBase}${BEDROCK_ROUTE_PREFIX}`;
@@ -97,7 +97,7 @@ export class BedrockProviderModule extends BaseProviderModule {
 
   buildCredentialPlaceholder(
     _agentId: string,
-    context?: import("../../embedded").ProviderCredentialContext
+    context?: import("../../embedded.js").ProviderCredentialContext
   ): string {
     // The /api/bedrock/* route authenticates callers with a worker JWT.
     // Workers forward their WORKER_TOKEN as the Bearer credential via the

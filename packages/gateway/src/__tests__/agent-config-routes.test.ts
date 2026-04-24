@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { OpenAPIHono } from "@hono/zod-openapi";
 import { encrypt } from "@lobu/core";
 import { MockRedisClient } from "@lobu/core/testing";
-import { AgentMetadataStore } from "../auth/agent-metadata-store";
-import { AgentSettingsStore } from "../auth/settings/agent-settings-store";
-import { GrantStore } from "../permissions/grant-store";
-import { createAgentConfigRoutes } from "../routes/public/agent-config";
-import { setAuthProvider } from "../routes/public/settings-auth";
+import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
+import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { GrantStore } from "../permissions/grant-store.js";
+import { createAgentConfigRoutes } from "../routes/public/agent-config.js";
+import { setAuthProvider } from "../routes/public/settings-auth.js";
 
 describe("agent config routes", () => {
   let originalEncryptionKey: string | undefined;

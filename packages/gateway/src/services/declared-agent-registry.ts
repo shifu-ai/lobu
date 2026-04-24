@@ -1,7 +1,7 @@
 import type { AgentSettings, DeclaredCredential } from "@lobu/core";
 import { createLogger } from "@lobu/core";
-import type { AgentConfig } from "../config";
-import type { FileLoadedAgent } from "../config/file-loader";
+import type { AgentConfig } from "../config/index.js";
+import type { FileLoadedAgent } from "../config/file-loader.js";
 
 const logger = createLogger("declared-agent-registry");
 

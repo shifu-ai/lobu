@@ -3,7 +3,7 @@ import {
   parseSlackTeamJoinEvent,
   postSlackTeamJoinWelcome,
   registerSlackPlatformHandlers,
-} from "../connections/slack-platform-bridge";
+} from "../connections/slack-platform-bridge.js";
 
 describe("Slack platform bridge", () => {
   test("routes /lobu slash commands through the command dispatcher", async () => {

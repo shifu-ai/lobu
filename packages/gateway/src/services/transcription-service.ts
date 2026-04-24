@@ -13,7 +13,7 @@
 
 import type { ProviderConfigEntry } from "@lobu/core";
 import { createLogger } from "@lobu/core";
-import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager";
+import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 
 const logger = createLogger("transcription-service");
 

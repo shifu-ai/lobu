@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { SettingsTokenPayload } from "../auth/settings/token-service";
-import { verifyOwnedAgentAccess } from "../routes/shared/agent-ownership";
+import type { SettingsTokenPayload } from "../auth/settings/token-service.js";
+import { verifyOwnedAgentAccess } from "../routes/shared/agent-ownership.js";
 
 const makeSession = (
   overrides: Partial<SettingsTokenPayload> = {}

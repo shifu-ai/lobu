@@ -1,6 +1,6 @@
-import { createChatReply } from "../commands/command-reply-adapters";
-import type { CommandDispatcher } from "../commands/command-dispatcher";
-import type { PlatformConnection } from "./types";
+import { createChatReply } from "../commands/command-reply-adapters.js";
+import type { CommandDispatcher } from "../commands/command-dispatcher.js";
+import type { PlatformConnection } from "./types.js";
 
 const DEFAULT_SLACK_COMMAND = "/lobu";
 const DEFAULT_SLACK_TEAM_JOIN_WELCOME =

@@ -1,9 +1,9 @@
-import type { AgentMetadataStore } from "../agent-metadata-store";
+import type { AgentMetadataStore } from "../agent-metadata-store.js";
 import type {
   AgentSettings,
   AgentSettingsContext,
   AgentSettingsStore,
-} from "./agent-settings-store";
+} from "./agent-settings-store.js";
 
 export const SETTINGS_SECTION_KEYS = [
   "model",

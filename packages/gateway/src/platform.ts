@@ -5,27 +5,30 @@ import type {
   InstructionProvider,
   UserSuggestion,
 } from "@lobu/core";
-import type { AgentMetadataStore } from "./auth/agent-metadata-store";
-import type { McpProxy } from "./auth/mcp/proxy";
-import type { ProviderOAuthStateStore } from "./auth/oauth/state-store";
-import type { AgentSettingsStore } from "./auth/settings";
-import type { ModelPreferenceStore } from "./auth/settings/model-preference-store";
-import type { UserAgentsStore } from "./auth/user-agents-store";
-import type { ChannelBindingService } from "./channels";
-import type { ArtifactStore } from "./files/artifact-store";
-import type { WorkerGateway } from "./gateway";
-import type { IMessageQueue, QueueProducer } from "./infrastructure/queue";
-import type { InteractionService } from "./interactions";
-import type { GrantStore } from "./permissions/grant-store";
-import type { IFileHandler } from "./platform/file-handler";
-import type { ResponseRenderer } from "./platform/response-renderer";
-import type { SecretProxy } from "./proxy/secret-proxy";
-import type { WritableSecretStore } from "./secrets";
-import type { DeclaredAgentRegistry } from "./services/declared-agent-registry";
-import type { InstructionService } from "./services/instruction-service";
-import type { SseManager } from "./services/sse-manager";
-import type { TranscriptionService } from "./services/transcription-service";
-import type { ISessionManager } from "./session";
+import type { AgentMetadataStore } from "./auth/agent-metadata-store.js";
+import type { McpProxy } from "./auth/mcp/proxy.js";
+import type { ProviderOAuthStateStore } from "./auth/oauth/state-store.js";
+import type { AgentSettingsStore } from "./auth/settings/index.js";
+import type { ModelPreferenceStore } from "./auth/settings/model-preference-store.js";
+import type { UserAgentsStore } from "./auth/user-agents-store.js";
+import type { ChannelBindingService } from "./channels/index.js";
+import type { ArtifactStore } from "./files/artifact-store.js";
+import type { WorkerGateway } from "./gateway/index.js";
+import type {
+  IMessageQueue,
+  QueueProducer,
+} from "./infrastructure/queue/index.js";
+import type { InteractionService } from "./interactions.js";
+import type { GrantStore } from "./permissions/grant-store.js";
+import type { IFileHandler } from "./platform/file-handler.js";
+import type { ResponseRenderer } from "./platform/response-renderer.js";
+import type { SecretProxy } from "./proxy/secret-proxy.js";
+import type { WritableSecretStore } from "./secrets/index.js";
+import type { DeclaredAgentRegistry } from "./services/declared-agent-registry.js";
+import type { InstructionService } from "./services/instruction-service.js";
+import type { SseManager } from "./services/sse-manager.js";
+import type { TranscriptionService } from "./services/transcription-service.js";
+import type { ISessionManager } from "./session.js";
 
 // ============================================================================
 // Core Services Interface

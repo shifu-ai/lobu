@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BedrockModelCatalog } from "../services/bedrock-model-catalog";
+import { BedrockModelCatalog } from "../services/bedrock-model-catalog.js";
 
 describe("BedrockModelCatalog", () => {
   test("returns configured models from the loader", async () => {

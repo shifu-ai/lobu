@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { ChatInstanceManager } from "../connections/chat-instance-manager";
+import { ChatInstanceManager } from "../connections/chat-instance-manager.js";
 
 /**
  * Helper: create a ChatInstanceManager with mocked internals for testing

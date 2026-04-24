@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { createSlackRoutes } from "../routes/public/slack";
+import { createSlackRoutes } from "../routes/public/slack.js";
 
 class RouteRedisMock {
   private store = new Map<string, string>();

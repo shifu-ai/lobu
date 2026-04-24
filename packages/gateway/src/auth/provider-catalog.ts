@@ -2,11 +2,11 @@ import { createLogger, type InstalledProvider } from "@lobu/core";
 import {
   getModelProviderModules,
   type ModelProviderModule,
-} from "../modules/module-system";
-import type { DeclaredAgentRegistry } from "../services/declared-agent-registry";
-import type { AgentSettingsStore } from "./settings/agent-settings-store";
-import type { AuthProfilesManager } from "./settings/auth-profiles-manager";
-import { reconcileModelSelectionForInstalledProviders } from "./settings/model-selection";
+} from "../modules/module-system.js";
+import type { DeclaredAgentRegistry } from "../services/declared-agent-registry.js";
+import type { AgentSettingsStore } from "./settings/agent-settings-store.js";
+import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
+import { reconcileModelSelectionForInstalledProviders } from "./settings/model-selection.js";
 
 const logger = createLogger("provider-catalog");
 

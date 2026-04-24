@@ -5,8 +5,8 @@ import {
   safeJsonParse,
   safeJsonStringify,
 } from "@lobu/core";
-import type Redis from "ioredis";
-import type { DeclaredAgentRegistry } from "../../services/declared-agent-registry";
+import type { Redis } from "ioredis";
+import type { DeclaredAgentRegistry } from "../../services/declared-agent-registry.js";
 
 // Re-export so existing imports from this module keep working.
 export type { AgentSettings };

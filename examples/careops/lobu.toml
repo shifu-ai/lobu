@@ -6,8 +6,8 @@ name = "careops"
 description = "Manage patient care, appointments, and treatment workflows for healthcare practices"
 dir = "./agents/careops"
 
-# Primary: Gemini 2.5 Flash via Google AI Studio (paid API key).
-# Get a key at https://aistudio.google.com/apikey
+# Primary: Gemini 2.5 Flash via Google AI Studio API key.
+# Get one at https://aistudio.google.com/apikey and export $GEMINI_API_KEY.
 [[agents.careops.providers]]
 id = "gemini"
 model = "gemini/gemini-2.5-flash"

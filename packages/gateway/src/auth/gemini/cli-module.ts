@@ -1,6 +1,6 @@
-import type { ModelOption } from "../../modules/module-system";
-import { BaseProviderModule } from "../base-provider-module";
-import type { AuthProfilesManager } from "../settings/auth-profiles-manager";
+import type { ModelOption } from "../../modules/module-system.js";
+import { BaseProviderModule } from "../base-provider-module.js";
+import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
 
 /**
  * Gemini CLI provider module — exposes Google's `gemini` CLI as a sub-agent

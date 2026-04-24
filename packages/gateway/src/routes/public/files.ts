@@ -3,7 +3,7 @@
 import { readFile } from "node:fs/promises";
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { ArtifactStore } from "../../files/artifact-store";
+import type { ArtifactStore } from "../../files/artifact-store.js";
 
 const logger = createLogger("public-files");
 

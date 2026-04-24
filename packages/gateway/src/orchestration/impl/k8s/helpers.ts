@@ -6,12 +6,12 @@ import {
   OrchestratorError,
   SpanStatusCode,
 } from "@lobu/core";
-import { BASE_WORKER_LABELS } from "../../deployment-utils";
+import { BASE_WORKER_LABELS } from "../../deployment-utils.js";
 import {
   IMAGE_PULL_FAILURE_REASONS,
   LOBU_FINALIZER,
   WORKER_SECURITY,
-} from "./deployment";
+} from "./deployment.js";
 
 const logger = createLogger("k8s-deployment");
 

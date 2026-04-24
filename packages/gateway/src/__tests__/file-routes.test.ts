@@ -1,15 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
 import { Hono } from "hono";
-import type { PlatformRegistry } from "../platform";
-import type { IFileHandler } from "../platform/file-handler";
-import { createFileRoutes } from "../routes/internal/files";
-import { createPublicFileRoutes } from "../routes/public/files";
+import type { PlatformRegistry } from "../platform.js";
+import type { IFileHandler } from "../platform/file-handler.js";
+import { createFileRoutes } from "../routes/internal/files.js";
+import { createPublicFileRoutes } from "../routes/public/files.js";
 import {
   type ArtifactTestEnv,
   createArtifactTestEnv,
   TEST_GATEWAY_URL,
-} from "./setup";
+} from "./setup.js";
 
 describe("file routes", () => {
   let env: ArtifactTestEnv;

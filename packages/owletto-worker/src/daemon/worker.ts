@@ -4,9 +4,9 @@
  * Main daemon loop that polls for jobs and executes them.
  */
 
-import type { Env } from '../types';
-import { type WorkerCapabilities, WorkerClient } from './client';
-import { type ExecutorConfig, executeRun } from './executor';
+import type { Env } from '../types.js';
+import { type WorkerCapabilities, WorkerClient } from './client.js';
+import { type ExecutorConfig, executeRun } from './executor.js';
 
 export interface DaemonConfig {
   apiUrl: string;
@@ -31,7 +31,10 @@ export class WorkerDaemon {
   private client: WorkerClient;
   private env: Env;
   private config: Required<
-    Omit<DaemonConfig, 'apiUrl' | 'workerId' | 'capabilities' | 'executor' | 'version'>
+    Omit<
+      DaemonConfig,
+      'apiUrl' | 'workerId' | 'workerApiToken' | 'capabilities' | 'executor' | 'version'
+    >
   > & {
     executor: Partial<ExecutorConfig>;
   };

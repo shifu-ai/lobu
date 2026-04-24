@@ -1,13 +1,13 @@
 import { createLogger } from "@lobu/core";
-import type { ModelOption } from "../../modules/module-system";
-import { BaseProviderModule } from "../base-provider-module";
-import { resolveEnv } from "../mcp/string-substitution";
-import type { OAuthCredentials } from "../oauth/credentials";
+import type { ModelOption } from "../../modules/module-system.js";
+import { BaseProviderModule } from "../base-provider-module.js";
+import { resolveEnv } from "../mcp/string-substitution.js";
+import type { OAuthCredentials } from "../oauth/credentials.js";
 import {
   type AuthProfilesManager,
   createAuthProfileLabel,
-} from "../settings/auth-profiles-manager";
-import type { ModelPreferenceStore } from "../settings/model-preference-store";
+} from "../settings/auth-profiles-manager.js";
+import type { ModelPreferenceStore } from "../settings/model-preference-store.js";
 
 const logger = createLogger("claude-oauth-module");
 
@@ -82,7 +82,7 @@ export class ClaudeOAuthModule extends BaseProviderModule {
   override async buildEnvVars(
     agentId: string,
     envVars: Record<string, string>,
-    context?: import("../../embedded").ProviderCredentialContext
+    context?: import("../../embedded.js").ProviderCredentialContext
   ): Promise<Record<string, string>> {
     const profile = await this.authProfilesManager.getBestProfile(
       agentId,

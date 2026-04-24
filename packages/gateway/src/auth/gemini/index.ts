@@ -1,1 +1,1 @@
-export { GeminiCliModule } from "./cli-module";
+export { GeminiCliModule } from "./cli-module.js";

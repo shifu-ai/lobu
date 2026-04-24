@@ -9,19 +9,22 @@ import { createLogger, encrypt, verifyWorkerToken } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { stream } from "hono/streaming";
-import type { ApiKeyProviderModule } from "../auth/api-key-provider-module";
-import type { McpConfigService } from "../auth/mcp/config-service";
-import type { McpProxy } from "../auth/mcp/proxy";
-import type { McpTool } from "../auth/mcp/tool-cache";
-import type { ProviderCatalogService } from "../auth/provider-catalog";
-import { getStoredCredential } from "../routes/internal/device-auth";
-import type { WritableSecretStore } from "../secrets";
-import { resolveEffectiveModelRef } from "../auth/settings/model-selection";
-import type { IMessageQueue } from "../infrastructure/queue";
-import type { InstructionService } from "../services/instruction-service";
-import type { SettingsResolver } from "../services/settings-resolver";
-import { type SSEWriter, WorkerConnectionManager } from "./connection-manager";
-import { WorkerJobRouter } from "./job-router";
+import type { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
+import type { McpConfigService } from "../auth/mcp/config-service.js";
+import type { McpProxy } from "../auth/mcp/proxy.js";
+import type { McpTool } from "../auth/mcp/tool-cache.js";
+import type { ProviderCatalogService } from "../auth/provider-catalog.js";
+import { getStoredCredential } from "../routes/internal/device-auth.js";
+import type { WritableSecretStore } from "../secrets/index.js";
+import { resolveEffectiveModelRef } from "../auth/settings/model-selection.js";
+import type { IMessageQueue } from "../infrastructure/queue/index.js";
+import type { InstructionService } from "../services/instruction-service.js";
+import type { SettingsResolver } from "../services/settings-resolver.js";
+import {
+  type SSEWriter,
+  WorkerConnectionManager,
+} from "./connection-manager.js";
+import { WorkerJobRouter } from "./job-router.js";
 
 const logger = createLogger("worker-gateway");
 

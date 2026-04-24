@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { TranscriptionService } from "../services/transcription-service";
+import { TranscriptionService } from "../services/transcription-service.js";
 
 describe("TranscriptionService provider fallback", () => {
   afterEach(() => {

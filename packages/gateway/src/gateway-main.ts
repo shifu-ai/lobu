@@ -7,12 +7,12 @@ import {
   createLogger,
   type ProviderRegistryEntry,
 } from "@lobu/core";
-import type { GatewayConfig } from "./config";
-import type { RuntimeProviderCredentialResolver } from "./embedded";
-import { type PlatformAdapter, platformRegistry } from "./platform";
-import { UnifiedThreadResponseConsumer } from "./platform/unified-thread-consumer";
-import type { SecretStoreRegistry } from "./secrets";
-import { CoreServices } from "./services/core-services";
+import type { GatewayConfig } from "./config/index.js";
+import type { RuntimeProviderCredentialResolver } from "./embedded.js";
+import { type PlatformAdapter, platformRegistry } from "./platform.js";
+import { UnifiedThreadResponseConsumer } from "./platform/unified-thread-consumer.js";
+import type { SecretStoreRegistry } from "./secrets/index.js";
+import { CoreServices } from "./services/core-services.js";
 
 const logger = createLogger("gateway");
 
