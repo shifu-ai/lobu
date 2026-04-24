@@ -1,5 +1,5 @@
 import type { ModelOption } from "../../modules/module-system.js";
-import { BaseProviderModule } from "../base-provider-module.js";
+import { CliBackendOnlyModule } from "../cli-backend-only-module.js";
 import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
 
 /**
@@ -17,7 +17,7 @@ import type { AuthProfilesManager } from "../settings/auth-profiles-manager.js";
  * provider in `config/providers.json`) or OpenRouter — both stable HTTP
  * paths that don't depend on the reverse-engineered Code Assist API.
  */
-export class GeminiCliModule extends BaseProviderModule {
+export class GeminiCliModule extends CliBackendOnlyModule {
   constructor(authProfilesManager: AuthProfilesManager) {
     super(
       {
@@ -25,43 +25,12 @@ export class GeminiCliModule extends BaseProviderModule {
         providerDisplayName: "Gemini CLI",
         providerIconUrl:
           "https://www.google.com/s2/favicons?domain=gemini.google.com&sz=128",
-        // No lobu-managed credential — gemini CLI reads its own OAuth file.
-        // Empty placeholder names keep BaseProviderModule's interface happy
-        // without claiming an env var slot.
-        credentialEnvVarName: "",
-        secretEnvVarNames: [],
-        authType: "oauth",
         catalogDescription:
           "Google's gemini CLI as a sub-agent shell-out (uses your local ~/.gemini OAuth)",
       },
       authProfilesManager
     );
     this.name = "gemini-cli";
-  }
-
-  override hasSystemKey(): boolean {
-    return false;
-  }
-
-  override async hasCredentials(): Promise<boolean> {
-    return false;
-  }
-
-  override injectSystemKeyFallback(
-    envVars: Record<string, string>
-  ): Record<string, string> {
-    return envVars;
-  }
-
-  override async buildEnvVars(
-    _agentId: string,
-    envVars: Record<string, string>
-  ): Promise<Record<string, string>> {
-    return envVars;
-  }
-
-  override getProxyBaseUrlMappings(): Record<string, string> {
-    return {};
   }
 
   getCliBackendConfig() {
