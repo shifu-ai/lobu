@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Lobu } from "../lobu";
+import { Lobu } from "../lobu.js";
 
 const originalMemoryUrl = process.env.MEMORY_URL;
 const originalAdminPassword = process.env.ADMIN_PASSWORD;

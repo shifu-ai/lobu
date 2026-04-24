@@ -8,6 +8,7 @@
 
 import type { PluginsConfig } from "./plugin-types";
 import type {
+  AgentEgressConfig,
   AuthProfile,
   InstalledProvider,
   McpServerConfig,
@@ -37,6 +38,8 @@ export interface AgentSettings {
   providerModelPreferences?: ProviderModelPreferences;
   /** Network access configuration */
   networkConfig?: NetworkConfig;
+  /** Egress judge configuration (operator-level overrides for the LLM egress judge). */
+  egressConfig?: AgentEgressConfig;
   /** Nix environment configuration */
   nixConfig?: NixConfig;
   /** Additional MCP servers */

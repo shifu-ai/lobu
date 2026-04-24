@@ -10,9 +10,9 @@ export type {
   PollResponse,
   StreamBatch,
   WorkerCapabilities,
-} from './client';
-export { WorkerClient } from './client';
-export type { ExecutorConfig } from './executor';
-export { executeRun } from './executor';
-export type { DaemonConfig } from './worker';
-export { startDaemon, WorkerDaemon } from './worker';
+} from './client.js';
+export { WorkerClient } from './client.js';
+export type { ExecutorConfig } from './executor.js';
+export { executeRun } from './executor.js';
+export type { DaemonConfig } from './worker.js';
+export { startDaemon, WorkerDaemon } from './worker.js';

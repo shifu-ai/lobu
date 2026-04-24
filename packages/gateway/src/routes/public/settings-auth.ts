@@ -1,7 +1,7 @@
 import { decrypt, encrypt } from "@lobu/core";
 import type { Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 
 export type AuthProvider = (c: Context) => SettingsTokenPayload | null;
 

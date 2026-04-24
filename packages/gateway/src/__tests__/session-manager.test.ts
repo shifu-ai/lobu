@@ -9,13 +9,13 @@ import {
   ConversationStateStore,
   sessionKey as stateSessionKey,
   threadIndexKey,
-} from "../connections/conversation-state-store";
+} from "../connections/conversation-state-store.js";
 import {
   SessionManager,
   StateAdapterSessionStore,
-} from "../services/session-manager";
-import { computeSessionKey, type ThreadSession } from "../session";
-import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter";
+} from "../services/session-manager.js";
+import { computeSessionKey, type ThreadSession } from "../session.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
 function createHarness() {
   const state = new InMemoryStateAdapter();

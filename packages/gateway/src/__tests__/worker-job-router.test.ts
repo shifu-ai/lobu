@@ -4,15 +4,15 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { WorkerConnectionManager } from "../gateway/connection-manager";
-import { WorkerJobRouter } from "../gateway/job-router";
+import { WorkerConnectionManager } from "../gateway/connection-manager.js";
+import { WorkerJobRouter } from "../gateway/job-router.js";
 import {
   cleanupTestEnv,
   MockMessageQueue,
   MockResponse,
   setupTestEnv,
   TestHelpers,
-} from "./setup";
+} from "./setup.js";
 
 describe("WorkerJobRouter", () => {
   let queue: MockMessageQueue;

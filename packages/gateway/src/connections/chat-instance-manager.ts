@@ -6,33 +6,33 @@
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import { createLogger, isSecretRef } from "@lobu/core";
-import type Redis from "ioredis";
-import type { CoreServices, PlatformAdapter } from "../platform";
-import type { IFileHandler } from "../platform/file-handler";
+import type { Redis } from "ioredis";
+import type { CoreServices, PlatformAdapter } from "../platform.js";
+import type { IFileHandler } from "../platform/file-handler.js";
 import {
   deleteSecretsByPrefix,
   persistSecretValue,
   resolveSecretValue,
-} from "../secrets";
+} from "../secrets/index.js";
 import {
   hasConfiguredProvider,
   resolveAgentOptions,
-} from "../services/platform-helpers";
+} from "../services/platform-helpers.js";
 import {
   ConversationStateStore,
   type HistoryEntry,
-} from "./conversation-state-store";
-import { createGatewayStateAdapter } from "./state-adapter";
-import { SlackConnectionCoordinator } from "./slack-connection-coordinator";
-import { SlackInstructionProvider } from "./slack-instruction-provider";
-import { registerSlackPlatformHandlers } from "./slack-platform-bridge";
-import type { MessageHandlerBridge } from "./message-handler-bridge";
+} from "./conversation-state-store.js";
+import { createGatewayStateAdapter } from "./state-adapter.js";
+import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
+import { SlackInstructionProvider } from "./slack-instruction-provider.js";
+import { registerSlackPlatformHandlers } from "./slack-platform-bridge.js";
+import type { MessageHandlerBridge } from "./message-handler-bridge.js";
 import {
   type ConnectionSettings,
   isSecretField,
   type PlatformAdapterConfig,
   type PlatformConnection,
-} from "./types";
+} from "./types.js";
 
 /** Shallow structural equality for plain config objects. */
 function configsEqual(
@@ -580,10 +580,10 @@ export class ChatInstanceManager {
 
       // Register message handlers (imported lazily to avoid circular deps)
       const { registerMessageHandlers } = await import(
-        "./message-handler-bridge"
+        "./message-handler-bridge.js"
       );
       const { CommandDispatcher } = await import(
-        "../commands/command-dispatcher"
+        "../commands/command-dispatcher.js"
       );
       const commandDispatcher = new CommandDispatcher({
         registry: this.services.getCommandRegistry(),
@@ -657,7 +657,7 @@ export class ChatInstanceManager {
       });
 
       const { registerInteractionBridge } = await import(
-        "./interaction-bridge"
+        "./interaction-bridge.js"
       );
       const mcpProxy = this.services.getMcpProxy();
       const interactionCleanup = registerInteractionBridge(

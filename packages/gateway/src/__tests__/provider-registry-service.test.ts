@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import {
   ProviderRegistryService,
   resolveProviderRegistryFromRaw,
-} from "../services/provider-registry-service";
+} from "../services/provider-registry-service.js";
 
 const testConfig = {
   providers: [

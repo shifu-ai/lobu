@@ -11,7 +11,11 @@ import type { LookupAddress } from "node:dns";
 import * as http from "node:http";
 import * as net from "node:net";
 import { generateWorkerToken } from "@lobu/core";
-import { __testOnly, startHttpProxy, stopHttpProxy } from "../proxy/http-proxy";
+import {
+  __testOnly,
+  startHttpProxy,
+  stopHttpProxy,
+} from "../proxy/http-proxy.js";
 
 // Generate a stable 32-byte encryption key for tests
 const TEST_ENCRYPTION_KEY = crypto.randomBytes(32).toString("base64");

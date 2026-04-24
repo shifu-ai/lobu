@@ -4,14 +4,14 @@
 
 import { createLogger } from "@lobu/core";
 import { type JobsOptions, Queue, type QueueEvents, Worker } from "bullmq";
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 import type {
   IMessageQueue,
   JobHandler,
   QueueJob,
   QueueOptions,
   QueueStats,
-} from "./types";
+} from "./types.js";
 
 const logger = createLogger("redis-queue");
 

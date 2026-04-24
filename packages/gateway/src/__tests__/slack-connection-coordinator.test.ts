@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
-import { SlackConnectionCoordinator } from "../connections/slack-connection-coordinator";
-import type { PlatformConnection } from "../connections/types";
+import { SlackConnectionCoordinator } from "../connections/slack-connection-coordinator.js";
+import type { PlatformConnection } from "../connections/types.js";
 
 function createSlackConnection(
   id: string,

@@ -1,1 +1,1 @@
-export { ChatGPTOAuthModule } from "./chatgpt-oauth-module";
+export { ChatGPTOAuthModule } from "./chatgpt-oauth-module.js";

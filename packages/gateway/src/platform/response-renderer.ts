@@ -4,7 +4,7 @@
  * in a platform-appropriate way (streaming, buffering, formatting).
  */
 
-import type { ThreadResponsePayload } from "../infrastructure/queue/types";
+import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
 
 /**
  * Interface for rendering thread responses to a specific platform.

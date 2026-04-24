@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { Readable } from "node:stream";
-import { ChatInstanceManager } from "../connections/chat-instance-manager";
+import { ChatInstanceManager } from "../connections/chat-instance-manager.js";
 
 const originalFetch = globalThis.fetch;
 

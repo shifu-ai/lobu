@@ -99,7 +99,7 @@ export async function compileConnectorSource(sourceCode: string): Promise<Compil
       banner: {
         js: `import { createRequire as __createRequire } from 'module'; const require = __createRequire(import.meta.url);`,
       },
-      external: ['pino', 'sharp', 'jimp', 'link-preview-js'],
+      external: ['pino', 'playwright', 'sharp', 'jimp', 'link-preview-js'],
     },
   });
 }

@@ -8,9 +8,9 @@
 
 import type { Context } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
-import { verifySettingsSession } from "../public/settings-auth";
-import type { WorkerContext } from "../internal/types";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
+import { verifySettingsSession } from "../public/settings-auth.js";
+import type { WorkerContext } from "../internal/types.js";
 
 /**
  * Return a standard JSON error response with the shape `{ error: message }`.

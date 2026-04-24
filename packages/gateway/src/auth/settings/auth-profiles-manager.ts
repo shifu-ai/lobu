@@ -2,11 +2,11 @@ import { type AuthProfile, createLogger } from "@lobu/core";
 import type {
   ProviderCredentialContext,
   RuntimeProviderCredentialResolver,
-} from "../../embedded";
-import type { WritableSecretStore } from "../../secrets";
-import type { DeclaredAgentRegistry } from "../../services/declared-agent-registry";
-import type { EphemeralAuthProfileRegistry } from "./agent-settings-store";
-import type { UserAuthProfileStore } from "./user-auth-profile-store";
+} from "../../embedded.js";
+import type { WritableSecretStore } from "../../secrets/index.js";
+import type { DeclaredAgentRegistry } from "../../services/declared-agent-registry.js";
+import type { EphemeralAuthProfileRegistry } from "./agent-settings-store.js";
+import type { UserAuthProfileStore } from "./user-auth-profile-store.js";
 
 const logger = createLogger("auth-profiles-manager");
 

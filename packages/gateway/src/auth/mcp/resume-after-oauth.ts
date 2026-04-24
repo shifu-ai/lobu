@@ -12,13 +12,13 @@
 
 import { randomUUID } from "node:crypto";
 import { createLogger, generateTraceId } from "@lobu/core";
-import type { ChatInstanceManager } from "../../connections/chat-instance-manager";
-import type { CoreServices } from "../../platform";
+import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
+import type { CoreServices } from "../../platform.js";
 import {
   buildMessagePayload,
   hasConfiguredProvider,
   resolveAgentOptions,
-} from "../../services/platform-helpers";
+} from "../../services/platform-helpers.js";
 
 const logger = createLogger("mcp-oauth-resume");
 

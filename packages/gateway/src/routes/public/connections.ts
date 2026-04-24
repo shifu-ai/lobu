@@ -12,10 +12,10 @@ import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { AgentConfigStore } from "@lobu/core";
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import type { ChatInstanceManager } from "../../connections/chat-instance-manager";
-import { verifyOwnedAgentAccess } from "../shared/agent-ownership";
-import { verifySettingsSession } from "./settings-auth";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
+import { verifyOwnedAgentAccess } from "../shared/agent-ownership.js";
+import { verifySettingsSession } from "./settings-auth.js";
 
 const logger = createLogger("connection-routes");
 const TAG = "Connections";

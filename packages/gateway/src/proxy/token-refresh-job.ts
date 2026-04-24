@@ -1,6 +1,6 @@
 import { createLogger } from "@lobu/core";
-import type { OAuthClient } from "../auth/oauth/client";
-import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager";
+import type { OAuthClient } from "../auth/oauth/client.js";
+import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 
 const logger = createLogger("token-refresh-job");
 

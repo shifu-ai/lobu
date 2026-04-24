@@ -243,7 +243,12 @@ export interface SkillConfig {
   /** System packages declared by the skill (nix) */
   nixPackages?: string[];
   /** Network access policy declared by the skill */
-  networkConfig?: { allowedDomains?: string[]; deniedDomains?: string[] };
+  networkConfig?: {
+    allowedDomains?: string[];
+    deniedDomains?: string[];
+    judgedDomains?: DomainJudgeRule[];
+    judges?: Record<string, string>;
+  };
   /** AI providers the skill requires */
   providers?: string[];
   /** Preferred model for this skill (e.g., "anthropic/claude-opus-4") */
@@ -294,6 +299,43 @@ export interface NetworkConfig {
   allowedDomains?: string[];
   /** Domains explicitly blocked (takes precedence over allowedDomains). */
   deniedDomains?: string[];
+  /**
+   * Domains that require an LLM judge verdict per request. Matched after the
+   * global blocklist/allowlist and before fail-closed. When matched, the
+   * proxy invokes the named judge policy (or "default") and allows only if
+   * the verdict is "allow".
+   */
+  judgedDomains?: DomainJudgeRule[];
+  /**
+   * Named judge policies. Keys are referenced by {@link DomainJudgeRule.judge};
+   * the entry "default" is used when a rule omits `judge`.
+   */
+  judges?: Record<string, string>;
+}
+
+/**
+ * Per-domain rule that routes matching requests through the LLM egress judge.
+ */
+export interface DomainJudgeRule {
+  /** Domain pattern — same format as {@link NetworkConfig.allowedDomains}. */
+  domain: string;
+  /** Named judge policy key; defaults to "default". */
+  judge?: string;
+}
+
+/**
+ * Agent-level egress judge configuration (operator-controlled).
+ *
+ * Skills supply per-domain rules and named judge policies via their
+ * {@link NetworkConfig}. This struct is merged on top at runtime:
+ *   - {@link extraPolicy} is appended to every judge prompt for this agent.
+ *   - {@link judgeModel} overrides the built-in judge model.
+ */
+export interface AgentEgressConfig {
+  /** Operator policy appended to every judge prompt for this agent. */
+  extraPolicy?: string;
+  /** Judge model identifier (defaults to a fast Haiku model). */
+  judgeModel?: string;
 }
 
 /**

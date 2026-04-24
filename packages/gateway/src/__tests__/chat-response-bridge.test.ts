@@ -1,7 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
-import { ChatResponseBridge } from "../connections/chat-response-bridge";
-import { ConversationStateStore } from "../connections/conversation-state-store";
-import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter";
+import { ChatResponseBridge } from "../connections/chat-response-bridge.js";
+import { ConversationStateStore } from "../connections/conversation-state-store.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
 /**
  * Build a target whose `post(iterable)` drains the AsyncIterable into

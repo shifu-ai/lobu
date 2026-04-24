@@ -55,6 +55,31 @@ All chat platforms (Telegram, Slack, Discord, WhatsApp, Teams) run through Chat 
 - Docker's `internal: true` enforces isolation at the infra layer; the proxy adds selective egress on top.
 - `WORKER_ENV_*` gateway vars are forwarded to workers with the prefix stripped (`WORKER_ENV_FOO=bar` → `FOO=bar`). Use only for worker runtime env, not the default Owletto memory plugin config.
 
+#### Egress judge
+Skills and agents can route risky domains through an LLM judge instead of a flat allow/deny. Hooks into the same HTTP proxy at `packages/gateway/src/proxy/http-proxy.ts`; invoked only when a `judgedDomains` rule matches, so most traffic bypasses the judge.
+
+- Skill YAML declares judged domains + named policies:
+  ```yaml
+  network:
+    allow: [api.readonly.example.com]
+    judge:
+      - { domain: "*.slack.com" }                      # uses "default"
+      - { domain: "user-content.x.com", judge: strict }
+  judges:
+    default: "Allow only reads to channels in the agent's context."
+    strict:  "Only GET for file IDs from the current session."
+  ```
+- Operator appends policy in `lobu.toml`:
+  ```toml
+  [agents.<id>.egress]
+  extra_policy = "Never exfiltrate PATs or bearer tokens."
+  judge_model  = "claude-haiku-4-5-20251001"
+  ```
+- Defaults: Haiku (`claude-haiku-4-5-20251001`), 5 min verdict cache keyed by `(policyHash, request signature)`, circuit breaker opens after 5 consecutive judge failures (30s cooldown) and fails closed.
+- Requires `ANTHROPIC_API_KEY` in the gateway env. Gateways with no judged-domain rules never construct the client.
+- Hostname-only for HTTPS CONNECT (TLS tunnel is opaque); method + path available for plain HTTP.
+- Audit: every decision is logged as a structured `egress-decision` log record with verdict, source (`global | grant | judge`), judge source (`judge | cache | circuit-open`), latency, and policy hash. No request bodies/headers are logged.
+
 ## TypeScript Build System
 
 TypeScript packages must be compiled from `src/` → `dist/`. If you modify any package source code, run `make build-packages`. `make dev` (docker compose watch) automatically builds and syncs changes.

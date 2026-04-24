@@ -1,5 +1,5 @@
 import { BaseRedisStore } from "@lobu/core";
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
 
 /**
  * Store and retrieve user's model preference from Redis

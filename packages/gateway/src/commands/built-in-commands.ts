@@ -1,9 +1,9 @@
 import type { CommandContext, CommandRegistry } from "@lobu/core";
-import type { AgentSettingsStore } from "../auth/settings";
+import type { AgentSettingsStore } from "../auth/settings/index.js";
 import {
   getModelSelectionState,
   resolveEffectiveModelRef,
-} from "../auth/settings/model-selection";
+} from "../auth/settings/model-selection.js";
 
 interface BuiltInCommandDeps {
   agentSettingsStore: AgentSettingsStore;

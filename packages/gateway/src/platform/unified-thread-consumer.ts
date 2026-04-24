@@ -5,16 +5,16 @@
  */
 
 import { createChildSpan, createLogger, flushTracing } from "@lobu/core";
-import type { ChatResponseBridge } from "../connections/chat-response-bridge";
+import type { ChatResponseBridge } from "../connections/chat-response-bridge.js";
 import type {
   IMessageQueue,
   QueueJob,
   ThreadResponsePayload,
-} from "../infrastructure/queue";
-import { getScheduleServiceInstance } from "../orchestration/scheduled-wakeup";
-import type { PlatformRegistry } from "../platform";
-import type { SseManager } from "../services/sse-manager";
-import type { ResponseRenderer } from "./response-renderer";
+} from "../infrastructure/queue/index.js";
+import { getScheduleServiceInstance } from "../orchestration/scheduled-wakeup.js";
+import type { PlatformRegistry } from "../platform.js";
+import type { SseManager } from "../services/sse-manager.js";
+import type { ResponseRenderer } from "./response-renderer.js";
 
 const logger = createLogger("unified-thread-consumer");
 

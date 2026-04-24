@@ -10,7 +10,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMockJob as _createMockJob } from "@lobu/core/testing";
-import { ArtifactStore } from "../files/artifact-store";
+import { ArtifactStore } from "../files/artifact-store.js";
 
 export { MockMessageQueue } from "@lobu/core/testing";
 

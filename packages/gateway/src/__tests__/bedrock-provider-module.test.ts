@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { BedrockProviderModule } from "../auth/bedrock/provider-module";
-import { BedrockModelCatalog } from "../services/bedrock-model-catalog";
+import { BedrockProviderModule } from "../auth/bedrock/provider-module.js";
+import { BedrockModelCatalog } from "../services/bedrock-model-catalog.js";
 
 describe("BedrockProviderModule", () => {
   const createModule = () =>

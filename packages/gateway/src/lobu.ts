@@ -1,19 +1,23 @@
+import { randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import { createLogger } from "@lobu/core";
-import { ApiPlatform } from "./api";
-import { createGatewayApp, startGatewayServer } from "./cli/gateway";
+import { ApiPlatform } from "./api/index.js";
+import { createGatewayApp, startGatewayServer } from "./cli/gateway.js";
 import {
   type AgentConfig,
   buildGatewayConfig,
   type GatewayConfig,
-} from "./config";
-import { ChatInstanceManager, ChatResponseBridge } from "./connections";
+} from "./config/index.js";
+import {
+  ChatInstanceManager,
+  ChatResponseBridge,
+} from "./connections/index.js";
 import type {
   EmbeddedAuthProvider,
   RuntimeProviderCredentialResolver,
-} from "./embedded";
-import { Gateway } from "./gateway-main";
-import type { SecretStoreRegistry } from "./secrets";
+} from "./embedded.js";
+import { Gateway } from "./gateway-main.js";
+import type { SecretStoreRegistry } from "./secrets/index.js";
 
 const logger = createLogger("lobu");
 
@@ -90,8 +94,7 @@ export class Lobu {
     if (config.adminPassword) {
       process.env.ADMIN_PASSWORD = config.adminPassword;
     } else if (!process.env.ADMIN_PASSWORD) {
-      const crypto = require("node:crypto");
-      process.env.ADMIN_PASSWORD = crypto.randomBytes(16).toString("base64url");
+      process.env.ADMIN_PASSWORD = randomBytes(16).toString("base64url");
     }
 
     const defaultPublicUrl = `http://localhost:${this.port}`;
@@ -224,7 +227,7 @@ export class Lobu {
   private async seedConnections(): Promise<void> {
     if (!this.chatInstanceManager) return;
 
-    const { buildStableConnectionId } = await import("./config/file-loader");
+    const { buildStableConnectionId } = await import("./config/file-loader.js");
 
     for (const agent of this.agentConfigs) {
       if (!agent.connections?.length) continue;

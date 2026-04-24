@@ -1,13 +1,13 @@
 import { randomBytes } from "node:crypto";
 import { createLogger } from "@lobu/core";
-import { OAuthClient } from "../oauth/client";
-import type { OAuthCredentials } from "../oauth/credentials";
-import type { OAuthProviderConfig } from "../oauth/providers";
+import { OAuthClient } from "../oauth/client.js";
+import type { OAuthCredentials } from "../oauth/credentials.js";
+import type { OAuthProviderConfig } from "../oauth/providers.js";
 import {
   DEVICE_CODE_GRANT_TYPE,
   type DeviceAuthorizationStartResult,
   GenericDeviceCodeClient,
-} from "./device-code-client";
+} from "./device-code-client.js";
 
 const logger = createLogger("external-auth-client");
 const EXTERNAL_AUTH_CACHE_KEY = "external:auth:client:v3";

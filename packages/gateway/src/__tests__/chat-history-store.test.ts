@@ -4,8 +4,8 @@ import {
   HISTORY_TTL_MS,
   MAX_HISTORY_MESSAGES,
   historyIndexKey,
-} from "../connections/conversation-state-store";
-import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter";
+} from "../connections/conversation-state-store.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 
 function freshStore() {
   const state = new InMemoryStateAdapter();

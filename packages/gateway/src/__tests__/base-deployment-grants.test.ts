@@ -1,12 +1,13 @@
 import { beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import type { MessagePayload } from "../infrastructure/queue/queue-producer";
+import type { MessagePayload } from "../infrastructure/queue/queue-producer.js";
 import {
   BaseDeploymentManager,
   type DeploymentInfo,
   type OrchestratorConfig,
-} from "../orchestration/base-deployment-manager";
-import { GrantStore } from "../permissions/grant-store";
+} from "../orchestration/base-deployment-manager.js";
+import { GrantStore } from "../permissions/grant-store.js";
+import { PolicyStore } from "../permissions/policy-store.js";
 
 /** Minimal concrete subclass — only exists so we can test grant syncing. */
 class TestDeploymentManager extends BaseDeploymentManager {
@@ -77,13 +78,16 @@ function buildPayload(overrides: Partial<MessagePayload>): MessagePayload {
 describe("BaseDeploymentManager.syncNetworkConfigGrants", () => {
   let redis: MockRedisClient;
   let grantStore: GrantStore;
+  let policyStore: PolicyStore;
   let manager: TestDeploymentManager;
 
   beforeEach(() => {
     redis = new MockRedisClient();
     grantStore = new GrantStore(redis);
+    policyStore = new PolicyStore();
     manager = new TestDeploymentManager(TEST_CONFIG);
     manager.setGrantStore(grantStore);
+    manager.setPolicyStore(policyStore);
   });
 
   test("syncs networkConfig.allowedDomains into the grant store", async () => {
@@ -140,6 +144,41 @@ describe("BaseDeploymentManager.syncNetworkConfigGrants", () => {
         preApprovedTools: ["/mcp/gmail/tools/send_email"],
       })
     );
+  });
+
+  test("syncs egress judge policies even when no grant store is set", async () => {
+    const barebones = new TestDeploymentManager(TEST_CONFIG);
+    barebones.setPolicyStore(policyStore);
+
+    await barebones.syncNetworkConfigGrants(
+      buildPayload({
+        networkConfig: {
+          judgedDomains: [{ domain: "api.example.com" }],
+          judges: { default: "initial policy" },
+        },
+        egressConfig: { extraPolicy: "operator policy" },
+      })
+    );
+
+    let resolved = policyStore.resolve("agent-1", "api.example.com");
+    expect(resolved?.policy).toContain("initial policy");
+    expect(resolved?.policy).toContain("operator policy");
+
+    await barebones.syncNetworkConfigGrants(
+      buildPayload({
+        networkConfig: {
+          judgedDomains: [{ domain: "api.example.com" }],
+          judges: { default: "updated policy" },
+        },
+      })
+    );
+
+    resolved = policyStore.resolve("agent-1", "api.example.com");
+    expect(resolved?.policy).toContain("updated policy");
+    expect(resolved?.policy).not.toContain("initial policy");
+
+    await barebones.syncNetworkConfigGrants(buildPayload({}));
+    expect(policyStore.resolve("agent-1", "api.example.com")).toBeUndefined();
   });
 
   test("skips redundant writes when the pattern set has not changed", async () => {

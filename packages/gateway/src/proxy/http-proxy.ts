@@ -10,8 +10,11 @@ import {
   isUnrestrictedMode,
   loadAllowedDomains,
   loadDisallowedDomains,
-} from "../config/network-allowlist";
-import type { GrantStore } from "../permissions/grant-store";
+} from "../config/network-allowlist.js";
+import type { GrantStore } from "../permissions/grant-store.js";
+import type { PolicyStore } from "../permissions/policy-store.js";
+import { EgressJudge } from "./egress-judge/index.js";
+import type { JudgeDecision } from "./egress-judge/index.js";
 
 const logger = createLogger("http-proxy");
 
@@ -65,6 +68,12 @@ let globalConfig: ResolvedNetworkConfig | null = null;
 // Module-level grant store reference for domain grant checks
 let proxyGrantStore: GrantStore | null = null;
 
+// Module-level policy store + lazy egress judge. The judge is only used
+// when a request matches a `judgedDomains` rule — most traffic never
+// touches it.
+let proxyPolicyStore: PolicyStore | null = null;
+let proxyEgressJudge: EgressJudge | null = null;
+
 /**
  * Set the grant store for the HTTP proxy to check domain grants.
  * Called during gateway initialization.
@@ -74,8 +83,25 @@ export function setProxyGrantStore(store: GrantStore): void {
 }
 
 /**
- * Get global network config (lazy loaded)
+ * Set the policy store for the HTTP proxy to look up judged-domain rules.
+ * Called during gateway initialization. Lazy-constructs the {@link EgressJudge}
+ * on first configuration so tests can opt out by never calling this.
  */
+export function setProxyPolicyStore(store: PolicyStore): void {
+  proxyPolicyStore = store;
+  if (!proxyEgressJudge) {
+    proxyEgressJudge = new EgressJudge();
+  }
+}
+
+/**
+ * Replace the lazy {@link EgressJudge} — tests inject a fake client here
+ * so the proxy can be exercised end-to-end without hitting a real model.
+ */
+export function setProxyEgressJudge(judge: EgressJudge): void {
+  proxyEgressJudge = judge;
+}
+
 function getGlobalConfig(): ResolvedNetworkConfig {
   if (!globalConfig) {
     globalConfig = {
@@ -87,16 +113,30 @@ function getGlobalConfig(): ResolvedNetworkConfig {
 }
 
 /**
- * Unified domain access check: global config → grant store.
+ * Outcome of a full access decision. When the judge is consulted,
+ * `judge` carries the verdict so the caller can surface the reason to
+ * the client and emit a structured audit log.
+ */
+interface AccessDecision {
+  allowed: boolean;
+  source: "global" | "grant" | "judge";
+  judge?: JudgeDecision;
+}
+
+/**
+ * Unified domain access check: global config → grant store → LLM judge.
  *
  * 1. If denied by global blocklist → block
  * 2. If allowed by global allowlist → check grantStore.isDenied() → allow/block
  * 3. If not in global list → check grantStore.hasGrant() → allow/block
+ * 4. If still not decided and the agent has a judged-domain rule for the
+ *    host → invoke the LLM judge → allow/block based on verdict
  */
 async function checkDomainAccess(
   hostname: string,
-  agentId: string | undefined
-): Promise<boolean> {
+  agentId: string | undefined,
+  requestContext?: { method?: string; path?: string }
+): Promise<AccessDecision> {
   const global = getGlobalConfig();
 
   // Global blocklist always takes precedence
@@ -104,7 +144,7 @@ async function checkDomainAccess(
     global.deniedDomains.length > 0 &&
     matchesDomainPattern(hostname, global.deniedDomains)
   ) {
-    return false;
+    return { allowed: false, source: "global" };
   }
 
   // Check if globally allowed (unrestricted or in allowlist)
@@ -120,10 +160,10 @@ async function checkDomainAccess(
       const denied = await proxyGrantStore.isDenied(agentId, hostname);
       if (denied) {
         logger.debug(`Domain ${hostname} denied via grant (agent: ${agentId})`);
-        return false;
+        return { allowed: false, source: "grant" };
       }
     }
-    return true;
+    return { allowed: true, source: "global" };
   }
 
   // Not globally allowed — check grant store for per-agent access
@@ -131,11 +171,32 @@ async function checkDomainAccess(
     const granted = await proxyGrantStore.hasGrant(agentId, hostname);
     if (granted) {
       logger.debug(`Domain ${hostname} allowed via grant (agent: ${agentId})`);
-      return true;
+      return { allowed: true, source: "grant" };
     }
   }
 
-  return false;
+  // Fall through to the LLM egress judge when a matching rule exists.
+  if (proxyPolicyStore && proxyEgressJudge && agentId) {
+    const rule = proxyPolicyStore.resolve(agentId, hostname);
+    if (rule) {
+      const decision = await proxyEgressJudge.decide(
+        {
+          agentId,
+          hostname,
+          method: requestContext?.method,
+          path: requestContext?.path,
+        },
+        rule
+      );
+      return {
+        allowed: decision.verdict === "allow",
+        source: "judge",
+        judge: decision,
+      };
+    }
+  }
+
+  return { allowed: false, source: "global" };
 }
 
 interface ProxyCredentials {
@@ -213,6 +274,14 @@ let dnsLookupOverride: DnsLookupAllFn | null = null;
 
 export const __testOnly = {
   isBlockedIpAddress,
+  /** Reset cached global config + module-level stores so tests can rebuild them. */
+  reset: () => {
+    globalConfig = null;
+    proxyGrantStore = null;
+    proxyPolicyStore = null;
+    proxyEgressJudge = null;
+    dnsLookupOverride = null;
+  },
   setDnsLookup(fn: DnsLookupAllFn | null): void {
     dnsLookupOverride = fn;
   },
@@ -427,6 +496,57 @@ function isHostnameAllowed(
 }
 
 /**
+ * Structured audit log for every access decision. We keep the shape stable
+ * (one log record per request) so operators can grep / index on it. We do
+ * NOT log request bodies or headers — the proxy is a trust boundary and
+ * the audit log must not become a secondary leak surface.
+ */
+function logAccessDecision(
+  method: string,
+  hostname: string,
+  deploymentName: string,
+  agentId: string | undefined,
+  decision: AccessDecision
+): void {
+  // Audit log only fires for non-trivial decisions — every judge
+  // invocation and every denial. Globally-allowed fast-path requests are
+  // the common case on busy gateways and flooding the log with them turns
+  // a useful audit stream into noise (and costs serialization per req).
+  if (decision.allowed && decision.source === "global") {
+    return;
+  }
+  logger.info("egress-decision", {
+    method,
+    hostname,
+    deploymentName,
+    agentId,
+    allowed: decision.allowed,
+    source: decision.source,
+    ...(decision.judge
+      ? {
+          judgeName: decision.judge.judgeName,
+          judgeVerdict: decision.judge.verdict,
+          judgeReason: decision.judge.reason,
+          judgeSource: decision.judge.source,
+          judgeLatencyMs: decision.judge.latencyMs,
+          policyHash: decision.judge.policyHash,
+        }
+      : {}),
+  });
+}
+
+/**
+ * Strip CR/LF and trim to a safe length so judge-provided reasons can't
+ * inject extra HTTP response headers via the status line.
+ */
+function escapeHeaderValue(value: string): string {
+  return value
+    .replace(/[\r\n]+/g, " ")
+    .trim()
+    .slice(0, 300);
+}
+
+/**
  * Extract hostname from CONNECT request
  */
 function extractConnectHostname(url: string): string | null {
@@ -470,15 +590,25 @@ async function handleConnect(
 
   const { deploymentName, tokenData } = auth;
 
-  // Check domain access: global config → grant store
-  const allowed = await checkDomainAccess(hostname, tokenData.agentId);
-  if (!allowed) {
+  // Check domain access: global config → grant store → LLM egress judge.
+  // TLS CONNECT tunneling means we cannot see the method or path — the
+  // judge decides on hostname alone.
+  const decision = await checkDomainAccess(hostname, tokenData.agentId);
+  logAccessDecision(
+    "CONNECT",
+    hostname,
+    deploymentName,
+    tokenData.agentId,
+    decision
+  );
+  if (!decision.allowed) {
+    const reason = decision.judge?.reason ?? `Domain not allowed: ${hostname}`;
     logger.warn(
-      `Blocked CONNECT to ${hostname} (deployment: ${deploymentName})`
+      `Blocked CONNECT to ${hostname} (deployment: ${deploymentName}) - ${reason}`
     );
     try {
       clientSocket.write(
-        `HTTP/1.1 403 Domain not allowed: ${hostname}. Network access is configured via lobu.toml or the gateway configuration APIs.\r\nContent-Type: text/plain\r\n\r\n403 Forbidden - Domain not allowed: ${hostname}. Network access is configured via lobu.toml or the gateway configuration APIs.\r\n`
+        `HTTP/1.1 403 ${escapeHeaderValue(reason)}\r\nContent-Type: text/plain\r\n\r\n403 Forbidden - ${reason}. Network access is configured via lobu.toml, skill configs, or the gateway configuration APIs.\r\n`
       );
       clientSocket.end();
     } catch {
@@ -617,17 +747,30 @@ async function handleProxyRequest(
 
   const { deploymentName, tokenData } = auth;
 
-  // Check domain access: global config → grant store
-  const allowed = await checkDomainAccess(hostname, tokenData.agentId);
-  if (!allowed) {
+  // Check domain access: global config → grant store → LLM egress judge.
+  // Plain HTTP: method and path are visible and are passed through to the
+  // judge so policies can reason about specific endpoints.
+  const decision = await checkDomainAccess(hostname, tokenData.agentId, {
+    method: req.method,
+    path: parsedUrl.pathname + parsedUrl.search,
+  });
+  logAccessDecision(
+    req.method ?? "?",
+    hostname,
+    deploymentName,
+    tokenData.agentId,
+    decision
+  );
+  if (!decision.allowed) {
+    const reason = decision.judge?.reason ?? `Domain not allowed: ${hostname}`;
     logger.warn(
-      `Blocked request to ${hostname} (deployment: ${deploymentName})`
+      `Blocked request to ${hostname} (deployment: ${deploymentName}) - ${reason}`
     );
-    res.writeHead(403, `Domain not allowed: ${hostname}`, {
+    res.writeHead(403, escapeHeaderValue(reason), {
       "Content-Type": "text/plain",
     });
     res.end(
-      `403 Forbidden - Domain not allowed: ${hostname}. Network access is configured via lobu.toml or the gateway configuration APIs.\n`
+      `403 Forbidden - ${reason}. Network access is configured via lobu.toml, skill configs, or the gateway configuration APIs.\n`
     );
     return;
   }

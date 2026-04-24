@@ -85,15 +85,52 @@ const skillsSchema = z.object({
 
 // ── Network ─────────────────────────────────────────────────────────────────
 
+const judgeDomainEntry = z.union([
+  z.string(),
+  z.object({
+    domain: z.string(),
+    judge: z.string().optional(),
+  }),
+]);
+
 const networkSchema = z
   .object({
     allowed: z.array(z.string()).optional(),
     denied: z.array(z.string()).optional(),
+    /**
+     * Domains routed through the LLM egress judge. Each entry is either
+     * a bare domain string (uses the "default" judge policy) or an object
+     * `{ domain, judge }` naming a policy in {@link network.judges}.
+     */
+    judge: z.array(judgeDomainEntry).optional(),
+    /**
+     * Named judge policies referenced by `judge[].judge`. The key "default"
+     * is applied when an entry omits `judge`.
+     */
+    judges: z.record(z.string(), z.string()).optional(),
   })
   .transform((network) => ({
     allowed: normalizeDomainPatterns(network.allowed),
     denied: normalizeDomainPatterns(network.denied),
+    judge: network.judge?.map((entry) =>
+      typeof entry === "string"
+        ? { domain: entry }
+        : {
+            domain: entry.domain,
+            ...(entry.judge ? { judge: entry.judge } : {}),
+          }
+    ),
+    judges: network.judges,
   }));
+
+// ── Egress ──────────────────────────────────────────────────────────────────
+
+const egressSchema = z.object({
+  /** Operator policy appended to every judge prompt for this agent. */
+  extra_policy: z.string().optional(),
+  /** Judge model identifier (defaults to a fast Haiku model). */
+  judge_model: z.string().optional(),
+});
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
@@ -182,6 +219,7 @@ const agentEntrySchema = z.object({
   connections: z.array(connectionSchema).default([]),
   skills: skillsSchema.default({}),
   network: networkSchema.optional(),
+  egress: egressSchema.optional(),
   tools: toolsSchema.optional(),
   /**
    * Guardrails enabled for this agent. Each name must match a guardrail
@@ -247,6 +285,7 @@ export type ConnectionEntry = z.infer<typeof connectionSchema>;
 export type McpServerEntry = z.infer<typeof mcpServerSchema>;
 export type SkillsEntry = z.infer<typeof skillsSchema>;
 export type NetworkEntry = z.infer<typeof networkSchema>;
+export type EgressEntry = z.infer<typeof egressSchema>;
 export type ToolsEntry = z.infer<typeof toolsSchema>;
 export type WorkerEntry = z.infer<typeof workerSchema>;
 export type ScheduleEntry = z.infer<typeof scheduleSchema>;

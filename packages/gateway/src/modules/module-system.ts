@@ -7,7 +7,7 @@ import {
   type WorkerContext,
   type WorkerModule,
 } from "@lobu/core";
-import type { ProviderCredentialContext } from "../embedded";
+import type { ProviderCredentialContext } from "../embedded.js";
 
 export interface ModelOption {
   value: string;

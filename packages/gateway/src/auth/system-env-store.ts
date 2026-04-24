@@ -1,5 +1,5 @@
 import { createBuiltinSecretRef, createLogger } from "@lobu/core";
-import type { WritableSecretStore } from "../secrets";
+import type { WritableSecretStore } from "../secrets/index.js";
 
 const logger = createLogger("system-env-store");
 const KEY_PREFIX = "system-env/";

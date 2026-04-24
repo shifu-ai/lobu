@@ -4,8 +4,11 @@ import {
   safeJsonParse,
   safeJsonStringify,
 } from "@lobu/core";
-import type Redis from "ioredis";
-import { deleteSecretsByPrefix, type WritableSecretStore } from "../../secrets";
+import type { Redis } from "ioredis";
+import {
+  deleteSecretsByPrefix,
+  type WritableSecretStore,
+} from "../../secrets/index.js";
 
 const logger = createLogger("user-auth-profile-store");
 

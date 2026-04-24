@@ -1,11 +1,11 @@
 import { createLogger, type SecretRef } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import type Redis from "ioredis";
-import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager";
-import type { ProviderCredentialContext } from "../embedded";
-import type { ProviderUpstreamConfig } from "../modules/module-system";
-import type { SecretStore } from "../secrets";
+import type { Redis } from "ioredis";
+import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
+import type { ProviderCredentialContext } from "../embedded.js";
+import type { ProviderUpstreamConfig } from "../modules/module-system.js";
+import type { SecretStore } from "../secrets/index.js";
 
 const logger = createLogger("secret-proxy");
 

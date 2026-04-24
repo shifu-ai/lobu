@@ -10,7 +10,18 @@ import {
   pipeline,
   env as transformersEnv,
 } from '@xenova/transformers';
-import { validateEmbeddingDimensions } from '../../owletto-embeddings/src/embedding-utils';
+
+function validateEmbeddingDimensions(
+  embedding: number[],
+  expectedDimensions: number,
+  context: string
+): void {
+  if (embedding.length !== expectedDimensions) {
+    throw new Error(
+      `${context}: unexpected embedding dimensions ${embedding.length} (expected ${expectedDimensions})`
+    );
+  }
+}
 
 const DEFAULT_MODEL_NAME = 'Xenova/bge-base-en-v1.5';
 const DEFAULT_DIMENSIONS = 768;

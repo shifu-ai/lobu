@@ -3,7 +3,7 @@ import {
   hasConfiguredProvider,
   resolveAgentId,
   resolveAgentOptions,
-} from "../services/platform-helpers";
+} from "../services/platform-helpers.js";
 
 const originalDispatcherServiceName = process.env.DISPATCHER_SERVICE_NAME;
 const originalKubernetesNamespace = process.env.KUBERNETES_NAMESPACE;
@@ -254,7 +254,7 @@ describe("resolveAgentOptions model resolution", () => {
 describe("hasConfiguredProvider", () => {
   test("accepts declared agents with credentials regardless of system keys", async () => {
     const { DeclaredAgentRegistry } = await import(
-      "../services/declared-agent-registry"
+      "../services/declared-agent-registry.js"
     );
     const settingsStore = {
       getEffectiveSettings: async () => null,

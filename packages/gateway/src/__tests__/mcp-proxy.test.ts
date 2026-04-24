@@ -8,10 +8,10 @@ import {
 } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
 import { MockMessageQueue } from "@lobu/core/testing";
-import { McpProxy } from "../auth/mcp/proxy";
-import { McpToolCache } from "../auth/mcp/tool-cache";
-import { GrantStore } from "../permissions/grant-store";
-import { RedisSecretStore } from "../secrets";
+import { McpProxy } from "../auth/mcp/proxy.js";
+import { McpToolCache } from "../auth/mcp/tool-cache.js";
+import { GrantStore } from "../permissions/grant-store.js";
+import { RedisSecretStore } from "../secrets/index.js";
 
 function createTestSecretStore(queue: MockMessageQueue): RedisSecretStore {
   return new RedisSecretStore(

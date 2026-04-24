@@ -1,5 +1,5 @@
 import type { ProviderConfigEntry } from "@lobu/core";
-import type { ProviderRegistryService } from "./provider-registry-service";
+import type { ProviderRegistryService } from "./provider-registry-service.js";
 
 interface ResolvedMcpRegistryServer {
   id: string;

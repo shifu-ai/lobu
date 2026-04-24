@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { ProviderConfigEntry, ProviderRegistryEntry } from "@lobu/core";
-import { ProviderConfigResolver } from "../services/provider-config-resolver";
+import { ProviderConfigResolver } from "../services/provider-config-resolver.js";
 
 class MockProviderRegistryService {
   constructor(

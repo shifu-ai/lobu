@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import { SystemMessageLimiter } from "../infrastructure/redis/system-message-limiter";
+import { SystemMessageLimiter } from "../infrastructure/redis/system-message-limiter.js";
 
 describe("SystemMessageLimiter", () => {
   test("sends once and suppresses subsequent sends within TTL", async () => {

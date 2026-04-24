@@ -1,6 +1,6 @@
-import { BaseOAuth2Client } from "./base-client";
-import type { OAuthCredentials } from "./credentials";
-import type { OAuthProviderConfig } from "./providers";
+import { BaseOAuth2Client } from "./base-client.js";
+import type { OAuthCredentials } from "./credentials.js";
+import type { OAuthProviderConfig } from "./providers.js";
 
 interface OAuthTokenResponse {
   access_token: string;

@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import type { Server } from "node:http";
 import { createLogger } from "@lobu/core";
-import { startHttpProxy, stopHttpProxy } from "./http-proxy";
+import { startHttpProxy, stopHttpProxy } from "./http-proxy.js";
 
 const logger = createLogger("proxy-manager");
 

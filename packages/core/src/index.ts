@@ -53,6 +53,7 @@ export type {
 export {
   type AgentEntry as TomlAgentEntry,
   type ConnectionEntry as TomlConnectionEntry,
+  type EgressEntry as TomlEgressEntry,
   type LobuTomlConfig,
   lobuConfigSchema,
   type McpServerEntry as TomlMcpServerEntry,
@@ -112,6 +113,7 @@ export { getSentry, initSentry } from "./sentry";
 export { extractTraceId, generateTraceId } from "./trace";
 // Core types
 export type {
+  AgentEgressConfig,
   AgentMcpConfig,
   AgentOptions,
   AuthProfile,
@@ -119,6 +121,7 @@ export type {
   ConversationMessage,
   DeclaredCredential,
   DeclaredSchedule,
+  DomainJudgeRule,
   HistoryMessage,
   InstalledProvider,
   InstructionContext,

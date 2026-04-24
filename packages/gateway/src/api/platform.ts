@@ -8,9 +8,9 @@
 
 import { randomUUID } from "node:crypto";
 import { createLogger, type InstructionProvider } from "@lobu/core";
-import type { CoreServices, PlatformAdapter } from "../platform";
-import type { ResponseRenderer } from "../platform/response-renderer";
-import { ApiResponseRenderer } from "./response-renderer";
+import type { CoreServices, PlatformAdapter } from "../platform.js";
+import type { ResponseRenderer } from "../platform/response-renderer.js";
+import { ApiResponseRenderer } from "./response-renderer.js";
 
 const logger = createLogger("api-platform");
 

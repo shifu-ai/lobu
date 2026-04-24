@@ -12,8 +12,8 @@ import {
   getStoredCredential,
   startDeviceAuth,
   tryCompletePendingDeviceAuth,
-} from "../routes/internal/device-auth";
-import type { SecretListEntry, WritableSecretStore } from "../secrets";
+} from "../routes/internal/device-auth.js";
+import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
 
 const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

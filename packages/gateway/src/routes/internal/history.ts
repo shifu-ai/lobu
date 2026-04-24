@@ -2,10 +2,10 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import { platformRegistry } from "../../platform";
-import { errorResponse, getVerifiedWorker } from "../shared/helpers";
-import { authenticateWorker } from "./middleware";
-import type { WorkerContext } from "./types";
+import { platformRegistry } from "../../platform.js";
+import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
+import { authenticateWorker } from "./middleware.js";
+import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("history-routes");
 

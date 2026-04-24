@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
-import { WorkerGateway } from "../gateway";
+import { WorkerGateway } from "../gateway/index.js";
 
 const TEST_ENCRYPTION_KEY = Buffer.from(
   "12345678901234567890123456789012"

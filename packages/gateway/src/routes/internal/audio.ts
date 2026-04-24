@@ -7,10 +7,10 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { TranscriptionService } from "../../services/transcription-service";
-import { errorResponse, getVerifiedWorker } from "../shared/helpers";
-import { authenticateWorker } from "./middleware";
-import type { WorkerContext } from "./types";
+import type { TranscriptionService } from "../../services/transcription-service.js";
+import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
+import { authenticateWorker } from "./middleware.js";
+import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("internal-audio-routes");
 
