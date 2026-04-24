@@ -299,10 +299,20 @@ export async function sweepStaleWatcherRuns(
 }
 
 /**
- * Startup reconciliation: reset any watcher run claimed by this gateway that
- * was never resolved (crash recovery). Safe to call only when this process
- * holds the watcher-dispatcher advisory lock — otherwise another gateway may
- * be legitimately executing those runs.
+ * Startup reconciliation: recover scheduled watcher runs that were claimed
+ * by the dispatcher but never transitioned to `running` (i.e. the process
+ * crashed between claim and POST). Called on first maintenance tick after
+ * boot, under the MAINTENANCE_LOCK_KEY advisory lock.
+ *
+ * Why this is narrow by design:
+ * - `status='claimed'` only. `running` rows are NOT reset — in a multi-pod
+ *   deployment another pod may be legitimately executing that agent turn,
+ *   and we have no per-pod fencing (no worker_instance_id). Mid-turn crashes
+ *   instead self-heal: sweepStaleWatcherRuns marks them `timeout` after 2h,
+ *   then materializeDueWatcherRuns creates a fresh pending run on the next
+ *   tick since next_run_at is still in the past.
+ * - `dispatch_source='scheduled'` only. Manual triggers are not auto-retried;
+ *   the caller would see the failure and decide whether to re-trigger.
  */
 export async function resetOrphanedWatcherRuns(
   db?: DbClient
@@ -617,7 +627,7 @@ function registerWatcherRunHandle(params: {
   messageId: string;
 }): void {
   const coreServices = getLobuCoreServices();
-  const tracker = coreServices?.getWatcherRunTracker?.();
+  const tracker = coreServices?.getWatcherRunTracker();
   if (!tracker) {
     logger.warn(
       { runId: params.runId },
@@ -645,8 +655,7 @@ function registerWatcherRunHandle(params: {
 
 function unregisterWatcherRunHandle(messageId: string): void {
   const coreServices = getLobuCoreServices();
-  const tracker = coreServices?.getWatcherRunTracker?.();
-  tracker?.unregister(messageId);
+  coreServices?.getWatcherRunTracker().unregister(messageId);
 }
 
 export async function dispatchPendingWatcherRuns(
