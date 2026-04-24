@@ -9,7 +9,6 @@ import {
 } from "bun:test";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
-import path from "node:path";
 import { ErrorCode, OrchestratorError } from "@lobu/core";
 import type {
   MessagePayload,
@@ -74,6 +73,8 @@ const TEST_CONFIG: OrchestratorConfig = {
       tag: "latest",
       pullPolicy: "IfNotPresent",
     },
+    entryPoint: "/test/packages/worker/src/index.ts",
+    binPathEntries: ["/test/node_modules/.bin"],
     resources: {
       requests: { cpu: "100m", memory: "128Mi" },
       limits: { cpu: "500m", memory: "512Mi" },
@@ -322,7 +323,7 @@ describe("EmbeddedDeploymentManager", () => {
           | { env?: Record<string, string> }
           | undefined;
         const pathEntries = (spawnOptions?.env?.PATH || "").split(":");
-        expect(pathEntries).toContain(path.resolve("node_modules/.bin"));
+        expect(pathEntries).toContain("/test/node_modules/.bin");
       } finally {
         existsSpy.mockRestore();
       }
