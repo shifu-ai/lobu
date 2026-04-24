@@ -262,22 +262,14 @@ async function buildAgentConfig(
   const mergedDeniedDomains: string[] = [
     ...(agentConfig.network?.denied || []),
   ];
-  // Judged domains and named judges aggregate across agent-level config and
-  // every enabled skill. Per-domain entries from later skills overwrite
-  // earlier ones; named judges with the same key likewise — last writer wins.
+  // Judged domains and named judges aggregate across every enabled skill,
+  // then operator-level config in lobu.toml is layered on top so it always
+  // wins. A skill must never silently weaken a stricter operator policy.
   const mergedJudgedDomains = new Map<
     string,
     { domain: string; judge?: string }
   >();
   const mergedJudges: Record<string, string> = {};
-  if (agentConfig.network?.judge) {
-    for (const rule of agentConfig.network.judge) {
-      mergedJudgedDomains.set(rule.domain, rule);
-    }
-  }
-  if (agentConfig.network?.judges) {
-    Object.assign(mergedJudges, agentConfig.network.judges);
-  }
 
   // Nix packages — start with agent-level, then merge skill-level
   const mergedNixPackages: string[] = [
@@ -379,6 +371,32 @@ async function buildAgentConfig(
           };
         }
       }
+    }
+  }
+
+  // Operator-level overrides: lobu.toml `[agents.<id>.network]` is the final
+  // authority. Apply after the skill loop so operator-authored judge policies
+  // and judged-domain rules cannot be silently weakened by a skill that
+  // happens to declare the same key.
+  if (agentConfig.network?.judge) {
+    for (const rule of agentConfig.network.judge) {
+      mergedJudgedDomains.set(rule.domain, rule);
+    }
+  }
+  if (agentConfig.network?.judges) {
+    for (const [judgeName, policy] of Object.entries(
+      agentConfig.network.judges
+    )) {
+      if (
+        mergedJudges[judgeName] !== undefined &&
+        mergedJudges[judgeName] !== policy
+      ) {
+        logger.warn(
+          { judgeName },
+          "Operator-level judge policy in lobu.toml overrides a skill-defined policy with the same name"
+        );
+      }
+      mergedJudges[judgeName] = policy;
     }
   }
 

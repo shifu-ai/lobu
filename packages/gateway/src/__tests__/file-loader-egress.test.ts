@@ -142,4 +142,32 @@ judges:
       "skill-judge": "skill policy",
     });
   });
+
+  test("operator-level lobu.toml overrides skill-defined judge with same name", async () => {
+    writeToml(`
+[agents.support.network.judges]
+default = "operator strict policy"
+
+[[agents.support.network.judge]]
+domain = "api.github.com"
+judge = "default"
+`);
+    writeSkill(`
+name: s1
+network:
+  judge:
+    - { domain: "api.github.com", judge: "default" }
+judges:
+  default: "skill weak policy"
+`);
+
+    const agents = await loadAgentConfigFromFiles(projectDir);
+    const network = agents[0]?.settings.networkConfig;
+    // Operator policy wins — skill cannot silently weaken egress.
+    expect(network?.judges?.default).toBe("operator strict policy");
+    // Operator's judged-domain rule wins on the same key as well.
+    expect(network?.judgedDomains).toEqual([
+      { domain: "api.github.com", judge: "default" },
+    ]);
+  });
 });
