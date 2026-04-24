@@ -127,16 +127,16 @@ const module = { exports: {} };
 const exports = module.exports;
 `;
 
-// Picks `default` first, then a legacy named `react` export (preserves
-// compatibility with stored reaction scripts), then the bare module export
-// when the script was a single function expression.
+// Picks `default`, falling back to the bare module export when the script
+// was written as a single function expression. Stored reaction scripts must
+// use the new `export default async (ctx, client, params?) => ...` shape;
+// migrate the database when shipping this change.
 const GUEST_RUNNER = `
 (async () => {
   const __entry = module.exports.default
-    ?? module.exports.react
     ?? (typeof module.exports === 'function' ? module.exports : null);
   if (typeof __entry !== 'function') {
-    throw new Error('Script must export a default async function (or a legacy "react" export for reaction scripts)');
+    throw new Error('Script must \`export default\` an async function');
   }
   const __extra = JSON.parse(__extra_args_json);
   const __result = await __entry(ctx, client, ...__extra);

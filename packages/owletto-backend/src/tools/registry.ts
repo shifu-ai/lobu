@@ -8,7 +8,6 @@
 import type { Static } from '@sinclair/typebox';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
-import { ADMIN_TOOLS } from './admin';
 import { QuerySqlSchema, querySql } from './admin/query_sql';
 import {
   ListOrganizationsSchema,
@@ -160,10 +159,6 @@ const TOOLS: ToolDefinition[] = [
       throw new Error('Handled directly in executeTool');
     },
   },
-  // Internal admin tools — hidden from the external MCP `tools/list`, but
-  // dispatchable by name from in-process callers (the test harness, the
-  // SDK delegating from `execute` scripts).
-  ...ADMIN_TOOLS,
 ];
 
 // ============================================

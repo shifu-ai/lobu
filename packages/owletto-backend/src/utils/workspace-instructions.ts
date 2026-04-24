@@ -130,7 +130,10 @@ export async function buildWorkspaceInstructions(organizationId: string): Promis
     `;
 
     if (operationConnections.length > 0) {
-      sections.push('', '### Connector Operations (use manage_operations tool)');
+      sections.push(
+        '',
+        '### Connector Operations (call via `execute` → `client.operations.execute(...)`)'
+      );
       for (const conn of operationConnections) {
         const actionCount =
           conn.actions_schema && typeof conn.actions_schema === 'object'
@@ -148,27 +151,30 @@ export async function buildWorkspaceInstructions(organizationId: string): Promis
 
     sections.push(
       '',
+      '### Tool surface',
+      'External MCP tools: `search_knowledge`, `save_knowledge`, `query_sql`, `search` (SDK method discovery), `execute` (run TS over the typed client SDK), `list_organizations`, `switch_organization`, `resolve_path`.',
+      'For everything else (entity CRUD, watchers, classifiers, connections, feeds, view templates, operations) write a TS script and call via `execute`. Use `search` to discover method names.',
+      '',
       '### Saving (do this automatically)',
       'When the user shares any of these, save immediately:',
-      '- Preferences, opinions, or personal details → save_knowledge to matching entity, create entity first if needed',
-      '- Facts about people, projects, or topics → save_knowledge to the relevant entity',
-      '- Relationships between things → manage_entity(action="link") with the appropriate relationship type',
+      '- Preferences, opinions, or personal details → `save_knowledge` to matching entity (create the entity first via `execute({script: "client.entities.create(...)"})` if needed)',
+      '- Facts about people, projects, or topics → `save_knowledge` to the relevant entity',
+      '- Relationships between things → `execute` calling `client.entities.link({...})`',
       '',
       "### Updating Facts (supersede, don't duplicate)",
       'When a fact changes (e.g. updated preference, corrected info):',
-      '1. Search for the existing fact: read_knowledge(query=…, entity_id=…)',
-      '2. Save the updated fact with supersedes_event_id pointing to the old one:',
-      '   save_knowledge({ content: "new fact", semantic_type: …, supersedes_event_id: <old_id> })',
+      '1. Search for the existing fact via `search_knowledge` or `execute({script: "client.knowledge.read({...})"})`',
+      '2. Save the updated fact with `supersedes_event_id` pointing to the old one in `save_knowledge`',
       'The old fact is automatically hidden from future searches. Never save a duplicate — always search first.',
       '',
       '### Recalling',
       '- Always search before creating to avoid duplicates',
-      '- search_knowledge(entity_type=…) to find entities by name',
-      '- read_knowledge(query=…) for semantic recall across saved content',
-      '- manage_entity(action="list_links") to explore connections',
+      '- `search_knowledge(query=…, entity_type=…)` to find entities + semantic content matches',
+      '- `execute({script: "client.entities.listLinks({entity_id: ...})"})` to explore relationships',
       '',
-      '### Full Schema Details',
-      '- manage_entity_schema(schema_type=…, action="list") for field definitions and relationship rules'
+      '### Full schema details',
+      '- `execute({script: "client.entitySchema.listTypes()"})` for entity types',
+      '- `execute({script: "client.entitySchema.listRelTypes()"})` for relationship types and rules'
     );
 
     return sections.join('\n');

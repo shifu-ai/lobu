@@ -730,7 +730,10 @@ describe('MCP Authentication', () => {
       expect(body.error?.message).toContain("Agent 'missing-agent' was not found");
     });
 
-    it('hides org switching tools on scoped /mcp/:org routes', async () => {
+    it('exposes org switching tools on scoped /mcp/:org routes too', async () => {
+      // PR-2: list_organizations + switch_organization are no longer
+      // gated behind the unscoped /mcp endpoint. Scoped sessions can still
+      // call switch_organization to move off the URL pin.
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
       const response = await post(`/mcp/${org.slug}`, {
@@ -747,8 +750,8 @@ describe('MCP Authentication', () => {
       const body = await response.json();
       const toolNames = body.result.tools.map((tool: any) => tool.name);
 
-      expect(toolNames).not.toContain('list_organizations');
-      expect(toolNames).not.toContain('switch_organization');
+      expect(toolNames).toContain('list_organizations');
+      expect(toolNames).toContain('switch_organization');
     });
   });
 

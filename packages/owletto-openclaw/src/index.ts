@@ -1120,7 +1120,7 @@ const plugin = {
                     text: JSON.stringify({
                       status: 'already_authenticated',
                       message:
-                        "You are already authenticated with Owletto. Do NOT call owletto_login again. Proceed directly with the user's request using the available owletto tools like owletto_manage_connections, owletto_manage_watchers, etc.",
+                        "You are already authenticated with Owletto. Do NOT call owletto_login again. Proceed directly with the user's request using the available owletto tools (owletto_search to discover SDK methods, owletto_execute to run TypeScript over the typed client SDK, owletto_search_knowledge for entity/knowledge search, owletto_save_knowledge to persist).",
                     }),
                   },
                 ],

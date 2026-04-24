@@ -207,11 +207,12 @@ describe('checkToolAccess', () => {
     ).not.toThrow();
   });
 
-  it('keeps admin-only actions restricted for members', () => {
+  it('keeps admin-only tools restricted for members', () => {
+    // query_sql is the canonical admin-only tool on the post-PR-2 surface.
     expect(() =>
       checkToolAccess(
-        'manage_connections',
-        { action: 'create' },
+        'query_sql',
+        { sql: 'SELECT 1', sort_by: 'id' },
         {
           ...baseAuth,
           memberRole: 'member',
