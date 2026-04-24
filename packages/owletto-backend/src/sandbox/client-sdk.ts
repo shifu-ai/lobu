@@ -15,13 +15,11 @@
 
 import type { Env } from "../index";
 import type { ToolContext } from "../tools/registry";
-import { getWorkspaceProvider } from "../workspace";
 import {
   getCachedMembershipRole,
   getCachedOrgBySlug,
   getOrgById,
 } from "../workspace/multi-tenant";
-import type { OrgInfo } from "../workspace/types";
 import {
   buildAuthProfilesNamespace,
   buildClassifiersNamespace,
@@ -218,16 +216,4 @@ export function buildClientSDK(ctx: ToolContext, env: Env): ClientSDK {
   };
 
   return sdk;
-}
-
-/**
- * Convenience: look up `OrgInfo` for the caller's current org. Useful for the
- * `search` tool's preamble and the web console's header chip.
- */
-export async function getCurrentOrgInfo(
-  ctx: ToolContext,
-): Promise<OrgInfo | null> {
-  const provider = getWorkspaceProvider();
-  const orgs = await provider.listOrganizations(undefined, ctx.userId);
-  return orgs.find((o) => o.id === ctx.organizationId) ?? null;
 }
