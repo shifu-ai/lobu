@@ -3,12 +3,13 @@
  *
  * Describes each SDK method for:
  * - `search` MCP tool (summary, example, throws)
- * - Dry-run classification (read | write | external) — PR-2 wires this into the wrapper
+ * - Dry-run classification (read | write | external) — PR-2 wires this into
+ *   the wrapper so writes and external side-effects are intercepted.
  * - Static bans (e.g. `client.execute` must not be exposed recursively)
  *
- * Keyed by dotted SDK path (e.g. `watchers.list`, `entities.create`).
- * Populated incrementally — PR-1 seeds the shape + a handful of examples.
- * PR-2 validates coverage against the runtime dispatch table in CI.
+ * Keyed by dotted SDK path (e.g. `watchers.list`, `entities.create`). The
+ * PR-1 coverage unit test asserts every method exported from a namespace has
+ * an entry here.
  */
 
 export type MethodAccess = "read" | "write" | "external";
@@ -26,12 +27,6 @@ export interface MethodMetadata {
   cost?: "cheap" | "normal" | "expensive";
 }
 
-/**
- * Metadata entries. Keys are dotted SDK paths.
- *
- * This table is intentionally sparse in PR-1 — PR-2 fills it to 100% coverage
- * and adds a CI test that fails if a new SDK method ships without metadata.
- */
 export const METHOD_METADATA: Record<string, MethodMetadata> = {
   // organizations
   "organizations.list": {
@@ -72,7 +67,7 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     access: "write",
   },
   "entities.delete": {
-    summary: "Delete an entity.",
+    summary: "Delete an entity, optionally cascading to descendants.",
     access: "write",
   },
   "entities.link": {
@@ -83,14 +78,81 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     summary: "Soft-delete an entity relationship.",
     access: "write",
   },
+  "entities.updateLink": {
+    summary: "Update metadata / confidence on an existing relationship.",
+    access: "write",
+  },
+  "entities.listLinks": {
+    summary: "List relationships for an entity.",
+    access: "read",
+  },
   "entities.search": {
-    summary: "Search entities by name / metadata.",
+    summary: "Fuzzy search entities by name, optionally filtered by type.",
+    access: "read",
+  },
+
+  // entitySchema
+  "entitySchema.listTypes": {
+    summary: "List entity types in the organization.",
+    access: "read",
+  },
+  "entitySchema.getType": {
+    summary: "Get an entity type by slug.",
+    access: "read",
+  },
+  "entitySchema.createType": {
+    summary: "Create an entity type.",
+    access: "write",
+  },
+  "entitySchema.updateType": {
+    summary: "Update an entity type.",
+    access: "write",
+  },
+  "entitySchema.deleteType": {
+    summary: "Delete an entity type.",
+    access: "write",
+  },
+  "entitySchema.auditType": {
+    summary: "List historical changes to an entity type.",
+    access: "read",
+  },
+  "entitySchema.listRelTypes": {
+    summary: "List relationship types.",
+    access: "read",
+  },
+  "entitySchema.getRelType": {
+    summary: "Get a relationship type by slug.",
+    access: "read",
+  },
+  "entitySchema.createRelType": {
+    summary: "Create a relationship type.",
+    access: "write",
+  },
+  "entitySchema.updateRelType": {
+    summary: "Update a relationship type.",
+    access: "write",
+  },
+  "entitySchema.deleteRelType": {
+    summary: "Delete a relationship type.",
+    access: "write",
+  },
+  "entitySchema.addRule": {
+    summary:
+      "Add an allowed source/target entity-type rule to a relationship type.",
+    access: "write",
+  },
+  "entitySchema.removeRule": {
+    summary: "Remove a rule from a relationship type.",
+    access: "write",
+  },
+  "entitySchema.listRules": {
+    summary: "List rules attached to a relationship type.",
     access: "read",
   },
 
   // knowledge
   "knowledge.search": {
-    summary: "Semantic search over stored knowledge events.",
+    summary: "Semantic + structured search over stored knowledge events.",
     access: "read",
     example:
       "const hits = await client.knowledge.search({ query: 'revenue update', limit: 10 });",
@@ -121,45 +183,72 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     throws: ["EntityNotFound", "InvalidExtractionSchema"],
   },
   "watchers.update": {
-    summary: "Update watcher config (model, schedule, sources).",
+    summary: "Update watcher config (schedule, model, sources).",
     access: "write",
   },
   "watchers.delete": {
-    summary: "Delete a watcher.",
+    summary: "Delete one or more watchers.",
     access: "write",
   },
   "watchers.setReactionScript": {
-    summary: "Attach a raw TS reaction script that fires on window completion.",
+    summary:
+      "Attach a raw TS reaction script (fires on window completion). Empty string removes it.",
     access: "write",
     throws: ["CompileError"],
   },
+  "watchers.completeWindow": {
+    summary:
+      "Submit LLM-extracted data for a watcher window. Requires a signed window_token.",
+    access: "write",
+  },
 
-  // connections (external side effects for execute)
+  // connections
   "connections.list": {
     summary: "List configured connections in the current organization.",
     access: "read",
   },
+  "connections.listConnectorDefinitions": {
+    summary: "List connector definitions installed in this organization.",
+    access: "read",
+  },
   "connections.get": { summary: "Get a connection by id.", access: "read" },
   "connections.create": {
-    summary: "Create a new connection.",
+    summary:
+      "Create a connection manually (for connectors that do not require OAuth).",
     access: "write",
   },
   "connections.connect": {
     summary:
-      "Start an OAuth flow. Returns a connect_url to share with the user.",
+      "Start an OAuth / auth-profile flow. Returns a connect_url to share with the user.",
     access: "write",
   },
   "connections.update": {
-    summary: "Update connection config.",
+    summary: "Update connection config or auth profile.",
     access: "write",
   },
   "connections.delete": { summary: "Delete a connection.", access: "write" },
   "connections.test": {
-    summary: "Test connection credentials.",
+    summary: "Test connection credentials (sends an external probe).",
     access: "external",
   },
+  "connections.installConnector": {
+    summary: "Install a connector definition into this organization.",
+    access: "write",
+  },
+  "connections.uninstallConnector": {
+    summary: "Uninstall a connector definition.",
+    access: "write",
+  },
+  "connections.toggleConnectorLogin": {
+    summary: "Enable/disable the login-with-connector flow.",
+    access: "write",
+  },
+  "connections.updateConnectorAuth": {
+    summary: "Update org-wide auth config for a connector.",
+    access: "write",
+  },
 
-  // operations (run external actions)
+  // operations
   "operations.listAvailable": {
     summary: "List operations exposed by the active connections.",
     access: "read",
@@ -169,15 +258,31 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     access: "external",
     cost: "expensive",
   },
+  "operations.listRuns": {
+    summary: "List past operation runs.",
+    access: "read",
+  },
+  "operations.getRun": { summary: "Get a single run by id.", access: "read" },
+  "operations.approve": {
+    summary: "Approve a pending run that required human approval.",
+    access: "write",
+  },
+  "operations.reject": {
+    summary: "Reject a pending run.",
+    access: "write",
+  },
 
   // feeds
   "feeds.list": { summary: "List data-sync feeds.", access: "read" },
   "feeds.get": { summary: "Get a feed by id.", access: "read" },
-  "feeds.create": { summary: "Create a data-sync feed.", access: "write" },
+  "feeds.create": {
+    summary: "Create a data-sync feed for a connection.",
+    access: "write",
+  },
   "feeds.update": { summary: "Update a feed.", access: "write" },
   "feeds.delete": { summary: "Delete a feed.", access: "write" },
   "feeds.trigger": {
-    summary: "Trigger an immediate sync for a feed.",
+    summary: "Trigger an immediate sync for a feed (external side-effect).",
     access: "external",
   },
 
@@ -186,7 +291,14 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     summary: "List reusable auth profiles.",
     access: "read",
   },
-  "authProfiles.get": { summary: "Get an auth profile by id.", access: "read" },
+  "authProfiles.get": {
+    summary: "Get an auth profile by slug.",
+    access: "read",
+  },
+  "authProfiles.test": {
+    summary: "Test auth-profile credentials.",
+    access: "external",
+  },
   "authProfiles.create": {
     summary: "Create an auth profile.",
     access: "write",
@@ -199,24 +311,41 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     summary: "Delete an auth profile.",
     access: "write",
   },
-  "authProfiles.test": {
-    summary: "Test auth profile credentials.",
-    access: "external",
-  },
 
   // classifiers
-  "classifiers.list": { summary: "List classifier templates.", access: "read" },
+  "classifiers.list": {
+    summary: "List classifier templates.",
+    access: "read",
+  },
   "classifiers.create": {
     summary: "Create a classifier template.",
     access: "write",
   },
+  "classifiers.createVersion": {
+    summary: "Create a new version of an existing classifier.",
+    access: "write",
+  },
+  "classifiers.getVersions": {
+    summary: "List versions of a classifier.",
+    access: "read",
+  },
+  "classifiers.setCurrentVersion": {
+    summary: "Promote a version to current.",
+    access: "write",
+  },
+  "classifiers.generateEmbeddings": {
+    summary: "Generate embeddings for attribute values (cost-heavy).",
+    access: "write",
+    cost: "expensive",
+  },
   "classifiers.delete": {
-    summary: "Delete a classifier template.",
+    summary: "Delete a classifier.",
     access: "write",
   },
   "classifiers.classify": {
-    summary: "Classify one or many content strings.",
-    access: "read",
+    summary:
+      "Apply a manual classification to one or many content records (single or batch).",
+    access: "write",
   },
 
   // viewTemplates
@@ -237,43 +366,13 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
     access: "write",
   },
 
-  // entitySchema
-  "entitySchema.listTypes": {
-    summary: "List entity types in the organization.",
-    access: "read",
-  },
-  "entitySchema.getType": {
-    summary: "Get an entity type by slug.",
-    access: "read",
-  },
-  "entitySchema.createType": {
-    summary: "Create an entity type.",
-    access: "write",
-  },
-  "entitySchema.updateType": {
-    summary: "Update an entity type.",
-    access: "write",
-  },
-  "entitySchema.deleteType": {
-    summary: "Delete an entity type.",
-    access: "write",
-  },
-  "entitySchema.listRelTypes": {
-    summary: "List relationship types.",
-    access: "read",
-  },
-  "entitySchema.createRelType": {
-    summary: "Create a relationship type.",
-    access: "write",
-  },
-
   // top-level
   query: {
     summary:
-      "Run a read-only SQL query against the organization-scoped virtual tables.",
+      "Run a read-only SQL query against the organization-scoped virtual tables. No positional parameters — use Handlebars {{query.name}} substitutions inside the SQL when you need values.",
     access: "read",
     example:
-      'const rows = await client.query("SELECT * FROM entities WHERE entity_type = $1", ["company"]);',
+      "const rows = await client.query(\"SELECT id, name FROM entities WHERE entity_type = 'company'\");",
   },
   log: {
     summary:
@@ -283,7 +382,7 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
   },
 };
 
-/** Paths that must never appear as SDK methods. Enforced in PR-2 tests. */
+/** Paths that must never appear as SDK methods. Enforced by the coverage test. */
 export const BANNED_PATHS = [
   "execute",
   "client.execute",

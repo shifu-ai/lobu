@@ -1,90 +1,103 @@
 /**
- * ClientSDK `entitySchema` namespace. Thin wrapper over `manageEntitySchema`.
+ * ClientSDK `entitySchema` namespace. Delegates to `manageEntitySchema`, which
+ * is doubly discriminated by `schema_type` (entity_type vs relationship_type)
+ * and `action`.
  *
- * The underlying handler is discriminated by `schema_type` *and* `action`; the
- * namespace splits those into method names so callers don't have to track both.
+ * Field names mirror the handler: plain `slug` for the type identifier,
+ * `source_entity_type_slug` / `target_entity_type_slug` / `relationship_type_slug`
+ * for add_rule.
  */
 
 import type { Env } from "../../index";
 import { manageEntitySchema } from "../../tools/admin/manage_entity_schema";
 import type { ToolContext } from "../../tools/registry";
 
+export interface EntitySchemaAddRuleInput {
+  slug: string;
+  source_entity_type_slug: string;
+  target_entity_type_slug: string;
+  relationship_type_slug?: string;
+  description?: string;
+}
+
 export interface EntitySchemaNamespace {
   listTypes(): Promise<unknown>;
-  getType(entity_type_slug: string): Promise<unknown>;
+  getType(slug: string): Promise<unknown>;
   createType(input: {
     slug: string;
     name: string;
-    [key: string]: unknown;
+    description?: string;
+    icon?: string;
+    color?: string;
+    metadata_schema?: Record<string, unknown>;
+    event_kinds?: Record<string, unknown>;
   }): Promise<unknown>;
   updateType(input: {
-    entity_type_slug: string;
-    [key: string]: unknown;
+    slug: string;
+    name?: string;
+    description?: string;
+    icon?: string;
+    color?: string;
+    metadata_schema?: Record<string, unknown>;
+    event_kinds?: Record<string, unknown>;
   }): Promise<unknown>;
-  deleteType(entity_type_slug: string): Promise<unknown>;
-  auditType(entity_type_slug: string): Promise<unknown>;
+  deleteType(slug: string): Promise<unknown>;
+  auditType(slug: string): Promise<unknown>;
 
   listRelTypes(): Promise<unknown>;
-  getRelType(relationship_type_slug: string): Promise<unknown>;
+  getRelType(slug: string): Promise<unknown>;
   createRelType(input: {
     slug: string;
     name: string;
-    [key: string]: unknown;
+    description?: string;
+    inverse_type_slug?: string | null;
   }): Promise<unknown>;
   updateRelType(input: {
-    relationship_type_slug: string;
-    [key: string]: unknown;
+    slug: string;
+    name?: string;
+    description?: string;
+    inverse_type_slug?: string | null;
   }): Promise<unknown>;
-  deleteRelType(relationship_type_slug: string): Promise<unknown>;
-  addRule(input: {
-    relationship_type_slug: string;
-    [key: string]: unknown;
-  }): Promise<unknown>;
-  removeRule(input: {
-    relationship_type_slug: string;
-    rule_id: number;
-  }): Promise<unknown>;
-  listRules(relationship_type_slug: string): Promise<unknown>;
+  deleteRelType(slug: string): Promise<unknown>;
+
+  addRule(input: EntitySchemaAddRuleInput): Promise<unknown>;
+  removeRule(input: { slug: string; rule_id: number }): Promise<unknown>;
+  listRules(slug: string): Promise<unknown>;
 }
 
 export function buildEntitySchemaNamespace(
   ctx: ToolContext,
-  env: Env
+  env: Env,
 ): EntitySchemaNamespace {
   const callEntity = <T>(payload: Record<string, unknown>): Promise<T> =>
     manageEntitySchema(
       { schema_type: "entity_type", ...payload } as never,
       env,
-      ctx
+      ctx,
     ) as Promise<T>;
   const callRel = <T>(payload: Record<string, unknown>): Promise<T> =>
     manageEntitySchema(
       { schema_type: "relationship_type", ...payload } as never,
       env,
-      ctx
+      ctx,
     ) as Promise<T>;
 
   return {
     listTypes: () => callEntity({ action: "list" }),
-    getType: (entity_type_slug) =>
-      callEntity({ action: "get", entity_type_slug }),
+    getType: (slug) => callEntity({ action: "get", slug }),
     createType: (input) => callEntity({ action: "create", ...input }),
     updateType: (input) => callEntity({ action: "update", ...input }),
-    deleteType: (entity_type_slug) =>
-      callEntity({ action: "delete", entity_type_slug }),
-    auditType: (entity_type_slug) =>
-      callEntity({ action: "audit", entity_type_slug }),
+    deleteType: (slug) => callEntity({ action: "delete", slug }),
+    auditType: (slug) => callEntity({ action: "audit", slug }),
 
     listRelTypes: () => callRel({ action: "list" }),
-    getRelType: (relationship_type_slug) =>
-      callRel({ action: "get", relationship_type_slug }),
+    getRelType: (slug) => callRel({ action: "get", slug }),
     createRelType: (input) => callRel({ action: "create", ...input }),
     updateRelType: (input) => callRel({ action: "update", ...input }),
-    deleteRelType: (relationship_type_slug) =>
-      callRel({ action: "delete", relationship_type_slug }),
+    deleteRelType: (slug) => callRel({ action: "delete", slug }),
+
     addRule: (input) => callRel({ action: "add_rule", ...input }),
     removeRule: (input) => callRel({ action: "remove_rule", ...input }),
-    listRules: (relationship_type_slug) =>
-      callRel({ action: "list_rules", relationship_type_slug }),
+    listRules: (slug) => callRel({ action: "list_rules", slug }),
   };
 }

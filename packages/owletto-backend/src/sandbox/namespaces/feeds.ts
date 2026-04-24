@@ -1,28 +1,42 @@
 /**
  * ClientSDK `feeds` namespace. Thin wrapper over `manageFeeds`.
+ *
+ * `create_feed` requires `feed_key` — the connector-declared identifier for the
+ * data surface this feed will sync.
  */
 
 import type { Env } from "../../index";
 import { manageFeeds } from "../../tools/admin/manage_feeds";
 import type { ToolContext } from "../../tools/registry";
 
+export interface FeedsCreateInput {
+  connection_id: number;
+  feed_key: string;
+  display_name?: string;
+  entity_ids?: number[];
+  config?: Record<string, unknown>;
+  schedule?: string;
+}
+
 export interface FeedsNamespace {
   list(input?: { connection_id?: number }): Promise<unknown>;
   get(feed_id: number): Promise<unknown>;
-  create(input: {
-    connection_id: number;
-    name: string;
-    schedule?: string;
+  create(input: FeedsCreateInput): Promise<unknown>;
+  update(input: {
+    feed_id: number;
+    display_name?: string;
+    status?: string;
+    entity_ids?: number[];
     config?: Record<string, unknown>;
+    schedule?: string;
   }): Promise<unknown>;
-  update(input: { feed_id: number; [key: string]: unknown }): Promise<unknown>;
   delete(feed_id: number): Promise<unknown>;
   trigger(feed_id: number): Promise<unknown>;
 }
 
 export function buildFeedsNamespace(
   ctx: ToolContext,
-  env: Env
+  env: Env,
 ): FeedsNamespace {
   const call = <T>(payload: Record<string, unknown>): Promise<T> =>
     manageFeeds(payload as never, env, ctx) as Promise<T>;

@@ -9,28 +9,39 @@ import type { Env } from "../../index";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
 
+export interface OperationsExecuteInput {
+  connection_id: number;
+  operation_key: string;
+  input?: Record<string, unknown>;
+  /**
+   * Watcher provenance when this operation fires from a reaction. Both ids are
+   * numeric.
+   */
+  watcher_source?: { watcher_id: number; window_id: number };
+}
+
 export interface OperationsNamespace {
   listAvailable(input?: { entity_id?: number }): Promise<unknown>;
-  execute(input: {
-    connection_id: number;
-    operation_key: string;
-    input?: Record<string, unknown>;
-    watcher_source?: { watcher_id: number; window_id: string };
-  }): Promise<unknown>;
+  execute(input: OperationsExecuteInput): Promise<unknown>;
   listRuns(input?: {
     connection_id?: number;
     operation_key?: string;
+    status?: string;
+    approval_status?: string;
     limit?: number;
     offset?: number;
   }): Promise<unknown>;
   getRun(run_id: number): Promise<unknown>;
-  approve(run_id: number): Promise<unknown>;
-  reject(run_id: number, reason?: string): Promise<unknown>;
+  approve(input: {
+    run_id: number;
+    input?: Record<string, unknown>;
+  }): Promise<unknown>;
+  reject(input: { run_id: number; reason?: string }): Promise<unknown>;
 }
 
 export function buildOperationsNamespace(
   ctx: ToolContext,
-  env: Env
+  env: Env,
 ): OperationsNamespace {
   const call = <T>(payload: Record<string, unknown>): Promise<T> =>
     manageOperations(payload as never, env, ctx) as Promise<T>;
@@ -40,7 +51,7 @@ export function buildOperationsNamespace(
     execute: (input) => call({ action: "execute", ...input }),
     listRuns: (input) => call({ action: "list_runs", ...input }),
     getRun: (run_id) => call({ action: "get_run", run_id }),
-    approve: (run_id) => call({ action: "approve", run_id }),
-    reject: (run_id, reason) => call({ action: "reject", run_id, reason }),
+    approve: (input) => call({ action: "approve", ...input }),
+    reject: (input) => call({ action: "reject", ...input }),
   };
 }

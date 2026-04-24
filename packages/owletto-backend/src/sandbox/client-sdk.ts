@@ -3,19 +3,25 @@
  * watcher reactions (PR-2 swap). Each namespace delegates to existing tool
  * handlers, preserving per-call auth checks and audit/change events.
  *
- * Multi-org support is provided by `client.org(slugOrId)`: it re-validates
- * membership against the `member` table, then returns a proxy SDK bound to a
- * swapped `ToolContext`. Membership lookups are cached in a small LRU with a
- * short TTL so a cross-org walk doesn't hammer Postgres, while still catching
- * revocations within ~30 s.
+ * Multi-org support is provided by `client.org(slugOrId)`: it resolves the
+ * identifier (slug preferred, id fallback) via the auth layer's existing
+ * caches (see `workspace/multi-tenant.ts`), re-reads the caller's role on
+ * every call, and returns a proxy SDK bound to a swapped `ToolContext`.
+ *
+ * No separate LRU lives here — `MultiTenantProvider.memberRoleCache` is the
+ * single source of truth, which means explicit invalidations from member-write
+ * paths flow through to sandbox callers without extra plumbing.
  */
 
-import { getDb } from "../db/client";
 import type { Env } from "../index";
 import type { ToolContext } from "../tools/registry";
 import { getWorkspaceProvider } from "../workspace";
+import {
+  getCachedMembershipRole,
+  getCachedOrgBySlug,
+  getOrgById,
+} from "../workspace/multi-tenant";
 import type { OrgInfo } from "../workspace/types";
-import { MembershipCache, type MembershipRecord } from "./membership-cache";
 import {
   buildAuthProfilesNamespace,
   buildClassifiersNamespace,
@@ -56,124 +62,104 @@ export interface ClientSDK {
 
   /**
    * Return a ClientSDK bound to a different organization the caller belongs
-   * to. Re-validates membership on each call; throws `AccessDenied` for
-   * private orgs the caller isn't a member of.
+   * to. Resolves `slugOrId` against the organization table (slug first, id
+   * fallback), then re-reads the caller's role from `member` via the shared
+   * `memberRoleCache`. Throws `AccessDenied` for private orgs the caller isn't
+   * a member of.
    *
    * Public-visibility orgs return an SDK with `memberRole: null` — reads
    * succeed, writes fail at the handler-level access check.
    *
-   * The returned SDK is fully independent: it has its own `.org()` that still
-   * resolves relative to the original user, so chains like
-   * `client.org('a').org('b')` are legal if the user is a member of both.
+   * Chained hops like `client.org('a').org('b')` are legal when the caller is
+   * a member of both; each hop re-validates against the original user.
    */
   org(slugOrId: string): Promise<ClientSDK>;
 
-  /** Run a read-only SQL query scoped to the current organization. */
-  query(sql: string, params?: unknown[]): Promise<unknown[]>;
+  /**
+   * Run a read-only SQL query scoped to the current organization. User-side
+   * positional parameters are not supported (`validateAndScopeQuery` rejects
+   * `$N`); pass values via Handlebars `{{query.name}}` substitutions instead.
+   */
+  query(sql: string): Promise<unknown[]>;
 
   /** Emit a structured log entry (captured by the invocation audit row in PR-3). */
   log(message: string, data?: Record<string, unknown>): void;
 }
 
-export interface BuildClientSDKOptions {
-  /** Pre-seeded membership cache shared across `.org()` calls in one isolate run. */
-  membershipCache?: MembershipCache;
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+export class SdkError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = code;
+    this.code = code;
+  }
 }
 
-// Re-export so callers can `import { MembershipCache } from '../sandbox/client-sdk'`
-// if they prefer; new code should import from `./membership-cache` directly.
-export { MembershipCache } from "./membership-cache";
-export type { MembershipRecord } from "./membership-cache";
+export class AccessDeniedError extends SdkError {
+  constructor(message: string) {
+    super("AccessDenied", message);
+  }
+}
+
+export class OrgNotFoundError extends SdkError {
+  constructor(message: string) {
+    super("OrgNotFound", message);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Membership resolution
 // ---------------------------------------------------------------------------
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Better Auth emits org IDs as text (not UUIDs) — we accept both UUIDs and
-// opaque ID strings as "id-shaped" when they don't match a slug pattern.
-const ID_RE = /^[A-Za-z0-9_-]{20,}$/;
-
-export class AccessDeniedError extends Error {
-  code = "AccessDenied" as const;
-  constructor(message: string) {
-    super(message);
-    this.name = "AccessDenied";
-  }
-}
-
-export class OrgNotFoundError extends Error {
-  code = "OrgNotFound" as const;
-  constructor(message: string) {
-    super(message);
-    this.name = "OrgNotFound";
-  }
+export interface ResolvedOrgMembership {
+  orgId: string;
+  slug: string;
+  role: string | null;
+  visibility: "public" | "private";
 }
 
 /**
- * Resolve an org identifier (slug or id) into a membership record, checking
- * the caller's access. Throws `OrgNotFound` if the org doesn't exist and
- * `AccessDenied` if the caller has no read access (non-member on a private
- * org).
+ * Resolve an org identifier (slug or id) into a membership record. Slug is
+ * tried first (covers the common case and hits the auth-layer cache); on miss,
+ * the id path runs. Throws `OrgNotFound` if neither matches, `AccessDenied` if
+ * the caller has no read access (non-member on a private org).
  */
 export async function resolveOrgMembership(
   slugOrId: string,
   ctx: ToolContext,
-  cache: MembershipCache
-): Promise<MembershipRecord> {
-  const cached = cache.get(ctx.userId, slugOrId);
-  if (cached) {
-    if (cached.visibility === "private" && cached.role === null) {
-      throw new AccessDeniedError(
-        `You are not a member of organization '${slugOrId}'.`
-      );
+): Promise<ResolvedOrgMembership> {
+  let orgId: string;
+  let slug: string;
+  let visibility: "public" | "private";
+
+  const bySlug = await getCachedOrgBySlug(slugOrId);
+  if (bySlug) {
+    orgId = bySlug.id;
+    slug = slugOrId;
+    visibility = bySlug.visibility === "public" ? "public" : "private";
+  } else {
+    const byId = await getOrgById(slugOrId);
+    if (!byId) {
+      throw new OrgNotFoundError(`Organization '${slugOrId}' not found.`);
     }
-    return cached;
+    orgId = slugOrId;
+    slug = byId.slug;
+    visibility = byId.visibility === "public" ? "public" : "private";
   }
 
-  const sql = getDb();
-  const looksLikeId = UUID_RE.test(slugOrId) || ID_RE.test(slugOrId);
-  const lookup = looksLikeId
-    ? await sql`SELECT id, slug, visibility FROM "organization" WHERE id = ${slugOrId} LIMIT 1`
-    : await sql`SELECT id, slug, visibility FROM "organization" WHERE slug = ${slugOrId} LIMIT 1`;
-
-  if (lookup.length === 0) {
-    throw new OrgNotFoundError(`Organization '${slugOrId}' not found.`);
-  }
-  const row = lookup[0] as {
-    id: string;
-    slug: string;
-    visibility: "public" | "private" | string;
-  };
-  const visibility = row.visibility === "public" ? "public" : "private";
-
-  let role: string | null = null;
-  if (ctx.userId) {
-    const memberRows = await sql`
-      SELECT role FROM "member"
-      WHERE "organizationId" = ${row.id} AND "userId" = ${ctx.userId}
-      LIMIT 1
-    `;
-    role = memberRows.length > 0 ? (memberRows[0].role as string) : null;
-  }
-
-  const record: MembershipRecord = {
-    orgId: row.id,
-    slug: row.slug,
-    role,
-    visibility,
-    expiresAt: 0, // set by cache
-  };
-  // Cache under both slug and id to avoid duplicate resolutions within the TTL.
-  cache.set(ctx.userId, [row.id, row.slug], record);
+  const role = await getCachedMembershipRole(orgId, ctx.userId);
 
   if (visibility === "private" && role === null) {
     throw new AccessDeniedError(
-      `You are not a member of organization '${slugOrId}'.`
+      `You are not a member of organization '${slug}'.`,
     );
   }
-  return record;
+
+  return { orgId, slug, role, visibility };
 }
 
 // ---------------------------------------------------------------------------
@@ -183,15 +169,9 @@ export async function resolveOrgMembership(
 /**
  * Build a `ClientSDK` bound to the caller's current `ToolContext`. The SDK
  * exposes `.org()` which constructs a fresh `ClientSDK` after re-validating
- * membership against the shared `MembershipCache`.
+ * membership against the shared auth-layer cache.
  */
-export function buildClientSDK(
-  ctx: ToolContext,
-  env: Env,
-  options: BuildClientSDKOptions = {}
-): ClientSDK {
-  const cache = options.membershipCache ?? new MembershipCache();
-
+export function buildClientSDK(ctx: ToolContext, env: Env): ClientSDK {
   const sdk: ClientSDK = {
     entities: buildEntitiesNamespace(ctx, env),
     entitySchema: buildEntitySchemaNamespace(ctx, env),
@@ -206,33 +186,33 @@ export function buildClientSDK(
     organizations: buildOrganizationsNamespace(ctx, env),
 
     async org(slugOrId) {
-      const member = await resolveOrgMembership(slugOrId, ctx, cache);
+      const member = await resolveOrgMembership(slugOrId, ctx);
       const swapped: ToolContext = {
         ...ctx,
         organizationId: member.orgId,
         memberRole: member.role,
       };
-      return buildClientSDK(swapped, env, { membershipCache: cache });
+      return buildClientSDK(swapped, env);
     },
 
-    async query(querySql, params) {
-      const { validateAndScopeQuery } = await import(
-        "../utils/execute-data-sources"
-      );
+    async query(querySql) {
+      const [{ getDb }, { validateAndScopeQuery }] = await Promise.all([
+        import("../db/client"),
+        import("../utils/execute-data-sources"),
+      ]);
       const scoped = validateAndScopeQuery(querySql, ctx.organizationId);
       const db = getDb();
       const rows = await db.begin(async (tx) => {
         await tx.unsafe("SET TRANSACTION READ ONLY");
         await tx.unsafe("SET LOCAL statement_timeout = '5000'");
-        const merged = (scoped.params as unknown[]).concat(params ?? []);
-        return tx.unsafe(scoped.sql, merged);
+        return tx.unsafe(scoped.sql, scoped.params as unknown[]);
       });
       return rows.map((r: Record<string, unknown>) => ({ ...r }));
     },
 
     log(message, data) {
       // Structured log; PR-3 routes these into the execute_invocation audit row.
-      // eslint-disable-next-line no-console
+      // biome-ignore lint/suspicious/noConsole: dev-level fallback; PR-3 swaps for a proper sink.
       console.log(`[client-sdk] ${message}`, data ?? {});
     },
   };
@@ -245,7 +225,7 @@ export function buildClientSDK(
  * `search` tool's preamble and the web console's header chip.
  */
 export async function getCurrentOrgInfo(
-  ctx: ToolContext
+  ctx: ToolContext,
 ): Promise<OrgInfo | null> {
   const provider = getWorkspaceProvider();
   const orgs = await provider.listOrganizations(undefined, ctx.userId);

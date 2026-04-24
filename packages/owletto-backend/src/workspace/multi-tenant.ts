@@ -33,6 +33,72 @@ export function invalidateMembershipRoleCache(
 }
 
 /**
+ * Cache-backed membership-role lookup. Reuses the same 60s cache the auth
+ * middleware populates so writes on the `member` table that call
+ * `invalidateMembershipRoleCache` take effect for sandbox callers too.
+ */
+export async function getCachedMembershipRole(
+  organizationId: string,
+  userId: string | null
+): Promise<string | null> {
+  if (!userId) return null;
+  const key = `${organizationId}:${userId}`;
+  const cached = memberRoleCache.get(key);
+  if (cached !== undefined) return cached;
+  const rows = await simpleQuery(
+    getDb()`
+      SELECT role FROM "member"
+      WHERE "organizationId" = ${organizationId} AND "userId" = ${userId}
+      LIMIT 1
+    `
+  );
+  const role = rows.length > 0 ? (rows[0].role as string) : null;
+  memberRoleCache.set(key, role);
+  return role;
+}
+
+/**
+ * Cache-backed org lookup by slug. Returns `null` for unknown slugs.
+ */
+export async function getCachedOrgBySlug(
+  slug: string
+): Promise<{ id: string; visibility: string } | null> {
+  const cached = orgSlugCache.get(slug);
+  if (cached) return cached;
+  const rows = await simpleQuery(
+    getDb()`
+      SELECT id, visibility FROM "organization" WHERE slug = ${slug} LIMIT 1
+    `
+  );
+  if (rows.length === 0) return null;
+  const record = {
+    id: rows[0].id as string,
+    visibility: (rows[0].visibility as string) ?? "private",
+  };
+  orgSlugCache.set(slug, record);
+  return record;
+}
+
+/**
+ * Direct org lookup by id. Uncached — ids are a fallback path for the sandbox's
+ * `.org(slugOrId)` accessor, so the TTL cache hit rate would be near-zero.
+ */
+export async function getOrgById(
+  organizationId: string
+): Promise<{ slug: string; visibility: string } | null> {
+  const rows = await simpleQuery(
+    getDb()`
+      SELECT slug, visibility FROM "organization" WHERE id = ${organizationId} LIMIT 1
+    `
+  );
+  if (rows.length === 0) return null;
+  return {
+    slug: rows[0].slug as string,
+    visibility: (rows[0].visibility as string) ?? "private",
+  };
+}
+
+/**
  * Test-only: clear all multi-tenant auth caches so a freshly-reset database
  * (new org/user/token IDs) is not shadowed by TTL'd entries from the previous run.
  * Referenced from cleanupTestDatabase().

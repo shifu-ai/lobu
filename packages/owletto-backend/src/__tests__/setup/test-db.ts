@@ -5,9 +5,27 @@
  * Uses a separate test database to avoid affecting development data.
  */
 
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import postgres from 'postgres';
 import { listMigrationFiles, loadMigrationUpSection } from '../../db/migration-loader';
+
+/**
+ * Walk up from startDir looking for `db/migrations`. Falls back to cwd so the
+ * historical behaviour (vitest invoked from repo root) still works even when
+ * no match is found upstream.
+ */
+function resolveMigrationsDir(startDir: string): string {
+  let dir = startDir;
+  for (let i = 0; i < 6; i++) {
+    const candidate = join(dir, 'db/migrations');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return join(startDir, 'db/migrations');
+}
 
 const TEST_SEED_USER_ID = 'test-seed-user';
 const TEST_SEED_USER_EMAIL = 'test-seed-user@example.com';
@@ -75,9 +93,10 @@ export async function setupTestDatabase(): Promise<void> {
   await db`CREATE EXTENSION IF NOT EXISTS "vector"`;
   await db`CREATE EXTENSION IF NOT EXISTS "pg_trgm"`;
 
-  // Run migrations in order
-  // Use process.cwd() since globalSetup runs from project root
-  const migrationsDir = join(process.cwd(), 'db/migrations');
+  // Run migrations in order. Resolves `db/migrations` by walking up from the
+  // current working directory so vitest works whether invoked at the repo
+  // root or inside the package.
+  const migrationsDir = resolveMigrationsDir(process.cwd());
 
   let migrationFiles: string[];
   try {

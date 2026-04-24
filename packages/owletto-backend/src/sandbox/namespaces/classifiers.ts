@@ -1,54 +1,89 @@
 /**
  * ClientSDK `classifiers` namespace. Thin wrapper over `manageClassifiers`.
+ *
+ * Most CRUD actions use `classifier_id: number`; `classify` uses
+ * `classifier_slug: string`. The namespace keeps those distinct.
  */
 
 import type { Env } from "../../index";
 import { manageClassifiers } from "../../tools/admin/manage_classifiers";
 import type { ToolContext } from "../../tools/registry";
 
+export interface ClassifierCreateInput {
+  slug: string;
+  name: string;
+  description?: string;
+  attribute_key: string;
+  attribute_values?: Record<string, unknown>;
+  entity_id?: number;
+  watcher_id: number;
+  min_similarity?: number;
+  fallback_value?: unknown;
+  created_by?: string;
+}
+
+export interface ClassifierCreateVersionInput {
+  classifier_id: number;
+  name?: string;
+  description?: string;
+  attribute_values?: Record<string, unknown>;
+  min_similarity?: number;
+  fallback_value?: unknown;
+  change_notes?: string;
+  set_as_current?: boolean;
+  created_by?: string;
+}
+
+export interface ClassifierClassifyInput {
+  classifier_slug: string;
+  /** Single-mode update. */
+  content_id?: number;
+  value?: string | null;
+  /** Batch mode. */
+  classifications?: Array<{
+    content_id: number;
+    value: string | null;
+    reasoning?: string;
+  }>;
+  source?: "llm" | "user";
+  reasoning?: string;
+}
+
 export interface ClassifiersNamespace {
-  list(): Promise<unknown>;
-  create(input: {
-    slug: string;
-    name: string;
-    [key: string]: unknown;
-  }): Promise<unknown>;
-  createVersion(input: {
-    classifier_slug: string;
-    [key: string]: unknown;
-  }): Promise<unknown>;
-  getVersions(classifier_slug: string): Promise<unknown>;
+  list(input?: { entity_id?: number; status?: string }): Promise<unknown>;
+  create(input: ClassifierCreateInput): Promise<unknown>;
+  createVersion(input: ClassifierCreateVersionInput): Promise<unknown>;
+  getVersions(classifier_id: number): Promise<unknown>;
   setCurrentVersion(input: {
-    classifier_slug: string;
-    version_id: number;
+    classifier_id: number;
+    version: number;
   }): Promise<unknown>;
-  generateEmbeddings(classifier_slug: string): Promise<unknown>;
-  delete(classifier_slug: string): Promise<unknown>;
-  classify(input: {
-    classifier_slug: string;
-    value: string | string[];
-    entity_id?: number;
+  generateEmbeddings(input: {
+    classifier_id: number;
+    force_regenerate?: boolean;
   }): Promise<unknown>;
+  delete(classifier_id: number): Promise<unknown>;
+  classify(input: ClassifierClassifyInput): Promise<unknown>;
 }
 
 export function buildClassifiersNamespace(
   ctx: ToolContext,
-  env: Env
+  env: Env,
 ): ClassifiersNamespace {
   const call = <T>(payload: Record<string, unknown>): Promise<T> =>
     manageClassifiers(payload as never, env, ctx) as Promise<T>;
 
   return {
-    list: () => call({ action: "list" }),
+    list: (input) => call({ action: "list", ...input }),
     create: (input) => call({ action: "create", ...input }),
     createVersion: (input) => call({ action: "create_version", ...input }),
-    getVersions: (classifier_slug) =>
-      call({ action: "get_versions", classifier_slug }),
+    getVersions: (classifier_id) =>
+      call({ action: "get_versions", classifier_id }),
     setCurrentVersion: (input) =>
       call({ action: "set_current_version", ...input }),
-    generateEmbeddings: (classifier_slug) =>
-      call({ action: "generate_embeddings", classifier_slug }),
-    delete: (classifier_slug) => call({ action: "delete", classifier_slug }),
+    generateEmbeddings: (input) =>
+      call({ action: "generate_embeddings", ...input }),
+    delete: (classifier_id) => call({ action: "delete", classifier_id }),
     classify: (input) => call({ action: "classify", ...input }),
   };
 }
