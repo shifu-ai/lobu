@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SecretPutOptions, SecretRef } from "@lobu/core";
-import type { GatewayConfig } from "../config";
-import { CoreServices } from "../services/core-services";
+import type { GatewayConfig } from "../config/index.js";
+import { CoreServices } from "../services/core-services.js";
 import {
   type SecretListEntry,
   SecretStoreRegistry,
   type WritableSecretStore,
-} from "../secrets";
-import { RedisAgentStore } from "../stores/redis-agent-store";
-import { MockMessageQueue } from "./setup";
+} from "../secrets/index.js";
+import { RedisAgentStore } from "../stores/redis-agent-store.js";
+import { MockMessageQueue } from "./setup.js";
 
 function createGatewayConfig(
   overrides?: Partial<GatewayConfig>

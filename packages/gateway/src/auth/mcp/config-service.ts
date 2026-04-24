@@ -3,8 +3,8 @@ import {
   createLogger,
   verifyWorkerToken,
 } from "@lobu/core";
-import type { ProviderConfigResolver } from "../../services/provider-config-resolver";
-import type { AgentSettingsStore } from "../settings/agent-settings-store";
+import type { ProviderConfigResolver } from "../../services/provider-config-resolver.js";
+import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 
 const logger = createLogger("mcp-config-service");
 

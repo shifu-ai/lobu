@@ -1,8 +1,8 @@
 #!/usr/bin/env bun
 
 import { createLogger } from "@lobu/core";
-import type { IMessageQueue } from "../infrastructure/queue";
-import type { WorkerConnectionManager } from "./connection-manager";
+import type { IMessageQueue } from "../infrastructure/queue/index.js";
+import type { WorkerConnectionManager } from "./connection-manager.js";
 
 const logger = createLogger("worker-job-router");
 

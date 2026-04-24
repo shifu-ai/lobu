@@ -7,8 +7,8 @@ import {
   test,
 } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import { RedisSecretStore } from "../secrets";
-import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store";
+import { RedisSecretStore } from "../secrets/index.js";
+import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
 
 const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";

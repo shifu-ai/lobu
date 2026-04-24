@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   renderOAuthErrorPage,
   renderOAuthSuccessPage,
-} from "../auth/oauth-templates";
+} from "../auth/oauth-templates.js";
 
 describe("OAuth template escaping", () => {
   test("escapes reflected OAuth error params", () => {

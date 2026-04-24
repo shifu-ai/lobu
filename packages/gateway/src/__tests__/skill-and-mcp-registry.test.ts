@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { McpRegistryService } from "../services/mcp-registry";
-import type { ProviderConfigResolver } from "../services/provider-config-resolver";
+import { McpRegistryService } from "../services/mcp-registry.js";
+import type { ProviderConfigResolver } from "../services/provider-config-resolver.js";
 
 // --- McpRegistryService ---
 

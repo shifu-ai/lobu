@@ -12,18 +12,18 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import { createLogger, type McpOAuthConfig } from "@lobu/core";
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
 import {
   OAuthStateStore,
   type ProviderOAuthStateData,
-} from "../oauth/state-store";
-import { storeCredentialForScope } from "../../routes/internal/device-auth";
-import type { WritableSecretStore } from "../../secrets";
+} from "../oauth/state-store.js";
+import { storeCredentialForScope } from "../../routes/internal/device-auth.js";
+import type { WritableSecretStore } from "../../secrets/index.js";
 import {
   discoverOAuth,
   type DiscoveredOAuthEndpoints,
   type DiscoveredClient,
-} from "./oauth-discovery";
+} from "./oauth-discovery.js";
 
 const logger = createLogger("mcp-oauth-flow");
 

@@ -1,5 +1,5 @@
 import { createLogger } from "@lobu/core";
-import type Redis from "ioredis";
+import type { Redis } from "ioredis";
 
 const logger = createLogger("user-agents-store");
 

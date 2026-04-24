@@ -5,8 +5,8 @@
  */
 
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
-import type { ProviderOAuthStateStore } from "../../auth/oauth/state-store";
-import { verifySettingsSessionOrToken } from "./settings-auth";
+import type { ProviderOAuthStateStore } from "../../auth/oauth/state-store.js";
+import { verifySettingsSessionOrToken } from "./settings-auth.js";
 
 const TAG = "Auth";
 const SuccessResponse = z.object({ success: z.boolean() });

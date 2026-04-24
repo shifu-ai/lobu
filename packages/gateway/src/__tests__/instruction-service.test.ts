@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import { AgentSettingsStore } from "../auth/settings/agent-settings-store";
-import { InstructionService } from "../services/instruction-service";
+import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { InstructionService } from "../services/instruction-service.js";
 
 describe("InstructionService", () => {
   let store: AgentSettingsStore;

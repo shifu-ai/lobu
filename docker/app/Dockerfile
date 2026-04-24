@@ -72,7 +72,8 @@ COPY packages/owletto-web packages/owletto-web
 # it walks the reference graph (gateway → core) in dependency order.
 RUN cd packages/core && bunx tsc \
     && cd ../owletto-sdk && bunx tsc \
-    && cd ../gateway && bunx tsc -b --force
+    && cd ../gateway && bunx tsc -b --force \
+    && cd ../owletto-worker && bunx tsc
 
 # Type check
 RUN cd packages/owletto-backend && bunx tsc --noEmit

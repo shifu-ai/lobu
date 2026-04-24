@@ -3,17 +3,17 @@ import dns from "node:dns/promises";
 import { createLogger, verifyWorkerToken } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import type { IMessageQueue } from "../../infrastructure/queue";
-import { requiresToolApproval } from "../../permissions/approval-policy";
-import type { GrantStore } from "../../permissions/grant-store";
+import type { IMessageQueue } from "../../infrastructure/queue/index.js";
+import { requiresToolApproval } from "../../permissions/approval-policy.js";
+import type { GrantStore } from "../../permissions/grant-store.js";
 import {
   getStoredCredential,
   refreshCredential,
   tryCompletePendingDeviceAuth,
-} from "../../routes/internal/device-auth";
-import type { WritableSecretStore } from "../../secrets";
-import { startAuthCodeFlow } from "./oauth-flow";
-import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache";
+} from "../../routes/internal/device-auth.js";
+import type { WritableSecretStore } from "../../secrets/index.js";
+import { startAuthCodeFlow } from "./oauth-flow.js";
+import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -1786,7 +1786,7 @@ export class McpProxy {
   } | null> {
     try {
       const { startDeviceAuth } = await import(
-        "../../routes/internal/device-auth"
+        "../../routes/internal/device-auth.js"
       );
 
       // Check if a device auth flow is already pending (avoid duplicate starts)

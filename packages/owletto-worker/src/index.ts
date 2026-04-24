@@ -19,12 +19,12 @@ export type {
   PollResponse,
   StreamBatch,
   WorkerCapabilities,
-} from './daemon';
+} from './daemon/index.js';
 // Worker Daemon
-export { executeRun, startDaemon, WorkerClient, WorkerDaemon } from './daemon';
+export { executeRun, startDaemon, WorkerClient, WorkerDaemon } from './daemon/index.js';
 
 // Types
-export type { Env } from './types';
+export type { Env } from './types.js';
 
 // ---------- Lobu embedded worker bootstrap ----------
 // The orchestrator spawns this file as a subprocess with DEPLOYMENT_MODE=embedded.
@@ -35,7 +35,11 @@ if (process.env.DEPLOYMENT_MODE === 'embedded') {
   const appPort = process.env.PORT || '8787';
   process.env.DISPATCHER_URL = `http://localhost:${appPort}/lobu`;
 
-  import('@lobu/worker').catch((err) => {
+  // Indirection hides the specifier from tsc so owletto-worker can build
+  // without @lobu/worker's dist present. The package is resolved by the bun
+  // runtime at dispatch time.
+  const workerSpecifier = '@lobu/worker';
+  import(workerSpecifier).catch((err) => {
     console.error('[lobu-worker] Failed to load @lobu/worker:', err.message);
     process.exit(1);
   });

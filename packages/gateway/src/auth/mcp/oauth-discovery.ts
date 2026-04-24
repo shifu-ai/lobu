@@ -14,8 +14,8 @@
 import { createHash } from "node:crypto";
 import dns from "node:dns/promises";
 import { createLogger } from "@lobu/core";
-import type Redis from "ioredis";
-import type { WritableSecretStore } from "../../secrets";
+import type { Redis } from "ioredis";
+import type { WritableSecretStore } from "../../secrets/index.js";
 
 const logger = createLogger("mcp-oauth-discovery");
 

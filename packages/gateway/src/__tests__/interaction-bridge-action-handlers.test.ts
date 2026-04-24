@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from "bun:test";
-import { registerActionHandlers } from "../connections/interaction-bridge";
-import type { PlatformConnection } from "../connections/types";
+import { registerActionHandlers } from "../connections/interaction-bridge.js";
+import type { PlatformConnection } from "../connections/types.js";
 
 type ActionHandler = (event: any) => Promise<void>;
 

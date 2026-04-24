@@ -10,11 +10,11 @@ import {
   isUnrestrictedMode,
   loadAllowedDomains,
   loadDisallowedDomains,
-} from "../config/network-allowlist";
-import type { GrantStore } from "../permissions/grant-store";
-import type { PolicyStore } from "../permissions/policy-store";
-import { EgressJudge } from "./egress-judge";
-import type { JudgeDecision } from "./egress-judge";
+} from "../config/network-allowlist.js";
+import type { GrantStore } from "../permissions/grant-store.js";
+import type { PolicyStore } from "../permissions/policy-store.js";
+import { EgressJudge } from "./egress-judge/index.js";
+import type { JudgeDecision } from "./egress-judge/index.js";
 
 const logger = createLogger("http-proxy");
 

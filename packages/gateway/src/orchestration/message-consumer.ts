@@ -13,15 +13,18 @@ import * as Sentry from "@sentry/node";
 import type {
   IMessageQueue,
   QueueJob as SharedQueueJob,
-} from "../infrastructure/queue";
-import { RedisQueue, type RedisQueueConfig } from "../infrastructure/queue";
+} from "../infrastructure/queue/index.js";
+import {
+  RedisQueue,
+  type RedisQueueConfig,
+} from "../infrastructure/queue/index.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
   generateDeploymentName,
   type MessagePayload,
   type OrchestratorConfig,
-} from "./base-deployment-manager";
+} from "./base-deployment-manager.js";
 
 const logger = createLogger("orchestrator");
 

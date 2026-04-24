@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { __testOnly } from "../proxy/gemini-oauth/proxy";
+import { __testOnly } from "../proxy/gemini-oauth/proxy.js";
 
 describe("Gemini OAuth proxy schema sanitizer", () => {
   test("preserves property names and filters required fields to known properties", () => {

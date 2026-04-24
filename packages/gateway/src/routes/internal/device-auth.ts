@@ -1,12 +1,12 @@
 import { createLogger, type McpOAuthConfig } from "@lobu/core";
 import { Hono } from "hono";
-import type Redis from "ioredis";
-import { GenericDeviceCodeClient } from "../../auth/external/device-code-client";
-import type { McpConfigService } from "../../auth/mcp/config-service";
-import type { WritableSecretStore } from "../../secrets";
-import { errorResponse, getVerifiedWorker } from "../shared/helpers";
-import { authenticateWorker } from "./middleware";
-import type { WorkerContext } from "./types";
+import type { Redis } from "ioredis";
+import { GenericDeviceCodeClient } from "../../auth/external/device-code-client.js";
+import type { McpConfigService } from "../../auth/mcp/config-service.js";
+import type { WritableSecretStore } from "../../secrets/index.js";
+import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
+import { authenticateWorker } from "./middleware.js";
+import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("device-auth");
 

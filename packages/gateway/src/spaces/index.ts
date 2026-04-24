@@ -1,1 +1,1 @@
-export * from "./space-resolver";
+export * from "./space-resolver.js";

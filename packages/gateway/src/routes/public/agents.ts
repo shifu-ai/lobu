@@ -10,17 +10,20 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { AgentMetadataStore } from "../../auth/agent-metadata-store";
-import type { AgentSettings, AgentSettingsStore } from "../../auth/settings";
-import { buildDefaultSettingsFromSource } from "../../auth/settings/template-utils";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import type { ChannelBindingService } from "../../channels";
+import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
+import type {
+  AgentSettings,
+  AgentSettingsStore,
+} from "../../auth/settings/index.js";
+import { buildDefaultSettingsFromSource } from "../../auth/settings/template-utils.js";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import type { ChannelBindingService } from "../../channels/index.js";
 import {
   resolveSettingsLookupUserId,
   verifyOwnedAgentAccess,
-} from "../shared/agent-ownership";
-import { errorResponse, requireSession } from "../shared/helpers";
+} from "../shared/agent-ownership.js";
+import { errorResponse, requireSession } from "../shared/helpers.js";
 
 const logger = createLogger("agent-routes");
 

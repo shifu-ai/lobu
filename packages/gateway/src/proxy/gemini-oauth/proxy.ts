@@ -22,13 +22,13 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import type { AuthProfilesManager } from "../../auth/settings/auth-profiles-manager";
+import type { AuthProfilesManager } from "../../auth/settings/auth-profiles-manager.js";
 import {
   buildUpstreamHeaders,
   codeAssistUpstreamUrl,
   type OAuthCreds,
   resolveCodeAssist,
-} from "./code-assist-client";
+} from "./code-assist-client.js";
 
 const logger = createLogger("gemini-oauth-proxy");
 

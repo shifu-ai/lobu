@@ -1,9 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
 import { verifyWorkerToken } from "@lobu/core";
 import type { Context, Next } from "hono";
-import { verifySettingsSession } from "../routes/public/settings-auth";
-import type { CliTokenService } from "./cli/token-service";
-import type { ExternalAuthClient } from "./external/client";
+import { verifySettingsSession } from "../routes/public/settings-auth.js";
+import type { CliTokenService } from "./cli/token-service.js";
+import type { ExternalAuthClient } from "./external/client.js";
 
 export const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 

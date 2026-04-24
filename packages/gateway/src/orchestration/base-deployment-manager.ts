@@ -6,11 +6,11 @@ import {
   generateWorkerToken,
   OrchestratorError,
 } from "@lobu/core";
-import type Redis from "ioredis";
-import type { ProviderCredentialContext } from "../embedded";
-import type { MessagePayload } from "../infrastructure/queue/queue-producer";
-import type { ModelProviderModule } from "../modules/module-system";
-import type { GrantStore } from "../permissions/grant-store";
+import type { Redis } from "ioredis";
+import type { ProviderCredentialContext } from "../embedded.js";
+import type { MessagePayload } from "../infrastructure/queue/queue-producer.js";
+import type { ModelProviderModule } from "../modules/module-system.js";
+import type { GrantStore } from "../permissions/grant-store.js";
 import {
   buildPolicyBundle,
   type PolicyStore,
@@ -18,12 +18,12 @@ import {
 import {
   deleteSecretMappings,
   generatePlaceholder,
-} from "../proxy/secret-proxy";
+} from "../proxy/secret-proxy.js";
 import {
   deleteSecretsByPrefix,
   persistSecretValue,
   type WritableSecretStore,
-} from "../secrets";
+} from "../secrets/index.js";
 // Re-export MessagePayload for use by deployment implementations
 export type { MessagePayload };
 
@@ -183,7 +183,7 @@ export abstract class BaseDeploymentManager {
   protected config: OrchestratorConfig;
   protected moduleEnvVarsBuilder?: ModuleEnvVarsBuilder;
   protected providerModules: ModelProviderModule[];
-  protected providerCatalogService?: import("../auth/provider-catalog").ProviderCatalogService;
+  protected providerCatalogService?: import("../auth/provider-catalog.js").ProviderCatalogService;
   protected redisClient?: Redis;
   /**
    * Set by `setSecretStore` during `Orchestrator.injectCoreServices`.
@@ -240,7 +240,7 @@ export abstract class BaseDeploymentManager {
   }
 
   setProviderCatalogService(
-    service: import("../auth/provider-catalog").ProviderCatalogService
+    service: import("../auth/provider-catalog.js").ProviderCatalogService
   ): void {
     this.providerCatalogService = service;
   }

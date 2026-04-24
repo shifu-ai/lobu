@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
-import { createInteractionRoutes } from "../../routes/internal/interactions";
+import { createInteractionRoutes } from "../../routes/internal/interactions.js";
 
 describe("interaction routes", () => {
   let originalKey: string | undefined;

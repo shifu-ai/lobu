@@ -2,7 +2,7 @@ import { createLogger } from "@lobu/core";
 import {
   getModelProviderModules,
   type ModelOption,
-} from "../modules/module-system";
+} from "../modules/module-system.js";
 
 const logger = createLogger("provider-model-options");
 

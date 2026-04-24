@@ -6,20 +6,20 @@ import {
   OrchestratorError,
   SpanStatusCode,
 } from "@lobu/core";
-import type { ModelProviderModule } from "../../../modules/module-system";
+import type { ModelProviderModule } from "../../../modules/module-system.js";
 import {
   BaseDeploymentManager,
   type DeploymentInfo,
   type MessagePayload,
   type ModuleEnvVarsBuilder,
   type OrchestratorConfig,
-} from "../../base-deployment-manager";
+} from "../../base-deployment-manager.js";
 import {
   BASE_WORKER_LABELS,
   buildDeploymentInfoSummary,
   getVeryOldThresholdDays,
   resolvePlatformDeploymentMetadata,
-} from "../../deployment-utils";
+} from "../../deployment-utils.js";
 import {
   cleanupOrphanedPvcFinalizers,
   createPVC,
@@ -27,7 +27,7 @@ import {
   removeFinalizerFromResource,
   runImagePullPreflight,
   waitForWorkerReady,
-} from "./helpers";
+} from "./helpers.js";
 
 export const LOBU_FINALIZER = "lobu.io/cleanup";
 

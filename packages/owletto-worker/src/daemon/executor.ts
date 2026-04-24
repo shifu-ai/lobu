@@ -6,15 +6,15 @@
  */
 
 import type { Checkpoint, Content } from '@lobu/owletto-sdk';
-import { generateEmbedding } from '../embeddings';
+import { generateEmbedding } from '../embeddings.js';
 import {
   executeCompiledConnector,
   getActionOutput,
   normalizeEventEnvelope,
-} from '../executor/runtime';
-import { SubprocessExecutor } from '../executor/subprocess';
-import type { Env } from '../types';
-import type { ContentItem, ExecutorClient, PollResponse } from './client';
+} from '../executor/runtime.js';
+import { SubprocessExecutor } from '../executor/subprocess.js';
+import type { Env } from '../types.js';
+import type { ContentItem, ExecutorClient, PollResponse } from './client.js';
 
 export interface ExecutorConfig {
   batchSize: number;

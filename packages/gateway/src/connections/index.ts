@@ -1,7 +1,7 @@
-export { ChatInstanceManager } from "./chat-instance-manager";
-export { ChatResponseBridge } from "./chat-response-bridge";
+export { ChatInstanceManager } from "./chat-instance-manager.js";
+export { ChatResponseBridge } from "./chat-response-bridge.js";
 export type {
   ConnectionSettings,
   PlatformAdapterConfig,
   PlatformConnection,
-} from "./types";
+} from "./types.js";

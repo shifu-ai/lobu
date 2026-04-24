@@ -10,19 +10,19 @@ import {
   flushTracing,
   generateTraceId,
 } from "@lobu/core";
-import type { CommandDispatcher } from "../commands/command-dispatcher";
-import { createChatReply } from "../commands/command-reply-adapters";
-import type { ArtifactStore } from "../files/artifact-store";
-import type { CoreServices } from "../platform";
+import type { CommandDispatcher } from "../commands/command-dispatcher.js";
+import { createChatReply } from "../commands/command-reply-adapters.js";
+import type { ArtifactStore } from "../files/artifact-store.js";
+import type { CoreServices } from "../platform.js";
 import {
   buildMessagePayload,
   hasConfiguredProvider,
   resolveAgentId,
   resolveAgentOptions,
-} from "../services/platform-helpers";
-import type { ConversationStateStore } from "./conversation-state-store";
-import type { ChatInstanceManager } from "./chat-instance-manager";
-import type { PlatformConnection } from "./types";
+} from "../services/platform-helpers.js";
+import type { ConversationStateStore } from "./conversation-state-store.js";
+import type { ChatInstanceManager } from "./chat-instance-manager.js";
+import type { PlatformConnection } from "./types.js";
 
 const logger = createLogger("chat-message-bridge");
 

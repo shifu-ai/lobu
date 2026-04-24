@@ -1,7 +1,7 @@
 import type { AgentConfigStore } from "@lobu/core";
-import type { SettingsTokenPayload } from "../../auth/settings/token-service";
-import type { UserAgentsStore } from "../../auth/user-agents-store";
-import { getAuthMethod } from "../../connections/platform-auth-methods";
+import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
+import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import { getAuthMethod } from "../../connections/platform-auth-methods.js";
 
 interface AgentOwnershipConfig {
   userAgentsStore?: UserAgentsStore;

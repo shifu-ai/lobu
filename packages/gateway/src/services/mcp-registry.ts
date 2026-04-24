@@ -1,5 +1,5 @@
 import { createLogger } from "@lobu/core";
-import type { ProviderConfigResolver } from "./provider-config-resolver";
+import type { ProviderConfigResolver } from "./provider-config-resolver.js";
 
 const logger = createLogger("mcp-registry");
 

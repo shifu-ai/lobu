@@ -10,7 +10,7 @@ import { fork } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ExecutionHooks, FeedSyncResult, SyncContext, SyncExecutor } from './interface';
+import type { ExecutionHooks, FeedSyncResult, SyncContext, SyncExecutor } from './interface.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);

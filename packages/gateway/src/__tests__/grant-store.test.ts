@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { MockRedisClient } from "@lobu/core/testing";
-import { GrantStore } from "../permissions/grant-store";
+import { GrantStore } from "../permissions/grant-store.js";
 
 describe("GrantStore", () => {
   let redis: MockRedisClient;
