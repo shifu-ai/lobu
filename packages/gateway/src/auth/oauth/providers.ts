@@ -41,29 +41,23 @@ export interface OAuthProviderConfig {
 
 /**
  * Claude OAuth Configuration
- * - Public client (no client secret)
- * - Uses PKCE for security
- * - Requires browser-like headers (anti-bot protection)
+ *
+ * Mirrors the public Claude Code CLI client so Anthropic's OAuth token endpoint
+ * treats us as a first-party client. Deviating from this (partial scope,
+ * browser-like headers, wrong authorize URL) causes `/v1/oauth/token` to
+ * return 429 rate_limit_error on any failed code exchange.
  */
 export const CLAUDE_PROVIDER: OAuthProviderConfig = {
   id: "claude",
   name: "Claude",
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authUrl: "https://claude.ai/oauth/authorize",
+  authUrl: "https://console.anthropic.com/oauth/authorize",
   tokenUrl: "https://console.anthropic.com/v1/oauth/token",
   redirectUri: "https://console.anthropic.com/oauth/code/callback",
-  scope: "user:inference",
+  scope: "org:create_api_key user:profile user:inference",
   usePKCE: true,
   responseType: "code",
   grantType: "authorization_code",
   tokenEndpointAuthMethod: "none",
   requireRefreshToken: true,
-  customHeaders: {
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    Accept: "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    Referer: "https://claude.ai/",
-    Origin: "https://claude.ai",
-  },
 };
