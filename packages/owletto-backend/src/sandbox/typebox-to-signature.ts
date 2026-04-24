@@ -101,7 +101,12 @@ function render(
 }
 
 function formatLiteral(value: unknown): string {
-  if (typeof value === "string") return `'${value.replace(/'/g, "\\'")}'`;
+  if (typeof value === "string") {
+    // Escape backslashes first, then single quotes — order matters so that the
+    // backslashes inserted by the quote escape don't get re-escaped.
+    const escaped = value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    return `'${escaped}'`;
+  }
   if (value === null) return "null";
   return String(value);
 }

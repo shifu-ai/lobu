@@ -69,4 +69,16 @@ describe("typeboxToSignature", () => {
     const schema = Type.Literal("fixed");
     expect(typeboxToSignature(schema)).toBe("'fixed'");
   });
+
+  it("escapes backslashes in literal values", () => {
+    // Regression: an unescaped trailing backslash would produce the
+    // unterminated literal `'\'`.
+    const schema = Type.Literal("path\\to\\file");
+    expect(typeboxToSignature(schema)).toBe("'path\\\\to\\\\file'");
+  });
+
+  it("escapes single quotes in literal values", () => {
+    const schema = Type.Literal("it's");
+    expect(typeboxToSignature(schema)).toBe("'it\\'s'");
+  });
 });
