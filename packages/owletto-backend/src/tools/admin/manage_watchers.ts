@@ -1519,160 +1519,7 @@ async function handleCompleteWindow(
   const cleanedExtractedData = stripFields(extractedData, Array.from(fieldsToStrip));
 
   // ============================================
-  // STEP 6: No-op if there's nothing to analyze
-  //
-  // Watchers can be triggered for periods where every candidate event was
-  // already consumed by an earlier window. Throwing here causes the agent
-  // loop to retry the same period indefinitely (Sentry: OWLETTO-Q). Treat
-  // it as a successful no-op completion, but persist a zero-content window
-  // so the scheduler has durable cursor progress and retries are idempotent.
-  // ============================================
-  if (uniqueContentIds.length === 0) {
-    const noOpResult = await sql.begin(async (tx) => {
-      let windowId: number;
-      let createdWindow = false;
-
-      if (tokenWindowId) {
-        const windowResult = await tx`
-          SELECT id, content_analyzed
-          FROM watcher_windows
-          WHERE id = ${tokenWindowId} AND watcher_id = ${watcherId}
-          LIMIT 1
-        `;
-        if (windowResult.length === 0) {
-          throw new Error(
-            `Window ${tokenWindowId} not found for watcher ${watcherId}. ` +
-              'The window may have been deleted. Get a fresh token from read_knowledge({ watcher_id: ... }).'
-          );
-        }
-        windowId = tokenWindowId;
-        if (Number(windowResult[0].content_analyzed ?? 0) === 0) {
-          await tx`
-            UPDATE watcher_windows
-            SET extracted_data = ${sql.json(cleanedExtractedData)},
-                content_analyzed = 0,
-                model_used = ${provenanceModel},
-                client_id = ${provenanceClientId},
-                run_metadata = ${sql.json(provenanceMetadata)},
-                created_at = COALESCE(created_at, NOW())
-            WHERE id = ${windowId} AND watcher_id = ${watcherId}
-          `;
-        }
-      } else {
-        const existingWindow = await tx`
-          SELECT id, content_analyzed FROM watcher_windows
-          WHERE watcher_id = ${watcherId}
-            AND window_start = ${window_start}
-            AND window_end = ${window_end}
-            AND granularity = ${timeGranularity}
-          LIMIT 1
-        `;
-
-        if (existingWindow.length > 0) {
-          windowId = existingWindow[0].id as number;
-          if (Number(existingWindow[0].content_analyzed ?? 0) === 0) {
-            await tx`
-              UPDATE watcher_windows
-              SET extracted_data = ${sql.json(cleanedExtractedData)},
-                  content_analyzed = 0,
-                  model_used = ${provenanceModel},
-                  client_id = ${provenanceClientId},
-                  run_metadata = ${sql.json(provenanceMetadata)},
-                  created_at = COALESCE(created_at, NOW())
-              WHERE id = ${windowId} AND watcher_id = ${watcherId}
-            `;
-          }
-        } else {
-          const newWindowId = await getNextNumericId(tx, 'watcher_windows');
-          try {
-            await tx`
-              INSERT INTO watcher_windows (
-                id,
-                watcher_id, window_start, window_end, granularity,
-                extracted_data, content_analyzed, model_used, client_id, run_metadata, created_at
-              ) VALUES (
-                ${newWindowId},
-                ${watcherId}, ${window_start}, ${window_end}, ${timeGranularity},
-                ${sql.json(cleanedExtractedData)}, 0, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)}, NOW()
-              )
-            `;
-            windowId = newWindowId;
-            createdWindow = true;
-          } catch (err: any) {
-            if (err?.code !== '23505') throw err;
-            const racedWindow = await tx`
-              SELECT id FROM watcher_windows
-              WHERE watcher_id = ${watcherId}
-                AND window_start = ${window_start}
-                AND window_end = ${window_end}
-                AND granularity = ${timeGranularity}
-              LIMIT 1
-            `;
-            if (racedWindow.length === 0) throw err;
-            windowId = racedWindow[0].id as number;
-          }
-        }
-      }
-
-      let completedRun = false;
-      if (watcherRunId && Number.isFinite(watcherRunId)) {
-        const completedRows = await tx`
-          UPDATE runs
-          SET status = 'completed',
-              window_id = ${windowId},
-              completed_at = current_timestamp,
-              error_message = NULL
-          WHERE id = ${watcherRunId}
-            AND run_type = 'watcher'
-            AND status IN ('running', 'claimed')
-          RETURNING id
-        `;
-        completedRun = completedRows.length > 0;
-      }
-
-      if (createdWindow || completedRun) {
-        const watcherScheduleRows = await tx`
-          SELECT schedule, next_run_at
-          FROM watchers
-          WHERE id = ${watcherId}
-          LIMIT 1
-        `;
-        const watcherSchedule = (watcherScheduleRows[0]?.schedule as string | null) ?? null;
-        const currentNextRunAt = (watcherScheduleRows[0]?.next_run_at as string | null) ?? null;
-        if (watcherSchedule) {
-          const nextRunBase = currentNextRunAt
-            ? new Date(Math.max(Date.now(), new Date(currentNextRunAt).getTime()))
-            : new Date();
-          await tx`
-            UPDATE watchers
-            SET next_run_at = ${nextRunAt(watcherSchedule, nextRunBase)}::timestamptz,
-                updated_at = NOW()
-            WHERE id = ${watcherId}
-          `;
-        }
-      }
-
-      return { windowId };
-    });
-
-    logger.info(
-      `[complete_window] No new content for watcher ${watcherId} (${window_start} - ${window_end}); ` +
-        `${skippedCount} item(s) already analyzed by prior windows. Marked as no-op completion.`
-    );
-
-    return {
-      action: 'complete_window' as const,
-      watcher_id: String(watcherId),
-      window_id: noOpResult.windowId,
-      window_start,
-      window_end,
-      content_linked: 0,
-      reaction_status: 'skipped' as const,
-    };
-  }
-
-  // ============================================
-  // STEP 7-9: Wrap all DB operations in a transaction
+  // STEP 6: Wrap all DB operations in a transaction
   // If classification processing fails (e.g., embeddings service unavailable),
   // the entire operation rolls back - no corrupted data is saved.
   //
@@ -1681,8 +1528,15 @@ async function handleCompleteWindow(
   const result = await sql.begin(async (tx) => {
     // ============================================
     // STEP 7: Get or create window with FINAL values
+    //
+    // Empty-content replay is idempotent: if a zero-content window already
+    // exists for this period (a prior run consumed all candidates already),
+    // refresh provenance instead of throwing "Window already exists". This
+    // keeps the agent loop from retrying the same period forever (OWLETTO-Q)
+    // without needing a separate no-op code path.
     // ============================================
-    let windowId: number;
+    let windowId!: number;
+    let windowCreated = false;
 
     if (tokenWindowId) {
       // Legacy flow: window_id in token, verify and update it
@@ -1709,7 +1563,7 @@ async function handleCompleteWindow(
     } else {
       // New flow: check for existing window first
       const existingWindow = await tx`
-        SELECT id FROM watcher_windows
+        SELECT id, content_analyzed FROM watcher_windows
         WHERE watcher_id = ${watcherId}
           AND window_start = ${window_start}
           AND window_end = ${window_end}
@@ -1717,6 +1571,7 @@ async function handleCompleteWindow(
         LIMIT 1
       `;
 
+      let reuseExistingWindow = false;
       if (existingWindow.length > 0) {
         if (args.replace_existing) {
           // Delete existing window and its content links
@@ -1726,6 +1581,23 @@ async function handleCompleteWindow(
           logger.info(
             `[complete_window] Deleted existing window ${windowId} (replace_existing=true)`
           );
+        } else if (uniqueContentIds.length === 0) {
+          // Idempotent empty-content replay: reuse the existing window. Only
+          // refresh provenance if the existing row was itself a no-op write
+          // — never overwrite a successful completion's data.
+          windowId = existingWindow[0].id as number;
+          reuseExistingWindow = true;
+          if (Number(existingWindow[0].content_analyzed ?? 0) === 0) {
+            await tx`
+              UPDATE watcher_windows
+              SET extracted_data = ${sql.json(cleanedExtractedData)},
+                  model_used = ${provenanceModel},
+                  client_id = ${provenanceClientId},
+                  run_metadata = ${sql.json(provenanceMetadata)},
+                  run_id = COALESCE(run_id, ${watcherRunId})
+              WHERE id = ${windowId} AND watcher_id = ${watcherId}
+            `;
+          }
         } else {
           throw new Error(
             `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
@@ -1734,35 +1606,38 @@ async function handleCompleteWindow(
         }
       }
 
-      const newWindowId = await getNextNumericId(tx, 'watcher_windows');
+      if (!reuseExistingWindow) {
+        const newWindowId = await getNextNumericId(tx, 'watcher_windows');
 
-      // Single INSERT with ALL final values
-      // UNIQUE index idx_watcher_windows_unique_period prevents race conditions
-      try {
-        await tx`
-          INSERT INTO watcher_windows (
-            id,
-            watcher_id, window_start, window_end, granularity,
-            extracted_data, content_analyzed, model_used, client_id, run_metadata, run_id, created_at
-          ) VALUES (
-            ${newWindowId},
-            ${watcherId}, ${window_start}, ${window_end}, ${timeGranularity},
-            ${sql.json(cleanedExtractedData)}, ${uniqueContentIds.length}, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)}, ${watcherRunId}, NOW()
-          )
-        `;
-      } catch (err: any) {
-        if (err?.code === '23505') {
-          throw new Error(
-            `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
-              'Use replace_existing: true to replace it, or query a different time period.'
-          );
+        // Single INSERT with ALL final values
+        // UNIQUE index idx_watcher_windows_unique_period prevents race conditions
+        try {
+          await tx`
+            INSERT INTO watcher_windows (
+              id,
+              watcher_id, window_start, window_end, granularity,
+              extracted_data, content_analyzed, model_used, client_id, run_metadata, run_id, created_at
+            ) VALUES (
+              ${newWindowId},
+              ${watcherId}, ${window_start}, ${window_end}, ${timeGranularity},
+              ${sql.json(cleanedExtractedData)}, ${uniqueContentIds.length}, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)}, ${watcherRunId}, NOW()
+            )
+          `;
+        } catch (err: any) {
+          if (err?.code === '23505') {
+            throw new Error(
+              `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
+                'Use replace_existing: true to replace it, or query a different time period.'
+            );
+          }
+          throw err;
         }
-        throw err;
+        windowId = newWindowId;
+        windowCreated = true;
+        logger.info(
+          `[complete_window] Created window ${windowId} for watcher ${watcherId} (${window_start} - ${window_end})`
+        );
       }
-      windowId = newWindowId;
-      logger.info(
-        `[complete_window] Created window ${windowId} for watcher ${watcherId} (${window_start} - ${window_end})`
-      );
     }
 
     // ============================================
@@ -1804,28 +1679,9 @@ async function handleCompleteWindow(
       env
     );
 
-    const watcherScheduleRows = await tx`
-      SELECT schedule, next_run_at
-      FROM watchers
-      WHERE id = ${watcherId}
-      LIMIT 1
-    `;
-    const watcherSchedule = (watcherScheduleRows[0]?.schedule as string | null) ?? null;
-    const currentNextRunAt = (watcherScheduleRows[0]?.next_run_at as string | null) ?? null;
-    if (watcherSchedule) {
-      const nextRunBase = currentNextRunAt
-        ? new Date(Math.max(Date.now(), new Date(currentNextRunAt).getTime()))
-        : new Date();
-      await tx`
-        UPDATE watchers
-        SET next_run_at = ${nextRunAt(watcherSchedule, nextRunBase)}::timestamptz,
-            updated_at = NOW()
-        WHERE id = ${watcherId}
-      `;
-    }
-
+    let runMarkedCompleted = false;
     if (watcherRunId && Number.isFinite(watcherRunId)) {
-      await tx`
+      const completedRows = await tx`
         UPDATE runs
         SET status = 'completed',
             window_id = ${windowId},
@@ -1834,7 +1690,34 @@ async function handleCompleteWindow(
         WHERE id = ${watcherRunId}
           AND run_type = 'watcher'
           AND status IN ('running', 'claimed')
+        RETURNING id
       `;
+      runMarkedCompleted = completedRows.length > 0;
+    }
+
+    // Advance the schedule only when we actually did new work. Idempotent
+    // replays (no window created, no run transitioned) must not push
+    // next_run_at forward, or each retry would shift the schedule.
+    if (windowCreated || runMarkedCompleted) {
+      const watcherScheduleRows = await tx`
+        SELECT schedule, next_run_at
+        FROM watchers
+        WHERE id = ${watcherId}
+        LIMIT 1
+      `;
+      const watcherSchedule = (watcherScheduleRows[0]?.schedule as string | null) ?? null;
+      const currentNextRunAt = (watcherScheduleRows[0]?.next_run_at as string | null) ?? null;
+      if (watcherSchedule) {
+        const nextRunBase = currentNextRunAt
+          ? new Date(Math.max(Date.now(), new Date(currentNextRunAt).getTime()))
+          : new Date();
+        await tx`
+          UPDATE watchers
+          SET next_run_at = ${nextRunAt(watcherSchedule, nextRunBase)}::timestamptz,
+              updated_at = NOW()
+          WHERE id = ${watcherId}
+        `;
+      }
     }
 
     logger.info(
@@ -1852,7 +1735,9 @@ async function handleCompleteWindow(
     };
   });
 
-  // Execute reaction script inline (in-process via QuickJS WASM sandbox)
+  // Execute reaction script inline (in-process via QuickJS WASM sandbox).
+  // Skip entirely when no content was linked — zero-content windows carry no
+  // new signal for the reaction to act on.
   let reactionStatus: 'success' | 'failed' | 'skipped' = 'skipped';
   let reactionError: string | undefined;
 
@@ -1871,7 +1756,11 @@ async function handleCompleteWindow(
   try {
     const sql = watcherMetaSql;
     const scriptRows = watcherMetaRows;
-    if (scriptRows.length > 0 && scriptRows[0].reaction_script_compiled) {
+    if (
+      result.content_linked > 0 &&
+      scriptRows.length > 0 &&
+      scriptRows[0].reaction_script_compiled
+    ) {
       const row = scriptRows[0];
       const orgId = row.organization_id as string;
 
