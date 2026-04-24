@@ -1,36 +1,44 @@
 /**
  * ClientSDK `authProfiles` namespace. Thin wrapper over `manageAuthProfiles`.
  *
- * All identifiers are `auth_profile_slug: string` — the handler does not use
- * numeric ids.
+ * Field names follow the handler schema:
+ *   - `auth_profile_slug: string` identifies the profile (no numeric ids)
+ *   - `profile_kind` discriminates the auth mechanism
+ *   - `credentials` (static key/value map) vs `auth_data` (OAuth/browser)
  */
 
 import type { Env } from "../../index";
 import { manageAuthProfiles } from "../../tools/admin/manage_auth_profiles";
 import type { ToolContext } from "../../tools/registry";
 
-export type AuthProfileType =
+export type AuthProfileKind =
   | "env"
   | "oauth_app"
   | "oauth_account"
   | "browser_session";
 
+export interface AuthProfileCreateInput {
+  auth_profile_slug: string;
+  profile_kind: AuthProfileKind;
+  connector_key: string;
+  display_name: string;
+  credentials?: Record<string, string>;
+  auth_data?: Record<string, unknown>;
+}
+
+export interface AuthProfileUpdateInput {
+  auth_profile_slug: string;
+  display_name?: string;
+  credentials?: Record<string, string>;
+  auth_data?: Record<string, unknown>;
+}
+
 export interface AuthProfilesNamespace {
   list(): Promise<unknown>;
   get(auth_profile_slug: string): Promise<unknown>;
   test(auth_profile_slug: string): Promise<unknown>;
-  create(input: {
-    auth_profile_slug: string;
-    auth_type: AuthProfileType;
-    connector_key: string;
-    display_name?: string;
-    config?: Record<string, unknown>;
-  }): Promise<unknown>;
-  update(input: {
-    auth_profile_slug: string;
-    display_name?: string;
-    config?: Record<string, unknown>;
-  }): Promise<unknown>;
+  create(input: AuthProfileCreateInput): Promise<unknown>;
+  update(input: AuthProfileUpdateInput): Promise<unknown>;
   delete(auth_profile_slug: string): Promise<unknown>;
 }
 

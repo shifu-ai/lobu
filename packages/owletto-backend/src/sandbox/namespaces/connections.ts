@@ -14,12 +14,40 @@ export interface ConnectionsConnectInput {
   connector_key: string;
   display_name?: string;
   auth_profile_slug?: string;
+  app_auth_profile_slug?: string;
+  config?: Record<string, unknown>;
 }
 
 export interface ConnectionsCreateInput {
   connector_key: string;
   display_name?: string;
+  auth_profile_slug?: string;
+  app_auth_profile_slug?: string;
   config?: Record<string, unknown>;
+  created_by?: string;
+}
+
+export interface ConnectionsUpdateInput {
+  connection_id: number;
+  display_name?: string;
+  status?: string;
+  auth_profile_slug?: string | null;
+  app_auth_profile_slug?: string | null;
+  config?: Record<string, unknown>;
+}
+
+/**
+ * `install_connector` accepts any of `source_url`, `source_uri`, `source_code`,
+ * or `mcp_url`. The handler picks the first non-null source. `auth_values` is
+ * an optional key-value map the handler stores as auth profiles.
+ */
+export interface ConnectionsInstallConnectorInput {
+  source_url?: string;
+  source_uri?: string;
+  source_code?: string;
+  compiled?: boolean;
+  mcp_url?: string;
+  auth_values?: Record<string, string>;
 }
 
 export interface ConnectionsNamespace {
@@ -28,18 +56,10 @@ export interface ConnectionsNamespace {
   get(connection_id: number): Promise<unknown>;
   create(input: ConnectionsCreateInput): Promise<unknown>;
   connect(input: ConnectionsConnectInput): Promise<unknown>;
-  update(input: {
-    connection_id: number;
-    display_name?: string;
-    auth_profile_slug?: string | null;
-    config?: Record<string, unknown>;
-  }): Promise<unknown>;
+  update(input: ConnectionsUpdateInput): Promise<unknown>;
   delete(connection_id: number): Promise<unknown>;
   test(connection_id: number): Promise<unknown>;
-  installConnector(input: {
-    connector_key: string;
-    source_url?: string;
-  }): Promise<unknown>;
+  installConnector(input: ConnectionsInstallConnectorInput): Promise<unknown>;
   uninstallConnector(connector_key: string): Promise<unknown>;
   toggleConnectorLogin(input: {
     connector_key: string;
@@ -47,7 +67,7 @@ export interface ConnectionsNamespace {
   }): Promise<unknown>;
   updateConnectorAuth(input: {
     connector_key: string;
-    auth_config: Record<string, unknown>;
+    auth_values: Record<string, string>;
   }): Promise<unknown>;
 }
 

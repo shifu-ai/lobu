@@ -2,7 +2,9 @@
  * ClientSDK `viewTemplates` namespace. Thin wrapper over `manageViewTemplates`.
  *
  * `resource_id` can be a string (entity_type slug) or a number (entity id)
- * depending on `resource_type`.
+ * depending on `resource_type`. The handler stores the whole template as a
+ * single `json_template` object — callers may nest a `data_sources` key
+ * inside it when they want SQL-backed sources.
  */
 
 import type { Env } from "../../index";
@@ -15,22 +17,25 @@ type ResourceId = string | number;
 export interface ViewTemplateSetInput {
   resource_type: ResourceType;
   resource_id: ResourceId;
+  json_template: Record<string, unknown>;
   tab_name?: string;
   tab_order?: number;
-  template: Record<string, unknown>;
-  data_sources?: Record<string, unknown>;
+  change_notes?: string;
 }
 
 export interface ViewTemplatesNamespace {
   get(input: {
     resource_type: ResourceType;
     resource_id: ResourceId;
+    tab_name?: string;
   }): Promise<unknown>;
   set(input: ViewTemplateSetInput): Promise<unknown>;
   rollback(input: {
     resource_type: ResourceType;
     resource_id: ResourceId;
-    version_id: number;
+    /** Version number (not the row id) to roll back to. */
+    version: number;
+    tab_name?: string;
   }): Promise<unknown>;
   removeTab(input: {
     resource_type: ResourceType;
