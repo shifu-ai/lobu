@@ -134,7 +134,7 @@ export function createOAuthRoutes(config: OAuthRoutesConfig): OpenAPIHono {
       const credentials = await oauthClient.exchangeCodeForToken(
         authCode,
         stateData.codeVerifier,
-        "https://console.anthropic.com/oauth/code/callback",
+        undefined,
         state
       );
       await credentialStore.setCredentials(

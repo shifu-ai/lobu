@@ -37,27 +37,38 @@ export interface OAuthProviderConfig {
     | "client_secret_basic";
   /** Whether auth-code exchange must include refresh_token */
   requireRefreshToken?: boolean;
+  /** Extra static query params to append to the authorize URL */
+  extraAuthParams?: Record<string, string>;
+  /** Extra static fields to include in the token exchange body */
+  extraTokenParams?: Record<string, string | number>;
 }
 
 /**
  * Claude OAuth Configuration
  *
- * Mirrors the public Claude Code CLI client so Anthropic's OAuth token endpoint
- * treats us as a first-party client. Deviating from this (partial scope,
- * browser-like headers, wrong authorize URL) causes `/v1/oauth/token` to
- * return 429 rate_limit_error on any failed code exchange.
+ * Mirrors the public Claude Code CLI's subscription login flow
+ * (`loginWithClaudeAi: true, inferenceOnly: true`). Anthropic's token endpoint
+ * 429s any failed code exchange using this client_id, so we must match the
+ * expected request shape exactly: claude.com authorize URL, the `code=true`
+ * query flag, `user:inference` scope, and a long `expires_in` in the exchange.
+ *
+ * Endpoints extracted from the current `@anthropic-ai/claude-code` binary —
+ * Anthropic moved them from `claude.ai`/`console.anthropic.com` to
+ * `claude.com`/`platform.claude.com` and the old hosts reject requests.
  */
 export const CLAUDE_PROVIDER: OAuthProviderConfig = {
   id: "claude",
   name: "Claude",
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authUrl: "https://console.anthropic.com/oauth/authorize",
-  tokenUrl: "https://console.anthropic.com/v1/oauth/token",
-  redirectUri: "https://console.anthropic.com/oauth/code/callback",
-  scope: "org:create_api_key user:profile user:inference",
+  authUrl: "https://claude.com/cai/oauth/authorize",
+  tokenUrl: "https://platform.claude.com/v1/oauth/token",
+  redirectUri: "https://platform.claude.com/oauth/code/callback",
+  scope: "user:inference",
   usePKCE: true,
   responseType: "code",
   grantType: "authorization_code",
   tokenEndpointAuthMethod: "none",
   requireRefreshToken: true,
+  extraAuthParams: { code: "true" },
+  extraTokenParams: { expires_in: 31536000 },
 };

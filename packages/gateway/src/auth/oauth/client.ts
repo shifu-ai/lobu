@@ -46,6 +46,9 @@ export class OAuthClient extends BaseOAuth2Client {
     url.searchParams.set("scope", this.config.scope);
     url.searchParams.set("code_challenge", codeChallenge);
     url.searchParams.set("code_challenge_method", "S256");
+    for (const [k, v] of Object.entries(this.config.extraAuthParams ?? {})) {
+      url.searchParams.set(k, v);
+    }
 
     return url.toString();
   }
@@ -61,12 +64,13 @@ export class OAuthClient extends BaseOAuth2Client {
   ): Promise<OAuthCredentials> {
     const redirectUri = customRedirectUri || this.config.redirectUri;
 
-    const body: Record<string, string> = {
+    const body: Record<string, string | number> = {
       grant_type: this.config.grantType || "authorization_code",
       client_id: this.config.clientId,
       code,
       redirect_uri: redirectUri,
       code_verifier: codeVerifier,
+      ...(this.config.extraTokenParams ?? {}),
     };
 
     // Include state if provided (required by Claude OAuth)

@@ -86,7 +86,7 @@ export abstract class BaseOAuth2Client {
    */
   protected async exchangeToken<T>(
     tokenUrl: string,
-    requestBody: Record<string, string> | URLSearchParams,
+    requestBody: Record<string, string | number> | URLSearchParams,
     contentType: "json" | "form" = "json",
     additionalHeaders?: Record<string, string>
   ): Promise<T> {
