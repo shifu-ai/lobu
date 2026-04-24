@@ -89,21 +89,6 @@ export class ApiKeyProviderModule extends BaseProviderModule {
   }
 
   /**
-   * Most providers are fine with a plain "lobu-proxy" placeholder because their
-   * SDKs treat the API key as an opaque string. pi-ai's `google-gemini-cli`
-   * provider is different — it `JSON.parse`s the key and pulls `{token,
-   * projectId}` out, so the placeholder has to parse and have both fields
-   * truthy. The gateway proxy rewrites the Bearer token and stamps the real
-   * projectId on the wire, so these values are never sent upstream.
-   */
-  override buildCredentialPlaceholder(): string {
-    if (this.apiKeyConfig.registryAlias === "google-gemini-cli") {
-      return JSON.stringify({ token: "lobu-proxy", projectId: "lobu-proxy" });
-    }
-    return "lobu-proxy";
-  }
-
-  /**
    * Returns metadata for config-driven providers (sdkCompat, defaultModel, etc.)
    * so the worker can register them dynamically. Returns null for hardcoded providers.
    */

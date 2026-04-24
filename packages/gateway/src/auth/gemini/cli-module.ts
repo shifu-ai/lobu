@@ -1,0 +1,83 @@
+import type { ModelOption } from "../../modules/module-system";
+import { BaseProviderModule } from "../base-provider-module";
+import type { AuthProfilesManager } from "../settings/auth-profiles-manager";
+
+/**
+ * Gemini CLI provider module — exposes Google's `gemini` CLI as a sub-agent
+ * shell-out via acpx. The agent (running on a different primary model) can
+ * Bash to `npx -y acpx@latest gemini "<prompt>"` for delegated tasks.
+ *
+ * This is **not** a primary-model path. The gemini CLI is invoked as a
+ * subprocess and reads its OAuth credentials from `~/.gemini/oauth_creds.json`
+ * locally — lobu doesn't proxy or refresh those credentials. Credential
+ * management is the user's responsibility (run `gemini auth login` once on
+ * the host that runs the worker).
+ *
+ * For Gemini *as a primary model*, use the AI Studio API key (`gemini`
+ * provider in `config/providers.json`) or OpenRouter — both stable HTTP
+ * paths that don't depend on the reverse-engineered Code Assist API.
+ */
+export class GeminiCliModule extends BaseProviderModule {
+  constructor(authProfilesManager: AuthProfilesManager) {
+    super(
+      {
+        providerId: "gemini-cli",
+        providerDisplayName: "Gemini CLI",
+        providerIconUrl:
+          "https://www.google.com/s2/favicons?domain=gemini.google.com&sz=128",
+        // No lobu-managed credential — gemini CLI reads its own OAuth file.
+        // Empty placeholder names keep BaseProviderModule's interface happy
+        // without claiming an env var slot.
+        credentialEnvVarName: "",
+        secretEnvVarNames: [],
+        authType: "oauth",
+        catalogDescription:
+          "Google's gemini CLI as a sub-agent shell-out (uses your local ~/.gemini OAuth)",
+      },
+      authProfilesManager
+    );
+    this.name = "gemini-cli";
+  }
+
+  override hasSystemKey(): boolean {
+    return false;
+  }
+
+  override async hasCredentials(): Promise<boolean> {
+    return false;
+  }
+
+  override injectSystemKeyFallback(
+    envVars: Record<string, string>
+  ): Record<string, string> {
+    return envVars;
+  }
+
+  override async buildEnvVars(
+    _agentId: string,
+    envVars: Record<string, string>
+  ): Promise<Record<string, string>> {
+    return envVars;
+  }
+
+  override getProxyBaseUrlMappings(): Record<string, string> {
+    return {};
+  }
+
+  getCliBackendConfig() {
+    return {
+      name: "gemini-cli",
+      command: "npx",
+      args: ["-y", "acpx@latest", "gemini"],
+      modelArg: "--model",
+      sessionArg: "--session",
+    };
+  }
+
+  override async getModelOptions(): Promise<ModelOption[]> {
+    return [
+      { value: "gemini-cli/gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+      { value: "gemini-cli/gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    ];
+  }
+}
