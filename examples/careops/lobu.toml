@@ -6,13 +6,12 @@ name = "careops"
 description = "Manage patient care, appointments, and treatment workflows for healthcare practices"
 dir = "./agents/careops"
 
-# Primary: Gemini 2.5 Flash via Google Code Assist OAuth — rides the
-# paid Google One AI Pro quota when the creds come from a paid user.
-# Paste the JSON from ~/.gemini/oauth_creds.json into $GEMINI_CLI_OAUTH_KEY.
+# Primary: Gemini 2.5 Flash via Google AI Studio API key.
+# Get one at https://aistudio.google.com/apikey and export $GEMINI_API_KEY.
 [[agents.careops.providers]]
-id = "gemini-cli"
-model = "gemini-cli/gemini-2.5-flash"
-key = "$GEMINI_CLI_OAUTH_KEY"
+id = "gemini"
+model = "gemini/gemini-2.5-flash"
+key = "$GEMINI_API_KEY"
 
 # Secondary: OpenAI — only used by the built-in GenerateImage tool
 # (gpt-image-1). Gemini handles all chat/tool-use; OpenAI is opt-in
