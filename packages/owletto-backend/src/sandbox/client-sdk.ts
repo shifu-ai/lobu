@@ -183,7 +183,7 @@ export function buildClientSDK(ctx: ToolContext, env: Env): ClientSDK {
     classifiers: buildClassifiersNamespace(ctx, env),
     viewTemplates: buildViewTemplatesNamespace(ctx, env),
     knowledge: buildKnowledgeNamespace(ctx, env),
-    organizations: buildOrganizationsNamespace(ctx, env),
+    organizations: buildOrganizationsNamespace(ctx),
 
     async org(slugOrId) {
       const member = await resolveOrgMembership(slugOrId, ctx);

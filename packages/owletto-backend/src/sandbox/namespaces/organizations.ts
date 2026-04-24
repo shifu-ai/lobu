@@ -6,7 +6,6 @@
  * `client-sdk.ts`) handles the actual cross-org context swap.
  */
 
-import type { Env } from "../../index";
 import type { ToolContext } from "../../tools/registry";
 import { getWorkspaceProvider } from "../../workspace";
 import type { OrgInfo } from "../../workspace/types";
@@ -34,7 +33,6 @@ export interface OrganizationsNamespace {
 
 export function buildOrganizationsNamespace(
   ctx: ToolContext,
-  _env: Env
 ): OrganizationsNamespace {
   return {
     async list(options) {
