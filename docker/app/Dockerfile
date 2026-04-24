@@ -8,8 +8,10 @@ FROM node:22-slim AS builder
 WORKDIR /app
 
 # Bun for workspace install + tsc. git needed because some deps ship git URLs.
+# python3 + build-essential needed for isolated-vm native build (node-gyp).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl unzip \
+      python3 build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
     && chmod +x /usr/local/bin/bun
