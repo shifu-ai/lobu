@@ -81,6 +81,7 @@ import { InstructionService } from "./instruction-service.js";
 import { SessionManager, StateAdapterSessionStore } from "./session-manager.js";
 import { SettingsResolver } from "./settings-resolver.js";
 import { SseManager } from "./sse-manager.js";
+import { WatcherRunTracker } from "../watchers/run-tracker.js";
 import { ProviderConfigResolver } from "./provider-config-resolver.js";
 import { ProviderRegistryService } from "./provider-registry-service.js";
 import { TranscriptionService } from "./transcription-service.js";
@@ -104,6 +105,7 @@ export class CoreServices {
   private instructionService?: InstructionService;
   private interactionService?: InteractionService;
   private sseManager?: SseManager;
+  private watcherRunTracker?: WatcherRunTracker;
 
   // ============================================================================
   // Auth & Provider Services
@@ -361,6 +363,9 @@ export class CoreServices {
 
     this.sseManager = new SseManager();
     logger.debug("SSE manager initialized");
+
+    this.watcherRunTracker = new WatcherRunTracker();
+    logger.debug("Watcher run tracker initialized");
 
     // Initialize grant store for unified permissions
     this.grantStore = new GrantStore(redisClient);
@@ -1168,6 +1173,12 @@ export class CoreServices {
   getSseManager(): SseManager {
     if (!this.sseManager) throw new Error("SSE manager not initialized");
     return this.sseManager;
+  }
+
+  getWatcherRunTracker(): WatcherRunTracker {
+    if (!this.watcherRunTracker)
+      throw new Error("Watcher run tracker not initialized");
+    return this.watcherRunTracker;
   }
 
   getAgentSettingsStore(): AgentSettingsStore {

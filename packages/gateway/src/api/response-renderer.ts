@@ -9,6 +9,7 @@ import { createLogger } from "@lobu/core";
 import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
 import type { ResponseRenderer } from "../platform/response-renderer.js";
 import type { SseManager } from "../services/sse-manager.js";
+import type { WatcherRunTracker } from "../watchers/run-tracker.js";
 
 const logger = createLogger("api-response-renderer");
 
@@ -17,7 +18,10 @@ const logger = createLogger("api-response-renderer");
  * Broadcasts responses to SSE clients instead of external platforms
  */
 export class ApiResponseRenderer implements ResponseRenderer {
-  constructor(private readonly sseManager: SseManager) {}
+  constructor(
+    private readonly sseManager: SseManager,
+    private readonly watcherRunTracker?: WatcherRunTracker
+  ) {}
 
   /**
    * Handle streaming delta content
@@ -75,6 +79,8 @@ export class ApiResponseRenderer implements ResponseRenderer {
     });
 
     logger.info(`Broadcast completion to session ${sessionId}`);
+
+    await this.resolveWatcherRunsFromPayload(payload, { ok: true });
   }
 
   /**
@@ -102,6 +108,31 @@ export class ApiResponseRenderer implements ResponseRenderer {
     });
 
     logger.error(`Broadcast error to session ${sessionId}: ${payload.error}`);
+
+    await this.resolveWatcherRunsFromPayload(payload, {
+      ok: false,
+      error: typeof payload.error === "string" ? payload.error : "agent error",
+    });
+  }
+
+  /**
+   * Resolve any watcher-run handles whose dispatched messageId matches the
+   * terminal event. Checks both the immediate messageId and processedMessageIds
+   * since a single turn can batch-process multiple messages.
+   */
+  private async resolveWatcherRunsFromPayload(
+    payload: ThreadResponsePayload,
+    result: { ok: true } | { ok: false; error: string }
+  ): Promise<void> {
+    if (!this.watcherRunTracker) return;
+    const ids = new Set<string>();
+    if (payload.messageId) ids.add(payload.messageId);
+    for (const id of payload.processedMessageIds ?? []) {
+      if (id) ids.add(id);
+    }
+    for (const id of ids) {
+      await this.watcherRunTracker.resolve(id, result);
+    }
   }
 
   /**

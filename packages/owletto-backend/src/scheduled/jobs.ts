@@ -5,6 +5,10 @@ import { withAdvisoryLock } from './advisory-lock';
 const MAINTENANCE_LOCK_KEY = 71002;
 const MAINTENANCE_INTERVAL_MS = 5 * 60_000;
 
+// Reset orphaned watcher runs once per process on the first maintenance tick
+// where we acquire the lock — ensures we are the singleton dispatcher/reconciler.
+let orphanedWatcherRunsReset = false;
+
 async function runMaintenanceTasks(env: Env): Promise<void> {
   logger.info('Running scheduled maintenance tasks');
   let failures = 0;
@@ -39,8 +43,20 @@ async function runMaintenanceTasks(env: Env): Promise<void> {
   }
 
   try {
-    const { dispatchPendingWatcherRuns, materializeDueWatcherRuns, reconcileWatcherRuns } =
-      await import('../watchers/automation');
+    const {
+      dispatchPendingWatcherRuns,
+      materializeDueWatcherRuns,
+      reconcileWatcherRuns,
+      resetOrphanedWatcherRuns,
+    } = await import('../watchers/automation');
+
+    if (!orphanedWatcherRunsReset) {
+      const { reset } = await resetOrphanedWatcherRuns();
+      orphanedWatcherRunsReset = true;
+      if (reset > 0) {
+        logger.info({ reset }, 'Scheduled: Reset orphaned watcher runs on first tick');
+      }
+    }
 
     const reconciliationResult = await reconcileWatcherRuns();
     const materializeResult = await materializeDueWatcherRuns(env);

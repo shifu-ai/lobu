@@ -1,8 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { inferWatcherGranularityFromSchedule } from '@lobu/owletto-sdk';
 import type { DbClient } from '../db/client';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
-import { isLobuGatewayRunning } from '../lobu/gateway';
+import {
+  getLobuCoreServices,
+  isLobuGatewayRunning,
+} from '../lobu/gateway';
 import { getLobuServiceToken } from '../lobu/service-token';
 import logger from '../utils/logger';
 import { createWatcherRun, type WatcherRunPayload } from '../utils/queue-helpers';
@@ -107,16 +111,11 @@ export function parseWatcherRunPayload(value: unknown): WatcherRunPayload | null
   };
 }
 
-export async function findWatcherWindowIdForPayload(
-  sql: DbClient,
-  payload: WatcherRunPayload
-): Promise<number | null> {
+async function findWindowIdForRun(sql: DbClient, runId: number): Promise<number | null> {
   const rows = await sql`
     SELECT id
     FROM watcher_windows
-    WHERE watcher_id = ${payload.watcher_id}
-      AND window_start = ${payload.window_start}::timestamptz
-      AND window_end = ${payload.window_end}::timestamptz
+    WHERE run_id = ${runId}
     ORDER BY id DESC
     LIMIT 1
   `;
@@ -187,7 +186,7 @@ async function enqueueWatcherRunForWatcher(
 async function markWatcherRunCompleted(
   sql: DbClient,
   runId: number,
-  windowId: number
+  windowId: number | null
 ): Promise<void> {
   await sql`
     UPDATE runs
@@ -196,6 +195,22 @@ async function markWatcherRunCompleted(
         completed_at = current_timestamp,
         error_message = NULL
     WHERE id = ${runId}
+      AND status IN ('running', 'claimed')
+  `;
+}
+
+async function markWatcherRunFailedIdempotent(
+  sql: DbClient,
+  runId: number,
+  message: string
+): Promise<void> {
+  await sql`
+    UPDATE runs
+    SET status = 'failed',
+        completed_at = current_timestamp,
+        error_message = ${message}
+    WHERE id = ${runId}
+      AND status IN ('running', 'claimed')
   `;
 }
 
@@ -228,12 +243,12 @@ export async function getWatcherRunInfo(
 export async function reconcileWatcherRuns(db?: DbClient): Promise<ReconcileWatcherRunsResult> {
   const sql = db ?? getDb();
   const rows = await sql`
-    SELECT id, approved_input
-    FROM runs
-    WHERE run_type = 'watcher'
-      AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
-      AND approved_input IS NOT NULL
-    ORDER BY created_at ASC
+    SELECT r.id, ww.id AS window_id
+    FROM runs r
+    JOIN watcher_windows ww ON ww.run_id = r.id
+    WHERE r.run_type = 'watcher'
+      AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+    ORDER BY r.created_at ASC
     LIMIT 100
   `;
 
@@ -241,17 +256,73 @@ export async function reconcileWatcherRuns(db?: DbClient): Promise<ReconcileWatc
 
   for (const row of rows) {
     const runId = Number((row as { id: unknown }).id);
-    const payload = parseWatcherRunPayload((row as { approved_input: unknown }).approved_input);
-    if (!payload) continue;
-
-    const windowId = await findWatcherWindowIdForPayload(sql, payload);
-    if (!windowId) continue;
+    const windowId = Number((row as { window_id: unknown }).window_id);
 
     await markWatcherRunCompleted(sql, runId, windowId);
     reconciled++;
   }
 
   return { reconciled };
+}
+
+/**
+ * Coarse backstop for watcher runs that never reached terminal state.
+ *
+ * The primary lifecycle is driven by WatcherRunTracker (in-process completion
+ * events) plus startup reconciliation on gateway boot. This sweeper only
+ * catches truly stuck runs — the tracker entry was lost without a crash
+ * (graceful shutdown mid-turn, redis message silently dropped, etc). TTL is
+ * intentionally generous so long LLM turns are not killed.
+ */
+const WATCHER_RUN_STALE_INTERVAL = '2 hours';
+
+export async function sweepStaleWatcherRuns(
+  db?: DbClient
+): Promise<{ timedOut: number }> {
+  const sql = db ?? getDb();
+  const errorMessage = `Watcher run exceeded ${WATCHER_RUN_STALE_INTERVAL} without reaching terminal state`;
+  const result = await sql`
+    UPDATE runs
+    SET status = 'timeout',
+        completed_at = current_timestamp,
+        error_message = ${errorMessage}
+    WHERE run_type = 'watcher'
+      AND status IN ('running', 'claimed')
+      AND COALESCE(claimed_at, created_at)
+          < current_timestamp - ${WATCHER_RUN_STALE_INTERVAL}::interval
+  `;
+  const timedOut = Number(result.count ?? 0);
+  if (timedOut > 0) {
+    logger.warn({ timedOut }, '[watchers] Swept stale watcher runs past coarse TTL');
+  }
+  return { timedOut };
+}
+
+/**
+ * Startup reconciliation: reset any watcher run claimed by this gateway that
+ * was never resolved (crash recovery). Safe to call only when this process
+ * holds the watcher-dispatcher advisory lock — otherwise another gateway may
+ * be legitimately executing those runs.
+ */
+export async function resetOrphanedWatcherRuns(
+  db?: DbClient
+): Promise<{ reset: number }> {
+  const sql = db ?? getDb();
+  const result = await sql`
+    UPDATE runs
+    SET status = 'pending',
+        claimed_by = NULL,
+        claimed_at = NULL,
+        dispatched_message_id = NULL,
+        error_message = NULL
+    WHERE run_type = 'watcher'
+      AND status IN ('running', 'claimed')
+  `;
+  const reset = Number(result.count ?? 0);
+  if (reset > 0) {
+    logger.info({ reset }, '[watchers] Reset orphaned watcher runs on startup');
+  }
+  return { reset };
 }
 
 export async function materializeDueWatcherRuns(
@@ -423,7 +494,8 @@ async function dispatchWatcherRun(
     return 'failed';
   }
 
-  const existingWindowId = await findWatcherWindowIdForPayload(sql, payload);
+  // Already-produced window for this exact run (e.g. retry after crash).
+  const existingWindowId = await findWindowIdForRun(sql, run.id);
   if (existingWindowId) {
     await markWatcherRunCompleted(sql, run.id, existingWindowId);
     return 'reconciled';
@@ -455,6 +527,7 @@ async function dispatchWatcherRun(
     Authorization: `Bearer ${serviceToken}`,
     'Content-Type': 'application/json',
   };
+  const messageId = randomUUID();
 
   try {
     const sessionResponse = await fetch(baseUrl, {
@@ -485,10 +558,29 @@ async function dispatchWatcherRun(
       return 'failed';
     }
 
+    // Mark the run 'running' with a durable message correlation BEFORE posting,
+    // so a late completion event arriving mid-POST has somewhere to land.
+    await sql`
+      UPDATE runs
+      SET status = 'running',
+          claimed_by = ${`lobu:${payload.agent_id}`},
+          dispatched_message_id = ${messageId},
+          error_message = NULL
+      WHERE id = ${run.id}
+    `;
+
+    registerWatcherRunHandle({
+      runId: run.id,
+      watcherId: run.watcher_id,
+      organizationId: run.organization_id,
+      messageId,
+    });
+
     const messageResponse = await fetch(messagesUrl, {
       method: 'POST',
       headers,
       body: JSON.stringify({
+        messageId,
         content: buildDispatchMessage({
           watcherId: run.watcher_id,
           runId: run.id,
@@ -501,6 +593,7 @@ async function dispatchWatcherRun(
 
     if (!messageResponse.ok) {
       const body = await messageResponse.text();
+      unregisterWatcherRunHandle(messageId);
       await failWatcherRun(
         sql,
         run.id,
@@ -509,16 +602,9 @@ async function dispatchWatcherRun(
       return 'failed';
     }
 
-    await sql`
-      UPDATE runs
-      SET status = 'running',
-          claimed_by = ${`lobu:${payload.agent_id}`},
-          error_message = NULL
-      WHERE id = ${run.id}
-    `;
-
     return 'dispatched';
   } catch (error) {
+    unregisterWatcherRunHandle(messageId);
     await failWatcherRun(
       sql,
       run.id,
@@ -526,6 +612,45 @@ async function dispatchWatcherRun(
     );
     return 'failed';
   }
+}
+
+function registerWatcherRunHandle(params: {
+  runId: number;
+  watcherId: number;
+  organizationId: string;
+  messageId: string;
+}): void {
+  const coreServices = getLobuCoreServices();
+  const tracker = coreServices?.getWatcherRunTracker?.();
+  if (!tracker) {
+    logger.warn(
+      { runId: params.runId },
+      '[watcher-dispatch] No WatcherRunTracker available — completion will rely on reconciler'
+    );
+    return;
+  }
+
+  tracker.register({
+    messageId: params.messageId,
+    runId: params.runId,
+    watcherId: params.watcherId,
+    organizationId: params.organizationId,
+    onResolve: async (result: { ok: true } | { ok: false; error: string }) => {
+      const db = getDb();
+      if (result.ok) {
+        const windowId = await findWindowIdForRun(db, params.runId);
+        await markWatcherRunCompleted(db, params.runId, windowId);
+      } else {
+        await markWatcherRunFailedIdempotent(db, params.runId, result.error);
+      }
+    },
+  });
+}
+
+function unregisterWatcherRunHandle(messageId: string): void {
+  const coreServices = getLobuCoreServices();
+  const tracker = coreServices?.getWatcherRunTracker?.();
+  tracker?.unregister(messageId);
 }
 
 export async function dispatchPendingWatcherRuns(

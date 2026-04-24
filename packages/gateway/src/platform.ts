@@ -29,6 +29,7 @@ import type { InstructionService } from "./services/instruction-service.js";
 import type { SseManager } from "./services/sse-manager.js";
 import type { TranscriptionService } from "./services/transcription-service.js";
 import type { ISessionManager } from "./session.js";
+import type { WatcherRunTracker } from "./watchers/run-tracker.js";
 
 // ============================================================================
 // Core Services Interface
@@ -53,6 +54,7 @@ export interface CoreServices {
   getInstructionService(): InstructionService | undefined;
   getInteractionService(): InteractionService;
   getSseManager(): SseManager;
+  getWatcherRunTracker(): WatcherRunTracker;
   getAgentSettingsStore(): AgentSettingsStore;
   getChannelBindingService(): ChannelBindingService;
   getTranscriptionService(): TranscriptionService | undefined;

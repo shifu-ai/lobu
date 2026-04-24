@@ -228,6 +228,30 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
     },
   },
   {
+    id: 'watcher-run-correlation',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        ALTER TABLE public.runs
+        ADD COLUMN IF NOT EXISTS dispatched_message_id text
+      `);
+      await sql.unsafe(`
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_dispatched_message_id
+        ON public.runs (dispatched_message_id)
+        WHERE dispatched_message_id IS NOT NULL
+      `);
+      await sql.unsafe(`
+        ALTER TABLE public.watcher_windows
+        ADD COLUMN IF NOT EXISTS run_id bigint
+        REFERENCES public.runs(id) ON DELETE SET NULL
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS idx_watcher_windows_run_id
+        ON public.watcher_windows (run_id)
+        WHERE run_id IS NOT NULL
+      `);
+    },
+  },
+  {
     id: 'mcp-sessions-table',
     apply: async (sql) => {
       await sql.unsafe(`

@@ -28,6 +28,11 @@ export type {
 } from "./embedded.js";
 export { Gateway, type GatewayOptions } from "./gateway-main.js";
 export { CoreServices } from "./services/core-services.js";
+export {
+  WatcherRunTracker,
+  type WatcherRunHandle,
+  type WatcherRunResult,
+} from "./watchers/run-tracker.js";
 export { InMemoryAgentStore } from "./stores/in-memory-agent-store.js";
 export {
   AwsSecretsManagerSecretStore,

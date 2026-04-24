@@ -1433,11 +1433,11 @@ async function handleCompleteWindow(
       INSERT INTO watcher_windows (
         id, watcher_id, window_start, window_end, granularity,
         extracted_data, content_analyzed, model_used, client_id, run_metadata,
-        is_rollup, depth, source_window_ids, created_at
+        is_rollup, depth, source_window_ids, run_id, created_at
       ) VALUES (
         ${newWindowId}, ${watcherId}, ${window_start}, ${window_end}, ${granularity || timeGranularity},
         ${sql.json(extractedData)}, 0, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)},
-        true, ${depth}, ${sourceIds}, NOW()
+        true, ${depth}, ${sourceIds}, ${watcherRunId}, NOW()
       )
     `;
 
@@ -1551,6 +1551,7 @@ async function handleCompleteWindow(
           model_used = ${provenanceModel},
           client_id = ${provenanceClientId},
           run_metadata = ${sql.json(provenanceMetadata)},
+          run_id = COALESCE(run_id, ${watcherRunId}),
           created_at = COALESCE(created_at, NOW())
         WHERE id = ${tokenWindowId} AND watcher_id = ${watcherId}
         RETURNING id
@@ -1599,11 +1600,11 @@ async function handleCompleteWindow(
           INSERT INTO watcher_windows (
             id,
             watcher_id, window_start, window_end, granularity,
-            extracted_data, content_analyzed, model_used, client_id, run_metadata, created_at
+            extracted_data, content_analyzed, model_used, client_id, run_metadata, run_id, created_at
           ) VALUES (
             ${newWindowId},
             ${watcherId}, ${window_start}, ${window_end}, ${timeGranularity},
-            ${sql.json(cleanedExtractedData)}, ${uniqueContentIds.length}, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)}, NOW()
+            ${sql.json(cleanedExtractedData)}, ${uniqueContentIds.length}, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)}, ${watcherRunId}, NOW()
           )
         `;
       } catch (err: any) {

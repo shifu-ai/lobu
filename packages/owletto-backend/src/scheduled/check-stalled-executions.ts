@@ -1,11 +1,11 @@
 /**
  * Scheduled Job: Check Stalled Runs
  *
- * Runs every 5 minutes to detect runs that:
- * 1. Were started by a worker but never sent a heartbeat (5+ minutes)
- * 2. Stopped sending heartbeats (5+ minutes since last heartbeat)
- *
- * Marks them as 'timeout' and creates new pending run for retry (sync only).
+ * Runs every 5 minutes to detect stalled sync/embed-backfill runs driven by the
+ * out-of-process owletto-worker daemon. Watcher runs are driven in-process by
+ * the embedded Lobu gateway; their lifecycle is handled by WatcherRunTracker
+ * and startup reconciliation (see automation.ts and lobu/gateway.ts), with a
+ * coarse backstop in sweepStaleWatcherRuns below.
  */
 
 import { getDb } from '../db/client';
@@ -13,29 +13,27 @@ import type { Env } from '../index';
 import { expireStaleConnectTokens } from '../utils/connect-tokens';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
-import { createWatcherRun } from '../utils/queue-helpers';
 import {
   EXECUTING_RUN_STATUSES,
   isExecutingRunStatus,
   runStatusLiteral,
 } from '../utils/run-statuses';
-import {
-  findWatcherWindowIdForPayload,
-  parseWatcherRunPayload,
-  reconcileWatcherRuns,
-} from '../watchers/automation';
+import { reconcileWatcherRuns, sweepStaleWatcherRuns } from '../watchers/automation';
 
 export async function checkStalledExecutions(_env: Env) {
   const sql = getDb();
 
   await reconcileWatcherRuns(sql);
+  await sweepStaleWatcherRuns(sql);
 
-    // Find stalled runs that are still considered executing, including legacy claimed rows.
+    // Find stalled sync/embed_backfill runs (driven by out-of-process workers).
+    // Watcher runs are excluded — they run in-process and use tracker-based lifecycle.
     const timedOut = await sql`
       SELECT id, feed_id, connection_id, run_type, claimed_by, last_heartbeat_at, claimed_at,
              organization_id, connector_key, connector_version, watcher_id, approved_input
       FROM runs
-      WHERE status = ANY(${runStatusLiteral(EXECUTING_RUN_STATUSES)}::text[])
+      WHERE run_type IN ('sync', 'embed_backfill')
+        AND status = ANY(${runStatusLiteral(EXECUTING_RUN_STATUSES)}::text[])
         AND (
           (last_heartbeat_at IS NULL AND COALESCE(claimed_at, created_at) < current_timestamp - INTERVAL '5 minutes')
           OR
@@ -68,33 +66,6 @@ export async function checkStalledExecutions(_env: Env) {
               return; // Already handled by another process
             }
 
-            if (run.run_type === 'watcher') {
-              const payload = parseWatcherRunPayload(run.approved_input);
-              if (!payload) {
-                await tx`
-                  UPDATE runs
-                  SET status = 'failed',
-                      completed_at = current_timestamp,
-                      error_message = 'Watcher run timed out with an invalid dispatch payload.'
-                  WHERE id = ${run.id}
-                `;
-                return;
-              }
-
-              const existingWindowId = await findWatcherWindowIdForPayload(tx, payload);
-              if (existingWindowId) {
-                await tx`
-                  UPDATE runs
-                  SET status = 'completed',
-                      window_id = ${existingWindowId},
-                      completed_at = current_timestamp,
-                      error_message = NULL
-                  WHERE id = ${run.id}
-                `;
-                return;
-              }
-            }
-
             await tx`
               UPDATE runs
               SET status = 'timeout',
@@ -120,45 +91,6 @@ export async function checkStalledExecutions(_env: Env) {
                 if (isUniqueViolation(retryError, 'idx_runs_active_sync_per_feed')) {
                   logger.info(
                     `[StalledRuns] Skipped retry for feed ${run.feed_id} - another active sync run exists`
-                  );
-                } else {
-                  throw retryError;
-                }
-              }
-            }
-
-            if (run.run_type === 'watcher' && run.watcher_id) {
-              const payload = parseWatcherRunPayload(run.approved_input);
-              if (!payload) {
-                return;
-              }
-
-              try {
-                const retryResult = await createWatcherRun(
-                  {
-                    organizationId: run.organization_id,
-                    watcherId: run.watcher_id,
-                    agentId: payload.agent_id,
-                    windowStart: payload.window_start,
-                    windowEnd: payload.window_end,
-                    dispatchSource: payload.dispatch_source,
-                  },
-                  tx
-                );
-
-                if (retryResult.created) {
-                  logger.info(
-                    `[StalledRuns] Created retry watcher run ${retryResult.runId} for watcher ${run.watcher_id}`
-                  );
-                } else {
-                  logger.info(
-                    `[StalledRuns] Reused watcher run ${retryResult.runId} for watcher ${run.watcher_id}`
-                  );
-                }
-              } catch (retryError) {
-                if (isUniqueViolation(retryError, 'idx_runs_active_watcher_per_watcher')) {
-                  logger.info(
-                    `[StalledRuns] Skipped watcher retry for watcher ${run.watcher_id} - another active watcher run exists`
                   );
                 } else {
                   throw retryError;
