@@ -6,7 +6,7 @@
   "type": "module",
   "description": "Lobu memory backend — Hono HTTP server, MCP handler, REST API, embedded @lobu/gateway",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --ignore=../owletto-web/** --ignore=../../node_modules/** src/server.ts",
     "start": "tsx src/server.ts",
     "test": "vitest",
     "test:pglite": "OWLETTO_TEST_BACKEND=pglite vitest",

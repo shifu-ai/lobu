@@ -73,4 +73,4 @@ echo "→ embedded gateway proxy on :8118"
 echo "→ Vite HMR in-process (same port)"
 echo ""
 
-exec bun --cwd packages/owletto-backend run dev
+exec bun run --filter '@lobu/owletto-backend' dev

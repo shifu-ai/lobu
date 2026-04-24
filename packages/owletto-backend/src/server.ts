@@ -18,7 +18,6 @@ dotenv.config();
 import { existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import type { Env } from './index';
@@ -29,23 +28,19 @@ import { initWorkspaceProvider } from './workspace';
 
 // Create a wrapper app that injects environment into each request
 const app = new Hono<{ Bindings: Env }>();
-const APP_ROOT = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
 
 function resolveWebSourceRoot(): string {
-  const candidates = [
-    process.env.WEB_SOURCE_DIR?.trim(),
-    path.resolve(APP_ROOT, 'packages/owletto-web'),
-    path.resolve(process.cwd(), 'packages/owletto-web'),
-    path.resolve(process.cwd(), '../packages/owletto-web'),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-
-  for (const candidate of candidates) {
-    if (existsSync(path.join(candidate, 'index.html'))) {
-      return candidate;
-    }
+  const projectRoot = process.env.LOBU_DEV_PROJECT_PATH || process.cwd();
+  const webSourceDir =
+    process.env.WEB_SOURCE_DIR?.trim() ||
+    path.join(projectRoot, 'packages/owletto-web');
+  if (!existsSync(path.join(webSourceDir, 'index.html'))) {
+    throw new Error(
+      `Owletto web source directory not found: ${webSourceDir}. ` +
+        `Set WEB_SOURCE_DIR or LOBU_DEV_PROJECT_PATH to the monorepo root.`
+    );
   }
-
-  throw new Error('Owletto web source directory not found');
+  return webSourceDir;
 }
 
 // Inject environment variables into Hono context

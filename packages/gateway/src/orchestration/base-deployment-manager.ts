@@ -126,6 +126,19 @@ export interface OrchestratorConfig {
       digest?: string;
       pullPolicy: string;
     };
+    /**
+     * Absolute path to the worker TypeScript entrypoint. Required for the
+     * embedded deployment manager; ignored for docker/kubernetes (the image
+     * already bakes the entry in). Callers compute this once at boot — the
+     * gateway never probes cwd or reads env at deployment time.
+     */
+    entryPoint?: string;
+    /**
+     * Extra PATH entries prepended when spawning embedded worker processes
+     * (e.g. workspace-local `.bin` directories for `tsx`, `bun`). Callers
+     * supply absolute paths; the manager uses them verbatim.
+     */
+    binPathEntries?: string[];
     serviceAccountName?: string;
     imagePullSecrets?: string[];
     runtimeClassName?: string; // Optional - if not set or unavailable, uses default container runtime

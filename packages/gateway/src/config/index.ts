@@ -3,6 +3,9 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
 import type { AgentOptions, LogLevel, PluginConfig } from "@lobu/core";
 import {
   DEFAULTS as CORE_DEFAULTS,
@@ -314,6 +317,19 @@ function deepMerge<T extends Record<string, any>>(
   return result;
 }
 
+function buildEmbeddedWorkerPaths(projectRoot: string): {
+  entryPoint: string;
+  binPathEntries: string[];
+} {
+  return {
+    entryPoint: path.join(projectRoot, "packages/worker/src/index.ts"),
+    binPathEntries: [
+      path.join(projectRoot, "node_modules/.bin"),
+      path.join(projectRoot, "packages/worker/node_modules/.bin"),
+    ],
+  };
+}
+
 /**
  * Build complete gateway configuration from environment variables,
  * optionally deep-merged with explicit overrides.
@@ -484,6 +500,13 @@ export function buildGatewayConfig(
         maxDeployments: getOptionalNumber(
           "MAX_WORKER_DEPLOYMENTS",
           DEFAULTS.MAX_WORKER_DEPLOYMENTS
+        ),
+        // Embedded-mode paths. Resolved from the monorepo root pointed at by
+        // LOBU_DEV_PROJECT_PATH (defaults to cwd so CLI invocations from the
+        // repo root still work). Docker/K8s modes ignore these — the worker
+        // image bakes the entrypoint in.
+        ...buildEmbeddedWorkerPaths(
+          process.env.LOBU_DEV_PROJECT_PATH || process.cwd()
         ),
       },
       kubernetes: {
