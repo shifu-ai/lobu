@@ -16,7 +16,7 @@
     },
     "packages/cli": {
       "name": "@lobu/cli",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "bin": {
         "lobu": "bin/lobu.js",
       },
@@ -41,7 +41,7 @@
     },
     "packages/core": {
       "name": "@lobu/core",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "dependencies": {
         "@opentelemetry/api": "^1.9.0",
         "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
@@ -61,7 +61,7 @@
     },
     "packages/gateway": {
       "name": "@lobu/gateway",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "dependencies": {
         "@aws-sdk/client-bedrock": "^3.1028.0",
         "@aws-sdk/client-secrets-manager": "^3.1028.0",
@@ -161,7 +161,7 @@
     },
     "packages/owletto-cli": {
       "name": "owletto",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "bin": {
         "owletto": "./dist/bin.js",
       },
@@ -221,7 +221,7 @@
     },
     "packages/owletto-openclaw": {
       "name": "@lobu/owletto-openclaw",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "devDependencies": {
         "@types/node": "^20.10.0",
         "postgres": "^3.4.7",
@@ -231,7 +231,7 @@
     },
     "packages/owletto-sdk": {
       "name": "@lobu/owletto-sdk",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "dependencies": {
         "@sinclair/typebox": "^0.34.41",
         "ky": "^1.14.0",
@@ -268,7 +268,7 @@
     },
     "packages/worker": {
       "name": "@lobu/worker",
-      "version": "4.2.0",
+      "version": "4.0.1",
       "bin": {
         "lobu-worker": "./dist/index.js",
       },
