@@ -28,7 +28,7 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-if [ ! -d packages/gateway/dist ] || [ ! -d packages/core/dist ]; then
+if [ ! -d packages/core/dist ] || [ ! -d packages/owletto-sdk/dist ] || [ ! -d packages/gateway/dist ]; then
   echo "📦 Building workspace packages (one-time)…"
   make build-packages
 fi

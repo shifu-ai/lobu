@@ -18,6 +18,7 @@ dotenv.config();
 import { existsSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { getRequestListener } from '@hono/node-server';
 import { Hono } from 'hono';
 import type { Env } from './index';
@@ -29,11 +30,37 @@ import { initWorkspaceProvider } from './workspace';
 // Create a wrapper app that injects environment into each request
 const app = new Hono<{ Bindings: Env }>();
 
+// Resolve repo root from this source file: …/packages/owletto-backend/src/server.ts → repo root.
+const PACKAGE_REPO_ROOT = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../../..'
+);
+
+// Make LOBU_DEV_PROJECT_PATH defaultable when invoked from the package dir
+// (`cd packages/owletto-backend && bun run dev`). Downstream consumers like
+// the embedded gateway's buildGatewayConfig() read this to derive worker
+// paths; without this fallback they'd resolve against process.cwd().
+if (!process.env.LOBU_DEV_PROJECT_PATH) {
+  process.env.LOBU_DEV_PROJECT_PATH = PACKAGE_REPO_ROOT;
+}
+
 function resolveWebSourceRoot(): string {
-  const projectRoot = process.env.LOBU_DEV_PROJECT_PATH || process.cwd();
-  const webSourceDir =
-    process.env.WEB_SOURCE_DIR?.trim() ||
-    path.join(projectRoot, 'packages/owletto-web');
+  const explicit = process.env.WEB_SOURCE_DIR?.trim();
+  if (explicit) {
+    if (!existsSync(path.join(explicit, 'index.html'))) {
+      throw new Error(
+        `WEB_SOURCE_DIR set but no index.html found: ${explicit}`
+      );
+    }
+    return explicit;
+  }
+
+  const projectRoot =
+    process.env.LOBU_DEV_PROJECT_PATH || PACKAGE_REPO_ROOT;
+  const webSourceDir = path.resolve(
+    projectRoot,
+    'packages/owletto-web'
+  );
   if (!existsSync(path.join(webSourceDir, 'index.html'))) {
     throw new Error(
       `Owletto web source directory not found: ${webSourceDir}. ` +

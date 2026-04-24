@@ -4,8 +4,6 @@ import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-
-const __filename = fileURLToPath(import.meta.url);
 import type { AgentOptions, LogLevel, PluginConfig } from "@lobu/core";
 import {
   DEFAULTS as CORE_DEFAULTS,
@@ -19,6 +17,7 @@ import {
 import { config as dotenvConfig } from "dotenv";
 import type { OrchestratorConfig } from "../orchestration/base-deployment-manager.js";
 
+const __filename = fileURLToPath(import.meta.url);
 const logger = createLogger("cli-config");
 const OWLETTO_PLUGIN_SOURCE = "@lobu/owletto-openclaw";
 const NATIVE_MEMORY_PLUGIN_SOURCE = "@openclaw/native-memory";
@@ -321,11 +320,15 @@ function buildEmbeddedWorkerPaths(projectRoot: string): {
   entryPoint: string;
   binPathEntries: string[];
 } {
+  // path.resolve so a relative LOBU_DEV_PROJECT_PATH still yields absolute
+  // paths — workers are spawned with cwd=workspaceDir, so relative entries
+  // would resolve against the workspace and fail.
+  const root = path.resolve(projectRoot);
   return {
-    entryPoint: path.join(projectRoot, "packages/worker/src/index.ts"),
+    entryPoint: path.join(root, "packages/worker/src/index.ts"),
     binPathEntries: [
-      path.join(projectRoot, "node_modules/.bin"),
-      path.join(projectRoot, "packages/worker/node_modules/.bin"),
+      path.join(root, "node_modules/.bin"),
+      path.join(root, "packages/worker/node_modules/.bin"),
     ],
   };
 }
