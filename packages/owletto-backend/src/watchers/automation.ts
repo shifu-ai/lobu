@@ -316,7 +316,9 @@ export async function resetOrphanedWatcherRuns(
         dispatched_message_id = NULL,
         error_message = NULL
     WHERE run_type = 'watcher'
-      AND status IN ('running', 'claimed')
+      AND status = 'claimed'
+      AND claimed_by = 'lobu-dispatcher'
+      AND COALESCE(approved_input->>'dispatch_source', 'scheduled') = 'scheduled'
   `;
   const reset = Number(result.count ?? 0);
   if (reset > 0) {
@@ -422,13 +424,7 @@ function buildDispatchMessage(params: {
 }
 
 async function failWatcherRun(sql: DbClient, runId: number, message: string): Promise<void> {
-  await sql`
-    UPDATE runs
-    SET status = 'failed',
-        completed_at = current_timestamp,
-        error_message = ${message}
-    WHERE id = ${runId}
-  `;
+  await markWatcherRunFailedIdempotent(sql, runId, message);
 }
 
 async function claimWatcherRun(
