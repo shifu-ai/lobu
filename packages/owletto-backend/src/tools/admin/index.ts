@@ -1,16 +1,14 @@
 /**
- * Admin Tools Module
+ * Internal admin tool registrations.
  *
- * This module exports all admin-related tools and their schemas.
+ * These tools are NOT exposed on the external MCP `tools/list` — agents work
+ * against them through the typed `ClientSDK` invoked from the `execute`
+ * tool. They remain registered as `internal: true` so the in-process test
+ * harness can dispatch them by name without forcing every test to migrate
+ * to script-based calls.
  *
- * Consolidated admin tools surface:
- * - manage_entity: entity CRUD + relationship actions
- * - manage_entity_schema: entity type + relationship type schema actions
- * - manage_connections: connection + connector actions
- * - manage_feeds: data sync feed actions
- * - manage_auth_profiles: reusable auth profile actions
- * - manage_watchers: watcher instance actions + versioning
- * - manage_classifiers: classifier template + manual classification actions
+ * `query_sql` is the exception: it's a kept hot-path tool registered
+ * directly in `registry.ts`, not here.
  */
 
 import type { Static } from '@sinclair/typebox';
@@ -24,8 +22,9 @@ import { ManageEntitySchemaSchema, manageEntitySchema } from './manage_entity_sc
 import { ManageFeedsSchema, manageFeeds } from './manage_feeds';
 import { ManageOperationsSchema, manageOperations } from './manage_operations';
 import { ManageViewTemplatesSchema, manageViewTemplates } from './manage_view_templates';
-import { ManageWatchersSchema, manageWatchers } from './manage_watchers';
-import { QuerySqlSchema, querySql } from './query_sql';
+import { ListWatchersSchema, ManageWatchersSchema, listWatchers, manageWatchers } from './manage_watchers';
+import { GetContentSchema, getContent } from '../get_content';
+import { GetWatcherSchema, getWatcher } from '../get_watchers';
 
 // ============================================
 // Admin Tool Definitions
@@ -38,6 +37,7 @@ export const ADMIN_TOOLS: ToolDefinition[] = [
       'Entity management and relationships. Actions: create (new entity), update (modify metadata), list (browse with filters), get (view details), delete (remove entity), link (create relationship between entities), unlink (soft-delete relationship), update_link (change metadata/confidence/source), list_links (browse entity relationships).',
     inputSchema: ManageEntitySchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageEntitySchema>, env: Env, ctx: ToolContext) => {
       return await manageEntity(args, env, ctx);
     },
@@ -48,6 +48,7 @@ export const ADMIN_TOOLS: ToolDefinition[] = [
       'Manage entity type definitions and relationship type definitions. Set schema_type="entity_type" for entity types or schema_type="relationship_type" for relationship types. Entity type actions: list, get, create, update, delete, audit. Relationship type actions: list, get, create, update, delete, add_rule, remove_rule, list_rules.',
     inputSchema: ManageEntitySchemaSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageEntitySchemaSchema>, env: Env, ctx: ToolContext) => {
       return await manageEntitySchema(args, env, ctx);
     },
@@ -63,6 +64,7 @@ export const ADMIN_TOOLS: ToolDefinition[] = [
       'Actions: list, list_connector_definitions, get, create, connect, update, delete, test, install_connector, uninstall_connector, update_connector_auth, toggle_connector_login.',
     inputSchema: ManageConnectionsSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageConnectionsSchema>, env: Env, ctx: ToolContext) => {
       return await manageConnections(args, env, ctx);
     },
@@ -73,6 +75,7 @@ export const ADMIN_TOOLS: ToolDefinition[] = [
       'Manage data sync feeds for connections. Actions: list_feeds, get_feed, create_feed, update_feed, delete_feed, trigger_feed.',
     inputSchema: ManageFeedsSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageFeedsSchema>, env: Env, ctx: ToolContext) => {
       return await manageFeeds(args, env, ctx);
     },
@@ -83,6 +86,7 @@ export const ADMIN_TOOLS: ToolDefinition[] = [
       'Manage reusable auth profiles for connector authentication. Actions: list_auth_profiles, get_auth_profile, test_auth_profile, create_auth_profile, update_auth_profile, delete_auth_profile.',
     inputSchema: ManageAuthProfilesSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageAuthProfilesSchema>, env: Env, ctx: ToolContext) => {
       return await manageAuthProfiles(args, env, ctx);
     },
@@ -110,6 +114,7 @@ REACTION SCRIPTS: Use set_reaction_script to attach TypeScript that auto-execute
 FEEDBACK: Use submit_feedback(watcher_id, window_id, corrections, notes) to correct extraction fields. Use get_feedback(watcher_id) to retrieve corrections. Corrections are automatically injected into future prompts.`,
     inputSchema: ManageWatchersSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageWatchersSchema>, env: Env, ctx: ToolContext) => {
       return await manageWatchers(args, env, ctx);
     },
@@ -120,6 +125,7 @@ FEEDBACK: Use submit_feedback(watcher_id, window_id, corrections, notes) to corr
       'Manage classifier templates and manual classifications. Template actions: create, create_version, list, get_versions, set_current_version, generate_embeddings, delete. Manual classification: classify (single or batch content classification with classifier_slug + value). Enable classifiers per entity via manage_entity(action="update", enabled_classifiers=[...]).',
     inputSchema: ManageClassifiersSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageClassifiersSchema>, env: Env, ctx: ToolContext) => {
       return await manageClassifiers(args, env, ctx);
     },
@@ -130,18 +136,39 @@ FEEDBACK: Use submit_feedback(watcher_id, window_id, corrections, notes) to corr
       'Manage view templates for entity types and individual entities. One tool for all template operations. Actions: set (create/update template), get (view current + history), rollback (revert to previous version), remove_tab (delete a named tab). Specify resource_type (entity_type/entity) and resource_id (entity type slug or entity id). Templates can include a data_sources key with named SQL queries that execute server-side. Queries run against org-scoped virtual tables (entities, events, connections, watchers, event_classifications) or entity type slugs as table names. Results are returned as template_data in resolve_path.',
     inputSchema: ManageViewTemplatesSchema,
     annotations: { destructiveHint: false },
+    internal: true,
     handler: async (args: Static<typeof ManageViewTemplatesSchema>, env: Env, ctx: ToolContext) => {
       return await manageViewTemplates(args, env, ctx);
     },
   },
   {
-    name: 'query_sql',
-    description:
-      'Execute paginated, sortable, searchable read-only SQL queries. Table references are auto-scoped to your organization. Do NOT include ORDER BY/LIMIT/OFFSET or positional parameters in your SQL.',
-    inputSchema: QuerySqlSchema,
+    name: 'list_watchers',
+    description: 'Internal: list watcher definitions. Production agents go through the SDK via `execute`.',
+    inputSchema: ListWatchersSchema,
     annotations: { readOnlyHint: true, idempotentHint: true },
-    handler: async (args: Static<typeof QuerySqlSchema>, env: Env, ctx: ToolContext) => {
-      return await querySql(args, env, ctx);
+    internal: true,
+    handler: async (args: Static<typeof ListWatchersSchema>, env: Env, ctx: ToolContext) => {
+      return await listWatchers(args, env, ctx);
+    },
+  },
+  {
+    name: 'get_watcher',
+    description: 'Internal: query saved analysis windows for a single watcher.',
+    inputSchema: GetWatcherSchema,
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    internal: true,
+    handler: async (args: Static<typeof GetWatcherSchema>, env: Env, ctx: ToolContext) => {
+      return await getWatcher(args, env, ctx);
+    },
+  },
+  {
+    name: 'read_knowledge',
+    description: 'Internal: list/search saved content for an entity, including watcher-window context.',
+    inputSchema: GetContentSchema,
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    internal: true,
+    handler: async (args: Static<typeof GetContentSchema>, env: Env, ctx: ToolContext) => {
+      return await getContent(args, env, ctx);
     },
   },
 ];

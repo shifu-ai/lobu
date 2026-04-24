@@ -18,7 +18,6 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
-    "@jitl/quickjs-ng-wasmfile-release-asyncify": "0.31.0",
     "@lobu/core": "workspace:*",
     "@lobu/gateway": "workspace:*",
     "@lobu/owletto-sdk": "workspace:*",
@@ -26,7 +25,6 @@
     "@polyglot-sql/sdk": "^0.1.13",
     "@react-email/components": "^1.0.12",
     "@react-email/render": "^2.0.7",
-    "@sebastianwessel/quickjs": "^3.0.1",
     "@sentry/node": "^9.0.0",
     "@sinclair/typebox": "^0.34.41",
     "@slack/socket-mode": "^2.0.6",

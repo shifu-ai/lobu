@@ -9,7 +9,7 @@ import { getRequiredAccessLevel, isPublicReadable } from '../auth/tool-access';
 import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
-import { joinOrganization, listOrganizations, switchOrganization } from './organizations';
+import { listOrganizations, switchOrganization } from './organizations';
 import { getTool, type ToolContext } from './registry';
 
 /**
@@ -77,9 +77,9 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     if (!authCtx.isAuthenticated) {
       throw new Error('Authentication required.');
     }
-    if (authCtx.scopedToOrg) {
-      throw new Error(`Tool '${toolName}' is only available on the unscoped /mcp endpoint.`);
-    }
+    // list_organizations + switch_organization are now exposed on both
+    // unscoped /mcp and scoped /mcp/{slug} endpoints. The URL pin defines the
+    // default org; switching moves the session.
     return;
   }
 
@@ -97,11 +97,11 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {
       throw new Error(
-        'This public workspace is read-only for your account. Call the `join_organization` tool to become a member and unlock write access (or join via the web UI).'
+        'This public workspace is read-only for your account. Ask an organization owner for an invite to unlock write access.'
       );
     }
     throw new Error(
-      'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access, then call `join_organization` to become a member.'
+      'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.'
     );
   }
 
@@ -121,7 +121,7 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     }
     if (requiredAccess === 'write') {
       throw new Error(
-        'This MCP session is read-only. If this is a public workspace, call `join_organization` first, then reconnect with write-scoped OAuth. Otherwise ask an owner to add you.'
+        'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.'
       );
     }
     throw new Error(
@@ -140,29 +140,6 @@ export async function executeTool(
   env: Env,
   authCtx: AuthContext
 ): Promise<unknown> {
-  // join_organization bypasses the standard membership/role check — its whole
-  // purpose is to upgrade a non-member / read-only session into a member.
-  // It still requires the caller to hold at least mcp:read, so OAuth tokens
-  // without any MCP scope cannot change membership. The tool itself enforces
-  // public-org policy.
-  if (toolName === 'join_organization') {
-    if (!authCtx.userId) {
-      throw new Error('Authentication required to join an organization. Sign in with OAuth first.');
-    }
-    if (!hasRequiredMcpScope('read', authCtx.scopes)) {
-      throw new Error(
-        'This MCP session does not include any mcp:* scope. Reconnect with at least read access before calling `join_organization`.'
-      );
-    }
-    return trackMCPToolCall(toolName, args, () =>
-      joinOrganization(args as any, env, {
-        userId: authCtx.userId!,
-        currentOrgId: authCtx.organizationId,
-        scopes: authCtx.scopes ?? null,
-      })
-    );
-  }
-
   checkToolAccess(toolName, args, authCtx);
 
   // Org-agnostic tools get a minimal context with just userId

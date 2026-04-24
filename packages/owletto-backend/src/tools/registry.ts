@@ -9,18 +9,16 @@ import type { Static } from '@sinclair/typebox';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
 import { ADMIN_TOOLS } from './admin';
-import { ListWatchersSchema, listWatchers } from './admin/manage_watchers';
-import { GetContentSchema, getContent } from './get_content';
-import { GetWatcherSchema, getWatcher } from './get_watchers';
+import { QuerySqlSchema, querySql } from './admin/query_sql';
 import {
-  JoinOrganizationSchema,
   ListOrganizationsSchema,
   SwitchOrganizationSchema,
 } from './organizations';
 import { ResolvePathSchema, resolvePath } from './resolve_path';
 import { SaveContentSchema, saveContent } from './save_content';
-// Import tool implementations and their schemas
 import { SearchSchema, search } from './search';
+import { ExecuteSchema, executeScript } from './sdk_execute';
+import { SdkSearchSchema, sdkSearch } from './sdk_search';
 
 // ============================================
 // Tool Definitions
@@ -77,61 +75,15 @@ export interface ToolDefinition<T = any> {
 }
 
 const TOOLS: ToolDefinition[] = [
+  // ─── Hot-path read/write surface ──────────────────────────────────────────
   {
     name: 'search_knowledge',
     description:
-      'Search the workspace knowledge graph and saved memory for entities and related context. Supports fuzzy matching and filtering by entity_type. Use this as the FIRST step when the user asks about a specific entity. If entity is missing, create it with manage_entity then configure ingestion with manage_connections.',
+      'Search the workspace knowledge graph and saved memory for entities and related context. Supports fuzzy matching and filtering by entity_type. Use this as the FIRST step when the user asks about a specific entity. To create or modify entities, use the `execute` tool with a TypeScript script over the `client` SDK.',
     inputSchema: SearchSchema,
     annotations: { readOnlyHint: true, idempotentHint: true },
     handler: async (args: Static<typeof SearchSchema>, env: Env, ctx: ToolContext) => {
       return await search(args, env, ctx);
-    },
-  },
-  {
-    name: 'list_watchers',
-    description:
-      'List watcher definitions and metadata for the current organization. Use optional filters like entity_id, watcher_id, or status. This is the discovery tool for finding watchers before using get_watcher on a specific watcher.',
-    inputSchema: ListWatchersSchema,
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    handler: async (args: Static<typeof ListWatchersSchema>, env: Env, ctx: ToolContext) => {
-      return await listWatchers(args, env, ctx);
-    },
-  },
-  {
-    name: 'get_watcher',
-    description:
-      'Query saved analysis windows and metadata for a single watcher. Requires watcher_id. Use list_watchers to discover watchers first. Pair with read_knowledge + manage_watchers(action="complete_window") for client-driven LLM execution.',
-    inputSchema: GetWatcherSchema,
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    handler: async (args: Static<typeof GetWatcherSchema>, env: Env, ctx: ToolContext) => {
-      return await getWatcher(args, env, ctx);
-    },
-  },
-  {
-    name: 'read_knowledge',
-    description: `List or search saved knowledge and content for an entity. Provide \`query\` parameter to perform semantic/text search (combines vector similarity for longer queries with full-text matching). Omit \`query\` to list all saved knowledge with filters. Returns content ordered by relevance (when searching) or date (when listing).
-
-WATCHER MODE: When \`watcher_id\` is provided with \`since\`/\`until\`, returns everything needed for external LLM processing:
-- window_token: JWT for complete_window action
-- prompt_rendered: Ready-to-use prompt for LLM
-- extraction_schema: JSON Schema defining expected output structure
-- content: The content data to analyze
-- classifiers: Current classifier values for context`,
-    inputSchema: GetContentSchema,
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    handler: async (args: Static<typeof GetContentSchema>, env: Env, ctx: ToolContext) => {
-      return await getContent(args, env, ctx);
-    },
-  },
-  {
-    name: 'resolve_path',
-    description:
-      'Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.',
-    inputSchema: ResolvePathSchema,
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    internal: true,
-    handler: async (args: Static<typeof ResolvePathSchema>, env: Env, ctx: ToolContext) => {
-      return await resolvePath(args, env, ctx);
     },
   },
   {
@@ -144,14 +96,56 @@ WATCHER MODE: When \`watcher_id\` is provided with \`since\`/\`until\`, returns 
       return await saveContent(args, env, ctx);
     },
   },
-  // Org switching tools (only exposed on unscoped /mcp endpoint)
+  {
+    name: 'query_sql',
+    description:
+      'Execute paginated, sortable, searchable read-only SQL queries. Table references are auto-scoped to your organization. Do NOT include ORDER BY/LIMIT/OFFSET or positional parameters in your SQL.',
+    inputSchema: QuerySqlSchema,
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    handler: async (args: Static<typeof QuerySqlSchema>, env: Env, ctx: ToolContext) => {
+      return await querySql(args, env, ctx);
+    },
+  },
+  // ─── Generic surface: discover + execute over the typed ClientSDK ─────────
+  {
+    name: 'search',
+    description:
+      "Discover ClientSDK methods. Pass a namespace ('watchers', 'entities', etc.) for a listing, a dotted path ('watchers.create') for a drill-down with signature/throws/example, or a free-text query for fuzzy matches. Pair with `execute` to actually call methods.",
+    inputSchema: SdkSearchSchema,
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    handler: async (args: Static<typeof SdkSearchSchema>, env: Env, ctx: ToolContext) => {
+      return await sdkSearch(args, env, ctx);
+    },
+  },
+  {
+    name: 'execute',
+    description:
+      "Run a TypeScript script in a sandboxed isolate over the typed `ClientSDK`. The script must `export default async (ctx, client) => { ... }` and may use `client.entities`, `client.watchers`, `client.knowledge`, `client.org(slug)` for cross-org calls, `client.query(sql)` for read-only SQL, etc. Use `search` to find method names and signatures. Replaces the previous `manage_*` MCP tool surface — call those handlers via `client.<namespace>.<method>(...)` from inside the script.",
+    inputSchema: ExecuteSchema,
+    annotations: { destructiveHint: false },
+    handler: async (args: Static<typeof ExecuteSchema>, env: Env, ctx: ToolContext) => {
+      return await executeScript(args, env, ctx);
+    },
+  },
+  // ─── Path resolution (frontend internal) ──────────────────────────────────
+  {
+    name: 'resolve_path',
+    description:
+      'Resolve a namespace-based URL path like /acme/entity-type/entity-slug into namespace and entity details. Returns template_data with executed data source query results when templates define data_sources.',
+    inputSchema: ResolvePathSchema,
+    annotations: { readOnlyHint: true, idempotentHint: true },
+    internal: true,
+    handler: async (args: Static<typeof ResolvePathSchema>, env: Env, ctx: ToolContext) => {
+      return await resolvePath(args, env, ctx);
+    },
+  },
+  // ─── Org tools (now exposed on both unscoped and scoped /mcp endpoints) ───
   {
     name: 'list_organizations',
     description:
-      'List organizations the authenticated user belongs to. Only available when the MCP session uses the unscoped /mcp endpoint.',
+      'List organizations the authenticated user belongs to, plus any public workspaces the session can read.',
     inputSchema: ListOrganizationsSchema,
     annotations: { readOnlyHint: true, idempotentHint: true },
-    orgSwitching: true,
     handler: async () => {
       throw new Error('Handled directly in executeTool');
     },
@@ -159,27 +153,16 @@ WATCHER MODE: When \`watcher_id\` is provided with \`since\`/\`until\`, returns 
   {
     name: 'switch_organization',
     description:
-      'Switch the current session to a different organization. The org slug must have appeared in a prior list_organizations result. After switching, all subsequent tool calls operate in the new org context. Returns workspace instructions for the new org.',
+      'Switch the current session to a different organization the user is a member of. After switching, all subsequent tool calls operate in the new org context. Available on both /mcp and /mcp/{slug} endpoints — on a scoped endpoint the URL pin defines the default, but a switch can move the session.',
     inputSchema: SwitchOrganizationSchema,
     annotations: { readOnlyHint: false },
-    orgSwitching: true,
     handler: async () => {
       throw new Error('Handled directly in executeTool');
     },
   },
-  {
-    name: 'join_organization',
-    description:
-      'Join the current public workspace as a member so you can write (create entities, save knowledge, update classifications). Only works on workspaces with visibility=public; private workspaces still require an invitation. Idempotent — calling when already a member is safe. On the unscoped /mcp endpoint, pass `organization_slug`; on /mcp/{slug} sessions the current workspace is used.',
-    inputSchema: JoinOrganizationSchema,
-    // readOnlyHint:true lets read-scoped MCP sessions invoke it — the whole
-    // point of this tool is to flip an anonymous reader into a member.
-    annotations: { readOnlyHint: true, idempotentHint: true },
-    handler: async () => {
-      throw new Error('Handled directly in executeTool');
-    },
-  },
-  // Admin tools
+  // Internal admin tools — hidden from the external MCP `tools/list`, but
+  // dispatchable by name from in-process callers (the test harness, the
+  // SDK delegating from `execute` scripts).
   ...ADMIN_TOOLS,
 ];
 

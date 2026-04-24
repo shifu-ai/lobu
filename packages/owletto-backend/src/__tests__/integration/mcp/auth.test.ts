@@ -924,12 +924,19 @@ describe('MCP Authentication', () => {
 
       expect(result.tools).toBeInstanceOf(Array);
 
-      // Verify expected tools are present
+      // Verify expected tools are present. The legacy `manage_*`,
+      // `read_knowledge`, `get_watcher`, `list_watchers` MCP tools are now
+      // internal-only and reachable via the SDK from `execute` scripts.
       const toolNames = result.tools.map((t: any) => t.name);
       expect(toolNames).toContain('search_knowledge');
-      expect(toolNames).toContain('read_knowledge');
-      expect(toolNames).toContain('get_watcher');
-      expect(toolNames).toContain('list_watchers');
+      expect(toolNames).toContain('save_knowledge');
+      expect(toolNames).toContain('search');
+      expect(toolNames).toContain('execute');
+      expect(toolNames).not.toContain('read_knowledge');
+      expect(toolNames).not.toContain('get_watcher');
+      expect(toolNames).not.toContain('list_watchers');
+      expect(toolNames).not.toContain('manage_entity');
+      expect(toolNames).not.toContain('join_organization');
     });
 
     it('should include tool descriptions', async () => {

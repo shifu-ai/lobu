@@ -31,6 +31,8 @@ packages/**/*.d.ts.map
 !packages/cli/bin/*.js
 # Tailwind config is a JS config file, not a build artifact
 !packages/gateway/tailwind.config.js
+# Hand-authored type shims for optional native modules (not build output)
+!packages/**/src/types/*.d.ts
 tsconfig.tsbuildinfo
 **/tsconfig.tsbuildinfo
 

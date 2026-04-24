@@ -3,12 +3,24 @@
  *
  * Centralizes role/scoped MCP access checks and what anonymous/public
  * callers are allowed to read.
+ *
+ * Note on `execute`: the MCP entry point requires write-tier access, but the
+ * real authorization happens per-SDK-call inside the script. A read-tier
+ * session can run scripts that only call read methods; the first write call
+ * inside the script will throw at the handler-level access check.
  */
 
 type ToolAccessLevel = 'read' | 'write' | 'admin';
 
 const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
   save_knowledge: null,
+  // `execute` reaches admin handlers inside the script; per-call gates fire
+  // on each SDK method, so the entry-point check is just write-tier.
+  execute: null,
+  // Internal admin tools (hidden from external `tools/list`, callable from
+  // the in-process test harness and from SDK delegations inside `execute`).
+  // Per-action gating preserved so the same authorization decisions fire
+  // regardless of caller path.
   manage_entity: new Set(['create', 'update', 'link', 'unlink', 'update_link']),
 };
 
@@ -57,13 +69,13 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
 const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
   resolve_path: null,
   search_knowledge: null,
+  // SDK method discovery — safe to expose; surfaces no data.
+  search: null,
+  // Internal read-paths — kept for tests that exercise public-readability
+  // semantics; legitimate external access is via `execute`.
   read_knowledge: null,
   get_watcher: null,
   list_watchers: null,
-  // Visible to anonymous/non-member sessions so the LLM can discover the
-  // self-serve join path on a public workspace. The tool itself enforces
-  // authentication and public-org policy at call time.
-  join_organization: null,
   manage_entity: new Set(['list', 'get', 'list_links']),
   manage_entity_schema: new Set(['list', 'get', 'audit', 'list_rules']),
   manage_connections: new Set(['list', 'get', 'list_connector_definitions']),
@@ -106,7 +118,8 @@ export function requiresOwnerAdmin(
   args: unknown,
   readOnlyHint: boolean
 ): boolean {
-  // query_sql is intentionally owner/admin only despite being read-only.
+  // query_sql is intentionally owner/admin only despite being read-only —
+  // it can read across the whole org's data, including audit/event tables.
   if (toolName === 'query_sql') return true;
 
   if (actionMatches(OWNER_ADMIN_ACTIONS, toolName, args)) return true;
@@ -123,6 +136,7 @@ export function getRequiredAccessLevel(
   readOnlyHint: boolean
 ): ToolAccessLevel {
   if (toolName === 'switch_organization') return 'read';
+  if (toolName === 'list_organizations') return 'read';
   if (requiresOwnerAdmin(toolName, args, readOnlyHint)) return 'admin';
   if (requiresMemberWrite(toolName, args, readOnlyHint)) return 'write';
   return 'read';

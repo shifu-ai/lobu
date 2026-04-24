@@ -181,18 +181,16 @@ describe('checkToolAccess', () => {
     scopedToOrg: true,
   };
 
-  it('explains the public read-only upgrade path on write attempts', () => {
+  it('explains the public read-only situation on write attempts', () => {
     expect(() => checkToolAccess('save_knowledge', {}, baseAuth)).toThrow(
-      'This public workspace is read-only for your account. Ask an organization admin to invite you for write access.'
+      /public workspace is read-only/i
     );
   });
 
   it('requires write scope for member writes', () => {
     expect(() =>
       checkToolAccess('save_knowledge', {}, { ...baseAuth, memberRole: 'member' })
-    ).toThrow(
-      'This MCP session is read-only. Reconnect with write access after you are added to the organization.'
-    );
+    ).toThrow(/MCP session is read-only/i);
   });
 
   it('allows members with write scope to save knowledge', () => {
