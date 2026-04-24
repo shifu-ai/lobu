@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { VerdictCache } from "../proxy/egress-judge/cache";
+import { VerdictCache } from "../proxy/egress-judge/cache.js";
 
 describe("VerdictCache", () => {
   test("returns undefined for unknown keys", () => {

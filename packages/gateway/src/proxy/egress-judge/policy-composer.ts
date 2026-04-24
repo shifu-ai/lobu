@@ -1,4 +1,4 @@
-import type { JudgeRequest } from "./types";
+import type { JudgeRequest } from "./types.js";
 
 /**
  * Built-in system prompt harness. Provides the fixed role/framing and the

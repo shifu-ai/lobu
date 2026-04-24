@@ -3,16 +3,16 @@ import * as crypto from "node:crypto";
 import type * as http from "node:http";
 import * as net from "node:net";
 import { generateWorkerToken } from "@lobu/core";
-import { PolicyStore } from "../permissions/policy-store";
-import { EgressJudge } from "../proxy/egress-judge";
-import type { JudgeClient, JudgeVerdict } from "../proxy/egress-judge";
+import { PolicyStore } from "../permissions/policy-store.js";
+import { EgressJudge } from "../proxy/egress-judge/index.js";
+import type { JudgeClient, JudgeVerdict } from "../proxy/egress-judge/index.js";
 import {
   __testOnly,
   setProxyEgressJudge,
   setProxyPolicyStore,
   startHttpProxy,
   stopHttpProxy,
-} from "../proxy/http-proxy";
+} from "../proxy/http-proxy.js";
 
 const TEST_ENCRYPTION_KEY = crypto.randomBytes(32).toString("base64");
 

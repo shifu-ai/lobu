@@ -1,10 +1,10 @@
 import { createLogger } from "@lobu/core";
-import type { ResolvedJudgeRule } from "../../permissions/policy-store";
-import { AnthropicJudgeClient } from "./anthropic-client";
-import { VerdictCache } from "./cache";
-import { CircuitBreaker } from "./circuit-breaker";
-import { buildSystemPrompt, buildUserPrompt } from "./policy-composer";
-import type { JudgeClient, JudgeDecision, JudgeRequest } from "./types";
+import type { ResolvedJudgeRule } from "../../permissions/policy-store.js";
+import { AnthropicJudgeClient } from "./anthropic-client.js";
+import { VerdictCache } from "./cache.js";
+import { CircuitBreaker } from "./circuit-breaker.js";
+import { buildSystemPrompt, buildUserPrompt } from "./policy-composer.js";
+import type { JudgeClient, JudgeDecision, JudgeRequest } from "./types.js";
 
 const logger = createLogger("egress-judge");
 

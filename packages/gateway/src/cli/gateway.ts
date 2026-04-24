@@ -1208,7 +1208,7 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
   // rules declared by skills or agent config.
   const policyStore = coreServices.getPolicyStore();
   if (policyStore) {
-    const { setProxyPolicyStore } = await import("../proxy/http-proxy");
+    const { setProxyPolicyStore } = await import("../proxy/http-proxy.js");
     setProxyPolicyStore(policyStore);
     logger.debug("Policy store connected to HTTP proxy");
   }

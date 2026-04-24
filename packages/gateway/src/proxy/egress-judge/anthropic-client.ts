@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { JudgeClient, JudgeVerdict } from "./types";
+import type { JudgeClient, JudgeVerdict } from "./types.js";
 
 /**
  * Anthropic-backed judge transport. Calls the Messages API and parses the

@@ -1,4 +1,4 @@
-import type { JudgeVerdict } from "./types";
+import type { JudgeVerdict } from "./types.js";
 
 interface Entry {
   verdict: JudgeVerdict;

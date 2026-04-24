@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildPolicyBundle, PolicyStore } from "../permissions/policy-store";
+import { buildPolicyBundle, PolicyStore } from "../permissions/policy-store.js";
 
 describe("PolicyStore.resolve", () => {
   test("returns undefined when no bundle is set", () => {

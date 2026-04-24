@@ -14,7 +14,7 @@ import type { GrantStore } from "../permissions/grant-store.js";
 import {
   buildPolicyBundle,
   type PolicyStore,
-} from "../permissions/policy-store";
+} from "../permissions/policy-store.js";
 import {
   deleteSecretMappings,
   generatePlaceholder,

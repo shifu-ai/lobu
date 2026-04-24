@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CircuitBreaker } from "../proxy/egress-judge/circuit-breaker";
+import { CircuitBreaker } from "../proxy/egress-judge/circuit-breaker.js";
 
 describe("CircuitBreaker", () => {
   test("is closed by default", () => {

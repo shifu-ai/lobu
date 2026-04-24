@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { parseVerdict } from "../proxy/egress-judge/anthropic-client";
+import { parseVerdict } from "../proxy/egress-judge/anthropic-client.js";
 import {
   buildSystemPrompt,
   buildUserPrompt,
-} from "../proxy/egress-judge/policy-composer";
+} from "../proxy/egress-judge/policy-composer.js";
 
 describe("buildSystemPrompt", () => {
   test("includes the required JSON output schema", () => {
