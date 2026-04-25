@@ -30,6 +30,7 @@ async function resolvePersonalOrg(
   const rows = await sql`
     SELECT id, slug FROM "organization"
     WHERE metadata IS NOT NULL AND metadata LIKE ${`%${tagFragment}%`}
+    ORDER BY "createdAt" ASC, id ASC
     LIMIT 1
   `;
   if (rows.length === 0) return null;

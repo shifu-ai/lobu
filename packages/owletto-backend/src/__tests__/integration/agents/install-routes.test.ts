@@ -45,6 +45,7 @@ describe('POST /api/install', () => {
     templateOrg = await createTestOrganization({
       name: 'PF Template',
       slug: 'personal-finance-tpl',
+      visibility: 'public',
     });
     templateAgent = await createTestAgent({
       organizationId: templateOrg.id,
@@ -91,6 +92,23 @@ describe('POST /api/install', () => {
     expect(body.created).toBe(true);
     expect(body.mirrored.entity_types).toBe(1);
     expect(body.redirectTo).toBe(`/${personalOrg.slug}/agents/${body.agentId}`);
+  });
+
+  it('rejects private template agents', async () => {
+    const privateOrg = await createTestOrganization({ name: 'Private Template' });
+    const privateAgent = await createTestAgent({
+      organizationId: privateOrg.id,
+      name: 'Private Agent',
+    });
+    const app = buildApp(user.id);
+    const res = await app.request('/api/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ templateAgentId: privateAgent.agentId }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/organization is not public/);
   });
 
   it('rejects requests without templateAgentId', async () => {
