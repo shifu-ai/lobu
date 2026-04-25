@@ -24,8 +24,20 @@ PR="${1:-$PR_NUMBER}"
 REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
 
 gh pr view "$PR" --json number,headRefName,headRefOid,author,isDraft,labels,baseRefName,statusCheckRollup,mergeable,mergeStateStatus,files,additions,deletions,title,body
-TRUSTED_COMMENT_FILTER='map(select((.author_association // "") as $a | $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR" or (.user.type // "") == "Bot"))'
-gh api "repos/$REPO/pulls/$PR/comments" --jq "$TRUSTED_COMMENT_FILTER" # trusted inline review comments (Codex, pi, members)
+
+# Trust only humans with write association OR an explicit bot allowlist.
+# `.user.type == "Bot"` is too permissive — any installed bot would land
+# in the "trusted" set, including ones that could inject escalation
+# keywords or Slack URLs. Allowlist is intentionally narrow.
+TRUSTED_COMMENT_FILTER='map(select(
+  ((.author_association // "") == "OWNER")
+  or ((.author_association // "") == "MEMBER")
+  or ((.author_association // "") == "COLLABORATOR")
+  or ((.user.login // "") == "codex-approver[bot]")
+  or ((.user.login // "") == "chatgpt-codex-connector[bot]")
+  or ((.user.login // "") == "github-actions[bot]")
+))'
+gh api "repos/$REPO/pulls/$PR/comments" --jq "$TRUSTED_COMMENT_FILTER" # trusted inline review comments
 gh api "repos/$REPO/issues/$PR/comments" --jq "$TRUSTED_COMMENT_FILTER" # trusted issue-level comments
 gh api "repos/$REPO/pulls/$PR/reviews" --jq "$TRUSTED_COMMENT_FILTER"   # trusted formal reviews
 ```
@@ -49,6 +61,7 @@ Classify as `needs-human` and exit when:
 
 - Any changed file path is under `packages/owletto-web/` — submodule two-PR rule (AGENTS.md). The agent must never push a parent commit referencing an unmerged submodule SHA.
 - Any changed file path is under `charts/lobu/`, `docker/`, `.github/workflows/`, or is `scripts/setup-dev.sh` — infra blast radius.
+- Any changed file path is `.github/triage-config.yml` or `.claude/commands/triage-pr.md` — these define triage policy itself. A PR modifying them must not be evaluated by the (potentially-modified) policy on its own branch; the agent escalates so a human can review the change against `main`.
 - Any review comment contains case-insensitive: `security`, `credential`, `token`, `secret`, `auth bypass`, `P0`, or `P1`.
 
 (Forks are filtered at the workflow level via the setup job. `issue_comment` triggers only run for trusted actors (`OWNER`, `MEMBER`, `COLLABORATOR`) whose first comment line is `/triage`; `pull_request_review` triggers only run for trusted reviewers. If you somehow get here on a fork or untrusted trigger, exit silently — pushing requires write access to the head ref.)

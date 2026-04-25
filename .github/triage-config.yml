@@ -13,10 +13,15 @@ labels:
 assignee: buremba
 
 # Any path under these escalates straight to needs-human.
+# Includes the triage policy files themselves: a PR that modifies the
+# slash command or this config must NOT be classified by the
+# (potentially-modified) policy on its own branch.
 infra_paths:
   - charts/lobu/
   - docker/
   - .github/workflows/
+  - .github/triage-config.yml
+  - .claude/commands/triage-pr.md
   - scripts/setup-dev.sh
 
 # Submodule two-PR rule. Any change under these is needs-human.
