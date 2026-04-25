@@ -10,6 +10,16 @@ metadata_schema:
   required:
     - legal_name
     - company_type
+  # Identity numbers (hmrc_utr, hmrc_paye_reference, companies_house_number,
+  # vat_number, hmrc_ni_number) live in entity_identities, not metadata.
+  # `not` blocks accidental writes to those fields here.
+  not:
+    anyOf:
+      - required: [hmrc_utr]
+      - required: [hmrc_paye_reference]
+      - required: [companies_house_number]
+      - required: [vat_number]
+      - required: [hmrc_ni_number]
   properties:
     legal_name:
       type: string

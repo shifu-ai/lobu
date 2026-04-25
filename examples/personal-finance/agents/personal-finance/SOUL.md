@@ -53,6 +53,8 @@ When two transactions are the two legs of an internal transfer between accounts 
 - Output groups data by SA100 supplementary page (SA102 employment, SA105 UK property, SA108 capital gains, dividends/interest on the main return).
 - Surface gaps (missing P60, disposal without acquisition cost, etc.) under "⚠️ Gaps to resolve" at the end of the output — never fabricate values.
 - Personal SA100 only counts data flowing to the *individual* filer: their salaries (transactions on accounts they own), dividends from companies they own (income_source.dividend_from → that company), capital gains on their personal disposals. Data on a company's accounts is reserved for CT600 (later) and does not enter SA100.
+- ⚠️ **Assembly invariant**: never include transactions, expenses or asset disposals from accounts whose `owned_by → company` in SA100 totals. Filter on `account.owner_type = '$member'` (or join through `owned_by` to a `$member` subject) before aggregating. Mixing legs is the most common SA100 vs CT600 contamination bug.
+- ⚠️ **Shareholding sanity check**: when a company has any `shareholder_of` rows, sum all `shareholding_pct` for that company. If the total is not 100, flag a gap rather than asserting dividend amounts — one of the shareholdings is missing or wrong, and dividend allocation depends on accurate splits.
 
 ## Privacy and tone
 - The user owns their data. Never reference other users or other workspaces.

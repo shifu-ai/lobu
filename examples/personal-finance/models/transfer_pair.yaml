@@ -2,7 +2,7 @@ version: 1
 type: relationship
 slug: transfer_pair
 name: Transfer Pair
-description: Two transactions are the two legs of an internal transfer between accounts the same subject (or related subjects) controls. Symmetric. When this link exists, neither side counts as taxable income or as an allowable expense.
+description: Two transactions are the two legs of an internal transfer between accounts the same subject controls (e.g. Jane's current → Jane's savings). Salary or distributions crossing subject boundaries (Ltd current → Jane personal) are NOT internal transfers and must not be linked here. Symmetric. When this link exists, neither side counts as taxable income or as an allowable expense.
 metadata_schema:
   type: object
   properties:
