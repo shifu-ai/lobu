@@ -34,7 +34,7 @@ jobs:
           bun test packages/core packages/gateway packages/cli --coverage
           # Owletto backend sandbox/auth coverage for MCP execute/search changes
           bun test packages/owletto-backend/src/__tests__/unit/sandbox
-          (cd packages/owletto-backend && SKIP_TEST_DB_SETUP=1 bun run test --run src/auth/__tests__/tool-access.test.ts)
+          bun test packages/owletto-backend/src/auth/__tests__/tool-access.test.ts
           # Worker tests that don't transitively load pi-coding-agent runtime (WASM unavailable on CI)
           bun test packages/worker/src/__tests__/embedded-tools.test.ts packages/worker/src/__tests__/model-resolver.test.ts packages/worker/src/__tests__/tool-policy.test.ts packages/worker/src/__tests__/processor.test.ts packages/worker/src/__tests__/audio-provider-suggestions.test.ts packages/worker/src/__tests__/generated-media.test.ts packages/worker/src/__tests__/tool-implementations.test.ts packages/worker/src/__tests__/instructions.test.ts packages/worker/src/__tests__/custom-tools.test.ts
 
