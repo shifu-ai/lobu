@@ -28,5 +28,5 @@ turns:
           credit. The finance cost of £3,800 should NOT have been subtracted. Off-by-one-penny rounding acceptable.
         weight: 0.7
       - type: regex
-        value: "12,420|12420"
+        value: '12,420(?:\.\d+)?|12420(?:\.\d+)?'
         weight: 0.3
