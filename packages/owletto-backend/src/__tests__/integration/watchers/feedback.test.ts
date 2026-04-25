@@ -324,6 +324,30 @@ describe('Watcher feedback', () => {
         )
       ).rejects.toThrow(/requires a value/);
     });
+
+    it('refuses to submit feedback against a watcher in a different org', async () => {
+      // Build a watcher in a second org. The first user (Alice) has no
+      // membership there, so her token's org context is still the first org;
+      // passing the foreign watcher_id must fail the org-scoped windowCheck.
+      const otherOrg = await createTestOrganization({ name: 'Stranger Org' });
+      const otherUser = await createTestUser({ email: 'stranger@test.com' });
+      await addUserToOrganization(otherUser.id, otherOrg.id, 'owner');
+      const foreign = await seedWatcher(otherOrg.id, otherUser.id);
+      const foreignWindow = await seedWindow(foreign.id, { problems: [] });
+
+      await expect(
+        mcpToolsCall(
+          'manage_watchers',
+          {
+            action: 'submit_feedback',
+            watcher_id: String(foreign.id),
+            window_id: foreignWindow,
+            corrections: [{ field_path: 'problems[0]', value: 'x' }],
+          },
+          { token }
+        )
+      ).rejects.toThrow(/not found/);
+    });
   });
 
   describe('get_feedback', () => {

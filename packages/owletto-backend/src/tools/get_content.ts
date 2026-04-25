@@ -104,7 +104,7 @@ import {
   getOrganizationSlug,
   getPublicWebUrl,
 } from '../utils/url-builder';
-import { getRecentFeedbackSummary, hasFeedback } from '../utils/watcher-feedback';
+import { getRecentFeedbackSummary } from '../utils/watcher-feedback';
 import { getAvailableOperations, getPastReactionsSummary } from '../utils/watcher-reactions';
 import { computePendingWindow, queryUncondensedWindows } from '../utils/window-utils';
 import type { ToolContext } from './registry';
@@ -1669,16 +1669,14 @@ async function handleWatcherMode(
 
   let pastFeedback: string | undefined;
   try {
-    const [pastReactionsResult, operations, feedbackExists] = await Promise.all([
+    const [pastReactionsResult, operations, feedbackSummary] = await Promise.all([
       getPastReactionsSummary(watcherId, 30),
       getAvailableOperations(watcherEntityIds),
-      hasFeedback(watcherId),
+      getRecentFeedbackSummary(watcherId, 10),
     ]);
     pastReactions = pastReactionsResult;
     availableOperations = operations.length > 0 ? operations : undefined;
-    if (feedbackExists) {
-      pastFeedback = await getRecentFeedbackSummary(watcherId, 10);
-    }
+    pastFeedback = feedbackSummary;
   } catch (err) {
     logger.warn({ err }, '[get_content] Failed to fetch reaction data for watcher mode');
   }

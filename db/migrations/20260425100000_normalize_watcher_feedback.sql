@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS public.watcher_window_feedback (
 CREATE INDEX IF NOT EXISTS idx_wwf_window ON public.watcher_window_feedback(window_id);
 CREATE INDEX IF NOT EXISTS idx_wwf_watcher ON public.watcher_window_feedback(watcher_id);
 
+-- Best-effort rollback: structural mutations ('add' / 'remove') don't fit
+-- the old shape and are dropped (WHERE mutation = 'set'). When multiple
+-- contributors edited the same window, MAX(note) and MAX(created_by) pick
+-- one arbitrarily — this is an emergency recovery path, not a clean inverse.
 INSERT INTO public.watcher_window_feedback (
     window_id, watcher_id, organization_id,
     corrections, notes, created_by, created_at

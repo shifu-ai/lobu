@@ -8,17 +8,6 @@
 import { getDb } from '../db/client';
 
 /**
- * Check whether any feedback exists for a watcher (cheap EXISTS query).
- */
-export async function hasFeedback(watcherId: number | string): Promise<boolean> {
-  const sql = getDb();
-  const result = await sql`
-    SELECT 1 FROM watcher_window_field_feedback WHERE watcher_id = ${watcherId} LIMIT 1
-  `;
-  return result.length > 0;
-}
-
-/**
  * Build a human-readable summary of past user corrections for a watcher.
  *
  * Returns only the most-recent correction per (field_path) — earlier

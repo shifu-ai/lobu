@@ -668,7 +668,7 @@ export async function manageWatchers(
     get_version_details: () => handleGetVersionDetails(args),
     get_component_reference: () => Promise.resolve(handleGetComponentReference()),
     submit_feedback: () => handleSubmitFeedback(args, ctx),
-    get_feedback: () => handleGetFeedback(args),
+    get_feedback: () => handleGetFeedback(args, ctx),
     create_from_version: () => handleCreateFromVersion(args, env, ctx),
   });
 }
@@ -2507,11 +2507,15 @@ async function handleSubmitFeedback(
   const sql = getDb();
   const watcherId = Number(args.watcher_id);
 
+  // Scope to the caller's current org so a member of org A can't write
+  // feedback against a watcher in org B by passing its watcher_id.
   const windowCheck = await sql`
     SELECT ww.id, w.organization_id
     FROM watcher_windows ww
     JOIN watchers w ON ww.watcher_id = w.id
-    WHERE ww.id = ${args.window_id} AND ww.watcher_id = ${watcherId}
+    WHERE ww.id = ${args.window_id}
+      AND ww.watcher_id = ${watcherId}
+      AND w.organization_id = ${ctx.organizationId}
   `;
   if (windowCheck.length === 0) {
     throw new Error(`Window ${args.window_id} not found for watcher ${watcherId}`);
@@ -2551,13 +2555,18 @@ async function handleSubmitFeedback(
   };
 }
 
-async function handleGetFeedback(args: ManageWatchersArgs): Promise<ManageWatchersResult> {
+async function handleGetFeedback(
+  args: ManageWatchersArgs,
+  ctx: ToolContext
+): Promise<ManageWatchersResult> {
   if (!args.watcher_id) throw new Error('watcher_id is required');
 
   const sql = getDb();
   const watcherId = Number(args.watcher_id);
   const limit = args.limit ?? 50;
 
+  // Scope to the caller's current org so a member of org A can't enumerate
+  // feedback for a watcher in org B by passing its watcher_id.
   const feedback = args.window_id
     ? await sql`
         SELECT f.id, f.window_id, f.field_path, f.mutation, f.corrected_value,
@@ -2565,7 +2574,9 @@ async function handleGetFeedback(args: ManageWatchersArgs): Promise<ManageWatche
                w.window_start, w.window_end
         FROM watcher_window_field_feedback f
         JOIN watcher_windows w ON f.window_id = w.id
-        WHERE f.watcher_id = ${watcherId} AND f.window_id = ${args.window_id}
+        WHERE f.watcher_id = ${watcherId}
+          AND f.window_id = ${args.window_id}
+          AND f.organization_id = ${ctx.organizationId}
         ORDER BY f.created_at DESC
         LIMIT ${limit}
       `
@@ -2576,6 +2587,7 @@ async function handleGetFeedback(args: ManageWatchersArgs): Promise<ManageWatche
         FROM watcher_window_field_feedback f
         JOIN watcher_windows w ON f.window_id = w.id
         WHERE f.watcher_id = ${watcherId}
+          AND f.organization_id = ${ctx.organizationId}
         ORDER BY f.created_at DESC
         LIMIT ${limit}
       `;
