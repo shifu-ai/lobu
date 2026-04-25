@@ -138,11 +138,14 @@ npx owletto@latest run
 # Search knowledge
 npx owletto@latest run search_knowledge '{"query":"Acme"}'
 
-# Read saved content
-npx owletto@latest run read_knowledge '{"query":"customer preferences"}'
-
 # Save new knowledge
 npx owletto@latest run save_knowledge '{"content":"Prefers weekly summaries","semantic_type":"preference","metadata":{}}'
+
+# Discover SDK methods (namespaces, signatures, examples)
+npx owletto@latest run search '{"query":"watchers.create"}'
+
+# Run a TypeScript script over the typed client SDK
+npx owletto@latest run execute '{"script":"export default async (ctx, client) => client.entities.list({ entity_type: \"company\", limit: 5 })"}'
 ```
 
 This is the most direct way to inspect or test Owletto behavior outside an agent runtime.
@@ -151,13 +154,13 @@ This is the most direct way to inspect or test Owletto behavior outside an agent
 
 The exact tool list depends on the endpoint and your session scope. Run `owletto run` with no arguments to see what is available.
 
-**Core memory:** `search_knowledge`, `read_knowledge`, `save_knowledge`
+**Core memory:** `search_knowledge`, `save_knowledge`
 
-**Watchers:** `list_watchers`, `get_watcher`
+**SDK surface:** `search` (method discovery), `execute` (run TS over the typed `ClientSDK` — replaces the previous `manage_*` MCP tools; reach handlers via `client.<namespace>.<method>(...)` from inside the script)
 
-**Organization:** `list_organizations`, `switch_organization` (unscoped endpoint only)
+**Read-only SQL:** `query_sql` (admin/owner only)
 
-**Admin / workspace** (admin sessions only): `manage_entity`, `manage_entity_schema`, `manage_connections`, `manage_feeds`, `manage_auth_profiles`, `manage_operations`, `manage_watchers`, `manage_classifiers`, `query_sql`
+**Organization:** `list_organizations`, `switch_organization` (exposed on both unscoped and scoped endpoints)
 
 ## Other Useful Commands
 

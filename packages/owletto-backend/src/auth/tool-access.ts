@@ -17,10 +17,10 @@ const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
   // `execute` reaches admin handlers inside the script; per-call gates fire
   // on each SDK method, so the entry-point check is just write-tier.
   execute: null,
-  // Internal admin tools (hidden from external `tools/list`, callable from
-  // the in-process test harness and from SDK delegations inside `execute`).
-  // Per-action gating preserved so the same authorization decisions fire
-  // regardless of caller path.
+  // Legacy `manage_*` policy entries — the tools themselves are no longer
+  // registered with MCP, but the handlers are still reached via SDK
+  // namespace wrappers from inside `execute`, and `routeAction` consults
+  // these tables to fire the same per-action access decisions.
   manage_entity: new Set(['create', 'update', 'link', 'unlink', 'update_link']),
 };
 

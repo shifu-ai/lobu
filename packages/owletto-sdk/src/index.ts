@@ -137,7 +137,7 @@ export type {
   PaginationConfig,
 } from './paginated.js';
 export { PaginatedFeed } from './paginated.js';
-export type { ReactionContext, ReactionHandler, ReactionSDK } from './reaction-sdk.js';
+export type { ReactionContext, ReactionEntity } from './reaction-sdk.js';
 export type {
   Checkpoint,
   Content,
