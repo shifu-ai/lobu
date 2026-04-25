@@ -69,6 +69,10 @@ Apply rules in order; first match wins.
    - **No `CHANGES_REQUESTED` review** since the latest commit on the PR head. (A stale approval from before later pushback does not qualify.)
    - `mergeable == 'MERGEABLE'`.
    - No `triage:hold` label.
+   - **Size under thresholds** read from `.github/triage-config.yml` (`auto_merge.max_lines`, `auto_merge.max_files`):
+     - `additions + deletions <= auto_merge.max_lines`
+     - `len(files) <= auto_merge.max_files`
+     If either is exceeded, the PR is otherwise valid but classify as `needs-human` with reason "PR size exceeds auto-merge threshold (X lines, Y files; limits L lines, F files) — merge manually after final review".
 
 If none match (e.g., CI still running, no Codex review yet), classify as `pending` — no action, no marker comment, let the next event re-trigger.
 

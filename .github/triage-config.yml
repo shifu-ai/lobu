@@ -32,3 +32,13 @@ escalation_keywords:
   - auth bypass
   - P0
   - P1
+
+# Auto-merge volume gates. A PR otherwise eligible for auto-merge
+# (CI green + APPROVE + no CHANGES_REQUESTED + MERGEABLE) is downgraded
+# to needs-human when it exceeds either threshold. Auto-merge is reserved
+# for small focused changes; large diffs need human eyes regardless of
+# how confident the bot reviewers are. Override per-PR by merging
+# manually in the GitHub UI.
+auto_merge:
+  max_lines: 300   # additions + deletions
+  max_files: 10
