@@ -77,9 +77,15 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     if (!authCtx.isAuthenticated) {
       throw new Error('Authentication required.');
     }
-    // list_organizations + switch_organization are now exposed on both
-    // unscoped /mcp and scoped /mcp/{slug} endpoints. The URL pin defines the
-    // default org; switching moves the session.
+    // list_organizations + switch_organization are read-tier; OAuth tokens
+    // without `mcp:read` (e.g. profile-only) must not call them.
+    if (!hasRequiredMcpScope('read', authCtx.scopes)) {
+      throw new Error(
+        'This MCP session does not include read access. Reconnect with read access to list or switch organizations.'
+      );
+    }
+    // Exposed on both unscoped /mcp and scoped /mcp/{slug} endpoints. The URL
+    // pin defines the default org; switching moves the session.
     return;
   }
 

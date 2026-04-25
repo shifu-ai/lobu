@@ -2,9 +2,10 @@
  * Reaction Executor
  *
  * Executes compiled watcher reaction scripts inside the shared `runScript`
- * isolate runner over the typed `ClientSDK`. Stored reactions written
- * against the legacy `react(ctx, sdk)` export keep working — the runner
- * accepts both `default` and `react` exports.
+ * isolate runner over the typed `ClientSDK`. Stored scripts MUST export
+ * `default async (ctx, client, params?) => ...`; the legacy `react(ctx, sdk)`
+ * export and the old `ReactionSDK` surface (actions/content/notify/query) are
+ * gone. A one-time DB migration is required before deploy — see PR #348.
  *
  * Reactions run with `userId: null` + `isAuthenticated: true` so handler-
  * level access checks treat them as system calls, just like before.

@@ -121,7 +121,9 @@ const TOOLS: ToolDefinition[] = [
     description:
       "Run a TypeScript script in a sandboxed isolate over the typed `ClientSDK`. The script must `export default async (ctx, client) => { ... }` and may use `client.entities`, `client.watchers`, `client.knowledge`, `client.org(slug)` for cross-org calls, `client.query(sql)` for read-only SQL, etc. Use `search` to find method names and signatures. Replaces the previous `manage_*` MCP tool surface — call those handlers via `client.<namespace>.<method>(...)` from inside the script.",
     inputSchema: ExecuteSchema,
-    annotations: { destructiveHint: false },
+    // The script can delete entities, drop watchers, trigger external operations
+    // — host clients should treat it as destructive and require approval.
+    annotations: { destructiveHint: true },
     handler: async (args: Static<typeof ExecuteSchema>, env: Env, ctx: ToolContext) => {
       return await executeScript(args, env, ctx);
     },

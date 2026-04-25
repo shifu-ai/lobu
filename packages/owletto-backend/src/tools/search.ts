@@ -3,7 +3,8 @@
  *
  * Search existing entities in the database.
  * Searches all entity types when entity_type not specified.
- * For new entities, use manage_entity action='create' and then manage_connections.
+ * For new entities, write a TS script for `execute` that calls
+ * `client.entities.create(...)` then `client.connections.create(...)`.
  */
 
 import { type Static, Type } from '@sinclair/typebox';
@@ -377,10 +378,10 @@ export async function search(
 
   const suggestionText =
     `No matches found for "${query}" in existing database.\n\n` +
-    '**Next steps:**\n' +
-    `1. Create the entity: manage_entity action='create' name='${query}' (optionally set entity_type, parent_id for hierarchy)\n` +
-    "2. Create a connection: manage_connections action='create' connector_key='<connector>', then scope it with manage_feeds action='create_feed' entity_ids=[<entity_id>]\n" +
-    '3. Wait for ingestion to start automatically, then discover watchers with list_watchers and inspect results with read_knowledge/get_watcher.\n\n' +
+    '**Next steps:** call `execute` with a TS script over `client`:\n' +
+    `1. Create the entity: \`await client.entities.create({ type: '<entity_type>', name: '${query}' })\` (optionally pass parent_id for hierarchy)\n` +
+    "2. Create a connection: `await client.connections.create({ connector_key: '<connector>', ... })`, then scope it with `await client.feeds.create({ ... })`\n" +
+    '3. Wait for ingestion to start automatically, then discover watchers with `client.watchers.list(...)` and inspect results with `client.knowledge.read(...)` / `client.watchers.get(...)`.\n\n' +
     '**Alternative:** If you know this entity should exist, verify the spelling or try a different search term.';
 
   // Fetch top entities per type so the LLM knows what exists

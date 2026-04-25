@@ -24,19 +24,21 @@ describe("runScript", () => {
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
   });
 
-  it("fails with RuntimeUnavailable or NotImplemented", async () => {
-    // PR-1 ships the scaffolding only; the runner either reports the optional
-    // native module missing, or a clear NotImplemented stub. PR-2 replaces the
-    // stub with the real isolated-vm bridge.
+  it("runs a default-export script and returns its value", async () => {
     const stubSdk = { log: () => undefined } as unknown as ClientSDK;
     const result = await runScript({
-      source: "export default async () => 1;",
+      source: "export default async () => 1 + 2;",
       sdk: stubSdk,
     });
-    expect(result.success).toBe(false);
-    expect(result.error).toBeDefined();
-    expect(["RuntimeUnavailable", "NotImplemented"]).toContain(
-      result.error?.name ?? ""
-    );
+    // Skip on environments where the optional native module is unavailable
+    // (the runner reports RuntimeUnavailable). Otherwise the bridge must
+    // succeed and forward the return value.
+    if (result.error?.name === "RuntimeUnavailable") {
+      expect(result.success).toBe(false);
+      return;
+    }
+    expect(result.success).toBe(true);
+    expect(result.returnValue).toBe(3);
+    expect(result.sdkCalls).toBe(0);
   });
 });

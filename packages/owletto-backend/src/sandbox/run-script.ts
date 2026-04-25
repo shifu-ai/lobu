@@ -86,9 +86,23 @@ async function loadIsolatedVm(): Promise<typeof import("isolated-vm") | null> {
 const GUEST_PREAMBLE = `
 const ctx = JSON.parse(__ctx_json);
 
+// Symbol/awaitable keys that JS may probe automatically (e.g. when a guest
+// accidentally awaits a namespace proxy). Returning undefined here avoids
+// turning every accidental \`await client.entities\` into a host SDK call.
+function __isReservedKey(k) {
+  return typeof k === 'symbol'
+    || k === 'then'
+    || k === 'catch'
+    || k === 'finally'
+    || k === 'inspect'
+    || k === 'constructor'
+    || k === '__proto__';
+}
+
 function __makeClient(orgPath) {
   return new Proxy({}, {
     get(_, key) {
+      if (__isReservedKey(key)) return undefined;
       const k = String(key);
       if (k === 'org') {
         return async (slug) => __makeClient([...orgPath, String(slug)]);
@@ -103,6 +117,7 @@ function __makeClient(orgPath) {
       // Namespace proxy
       return new Proxy({}, {
         get(_, methodKey) {
+          if (__isReservedKey(methodKey)) return undefined;
           const m = String(methodKey);
           return async (...args) => {
             const payload = JSON.stringify({ args, orgPath });
@@ -239,8 +254,20 @@ export async function runScript(
           if (!ns || !method) {
             throw new Error(`Invalid SDK path: '${path}'`);
           }
+          // Restrict to actual SDK namespaces (own enumerable keys of the
+          // resolved target). Anything else (constructor, __proto__, etc.)
+          // is rejected before the function call. Belt-and-braces with the
+          // guest-side reserved-key filter.
+          if (!Object.prototype.hasOwnProperty.call(target, ns)) {
+            throw new Error(`Unknown SDK namespace: '${ns}'`);
+          }
           const namespace = (target as unknown as Record<string, Record<string, (...a: unknown[]) => unknown>>)[ns];
-          if (!namespace || typeof namespace[method] !== "function") {
+          if (
+            !namespace ||
+            typeof namespace !== "object" ||
+            !Object.prototype.hasOwnProperty.call(namespace, method) ||
+            typeof namespace[method] !== "function"
+          ) {
             throw new Error(`Unknown SDK method: '${path}'`);
           }
           result = await namespace[method](...args);
@@ -285,6 +312,14 @@ export async function runScript(
       copy: true,
     });
     const returnJson = (await resultPromise) as string | null;
+    if (returnJson) {
+      outputBytes += returnJson.length;
+      if (outputBytes > limits.outputBytes) {
+        throw new Error(
+          `OutputSizeExceeded: combined output exceeded ${limits.outputBytes} bytes`,
+        );
+      }
+    }
     const returnValue = returnJson ? JSON.parse(returnJson) : null;
 
     return {

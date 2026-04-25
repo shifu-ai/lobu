@@ -262,17 +262,15 @@ describe('MCP Authentication', () => {
       const body = await response.json();
       const toolNames = body.result.tools.map((tool: any) => tool.name);
 
+      // Public reads survive: search_knowledge, search (SDK discovery).
       expect(toolNames).toContain('search_knowledge');
+      expect(toolNames).toContain('search');
+      // Writes and admin reads must not be visible to anonymous public callers.
       expect(toolNames).not.toContain('save_knowledge');
       expect(toolNames).not.toContain('query_sql');
-
-      const manageEntity = body.result.tools.find((tool: any) => tool.name === 'manage_entity');
-      expect(manageEntity).toBeDefined();
-      expect(manageEntity.inputSchema.properties.action.enum).toEqual([
-        'list',
-        'get',
-        'list_links',
-      ]);
+      expect(toolNames).not.toContain('execute');
+      // Legacy `manage_*` tools are no longer registered as external MCP tools.
+      expect(toolNames).not.toContain('manage_entity');
     });
 
     it('allows anonymous public-read tool calls on public org MCP routes', async () => {
@@ -379,16 +377,11 @@ describe('MCP Authentication', () => {
       const toolNames = body.result.tools.map((tool: any) => tool.name);
 
       expect(toolNames).toContain('search_knowledge');
+      expect(toolNames).toContain('search');
       expect(toolNames).not.toContain('save_knowledge');
       expect(toolNames).not.toContain('query_sql');
-
-      const manageEntity = body.result.tools.find((tool: any) => tool.name === 'manage_entity');
-      expect(manageEntity).toBeDefined();
-      expect(manageEntity.inputSchema.properties.action.enum).toEqual([
-        'list',
-        'get',
-        'list_links',
-      ]);
+      expect(toolNames).not.toContain('execute');
+      expect(toolNames).not.toContain('manage_entity');
     });
 
     it('should reject expired OAuth access token', async () => {

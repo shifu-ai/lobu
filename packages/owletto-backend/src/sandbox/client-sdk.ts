@@ -194,6 +194,14 @@ export function buildClientSDK(ctx: ToolContext, env: Env): ClientSDK {
     },
 
     async query(querySql) {
+      // Mirrors `query_sql` MCP tool: admin/owner only, even though the
+      // method is read-only. The query allowlist exposes audit/event tables
+      // that should not be reachable by member-tier callers via `execute`.
+      if (ctx.memberRole !== "owner" && ctx.memberRole !== "admin") {
+        throw new AccessDeniedError(
+          "client.query requires admin or owner access in the current organization.",
+        );
+      }
       const [{ getDb }, { validateAndScopeQuery }] = await Promise.all([
         import("../db/client"),
         import("../utils/execute-data-sources"),
