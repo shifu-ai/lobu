@@ -319,6 +319,29 @@ describe('installAgentFromTemplate', () => {
     ).rejects.toThrow(/Cannot install template agent into its own org/);
   });
 
+  it('refuses to install when the user is not a member of the target org', async () => {
+    const strangerOrg = await createTestOrganization({ name: 'Stranger Org' });
+    await expect(
+      installAgentFromTemplate({
+        templateAgentId: templateAgent.agentId,
+        targetOrganizationId: strangerOrg.id,
+        userId: user.id,
+      })
+    ).rejects.toThrow(/not a member/);
+  });
+
+  it('refuses to install when the user is a member but lacks admin/owner role', async () => {
+    const memberOrg = await createTestOrganization({ name: 'Member-Only Org' });
+    await addUserToOrganization(user.id, memberOrg.id, 'member');
+    await expect(
+      installAgentFromTemplate({
+        templateAgentId: templateAgent.agentId,
+        targetOrganizationId: memberOrg.id,
+        userId: user.id,
+      })
+    ).rejects.toThrow(/owner or admin role/);
+  });
+
   it('refuses to overwrite a user-authored row of the same slug', async () => {
     const sql = getTestDb();
     const otherOrg = await createTestOrganization({ name: 'Other User Org' });

@@ -785,6 +785,23 @@ export async function installAgentFromTemplate(
     );
   }
 
+  const membership = await sql<{ role: string }[]>`
+    SELECT role FROM "member"
+    WHERE "organizationId" = ${params.targetOrganizationId}
+      AND "userId" = ${params.userId}
+    LIMIT 1
+  `;
+  if (membership.length === 0) {
+    throw new Error(
+      `User ${params.userId} is not a member of organization ${params.targetOrganizationId}.`
+    );
+  }
+  if (membership[0].role !== 'owner' && membership[0].role !== 'admin') {
+    throw new Error(
+      `Installing a template agent requires owner or admin role in organization ${params.targetOrganizationId}.`
+    );
+  }
+
   let result: InstallResult | null = null;
 
   await sql.begin(async (tx) => {
