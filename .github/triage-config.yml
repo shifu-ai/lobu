@@ -1,0 +1,29 @@
+# Static config consumed by .claude/commands/triage-pr.md.
+# Keep this file small — heuristics live in the slash command, not here.
+
+labels:
+  hold: triage:hold
+  needs_human: triage:needs-human
+  fixes_applied: triage:fixes-applied
+  auto_mergeable: triage:auto-mergeable
+
+# Any path under these escalates straight to needs-human.
+infra_paths:
+  - charts/lobu/
+  - docker/
+  - .github/workflows/
+  - scripts/setup-dev.sh
+
+# Submodule two-PR rule. Any change under these is needs-human.
+two_pr_paths:
+  - packages/owletto-web/
+
+# Comment substring matches (case-insensitive) that escalate to needs-human.
+escalation_keywords:
+  - security
+  - credential
+  - token
+  - secret
+  - auth bypass
+  - P0
+  - P1
