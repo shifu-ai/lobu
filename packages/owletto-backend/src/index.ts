@@ -23,6 +23,7 @@ import { connectRoutes } from './connect/routes';
 import { getDb } from './db/client';
 import * as invalidationEmitter from './events/emitter';
 import { isExcludedSpaPath } from './http/spa-route-filter';
+import { installRoutes } from './agents/install-routes';
 import { agentRoutes } from './lobu/agent-routes';
 import { clientRoutes, platformSchemaRoutes } from './lobu/client-routes';
 import { isLobuGatewayRunning } from './lobu/gateway';
@@ -436,6 +437,12 @@ app.on(['GET', 'POST'], '/api/auth/*', async (c) => {
  * Handles linking OAuth accounts to connections
  */
 app.route('/api', credentialRoutes);
+
+/**
+ * Template agent installation routes
+ * POST /api/install — install a template agent into the caller's personal org
+ */
+app.route('/api', installRoutes);
 
 /**
  * OAuth 2.1 Authorization Server routes
