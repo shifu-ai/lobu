@@ -96,12 +96,32 @@ Tolerate ±0.01 rounding. If the delta is larger:
 
 For every accepted row:
 
-1. Resolve or create the `account` entity (provider + account_number_last4 match).
+1. Resolve or create the `account` entity (provider + account_number_last4 match). Set ownership via `owned_by → $member` (or `co_owned_by` for joint accounts).
 2. Create a `document` entity with `source="whatsapp_upload"`, `download_url=$DOWNLOAD_URL`, `doc_type` set appropriately.
 3. Create the `transaction` / `cgt_event` / `holding` entity linked to the account via `account_contains`.
 4. Add a `parsed_from` relationship from each row → the `document` entity (provenance).
 5. Link each row to the active `tax_year` via `for_tax_year`.
-6. For income rows, resolve or create the `income_source` and link via `income_from`.
+6. For income rows, resolve or create the `income_source` and link via `income_from`. For employment income, also link `income_source.employed_by → company` (the employer).
+
+## Step 5b — extract identifiers (UTR, NI, PAYE refs, Companies House numbers)
+
+Documents like P60, P45, P11D, SA302 carry HMRC identifiers. **These go into `entity_identities`, not entity metadata.** When you spot one:
+
+| Identifier | Source document(s) | Where it goes |
+|---|---|---|
+| 10-digit HMRC UTR | SA302, HMRC letters | `entity_identities` on the `$member` (personal) or on a `company` (corporate UTR) — `namespace='hmrc_utr'` |
+| NI number (e.g. `QQ123456C`) | P60, P45 | `entity_identities` on the `$member` — `namespace='hmrc_ni_number'` |
+| PAYE reference (e.g. `123/AB456`) | P60, P45, P11D | NOT on `entity_identities` — it's per-employment, so it goes on the `employed_by` relationship's `metadata.paye_reference` |
+| 8-char Companies House number | Company filings, payslips for own Ltd | `entity_identities` on the `company` — `namespace='companies_house_number'` |
+| VAT number (e.g. `GB123456789`) | VAT-registered invoices | `entity_identities` on the `company` — `namespace='vat_number'` |
+
+Before writing, search for an existing identity row to avoid duplicates:
+```sql
+SELECT entity_id FROM entity_identities
+WHERE namespace = 'hmrc_utr' AND identifier = '1234567890' AND deleted_at IS NULL
+```
+
+If the identifier already exists on a different entity than expected, surface to the user before writing — it might mean two `$member` entities collapsed or a number was mistyped.
 
 ## Step 6 — confirm
 
