@@ -8,6 +8,7 @@
 import type { Static } from '@sinclair/typebox';
 import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-access';
 import type { Env } from '../index';
+import { LEGACY_ADMIN_TOOLS } from './admin';
 import { QuerySqlSchema, querySql } from './admin/query_sql';
 import {
   ListOrganizationsSchema,
@@ -130,6 +131,8 @@ const TOOLS: ToolDefinition[] = [
       return await executeScript(args, env, ctx);
     },
   },
+  // ─── Legacy REST/session-only admin tools ────────────────────────────────
+  ...LEGACY_ADMIN_TOOLS,
   // ─── Path resolution (frontend internal) ──────────────────────────────────
   {
     name: 'resolve_path',

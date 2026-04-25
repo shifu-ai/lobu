@@ -166,7 +166,7 @@ function truncateDescription(text: string, maxLength: number = 300): string {
  * Generates OpenAPI 3.1.0 spec from tool registry
  */
 export function generateOpenAPISpec(serverUrl: string) {
-  const tools = getAllTools();
+  const tools = getAllTools({ includeInternalTools: false });
   const paths: Record<string, any> = {};
 
   for (const tool of tools) {

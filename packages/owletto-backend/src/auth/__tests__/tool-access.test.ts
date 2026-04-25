@@ -289,6 +289,23 @@ describe('checkToolAccess', () => {
     ).not.toThrow();
   });
 
+  it('hides legacy internal tools from external MCP calls even when the name is known', () => {
+    expect(() =>
+      checkToolAccess('manage_entity', { action: 'list' }, { ...baseAuth, memberRole: 'owner' })
+    ).toThrow('Tool not found: manage_entity');
+  });
+
+  it('allows REST compatibility paths to reach legacy internal tools subject to access', () => {
+    expect(() =>
+      checkToolAccess('manage_entity', { action: 'create' }, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:write'],
+        allowInternalTools: true,
+      })
+    ).not.toThrow();
+  });
+
   it('keeps admin-only tools restricted for members', () => {
     // query_sql is the canonical admin-only tool on the post-PR-2 surface.
     expect(() =>

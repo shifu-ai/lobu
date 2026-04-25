@@ -30,12 +30,15 @@ export interface AuthContext {
   scopedToOrg: boolean;
   /** Workspace instructions (populated after org resolution in MCP sessions). */
   instructions?: string;
+  /** REST/session compatibility path may invoke tools hidden from external MCP. */
+  allowInternalTools?: boolean;
 }
 
 /**
  * Extract auth context from a Hono request context.
  */
 export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
+  const pathname = new URL(c.req.url).pathname;
   return {
     organizationId: c.var.organizationId,
     userId: c.var.mcpAuthInfo?.userId || c.var.session?.userId || null,
@@ -48,6 +51,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     requestUrl: c.req.url,
     baseUrl: getConfiguredPublicOrigin() ?? '',
     scopedToOrg: !!c.req.param('orgSlug'),
+    allowInternalTools: !pathname.startsWith('/mcp'),
   };
 }
 
@@ -78,7 +82,9 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   }
 
   const tool = getTool(toolName);
-  if (!tool) throw new Error(`Tool not found: ${toolName}`);
+  if (!tool || (tool.internal && !authCtx.allowInternalTools)) {
+    throw new Error(`Tool not found: ${toolName}`);
+  }
 
   const isReadOnly = tool.annotations?.readOnlyHint === true;
   const { memberRole: role } = authCtx;
