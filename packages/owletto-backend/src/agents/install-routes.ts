@@ -1,10 +1,13 @@
 /**
  * Public install endpoints backing the /install/:slug landing pages.
  *
- * A signed-in user POSTs { templateAgentId, whatsapp_phone? } and we:
+ * A signed-in user POSTs { slug, whatsapp_phone? } (or the equivalent
+ * { templateAgentId } form) and we:
  *   1. Look up their personal org (created by the user.create.after hook).
- *   2. Mirror the template's schema into that org via installAgentFromTemplate.
- *   3. Optionally write a WhatsApp identity (`wa_jid` + `phone`) on their
+ *   2. Resolve the slug to its canonical template agent (or accept an
+ *      explicit templateAgentId from internal callers).
+ *   3. Mirror the template's schema into that org via installAgentFromTemplate.
+ *   4. Optionally write a WhatsApp identity (`wa_jid` + `phone`) on their
  *      $member entity so the gateway can later route inbound WhatsApp
  *      messages from that number back to this user's org.
  *
@@ -46,6 +49,21 @@ async function resolvePersonalOrg(
   return { id: rows[0].id as string, slug: rows[0].slug as string };
 }
 
+async function resolveTemplateAgentBySlug(slug: string): Promise<string | null> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT a.id
+    FROM agents a
+    JOIN "organization" o ON o.id = a.organization_id
+    WHERE o.slug = ${slug}
+      AND a.template_agent_id IS NULL
+    ORDER BY a.created_at ASC
+    LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+  return rows[0].id as string;
+}
+
 installRoutes.post('/install', requireAuth, async (c) => {
   const user = getAuthenticatedUser(c);
 
@@ -58,15 +76,32 @@ installRoutes.post('/install', requireAuth, async (c) => {
     return c.json({ error: rateLimit.errorMessage }, 429);
   }
 
-  let body: { templateAgentId?: string; name?: string; whatsapp_phone?: string };
+  let body: {
+    slug?: string;
+    templateAgentId?: string;
+    name?: string;
+    whatsapp_phone?: string;
+  };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ error: 'Invalid JSON body' }, 400);
   }
 
-  if (!body.templateAgentId || typeof body.templateAgentId !== 'string') {
-    return c.json({ error: 'templateAgentId is required' }, 400);
+  let templateAgentId: string;
+  if (typeof body.slug === 'string' && body.slug.trim()) {
+    const resolved = await resolveTemplateAgentBySlug(body.slug.trim());
+    if (!resolved) {
+      return c.json(
+        { error: 'unknown_slug', message: `No installable template at /${body.slug}` },
+        404
+      );
+    }
+    templateAgentId = resolved;
+  } else if (typeof body.templateAgentId === 'string' && body.templateAgentId.trim()) {
+    templateAgentId = body.templateAgentId.trim();
+  } else {
+    return c.json({ error: '`slug` or `templateAgentId` is required' }, 400);
   }
 
   const personalOrg = await resolvePersonalOrg(user.id);
@@ -84,7 +119,7 @@ installRoutes.post('/install', requireAuth, async (c) => {
   let installResult: Awaited<ReturnType<typeof installAgentFromTemplate>>;
   try {
     installResult = await installAgentFromTemplate({
-      templateAgentId: body.templateAgentId,
+      templateAgentId,
       targetOrganizationId: personalOrg.id,
       userId: user.id,
       name: body.name,

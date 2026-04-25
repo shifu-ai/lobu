@@ -23,6 +23,7 @@ import { connectRoutes } from './connect/routes';
 import { getDb } from './db/client';
 import * as invalidationEmitter from './events/emitter';
 import { isExcludedSpaPath } from './http/spa-route-filter';
+import { installManifestRoutes } from './agents/install-manifest-routes';
 import { installRoutes } from './agents/install-routes';
 import { agentRoutes } from './lobu/agent-routes';
 import { clientRoutes, platformSchemaRoutes } from './lobu/client-routes';
@@ -440,8 +441,10 @@ app.route('/api', credentialRoutes);
 
 /**
  * Template agent installation routes
+ * GET  /api/install/manifest/:slug — public discovery for a landing page
  * POST /api/install — install a template agent into the caller's personal org
  */
+app.route('/api', installManifestRoutes);
 app.route('/api', installRoutes);
 
 /**
