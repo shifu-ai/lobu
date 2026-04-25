@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { installRoutes } from '../../../agents/install-routes';
+import { ensureMemberEntity } from '../../../utils/member-entity';
 import type { Env } from '../../../index';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -69,6 +70,18 @@ describe('POST /api/install', () => {
       WHERE id = ${personalOrg.id}
     `;
     await addUserToOrganization(user.id, personalOrg.id, 'owner');
+
+    // Pre-create the user's $member entity, mirroring what
+    // provisionMemberAndCoreIdentities does during signup. Tests that exercise
+    // WhatsApp identity linking need this to exist.
+    await ensureMemberEntity({
+      organizationId: personalOrg.id,
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      role: 'owner',
+      status: 'active',
+    });
   });
 
   it('installs the template into the caller personal org and returns redirect info', async () => {
@@ -137,5 +150,62 @@ describe('POST /api/install', () => {
 
     // Don't leak the orphan user into subsequent tests.
     await sql`DELETE FROM "user" WHERE id = ${userWithoutOrg.id}`;
+  });
+
+  it('writes WhatsApp identities when whatsapp_phone is supplied', async () => {
+    const sql = getTestDb();
+    const app = buildApp(user.id);
+    const res = await app.request('/api/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        templateAgentId: templateAgent.agentId,
+        whatsapp_phone: '07123456789',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      whatsapp?: { phone: string; waJid: string };
+      whatsappError?: string;
+    };
+    expect(body.whatsappError).toBeUndefined();
+    expect(body.whatsapp).toEqual({
+      phone: '+447123456789',
+      waJid: '447123456789@s.whatsapp.net',
+    });
+
+    const identities = await sql`
+      SELECT namespace, identifier
+      FROM entity_identities
+      WHERE organization_id = ${personalOrg.id}
+        AND namespace IN ('phone', 'wa_jid')
+        AND deleted_at IS NULL
+      ORDER BY namespace
+    `;
+    expect(identities.map((r: { namespace: string; identifier: string }) => r)).toEqual([
+      { namespace: 'phone', identifier: '+447123456789' },
+      { namespace: 'wa_jid', identifier: '447123456789@s.whatsapp.net' },
+    ]);
+  });
+
+  it('reports whatsappError when the phone is unparseable but still installs', async () => {
+    const app = buildApp(user.id);
+    const res = await app.request('/api/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        templateAgentId: templateAgent.agentId,
+        whatsapp_phone: 'not a phone',
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      agentId: string;
+      whatsappError?: string;
+      whatsapp?: unknown;
+    };
+    expect(body.agentId).toBeTruthy();
+    expect(body.whatsapp).toBeUndefined();
+    expect(body.whatsappError).toBe('invalid_phone');
   });
 });

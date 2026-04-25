@@ -14,7 +14,7 @@ import { ensureMemberEntityType, resolveMemberSchemaFieldsFromSchema } from './m
  * Resolve annotated field names from the $member entity type's metadata_schema.
  * Uses the `x-email`/`x-image` annotations; falls back to 'email' for email.
  */
-async function resolveMemberSchemaFields(organizationId: string): Promise<{
+export async function resolveMemberSchemaFields(organizationId: string): Promise<{
   emailField: string;
   imageField?: string;
 }> {

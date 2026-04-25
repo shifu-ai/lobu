@@ -1,14 +1,19 @@
 /**
  * Public install endpoints backing the /install/:slug landing pages.
  *
- * A signed-in user POSTs { templateAgentId } and we mirror that template into
- * the user's personal org (looked up via the personal_org_for_user_id tag we
- * set in the user.create.after hook). Returns the new agent id so the landing
- * page can redirect to /$org/agents/$id.
+ * A signed-in user POSTs { templateAgentId, whatsapp_phone? } and we:
+ *   1. Look up their personal org (created by the user.create.after hook).
+ *   2. Mirror the template's schema into that org via installAgentFromTemplate.
+ *   3. Optionally write a WhatsApp identity (`wa_jid` + `phone`) on their
+ *      $member entity so the gateway can later route inbound WhatsApp
+ *      messages from that number back to this user's org.
+ *
+ * Returns the new agent id, the target org slug, and a redirectTo path.
  */
 
 import { type Context, Hono } from 'hono';
 import { requireAuth } from '../auth/middleware';
+import { linkWhatsAppToMember } from '../auth/subject-identities';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage } from '../utils/errors';
@@ -53,7 +58,7 @@ installRoutes.post('/install', requireAuth, async (c) => {
     return c.json({ error: rateLimit.errorMessage }, 429);
   }
 
-  let body: { templateAgentId?: string; name?: string };
+  let body: { templateAgentId?: string; name?: string; whatsapp_phone?: string };
   try {
     body = await c.req.json();
   } catch {
@@ -76,24 +81,46 @@ installRoutes.post('/install', requireAuth, async (c) => {
     );
   }
 
+  let installResult: Awaited<ReturnType<typeof installAgentFromTemplate>>;
   try {
-    const result = await installAgentFromTemplate({
+    installResult = await installAgentFromTemplate({
       templateAgentId: body.templateAgentId,
       targetOrganizationId: personalOrg.id,
       userId: user.id,
       name: body.name,
     });
-    return c.json({
-      agentId: result.agentId,
-      organizationId: result.organizationId,
-      organizationSlug: personalOrg.slug,
-      created: result.created,
-      mirrored: result.mirrored,
-      redirectTo: `/${personalOrg.slug}/agents/${result.agentId}`,
-    });
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 400);
   }
+
+  // Optional: link the user's WhatsApp number to their $member so inbound
+  // WA messages can be routed back here. Failure is non-fatal — agent is
+  // already installed; user can re-link later.
+  let whatsapp: { phone: string; waJid: string } | undefined;
+  let whatsappError: 'invalid_phone' | 'no_member' | undefined;
+  if (body.whatsapp_phone && typeof body.whatsapp_phone === 'string') {
+    const result = await linkWhatsAppToMember({
+      organizationId: personalOrg.id,
+      email: user.email,
+      rawPhone: body.whatsapp_phone,
+    });
+    if ('error' in result) {
+      whatsappError = result.error;
+    } else {
+      whatsapp = result;
+    }
+  }
+
+  return c.json({
+    agentId: installResult.agentId,
+    organizationId: installResult.organizationId,
+    organizationSlug: personalOrg.slug,
+    created: installResult.created,
+    mirrored: installResult.mirrored,
+    redirectTo: `/${personalOrg.slug}/agents/${installResult.agentId}`,
+    ...(whatsapp ? { whatsapp } : {}),
+    ...(whatsappError ? { whatsappError } : {}),
+  });
 });
 
 export { installRoutes };

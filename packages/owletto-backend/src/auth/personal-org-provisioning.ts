@@ -9,6 +9,7 @@
 
 import { getDb } from '../db/client';
 import { generateSecureToken } from './oauth/utils';
+import { provisionMemberAndCoreIdentities } from './subject-identities';
 
 interface UserLike {
   id: string;
@@ -164,8 +165,32 @@ export async function ensurePersonalOrganization(user: UserLike): Promise<Ensure
     result = { organizationId: orgId, slug, created: true };
   });
 
-  if (!result) {
+  const finalResult = result as EnsureResult | null;
+  if (!finalResult) {
     throw new Error('Personal organization transaction did not produce a result');
   }
-  return result;
+
+  // Provision the $member entity + core identifiers (auth_user_id, email)
+  // outside the transaction. ensureMemberEntity uses createEntity which
+  // manages its own transaction and seeds the $member entity type if absent.
+  // Failures here shouldn't roll back the org creation — the user has a
+  // valid org, identity rows can be backfilled later. Run this for both newly
+  // created and pre-existing personal orgs; the helper is idempotent.
+  if (user.email) {
+    try {
+      await provisionMemberAndCoreIdentities(finalResult.organizationId, {
+        userId: user.id,
+        email: user.email,
+        name: user.name,
+      });
+    } catch (error) {
+      console.error('[Auth] Failed to provision $member entity for personal org:', {
+        orgId: finalResult.organizationId,
+        userId: user.id,
+        error: String(error),
+      });
+    }
+  }
+
+  return finalResult;
 }
