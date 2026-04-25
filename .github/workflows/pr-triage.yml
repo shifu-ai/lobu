@@ -121,11 +121,7 @@ jobs:
         with:
           prompt_file: /tmp/claude-prompts/prompt.txt
           allowed_tools: "Bash(gh pr:*),Bash(gh api:*),Bash(gh label:*),Bash(gh repo view:*),Bash(git fetch:*),Bash(git switch:*),Bash(git status),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git reset:*),Bash(bun run check:fix),Bash(bun run typecheck),Bash(bun run build),Bash(bun run test:*),Bash(bun test:*),Bash(make build-packages),Bash(./scripts/slack-thread-viewer.js:*),Read,Edit,Write"
-          # Org policy disallows OAuth tokens (CLAUDE_CODE_OAUTH_TOKEN /
-          # ANTHROPIC_OAUTH_TOKEN both fail with "OAuth authentication is
-          # currently not allowed for this organization"). An admin must
-          # add ANTHROPIC_API_KEY as a repo or org secret for this to run.
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.ANTHROPIC_OAUTH_TOKEN }}
           timeout_minutes: "15"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
