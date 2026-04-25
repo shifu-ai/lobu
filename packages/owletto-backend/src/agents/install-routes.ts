@@ -12,6 +12,7 @@ import { requireAuth } from '../auth/middleware';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage } from '../utils/errors';
+import { getRateLimiter, RateLimitPresets } from '../utils/rate-limiter';
 import { installAgentFromTemplate } from './install';
 
 const installRoutes = new Hono<{ Bindings: Env }>();
@@ -26,10 +27,13 @@ async function resolvePersonalOrg(
   userId: string
 ): Promise<{ id: string; slug: string } | null> {
   const sql = getDb();
-  const tagFragment = `"personal_org_for_user_id":"${userId}"`;
+  // organization.metadata is `text` storing JSON; cast to jsonb and use the
+  // ->> operator instead of LIKE so a userId containing % or _ can't match
+  // unintended rows.
   const rows = await sql`
     SELECT id, slug FROM "organization"
-    WHERE metadata IS NOT NULL AND metadata LIKE ${`%${tagFragment}%`}
+    WHERE metadata IS NOT NULL
+      AND (metadata::jsonb)->>'personal_org_for_user_id' = ${userId}
     ORDER BY "createdAt" ASC, id ASC
     LIMIT 1
   `;
@@ -39,6 +43,15 @@ async function resolvePersonalOrg(
 
 installRoutes.post('/install', requireAuth, async (c) => {
   const user = getAuthenticatedUser(c);
+
+  const rateLimiter = getRateLimiter();
+  const rateLimit = rateLimiter.checkLimit(
+    `rate:install-agent:${user.id}`,
+    RateLimitPresets.INSTALL_AGENT_PER_USER_HOUR
+  );
+  if (!rateLimit.allowed) {
+    return c.json({ error: rateLimit.errorMessage }, 429);
+  }
 
   let body: { templateAgentId?: string; name?: string };
   try {
