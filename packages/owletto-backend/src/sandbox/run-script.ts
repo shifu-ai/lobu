@@ -86,9 +86,10 @@ async function loadIsolatedVm(): Promise<typeof import("isolated-vm") | null> {
 const GUEST_PREAMBLE = `
 const ctx = JSON.parse(__ctx_json);
 
-// Symbol/awaitable keys that JS may probe automatically (e.g. when a guest
-// accidentally awaits a namespace proxy). Returning undefined here avoids
-// turning every accidental \`await client.entities\` into a host SDK call.
+// Symbol/awaitable/coercion keys that JS may probe automatically (e.g. when a
+// guest accidentally awaits a namespace proxy or runs JSON.stringify(client.x)).
+// Returning undefined here avoids turning every accidental probe into a host
+// SDK call that consumes quota or throws \`Unknown SDK method\`.
 function __isReservedKey(k) {
   return typeof k === 'symbol'
     || k === 'then'
@@ -96,7 +97,10 @@ function __isReservedKey(k) {
     || k === 'finally'
     || k === 'inspect'
     || k === 'constructor'
-    || k === '__proto__';
+    || k === '__proto__'
+    || k === 'toJSON'
+    || k === 'toString'
+    || k === 'valueOf';
 }
 
 function __makeClient(orgPath) {
