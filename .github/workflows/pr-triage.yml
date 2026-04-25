@@ -20,40 +20,39 @@ on:
 
 concurrency:
   group: pr-triage-${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
-  cancel-in-progress: true
+  # IMPORTANT: do NOT cancel-in-progress. The agent's own label/comment events
+  # create no-op runs that would otherwise cancel a real in-flight run mid-fix.
+  cancel-in-progress: false
 
 permissions:
   contents: write
   pull-requests: write
   issues: write
-  id-token: write
-  checks: read
-  actions: read
 
 jobs:
-  triage:
+  setup:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # Skip when:
-    # - draft PR (pull_request events only)
-    # - issue_comment is not on a PR
-    # - fork PR (head repo != base repo) — no write token, no secrets
-    # - we triggered the event ourselves (label add, summary comment)
+    timeout-minutes: 2
+    # Cheap event-level filters. The fork check (which needs an API call) lives
+    # in the step body so it covers issue_comment / pull_request_review too.
     if: >
       (github.event_name != 'pull_request' || github.event.pull_request.draft == false) &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
       (github.event_name != 'pull_request' || github.event.action != 'labeled' || !startsWith(github.event.label.name, 'triage:')) &&
       (github.event_name != 'issue_comment' || github.event.issue.pull_request != null) &&
       (github.event_name != 'issue_comment' || github.event.comment.user.login != 'github-actions[bot]') &&
       (github.event_name != 'pull_request_review' || github.event.review.state != 'pending')
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      pr_number: ${{ steps.gate.outputs.pr_number }}
     steps:
-      - name: Resolve PR number
-        id: pr
+      - id: gate
         env:
           EVENT: ${{ github.event_name }}
           PR_PR: ${{ github.event.pull_request.number }}
           PR_ISSUE: ${{ github.event.issue.number }}
           PR_INPUT: ${{ inputs.pr_number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           case "$EVENT" in
@@ -63,8 +62,26 @@ jobs:
             *) echo "unsupported event $EVENT"; exit 1 ;;
           esac
           [ -n "$num" ] || { echo "no PR number resolved"; exit 1; }
-          echo "number=$num" >> "$GITHUB_OUTPUT"
 
+          # Fork detection works for every event type.
+          head_repo=$(gh pr view "$num" --repo "$GH_REPO" \
+            --json headRepositoryOwner,headRepository \
+            -q '(.headRepositoryOwner.login // "") + "/" + (.headRepository.name // "")')
+          if [ "$head_repo" != "$GH_REPO" ]; then
+            echo "fork PR (head=$head_repo) — skipping"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "pr_number=$num" >> "$GITHUB_OUTPUT"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+  triage:
+    needs: setup
+    if: needs.setup.outputs.proceed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -73,12 +90,6 @@ jobs:
         uses: ./.github/actions/setup-submodule
         with:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
-
-      - name: Skip on stubbed submodule (fork PR)
-        if: steps.submodule.outputs.stubbed == 'true'
-        run: |
-          echo "Stubbed submodule — fork PR or missing deploy key. Exiting."
-          exit 0
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -95,9 +106,9 @@ jobs:
       - name: Run triage agent
         uses: anthropics/claude-code-action@main
         with:
-          direct_prompt: "/triage-pr ${{ steps.pr.outputs.number }}"
+          direct_prompt: "/triage-pr ${{ needs.setup.outputs.pr_number }}"
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          allowed_tools: "Bash(gh pr:*),Bash(gh api:*),Bash(gh label:*),Bash(gh repo view:*),Bash(git fetch:*),Bash(git switch:*),Bash(git status),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git reset:*),Bash(bun run check:fix),Bash(bun run typecheck),Bash(bun run build),Bash(make build-packages),Bash(./scripts/slack-thread-viewer.js:*),mcp__github__get_pull_request_diff"
+          allowed_tools: "Bash(gh pr:*),Bash(gh api:*),Bash(gh label:*),Bash(gh repo view:*),Bash(git fetch:*),Bash(git switch:*),Bash(git status),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git reset:*),Bash(bun run check:fix),Bash(bun run typecheck),Bash(bun run build),Bash(bun run test:*),Bash(bun test:*),Bash(make build-packages),Bash(./scripts/slack-thread-viewer.js:*)"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          PR_NUMBER: ${{ needs.setup.outputs.pr_number }}

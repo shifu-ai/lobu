@@ -7,6 +7,11 @@ labels:
   fixes_applied: triage:fixes-applied
   auto_mergeable: triage:auto-mergeable
 
+# GitHub login to assign on needs-human escalation. Cannot use `@me` here:
+# in CI, GH_TOKEN authenticates as github-actions[bot], so `@me` resolves to
+# the bot. Hardcode the human reviewer's login.
+assignee: buremba
+
 # Any path under these escalates straight to needs-human.
 infra_paths:
   - charts/lobu/

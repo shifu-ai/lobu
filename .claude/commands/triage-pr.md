@@ -53,7 +53,8 @@ Apply rules in order; first match wins.
 
 3. **`auto-mergeable`** — all of:
    - `statusCheckRollup` entries all `SUCCESS`, `NEUTRAL`, or `SKIPPED`.
-   - At least one `APPROVED` review (from `codex-approver[bot]`, you, or another human).
+   - At least one `APPROVED` review (from `codex-approver[bot]`, you, or another human) since the latest commit on the PR head.
+   - **No `CHANGES_REQUESTED` review** since the latest commit on the PR head. (A stale approval from before later pushback does not qualify.)
    - `mergeable == 'MERGEABLE'`.
    - No `triage:hold` label.
 
@@ -63,8 +64,11 @@ If none match (e.g., CI still running, no Codex review yet), classify as `pendin
 
 ### `needs-human`
 
+Read `assignee:` from `.github/triage-config.yml` (do NOT use `@me` — in CI it resolves to `github-actions[bot]`).
+
 ```bash
-gh pr edit "$PR" --add-label "triage:needs-human" --add-assignee "@me"
+ASSIGNEE=$(grep '^assignee:' .github/triage-config.yml | awk '{print $2}')
+gh pr edit "$PR" --add-label "triage:needs-human" --add-assignee "$ASSIGNEE"
 ```
 
 Upsert the marker comment (Phase E) with classification + reasons + links to the specific blocking comments.
@@ -78,13 +82,19 @@ Upsert the marker comment (Phase E) with classification + reasons + links to the
    git switch "triage-$PR"
    ```
 
-2. Apply scoped fixes for the flagged comments. **Hard rules:**
+2. Capture the original PR diff scope BEFORE making any edits — fixes and the staged commit must stay within these paths so a stray `bun run check:fix` reformat doesn't sweep unrelated files into the PR:
+
+   ```bash
+   gh pr diff "$PR" --name-only > /tmp/triage-scope.txt
+   ```
+
+3. Apply scoped fixes for the flagged comments. **Hard rules:**
    - Never modify tests except to fix typos.
    - Never edit anything under `/dist/` (existing hook blocks this).
    - Never use `npm` (existing hook blocks this — use `bun`).
    - Never `--no-verify` and never `--force` push.
 
-3. Validate per AGENTS.md matrix:
+4. Validate per AGENTS.md matrix:
 
    ```bash
    bun run check:fix                                # always
@@ -94,18 +104,25 @@ Upsert the marker comment (Phase E) with classification + reasons + links to the
    make build-packages
    # always — root catches drift the package-local checks miss:
    bun run typecheck
+   # tests — biome/tsc don't catch behavioral regressions:
+   bun run test
    ```
 
-4. If validation fails: do NOT push. Reset the branch, downgrade classification to `needs-human`, comment `auto-fix attempt failed: <error excerpt>`, exit.
+5. If validation fails: do NOT push. Reset the branch (`git reset --hard origin/<headRefName>`), downgrade classification to `needs-human`, comment `auto-fix attempt failed: <error excerpt>`, exit.
 
-5. If validation passes:
+6. If validation passes — stage ONLY paths that were already in the PR diff scope:
 
    ```bash
-   git add -A
+   # Intersect dirty files with the original PR scope.
+   git status --porcelain | awk '{print $2}' \
+     | grep -Fxf /tmp/triage-scope.txt \
+     | xargs -r git add --
    git commit -m "chore: address review comments"
    git push origin "HEAD:$(gh pr view "$PR" --json headRefName -q .headRefName)"
    gh pr edit "$PR" --add-label "triage:fixes-applied"
    ```
+
+   If `bun run check:fix` reformatted files OUTSIDE the PR scope, leave them — that's repo-wide formatter drift, not a fix for this PR. Note it in the marker comment.
 
    On push rejection (race with another commit), downgrade to `needs-human`.
 
