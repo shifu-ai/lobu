@@ -31,15 +31,34 @@ Sources: gov.uk/income-tax-rates, gov.uk/capital-gains-tax/allowances, gov.uk/ta
 
 `$TAX_YEAR_ID` below is the `entities.id` of the active `tax_year` row (resolve once, reuse in every query). All queries are org-scoped automatically — no need to filter by organization_id.
 
-### 0. Resolve the tax year
+### 0. Resolve the tax year + the user's $member + their identifiers
 
 ```sql
 SELECT id, name, (metadata->>'year_label') AS year_label,
        (metadata->>'start')::date AS start_date,
-       (metadata->>'end')::date AS end_date
+       (metadata->>'end')::date AS end_date,
+       (metadata->>'residence_status') AS residence_status
 FROM entities
 WHERE entity_type = 'tax_year'
   AND metadata->>'year_label' = '2025-26';
+```
+
+```sql
+-- $MEMBER_ID is the user's $member entity in their personal org.
+SELECT id, name, (metadata->>'display_name') AS display_name
+FROM entities
+WHERE entity_type = '$member'
+  AND deleted_at IS NULL
+LIMIT 1;
+```
+
+```sql
+-- HMRC identifiers live in entity_identities, NOT metadata.
+SELECT namespace, identifier
+FROM entity_identities
+WHERE entity_id = $MEMBER_ID
+  AND namespace IN ('hmrc_utr', 'hmrc_ni_number')
+  AND deleted_at IS NULL;
 ```
 
 ### 1. SA100 main — dividends & interest
@@ -67,11 +86,18 @@ WHERE t.entity_type = 'transaction'
 
 ### 2. SA102 — employment income (per employer)
 
+Employer is a `company` entity. PAYE ref lives on the `employed_by` relationship's metadata (since one company can pay one person via different PAYE schemes — e.g. a director who's also a regular PAYE employee). Director status is the `director_of` relationship between the user's `$member` and the company.
+
 ```sql
 SELECT
   emp.name AS employer,
-  (emp.metadata->>'paye_reference') AS paye_ref,
-  (emp.metadata->>'director_flag')::boolean AS director,
+  (er.metadata->>'paye_reference') AS paye_ref,
+  EXISTS(
+    SELECT 1 FROM entity_relationships dr
+    WHERE dr.relationship_type_slug = 'director_of'
+      AND dr.from_entity_id = $MEMBER_ID
+      AND dr.to_entity_id = emp.id
+  ) AS director,
   SUM(COALESCE((ir.metadata->>'gross_amount')::numeric, t.amount::numeric)) AS gross_pay,
   SUM(COALESCE((ir.metadata->>'tax_deducted')::numeric, 0)) AS tax_deducted
 FROM entities t
@@ -86,30 +112,40 @@ JOIN entities src ON src.id = ir.to_entity_id
 JOIN entity_relationships er ON er.from_entity_id = src.id
   AND er.relationship_type_slug = 'employed_by'
 JOIN entities emp ON emp.id = er.to_entity_id
+  AND emp.entity_type = 'company'
 WHERE t.entity_type = 'transaction'
-GROUP BY emp.id, emp.name, emp.metadata;
+GROUP BY emp.id, emp.name, er.metadata;
 ```
 
 ### 3. SA105 — UK property (per property)
+
+Properties are filtered by `use IN ('let', 'FHL', 'commercial_let')` — primary residences and investment-held properties don't generate rental income. Joint ownership comes from `co_owned_by` rows; the user's share is the row whose `from_entity_id = $MEMBER_ID`.
 
 ```sql
 SELECT
   p.name AS property,
   (p.metadata->>'address') AS address,
   (p.metadata->>'type') AS type,
-  (p.metadata->>'joint_share_pct')::numeric AS share_pct,
+  (p.metadata->>'use') AS use,
+  COALESCE((co.metadata->>'share_pct')::numeric, 100) AS share_pct,
   SUM(CASE WHEN (t.metadata->>'tax_relevance') = 'income'
             THEN t.amount::numeric ELSE 0 END) AS rental_income_gross,
   (SELECT COALESCE(SUM((ex.metadata->>'amount')::numeric), 0)
    FROM entities ex
-   JOIN entity_relationships er ON er.from_entity_id = ex.id
-     AND er.relationship_type_slug = 'expense_of'
-     AND er.to_entity_id = p.id
+   JOIN entity_relationships eor ON eor.from_entity_id = ex.id
+     AND eor.relationship_type_slug = 'expense_of'
+     AND eor.to_entity_id = p.id
    JOIN entity_relationships fr2 ON fr2.from_entity_id = ex.id
      AND fr2.relationship_type_slug = 'for_tax_year'
      AND fr2.to_entity_id = $TAX_YEAR_ID
    WHERE ex.entity_type = 'expense') AS allowable_expenses
 FROM entities p
+LEFT JOIN entity_relationships co ON co.from_entity_id = p.id
+  AND co.relationship_type_slug = 'co_owned_by'
+  AND co.to_entity_id = $MEMBER_ID
+LEFT JOIN entity_relationships own ON own.from_entity_id = p.id
+  AND own.relationship_type_slug = 'owned_by'
+  AND own.to_entity_id = $MEMBER_ID
 LEFT JOIN entity_relationships acr ON acr.from_entity_id = p.id
   AND acr.relationship_type_slug = 'account_contains'
 LEFT JOIN entities t ON t.id = acr.to_entity_id
@@ -119,7 +155,9 @@ LEFT JOIN entity_relationships fr ON fr.from_entity_id = t.id
   AND fr.to_entity_id = $TAX_YEAR_ID
 WHERE p.entity_type = 'property'
   AND (p.metadata->>'country') = 'GB'
-GROUP BY p.id, p.name, p.metadata;
+  AND (p.metadata->>'use') IN ('let', 'FHL', 'commercial_let')
+  AND (own.id IS NOT NULL OR co.id IS NOT NULL)
+GROUP BY p.id, p.name, p.metadata, co.metadata;
 ```
 
 Note on SA105: mortgage interest on residential lets is NOT deductible as an expense. Instead it gives a basic-rate tax credit (20% of the lower of finance costs, rental profits, or adjusted total income). Surface finance costs separately in the output; don't include them in `allowable_expenses`.
@@ -187,7 +225,8 @@ Return one markdown document with these sections, in order. Use exact figures fr
 ```
 # Self Assessment {{year_label}} — assembly
 
-**Taxpayer**: {{$member.name}} — UTR {{$member.utr or "(missing)"}} — NI {{$member.ni_number or "(missing)"}}
+**Taxpayer**: {{$member.name}} — UTR {{identities.hmrc_utr or "(missing)"}} — NI {{identities.hmrc_ni_number or "(missing)"}}
+**Residence**: {{tax_year.residence_status or "uk_resident (assumed)"}}
 **Deadlines**: paper 31 Oct {{YYYY}}, online 31 Jan {{YYYY+1}}, balancing payment 31 Jan {{YYYY+1}}, 2nd POA 31 Jul {{YYYY+1}}.
 
 ## SA100 main return
