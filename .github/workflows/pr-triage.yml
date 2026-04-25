@@ -53,6 +53,10 @@ jobs:
           PR_INPUT: ${{ inputs.pr_number }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
+          COMMENT_ASSOCIATION: ${{ github.event.comment.author_association }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          REVIEW_ASSOCIATION: ${{ github.event.review.author_association }}
+          REVIEW_USER: ${{ github.event.review.user.login }}
         run: |
           set -euo pipefail
           case "$EVENT" in
@@ -62,6 +66,51 @@ jobs:
             *) echo "unsupported event $EVENT"; exit 1 ;;
           esac
           [ -n "$num" ] || { echo "no PR number resolved"; exit 1; }
+
+          is_trusted_assoc() {
+            case "$1" in
+              OWNER|MEMBER|COLLABORATOR) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Approval bots need an explicit allowlist — their author_association
+          # is NONE/BOT, but their reviews are the trigger that moves PRs to
+          # auto-mergeable. Filter only on pull_request_review.
+          is_trusted_review_bot() {
+            case "$1" in
+              codex-approver|codex-approver[bot]) return 0 ;;
+              chatgpt-codex-connector|chatgpt-codex-connector[bot]) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          if [ "$EVENT" = "issue_comment" ]; then
+            if ! is_trusted_assoc "$COMMENT_ASSOCIATION"; then
+              echo "untrusted issue_comment actor ($COMMENT_ASSOCIATION) — skipping"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            first_line=$(printf '%s\n' "$COMMENT_BODY" | head -n 1 | tr -d '\r')
+            case "$first_line" in
+              /triage|/triage\ *) ;;
+              *)
+                echo "trusted comment without /triage command — skipping"
+                echo "proceed=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+          fi
+
+          if [ "$EVENT" = "pull_request_review" ]; then
+            if ! is_trusted_assoc "$REVIEW_ASSOCIATION" \
+               && ! is_trusted_review_bot "$REVIEW_USER"; then
+              echo "untrusted pull_request_review actor ($REVIEW_USER, $REVIEW_ASSOCIATION) — skipping"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
 
           # Fork detection works for every event type.
           head_repo=$(gh pr view "$num" --repo "$GH_REPO" \
