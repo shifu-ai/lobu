@@ -119,10 +119,12 @@ async function findExistingPersonalOrg(
   // user's personal one. Re-running the hook (e.g. after a transient failure)
   // is a no-op. The ORDER BY keeps resolution deterministic if legacy data ever
   // contains duplicates.
-  const tagFragment = `"personal_org_for_user_id":"${userId}"`;
+  // organization.metadata is `text` storing JSON; cast to jsonb and use ->>
+  // instead of LIKE so a userId containing % or _ can't match unintended rows.
   const existing = await sql`
     SELECT id, slug FROM "organization"
-    WHERE metadata IS NOT NULL AND metadata LIKE ${`%${tagFragment}%`}
+    WHERE metadata IS NOT NULL
+      AND (metadata::jsonb)->>'personal_org_for_user_id' = ${userId}
     ORDER BY "createdAt" ASC, id ASC
     LIMIT 1
   `;
