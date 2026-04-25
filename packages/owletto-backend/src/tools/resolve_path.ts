@@ -453,7 +453,9 @@ async function _resolvePath(
     ] = await Sentry.startSpan({ name: 'entity:counts+tabs', op: 'db' }, () =>
       Promise.all([
         simpleQuery(
-          sql`SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${sql.unsafe(entityLinkMatchSql(`${Number(entityRow.id)}::bigint`, 'ev'))}`
+          sql.unsafe<{ cnt: number }>(
+            `SELECT COUNT(*) as cnt FROM current_event_records ev WHERE ${entityLinkMatchSql(`${Number(entityRow.id)}::bigint`, 'ev')}`
+          )
         ),
         simpleQuery(sql`
           SELECT COUNT(DISTINCT cn.connector_key) as cnt
@@ -731,7 +733,16 @@ async function fetchRecentContent(
   organizationId: string,
   entityId: number | null
 ): Promise<BootstrapContentItem[]> {
-  const rows = await simpleQuery(sql`
+  // Inline the entity-link match as raw SQL — postgres.js can't combine
+  // sql.unsafe() inside a tagged template that also has $N values when
+  // running against PGlite (prepare:false simple-query mode).
+  const entityFilter =
+    entityId !== null
+      ? `AND ${entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev')}`
+      : '';
+  const rows = await simpleQuery(
+    sql.unsafe<Record<string, unknown>>(
+      `
     SELECT
       ev.id,
       ev.entity_ids,
@@ -754,11 +765,14 @@ async function fetchRecentContent(
       ev.occurred_at
     FROM current_event_records ev
     LEFT JOIN connections cn ON cn.id = ev.connection_id
-    WHERE ev.organization_id = ${organizationId}
-      ${entityId !== null ? sql`AND ${sql.unsafe(entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev'))}` : sql``}
+    WHERE ev.organization_id = $1
+      ${entityFilter}
     ORDER BY COALESCE(ev.occurred_at, ev.created_at) DESC
-    LIMIT ${BOOTSTRAP_RECENT_LIMIT}
-  `);
+    LIMIT $2
+  `,
+      [organizationId, BOOTSTRAP_RECENT_LIMIT]
+    )
+  );
 
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     id: Number(row.id),

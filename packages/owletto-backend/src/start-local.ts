@@ -395,6 +395,6 @@ async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
 }
 
 main().catch((error) => {
-  logger.error({ error }, 'Failed to start');
+  logger.error({ err: error }, 'Failed to start');
   process.exit(1);
 });

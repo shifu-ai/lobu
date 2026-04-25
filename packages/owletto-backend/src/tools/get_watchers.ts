@@ -477,9 +477,14 @@ export async function getWatcher(
   const classificationStatsMap: Map<number, Record<string, Record<string, number>>> = new Map();
   let classificationTimeline: ClassificationTimeline | undefined;
 
-  // Fire watcher details query early (awaited after classification stats)
+  // Fire watcher details query early (awaited after classification stats).
+  // Use sql.unsafe() with a $N parameter so the latest-run LATERAL JOIN can
+  // be string-interpolated safely. Tagged-template + sql.unsafe() inside the
+  // template breaks PGlite's simple-query mode (prepare=false), so we keep
+  // this path as a single unsafe call instead.
   const watcherQueryPromise = args.watcher_id
-    ? sql`
+    ? sql.unsafe(
+        `
       SELECT
         i.id as watcher_id,
         i.name,
@@ -504,9 +509,11 @@ export async function getWatcher(
         wr.completed_at as watcher_run_completed_at
       FROM watchers i
       LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
-      ${sql.unsafe(buildLatestWatcherRunJoinSql('i', 'wr'))}
-      WHERE i.id = ${args.watcher_id}
-    `
+      ${buildLatestWatcherRunJoinSql('i', 'wr')}
+      WHERE i.id = $1
+    `,
+        [args.watcher_id]
+      )
     : null;
 
   logger.info(

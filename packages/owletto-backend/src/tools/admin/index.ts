@@ -107,7 +107,7 @@ EXECUTION WORKFLOW: Use read_knowledge(watcher_id, since/until) to fetch prompt_
 
 REACTION SCRIPTS: Use set_reaction_script to attach TypeScript that auto-executes after complete_window. Script receives ReactionContext + ReactionSDK for entities, actions, content, and notifications.
 
-FEEDBACK: Use submit_feedback(watcher_id, window_id, corrections, notes) to correct extraction fields. Use get_feedback(watcher_id) to retrieve corrections. Corrections are automatically injected into future prompts.`,
+FEEDBACK: Use submit_feedback(watcher_id, window_id, corrections=[{field_path, mutation?, value?, note?}]) to correct extraction. Mutation defaults to 'set'; use 'remove' to drop an array item, 'add' to append one. Each entry is stored as its own row so later submissions supersede earlier ones per field. Use get_feedback(watcher_id) to retrieve corrections. Most-recent-per-field corrections are injected into future prompts.`,
     inputSchema: ManageWatchersSchema,
     annotations: { destructiveHint: false },
     handler: async (args: Static<typeof ManageWatchersSchema>, env: Env, ctx: ToolContext) => {
