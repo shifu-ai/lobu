@@ -30,7 +30,7 @@ Skip silently when:
 
 - `isDraft == true`
 - Labels include `triage:hold`
-- The most recent `<!-- triage:summary -->` comment records the same `headRefOid` AND a terminal classification (`auto-mergeable` or `needs-human`)
+- The most recent `<!-- triage:summary -->` comment records the same `headRefOid` AND classification `needs-human`. **Only `needs-human` short-circuits.** `auto-mergeable` must be re-evaluated on every event because a later `CHANGES_REQUESTED` review on the same head should downgrade the decision (without branch protection, an already-queued `--auto --squash` would otherwise still merge after CI green). `needs-fixes` naturally re-runs because the agent's own push changes the head SHA.
 - `additions + deletions > 1000` and `skip-size-check` not in labels (already failed in `pr-validation.yml`)
 
 Classify as `needs-human` and exit when:
@@ -65,6 +65,14 @@ If none match (e.g., CI still running, no Codex review yet), classify as `pendin
 ### `needs-human`
 
 Read `assignee:` from `.github/triage-config.yml` (do NOT use `@me` — in CI it resolves to `github-actions[bot]`).
+
+If the previous classification was `auto-mergeable` (per the marker comment), cancel the queued auto-merge:
+
+```bash
+gh pr merge "$PR" --disable-auto || true
+```
+
+Then label and assign:
 
 ```bash
 ASSIGNEE=$(grep '^assignee:' .github/triage-config.yml | awk '{print $2}')
@@ -108,7 +116,7 @@ Upsert the marker comment (Phase E) with classification + reasons + links to the
    bun run test
    ```
 
-5. If validation fails: do NOT push. Reset the branch (`git reset --hard origin/<headRefName>`), downgrade classification to `needs-human`, comment `auto-fix attempt failed: <error excerpt>`, exit.
+5. If validation fails: do NOT push. Reset the branch (`git reset --hard origin/<headRefName>`), cancel any queued auto-merge (`gh pr merge "$PR" --disable-auto || true`), downgrade classification to `needs-human`, comment `auto-fix attempt failed: <error excerpt>`, exit.
 
 6. If validation passes — stage ONLY paths that were already in the PR diff scope:
 
