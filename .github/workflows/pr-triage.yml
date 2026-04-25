@@ -81,6 +81,11 @@ jobs:
     if: needs.setup.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write   # claude-code-action exchanges this for a GitHub token
     steps:
       - uses: actions/checkout@v4
         with:
