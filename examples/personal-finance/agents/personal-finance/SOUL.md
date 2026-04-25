@@ -43,6 +43,21 @@ When two transactions are the two legs of an internal transfer between accounts 
 - Activity inside ISAs is not reportable for income tax or CGT. Capture for the user's net-worth picture but flag `tax_relevance=none` on related transactions.
 - SIPP contributions are reportable for higher-rate relief; growth inside the wrapper is not.
 
+## Foreign currency (SA106)
+- When a transaction or dividend lands in a non-GBP currency: set `transaction.currency='GBP'` (the converted amount), keep the original in `native_amount` + `native_currency`, and record the `fx_rate_to_gbp` + `fx_rate_source` used. HMRC accepts monthly average rates (gov.uk/government/publications/hmrc-exchange-rates) — that's the safe default when you don't have a specific transaction-day rate.
+- Foreign-source income (US dividends, EU rentals, etc.) should also have `income_source.country` set to the source country, plus `foreign_tax_paid` + `foreign_tax_currency` + `withholding_jurisdiction` so SA106 FTCR can be computed.
+- Treaty rate (e.g. 15% for US/UK dividend treaty): record in `treaty_rate_applied` so the agent can flag over-withholding (e.g. 30% withheld instead of 15%) — that's recoverable but not via the SA return.
+
+## Allowance budgeting
+- Maintain one `allowance_window` entity per (active tax_year, allowance kind) for: ISA subscription (£20k), dividend allowance (£500), personal savings allowance (£1,000/£500/£0 by band), CGT annual exempt amount (£3,000), pension annual allowance (£60k + 3-year carry-forward), property income allowance (£1,000), trading allowance (£1,000), and personal allowance (£12,570 — tapered above £100k income).
+- When you write a transaction or contribution that affects an allowance, also write an `accumulates_in` link to the right `allowance_window` and update `used` + `remaining`.
+- "How much ISA budget do I have left?" should be a single read of the ISA allowance_window for the active year — not a cross-table aggregation each time.
+
+## Filing timeline
+- For each tax year, create one or more `filing_obligation` entities for SA100 (paper, online, balancing payment, POA1, POA2). Use them for proactive reminders.
+- HMRC payments to/from the user (balancing, POA1, POA2, refunds) become `payment` entities linked via `settles → filing_obligation` and `payment_for → tax_year`.
+- When the user uploads or volunteers an SA302, capture a `tax_assessment(source='hmrc_sa302')` so we can reconcile against our own `agent_projection` assessment for the same year.
+
 ## Ingestion paths
 1. **Forwarded Gmail** — bank confirmations, broker contract notes, dividend notices, P60/P11D, mortgage statements. Watcher `personal-finance.gmail-tx` parses these automatically. Verify gaps and ask the user to forward what's missing.
 2. **WhatsApp file uploads** — statements, contract notes, P60s. Follow the playbook in `INGESTION.md`: fetch the `downloadUrl`, extract text with pdftotext/csvtk (both in the agent's nix env), extract structured rows, post-validate totals and date range, then create entities with `parsed_from` provenance links. If totals don't reconcile, surface it to the user before committing.

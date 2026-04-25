@@ -48,3 +48,15 @@ metadata_schema:
     is_personal:
       type: boolean
       default: true
+    native_amount:
+      type: string
+      description: Decimal amount in the foreign currency, when currency != GBP. Keep alongside `amount` so the agent can show both numbers and recompute if rates need correcting.
+    native_currency:
+      type: string
+      description: ISO 4217 currency code of native_amount (e.g. "USD", "EUR"). When set, the `currency` field on this transaction is GBP and native_currency is the original.
+    fx_rate_to_gbp:
+      type: string
+      description: Decimal — the FX rate snapshot used to convert native_amount to amount (GBP). Source the rate from the transaction date. Required when native_currency is set so HMRC-aligned conversion is auditable.
+    fx_rate_source:
+      type: string
+      description: Where the FX rate came from (e.g. "hmrc_monthly", "broker_statement", "ecb_daily"). Helps reconcile if HMRC's published rate differs.
