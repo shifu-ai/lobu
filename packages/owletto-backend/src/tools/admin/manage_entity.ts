@@ -383,7 +383,7 @@ export async function manageEntity(
 ): Promise<ManageEntityResult> {
   const id = () => requireField(args.entity_id, 'entity_id', args.action);
 
-  const result = await routeAction('manage_entity', args.action, {
+  const result = await routeAction('manage_entity', args.action, ctx, {
     create: () => handleCreate(args, env, ctx),
     update: () => handleUpdate(id(), args, env, ctx),
     list: () => handleList(args, env, ctx),

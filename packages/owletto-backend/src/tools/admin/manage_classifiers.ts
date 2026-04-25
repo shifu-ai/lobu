@@ -243,9 +243,9 @@ function stripEmbeddingsFromAttributeValues(
 export async function manageClassifiers(
   args: ManageClassifiersArgs,
   env: Env,
-  _ctx: ToolContext
+  ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
-  return routeAction<ManageClassifiersResult>('manage_classifiers', args.action, {
+  return routeAction<ManageClassifiersResult>('manage_classifiers', args.action, ctx, {
     create: () => handleCreate(args, env),
     create_version: () => handleCreateVersion(args, env),
     list: () => handleList(args),

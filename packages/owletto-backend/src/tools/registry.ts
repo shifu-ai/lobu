@@ -55,6 +55,8 @@ export interface ToolContext {
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */
   clientId?: string | null;
+  /** OAuth scopes granted to this MCP/tool session, when applicable. */
+  scopes?: string[] | null;
   /** Original request URL, used to derive public-facing origin for URL generation */
   requestUrl?: string;
   /** PUBLIC_WEB_URL env var fallback for URL generation when requestUrl is unreliable */

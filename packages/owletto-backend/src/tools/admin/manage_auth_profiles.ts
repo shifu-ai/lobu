@@ -179,7 +179,7 @@ export async function manageAuthProfiles(
   _env: Env,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
-  return routeAction<ManageAuthProfilesResult>('manage_auth_profiles', args.action, {
+  return routeAction<ManageAuthProfilesResult>('manage_auth_profiles', args.action, ctx, {
     list_auth_profiles: () =>
       handleListAuthProfiles(
         args as Extract<AuthProfilesArgs, { action: 'list_auth_profiles' }>,

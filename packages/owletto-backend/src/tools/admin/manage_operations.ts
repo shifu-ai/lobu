@@ -145,7 +145,7 @@ export async function manageOperations(
   env: Env,
   ctx: ToolContext
 ): Promise<ManageOperationsResult> {
-  return routeAction<ManageOperationsResult>('manage_operations', args.action, {
+  return routeAction<ManageOperationsResult>('manage_operations', args.action, ctx, {
     list_available: () =>
       handleListAvailable(args as Extract<OperationsArgs, { action: 'list_available' }>, ctx),
     execute: () => handleExecute(args as Extract<OperationsArgs, { action: 'execute' }>, env, ctx),

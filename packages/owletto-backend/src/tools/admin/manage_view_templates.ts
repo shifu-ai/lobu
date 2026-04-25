@@ -81,7 +81,7 @@ export async function manageViewTemplates(
   _env: unknown,
   ctx: ToolContext
 ): Promise<ManageViewTemplatesResult> {
-  return routeAction<ManageViewTemplatesResult>('manage_view_templates', args.action, {
+  return routeAction<ManageViewTemplatesResult>('manage_view_templates', args.action, ctx, {
     set: () => handleSet(args, ctx),
     get: () => handleGet(args, ctx),
     rollback: () => handleRollback(args, ctx),

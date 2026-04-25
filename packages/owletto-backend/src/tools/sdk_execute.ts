@@ -4,8 +4,8 @@
  * tool surface (those handlers stay; the SDK delegates to them).
  *
  * Auth: requires `write` access. Per-method access checks fire inside the
- * SDK (read-tier sessions can run scripts that only call read methods; the
- * first write call throws).
+ * delegated handlers, so admin-only SDK calls still require admin role and
+ * `mcp:admin` scope before they run.
  */
 
 import { type Static, Type } from "@sinclair/typebox";

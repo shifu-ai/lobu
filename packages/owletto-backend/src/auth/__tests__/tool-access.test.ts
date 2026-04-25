@@ -5,7 +5,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { routeAction } from '../../tools/admin/action-router';
 import { type AuthContext, checkToolAccess } from '../../tools/execute';
+import type { ToolContext } from '../../tools/registry';
 import {
   getRequiredAccessLevel,
   isPublicReadable,
@@ -46,9 +48,21 @@ describe('requiresOwnerAdmin', () => {
     expect(
       requiresOwnerAdmin('manage_connections', { action: 'update_connector_auth' }, false)
     ).toBe(true);
+    expect(
+      requiresOwnerAdmin('manage_connections', { action: 'update_connector_default_config' }, false)
+    ).toBe(true);
+    expect(requiresOwnerAdmin('manage_connections', { action: 'reauthenticate' }, false)).toBe(
+      true
+    );
   });
 
-  it('should require admin for manage_auth_profiles mutations', () => {
+  it('should require admin for manage_auth_profiles sensitive actions', () => {
+    expect(requiresOwnerAdmin('manage_auth_profiles', { action: 'get_auth_profile' }, false)).toBe(
+      true
+    );
+    expect(
+      requiresOwnerAdmin('manage_auth_profiles', { action: 'test_auth_profile' }, false)
+    ).toBe(true);
     expect(
       requiresOwnerAdmin('manage_auth_profiles', { action: 'create_auth_profile' }, false)
     ).toBe(true);
@@ -68,6 +82,10 @@ describe('requiresOwnerAdmin', () => {
     expect(requiresOwnerAdmin('manage_watchers', { action: 'set_reaction_script' }, false)).toBe(
       true
     );
+    expect(requiresOwnerAdmin('manage_watchers', { action: 'trigger' }, false)).toBe(true);
+    expect(requiresOwnerAdmin('manage_watchers', { action: 'create_from_version' }, false)).toBe(
+      true
+    );
   });
 
   it('should not require admin for manage_watchers read actions', () => {
@@ -78,6 +96,13 @@ describe('requiresOwnerAdmin', () => {
     expect(
       requiresOwnerAdmin('manage_watchers', { action: 'get_component_reference' }, false)
     ).toBe(false);
+    expect(requiresOwnerAdmin('manage_watchers', { action: 'get_feedback' }, false)).toBe(false);
+  });
+
+  it('should require admin for view template mutations while leaving reads as read-tier', () => {
+    expect(requiresOwnerAdmin('manage_view_templates', { action: 'set' }, false)).toBe(true);
+    expect(requiresOwnerAdmin('manage_view_templates', { action: 'rollback' }, false)).toBe(true);
+    expect(requiresOwnerAdmin('manage_view_templates', { action: 'get' }, false)).toBe(false);
   });
 });
 
@@ -163,6 +188,63 @@ describe('isPublicReadable', () => {
 
   it('should deny public read for manage_operations execute', () => {
     expect(isPublicReadable('manage_operations', { action: 'execute' })).toBe(false);
+  });
+});
+
+describe('routeAction per-action enforcement', () => {
+  const memberWriteCtx: ToolContext = {
+    organizationId: 'org_123',
+    userId: 'user_123',
+    memberRole: 'member',
+    isAuthenticated: true,
+    scopes: ['mcp:write'],
+  };
+
+  it('blocks admin-only handler actions reached through execute for write-tier members', async () => {
+    let called = false;
+    await expect(
+      routeAction('manage_entity_schema', 'create', memberWriteCtx, {
+        create: async () => {
+          called = true;
+          return { ok: true };
+        },
+      })
+    ).rejects.toThrow(/requires admin or owner access/i);
+    expect(called).toBe(false);
+  });
+
+  it('requires admin MCP scope even for owner/admin roles', async () => {
+    await expect(
+      routeAction(
+        'manage_connections',
+        'install_connector',
+        {
+          ...memberWriteCtx,
+          memberRole: 'admin',
+        },
+        {
+          install_connector: async () => ({ ok: true }),
+        }
+      )
+    ).rejects.toThrow(/requires an MCP session with admin access/i);
+  });
+
+  it('preserves system reaction calls', async () => {
+    await expect(
+      routeAction(
+        'manage_operations',
+        'execute',
+        {
+          organizationId: 'org_123',
+          userId: null,
+          memberRole: null,
+          isAuthenticated: true,
+        },
+        {
+          execute: async () => ({ ok: true }),
+        }
+      )
+    ).resolves.toEqual({ ok: true });
   });
 });
 

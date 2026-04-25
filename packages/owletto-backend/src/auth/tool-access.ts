@@ -4,13 +4,12 @@
  * Centralizes role/scoped MCP access checks and what anonymous/public
  * callers are allowed to read.
  *
- * Note on `execute`: the MCP entry point requires write-tier access, but the
- * real authorization happens per-SDK-call inside the script. A read-tier
- * session can run scripts that only call read methods; the first write call
- * inside the script will throw at the handler-level access check.
+ * Note on `execute`: the MCP entry point requires write-tier access, and
+ * admin-only SDK methods still re-check role + MCP scope at the delegated
+ * handler boundary before any mutation runs.
  */
 
-type ToolAccessLevel = 'read' | 'write' | 'admin';
+export type ToolAccessLevel = 'read' | 'write' | 'admin';
 
 const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
   save_knowledge: null,
@@ -32,15 +31,19 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
     'update',
     'delete',
     'connect',
+    'reauthenticate',
     'test',
     'install_connector',
     'uninstall_connector',
     'toggle_connector_login',
     'update_connector_auth',
+    'update_connector_default_config',
     'set_connector_entity_link_overrides',
   ]),
   manage_feeds: new Set(['create_feed', 'update_feed', 'delete_feed', 'trigger_feed']),
   manage_auth_profiles: new Set([
+    'get_auth_profile',
+    'test_auth_profile',
     'create_auth_profile',
     'update_auth_profile',
     'delete_auth_profile',
@@ -52,9 +55,11 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
     'create_version',
     'upgrade',
     'complete_window',
+    'trigger',
     'delete',
     'set_reaction_script',
     'submit_feedback',
+    'create_from_version',
   ]),
   manage_classifiers: new Set([
     'create',
@@ -64,6 +69,7 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
     'delete',
     'classify',
   ]),
+  manage_view_templates: new Set(['set', 'rollback', 'remove_tab']),
 };
 
 const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
@@ -82,8 +88,14 @@ const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {
   manage_feeds: new Set(['list_feeds', 'get_feed']),
   manage_auth_profiles: new Set(['list_auth_profiles']),
   manage_operations: new Set(['list_available', 'list_runs', 'get_run']),
-  manage_watchers: new Set(['get_versions', 'get_version_details', 'get_component_reference']),
+  manage_watchers: new Set([
+    'get_versions',
+    'get_version_details',
+    'get_component_reference',
+    'get_feedback',
+  ]),
   manage_classifiers: new Set(['list', 'get_versions']),
+  manage_view_templates: new Set(['get']),
 };
 
 function getAction(args: unknown): string | null {
@@ -140,6 +152,22 @@ export function getRequiredAccessLevel(
   if (requiresOwnerAdmin(toolName, args, readOnlyHint)) return 'admin';
   if (requiresMemberWrite(toolName, args, readOnlyHint)) return 'write';
   return 'read';
+}
+
+export function hasRequiredMcpScope(
+  requiredAccess: ToolAccessLevel,
+  scopes: string[] | null | undefined
+): boolean {
+  if (scopes == null) return true;
+  if (scopes.length === 0) return false;
+  const scopeSet = new Set(scopes);
+  if (requiredAccess === 'read') {
+    return scopeSet.has('mcp:read') || scopeSet.has('mcp:write') || scopeSet.has('mcp:admin');
+  }
+  if (requiredAccess === 'write') {
+    return scopeSet.has('mcp:write') || scopeSet.has('mcp:admin');
+  }
+  return scopeSet.has('mcp:admin');
 }
 
 export function isPublicReadable(toolName: string, args: unknown): boolean {

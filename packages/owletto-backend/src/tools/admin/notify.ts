@@ -76,7 +76,7 @@ export async function notify(
   _env: Env,
   ctx: ToolContext
 ): Promise<{ notified_count: number }> {
-  return routeAction('notify', args.action, {
+  return routeAction('notify', args.action, ctx, {
     send: () => handleSend(args, ctx),
   });
 }

@@ -632,7 +632,7 @@ export async function manageWatchers(
     }
   }
 
-  return routeAction<ManageWatchersResult>('manage_watchers', args.action, {
+  return routeAction<ManageWatchersResult>('manage_watchers', args.action, ctx, {
     create: () => handleCreate(args, env, ctx),
     update: () => handleUpdate(args, env),
     create_version: () => handleCreateVersion(args, env, ctx),

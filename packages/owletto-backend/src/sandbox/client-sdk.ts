@@ -13,6 +13,7 @@
  * paths flow through to sandbox callers without extra plumbing.
  */
 
+import { hasRequiredMcpScope } from "../auth/tool-access";
 import type { Env } from "../index";
 import type { ToolContext } from "../tools/registry";
 import {
@@ -164,6 +165,10 @@ export async function resolveOrgMembership(
 // SDK construction
 // ---------------------------------------------------------------------------
 
+function isSystemContext(ctx: ToolContext): boolean {
+  return ctx.isAuthenticated === true && ctx.userId === null && ctx.memberRole === null;
+}
+
 /**
  * Build a `ClientSDK` bound to the caller's current `ToolContext`. The SDK
  * exposes `.org()` which constructs a fresh `ClientSDK` after re-validating
@@ -194,13 +199,21 @@ export function buildClientSDK(ctx: ToolContext, env: Env): ClientSDK {
     },
 
     async query(querySql) {
-      // Mirrors `query_sql` MCP tool: admin/owner only, even though the
-      // method is read-only. The query allowlist exposes audit/event tables
-      // that should not be reachable by member-tier callers via `execute`.
-      if (ctx.memberRole !== "owner" && ctx.memberRole !== "admin") {
-        throw new AccessDeniedError(
-          "client.query requires admin or owner access in the current organization.",
-        );
+      // Mirrors `query_sql` MCP tool: admin/owner only for user sessions,
+      // even though the method is read-only. The query allowlist exposes
+      // audit/event tables that should not be reachable by member-tier callers
+      // via `execute`. Watcher reactions remain system calls and are allowed.
+      if (!isSystemContext(ctx)) {
+        if (ctx.memberRole !== "owner" && ctx.memberRole !== "admin") {
+          throw new AccessDeniedError(
+            "client.query requires admin or owner access in the current organization.",
+          );
+        }
+        if (!hasRequiredMcpScope("admin", ctx.scopes)) {
+          throw new AccessDeniedError(
+            "client.query requires an MCP session with admin access.",
+          );
+        }
       }
       const [{ getDb }, { validateAndScopeQuery }] = await Promise.all([
         import("../db/client"),

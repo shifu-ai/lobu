@@ -371,7 +371,7 @@ export async function manageConnections(
   env: Env,
   ctx: ToolContext
 ): Promise<ManageConnectionsResult> {
-  return routeAction<ManageConnectionsResult>('manage_connections', args.action, {
+  return routeAction<ManageConnectionsResult>('manage_connections', args.action, ctx, {
     list_connector_definitions: () =>
       handleListConnectorDefinitions(
         args as Extract<ConnectionsArgs, { action: 'list_connector_definitions' }>,

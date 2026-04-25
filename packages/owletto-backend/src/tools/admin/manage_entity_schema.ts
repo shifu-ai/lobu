@@ -209,7 +209,7 @@ export async function manageEntitySchema(
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
   if (args.schema_type === 'entity_type') {
-    return routeAction('manage_entity_schema', args.action, {
+    return routeAction('manage_entity_schema', args.action, ctx, {
       list: () => etHandleList(ctx),
       get: () => etHandleGet(args.slug, ctx),
       create: () => etHandleCreate(args, ctx),
@@ -219,7 +219,7 @@ export async function manageEntitySchema(
     });
   }
 
-  return routeAction('manage_entity_schema', args.action, {
+  return routeAction('manage_entity_schema', args.action, ctx, {
     list: () => rtHandleList(args, ctx),
     get: () => rtHandleGet(args, ctx),
     create: () => rtHandleCreate(args, ctx),

@@ -5,7 +5,7 @@
  */
 
 import type { Context } from 'hono';
-import { getRequiredAccessLevel, isPublicReadable } from '../auth/tool-access';
+import { getRequiredAccessLevel, hasRequiredMcpScope, isPublicReadable } from '../auth/tool-access';
 import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
@@ -55,22 +55,6 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
  * Check access control for a tool call. Throws on denial.
  */
 const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations', 'switch_organization']);
-
-function hasRequiredMcpScope(
-  requiredAccess: 'read' | 'write' | 'admin',
-  scopes: string[] | null | undefined
-): boolean {
-  if (scopes == null) return true;
-  if (scopes.length === 0) return false;
-  const scopeSet = new Set(scopes);
-  if (requiredAccess === 'read') {
-    return scopeSet.has('mcp:read') || scopeSet.has('mcp:write') || scopeSet.has('mcp:admin');
-  }
-  if (requiredAccess === 'write') {
-    return scopeSet.has('mcp:write') || scopeSet.has('mcp:admin');
-  }
-  return scopeSet.has('mcp:admin');
-}
 
 export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthContext): void {
   if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
@@ -188,6 +172,7 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
     agentId: authCtx.agentId,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,
+    scopes: authCtx.scopes,
     requestUrl: authCtx.requestUrl,
     baseUrl: authCtx.baseUrl,
   };

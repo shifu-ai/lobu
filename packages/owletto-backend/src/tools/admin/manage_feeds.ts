@@ -115,7 +115,7 @@ export async function manageFeeds(
   env: Env,
   ctx: ToolContext
 ): Promise<ManageFeedsResult> {
-  return routeAction<ManageFeedsResult>('manage_feeds', args.action, {
+  return routeAction<ManageFeedsResult>('manage_feeds', args.action, ctx, {
     list_feeds: () => handleListFeeds(args as Extract<FeedsArgs, { action: 'list_feeds' }>, ctx),
     get_feed: () => handleGetFeed(args as Extract<FeedsArgs, { action: 'get_feed' }>, ctx),
     create_feed: () =>

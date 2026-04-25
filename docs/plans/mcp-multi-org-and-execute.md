@@ -56,10 +56,10 @@ The original design doc says `getRequiredAccessLevel('execute') = 'admin'`. Flip
 
 - Per-method access checks already exist in the SDK dispatch. A member running `execute` can call any method they could call as a direct tool — composition does not create new authorization.
 - An `admin`-only gate on `execute` would force members onto the aggregation-tool path we're explicitly killing. Members either deserve scripted composition or they don't.
-- Read-tier sessions (no `mcp:write` scope or no member role) still can't call write methods inside a script — the first write attempt fails mid-execution with a typed `AccessDenied`. Partial side effects already committed remain committed; no two-phase rollback.
-- Bare-minimum entry gate: `execute` requires authentication. Read-tier sessions can run read-only scripts. Write-tier runs anything their per-method access permits.
+- Read-tier sessions (no `mcp:write` scope or no member role) cannot call `execute`; they can still use `search` and the normal public-read tools.
+- Entry gate: `execute` requires write-tier access. Admin-only SDK calls still re-check owner/admin role plus `mcp:admin` scope at the delegated handler boundary.
 
-Public-workspace callers (`role: null`) can run `execute` but every write method throws. `search` is read-only and available to everyone.
+Public-workspace callers (`role: null`) can use `search` and public-read tools but cannot run `execute`. `search` is read-only and available to everyone.
 
 ## Scoped-endpoint UX fix: expose org tools everywhere
 
