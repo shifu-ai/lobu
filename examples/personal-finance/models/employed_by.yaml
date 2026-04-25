@@ -1,0 +1,8 @@
+version: 1
+type: relationship
+slug: employed_by
+name: Employed By
+description: An employment-type income source is employment by an employer (links income_source to employer for SA102).
+metadata_schema:
+  type: object
+  properties: {}

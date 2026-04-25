@@ -1,0 +1,8 @@
+version: 1
+type: relationship
+slug: expense_of
+name: Expense Of
+description: An expense is incurred against a trade or property.
+metadata_schema:
+  type: object
+  properties: {}

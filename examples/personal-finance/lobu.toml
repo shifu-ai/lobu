@@ -1,0 +1,31 @@
+# lobu.toml — Personal Finance agent (UK Self Assessment)
+# Docs: https://lobu.ai/docs/getting-started
+
+[agents.personal-finance]
+name = "personal-finance"
+description = "Help individuals capture wages, expenses, savings, dividends, capital gains and pension contributions across the tax year and assemble a UK Self Assessment (SA100) return."
+dir = "./agents/personal-finance"
+
+[[agents.personal-finance.providers]]
+id = "anthropic"
+model = "claude/sonnet-4-5"
+key = "$ANTHROPIC_API_KEY"
+
+[agents.personal-finance.network]
+allowed = [
+  "gov.uk",
+  ".gov.uk",
+  "github.com",
+  ".github.com",
+  ".githubusercontent.com",
+  "registry.npmjs.org",
+  ".npmjs.org",
+]
+
+[memory.owletto]
+enabled = true
+org = "personal-finance"
+name = "Personal Finance"
+description = "UK Self Assessment helper — captures financial activity across the tax year and assembles SA100 + supplementary pages."
+models = "./models"
+data = "./data"

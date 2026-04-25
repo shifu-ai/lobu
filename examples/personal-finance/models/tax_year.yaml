@@ -1,0 +1,39 @@
+version: 1
+type: entity
+slug: tax_year
+name: Tax Year
+description: A UK fiscal year (6 April to 5 April) — the container all reportable activity is anchored to.
+icon: calendar
+color: "#0EA5E9"
+metadata_schema:
+  type: object
+  required:
+    - year_label
+    - start
+    - end
+  properties:
+    year_label:
+      type: string
+      description: Year label, e.g. "2025-26"
+      x-table-label: Year
+      x-table-column: true
+    start:
+      type: string
+      format: date
+      description: Inclusive start, e.g. 2025-04-06
+    end:
+      type: string
+      format: date
+      description: Inclusive end, e.g. 2026-04-05
+    filing_status:
+      type: string
+      enum:
+        - in_progress
+        - assembled
+        - filed
+      description: Where the user is in the cycle
+      x-table-label: Status
+      x-table-column: true
+    filed_at:
+      type: string
+      format: date-time

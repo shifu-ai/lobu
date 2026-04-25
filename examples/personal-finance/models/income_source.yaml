@@ -1,0 +1,33 @@
+version: 1
+type: entity
+slug: income_source
+name: Income Source
+description: A recurring origin of income (employer, trade, dividend payer, interest payer, rental property, pension, foreign source).
+icon: banknote
+color: "#22C55E"
+metadata_schema:
+  type: object
+  required:
+    - type
+  properties:
+    type:
+      type: string
+      enum:
+        - employment
+        - self_employment
+        - dividend
+        - interest
+        - rental
+        - pension
+        - foreign
+      x-table-label: Type
+      x-table-column: true
+    payer_name:
+      type: string
+      x-table-label: Payer
+      x-table-column: true
+    country:
+      type: string
+      description: ISO 3166-1 alpha-2; relevant for SA106 foreign income
+    notes:
+      type: string

@@ -1,0 +1,52 @@
+version: 1
+type: entity
+slug: account
+name: Account
+description: A bank, savings, brokerage, pension or mortgage account held by the user.
+icon: wallet
+color: "#3B82F6"
+metadata_schema:
+  type: object
+  required:
+    - provider
+    - wrapper
+  properties:
+    provider:
+      type: string
+      description: Bank or broker name (e.g. "Monzo", "Hargreaves Lansdown")
+      x-table-label: Provider
+      x-table-column: true
+    wrapper:
+      type: string
+      enum:
+        - current
+        - savings
+        - ISA
+        - LISA
+        - JISA
+        - SIPP
+        - GIA
+        - mortgage
+        - credit_card
+        - other
+      description: Tax wrapper / account class
+      x-table-label: Wrapper
+      x-table-column: true
+    currency:
+      type: string
+      description: ISO 4217 currency code
+      default: GBP
+      x-table-label: Ccy
+      x-table-column: true
+    account_number_last4:
+      type: string
+      description: Last 4 digits, for matching
+    sort_code:
+      type: string
+    opening_balance:
+      type: string
+      description: Decimal string, e.g. "1234.56"
+    closing_balance:
+      type: string
+    notes:
+      type: string

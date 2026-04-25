@@ -1,0 +1,39 @@
+version: 1
+type: entity
+slug: property
+name: Property
+description: A let property (UK or foreign) for SA105 / SA106 reporting.
+icon: home
+color: "#EA580C"
+metadata_schema:
+  type: object
+  required:
+    - address
+    - type
+  properties:
+    address:
+      type: string
+      x-table-label: Address
+      x-table-column: true
+    type:
+      type: string
+      enum:
+        - residential
+        - FHL
+        - commercial
+      x-table-label: Type
+      x-table-column: true
+    country:
+      type: string
+      description: ISO 3166-1 alpha-2; non-GB triggers SA106
+      default: GB
+    joint_share_pct:
+      type: number
+      minimum: 0
+      maximum: 100
+      description: Your share of the property income, percent
+      default: 100
+    rental_income_allowance_claimed:
+      type: boolean
+      default: false
+      description: £1,000 property income allowance flag
