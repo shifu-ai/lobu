@@ -13,7 +13,6 @@ key = "$ANTHROPIC_API_KEY"
 
 [agents.personal-finance.network]
 allowed = [
-  "gov.uk",
   ".gov.uk",
   "github.com",
   ".github.com",
