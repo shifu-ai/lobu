@@ -81,11 +81,6 @@ jobs:
     if: needs.setup.outputs.proceed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      id-token: write   # claude-code-action exchanges this for a GitHub token
     steps:
       - uses: actions/checkout@v4
         with:
@@ -108,12 +103,26 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Build triage prompt
+        run: |
+          mkdir -p /tmp/claude-prompts
+          {
+            echo "PR: ${{ needs.setup.outputs.pr_number }}"
+            echo "Repo: ${{ github.repository }}"
+            echo
+            echo "Follow every phase of the procedure below. The procedure is the contract."
+            echo "----- BEGIN /triage-pr -----"
+            cat .claude/commands/triage-pr.md
+            echo "----- END /triage-pr -----"
+          } > /tmp/claude-prompts/prompt.txt
+
       - name: Run triage agent
-        uses: anthropics/claude-code-action@main
+        uses: anthropics/claude-code-base-action@beta
         with:
-          direct_prompt: "/triage-pr ${{ needs.setup.outputs.pr_number }}"
+          prompt_file: /tmp/claude-prompts/prompt.txt
+          allowed_tools: "Bash(gh pr:*),Bash(gh api:*),Bash(gh label:*),Bash(gh repo view:*),Bash(git fetch:*),Bash(git switch:*),Bash(git status),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git reset:*),Bash(bun run check:fix),Bash(bun run typecheck),Bash(bun run build),Bash(bun run test:*),Bash(bun test:*),Bash(make build-packages),Bash(./scripts/slack-thread-viewer.js:*),Read,Edit,Write"
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          allowed_tools: "Bash(gh pr:*),Bash(gh api:*),Bash(gh label:*),Bash(gh repo view:*),Bash(git fetch:*),Bash(git switch:*),Bash(git status),Bash(git diff:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git reset:*),Bash(bun run check:fix),Bash(bun run typecheck),Bash(bun run build),Bash(bun run test:*),Bash(bun test:*),Bash(make build-packages),Bash(./scripts/slack-thread-viewer.js:*)"
+          timeout_minutes: "15"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ needs.setup.outputs.pr_number }}
