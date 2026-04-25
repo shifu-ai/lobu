@@ -138,7 +138,18 @@ SELECT
    JOIN entity_relationships fr2 ON fr2.from_entity_id = ex.id
      AND fr2.relationship_type_slug = 'for_tax_year'
      AND fr2.to_entity_id = $TAX_YEAR_ID
-   WHERE ex.entity_type = 'expense') AS allowable_expenses
+   WHERE ex.entity_type = 'expense'
+     AND COALESCE(ex.metadata->>'tax_category', '') <> 'finance') AS allowable_expenses,
+  (SELECT COALESCE(SUM((ex.metadata->>'amount')::numeric), 0)
+   FROM entities ex
+   JOIN entity_relationships eor ON eor.from_entity_id = ex.id
+     AND eor.relationship_type_slug = 'expense_of'
+     AND eor.to_entity_id = p.id
+   JOIN entity_relationships fr2 ON fr2.from_entity_id = ex.id
+     AND fr2.relationship_type_slug = 'for_tax_year'
+     AND fr2.to_entity_id = $TAX_YEAR_ID
+   WHERE ex.entity_type = 'expense'
+     AND ex.metadata->>'tax_category' = 'finance') AS finance_costs
 FROM entities p
 LEFT JOIN entity_relationships co ON co.from_entity_id = p.id
   AND co.relationship_type_slug = 'co_owned_by'
@@ -160,7 +171,7 @@ WHERE p.entity_type = 'property'
 GROUP BY p.id, p.name, p.metadata, co.metadata;
 ```
 
-Note on SA105: mortgage interest on residential lets is NOT deductible as an expense. Instead it gives a basic-rate tax credit (20% of the lower of finance costs, rental profits, or adjusted total income). Surface finance costs separately in the output; don't include them in `allowable_expenses`.
+Note on SA105: mortgage interest on residential lets is NOT deductible as an expense. Instead it gives a basic-rate tax credit (20% of the lower of finance costs, rental profits, or adjusted total income). The query above splits expenses by `metadata.tax_category`: rows tagged `finance` go into `finance_costs` and are excluded from `allowable_expenses`. If a finance-cost row is mis-tagged it will silently slip into `allowable_expenses` — flag any expense referencing "mortgage", "interest" or "loan" in its description that isn't tagged `finance` as a gap.
 
 ### 4. SA108 — capital gains
 
@@ -252,7 +263,11 @@ Return one markdown document with these sections, in order. Use exact figures fr
 | … | … | … | … |
 
 ## SA105 — UK property
-(per property, with rental income, allowable expenses, finance costs restricted to basic-rate credit)
+| Property | Use | Share | Rental income | Allowable expenses | Finance costs (basic-rate credit) | Net profit |
+|---|---|---|---|---|---|---|
+| … | … | … | … | … | … | … |
+
+Finance costs are NOT subtracted to compute net profit on SA105 — they generate a separate 20% basic-rate tax credit on the main return. Net profit shown above is `(rental_income - allowable_expenses) × share_pct`.
 
 ## SA108 — Capital gains
 | Asset | Class | Acquired | Disposed | Proceeds | Cost | Gain | Relief |
