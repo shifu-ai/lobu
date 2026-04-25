@@ -40,12 +40,15 @@ export const LEGACY_ADMIN_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    // Kept on the public MCP surface (not internal) because owletto-cli's
+    // `browser-auth` flow drives connection setup via MCP RPC. New external
+    // clients should still prefer execute + client.connections; we'll flip
+    // this back to internal once the CLI migrates.
     name: 'manage_connections',
     description:
-      'Legacy internal connection management tool for REST/session callers. External MCP clients should use execute + client.connections instead.',
+      'Connection management. New external MCP clients should prefer execute + client.connections; this tool is kept public for the owletto-cli browser-auth flow.',
     inputSchema: ManageConnectionsSchema,
     annotations: { destructiveHint: false },
-    internal: true,
     handler: async (args: Static<typeof ManageConnectionsSchema>, env: Env, ctx: ToolContext) => {
       return await manageConnections(args, env, ctx);
     },
@@ -62,12 +65,15 @@ export const LEGACY_ADMIN_TOOLS: ToolDefinition[] = [
     },
   },
   {
+    // Kept on the public MCP surface (not internal) because owletto-cli's
+    // `browser-auth` flow exchanges credential blobs via MCP RPC. New external
+    // clients should still prefer execute + client.authProfiles; we'll flip
+    // this back to internal once the CLI migrates.
     name: 'manage_auth_profiles',
     description:
-      'Legacy internal auth-profile management tool for REST/session callers. External MCP clients should use execute + client.authProfiles instead.',
+      'Auth-profile management. New external MCP clients should prefer execute + client.authProfiles; this tool is kept public for the owletto-cli browser-auth flow.',
     inputSchema: ManageAuthProfilesSchema,
     annotations: { destructiveHint: false },
-    internal: true,
     handler: async (args: Static<typeof ManageAuthProfilesSchema>, env: Env, ctx: ToolContext) => {
       return await manageAuthProfiles(args, env, ctx);
     },
