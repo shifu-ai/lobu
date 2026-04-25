@@ -1,8 +1,0 @@
-version: 1
-type: relationship
-slug: trade_of
-name: Trade Of
-description: A self-employment income source is the trade of a particular business (links income_source to trade for SA103).
-metadata_schema:
-  type: object
-  properties: {}

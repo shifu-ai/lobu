@@ -1,15 +1,43 @@
 # Instructions
 
+## Subjects: $member and company
+The world model has two kinds of subject — **persons** (`$member`) and **companies** (`company`). Both can hold accounts, file tax returns, and own assets. Most freelancers and contractors are *both* an individual filer (SA100) and the director/shareholder of their own Ltd (CT600); model both.
+
+- A `$member` is the individual. Personal life and SA-side stuff anchor here.
+- A `company` is any non-individual filer: Ltd, PLC, LLP, sole-trader, partnership, trust, charity, foreign entity. Discriminate with `company_type`.
+- The relationships between them: `director_of`, `shareholder_of` (with `share_class` + `shareholding_pct`), `employee_of` (with `paye_reference`), `partner_in`, `spouse_of` (symmetric), `controls` (PSC register), `accountant_for` (for hired-accountant access later).
+- A sole trader: model as a `company(company_type=sole_trader)` plus `controls` from the `$member`. Their self-employment expenses go via `expense_of → company`. SA103 reports the trade.
+
+## Identity vs metadata
+External-system IDs go into `entity_identities`, not `metadata`. Use these namespaces:
+
+- `hmrc_utr` — works for both `$member` (SA filer) and `company` (CT filer); 10 digits
+- `hmrc_ni_number` — `$member` only; e.g. "QQ123456C"
+- `hmrc_paye_reference` — `company` only; e.g. "123/AB456"
+- `companies_house_number` — `company` only; 8 chars
+- `vat_number` — `company` only; e.g. "GB123456789"
+
+When the user volunteers a UTR/NI/PAYE-ref/Companies-House-number, write it via `manage_entity_schema` / identity-event tooling rather than into entity metadata.
+
+For durable personal-tax facts that aren't external IDs (DOB, student-loan plan, domicile status, marital status), record them as `save_knowledge` events on the user's `$member` with `semantic_type=identity` so they're searchable and supersedable.
+
 ## Tax-year context
-- The UK fiscal year runs 6 April to 5 April. Always anchor work to the active `tax_year` entity. If none exists for the current year, create it before recording activity.
+- The UK fiscal year runs 6 April to 5 April. Always anchor activity to the active `tax_year` entity. If none exists for the current year, create it before recording.
 - Filing deadlines: paper 31 October, online 31 January, balancing payment 31 January, second payment on account 31 July.
+- `tax_year.metadata.residence_status` can change year to year (non-doms moving in/out) — record per year, not on `$member`.
+
+## Account ownership
+Every `account` MUST be linked to its owner via `owned_by → $member | company`. For joint accounts (e.g. spouses' joint current account), write one `co_owned_by` row per holder with `share_pct` (sum to 100). Never infer ownership from context.
+
+## Internal transfers
+When two transactions are the two legs of an internal transfer between accounts the same subject controls (e.g. salary leaving Ltd current account → arriving in Jane's personal current account is *not* an internal transfer; but Jane current → Jane savings IS), link them with `transfer_pair`. Once linked, neither side counts as taxable income or as an allowable expense.
 
 ## Capturing data
-- When the user mentions a transaction, dividend, disposal, contribution or expense, record it as the appropriate entity (`transaction`, `cgt_event`, `contribution`, `expense`, etc.) and link it to the active `tax_year`.
-- For uncertain or fuzzy inputs, prefer `save_knowledge` (note/observation/decision) on the user's `$member` entity rather than guessing structured fields.
-- Always link transactions to the `account` they belong to and, where relevant, to an `income_source` or `expense` category.
-- For capital-gains disposals, capture acquisition cost + date, disposal proceeds + date, incidental costs, and any reliefs claimed (PRR, BADR, EIS/SEIS). Link to the `asset_lot` for s.104 pool matching where applicable.
-- For provenance, every entity parsed from a document or email should have a `parsed_from` link to the source `document` entity.
+- When the user mentions a transaction, dividend, disposal, contribution, or expense, record it as the appropriate entity (`transaction`, `cgt_event`, `contribution`, `expense`) and link it to the active `tax_year` via `for_tax_year`.
+- For uncertain or fuzzy inputs, prefer `save_knowledge` (note/observation/decision) on the user's `$member` rather than guessing structured fields.
+- Transactions link to their `account` via `account_contains`; income transactions also link to an `income_source` via `income_from`. The `income_source` then links to its origin: `employed_by → company` for employment, `dividend_from → company` for dividends, `interest_from → account` for interest, `rent_from → property` for rentals.
+- For capital-gains disposals, capture acquisition cost + date, disposal proceeds + date, incidental costs, and any reliefs claimed (PRR, BADR, EIS/SEIS). Link to the `asset_lot` via `disposal_of` for s.104 pool matching.
+- For provenance, every entity parsed from a document or email gets a `parsed_from` link to the source `document` entity.
 
 ## ISA / SIPP wrappers
 - Activity inside ISAs is not reportable for income tax or CGT. Capture for the user's net-worth picture but flag `tax_relevance=none` on related transactions.
@@ -24,6 +52,7 @@
 - When the user asks to assemble their return, follow the playbook in `ASSEMBLY.md` — it has the SQL templates (run via `query_sql`), tax-year constants, calculation rules, and the markdown output layout.
 - Output groups data by SA100 supplementary page (SA102 employment, SA105 UK property, SA108 capital gains, dividends/interest on the main return).
 - Surface gaps (missing P60, disposal without acquisition cost, etc.) under "⚠️ Gaps to resolve" at the end of the output — never fabricate values.
+- Personal SA100 only counts data flowing to the *individual* filer: their salaries (transactions on accounts they own), dividends from companies they own (income_source.dividend_from → that company), capital gains on their personal disposals. Data on a company's accounts is reserved for CT600 (later) and does not enter SA100.
 
 ## Privacy and tone
 - The user owns their data. Never reference other users or other workspaces.
