@@ -57,7 +57,7 @@ describe('SubprocessExecutor diagnostic capture', () => {
     expect(err!.outputTail).toContain('about to die hard');
   });
 
-  test('classifies thrown error as error_message via uncaught handler', async () => {
+  test('thrown sync() error is caught by the runner try/catch and reported as error_message', async () => {
     const executor = new SubprocessExecutor({ timeoutMs: 30_000, maxOldSpaceSize: 256 });
     let err: SubprocessError | null = null;
     try {
@@ -75,7 +75,26 @@ describe('SubprocessExecutor diagnostic capture', () => {
     expect(err!.message).toContain('connector blew up');
   });
 
-  test('uncaught handler catches unhandled rejection', async () => {
+  test('uncaughtException handler catches asynchronous setTimeout throw', async () => {
+    const executor = new SubprocessExecutor({ timeoutMs: 30_000, maxOldSpaceSize: 256 });
+    let err: SubprocessError | null = null;
+    try {
+      await executor.execute(
+        compiled(`
+          setTimeout(() => { throw new Error('async tick throw'); }, 0);
+          await new Promise(() => {});
+        `),
+        BASE_CONTEXT
+      );
+    } catch (e) {
+      err = e as SubprocessError;
+    }
+    expect(err).toBeInstanceOf(SubprocessError);
+    expect(err!.exitReason).toBe('error_message');
+    expect(err!.message).toContain('async tick throw');
+  });
+
+  test('unhandledRejection handler catches dangling Promise.reject', async () => {
     const executor = new SubprocessExecutor({ timeoutMs: 30_000, maxOldSpaceSize: 256 });
     let err: SubprocessError | null = null;
     try {

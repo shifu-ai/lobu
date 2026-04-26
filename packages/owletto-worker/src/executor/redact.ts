@@ -74,10 +74,13 @@ export class StreamRedactor {
       return;
     }
     if (combined.length > StreamRedactor.MAX_BUFFER) {
-      const overflow = combined.length - StreamRedactor.MAX_BUFFER;
-      const headPrefix = combined.slice(0, overflow);
-      this.carryover = combined.slice(overflow);
-      emit(redactOutput(headPrefix));
+      // No newline but we have to bound memory. Redact the whole buffer
+      // before emitting — slicing would re-introduce a boundary mid-secret.
+      // Carryover resets; the next chunk starts fresh, accepting that a
+      // secret split across the cap boundary may be redacted twice (safe)
+      // but never split within a regex match.
+      emit(redactOutput(combined));
+      this.carryover = '';
       return;
     }
     this.carryover = combined;

@@ -103,4 +103,16 @@ describe('StreamRedactor', () => {
     r.process('x'.repeat(8200), c.emit);
     expect(c.out().length).toBeGreaterThan(0);
   });
+
+  test('redacts a secret embedded near the cap-boundary even with no newline', () => {
+    const r = new StreamRedactor();
+    const c = collect();
+    // A long no-newline payload with a secret somewhere inside. Cap is
+    // 8192; the redactor must redact the entire combined buffer before
+    // emitting, otherwise a slice near the cap could split the match.
+    const payload = 'x'.repeat(8000) + 'Authorization: Bearer abc123secret456 ' + 'y'.repeat(500);
+    r.process(payload, c.emit);
+    expect(c.out()).not.toContain('abc123secret456');
+    expect(c.out()).toContain('Authorization: [REDACTED]');
+  });
 });
