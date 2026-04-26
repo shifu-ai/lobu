@@ -108,6 +108,13 @@ export const SearchSchema = Type.Object({
       maximum: 100,
     })
   ),
+  include_public_catalogs: Type.Optional(
+    Type.Boolean({
+      description:
+        'Also search public-catalog orgs (visibility=public) — canonical world entities like HMRC, banks, currencies. Defaults to true so agents can discover entities to reference cross-org.',
+      default: true,
+    })
+  ),
 });
 
 type SearchArgs = Static<typeof SearchSchema>;
@@ -509,8 +516,19 @@ async function queryEntities(
     conditions.push('e.embedding IS NOT NULL');
   }
 
-  // Organization filter
-  conditions.push(`e.organization_id = $${addParam(organizationId)}`);
+  // Organization filter — caller's org always; public-catalog orgs when the
+  // flag is on (default), so an agent looking up "Apple" finds tenant-local
+  // and canonical hits in one call. The result row carries the org_id so the
+  // agent can tell which is which.
+  const includePublic = args.include_public_catalogs ?? true;
+  if (includePublic) {
+    const orgParamIdx = addParam(organizationId);
+    conditions.push(
+      `(e.organization_id = $${orgParamIdx} OR EXISTS (SELECT 1 FROM organization o WHERE o.id = e.organization_id AND o.visibility = 'public'))`
+    );
+  } else {
+    conditions.push(`e.organization_id = $${addParam(organizationId)}`);
+  }
 
   if (args.entity_type) conditions.push(`et.slug = $${addParam(args.entity_type)}`);
   if (args.parent_id) conditions.push(`e.parent_id = $${addParam(args.parent_id)}`);
@@ -578,11 +596,14 @@ async function queryEntities(
 async function fetchEntityById(entityId: number, _env: Env, organizationId: string) {
   const sql = getDb();
 
+  // Caller's org or any visibility=public catalog. Lets entity_id lookup find
+  // canonical entities (HMRC, banks) the agent has discovered via search.
   const result = await sql.unsafe<EntityQueryRow>(
     `SELECT ${ENTITY_SELECT_COLUMNS}
     ${ENTITY_JOINS}
+    LEFT JOIN organization eo ON eo.id = e.organization_id
     WHERE e.id = $1
-      AND e.organization_id = $2
+      AND (e.organization_id = $2 OR eo.visibility = 'public')
       AND e.deleted_at IS NULL`,
     [entityId, organizationId]
   );
