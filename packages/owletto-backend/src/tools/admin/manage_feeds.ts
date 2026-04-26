@@ -69,6 +69,12 @@ const UpdateFeedAction = Type.Object({
   entity_ids: Type.Optional(Type.Array(Type.Number())),
   config: Type.Optional(Type.Record(Type.String(), Type.Any())),
   schedule: Type.Optional(Type.String({ description: 'Cron expression for sync schedule' })),
+  repair_agent_id: Type.Optional(
+    Type.Union([Type.String(), Type.Null()], {
+      description:
+        'Per-feed repair agent override. Null clears the override and falls back to the connector default.',
+    })
+  ),
 });
 
 const DeleteFeedAction = Type.Object({
@@ -335,6 +341,11 @@ async function handleUpdateFeed(
     }
   }
 
+  // `repair_agent_id` is tri-state: undefined = leave alone, null = clear, string = set.
+  // Use Object.hasOwn so an explicit null overwrites instead of being skipped.
+  const hasRepairAgentArg = Object.hasOwn(args, 'repair_agent_id');
+  const repairAgentValue = hasRepairAgentArg ? (args.repair_agent_id ?? null) : null;
+
   const updated = await sql`
     UPDATE feeds
     SET display_name = COALESCE(${args.display_name ?? null}::text, display_name),
@@ -343,6 +354,7 @@ async function handleUpdateFeed(
         config = CASE WHEN ${args.config ? sql.json(args.config) : null}::jsonb IS NOT NULL THEN COALESCE(config, '{}'::jsonb) || ${args.config ? sql.json(args.config) : null}::jsonb ELSE config END,
         schedule = COALESCE(${args.schedule ?? null}::text, schedule),
         next_run_at = CASE WHEN ${args.schedule ?? null}::text IS NOT NULL THEN ${args.schedule ? nextRunAt(args.schedule) : null}::timestamptz ELSE next_run_at END,
+        repair_agent_id = CASE WHEN ${hasRepairAgentArg} THEN ${repairAgentValue}::text ELSE repair_agent_id END,
         updated_at = NOW()
     WHERE id = ${args.feed_id} AND organization_id = ${organizationId}
     RETURNING *
