@@ -198,6 +198,14 @@ export interface CompleteAuthRequest {
   credentials?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
   error_message?: string;
+  /** Tail of subprocess stdout+stderr (already redacted in the worker). */
+  output_tail?: string;
+  /** Subprocess exit code, if the child terminated without an IPC result. */
+  exit_code?: number | null;
+  /** Subprocess exit signal, if any. */
+  exit_signal?: string | null;
+  /** Categorized exit reason: ok | error_message | timeout | oom | crash. */
+  exit_reason?: 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
 }
 
 /**
