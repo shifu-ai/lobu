@@ -242,11 +242,18 @@ function sendIPC(msg: unknown): Promise<void> {
  */
 function installUncaughtHandlers(): void {
   let handled = false;
+  const safeStringify = (v: unknown): string => {
+    try {
+      return JSON.stringify(v) ?? String(v);
+    } catch {
+      return String(v);
+    }
+  };
   const handle = async (err: unknown) => {
     if (handled) return;
     handled = true;
     const e =
-      err instanceof Error ? err : new Error(typeof err === 'string' ? err : JSON.stringify(err));
+      err instanceof Error ? err : new Error(typeof err === 'string' ? err : safeStringify(err));
     try {
       await sendIPC({
         type: 'error',

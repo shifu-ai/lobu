@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionHooks, FeedSyncResult, SyncContext, SyncExecutor } from './interface.js';
-import { redactOutput } from './redact.js';
+import { StreamRedactor, redactOutput } from './redact.js';
 
 /**
  * exit_reason values surfaced to the runs table:
@@ -195,6 +195,10 @@ export class SubprocessExecutor implements SyncExecutor {
         child.removeListener('exit', onExit);
         child.stdout?.removeListener('data', onStdout);
         child.stderr?.removeListener('data', onStderr);
+        // Flush any trailing partial line from each stream so the live tee
+        // matches what the persisted tail saw.
+        stdoutRedactor.flush((clean) => process.stdout.write(`[subprocess] ${clean}`));
+        stderrRedactor.flush((clean) => process.stderr.write(`[subprocess] ${clean}`));
       };
 
       const settle = (fn: () => void) => {
@@ -387,17 +391,23 @@ export class SubprocessExecutor implements SyncExecutor {
       // the ring buffer so we can surface the tail on failure. Without this
       // listener, stdio: 'pipe' fills the OS pipe buffer (~16-64 KB) and the
       // child blocks on its next console.log until SIGKILL.
+      // Stream redactors buffer up to the last newline so secrets split
+      // across chunk boundaries still match. Persisted tails already
+      // redact the full ring-buffer string and are unaffected.
+      const stdoutRedactor = new StreamRedactor();
+      const stderrRedactor = new StreamRedactor();
+
       const onStdout = (data: Buffer) => {
         const text = data.toString();
         stdoutTail.append(text);
-        process.stdout.write(`[subprocess] ${redactOutput(text)}`);
+        stdoutRedactor.process(text, (clean) => process.stdout.write(`[subprocess] ${clean}`));
       };
 
       // Forward child stderr to parent stderr for logging + ring buffer.
       const onStderr = (data: Buffer) => {
         const text = data.toString();
         stderrTail.append(text);
-        process.stderr.write(`[subprocess] ${redactOutput(text)}`);
+        stderrRedactor.process(text, (clean) => process.stderr.write(`[subprocess] ${clean}`));
       };
 
       child.on('message', onMessage);
