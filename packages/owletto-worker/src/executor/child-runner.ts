@@ -234,7 +234,46 @@ function sendIPC(msg: unknown): Promise<void> {
   });
 }
 
+/**
+ * Best-effort handlers for top-level errors that previously escaped the
+ * runner's try/catch and surfaced as the bare wrapper string in the parent.
+ * These do NOT catch SIGKILL, native crashes, OOM, or sync `process.exit()`;
+ * those are surfaced via `exit_reason` in the parent SubprocessExecutor.
+ */
+function installUncaughtHandlers(): void {
+  let handled = false;
+  const handle = async (err: unknown) => {
+    if (handled) return;
+    handled = true;
+    const e =
+      err instanceof Error ? err : new Error(typeof err === 'string' ? err : JSON.stringify(err));
+    try {
+      await sendIPC({
+        type: 'error',
+        error: {
+          message: e.message,
+          stack: e.stack,
+          name: e.name,
+        },
+      });
+    } catch {
+      // If IPC is dead, the parent's exit-handler path will still produce
+      // diagnostics from the output tail.
+    } finally {
+      process.exit(1);
+    }
+  };
+
+  process.on('uncaughtException', (err) => {
+    void handle(err);
+  });
+  process.on('unhandledRejection', (reason) => {
+    void handle(reason);
+  });
+}
+
 async function main() {
+  installUncaughtHandlers();
   let started = false;
   // Wait for message from parent
   process.on('message', async (msg: any) => {

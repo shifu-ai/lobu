@@ -144,6 +144,14 @@ export interface CompleteRequest {
   error_message?: string;
   checkpoint?: Record<string, unknown>;
   auth_update?: Record<string, unknown>;
+  /** Tail of subprocess stdout+stderr (already redacted in the worker). */
+  output_tail?: string;
+  /** Subprocess exit code, if the child terminated without an IPC result. */
+  exit_code?: number | null;
+  /** Subprocess exit signal, if any. */
+  exit_signal?: string | null;
+  /** Categorized exit reason: ok | error_message | timeout | oom | crash. */
+  exit_reason?: 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
 }
 
 export interface CompleteActionRequest {

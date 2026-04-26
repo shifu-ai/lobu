@@ -447,19 +447,41 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
       error_message?: string;
       checkpoint?: Record<string, unknown>;
       auth_update?: Record<string, unknown>;
+      // Diagnostic fields from the subprocess executor (failed-run path only).
+      // The worker redacts output_tail before sending; backend stores as-is.
+      output_tail?: string;
+      exit_code?: number | null;
+      exit_signal?: string | null;
+      exit_reason?: 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
     }>();
 
     const sql = getDb();
 
-    await sql`
-    UPDATE runs
-    SET status = ${req.status === 'success' ? 'completed' : 'failed'},
-        completed_at = current_timestamp,
-        items_collected = ${req.items_collected ?? 0},
-        error_message = ${req.error_message ?? null},
-        checkpoint = COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint)
-    WHERE id = ${req.run_id}
-  `;
+    if (req.status === 'failed') {
+      await sql`
+      UPDATE runs
+      SET status = 'failed',
+          completed_at = current_timestamp,
+          items_collected = ${req.items_collected ?? 0},
+          error_message = ${req.error_message ?? null},
+          checkpoint = COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint),
+          output_tail = ${req.output_tail ?? null},
+          exit_code = ${req.exit_code ?? null},
+          exit_signal = ${req.exit_signal ?? null},
+          exit_reason = ${req.exit_reason ?? null}
+      WHERE id = ${req.run_id}
+    `;
+    } else {
+      await sql`
+      UPDATE runs
+      SET status = 'completed',
+          completed_at = current_timestamp,
+          items_collected = ${req.items_collected ?? 0},
+          error_message = ${req.error_message ?? null},
+          checkpoint = COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint)
+      WHERE id = ${req.run_id}
+    `;
+    }
 
     // Update the feed's sync state
     const runRows = (await sql`

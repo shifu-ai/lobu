@@ -11,6 +11,75 @@ import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionHooks, FeedSyncResult, SyncContext, SyncExecutor } from './interface.js';
+import { redactOutput } from './redact.js';
+
+/**
+ * exit_reason values surfaced to the runs table:
+ *  - ok: successful 'result' IPC.
+ *  - error_message: child sent {type:'error',...} via IPC.
+ *  - timeout: parent killed the child with SIGKILL after timeoutMs.
+ *  - oom: code !== 0 and output tail mentions a JS heap OOM.
+ *  - crash: any other non-zero exit / unexpected signal.
+ */
+export type SubprocessExitReason = 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
+
+/** Diagnostic fields attached to errors thrown by the executor. */
+export interface SubprocessDiagnostics {
+  exitCode: number | null;
+  exitSignal: string | null;
+  outputTail: string;
+  exitReason: SubprocessExitReason;
+}
+
+export class SubprocessError extends Error implements SubprocessDiagnostics {
+  exitCode: number | null;
+  exitSignal: string | null;
+  outputTail: string;
+  exitReason: SubprocessExitReason;
+
+  constructor(
+    message: string,
+    diagnostics: SubprocessDiagnostics,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+    this.name = 'SubprocessError';
+    this.exitCode = diagnostics.exitCode;
+    this.exitSignal = diagnostics.exitSignal;
+    this.outputTail = diagnostics.outputTail;
+    this.exitReason = diagnostics.exitReason;
+  }
+}
+
+/** Per-stream ring buffer that preserves the most recent bytes. */
+class RingBuffer {
+  private chunks: string[] = [];
+  private size = 0;
+  constructor(private readonly cap: number) {}
+
+  append(chunk: string): void {
+    if (!chunk) return;
+    this.chunks.push(chunk);
+    this.size += chunk.length;
+    while (this.size > this.cap && this.chunks.length > 0) {
+      const front = this.chunks[0];
+      const overflow = this.size - this.cap;
+      if (front.length <= overflow) {
+        this.size -= front.length;
+        this.chunks.shift();
+      } else {
+        this.chunks[0] = front.slice(overflow);
+        this.size -= overflow;
+      }
+    }
+  }
+
+  toString(): string {
+    return this.chunks.join('');
+  }
+}
+
+const STREAM_TAIL_CAP_BYTES = 16 * 1024;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -89,6 +158,7 @@ export class SubprocessExecutor implements SyncExecutor {
 
       let resolved = false;
       let terminalMessageReceived = false;
+      let timedOut = false;
       let latestCheckpoint = context.checkpoint;
       let finalMetadata: Record<string, any> | undefined;
       let finalAuthUpdate: Record<string, any> | undefined;
@@ -96,6 +166,12 @@ export class SubprocessExecutor implements SyncExecutor {
       const collectedContents: FeedSyncResult['contents'] = [];
       const collectContents = hooks?.collectContents !== false;
       let processingChain = Promise.resolve();
+
+      // Per-stream ring buffers — preserve the *tail* (most recent bytes),
+      // which is where the failure cause lands. Cap each at 16 KiB so a
+      // chatty connector can't grow the worker's memory.
+      const stdoutTail = new RingBuffer(STREAM_TAIL_CAP_BYTES);
+      const stderrTail = new RingBuffer(STREAM_TAIL_CAP_BYTES);
 
       // Set timeout - kill child if it takes too long. timeoutMs <= 0 disables
       // the timer (used for interactive auth runs that wait on human input).
@@ -106,6 +182,7 @@ export class SubprocessExecutor implements SyncExecutor {
                 console.error(
                   `[SubprocessExecutor] Killing child process after ${this.options.timeoutMs}ms timeout`
                 );
+                timedOut = true;
                 child.kill('SIGKILL');
               }
             }, this.options.timeoutMs)
@@ -116,6 +193,7 @@ export class SubprocessExecutor implements SyncExecutor {
         child.removeListener('message', onMessage);
         child.removeListener('error', onError);
         child.removeListener('exit', onExit);
+        child.stdout?.removeListener('data', onStdout);
         child.stderr?.removeListener('data', onStderr);
       };
 
@@ -137,6 +215,29 @@ export class SubprocessExecutor implements SyncExecutor {
             reject(err instanceof Error ? err : new Error(String(err)));
           });
         });
+      };
+
+      const combinedTail = (): string => {
+        const out = stdoutTail.toString();
+        const err = stderrTail.toString();
+        if (!out && !err) return '';
+        if (!out) return `[stderr]\n${err}`;
+        if (!err) return `[stdout]\n${out}`;
+        return `[stdout]\n${out}\n[stderr]\n${err}`;
+      };
+
+      const computeExitReason = (
+        code: number | null,
+        signal: string | null,
+        tail: string
+      ): SubprocessExitReason => {
+        if (timedOut || signal === 'SIGKILL') return 'timeout';
+        if (code !== null && code !== 0) {
+          if (/javascript heap out of memory/i.test(tail)) return 'oom';
+          return 'crash';
+        }
+        if (signal) return 'crash';
+        return 'crash';
       };
 
       // Handle messages from child
@@ -231,9 +332,16 @@ export class SubprocessExecutor implements SyncExecutor {
 
         if (msg.type === 'error') {
           terminalMessageReceived = true;
-          const error = new Error(msg.error.message);
-          error.name = msg.error.name;
-          error.stack = msg.error.stack;
+          const tail = redactOutput(combinedTail());
+          const diagnostics: SubprocessDiagnostics = {
+            exitCode: null,
+            exitSignal: null,
+            outputTail: tail,
+            exitReason: 'error_message',
+          };
+          const error = new SubprocessError(msg.error?.message ?? 'Subprocess reported error', diagnostics);
+          error.name = msg.error?.name ?? 'SubprocessError';
+          if (msg.error?.stack) error.stack = msg.error.stack;
           settle(() => reject(error));
           return;
         }
@@ -241,7 +349,17 @@ export class SubprocessExecutor implements SyncExecutor {
 
       // Handle child errors
       const onError = (err: Error) => {
-        settle(() => reject(new Error(`Subprocess error: ${err.message}`)));
+        const tail = redactOutput(combinedTail());
+        const diagnostics: SubprocessDiagnostics = {
+          exitCode: null,
+          exitSignal: null,
+          outputTail: tail,
+          exitReason: 'crash',
+        };
+        const wrapped = new SubprocessError(`Subprocess error: ${err.message}`, diagnostics, {
+          cause: err,
+        });
+        settle(() => reject(wrapped));
       };
 
       // Handle child exit (single handler for both timeout cleanup and unexpected exits)
@@ -250,22 +368,46 @@ export class SubprocessExecutor implements SyncExecutor {
           return;
         }
         settle(() => {
-          if (signal === 'SIGKILL') {
-            reject(new Error(`Feed execution timed out after ${this.options.timeoutMs}ms`));
-          } else {
-            reject(new Error(`Subprocess exited with code ${code}, signal ${signal}`));
-          }
+          const tail = redactOutput(combinedTail());
+          const reason = computeExitReason(code, signal, tail);
+          const prefix =
+            reason === 'timeout'
+              ? `Feed execution timed out after ${this.options.timeoutMs}ms`
+              : reason === 'oom'
+                ? `Subprocess out of memory (code ${code}, signal ${signal})`
+                : `Subprocess exited with code ${code}, signal ${signal}`;
+          const message = tail ? `${prefix}\n${tail}` : prefix;
+          const diagnostics: SubprocessDiagnostics = {
+            exitCode: code,
+            exitSignal: signal,
+            outputTail: tail,
+            exitReason: reason,
+          };
+          reject(new SubprocessError(message, diagnostics));
         });
       };
 
-      // Forward child stderr to parent stderr for logging
+      // Forward child stdout to parent stdout for live tailing AND tap into
+      // the ring buffer so we can surface the tail on failure. Without this
+      // listener, stdio: 'pipe' fills the OS pipe buffer (~16-64 KB) and the
+      // child blocks on its next console.log until SIGKILL.
+      const onStdout = (data: Buffer) => {
+        const text = data.toString();
+        stdoutTail.append(text);
+        process.stdout.write(`[subprocess] ${text}`);
+      };
+
+      // Forward child stderr to parent stderr for logging + ring buffer.
       const onStderr = (data: Buffer) => {
-        process.stderr.write(`[subprocess] ${data.toString()}`);
+        const text = data.toString();
+        stderrTail.append(text);
+        process.stderr.write(`[subprocess] ${text}`);
       };
 
       child.on('message', onMessage);
       child.on('error', onError);
       child.on('exit', onExit);
+      child.stdout?.on('data', onStdout);
       child.stderr?.on('data', onStderr);
 
       // Send the compiled code and context to the child
