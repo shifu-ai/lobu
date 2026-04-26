@@ -692,8 +692,8 @@ async function formatEntityResult(
   // Fetch children for root entities (no parent). Children are scoped to
   // the primary's own org — preserves the parent-org boundary and stops
   // tenant-private "child of HMRC"-style rows from leaking when the primary
-  // is a cross-org public entity. content_count likewise scoped to that
-  // entity's own org so we don't aggregate other tenants' activity.
+  // is a cross-org public entity. content_count is zeroed for cross-org
+  // primaries to match the same invariant the parent's stats follow.
   let children: UnifiedSearchResult['children'];
   if (isRootEntity) {
     const childRows = await getDb()<ChildEntityRow>`
@@ -702,12 +702,14 @@ async function formatEntityResult(
         e.name,
         et.slug AS entity_type,
         e.metadata::jsonb->>'market' as market,
-        COALESCE(
-          (SELECT COUNT(*) FROM current_event_records ev
-            WHERE e.id = ANY(ev.entity_ids)
-              AND ev.organization_id = e.organization_id),
-          0
-        ) as content_count
+        CASE WHEN ${primaryIsCallerOrg} THEN
+          COALESCE(
+            (SELECT COUNT(*) FROM current_event_records ev
+              WHERE e.id = ANY(ev.entity_ids)
+                AND ev.organization_id = e.organization_id),
+            0
+          )
+        ELSE 0 END as content_count
       FROM entities e
       JOIN entity_types et ON et.id = e.entity_type_id
       WHERE e.parent_id = ${primaryEntity.id}
