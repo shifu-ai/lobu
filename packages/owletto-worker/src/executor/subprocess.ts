@@ -339,9 +339,15 @@ export class SubprocessExecutor implements SyncExecutor {
             outputTail: tail,
             exitReason: 'error_message',
           };
-          const error = new SubprocessError(msg.error?.message ?? 'Subprocess reported error', diagnostics);
+          // Connector code is allowed to throw with the offending value
+          // embedded — `throw new Error('failed with api_key=sk_live_…')`.
+          // Redact the message and stack the same way the persisted tail
+          // is redacted so secrets don't leak through the error path
+          // (which is also written to gateway logs by upstream callers).
+          const rawMessage = msg.error?.message ?? 'Subprocess reported error';
+          const error = new SubprocessError(redactOutput(rawMessage), diagnostics);
           error.name = msg.error?.name ?? 'SubprocessError';
-          if (msg.error?.stack) error.stack = msg.error.stack;
+          if (msg.error?.stack) error.stack = redactOutput(msg.error.stack);
           settle(() => reject(error));
           return;
         }

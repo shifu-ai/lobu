@@ -134,6 +134,27 @@ describe('SubprocessExecutor diagnostic capture', () => {
     expect(err!.outputTail).toContain('[REDACTED]');
   });
 
+  test('redacts secrets embedded in a thrown Error message and stack', async () => {
+    const executor = new SubprocessExecutor({ timeoutMs: 30_000, maxOldSpaceSize: 256 });
+    let err: SubprocessError | null = null;
+    try {
+      await executor.execute(
+        compiled(`
+          throw new Error('upstream failed: api_key=sk_live_abcdefghijklmn123');
+        `),
+        BASE_CONTEXT
+      );
+    } catch (e) {
+      err = e as SubprocessError;
+    }
+    expect(err).toBeInstanceOf(SubprocessError);
+    expect(err!.message).not.toContain('sk_live_abcdefghijklmn123');
+    expect(err!.message).toContain('[REDACTED]');
+    if (err!.stack) {
+      expect(err!.stack).not.toContain('sk_live_abcdefghijklmn123');
+    }
+  });
+
   test('classifies parent-driven SIGKILL as timeout', async () => {
     const executor = new SubprocessExecutor({ timeoutMs: 1_000, maxOldSpaceSize: 256 });
     let err: SubprocessError | null = null;

@@ -8,16 +8,35 @@
 
 const REDACTED = '[REDACTED]';
 
+// Value charset for assignment-style secrets: word + URL-safe base64 + the
+// dot/dollar/percent that show up in OAuth tokens (e.g. ya29.a0AfH6SM…) and
+// signed cookies. Excludes whitespace, quote, brace, and bracket so the
+// pattern stops at the boundary of the value.
+const SECRET_VALUE = `[\\w\\-.~+/=:%$]{12,}`;
+
 const PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
   // HTTP Authorization header (e.g. "Authorization: Bearer abc...") — match
   // the rest of the line so multi-token schemes like "Bearer xxx" get caught.
   { regex: /Authorization:[^\r\n]+/gi, replacement: `Authorization: ${REDACTED}` },
 
-  // Bearer tokens anywhere
+  // Cookie / Set-Cookie header — same line-eating shape.
+  { regex: /(Set-)?Cookie:[^\r\n]+/gi, replacement: `$1Cookie: ${REDACTED}` },
+
+  // Bearer tokens anywhere (URL-safe-base64 style values)
   { regex: /Bearer\s+[\w\-.~+/=]+/gi, replacement: `Bearer ${REDACTED}` },
 
   // JWT shape (eyJ...header.payload.sig)
   { regex: /eyJ[\w\-]+\.[\w\-]+\.[\w\-]+/g, replacement: REDACTED },
+
+  // Google OAuth access token shape (ya29.<varies>) — high-confidence.
+  { regex: /ya29\.[\w\-.]{20,}/g, replacement: REDACTED },
+
+  // URI userinfo: `scheme://user:pass@host` — redact the password segment.
+  // Captures any scheme; replaces password while preserving structure.
+  {
+    regex: /([a-z][a-z0-9+\-.]*:\/\/[^:/\s]+):([^@/\s]+)@/gi,
+    replacement: `$1:${REDACTED}@`,
+  },
 
   // CH_API_KEY=value (literal env-var key from the connector ecosystem)
   {
@@ -25,11 +44,23 @@ const PATTERNS: Array<{ regex: RegExp; replacement: string }> = [
     replacement: `$1$2${REDACTED}$4`,
   },
 
-  // JSON/YAML/env-var style "api_key": "..." / apikey=... / access_token: ...
-  // / secret = "..."
+  // AWS_<SOMETHING>_KEY / AWS_<SOMETHING>_TOKEN env-style.
   {
-    regex:
-      /((?:api[_-]?key|apikey|access[_-]?token|secret))(["'\s:=]+["']?)([\w\-]{12,})(["']?)/gi,
+    regex: new RegExp(
+      `(AWS_[A-Z0-9_]*(?:KEY|TOKEN|SECRET))(["'\\s:=]+["']?)(${SECRET_VALUE})(["']?)`,
+      'g'
+    ),
+    replacement: `$1$2${REDACTED}$4`,
+  },
+
+  // JSON/YAML/env-var style `api_key=...`, `apikey: "..."`, `access_token: ...`,
+  // `secret = "..."`, `refresh_token: ...`, `id_token=...`, `_authToken: ...`,
+  // `password: "..."`, `client_secret=...`.
+  {
+    regex: new RegExp(
+      `((?:api[_-]?key|apikey|access[_-]?token|refresh[_-]?token|id[_-]?token|_?auth[_-]?token|client[_-]?secret|secret|password))(["'\\s:=]+["']?)(${SECRET_VALUE})(["']?)`,
+      'gi'
+    ),
     replacement: `$1$2${REDACTED}$4`,
   },
 ];

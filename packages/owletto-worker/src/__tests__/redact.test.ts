@@ -55,6 +55,42 @@ describe('redactOutput', () => {
     expect(redactOutput('')).toBe('');
   });
 
+  test('redacts Cookie / Set-Cookie headers as a whole', () => {
+    expect(redactOutput('Cookie: session=abc.def; user=alice')).toContain('Cookie: [REDACTED]');
+    expect(redactOutput('Set-Cookie: jwt=eyJxxx; HttpOnly')).toContain('Set-Cookie: [REDACTED]');
+  });
+
+  test('redacts Google OAuth ya29.* access tokens', () => {
+    const out = redactOutput('access_token=ya29.a0AfH6SMblahblahblah_more.morestuff');
+    expect(out).not.toContain('ya29.a0AfH6SMblahblahblah');
+    expect(out).toContain('[REDACTED]');
+  });
+
+  test('redacts password in URI userinfo while preserving scheme/host', () => {
+    const out = redactOutput('postgres://app_user:s3cretP@db.internal/mydb');
+    expect(out).toContain('postgres://app_user:[REDACTED]@db.internal/mydb');
+    expect(out).not.toContain('s3cretP');
+  });
+
+  test('redacts AWS_*_KEY/TOKEN/SECRET env-style assignments', () => {
+    expect(redactOutput('AWS_SECRET_ACCESS_KEY=AKIAlongvaluehere1234')).toContain('[REDACTED]');
+    expect(redactOutput('AWS_SESSION_TOKEN: longsessiontokenvalue')).toContain('[REDACTED]');
+  });
+
+  test('redacts refresh_token / id_token / password / client_secret', () => {
+    const variants = [
+      'refresh_token=longvaluehere1234',
+      'id_token: "longvaluehere1234"',
+      "password = 'longvaluehere1234'",
+      'client_secret="longvaluehere1234"',
+    ];
+    for (const v of variants) {
+      const out = redactOutput(v);
+      expect(out).not.toContain('longvaluehere1234');
+      expect(out).toContain('[REDACTED]');
+    }
+  });
+
   test('does not redact short api_key-like values (avoid false positives on word "key")', () => {
     // The api_key pattern requires a 12+ char value to avoid eating things like
     // "no apikey set" or "key: id".
