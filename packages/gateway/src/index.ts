@@ -27,6 +27,14 @@ export type {
   RuntimeProviderCredentialResult,
 } from "./embedded.js";
 export { Gateway, type GatewayOptions } from "./gateway-main.js";
+export {
+  type CreateThreadForAgentArgs,
+  type CreateThreadForAgentResult,
+  createThreadForAgent,
+  type EnqueueAgentMessageArgs,
+  type EnqueueAgentMessageResult,
+  enqueueAgentMessage,
+} from "./services/agent-threads.js";
 export { CoreServices } from "./services/core-services.js";
 export {
   WatcherRunTracker,

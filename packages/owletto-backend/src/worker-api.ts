@@ -14,6 +14,10 @@ import { notifyBrowserAuthExpired } from './notifications/triggers';
 import { materializeDueFeeds } from './scheduled/check-due-feeds';
 import { supersedeActionEvent } from './tools/admin/manage_operations';
 import { getAuthProfileById, getBrowserSessionReadiness } from './utils/auth-profiles';
+import {
+  maybeCloseRepairThread,
+  maybeOpenOrAppendRepairThread,
+} from './connectors/repair-agent';
 import { autoLinkEvent } from './utils/auto-linker';
 import { nextRunAt as nextRunAtFromCron } from './utils/cron';
 import { resolveConnectorCode } from './utils/ensure-connector-installed';
@@ -504,12 +508,32 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
             last_sync_status = ${req.status},
             last_error = ${isSuccess ? null : (req.error_message ?? null)},
             consecutive_failures = ${isSuccess ? sql`0` : sql`consecutive_failures + 1`},
+            first_failure_at = ${isSuccess ? sql`NULL` : sql`COALESCE(first_failure_at, current_timestamp)`},
             items_collected = ${isSuccess ? sql`items_collected + ${req.items_collected ?? 0}` : sql`items_collected`},
             checkpoint = ${isSuccess ? sql`COALESCE(${req.checkpoint ? sql.json(req.checkpoint) : null}, checkpoint)` : sql`checkpoint`},
             next_run_at = ${nextRun},
             updated_at = current_timestamp
         WHERE id = ${feedId}
       `;
+
+      // Repair-agent trigger: open / append / close threads based on the
+      // updated streak state. All errors swallowed inside the helper — must
+      // never block the worker-completion path.
+      if (isSuccess) {
+        await maybeCloseRepairThread(feedId, req.run_id).catch((err) => {
+          logger.warn(
+            { feed_id: feedId, error: errorMessage(err) },
+            '[completeWorkerJob] maybeCloseRepairThread threw'
+          );
+        });
+      } else {
+        await maybeOpenOrAppendRepairThread(feedId, req.run_id).catch((err) => {
+          logger.warn(
+            { feed_id: feedId, error: errorMessage(err) },
+            '[completeWorkerJob] maybeOpenOrAppendRepairThread threw'
+          );
+        });
+      }
     }
 
     // Persist refreshed browser auth data on the auth profile
