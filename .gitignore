@@ -33,6 +33,9 @@ packages/**/*.d.ts.map
 !packages/gateway/tailwind.config.js
 # Hand-authored type shims for optional native modules (not build output)
 !packages/**/src/types/*.d.ts
+# owletto-web is a vite frontend and ships hand-authored .js config + Vite type shim
+!packages/owletto-web/postcss.config.js
+!packages/owletto-web/src/vite-env.d.ts
 tsconfig.tsbuildinfo
 **/tsconfig.tsbuildinfo
 

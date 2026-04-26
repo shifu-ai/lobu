@@ -1,0 +1,11 @@
+node_modules/
+dist/
+tsconfig.tsbuildinfo
+
+# Local env (never commit)
+.env
+.env.local
+.env.*.local
+
+# TanStack Router generated artifacts
+.tanstack/

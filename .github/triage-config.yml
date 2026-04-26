@@ -24,10 +24,6 @@ infra_paths:
   - .claude/commands/triage-pr.md
   - scripts/setup-dev.sh
 
-# Submodule two-PR rule. Any change under these is needs-human.
-two_pr_paths:
-  - packages/owletto-web/
-
 # Comment substring matches (case-insensitive) that escalate to needs-human.
 escalation_keywords:
   - security
