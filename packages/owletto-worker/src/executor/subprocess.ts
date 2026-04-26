@@ -231,12 +231,8 @@ export class SubprocessExecutor implements SyncExecutor {
         signal: string | null,
         tail: string
       ): SubprocessExitReason => {
-        if (timedOut || signal === 'SIGKILL') return 'timeout';
-        if (code !== null && code !== 0) {
-          if (/javascript heap out of memory/i.test(tail)) return 'oom';
-          return 'crash';
-        }
-        if (signal) return 'crash';
+        if (timedOut) return 'timeout';
+        if (/javascript heap out of memory/i.test(tail)) return 'oom';
         return 'crash';
       };
 
@@ -394,14 +390,14 @@ export class SubprocessExecutor implements SyncExecutor {
       const onStdout = (data: Buffer) => {
         const text = data.toString();
         stdoutTail.append(text);
-        process.stdout.write(`[subprocess] ${text}`);
+        process.stdout.write(`[subprocess] ${redactOutput(text)}`);
       };
 
       // Forward child stderr to parent stderr for logging + ring buffer.
       const onStderr = (data: Buffer) => {
         const text = data.toString();
         stderrTail.append(text);
-        process.stderr.write(`[subprocess] ${text}`);
+        process.stderr.write(`[subprocess] ${redactOutput(text)}`);
       };
 
       child.on('message', onMessage);
