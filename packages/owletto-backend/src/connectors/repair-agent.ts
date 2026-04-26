@@ -363,6 +363,12 @@ export async function maybeOpenOrAppendRepairThread(
   const externalThreadId = mint();
   const conversationId = `${repairAgentId}_${userId}_${externalThreadId}`;
 
+  // All gates re-checked atomically inside the UPDATE, not just the
+  // already-read JS values. Stale readers (e.g. another worker that loaded
+  // state before a manual pause / budget reset) cannot win the claim if any
+  // gate has flipped between the read and the UPDATE.
+  const minFailingDurationSeconds = Math.floor(cfg.minFailingDurationMs / 1000);
+  const cooldownSeconds = Math.floor(cfg.cooldownMs / 1000);
   let won = false;
   try {
     const claim = (await sql`
@@ -373,6 +379,16 @@ export async function maybeOpenOrAppendRepairThread(
           updated_at = current_timestamp
       WHERE id = ${feedId}
         AND repair_thread_id IS NULL
+        AND status <> 'paused'
+        AND consecutive_failures >= ${cfg.threshold}
+        AND first_failure_at IS NOT NULL
+        AND first_failure_at <= current_timestamp - make_interval(secs => ${minFailingDurationSeconds})
+        AND (last_repair_at IS NULL
+             OR last_repair_at <= current_timestamp - make_interval(secs => ${cooldownSeconds}))
+        AND repair_attempt_count < ${cfg.maxAttempts}
+        AND organization_id IN (
+          SELECT id FROM organization WHERE id = ${state.organization_id} AND repair_agents_enabled = TRUE
+        )
       RETURNING repair_thread_id
     `) as unknown as Array<{ repair_thread_id: string | null }>;
     won = claim.length > 0;
@@ -453,40 +469,39 @@ export async function maybeCloseRepairThread(
 ): Promise<void> {
   const sql = deps.sql ?? getDb();
 
-  let openThreadId: string | null = null;
+  // Atomic claim: only the caller whose UPDATE actually clears the row sees
+  // the previously-open thread id. The `consecutive_failures = 0` guard
+  // ensures a stale success completion arriving AFTER a new failure has
+  // restarted the streak does not erase the new failure state.
+  let claimedThreadId: string | null = null;
   try {
     const rows = (await sql`
-      SELECT repair_thread_id FROM feeds WHERE id = ${feedId} LIMIT 1
-    `) as unknown as Array<{ repair_thread_id: string | null }>;
-    openThreadId = rows[0]?.repair_thread_id ?? null;
-  } catch (error) {
-    logger.error(
-      { feed_id: feedId, error: String(error) },
-      '[repair-agent] failed to read repair_thread_id on success'
-    );
-    return;
-  }
-
-  // Always clear first_failure_at and last_repair_post_hash on success — the
-  // streak is over regardless of whether a thread was open.
-  try {
-    await sql`
-      UPDATE feeds
+      WITH old AS (
+        SELECT id, repair_thread_id
+        FROM feeds
+        WHERE id = ${feedId}
+          AND consecutive_failures = 0
+        FOR UPDATE
+      )
+      UPDATE feeds f
       SET first_failure_at = NULL,
           last_repair_post_hash = NULL,
           repair_thread_id = NULL,
           updated_at = current_timestamp
-      WHERE id = ${feedId}
-    `;
+      FROM old
+      WHERE f.id = old.id
+      RETURNING old.repair_thread_id
+    `) as unknown as Array<{ repair_thread_id: string | null }>;
+    claimedThreadId = rows[0]?.repair_thread_id ?? null;
   } catch (error) {
     logger.error(
       { feed_id: feedId, error: String(error) },
-      '[repair-agent] failed to clear streak state on success'
+      '[repair-agent] failed to atomically clear streak state on success'
     );
     return;
   }
 
-  if (!openThreadId) return;
+  if (!claimedThreadId) return;
 
   const services = deps.services ?? (await loadCallableServices());
   if (!services) return;
@@ -495,18 +510,18 @@ export async function maybeCloseRepairThread(
     await services.enqueueAgentMessage(
       { sessionManager: services.sessionManager, queueProducer: services.queueProducer },
       {
-        threadId: openThreadId,
+        threadId: claimedThreadId,
         messageText: `Resolved: feed has resumed successfully (run id ${runId})`,
         source: 'connector-repair',
       }
     );
     logger.info(
-      { feed_id: feedId, thread_id: openThreadId, run_id: runId },
+      { feed_id: feedId, thread_id: claimedThreadId, run_id: runId },
       '[repair-agent] posted resolved message and cleared open thread'
     );
   } catch (error) {
     logger.error(
-      { feed_id: feedId, thread_id: openThreadId, error: String(error) },
+      { feed_id: feedId, thread_id: claimedThreadId, error: String(error) },
       '[repair-agent] failed to post resolved message'
     );
   }
