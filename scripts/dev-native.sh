@@ -28,7 +28,7 @@ if [ ! -f .env ]; then
   exit 1
 fi
 
-if [ ! -d packages/gateway/dist ] || [ ! -d packages/core/dist ]; then
+if [ ! -d packages/core/dist ] || [ ! -d packages/owletto-sdk/dist ] || [ ! -d packages/gateway/dist ]; then
   echo "📦 Building workspace packages (one-time)…"
   make build-packages
 fi
@@ -73,4 +73,4 @@ echo "→ embedded gateway proxy on :8118"
 echo "→ Vite HMR in-process (same port)"
 echo ""
 
-exec bun --cwd packages/owletto-backend run dev
+exec bun run --filter '@lobu/owletto-backend' dev

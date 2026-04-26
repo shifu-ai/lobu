@@ -30,12 +30,10 @@ help:
 # Build all TypeScript packages in dependency order
 build-packages:
 	@echo "📦 Building all TypeScript packages..."
-	@echo "   1️⃣  Building packages/core..."
-	@cd packages/core && bun run build
-	@echo "   2️⃣  Building packages/gateway..."
-	@cd packages/gateway && bun run build
-	@echo "   3️⃣  Building packages/worker..."
-	@cd packages/worker && bun run build
+	@for pkg in core owletto-sdk gateway worker; do \
+		echo "   📦 Building packages/$$pkg..."; \
+		( cd packages/$$pkg && bun run build ) || exit $$?; \
+	done
 	@echo "✅ All packages built successfully!"
 
 # Start dev environment with Docker Compose Watch

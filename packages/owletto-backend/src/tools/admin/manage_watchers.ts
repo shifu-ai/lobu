@@ -462,19 +462,40 @@ export const ManageWatchersSchema = Type.Object({
     })
   ),
   corrections: Type.Optional(
-    Type.Any({
-      description:
-        '[submit_feedback] JSONB object with field path corrections, e.g. { "problems[1].severity": "high" }',
-    })
-  ),
-  notes: Type.Optional(
-    Type.String({
-      description: '[submit_feedback] Optional explanation for the corrections.',
-    })
+    Type.Array(
+      Type.Object({
+        field_path: Type.String({
+          description:
+            'Dot/bracket path into extracted_data, e.g. "problems[1].severity" or "problems[2]" for an array item.',
+        }),
+        mutation: Type.Optional(
+          Type.Union(
+            [Type.Literal('set'), Type.Literal('remove'), Type.Literal('add')],
+            {
+              description:
+                'Default "set". Use "remove" to drop an array item; "add" to append one.',
+            }
+          )
+        ),
+        value: Type.Optional(
+          Type.Any({
+            description:
+              'New value for set/add. Omitted for remove. Any JSON type (string/number/object/array).',
+          })
+        ),
+        note: Type.Optional(
+          Type.String({ description: 'Optional per-field explanation.' })
+        ),
+      }),
+      {
+        description:
+          '[submit_feedback] One entry per corrected field. Each row is stored independently so future corrections can supersede earlier ones per field.',
+      }
+    )
   ),
   limit: Type.Optional(
     Type.Number({
-      description: '[get_feedback] Max feedback records to return (default: 20).',
+      description: '[get_feedback] Max feedback records to return (default: 50).',
     })
   ),
 });
@@ -535,9 +556,9 @@ type ManageWatchersResult =
   | { action: 'get_component_reference'; documentation: ComponentReferenceDocumentation }
   | {
       action: 'submit_feedback';
-      feedback_id: number;
       watcher_id: string;
       window_id: number;
+      feedback_ids: number[];
     }
   | {
       action: 'get_feedback';
@@ -545,8 +566,10 @@ type ManageWatchersResult =
       feedback: Array<{
         id: number;
         window_id: number;
-        corrections: Record<string, unknown>;
-        notes: string | null;
+        field_path: string;
+        mutation: 'set' | 'remove' | 'add';
+        corrected_value: unknown;
+        note: string | null;
         created_by: string;
         created_at: string;
         window_start?: string;
@@ -645,7 +668,7 @@ export async function manageWatchers(
     get_version_details: () => handleGetVersionDetails(args),
     get_component_reference: () => Promise.resolve(handleGetComponentReference()),
     submit_feedback: () => handleSubmitFeedback(args, ctx),
-    get_feedback: () => handleGetFeedback(args),
+    get_feedback: () => handleGetFeedback(args, ctx),
     create_from_version: () => handleCreateFromVersion(args, env, ctx),
   });
 }
@@ -2447,88 +2470,127 @@ async function handleGetVersionDetails(args: ManageWatchersArgs): Promise<Manage
 // Feedback Handlers
 // ============================================
 
+type CorrectionInput = {
+  field_path: string;
+  mutation?: 'set' | 'remove' | 'add';
+  value?: unknown;
+  note?: string;
+};
+
 async function handleSubmitFeedback(
   args: ManageWatchersArgs,
   ctx: ToolContext
 ): Promise<ManageWatchersResult> {
   if (!args.watcher_id) throw new Error('watcher_id is required');
   if (!args.window_id) throw new Error('window_id is required');
-  if (!args.corrections || typeof args.corrections !== 'object') {
-    throw new Error('corrections is required and must be a JSON object');
-  }
   if (!ctx.userId) {
     throw new Error('Authentication required to submit feedback');
   }
+  const corrections = args.corrections as CorrectionInput[] | undefined;
+  if (!Array.isArray(corrections) || corrections.length === 0) {
+    throw new Error('corrections must be a non-empty array of {field_path, ...} entries');
+  }
 
-  const correctionKeys = Object.keys(args.corrections as Record<string, unknown>);
-  if (correctionKeys.length === 0) {
-    throw new Error('corrections must contain at least one field');
+  for (const c of corrections) {
+    if (!c.field_path || typeof c.field_path !== 'string') {
+      throw new Error('each correction requires a string field_path');
+    }
+    const m = c.mutation ?? 'set';
+    if (m !== 'set' && m !== 'remove' && m !== 'add') {
+      throw new Error(`unsupported mutation "${m}" for ${c.field_path}`);
+    }
+    if ((m === 'set' || m === 'add') && c.value === undefined) {
+      throw new Error(`${m} correction for ${c.field_path} requires a value`);
+    }
   }
 
   const sql = getDb();
   const watcherId = Number(args.watcher_id);
 
-  // Verify window exists and belongs to this watcher, get org_id from watchers table
+  // Scope to the caller's current org so a member of org A can't write
+  // feedback against a watcher in org B by passing its watcher_id.
   const windowCheck = await sql`
     SELECT ww.id, w.organization_id
     FROM watcher_windows ww
     JOIN watchers w ON ww.watcher_id = w.id
-    WHERE ww.id = ${args.window_id} AND ww.watcher_id = ${watcherId}
+    WHERE ww.id = ${args.window_id}
+      AND ww.watcher_id = ${watcherId}
+      AND w.organization_id = ${ctx.organizationId}
   `;
   if (windowCheck.length === 0) {
     throw new Error(`Window ${args.window_id} not found for watcher ${watcherId}`);
   }
+  const organizationId = windowCheck[0].organization_id as string;
 
-  const result = await sql`
-    INSERT INTO watcher_window_feedback (
-      window_id, watcher_id, organization_id,
-      corrections, notes, created_by
-    )
-    VALUES (
-      ${args.window_id}, ${watcherId}, ${windowCheck[0].organization_id},
-      ${sql.json(args.corrections)}, ${args.notes || null},
-      ${ctx.userId}
-    )
-    RETURNING id
-  `;
+  // Insert in one transaction so a partial failure never leaks half-applied
+  // corrections — submit_feedback is naturally a batch operation from the UI.
+  const feedbackIds = await sql.begin(async (tx) => {
+    const ids: number[] = [];
+    for (const c of corrections) {
+      const mutation = c.mutation ?? 'set';
+      const correctedValueJson =
+        mutation === 'remove' || c.value === undefined ? null : tx.json(c.value);
+      const result = await tx`
+        INSERT INTO watcher_window_field_feedback (
+          window_id, watcher_id, organization_id,
+          field_path, mutation, corrected_value, note, created_by
+        )
+        VALUES (
+          ${args.window_id}, ${watcherId}, ${organizationId},
+          ${c.field_path}, ${mutation}, ${correctedValueJson},
+          ${c.note ?? null}, ${ctx.userId}
+        )
+        RETURNING id
+      `;
+      ids.push(Number(result[0].id));
+    }
+    return ids;
+  });
 
   return {
     action: 'submit_feedback',
-    feedback_id: Number(result[0].id),
     watcher_id: args.watcher_id,
     window_id: args.window_id,
+    feedback_ids: feedbackIds,
   };
 }
 
-async function handleGetFeedback(args: ManageWatchersArgs): Promise<ManageWatchersResult> {
+async function handleGetFeedback(
+  args: ManageWatchersArgs,
+  ctx: ToolContext
+): Promise<ManageWatchersResult> {
   if (!args.watcher_id) throw new Error('watcher_id is required');
 
   const sql = getDb();
   const watcherId = Number(args.watcher_id);
-  const limit = args.limit ?? 20;
+  const limit = args.limit ?? 50;
 
-  let feedback;
-  if (args.window_id) {
-    feedback = await sql`
-      SELECT f.id, f.window_id, f.corrections, f.notes, f.created_by, f.created_at,
-             w.window_start, w.window_end
-      FROM watcher_window_feedback f
-      JOIN watcher_windows w ON f.window_id = w.id
-      WHERE f.watcher_id = ${watcherId} AND f.window_id = ${args.window_id}
-      ORDER BY f.created_at DESC
-      LIMIT ${limit}
-    `;
-  } else {
-    feedback = await sql`
-      SELECT f.id, f.window_id, f.corrections, f.notes, f.created_by, f.created_at,
-             w.window_start, w.window_end
-      FROM watcher_window_feedback f
-      JOIN watcher_windows w ON f.window_id = w.id
-      WHERE f.watcher_id = ${watcherId}
-      ORDER BY f.created_at DESC
-      LIMIT ${limit}
-    `;
-  }
+  // Scope to the caller's current org so a member of org A can't enumerate
+  // feedback for a watcher in org B by passing its watcher_id.
+  const feedback = args.window_id
+    ? await sql`
+        SELECT f.id, f.window_id, f.field_path, f.mutation, f.corrected_value,
+               f.note, f.created_by, f.created_at,
+               w.window_start, w.window_end
+        FROM watcher_window_field_feedback f
+        JOIN watcher_windows w ON f.window_id = w.id
+        WHERE f.watcher_id = ${watcherId}
+          AND f.window_id = ${args.window_id}
+          AND f.organization_id = ${ctx.organizationId}
+        ORDER BY f.created_at DESC
+        LIMIT ${limit}
+      `
+    : await sql`
+        SELECT f.id, f.window_id, f.field_path, f.mutation, f.corrected_value,
+               f.note, f.created_by, f.created_at,
+               w.window_start, w.window_end
+        FROM watcher_window_field_feedback f
+        JOIN watcher_windows w ON f.window_id = w.id
+        WHERE f.watcher_id = ${watcherId}
+          AND f.organization_id = ${ctx.organizationId}
+        ORDER BY f.created_at DESC
+        LIMIT ${limit}
+      `;
 
   return {
     action: 'get_feedback',
@@ -2536,8 +2598,10 @@ async function handleGetFeedback(args: ManageWatchersArgs): Promise<ManageWatche
     feedback: feedback.map((row) => ({
       id: Number(row.id),
       window_id: Number(row.window_id),
-      corrections: row.corrections as Record<string, unknown>,
-      notes: row.notes as string | null,
+      field_path: row.field_path as string,
+      mutation: row.mutation as 'set' | 'remove' | 'add',
+      corrected_value: row.corrected_value as unknown,
+      note: row.note as string | null,
       created_by: row.created_by as string,
       created_at: (row.created_at as Date).toISOString(),
       window_start: row.window_start ? (row.window_start as Date).toISOString() : undefined,

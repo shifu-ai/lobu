@@ -29,23 +29,45 @@ import { initWorkspaceProvider } from './workspace';
 
 // Create a wrapper app that injects environment into each request
 const app = new Hono<{ Bindings: Env }>();
-const APP_ROOT = path.resolve(fileURLToPath(new URL('.', import.meta.url)), '..');
+
+// Resolve repo root from this source file: …/packages/owletto-backend/src/server.ts → repo root.
+const PACKAGE_REPO_ROOT = path.resolve(
+  fileURLToPath(new URL('.', import.meta.url)),
+  '../../..'
+);
+
+// Make LOBU_DEV_PROJECT_PATH defaultable when invoked from the package dir
+// (`cd packages/owletto-backend && bun run dev`). Downstream consumers like
+// the embedded gateway's buildGatewayConfig() read this to derive worker
+// paths; without this fallback they'd resolve against process.cwd().
+if (!process.env.LOBU_DEV_PROJECT_PATH) {
+  process.env.LOBU_DEV_PROJECT_PATH = PACKAGE_REPO_ROOT;
+}
 
 function resolveWebSourceRoot(): string {
-  const candidates = [
-    process.env.WEB_SOURCE_DIR?.trim(),
-    path.resolve(APP_ROOT, 'packages/owletto-web'),
-    path.resolve(process.cwd(), 'packages/owletto-web'),
-    path.resolve(process.cwd(), '../packages/owletto-web'),
-  ].filter((candidate): candidate is string => Boolean(candidate));
-
-  for (const candidate of candidates) {
-    if (existsSync(path.join(candidate, 'index.html'))) {
-      return candidate;
+  const explicit = process.env.WEB_SOURCE_DIR?.trim();
+  if (explicit) {
+    if (!existsSync(path.join(explicit, 'index.html'))) {
+      throw new Error(
+        `WEB_SOURCE_DIR set but no index.html found: ${explicit}`
+      );
     }
+    return explicit;
   }
 
-  throw new Error('Owletto web source directory not found');
+  const projectRoot =
+    process.env.LOBU_DEV_PROJECT_PATH || PACKAGE_REPO_ROOT;
+  const webSourceDir = path.resolve(
+    projectRoot,
+    'packages/owletto-web'
+  );
+  if (!existsSync(path.join(webSourceDir, 'index.html'))) {
+    throw new Error(
+      `Owletto web source directory not found: ${webSourceDir}. ` +
+        `Set WEB_SOURCE_DIR or LOBU_DEV_PROJECT_PATH to the monorepo root.`
+    );
+  }
+  return webSourceDir;
 }
 
 // Inject environment variables into Hono context

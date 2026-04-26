@@ -367,6 +367,26 @@ export async function createAuth(env: Env, request?: Request) {
             }
             return { data: user };
           },
+          after: async (user) => {
+            try {
+              const { ensurePersonalOrganization } = await import(
+                './personal-org-provisioning'
+              );
+              const result = await ensurePersonalOrganization({
+                id: user.id,
+                email: user.email,
+                name: user.name,
+                username: (user as { username?: string | null }).username ?? null,
+              });
+              if (result.created) {
+                console.log(
+                  `[Auth] Provisioned personal org ${result.slug} for user ${user.id}`
+                );
+              }
+            } catch (error) {
+              console.error('[Auth] Failed to provision personal org:', error);
+            }
+          },
         },
       },
       account: {

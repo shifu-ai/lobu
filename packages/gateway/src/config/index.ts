@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentOptions, LogLevel, PluginConfig } from "@lobu/core";
 import {
   DEFAULTS as CORE_DEFAULTS,
@@ -16,6 +17,7 @@ import {
 import { config as dotenvConfig } from "dotenv";
 import type { OrchestratorConfig } from "../orchestration/base-deployment-manager.js";
 
+const __filename = fileURLToPath(import.meta.url);
 const logger = createLogger("cli-config");
 const OWLETTO_PLUGIN_SOURCE = "@lobu/owletto-openclaw";
 const NATIVE_MEMORY_PLUGIN_SOURCE = "@openclaw/native-memory";
@@ -314,6 +316,23 @@ function deepMerge<T extends Record<string, any>>(
   return result;
 }
 
+function buildEmbeddedWorkerPaths(projectRoot: string): {
+  entryPoint: string;
+  binPathEntries: string[];
+} {
+  // path.resolve so a relative LOBU_DEV_PROJECT_PATH still yields absolute
+  // paths — workers are spawned with cwd=workspaceDir, so relative entries
+  // would resolve against the workspace and fail.
+  const root = path.resolve(projectRoot);
+  return {
+    entryPoint: path.join(root, "packages/worker/src/index.ts"),
+    binPathEntries: [
+      path.join(root, "node_modules/.bin"),
+      path.join(root, "packages/worker/node_modules/.bin"),
+    ],
+  };
+}
+
 /**
  * Build complete gateway configuration from environment variables,
  * optionally deep-merged with explicit overrides.
@@ -484,6 +503,13 @@ export function buildGatewayConfig(
         maxDeployments: getOptionalNumber(
           "MAX_WORKER_DEPLOYMENTS",
           DEFAULTS.MAX_WORKER_DEPLOYMENTS
+        ),
+        // Embedded-mode paths. Resolved from the monorepo root pointed at by
+        // LOBU_DEV_PROJECT_PATH (defaults to cwd so CLI invocations from the
+        // repo root still work). Docker/K8s modes ignore these — the worker
+        // image bakes the entrypoint in.
+        ...buildEmbeddedWorkerPaths(
+          process.env.LOBU_DEV_PROJECT_PATH || process.cwd()
         ),
       },
       kubernetes: {

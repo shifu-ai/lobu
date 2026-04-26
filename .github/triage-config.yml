@@ -1,0 +1,49 @@
+# Static config consumed by .claude/commands/triage-pr.md.
+# Keep this file small — heuristics live in the slash command, not here.
+
+labels:
+  hold: triage:hold
+  needs_human: triage:needs-human
+  fixes_applied: triage:fixes-applied
+  auto_mergeable: triage:auto-mergeable
+
+# GitHub login to assign on needs-human escalation. Cannot use `@me` here:
+# in CI, GH_TOKEN authenticates as github-actions[bot], so `@me` resolves to
+# the bot. Hardcode the human reviewer's login.
+assignee: buremba
+
+# Any path under these escalates straight to needs-human.
+# Includes the triage policy files themselves: a PR that modifies the
+# slash command or this config must NOT be classified by the
+# (potentially-modified) policy on its own branch.
+infra_paths:
+  - charts/lobu/
+  - docker/
+  - .github/workflows/
+  - .github/triage-config.yml
+  - .claude/commands/triage-pr.md
+  - scripts/setup-dev.sh
+
+# Submodule two-PR rule. Any change under these is needs-human.
+two_pr_paths:
+  - packages/owletto-web/
+
+# Comment substring matches (case-insensitive) that escalate to needs-human.
+escalation_keywords:
+  - security
+  - credential
+  - token
+  - secret
+  - auth bypass
+  - P0
+  - P1
+
+# Auto-merge volume gates. A PR otherwise eligible for auto-merge
+# (CI green + APPROVE + no CHANGES_REQUESTED + MERGEABLE) is downgraded
+# to needs-human when it exceeds either threshold. Auto-merge is reserved
+# for small focused changes; large diffs need human eyes regardless of
+# how confident the bot reviewers are. Override per-PR by merging
+# manually in the GitHub UI.
+auto_merge:
+  max_lines: 300   # additions + deletions
+  max_files: 10

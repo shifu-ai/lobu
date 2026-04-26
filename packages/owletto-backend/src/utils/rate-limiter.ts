@@ -179,6 +179,13 @@ export const RateLimitPresets = {
     windowSeconds: 3600,
     errorMessage: 'Join rate limit exceeded. Maximum 10 join attempts per hour.',
   } as RateLimitConfig,
+
+  /** Public template-agent install: 20/hour per user */
+  INSTALL_AGENT_PER_USER_HOUR: {
+    limit: 20,
+    windowSeconds: 3600,
+    errorMessage: 'Install rate limit exceeded. Maximum 20 installs per hour.',
+  } as RateLimitConfig,
 };
 
 /** Module-level singleton rate limiter. */

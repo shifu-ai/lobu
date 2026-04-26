@@ -37,33 +37,38 @@ export interface OAuthProviderConfig {
     | "client_secret_basic";
   /** Whether auth-code exchange must include refresh_token */
   requireRefreshToken?: boolean;
+  /** Extra static query params to append to the authorize URL */
+  extraAuthParams?: Record<string, string>;
+  /** Extra static fields to include in the token exchange body */
+  extraTokenParams?: Record<string, string | number>;
 }
 
 /**
  * Claude OAuth Configuration
- * - Public client (no client secret)
- * - Uses PKCE for security
- * - Requires browser-like headers (anti-bot protection)
+ *
+ * Mirrors the public Claude Code CLI's subscription login flow
+ * (`loginWithClaudeAi: true, inferenceOnly: true`). Anthropic's token endpoint
+ * 429s any failed code exchange using this client_id, so we must match the
+ * expected request shape exactly: claude.com authorize URL, the `code=true`
+ * query flag, `user:inference` scope, and a long `expires_in` in the exchange.
+ *
+ * Endpoints extracted from the current `@anthropic-ai/claude-code` binary —
+ * Anthropic moved them from `claude.ai`/`console.anthropic.com` to
+ * `claude.com`/`platform.claude.com` and the old hosts reject requests.
  */
 export const CLAUDE_PROVIDER: OAuthProviderConfig = {
   id: "claude",
   name: "Claude",
   clientId: "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-  authUrl: "https://claude.ai/oauth/authorize",
-  tokenUrl: "https://console.anthropic.com/v1/oauth/token",
-  redirectUri: "https://console.anthropic.com/oauth/code/callback",
+  authUrl: "https://claude.com/cai/oauth/authorize",
+  tokenUrl: "https://platform.claude.com/v1/oauth/token",
+  redirectUri: "https://platform.claude.com/oauth/code/callback",
   scope: "user:inference",
   usePKCE: true,
   responseType: "code",
   grantType: "authorization_code",
   tokenEndpointAuthMethod: "none",
   requireRefreshToken: true,
-  customHeaders: {
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    Accept: "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    Referer: "https://claude.ai/",
-    Origin: "https://claude.ai",
-  },
+  extraAuthParams: { code: "true" },
+  extraTokenParams: { expires_in: 31536000 },
 };

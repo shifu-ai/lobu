@@ -19,12 +19,6 @@ const logger = createLogger("orchestrator");
 
 /** Timeout (ms) to wait for graceful shutdown before SIGKILL. */
 const KILL_TIMEOUT_MS = 5_000;
-const WORKER_BIN_DIR_CANDIDATES = [
-  path.resolve("node_modules/.bin"),
-  path.resolve("packages/worker/node_modules/.bin"),
-  "/app/node_modules/.bin",
-  "/app/packages/worker/node_modules/.bin",
-] as const;
 
 interface EmbeddedWorkerEntry {
   process: ChildProcess;
@@ -33,10 +27,13 @@ interface EmbeddedWorkerEntry {
   workspaceDir: string;
 }
 
-function buildEmbeddedWorkerPath(existingPath?: string): string | undefined {
+function buildEmbeddedWorkerPath(
+  binPathEntries: readonly string[] | undefined,
+  existingPath?: string
+): string | undefined {
   const segments = (existingPath || "").split(":").filter(Boolean);
 
-  for (const candidate of [...WORKER_BIN_DIR_CANDIDATES].reverse()) {
+  for (const candidate of [...(binPathEntries ?? [])].reverse()) {
     if (!fs.existsSync(candidate)) continue;
     if (segments.includes(candidate)) continue;
     segments.unshift(candidate);
@@ -66,12 +63,24 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     return "localhost";
   }
 
+  private getWorkerEntryPoint(): string {
+    const entryPoint = this.config.worker.entryPoint;
+    if (!entryPoint) {
+      throw new OrchestratorError(
+        ErrorCode.DEPLOYMENT_CREATE_FAILED,
+        "OrchestratorConfig.worker.entryPoint is required for embedded mode. " +
+          "Callers must supply an absolute path to the worker source file."
+      );
+    }
+    return entryPoint;
+  }
+
   async validateWorkerImage(): Promise<void> {
-    const entryPoint = path.resolve("packages/worker/src/index.ts");
+    const entryPoint = this.getWorkerEntryPoint();
     if (!fs.existsSync(entryPoint)) {
       throw new OrchestratorError(
         ErrorCode.DEPLOYMENT_CREATE_FAILED,
-        `Worker entry point not found: ${entryPoint}. Run from the project root.`
+        `Worker entry point not found: ${entryPoint}`
       );
     }
     logger.debug(`Worker entry point verified: ${entryPoint}`);
@@ -113,6 +122,7 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     commonEnvVars.WORKSPACE_DIR = workspaceDir;
     commonEnvVars.DEPLOYMENT_MODE = "embedded";
     const embeddedPath = buildEmbeddedWorkerPath(
+      this.config.worker.binPathEntries,
       commonEnvVars.PATH || process.env.PATH
     );
     if (embeddedPath) {
@@ -127,7 +137,7 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
 
     // Determine spawn command based on nix packages
     const nixPackages = messageData?.nixConfig?.packages ?? [];
-    const workerEntryPoint = path.resolve("packages/worker/src/index.ts");
+    const workerEntryPoint = this.getWorkerEntryPoint();
     const bunExecutable = getBunExecutable();
 
     let command: string;

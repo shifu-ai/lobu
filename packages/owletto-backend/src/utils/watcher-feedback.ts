@@ -8,32 +8,25 @@
 import { getDb } from '../db/client';
 
 /**
- * Check whether any feedback exists for a watcher (cheap EXISTS query).
- */
-export async function hasFeedback(watcherId: number | string): Promise<boolean> {
-  const sql = getDb();
-  const result = await sql`
-    SELECT 1 FROM watcher_window_feedback WHERE watcher_id = ${watcherId} LIMIT 1
-  `;
-  return result.length > 0;
-}
-
-/**
  * Build a human-readable summary of past user corrections for a watcher.
- * Returns undefined if no feedback exists.
+ *
+ * Returns only the most-recent correction per (field_path) — earlier
+ * superseded corrections are dropped so the prompt does not accumulate
+ * historical noise. Returns undefined if no feedback exists.
  */
 export async function getRecentFeedbackSummary(
   watcherId: number | string,
-  limit = 10
+  limit = 20
 ): Promise<string | undefined> {
   const sql = getDb();
   const feedback = await sql`
-    SELECT f.corrections, f.notes, f.created_at,
+    SELECT DISTINCT ON (f.field_path)
+           f.field_path, f.mutation, f.corrected_value, f.note, f.created_at,
            w.window_start, w.window_end
-    FROM watcher_window_feedback f
+    FROM watcher_window_field_feedback f
     JOIN watcher_windows w ON f.window_id = w.id
     WHERE f.watcher_id = ${watcherId}
-    ORDER BY f.created_at DESC
+    ORDER BY f.field_path, f.created_at DESC
     LIMIT ${limit}
   `;
 
@@ -43,15 +36,23 @@ export async function getRecentFeedbackSummary(
   for (const row of feedback) {
     const start = new Date(row.window_start as string).toISOString().split('T')[0];
     const end = new Date(row.window_end as string).toISOString().split('T')[0];
-    const corrections = row.corrections as Record<string, unknown>;
+    const path = row.field_path as string;
+    const mutation = row.mutation as 'set' | 'remove' | 'add';
+    const value = row.corrected_value;
 
-    for (const [field, correctedValue] of Object.entries(corrections)) {
-      let line = `- Window ${start} to ${end}: "${field}" corrected to "${correctedValue}"`;
-      if (row.notes) {
-        line += ` (note: "${row.notes}")`;
-      }
-      lines.push(line);
+    let line: string;
+    if (mutation === 'remove') {
+      line = `- Window ${start}–${end}: drop "${path}"`;
+    } else if (mutation === 'add') {
+      line = `- Window ${start}–${end}: append to "${path}" — ${JSON.stringify(value)}`;
+    } else {
+      const rendered = typeof value === 'string' ? value : JSON.stringify(value);
+      line = `- Window ${start}–${end}: "${path}" → ${rendered}`;
     }
+    if (row.note) {
+      line += ` (note: "${row.note}")`;
+    }
+    lines.push(line);
   }
 
   return lines.join('\n');

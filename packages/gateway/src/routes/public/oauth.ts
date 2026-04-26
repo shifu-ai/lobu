@@ -134,7 +134,7 @@ export function createOAuthRoutes(config: OAuthRoutesConfig): OpenAPIHono {
       const credentials = await oauthClient.exchangeCodeForToken(
         authCode,
         stateData.codeVerifier,
-        "https://console.anthropic.com/oauth/code/callback",
+        undefined,
         state
       );
       await credentialStore.setCredentials(
@@ -144,10 +144,11 @@ export function createOAuthRoutes(config: OAuthRoutesConfig): OpenAPIHono {
       );
       return c.json({ success: true });
     } catch (e) {
-      return c.json(
-        { error: e instanceof Error ? e.message : "Exchange failed" },
-        400
-      );
+      const raw = e instanceof Error ? e.message : "Exchange failed";
+      const message = raw.includes("429")
+        ? "Anthropic rate-limited this IP after a prior failed attempt. Wait ~10 minutes and retry, or use the API Key tab instead."
+        : raw;
+      return c.json({ error: message }, 400);
     }
   });
 
