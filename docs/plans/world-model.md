@@ -152,6 +152,151 @@ inventing new permission machinery.
 5. **`entity_identities` (technical) ≠ `entity_relationships` (semantic)** —
    keep them separate.
 
+## Outstanding work
+
+The agent path is complete: tenant agents discover canonical entities via
+`search_knowledge`, create entities with public-catalog vocabulary, and link
+cross-org. The frontend has org-awareness primitives (`useCurrentOrg`,
+`PublicOrgJoinBar`, public orgs in the org dropdown) but doesn't yet exercise
+the cross-org features. The work below closes that gap with as little new UX
+as possible — every item reuses an existing surface or widens an existing
+query.
+
+Ordered by what unblocks usage; skip items if the corresponding use case
+doesn't bite yet.
+
+### 1. Schema CRUD cross-org awareness — backend (~80 LOC)
+
+`manage_entity_schema` `action='list'` and `action='get'` are still org-local
+in `tools/admin/manage_entity_schema.ts`. Widen the entity-types and
+relationship-types lookups with the same pattern as #374's resolver: tenant
+first, then `visibility='public'`, ORDER BY tenant-first. Each row in the
+response carries `organization_id` + `organization_slug` so callers can
+distinguish local from cross-org.
+
+This is the prerequisite for *every* frontend type-picker change below.
+
+### 2. Frontend type pickers show cross-org types (~30 LOC)
+
+The two consumers of the schema CRUD list API:
+
+- `useEntityTypes(orgContext)` — entity creation flow's type dropdown
+- `useRelationshipTypes(orgContext)` — relationship-type-rules form
+
+Both already read `manage_entity_schema action='list'` results. Once #1 ships,
+the rows will include cross-org types automatically. Frontend-side change is
+purely visual:
+
+- Add a small **read-only badge** on rows whose `organization_slug !==
+  currentOrgSlug`. Reuses the existing `<Badge>` from
+  `@/components/ui/badge`. Group cross-org types under a "From public
+  catalogs" subheader in the dropdown.
+- For cross-org rows, hide the edit/delete actions and disable the row's
+  click-into-edit affordance.
+
+No new components; no new pages. The dropdown's data shape grows by one
+field. Same component everywhere.
+
+### 3. Discovery: lean on the existing org dropdown
+
+A user wanting to *browse* a public catalog already navigates to
+`/{public-org-slug}` (e.g. `/venture-capital`). The org dropdown returns
+public orgs alongside member orgs. No new UI surface needed.
+
+What is *missing* from the dropdown today: visual separation between "your
+orgs" and "public catalogs you can read." Single-line change in the dropdown
+component to render two grouped sections, gated on
+`org.visibility === 'public'`.
+
+For users who want to *find* a canonical entity by name without knowing the
+catalog: that's an agent task (`search_knowledge`), not a frontend search.
+**Don't add a global search bar** — keeps the UI simple, pushes the
+discovery work into the AI tool where it's already strong.
+
+### 4. Read-side cross-org tolerance (~50 LOC)
+
+`manage_entity.get`, `resolve_path`, and the public-pages routes filter by
+`e.organization_id = ctx.organizationId`. After #374, a tenant relationship
+can have `to_entity_id` pointing at a public-catalog entity — but
+`list_links` reaches it via FK join, while a follow-up `get` of that target
+fails with "not found" because it isn't in the caller's org.
+
+Same pattern as #377's `fetchEntityById`: widen each read site to
+`(e.organization_id = caller OR target_org.visibility='public') AND
+e.deleted_at IS NULL`. Operational counts already gated by the CASE-WHEN
+shape.
+
+### 5. Visibility-flip safety (~10 LOC)
+
+If a public catalog flips back to private, existing tenant cross-org refs
+become semantically dangling. Cheapest defense: refuse the flip. In
+`tools/organizations.ts` (or wherever org settings are mutated), when a
+`visibility=public → private` change is requested, query
+`SELECT EXISTS (SELECT 1 FROM entity_relationships
+  JOIN entities te ON te.id = to_entity_id
+  WHERE te.organization_id = $org_being_flipped)`. If true, reject with
+"this catalog has incoming references; remove them or split your data into a
+new private org first."
+
+Cleaner than retroactive revalidation, no migration cost.
+
+### 6. Catalog curation pass (data, not code)
+
+Existing public orgs (`venture-capital`, `market-intelligence`,
+`careops`, …) already hold ~200 canonical entities. Some demo cruft is
+mixed in:
+
+- `default` (Market Intelligence) has a `Classification Test Brand` and
+  the user's own `$member` row that aren't catalog content.
+- The 4-5-entity verticals (`leadership`, `sales`, `devops`, …) are likely
+  template seeds, not curated catalogs.
+
+Before recommending these as references in agent prompts, do a one-off
+prune. Pure SQL pass against prod (we have direct access). No PR needed —
+just a documented changelog of what was removed.
+
+### 7. `is_catalog` flag on `organization` (~30 LOC + migration)
+
+Pi flagged that `visibility='public'` alone trusts every public org as
+canonical, so a tenant who flips their org public could squat on common
+slugs (`brand`, `tax_filing`). Today **no normal user code path lets a
+regular user mutate `visibility`** — only admins via direct DB or a
+yet-unwritten admin API — so this is bounded operationally.
+
+Promote to schema when we add an admin-flippable visibility control, or
+when the catalog count grows past ~10. The fix is small: add
+`organization.is_catalog boolean DEFAULT false`, change the schema search
+path's `OR o.visibility = 'public'` to `OR o.is_catalog = true`.
+
+### 8. `entity_relationship_type_rules` slug → id (~150 LOC + migration)
+
+`entity_relationship_type_rules.source_entity_type_slug` and
+`target_entity_type_slug` are text. Cross-catalog vocabulary makes slug
+lookup ambiguous. Same conversion shape as #370 (entity_type slug → FK)
+applied to this table. Defer until the first cross-catalog rule conflict
+shows up — none today.
+
+### 9. Contribution flow — when there's actually content to contribute
+
+The "invite the public-org admin agent into your tenant as a viewer"
+pattern (described above) needs:
+
+- A way for the admin agent to declare which entity types it's interested
+  in (could be a `requires_review` watcher in the admin's public catalog).
+- A small UI nudge in the tenant when the agent posts back "this looks
+  canonical, want me to ask the catalog admin to incorporate it?"
+
+No new schema. Build this when the first user actually has data worth
+contributing. Until then it's premature.
+
+### 10. TOCTOU on type lookup (deferred indefinitely)
+
+The microsecond window between schema-search-path resolution and INSERT
+where a public type could be soft-deleted. Worst case is an entity row
+referencing a now-soft-deleted type — recoverable, not corrupting. Pi
+flagged twice; we deferred twice. The cleanest fix is a transactional
+rewrite of `createEntity`, which is bigger than the bug warrants.
+
 ## Deferred (with rationale)
 
 | Deferred | Why later |
