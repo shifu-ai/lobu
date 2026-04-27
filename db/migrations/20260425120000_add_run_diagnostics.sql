@@ -1,3 +1,5 @@
+-- migrate:up
+
 -- Add diagnostic columns to runs so subprocess failures carry enough context
 -- to diagnose without reading gateway pod logs.
 --
@@ -9,3 +11,10 @@ ALTER TABLE public.runs ADD COLUMN output_tail TEXT NULL;
 ALTER TABLE public.runs ADD COLUMN exit_code INTEGER NULL;
 ALTER TABLE public.runs ADD COLUMN exit_signal TEXT NULL;
 ALTER TABLE public.runs ADD COLUMN exit_reason TEXT NULL;
+
+-- migrate:down
+
+ALTER TABLE public.runs DROP COLUMN IF EXISTS exit_reason;
+ALTER TABLE public.runs DROP COLUMN IF EXISTS exit_signal;
+ALTER TABLE public.runs DROP COLUMN IF EXISTS exit_code;
+ALTER TABLE public.runs DROP COLUMN IF EXISTS output_tail;

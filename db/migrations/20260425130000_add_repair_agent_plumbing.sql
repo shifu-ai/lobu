@@ -1,3 +1,5 @@
+-- migrate:up
+
 -- Repair-agent plumbing for connector reliability.
 --
 -- When a feed accumulates persistent failures, the worker-completion path
@@ -29,3 +31,16 @@ ALTER TABLE public.connector_definitions
 -- feed in the org regardless of per-feed configuration.
 ALTER TABLE public.organization
   ADD COLUMN repair_agents_enabled boolean NOT NULL DEFAULT TRUE;
+
+-- migrate:down
+
+ALTER TABLE public.organization DROP COLUMN IF EXISTS repair_agents_enabled;
+ALTER TABLE public.connector_definitions DROP COLUMN IF EXISTS default_repair_agent_id;
+DROP INDEX IF EXISTS feeds_open_repair_thread_uniq;
+ALTER TABLE public.feeds
+  DROP COLUMN IF EXISTS last_repair_post_hash,
+  DROP COLUMN IF EXISTS first_failure_at,
+  DROP COLUMN IF EXISTS last_repair_at,
+  DROP COLUMN IF EXISTS repair_attempt_count,
+  DROP COLUMN IF EXISTS repair_thread_id,
+  DROP COLUMN IF EXISTS repair_agent_id;
