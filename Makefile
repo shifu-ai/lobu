@@ -41,8 +41,8 @@ build-packages:
 ensure-submodule:
 	@status=$$(git submodule status packages/owletto-web 2>/dev/null || true); \
 	case "$$status" in \
-		'-'*) echo ">> owletto-web submodule not initialized — running git submodule update --init"; \
-		      git submodule update --init packages/owletto-web ;; \
+		'-'*) echo ">> owletto-web submodule not initialized — running git submodule update --init --recursive"; \
+		      git submodule update --init --recursive packages/owletto-web ;; \
 		'+'*) echo ">> WARNING: packages/owletto-web is at a different SHA than the parent pin:"; \
 		      echo "   $$status"; \
 		      echo "   If this is unintentional, run: git submodule update packages/owletto-web" ;; \

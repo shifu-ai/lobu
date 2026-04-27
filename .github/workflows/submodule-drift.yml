@@ -2,7 +2,8 @@ name: Submodule Drift
 
 # Surfaces when packages/owletto-web (private) has merged commits past the
 # parent's pinned SHA — i.e. the two-PR rule's parent bump is missing.
-# Skips bot tag-update commits so FluxCD's image automation doesn't trip it.
+# Bot tag-update commits (FluxCD image automation) are exempted only when both
+# the author and exact subject match — a sloppy human commit cannot slip past.
 
 on:
   push:
@@ -16,6 +17,10 @@ on:
 permissions:
   contents: read
 
+env:
+  BOT_AUTHOR_EMAIL: fluxcd@lobu.ai
+  BOT_SUBJECT: "chore: update images"
+
 jobs:
   check-drift:
     runs-on: ubuntu-latest
@@ -28,9 +33,21 @@ jobs:
         with:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
 
-      - name: Skip when deploy key is unavailable (fork PRs)
-        if: steps.submodule.outputs.stubbed == 'true'
-        run: echo "::notice::No deploy key available — skipping submodule drift check."
+      - name: Skip on fork PR (no deploy key by design)
+        if: |
+          steps.submodule.outputs.stubbed == 'true'
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name != github.repository
+        run: echo "::notice::Fork PR — submodule drift check skipped."
+
+      - name: Fail when deploy key is missing on a same-repo run
+        if: |
+          steps.submodule.outputs.stubbed == 'true'
+          && !(github.event_name == 'pull_request'
+            && github.event.pull_request.head.repo.full_name != github.repository)
+        run: |
+          echo "::error::OWLETTO_WEB_DEPLOY_KEY is missing for a same-repo run; drift check cannot run."
+          exit 1
 
       - name: Check for unmerged non-bot commits on owletto-web/main
         if: steps.submodule.outputs.stubbed != 'true'
@@ -44,16 +61,30 @@ jobs:
           echo "Pinned (parent):   $PINNED"
           echo "owletto-web/main:  $REMOTE"
 
+          # Hard rule: parent must never pin a SHA that isn't on owletto-web/main.
+          # FluxCD reads charts from owletto-web/main; an off-main pin breaks deploy.
+          if ! git -C packages/owletto-web merge-base --is-ancestor "$PINNED" origin/main; then
+            echo "::error::Pinned SHA $PINNED is not reachable from owletto-web/main."
+            echo "This violates the rule against pinning unmerged submodule SHAs (see AGENTS.md)."
+            exit 1
+          fi
+
           if [ "$PINNED" = "$REMOTE" ]; then
             echo "Submodule pin matches owletto-web/main — no drift."
             exit 0
           fi
 
-          NON_BOT=$(git -C packages/owletto-web log \
-            --invert-grep --grep '^chore: update images' \
-            --pretty='format:%h %s' "$PINNED..origin/main" || true)
+          # Walk each commit between PINNED..origin/main; exempt only those whose
+          # author email AND exact subject match the FluxCD image-tag bot.
+          DRIFT=""
+          while IFS='|' read -r sha email subject; do
+            if [ "$email" = "$BOT_AUTHOR_EMAIL" ] && [ "$subject" = "$BOT_SUBJECT" ]; then
+              continue
+            fi
+            DRIFT+="$sha $subject"$'\n'
+          done < <(git -C packages/owletto-web log --pretty='format:%h|%ae|%s' "$PINNED..origin/main")
 
-          if [ -z "$NON_BOT" ]; then
+          if [ -z "$DRIFT" ]; then
             echo "owletto-web/main is ahead, but only by FluxCD image-tag commits — no parent bump needed."
             exit 0
           fi
@@ -64,7 +95,7 @@ jobs:
           echo "owletto-web/main: $REMOTE"
           echo ""
           echo "Commits needing a parent bump:"
-          echo "$NON_BOT"
+          printf '%s' "$DRIFT"
           echo ""
           echo "Fix (open as a separate PR):"
           echo "  git -C packages/owletto-web fetch origin"
