@@ -39,13 +39,15 @@ BEGIN
 END$$;
 
 -- Backfill historical NULLs with the existing 'system' sentinel before
--- VALIDATE. Pre-`created_by` events end up here. A single statement
--- because `transaction:false` already lets each statement commit on
--- its own — the previous chunked DO LOOP wrapped the whole backfill
--- in one PL/pgSQL transaction, holding row locks until the loop
--- finished, which exceeded the gateway pod's livenessProbe budget
--- (90 s) on tables with >100k NULL rows. A plain UPDATE on 400k rows
--- runs in single-digit seconds and commits when it returns.
+-- VALIDATE. Pre-`created_by` events end up here.
+--
+-- The session's lock_timeout is 5s (set at the top of this migration)
+-- which is appropriate for DDL but too aggressive for a row-level
+-- backfill running concurrently with live inserts: the deploying
+-- gateway and the live old pod can hold per-row locks briefly, and
+-- our UPDATE waits on each one. Bump locally for the UPDATE and the
+-- VALIDATE that follows, then restore.
+SET lock_timeout = 0;
 UPDATE public.events SET created_by = 'system' WHERE created_by IS NULL;
 
 ALTER TABLE public.events
@@ -56,6 +58,8 @@ ALTER TABLE public.events
 
 ALTER TABLE public.events
     DROP CONSTRAINT IF EXISTS events_created_by_not_null;
+
+SET lock_timeout = '5s';
 
 -- 2. Prune historical run_type values from the runs CHECK.
 --    'embed_backfill' is still in active use and stays. 'insight' and
