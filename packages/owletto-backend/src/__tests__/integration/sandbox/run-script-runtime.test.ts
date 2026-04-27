@@ -1,16 +1,44 @@
-import { describe, expect, it } from "bun:test";
+/**
+ * Sandbox runtime integration test.
+ *
+ * Asserts that the host runtime can actually load `isolated-vm` and run a
+ * script end-to-end. Lives under integration/ and is invoked by the
+ * `test:sandbox-runtime` package script — which CI runs under Node, the
+ * production runtime.
+ *
+ * Background: `isolated-vm` is a V8 native addon. Bun (which uses
+ * JavaScriptCore with a partial V8 ABI shim) cannot load it; the addon
+ * throws at dlopen. The previous bun:test version of this suite hid that
+ * gap by skipping when the runner reported `RuntimeUnavailable`. The
+ * production app image silently regressed for months as a result.
+ *
+ * This file deliberately fails (not skips) when the runtime can't load
+ * `isolated-vm` so the regression cannot ship again.
+ */
+
+import { describe, expect, it } from "vitest";
 import type { ClientSDK } from "../../../sandbox/client-sdk";
 import { getDefaultLimits, runScript } from "../../../sandbox/run-script";
 
-function skipIfRuntimeUnavailable(
-  result: Awaited<ReturnType<typeof runScript>>,
-): boolean {
-  if (result.error?.name !== "RuntimeUnavailable") return false;
-  expect(result.success).toBe(false);
-  return true;
-}
+describe("sandbox runtime", () => {
+  it("loads isolated-vm and runs a trivial script", async () => {
+    const stubSdk = { log: () => undefined } as unknown as ClientSDK;
+    const result = await runScript({
+      source: "export default async () => 1 + 2;",
+      sdk: stubSdk,
+    });
+    if (result.error?.name === "RuntimeUnavailable") {
+      throw new Error(
+        "isolated-vm failed to load under the test runtime. " +
+          "Production runs the backend under Node; this test must too. " +
+          `Detail: ${result.error.message}`,
+      );
+    }
+    expect(result.success).toBe(true);
+    expect(result.returnValue).toBe(3);
+    expect(result.sdkCalls).toBe(0);
+  });
 
-describe("runScript", () => {
   it("exposes default resource limits", () => {
     const limits = getDefaultLimits();
     expect(limits.memoryMb).toBe(64);
@@ -30,21 +58,6 @@ describe("runScript", () => {
     expect(result).toHaveProperty("durationMs");
     expect(result).toHaveProperty("sdkCalls");
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
-  });
-
-  it("runs a default-export script and returns its value", async () => {
-    const stubSdk = { log: () => undefined } as unknown as ClientSDK;
-    const result = await runScript({
-      source: "export default async () => 1 + 2;",
-      sdk: stubSdk,
-    });
-    // Skip on environments where the optional native module is unavailable
-    // (the runner reports RuntimeUnavailable). Otherwise the bridge must
-    // succeed and forward the return value.
-    if (skipIfRuntimeUnavailable(result)) return;
-    expect(result.success).toBe(true);
-    expect(result.returnValue).toBe(3);
-    expect(result.sdkCalls).toBe(0);
   });
 
   it("supports direct client.org(slug).namespace.method() chaining", async () => {
@@ -73,7 +86,6 @@ describe("runScript", () => {
       sdk: stubSdk,
     });
 
-    if (skipIfRuntimeUnavailable(result)) return;
     expect(result.success).toBe(true);
     expect(result.returnValue).toEqual({ org: "atlas", id: 123 });
     expect(result.sdkCalls).toBe(1);
@@ -95,7 +107,6 @@ describe("runScript", () => {
       limits: { timeoutMs: 25 },
     });
 
-    if (skipIfRuntimeUnavailable(result)) return;
     expect(result.success).toBe(false);
     expect(result.error?.name).toBe("TimeoutError");
     expect(result.sdkCalls).toBe(1);

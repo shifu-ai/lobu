@@ -3,7 +3,7 @@ set -e
 
 MODE="${1:-server}"
 
-echo "Starting Owletto backend (Bun)"
+echo "Starting Owletto backend (Node + tsx)"
 echo "================================"
 
 echo "Environment:"
@@ -41,4 +41,11 @@ else
   run_migrations
 fi
 
-exec bun /app/packages/owletto-backend/src/server.ts
+# Run under Node so V8 native addons (isolated-vm) load.
+# Bun uses JavaScriptCore and cannot link the V8 ABI surface that
+# isolated-vm requires; the execute MCP tool silently degrades to
+# RuntimeUnavailable under bun. tsx provides the TS loader so the
+# source layout stays uncompiled. cwd needs to be the package so
+# `--import tsx` resolves from owletto-backend's node_modules.
+cd /app/packages/owletto-backend
+exec node --import tsx src/server.ts

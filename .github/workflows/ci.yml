@@ -41,6 +41,22 @@ jobs:
           # Worker tests that don't transitively load pi-coding-agent runtime (WASM unavailable on CI)
           bun test packages/worker/src/__tests__/embedded-tools.test.ts packages/worker/src/__tests__/model-resolver.test.ts packages/worker/src/__tests__/tool-policy.test.ts packages/worker/src/__tests__/processor.test.ts packages/worker/src/__tests__/audio-provider-suggestions.test.ts packages/worker/src/__tests__/generated-media.test.ts packages/worker/src/__tests__/tool-implementations.test.ts packages/worker/src/__tests__/instructions.test.ts packages/worker/src/__tests__/custom-tools.test.ts
 
+      # The execute MCP tool runs scripts in isolated-vm — a V8 native addon.
+      # Bun (JavaScriptCore) cannot link the V8 ABI, so this test must run
+      # under Node, the production runtime. Invoking vitest via `node` (not
+      # `bun run`) guarantees the runtime even though the binary's shebang
+      # already points at node. SKIP_TEST_DB_SETUP=1 keeps this fast — the
+      # test uses a stub SDK and doesn't need Postgres.
+      #
+      # The broader vitest suite (~38 integration files) is not yet wired
+      # into CI; many are stale after the manage_* → execute/search MCP
+      # consolidation in #348. Tracked separately.
+      - name: Sandbox runtime test (Node + isolated-vm)
+        working-directory: packages/owletto-backend
+        env:
+          SKIP_TEST_DB_SETUP: '1'
+        run: node ../../node_modules/.bin/vitest run src/__tests__/integration/sandbox/run-script-runtime.test.ts
+
       - name: Upload coverage
         if: always()
         uses: codecov/codecov-action@v4
