@@ -47,6 +47,24 @@ export type {
   SyncResult,
 } from './connector-types.js';
 export { IDENTITY } from './connector-types.js';
+// Identity-engine SDK contracts. Each schema export is both a TypeBox
+// runtime validator (value) AND a TypeScript type via declaration merging.
+export {
+  AssuranceLevel,
+  assuranceMeets,
+  AutoCreateWhenRule,
+  CLAIM_COLLISION_SEMANTIC_TYPE,
+  ClaimCollisionPayload,
+  ConnectorFact,
+  ConnectorIdentityCapability,
+  DerivedFromProvenance,
+  DerivedRelationshipMetadata,
+  FactEventMetadata,
+  IDENTITY_FACT_SEMANTIC_TYPE,
+  IdentityNamespaceField,
+  MatchStrategy,
+  RelationshipTypeIdentityMetadata,
+} from './identity-types.js';
 export { isSourceNativeEventType, SOURCE_NATIVE_EVENT_TYPES } from './event-taxonomy.js';
 // HTTP clients
 export {
