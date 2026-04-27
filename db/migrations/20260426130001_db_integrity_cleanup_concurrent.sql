@@ -38,6 +38,30 @@ BEGIN
     END IF;
 END$$;
 
+-- Backfill historical NULLs with the existing 'system' sentinel before
+-- VALIDATE. Pre-`created_by` events (and any system-generated events
+-- written before the column was tracked) end up here. The chunked loop
+-- avoids a single 100k+ row UPDATE holding row locks for too long.
+DO $$
+DECLARE
+    rows_left bigint;
+BEGIN
+    LOOP
+        WITH chunk AS (
+            SELECT id FROM public.events
+             WHERE created_by IS NULL
+             LIMIT 50000
+             FOR UPDATE SKIP LOCKED
+        )
+        UPDATE public.events
+           SET created_by = 'system'
+          FROM chunk
+         WHERE events.id = chunk.id;
+        GET DIAGNOSTICS rows_left = ROW_COUNT;
+        EXIT WHEN rows_left = 0;
+    END LOOP;
+END$$;
+
 ALTER TABLE public.events
     VALIDATE CONSTRAINT events_created_by_not_null;
 
