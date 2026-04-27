@@ -93,11 +93,7 @@ export async function revokeInMemoryMcpSessionsForClient(
 /** Shared mutable ref so handleMcp can signal the format to tool handlers. */
 const formatRef = { rawJson: false };
 
-function createServerForContext(
-  env: Env,
-  authCtx: SessionAuthContext,
-  onAuthContextChanged?: () => Promise<void>
-): Server {
+function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
   const server = new Server(
     { name: 'owletto-mcp', version: '0.2.0' },
     {
@@ -107,10 +103,9 @@ function createServerForContext(
   );
 
   // tools/list — return our TypeBox JSON Schemas
-  // Read auth state dynamically so the list updates after auth upgrades or org switches.
+  // Read auth state dynamically so the list updates after auth upgrades.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const includeInternalTools = authCtx.allowInternalTools === true && !authCtx.clientId;
-    const includeOrgSwitching = !authCtx.scopedToOrg;
     const publicOnly = !!authCtx.organizationId && !authCtx.memberRole;
     const roleAccessLevel = !authCtx.memberRole
       ? 'read'
@@ -132,7 +127,6 @@ function createServerForContext(
           : 'admin';
     const staticTools = getAllTools({
       includeInternalTools,
-      includeOrgSwitching,
       publicOnly,
       maxAccessLevel,
     });
@@ -153,23 +147,6 @@ function createServerForContext(
     // Regular tool execution
     try {
       const result = await executeTool(name, args ?? {}, env, authCtx);
-
-      // After a successful org switch, mutate the session's auth context
-      if (
-        name === 'switch_organization' &&
-        result &&
-        typeof result === 'object' &&
-        'switched' in (result as any)
-      ) {
-        const switchResult = result as { switched: true; org: { id: string; role: string } };
-        authCtx.organizationId = switchResult.org.id;
-        authCtx.memberRole = switchResult.org.role;
-        authCtx.agentId = null;
-        authCtx.instructions =
-          (await buildWorkspaceInstructions(authCtx.organizationId)) ?? undefined;
-        await syncAgentBinding(authCtx);
-        await onAuthContextChanged?.();
-      }
 
       if (authCtx.agentId && authCtx.organizationId) {
         await touchAgentLastUsed(authCtx.organizationId, authCtx.agentId);
@@ -595,11 +572,9 @@ function createSessionTransport(
   authCtx: SessionAuthContext,
   sessionIdGenerator: () => string
 ): { transport: WebStandardStreamableHTTPServerTransport; server: Server } {
-  const sessionIdRef: { id: string | null } = { id: null };
   const transport = new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator,
     onsessioninitialized: (id) => {
-      sessionIdRef.id = id;
       sessions.set(id, { transport, server, authCtx, lastAccessedAt: Date.now() });
     },
   });
@@ -609,9 +584,7 @@ function createSessionTransport(
       void deletePersistedSession(transport.sessionId);
     }
   };
-  const server = createServerForContext(env, authCtx, async () => {
-    await persistSessionState(sessionIdRef.id, authCtx);
-  });
+  const server = createServerForContext(env, authCtx);
   return { transport, server };
 }
 

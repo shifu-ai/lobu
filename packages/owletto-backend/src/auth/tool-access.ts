@@ -149,7 +149,6 @@ export function getRequiredAccessLevel(
   args: unknown,
   readOnlyHint: boolean
 ): ToolAccessLevel {
-  if (toolName === 'switch_organization') return 'read';
   if (toolName === 'list_organizations') return 'read';
   if (requiresOwnerAdmin(toolName, args, readOnlyHint)) return 'admin';
   if (requiresMemberWrite(toolName, args, readOnlyHint)) return 'write';

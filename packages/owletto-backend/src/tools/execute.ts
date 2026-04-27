@@ -9,7 +9,7 @@ import { getRequiredAccessLevel, hasRequiredMcpScope, isPublicReadable } from '.
 import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
-import { listOrganizations, switchOrganization } from './organizations';
+import { listOrganizations } from './organizations';
 import { getTool, type ToolContext } from './registry';
 
 /**
@@ -58,22 +58,20 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
 /**
  * Check access control for a tool call. Throws on denial.
  */
-const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations', 'switch_organization']);
+const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations']);
 
 export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthContext): void {
   if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
     if (!authCtx.isAuthenticated) {
       throw new Error('Authentication required.');
     }
-    // list_organizations + switch_organization are read-tier; OAuth tokens
-    // without `mcp:read` (e.g. profile-only) must not call them.
+    // list_organizations is read-tier; OAuth tokens without `mcp:read`
+    // (e.g. profile-only) must not call it.
     if (!hasRequiredMcpScope('read', authCtx.scopes)) {
       throw new Error(
-        'This MCP session does not include read access. Reconnect with read access to list or switch organizations.'
+        'This MCP session does not include read access. Reconnect with read access to list organizations.'
       );
     }
-    // Exposed on both unscoped /mcp and scoped /mcp/{slug} endpoints. The URL
-    // pin defines the default org; switching moves the session.
     return;
   }
 
@@ -146,14 +144,6 @@ export async function executeTool(
     if (toolName === 'list_organizations') {
       return trackMCPToolCall(toolName, args, () =>
         listOrganizations(args as any, env, { userId: authCtx.userId! })
-      );
-    }
-    if (toolName === 'switch_organization') {
-      return trackMCPToolCall(toolName, args, () =>
-        switchOrganization(args as any, env, {
-          userId: authCtx.userId!,
-          currentOrgId: authCtx.organizationId,
-        })
       );
     }
   }

@@ -26,7 +26,7 @@ export interface OrganizationsNamespace {
   list(options?: { search?: string }): Promise<OrgSummary[]>;
   /**
    * Return the session's current organization context. Reflects the URL pin
-   * (`/mcp/{slug}`) or the last successful `switch_organization`.
+   * (`/mcp/{slug}`) or the user's default org for an unscoped /mcp session.
    */
   current(): Promise<OrgSummary>;
 }

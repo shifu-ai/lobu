@@ -10,10 +10,7 @@ import { getPublicReadableActions, getRequiredAccessLevel } from '../auth/tool-a
 import type { Env } from '../index';
 import { LEGACY_ADMIN_TOOLS } from './admin';
 import { QuerySqlSchema, querySql } from './admin/query_sql';
-import {
-  ListOrganizationsSchema,
-  SwitchOrganizationSchema,
-} from './organizations';
+import { ListOrganizationsSchema } from './organizations';
 import { ResolvePathSchema, resolvePath } from './resolve_path';
 import { SaveContentSchema, saveContent } from './save_content';
 import { SearchSchema, search } from './search';
@@ -71,8 +68,6 @@ export interface ToolDefinition<T = any> {
   annotations?: ToolAnnotations;
   /** Internal tools are excluded from external MCP clients (only available to the frontend) */
   internal?: boolean;
-  /** Org-switching tools are only exposed when the session uses the unscoped /mcp endpoint */
-  orgSwitching?: boolean;
   handler: (args: T, env: Env, ctx: ToolContext) => Promise<any>;
 }
 
@@ -145,23 +140,13 @@ const TOOLS: ToolDefinition[] = [
       return await resolvePath(args, env, ctx);
     },
   },
-  // ─── Org tools (now exposed on both unscoped and scoped /mcp endpoints) ───
+  // ─── Org discovery (exposed on both unscoped and scoped /mcp endpoints) ───
   {
     name: 'list_organizations',
     description:
-      'List organizations the authenticated user belongs to, plus any public workspaces the session can read.',
+      'List organizations the authenticated user belongs to, plus any public workspaces the session can read. Use the slug with `client.org(slug)` inside an `execute` script for cross-org reads, or reconnect the MCP client to /mcp/{slug} to pin a different default.',
     inputSchema: ListOrganizationsSchema,
     annotations: { readOnlyHint: true, idempotentHint: true },
-    handler: async () => {
-      throw new Error('Handled directly in executeTool');
-    },
-  },
-  {
-    name: 'switch_organization',
-    description:
-      'Switch the current session to a different organization the user is a member of. After switching, all subsequent tool calls operate in the new org context. Available on both /mcp and /mcp/{slug} endpoints — on a scoped endpoint the URL pin defines the default, but a switch can move the session.',
-    inputSchema: SwitchOrganizationSchema,
-    annotations: { readOnlyHint: false },
     handler: async () => {
       throw new Error('Handled directly in executeTool');
     },
@@ -277,17 +262,14 @@ function filterSchemaForAccessLevel(
  */
 export function getAllTools(options?: {
   includeInternalTools?: boolean;
-  includeOrgSwitching?: boolean;
   publicOnly?: boolean;
   maxAccessLevel?: 'read' | 'write' | 'admin';
 }) {
   const includeInternalTools = options?.includeInternalTools ?? true;
-  const includeOrgSwitching = options?.includeOrgSwitching ?? false;
   const publicOnly = options?.publicOnly ?? false;
   const maxAccessLevel = options?.maxAccessLevel ?? 'admin';
 
   return TOOLS.filter((tool) => includeInternalTools || !tool.internal)
-    .filter((tool) => includeOrgSwitching || !tool.orgSwitching)
     .filter((tool) => !publicOnly || getPublicReadableActions(tool.name) !== undefined)
     .map((tool) => {
       let inputSchema = tool.inputSchema;

@@ -154,7 +154,7 @@ export async function buildWorkspaceInstructions(organizationId: string): Promis
     sections.push(
       '',
       '### Tool surface',
-      'External MCP tools: `search_knowledge`, `save_knowledge`, `query_sql`, `search` (SDK method discovery), `execute` (run TS over the typed client SDK), `list_organizations`, `switch_organization`, `resolve_path`.',
+      'External MCP tools: `search_knowledge`, `save_knowledge`, `query_sql`, `search` (SDK method discovery), `execute` (run TS over the typed client SDK), `list_organizations`, `resolve_path`.',
       'For everything else (entity CRUD, watchers, classifiers, connections, feeds, view templates, operations) write a TS script and call via `execute`. Use `search` to discover method names.',
       '',
       '### Saving (do this automatically)',

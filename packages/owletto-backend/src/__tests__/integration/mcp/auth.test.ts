@@ -61,7 +61,7 @@ describe('MCP Authentication', () => {
   });
 
   describe('Unauthenticated Requests', () => {
-    it('allows unauthenticated tools/list discovery requests including org switching', async () => {
+    it('allows unauthenticated tools/list discovery requests including list_organizations', async () => {
       const response = await post('/mcp', {
         body: {
           jsonrpc: '2.0',
@@ -78,7 +78,7 @@ describe('MCP Authentication', () => {
       expect(body.result.tools.length).toBeGreaterThan(0);
       const toolNames = body.result.tools.map((t: any) => t.name);
       expect(toolNames).toContain('list_organizations');
-      expect(toolNames).toContain('switch_organization');
+      expect(toolNames).not.toContain('switch_organization');
     });
 
     it('returns an OAuth challenge for anonymous root session stream requests', async () => {
@@ -437,38 +437,20 @@ describe('MCP Authentication', () => {
       expect(response.error).toBeUndefined();
     });
 
-    it('exposes org switching tools on unscoped /mcp for authenticated tokens', async () => {
+    it('exposes list_organizations on unscoped /mcp for authenticated tokens', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
       const result = await mcpListTools({ token });
       const toolNames = result.tools.map((tool: any) => tool.name);
 
       expect(toolNames).toContain('list_organizations');
-      expect(toolNames).toContain('switch_organization');
-    });
-
-    it('allows switching organizations within an unscoped MCP session', async () => {
-      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
-
-      const result = await mcpRequest(
-        'tools/call',
-        {
-          name: 'switch_organization',
-          arguments: { org: org2.slug },
-        },
-        { token }
-      );
-
-      expect(result.error).toBeUndefined();
-      const payload = JSON.parse(result.result?.content?.[0]?.text ?? '{}');
-      expect(payload.switched).toBe(true);
-      expect(payload.org.slug).toBe(org2.slug);
+      expect(toolNames).not.toContain('switch_organization');
     });
 
     it('recovers a stale authenticated MCP session from the persisted session store', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
-      const initResponse = await post('/mcp', {
+      const initResponse = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: '__test_init__',
@@ -485,24 +467,10 @@ describe('MCP Authentication', () => {
       const sessionId = initResponse.headers.get('mcp-session-id');
       expect(sessionId).toBeTruthy();
 
-      await post('/mcp', {
+      await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           method: 'notifications/initialized',
-        },
-        headers: { 'mcp-session-id': sessionId! },
-        token,
-      });
-
-      await post('/mcp', {
-        body: {
-          jsonrpc: '2.0',
-          id: 1,
-          method: 'tools/call',
-          params: {
-            name: 'switch_organization',
-            arguments: { org: org2.slug },
-          },
         },
         headers: { 'mcp-session-id': sessionId! },
         token,
@@ -514,18 +482,18 @@ describe('MCP Authentication', () => {
         WHERE session_id = ${sessionId}
       `;
       expect(persistedRows).toHaveLength(1);
-      expect(persistedRows[0].organization_id).toBe(org2.id);
+      expect(persistedRows[0].organization_id).toBe(org.id);
 
       clearInMemoryMcpSessionsForTests();
 
-      const recoveredResponse = await post('/mcp', {
+      const recoveredResponse = await post(`/mcp/${org.slug}`, {
         body: {
           jsonrpc: '2.0',
           id: 2,
           method: 'tools/call',
           params: {
-            name: 'resolve_path',
-            arguments: { path: `/${org2.slug}`, include_bootstrap: false },
+            name: 'search_knowledge',
+            arguments: { query: 'recovery-probe-nonexistent-12345' },
           },
         },
         headers: { 'X-MCP-Format': 'json', 'mcp-session-id': sessionId! },
@@ -536,9 +504,6 @@ describe('MCP Authentication', () => {
       const recoveredBody = await recoveredResponse.json();
       expect(recoveredBody.error).toBeUndefined();
       expect(recoveredBody.result?.isError).not.toBe(true);
-
-      const payload = JSON.parse(recoveredBody.result.content[0].text);
-      expect(payload.workspace.slug).toBe(org2.slug);
     });
 
     it('binds an MCP session to a durable agent and updates last_used_at', async () => {
@@ -723,10 +688,7 @@ describe('MCP Authentication', () => {
       expect(body.error?.message).toContain("Agent 'missing-agent' was not found");
     });
 
-    it('exposes org switching tools on scoped /mcp/:org routes too', async () => {
-      // PR-2: list_organizations + switch_organization are no longer
-      // gated behind the unscoped /mcp endpoint. Scoped sessions can still
-      // call switch_organization to move off the URL pin.
+    it('exposes list_organizations on scoped /mcp/:org routes too', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
       const response = await post(`/mcp/${org.slug}`, {
@@ -744,12 +706,12 @@ describe('MCP Authentication', () => {
       const toolNames = body.result.tools.map((tool: any) => tool.name);
 
       expect(toolNames).toContain('list_organizations');
-      expect(toolNames).toContain('switch_organization');
+      expect(toolNames).not.toContain('switch_organization');
     });
   });
 
   describe('Session Cookie Authentication', () => {
-    it('exposes org switching tools on unscoped /mcp for authenticated browser sessions', async () => {
+    it('exposes list_organizations on unscoped /mcp for authenticated browser sessions', async () => {
       const response = await post('/mcp', {
         body: {
           jsonrpc: '2.0',
@@ -765,7 +727,7 @@ describe('MCP Authentication', () => {
       const toolNames = body.result.tools.map((tool: any) => tool.name);
 
       expect(toolNames).toContain('list_organizations');
-      expect(toolNames).toContain('switch_organization');
+      expect(toolNames).not.toContain('switch_organization');
     });
 
     it('allows a signed-in non-member to call public-readable REST tools on a public org', async () => {
