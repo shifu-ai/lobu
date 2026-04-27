@@ -917,9 +917,22 @@ async function handleLink(
   validateNoSelfReference(args.from_entity_id, args.to_entity_id);
   await validateScopeRule(args.from_entity_id, args.to_entity_id, env, ctx);
 
+  // Schema search path for relationship types: tenant first, then any
+  // visibility='public' catalog. Mirrors createEntity's resolver so a tenant
+  // can use a canonical relationship type like `works_at` defined in
+  // public-uk-finance without registering a local copy. Tenant-local types
+  // win when both exist.
   const typeRows = await sql`
-    SELECT id, is_symmetric FROM entity_relationship_types
-    WHERE slug = ${args.relationship_type_slug} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+    SELECT rt.id, rt.is_symmetric
+    FROM entity_relationship_types rt
+    LEFT JOIN organization o ON o.id = rt.organization_id
+    WHERE rt.slug = ${args.relationship_type_slug}
+      AND rt.deleted_at IS NULL
+      AND (
+        rt.organization_id = ${ctx.organizationId}
+        OR o.visibility = 'public'
+      )
+    ORDER BY (rt.organization_id = ${ctx.organizationId}) DESC, rt.id ASC
     LIMIT 1
   `;
   if (typeRows.length === 0) {

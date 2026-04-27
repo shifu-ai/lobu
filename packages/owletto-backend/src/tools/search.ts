@@ -108,6 +108,13 @@ export const SearchSchema = Type.Object({
       maximum: 100,
     })
   ),
+  include_public_catalogs: Type.Optional(
+    Type.Boolean({
+      description:
+        'Also search public-catalog orgs (visibility=public) — canonical world entities like HMRC, banks, currencies. Defaults to true so agents can discover entities to reference cross-org.',
+      default: true,
+    })
+  ),
 });
 
 type SearchArgs = Static<typeof SearchSchema>;
@@ -428,29 +435,48 @@ async function fetchTopEntitiesByType(
 // Query Helper Functions
 // ============================================
 
-const ENTITY_SELECT_COLUMNS = `
+// Build the entity SELECT projection. The count subqueries (events,
+// connections, watchers, children) are tenant-private operational data:
+// running them globally for a public-catalog entity would leak other
+// tenants' activity volumes through aggregate counts. Each count is
+// gated on `e.organization_id = $callerOrg` so we return zeros for
+// cross-org rows. Caller passes the parameter index for their org.
+function entitySelectColumns(callerOrgParamIdx: number): string {
+  const ownOrg = `e.organization_id = $${callerOrgParamIdx}`;
+  return `
   e.id, e.organization_id, e.name, et.slug AS entity_type, e.slug, e.metadata, e.parent_id,
   pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
-  COALESCE((SELECT COUNT(*) FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}), 0) as content_count,
-  COALESCE((
-    SELECT COUNT(DISTINCT cn.connector_key)
-    FROM feeds f
-    JOIN connections cn ON cn.id = f.connection_id
-    WHERE e.id = ANY(f.entity_ids)
-      AND f.deleted_at IS NULL
-      AND cn.deleted_at IS NULL
-  ), 0) as connection_count,
-  COALESCE((
-    SELECT COUNT(DISTINCT cn.connector_key)
-    FROM feeds f
-    JOIN connections cn ON cn.id = f.connection_id
-    WHERE e.id = ANY(f.entity_ids)
-      AND f.deleted_at IS NULL
-      AND cn.deleted_at IS NULL
-      AND cn.status = 'active'
-  ), 0) as active_connection_count,
-  COALESCE((SELECT COUNT(*) FROM entities c WHERE c.parent_id = e.id), 0) as children_count,
-  COALESCE((SELECT COUNT(*) FROM watchers i WHERE e.id = ANY(i.entity_ids)), 0) as watcher_count`;
+  CASE WHEN ${ownOrg} THEN
+    COALESCE((SELECT COUNT(*) FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}), 0)
+  ELSE 0 END as content_count,
+  CASE WHEN ${ownOrg} THEN
+    COALESCE((
+      SELECT COUNT(DISTINCT cn.connector_key)
+      FROM feeds f
+      JOIN connections cn ON cn.id = f.connection_id
+      WHERE e.id = ANY(f.entity_ids)
+        AND f.deleted_at IS NULL
+        AND cn.deleted_at IS NULL
+    ), 0)
+  ELSE 0 END as connection_count,
+  CASE WHEN ${ownOrg} THEN
+    COALESCE((
+      SELECT COUNT(DISTINCT cn.connector_key)
+      FROM feeds f
+      JOIN connections cn ON cn.id = f.connection_id
+      WHERE e.id = ANY(f.entity_ids)
+        AND f.deleted_at IS NULL
+        AND cn.deleted_at IS NULL
+        AND cn.status = 'active'
+    ), 0)
+  ELSE 0 END as active_connection_count,
+  CASE WHEN ${ownOrg} THEN
+    COALESCE((SELECT COUNT(*) FROM entities c WHERE c.parent_id = e.id AND c.organization_id = e.organization_id), 0)
+  ELSE 0 END as children_count,
+  CASE WHEN ${ownOrg} THEN
+    COALESCE((SELECT COUNT(*) FROM watchers i WHERE e.id = ANY(i.entity_ids) AND i.organization_id = e.organization_id), 0)
+  ELSE 0 END as watcher_count`;
+}
 
 const ENTITY_JOINS = `
   FROM entities e
@@ -509,8 +535,22 @@ async function queryEntities(
     conditions.push('e.embedding IS NOT NULL');
   }
 
-  // Organization filter
-  conditions.push(`e.organization_id = $${addParam(organizationId)}`);
+  // Organization filter — caller's org always; public-catalog orgs when the
+  // flag is on (default), so an agent looking up "Apple" finds tenant-local
+  // and canonical hits in one call. The result row carries the org_id so the
+  // agent can tell which is which. The same param index is reused by the
+  // count subqueries in entitySelectColumns(orgParamIdx), which gate
+  // operational counts (events, connections, watchers) on caller-org rows
+  // so cross-org public results don't leak other tenants' activity.
+  const includePublic = args.include_public_catalogs ?? true;
+  const orgParamIdx = addParam(organizationId);
+  if (includePublic) {
+    conditions.push(
+      `(e.organization_id = $${orgParamIdx} OR EXISTS (SELECT 1 FROM organization o WHERE o.id = e.organization_id AND o.visibility = 'public'))`
+    );
+  } else {
+    conditions.push(`e.organization_id = $${orgParamIdx}`);
+  }
 
   if (args.entity_type) conditions.push(`et.slug = $${addParam(args.entity_type)}`);
   if (args.parent_id) conditions.push(`e.parent_id = $${addParam(args.parent_id)}`);
@@ -559,13 +599,13 @@ async function queryEntities(
   }
 
   const rows = await sql.unsafe<EntityQueryRow>(
-    `SELECT ${ENTITY_SELECT_COLUMNS},
+    `SELECT ${entitySelectColumns(orgParamIdx)},
       ${scoreExpr} as match_score,
       '${matchReason}' as match_reason,
       ${vectorSimExpr} as vector_similarity
     ${ENTITY_JOINS}
     WHERE ${whereClause}
-    ORDER BY match_score DESC
+    ORDER BY (e.organization_id = $${orgParamIdx}) DESC, match_score DESC
     LIMIT ${limit}`,
     params
   );
@@ -578,11 +618,16 @@ async function queryEntities(
 async function fetchEntityById(entityId: number, _env: Env, organizationId: string) {
   const sql = getDb();
 
+  // Caller's org or any visibility=public catalog. Lets entity_id lookup find
+  // canonical entities (HMRC, banks) the agent has discovered via search.
+  // Operational counts (events, connections, watchers) are gated on
+  // caller-org so cross-org public hits don't leak other tenants' activity.
   const result = await sql.unsafe<EntityQueryRow>(
-    `SELECT ${ENTITY_SELECT_COLUMNS}
+    `SELECT ${entitySelectColumns(2)}
     ${ENTITY_JOINS}
+    LEFT JOIN organization eo ON eo.id = e.organization_id
     WHERE e.id = $1
-      AND e.organization_id = $2
+      AND (e.organization_id = $2 OR eo.visibility = 'public')
       AND e.deleted_at IS NULL`,
     [entityId, organizationId]
   );
@@ -627,16 +672,28 @@ async function formatEntityResult(
 
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
   const primaryEntity = matches[0];
+  const primaryRow = entityRows[0];
   const entityType = primaryEntity.type;
   const isRootEntity = !primaryEntity.parent_id;
 
-  // Fetch connections if requested (default: true)
+  // Fetch connections if requested (default: true). Public-catalog entities
+  // are referenced by many tenants; running fetchConnectionsForEntity on
+  // them would surface other tenants' private connection metadata
+  // (display_name, config, feed entity names). Connections are per-tenant
+  // operational data, never canonical, so skip them entirely for cross-org
+  // public results.
   let connections: ConnectionInfo[] | undefined;
-  if (args.include_connections ?? true) {
+  const primaryIsCallerOrg =
+    String(primaryRow.organization_id) === ctx.organizationId;
+  if ((args.include_connections ?? true) && primaryIsCallerOrg) {
     connections = await fetchConnectionsForEntity(primaryEntity.id);
   }
 
-  // Fetch children for root entities (no parent)
+  // Fetch children for root entities (no parent). Children are scoped to
+  // the primary's own org — preserves the parent-org boundary and stops
+  // tenant-private "child of HMRC"-style rows from leaking when the primary
+  // is a cross-org public entity. content_count is zeroed for cross-org
+  // primaries to match the same invariant the parent's stats follow.
   let children: UnifiedSearchResult['children'];
   if (isRootEntity) {
     const childRows = await getDb()<ChildEntityRow>`
@@ -645,13 +702,18 @@ async function formatEntityResult(
         e.name,
         et.slug AS entity_type,
         e.metadata::jsonb->>'market' as market,
-        COALESCE(
-          (SELECT COUNT(*) FROM current_event_records WHERE e.id = ANY(entity_ids)),
-          0
-        ) as content_count
+        CASE WHEN ${primaryIsCallerOrg} THEN
+          COALESCE(
+            (SELECT COUNT(*) FROM current_event_records ev
+              WHERE e.id = ANY(ev.entity_ids)
+                AND ev.organization_id = e.organization_id),
+            0
+          )
+        ELSE 0 END as content_count
       FROM entities e
       JOIN entity_types et ON et.id = e.entity_type_id
       WHERE e.parent_id = ${primaryEntity.id}
+        AND e.organization_id = ${primaryRow.organization_id}
       ORDER BY e.created_at DESC
     `;
     children = childRows.map((row) => ({

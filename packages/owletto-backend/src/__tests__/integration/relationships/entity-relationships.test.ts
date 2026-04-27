@@ -606,6 +606,39 @@ describe('Entity Relationships', () => {
       expect(result.relationship.organization_id).toBe(orgA.id);
     });
 
+    it('should resolve a relationship_type defined in a public-catalog org (cross-org type vocabulary)', async () => {
+      // Set up a public catalog with a canonical relationship type the
+      // tenant doesn't have locally. Mirrors how `works_at` would live in
+      // public-uk-finance.
+      const publicCatalog = await createTestOrganization({
+        name: 'Public Catalog Type',
+        visibility: 'public',
+      });
+      const publicEntity = await createTestEntity({
+        name: 'Canonical Co',
+        entity_type: 'brand',
+        organization_id: publicCatalog.id,
+      });
+      const sql = getTestDb();
+      await sql`
+        INSERT INTO entity_relationship_types (organization_id, slug, name, is_symmetric, created_at, updated_at)
+        VALUES (${publicCatalog.id}, 'works-at-public', 'Works At', false, current_timestamp, current_timestamp)
+      `;
+
+      const result = await mcpToolsCall(
+        'manage_entity',
+        {
+          action: 'link',
+          from_entity_id: entityA1.id,
+          to_entity_id: publicEntity.id,
+          relationship_type_slug: 'works-at-public',
+        },
+        { token: tokenA }
+      );
+      expect(result.action).toBe('link');
+      expect(result.relationship.organization_id).toBe(orgA.id);
+    });
+
     it('should reject a relationship whose source is in a different org from the caller', async () => {
       // userA is signed in (tokenA → orgA), but the source entity is in orgB.
       // Even though tokenA's caller has access to read entityB1, they cannot
