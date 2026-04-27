@@ -14,7 +14,7 @@ import {
 } from "../commands/providers/registry.js";
 import { renderTemplate } from "../utils/template.js";
 
-const DEFAULT_OWLETTO_MCP_URL = "https://app.lobu.ai/mcp";
+const DEFAULT_OWLETTO_MCP_URL = "https://lobu.ai/mcp";
 const LOCAL_OWLETTO_MCP_URL = "http://owletto:8787/mcp";
 
 export async function initCommand(

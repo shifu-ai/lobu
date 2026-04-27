@@ -9,7 +9,7 @@
     "properties": {
       "mcpUrl": {
         "type": "string",
-        "description": "Full MCP endpoint URL (for example, https://app.lobu.ai/mcp/acme). Required."
+        "description": "Full MCP endpoint URL (for example, https://lobu.ai/mcp/acme). Required."
       },
       "webUrl": {
         "type": "string",
