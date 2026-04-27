@@ -447,7 +447,11 @@ function entitySelectColumns(callerOrgParamIdx: number): string {
   e.id, e.organization_id, e.name, et.slug AS entity_type, e.slug, e.metadata, e.parent_id,
   pe.name as parent_name, pe.slug as parent_slug, pet.slug as parent_entity_type,
   CASE WHEN ${ownOrg} THEN
-    COALESCE((SELECT COUNT(*) FROM current_event_records ev WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}), 0)
+    COALESCE((
+      SELECT COUNT(*) FROM current_event_records ev
+      WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
+        AND ev.organization_id = e.organization_id
+    ), 0)
   ELSE 0 END as content_count,
   CASE WHEN ${ownOrg} THEN
     COALESCE((
