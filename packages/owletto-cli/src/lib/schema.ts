@@ -34,6 +34,18 @@ export interface RelationshipTypeRule {
   target: string;
 }
 
+export interface AutoCreateWhenRuleSchema {
+  sourceNamespace: string;
+  targetField: string;
+  assuranceRequired:
+    | 'oauth_verified_admin_role'
+    | 'oauth_verified'
+    | 'cookie_session'
+    | 'self_attested';
+  matchStrategy: 'unique_only' | 'all_matches';
+  notes?: string;
+}
+
 export interface RelationshipSchema {
   version?: number;
   type: 'relationship';
@@ -48,6 +60,7 @@ export interface RelationshipSchema {
    * entity link to any target.
    */
   rules?: RelationshipTypeRule[];
+  auto_create_when?: AutoCreateWhenRuleSchema[];
 }
 
 export interface WatcherSchema {
@@ -145,6 +158,68 @@ function requireObject(
   return true;
 }
 
+const ASSURANCE_LEVELS = new Set([
+  'oauth_verified_admin_role',
+  'oauth_verified',
+  'cookie_session',
+  'self_attested',
+]);
+const MATCH_STRATEGIES = new Set(['unique_only', 'all_matches']);
+
+function validateAutoCreateWhenRules(
+  value: unknown,
+  file: string,
+  errors: ValidationError[]
+): void {
+  if (!Array.isArray(value)) {
+    errors.push({
+      file,
+      field: 'auto_create_when',
+      message: '"auto_create_when" must be an array of identity-engine rules',
+    });
+    return;
+  }
+  value.forEach((rule, idx) => {
+    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+      errors.push({
+        file,
+        field: `auto_create_when[${idx}]`,
+        message: 'each auto_create_when rule must be an object',
+      });
+      return;
+    }
+    const r = rule as Record<string, unknown>;
+    if (typeof r.sourceNamespace !== 'string' || r.sourceNamespace === '') {
+      errors.push({
+        file,
+        field: `auto_create_when[${idx}].sourceNamespace`,
+        message: '"sourceNamespace" is required and must be a non-empty fact namespace',
+      });
+    }
+    if (typeof r.targetField !== 'string' || r.targetField === '') {
+      errors.push({
+        file,
+        field: `auto_create_when[${idx}].targetField`,
+        message: '"targetField" is required and must be a non-empty metadata field',
+      });
+    }
+    if (typeof r.assuranceRequired !== 'string' || !ASSURANCE_LEVELS.has(r.assuranceRequired)) {
+      errors.push({
+        file,
+        field: `auto_create_when[${idx}].assuranceRequired`,
+        message: '"assuranceRequired" must be a supported assurance level',
+      });
+    }
+    if (typeof r.matchStrategy !== 'string' || !MATCH_STRATEGIES.has(r.matchStrategy)) {
+      errors.push({
+        file,
+        field: `auto_create_when[${idx}].matchStrategy`,
+        message: '"matchStrategy" must be one of: unique_only, all_matches',
+      });
+    }
+  });
+}
+
 export function validateModel(parsed: Record<string, unknown>, file: string): ValidationError[] {
   const errors: ValidationError[] = [];
   checkVersion(parsed, file, errors);
@@ -165,6 +240,10 @@ export function validateModel(parsed: Record<string, unknown>, file: string): Va
   if (modelType === 'watcher') {
     requireString(parsed, 'schedule', file, errors);
     requireString(parsed, 'prompt', file, errors);
+  }
+
+  if (modelType === 'relationship' && parsed.auto_create_when !== undefined) {
+    validateAutoCreateWhenRules(parsed.auto_create_when, file, errors);
   }
 
   if (modelType === 'relationship' && parsed.rules !== undefined) {

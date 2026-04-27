@@ -292,7 +292,12 @@ async function seedRelationshipType(rel: Record<string, unknown>, ctx: SeedConte
     printText(`  + relationship_type: ${slug}`);
   } catch (e) {
     if (e instanceof Error && e.message?.includes('already exists')) {
-      printText(`  = relationship_type: ${slug} (exists)`);
+      await callTool(ctx, 'manage_entity_schema', {
+        schema_type: 'relationship_type',
+        action: 'update',
+        ...createPayload,
+      });
+      printText(`  = relationship_type: ${slug} (updated)`);
     } else {
       throw e;
     }

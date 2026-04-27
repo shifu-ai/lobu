@@ -516,6 +516,211 @@ describe("identity engine — facts ingestion", () => {
 		expect(payload.candidateEntityIds).toHaveLength(2);
 	});
 
+	it("unique_only filters metadata matches through relationship type rules before declaring a collision", async () => {
+		const market = await createPublicCatalog("Market Type Filter");
+		const tenant = await createTestOrganization({
+			name: "Tenant Type Filter",
+			visibility: "private",
+		});
+		const user = await createTestUser({ email: "typed@bolt.new" });
+		await addUserToOrganization(user.id, tenant.id, "owner");
+		const memberEntityId = await createMemberEntity({
+			organizationId: tenant.id,
+			userId: user.id,
+			email: user.email,
+			name: "Typed",
+		});
+		const company = await createTestEntity({
+			name: "Bolt.new",
+			entity_type: "company",
+			organization_id: market.id,
+			created_by: user.id,
+		});
+		const unrelated = await createTestEntity({
+			name: "Unrelated taxonomy row",
+			entity_type: "sector",
+			organization_id: market.id,
+			created_by: user.id,
+		});
+		const sql = getTestDb();
+		await sql`
+      UPDATE entities SET metadata = metadata || ${sql.json({ identity_key: "bolt.new" })}
+      WHERE id IN (${company.id}, ${unrelated.id})
+    `;
+		await declareIdentityField(market.id, "company", "identity_key");
+		clearIdentityFieldCache();
+		const works_at = await createRelationshipTypeWithRules({
+			organizationId: market.id,
+			slug: "works_at",
+			name: "Works at",
+			rules: [
+				{
+					sourceNamespace: "hosted_domain",
+					targetField: "identity_key",
+					assuranceRequired: "oauth_verified",
+					matchStrategy: "unique_only",
+				},
+			],
+		});
+		await sql`
+      INSERT INTO entity_relationship_type_rules (
+        relationship_type_id, source_entity_type_slug, target_entity_type_slug, created_at
+      ) VALUES (${works_at.id}, '$member', 'company', current_timestamp)
+    `;
+
+		const result = await ingestFacts({
+			tenantOrganizationId: tenant.id,
+			memberEntityId,
+			userId: user.id,
+			accountIdentity: {
+				connectorKey: "google_workspace",
+				providerStableId: "google:sub:type-filter",
+				sourceAccountId: "acct_type_filter",
+			},
+			facts: [
+				{
+					namespace: "hosted_domain",
+					identifier: "bolt.new",
+					normalizedValue: "bolt.new",
+					assurance: "oauth_verified",
+					providerStableId: "google:sub:type-filter",
+					sourceAccountId: "acct_type_filter",
+				},
+			],
+		});
+
+		expect(result.collisionEventIds).toHaveLength(0);
+		expect(result.derivedRelationshipIds).toHaveLength(1);
+		const rel = await getRelationship(result.derivedRelationshipIds[0]);
+		expect(rel?.to_entity_id).toBe(company.id);
+	});
+
+	it("caps and dedupes repeated claim-collision events", async () => {
+		const market = await createPublicCatalog("Market Collision Cap");
+		const tenant = await createTestOrganization({
+			name: "Tenant Collision Cap",
+			visibility: "private",
+		});
+		const user = await createTestUser({ email: "collision-cap@example.com" });
+		await addUserToOrganization(user.id, tenant.id, "owner");
+		const memberEntityId = await createMemberEntity({
+			organizationId: tenant.id,
+			userId: user.id,
+			email: user.email,
+			name: "Collision Cap",
+		});
+		const sql = getTestDb();
+		for (let i = 0; i < 17; i++) {
+			const entity = await createTestEntity({
+				name: `Duplicate ${i}`,
+				entity_type: "company",
+				organization_id: market.id,
+				created_by: user.id,
+			});
+			await sql`
+        UPDATE entities SET metadata = metadata || ${sql.json({ dupe_key: "dupe.test" })}
+        WHERE id = ${entity.id}
+      `;
+		}
+		await declareIdentityField(market.id, "company", "dupe_key");
+		clearIdentityFieldCache();
+		await createRelationshipTypeWithRules({
+			organizationId: market.id,
+			slug: "works_at",
+			name: "Works at",
+			rules: [
+				{
+					sourceNamespace: "hosted_domain",
+					targetField: "dupe_key",
+					assuranceRequired: "oauth_verified",
+					matchStrategy: "unique_only",
+				},
+			],
+		});
+		const accountIdentity = {
+			connectorKey: "google_workspace",
+			providerStableId: "google:sub:collision-cap",
+			sourceAccountId: "acct_collision_cap",
+		};
+		const fact: ConnectorFact = {
+			namespace: "hosted_domain",
+			identifier: "dupe.test",
+			normalizedValue: "dupe.test",
+			assurance: "oauth_verified",
+			providerStableId: accountIdentity.providerStableId,
+			sourceAccountId: accountIdentity.sourceAccountId,
+		};
+
+		const first = await ingestFacts({
+			tenantOrganizationId: tenant.id,
+			memberEntityId,
+			userId: user.id,
+			accountIdentity,
+			facts: [fact],
+		});
+		const second = await ingestFacts({
+			tenantOrganizationId: tenant.id,
+			memberEntityId,
+			userId: user.id,
+			accountIdentity,
+			facts: [fact],
+		});
+
+		expect(first.collisionEventIds).toHaveLength(1);
+		expect(second.collisionEventIds).toEqual(first.collisionEventIds);
+		const [eventCount] = await sql<{ count: string }[]>`
+      SELECT COUNT(*)::text AS count
+      FROM events
+      WHERE semantic_type = ${CLAIM_COLLISION_SEMANTIC_TYPE}
+    `;
+		expect(Number(eventCount.count)).toBe(1);
+		const ev = await getEvent(first.collisionEventIds[0]);
+		const payload = ev?.metadata as {
+			candidateEntityIds: number[];
+			candidateCount: number;
+		};
+		expect(payload.candidateEntityIds).toHaveLength(16);
+		expect(payload.candidateCount).toBe(17);
+	});
+
+	it("rejects duplicate namespace/value facts in the same batch", async () => {
+		const tenant = await createTestOrganization({
+			name: "Tenant Duplicate Fact",
+			visibility: "private",
+		});
+		const user = await createTestUser({ email: "dupe-fact@example.com" });
+		await addUserToOrganization(user.id, tenant.id, "owner");
+		const memberEntityId = await createMemberEntity({
+			organizationId: tenant.id,
+			userId: user.id,
+			email: user.email,
+			name: "Duplicate Fact",
+		});
+		const accountIdentity = {
+			connectorKey: "google_workspace",
+			providerStableId: "google:sub:dupe-fact",
+			sourceAccountId: "acct_dupe_fact",
+		};
+		const fact: ConnectorFact = {
+			namespace: "email",
+			identifier: "dupe-fact@example.com",
+			normalizedValue: "dupe-fact@example.com",
+			assurance: "oauth_verified",
+			providerStableId: accountIdentity.providerStableId,
+			sourceAccountId: accountIdentity.sourceAccountId,
+		};
+
+		await expect(
+			ingestFacts({
+				tenantOrganizationId: tenant.id,
+				memberEntityId,
+				userId: user.id,
+				accountIdentity,
+				facts: [fact, { ...fact, identifier: "Dupe Fact <dupe-fact@example.com>" }],
+			}),
+		).rejects.toThrow(/duplicate fact/);
+	});
+
 	it("UC8: rejects a fact whose assurance is below the rule requirement", async () => {
 		const market = await createPublicCatalog("Market UC8");
 		const tenant = await createTestOrganization({

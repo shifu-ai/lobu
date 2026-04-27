@@ -298,6 +298,8 @@ export const ClaimCollisionPayload = Type.Object(
       minItems: 2,
       maxItems: 16,
     }),
+    /** Total number of matching candidates; candidateEntityIds may be capped for UI payload size. */
+    candidateCount: Type.Optional(Type.Integer({ minimum: 2 })),
     /**
      * Which fact (events.id) raised the collision. Lets the resolver replay
      * the binding once the human picks a winner.

@@ -93,4 +93,50 @@ describe('validateModel — relationship rules', () => {
     expect(fields).toContain('rules[0].source');
     expect(fields).toContain('rules[0].target');
   });
+
+  test('accepts identity auto-create rules', () => {
+    const errors = validateModel(
+      {
+        version: 1,
+        type: 'relationship',
+        slug: 'works_at',
+        name: 'Works At',
+        auto_create_when: [
+          {
+            sourceNamespace: 'hosted_domain',
+            targetField: 'domain',
+            assuranceRequired: 'oauth_verified',
+            matchStrategy: 'unique_only',
+          },
+        ],
+      },
+      'works_at.yaml'
+    );
+    expect(errors).toEqual([]);
+  });
+
+  test('rejects malformed identity auto-create rules', () => {
+    const errors = validateModel(
+      {
+        version: 1,
+        type: 'relationship',
+        slug: 'works_at',
+        name: 'Works At',
+        auto_create_when: [
+          {
+            sourceNamespace: '',
+            targetField: 42,
+            assuranceRequired: 'root',
+            matchStrategy: 'first_match',
+          },
+        ],
+      },
+      'works_at.yaml'
+    );
+    const fields = errors.map((e) => e.field);
+    expect(fields).toContain('auto_create_when[0].sourceNamespace');
+    expect(fields).toContain('auto_create_when[0].targetField');
+    expect(fields).toContain('auto_create_when[0].assuranceRequired');
+    expect(fields).toContain('auto_create_when[0].matchStrategy');
+  });
 });

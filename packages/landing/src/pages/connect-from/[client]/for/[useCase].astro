@@ -8,14 +8,14 @@ import {
 } from "../../../../connect-from-config";
 import {
   getLandingUseCaseShowcase,
-  landingUseCaseShowcases,
+  landingUseCaseRouteEntries,
 } from "../../../../use-case-showcases";
 
 export function getStaticPaths() {
   return connectFromClientIds.flatMap((clientId) =>
-    landingUseCaseShowcases.map((useCase) => ({
-      params: { client: clientId, useCase: useCase.id },
-      props: { clientId, useCaseId: useCase.id },
+    landingUseCaseRouteEntries.map((entry) => ({
+      params: { client: clientId, useCase: entry.routeId },
+      props: { clientId, useCaseId: entry.useCaseId },
     }))
   );
 }

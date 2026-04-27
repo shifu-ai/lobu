@@ -77,6 +77,24 @@ CREATE INDEX IF NOT EXISTS idx_entity_relationships_derived_from_rule
 -- constraint catches accidental double-inserts (e.g. when a different code
 -- path tries to write the same auto-derived edge). ON CONFLICT DO NOTHING
 -- in the engine relies on this index to fire.
+--
+-- Existing installs may already have duplicate live triples. Collapse those
+-- first so adding the invariant is safe and deterministic.
+WITH duplicate_live_triples AS (
+    SELECT id,
+           ROW_NUMBER() OVER (
+               PARTITION BY from_entity_id, to_entity_id, relationship_type_id
+               ORDER BY created_at ASC NULLS LAST, id ASC
+           ) AS rn
+    FROM public.entity_relationships
+    WHERE deleted_at IS NULL
+)
+UPDATE public.entity_relationships r
+SET deleted_at = NOW(), updated_at = NOW()
+FROM duplicate_live_triples d
+WHERE r.id = d.id
+  AND d.rn > 1;
+
 CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_relationships_live_triple
     ON public.entity_relationships (from_entity_id, to_entity_id, relationship_type_id)
     WHERE deleted_at IS NULL;

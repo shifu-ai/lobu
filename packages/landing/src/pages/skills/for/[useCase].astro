@@ -7,13 +7,13 @@ import { Nav } from "../../../components/Nav";
 import {
   getLandingUseCaseShowcase,
   getSurfaceHeroCopy,
-  landingUseCaseShowcases,
+  landingUseCaseRouteEntries,
 } from "../../../use-case-showcases";
 
 export function getStaticPaths() {
-  return landingUseCaseShowcases.map((useCase) => ({
-    params: { useCase: useCase.id },
-    props: { useCaseId: useCase.id },
+  return landingUseCaseRouteEntries.map((entry) => ({
+    params: { useCase: entry.routeId },
+    props: { useCaseId: entry.useCaseId },
   }));
 }
 

@@ -31,14 +31,17 @@
 DO $$
 DECLARE
     v_market_org_id text;
+    v_market_org_slug text;
     v_member_type_id integer;
     v_founder_type_id integer;
 BEGIN
-    SELECT id INTO v_market_org_id FROM public.organization WHERE slug = 'market' LIMIT 1;
-    IF v_market_org_id IS NULL THEN
-        RAISE NOTICE 'market org not found — skipping founder→$member migration';
-        RETURN;
-    END IF;
+    FOR v_market_org_id, v_market_org_slug IN
+        SELECT id, slug
+        FROM public.organization
+        WHERE slug IN ('market', 'venture-capital')
+        ORDER BY CASE slug WHEN 'market' THEN 0 ELSE 1 END
+    LOOP
+        RAISE NOTICE 'running founder→$member migration for org %', v_market_org_slug;
 
     SELECT id INTO v_member_type_id
     FROM public.entity_types
@@ -56,8 +59,8 @@ BEGIN
     LIMIT 1;
 
     IF v_founder_type_id IS NULL THEN
-        RAISE NOTICE 'no founder entity_type in market — nothing to migrate';
-        RETURN;
+        RAISE NOTICE 'no founder entity_type in % — nothing to migrate', v_market_org_slug;
+        CONTINUE;
     END IF;
 
     -- 1. Create $member rows for each founder. Idempotent via slug uniqueness:
@@ -73,7 +76,7 @@ BEGIN
         v_member_type_id,
         v_market_org_id,
         NULL,
-        f.metadata || jsonb_build_object('role', 'founder', 'migrated_from_founder_id', f.id),
+        COALESCE(f.metadata, '{}'::jsonb) || jsonb_build_object('role', 'founder', 'migrated_from_founder_id', f.id),
         COALESCE(f.created_by, 'system'),
         NOW(),
         NOW()
@@ -157,7 +160,32 @@ BEGIN
 
     -- 3. Re-point existing relationships pointing FROM the founder rows to
     -- point FROM the new $member rows. The reverse direction (relationships
-    -- pointing AT founders) is handled symmetrically.
+    -- pointing AT founders) is handled symmetrically. If the destination edge
+    -- already exists, archive the founder edge first so the live-triple unique
+    -- index remains satisfied.
+    UPDATE public.entity_relationships r
+    SET deleted_at = NOW(), updated_at = NOW()
+    FROM public.entities f
+    JOIN public.entities m
+      ON m.organization_id = f.organization_id
+     AND m.entity_type_id = v_member_type_id
+     AND m.metadata->>'migrated_from_founder_id' = f.id::text
+     AND m.deleted_at IS NULL
+    WHERE r.from_entity_id = f.id
+      AND r.deleted_at IS NULL
+      AND f.organization_id = v_market_org_id
+      AND f.entity_type_id = v_founder_type_id
+      AND f.deleted_at IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM public.entity_relationships existing
+          WHERE existing.from_entity_id = m.id
+            AND existing.to_entity_id = r.to_entity_id
+            AND existing.relationship_type_id = r.relationship_type_id
+            AND existing.deleted_at IS NULL
+            AND existing.id <> r.id
+      );
+
     UPDATE public.entity_relationships r
     SET from_entity_id = m.id, updated_at = NOW()
     FROM public.entities f
@@ -171,6 +199,29 @@ BEGIN
       AND f.organization_id = v_market_org_id
       AND f.entity_type_id = v_founder_type_id
       AND f.deleted_at IS NULL;
+
+    UPDATE public.entity_relationships r
+    SET deleted_at = NOW(), updated_at = NOW()
+    FROM public.entities f
+    JOIN public.entities m
+      ON m.organization_id = f.organization_id
+     AND m.entity_type_id = v_member_type_id
+     AND m.metadata->>'migrated_from_founder_id' = f.id::text
+     AND m.deleted_at IS NULL
+    WHERE r.to_entity_id = f.id
+      AND r.deleted_at IS NULL
+      AND f.organization_id = v_market_org_id
+      AND f.entity_type_id = v_founder_type_id
+      AND f.deleted_at IS NULL
+      AND EXISTS (
+          SELECT 1
+          FROM public.entity_relationships existing
+          WHERE existing.from_entity_id = r.from_entity_id
+            AND existing.to_entity_id = m.id
+            AND existing.relationship_type_id = r.relationship_type_id
+            AND existing.deleted_at IS NULL
+            AND existing.id <> r.id
+      );
 
     UPDATE public.entity_relationships r
     SET to_entity_id = m.id, updated_at = NOW()
@@ -227,6 +278,30 @@ BEGIN
     -- founder is soft-deleted in step 7 — entity-identity lookups join on
     -- entities.deleted_at IS NULL and silently miss the binding.
     UPDATE public.entity_identities ei
+    SET deleted_at = NOW(), updated_at = NOW()
+    FROM public.entities f
+    JOIN public.entities m
+      ON m.organization_id = f.organization_id
+     AND m.entity_type_id = v_member_type_id
+     AND m.metadata->>'migrated_from_founder_id' = f.id::text
+     AND m.deleted_at IS NULL
+    WHERE ei.entity_id = f.id
+      AND ei.organization_id = v_market_org_id
+      AND ei.deleted_at IS NULL
+      AND f.organization_id = v_market_org_id
+      AND f.entity_type_id = v_founder_type_id
+      AND EXISTS (
+          SELECT 1
+          FROM public.entity_identities existing
+          WHERE existing.organization_id = ei.organization_id
+            AND existing.namespace = ei.namespace
+            AND existing.identifier = ei.identifier
+            AND existing.entity_id = m.id
+            AND existing.deleted_at IS NULL
+            AND existing.id <> ei.id
+      );
+
+    UPDATE public.entity_identities ei
     SET entity_id = m.id, updated_at = NOW()
     FROM public.entities f
     JOIN public.entities m
@@ -271,6 +346,7 @@ BEGIN
             AND m.metadata->>'migrated_from_founder_id' = f.id::text
             AND m.deleted_at IS NULL
       );
+    END LOOP;
 END $$;
 
 

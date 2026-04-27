@@ -49,11 +49,11 @@ describe("founder→$member migration", () => {
 	it("repoints identities, rewrites event entity_ids, and is idempotent on re-run", async () => {
 		const sql = getTestDb();
 		const market = await createTestOrganization({
-			name: "market",
+			name: "venture-capital",
 			visibility: "public",
 		});
-		// Mark slug='market' so the migration's `WHERE slug = 'market'` finds it.
-		await sql`UPDATE organization SET slug = 'market' WHERE id = ${market.id}`;
+		// Legacy installs used slug='venture-capital'; migration must still find them.
+		await sql`UPDATE organization SET slug = 'venture-capital' WHERE id = ${market.id}`;
 		const user = await createTestUser({ email: "op@market.test" });
 
 		const founder = await createTestEntity({

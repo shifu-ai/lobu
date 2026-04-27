@@ -3053,6 +3053,17 @@ export const landingUseCaseShowcases: LandingUseCaseShowcase[] = (
     };
   });
 
+export const landingUseCaseRouteEntries: Array<{
+  routeId: string;
+  useCaseId: LandingUseCaseId;
+}> = [
+  ...landingUseCaseShowcases.map((useCase) => ({
+    routeId: useCase.id,
+    useCaseId: useCase.id,
+  })),
+  { routeId: "venture-capital", useCaseId: "market" },
+];
+
 export const DEFAULT_LANDING_USE_CASE_ID: LandingUseCaseId = "engineering";
 
 const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {

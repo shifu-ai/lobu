@@ -18,7 +18,6 @@
  * real users before flipping derivations on.
  */
 
-import { createHash } from "node:crypto";
 import { getDb } from "../db/client";
 import { insertEvent } from "../utils/insert-event";
 import logger from "../utils/logger";
@@ -43,6 +42,8 @@ import {
 	validateFactEventMetadata,
 	validateRelationshipTypeIdentityMetadata,
 } from "./validate";
+import { ruleHashFor } from "./rules";
+export { compileRulesMetadata, ruleHashFor } from "./rules";
 
 type Sql = ReturnType<typeof getDb>;
 
@@ -104,6 +105,7 @@ interface PriorFact {
 }
 
 const log = logger.child({ module: "identity-engine" });
+const MAX_COLLISION_CANDIDATES = 16;
 
 function isShadow(opts: EngineOptions | undefined): boolean {
 	if (typeof opts?.shadow === "boolean") return opts.shadow;
@@ -148,50 +150,6 @@ function emptyResult(): IngestResult {
 		collisionEventIds: [],
 		skippedRules: [],
 	};
-}
-
-function canonicaliseRules(rules: AutoCreateWhenRule[]): string {
-	return JSON.stringify(
-		rules
-			.map((r) => ({
-				sourceNamespace: r.sourceNamespace,
-				targetField: r.targetField,
-				assuranceRequired: r.assuranceRequired,
-				matchStrategy: r.matchStrategy,
-			}))
-			.sort((a, b) =>
-				a.sourceNamespace === b.sourceNamespace
-					? a.targetField.localeCompare(b.targetField)
-					: a.sourceNamespace.localeCompare(b.sourceNamespace),
-			),
-	);
-}
-
-export function ruleHashFor(rules: AutoCreateWhenRule[]): string {
-	return createHash("sha256").update(canonicaliseRules(rules)).digest("hex");
-}
-
-/**
- * Build the metadata blob that lands on `entity_relationship_types.metadata`
- * for a public-catalog rule. Validates the result so seeders / test fixtures
- * never persist a malformed shape — bad rules are caught at write, not at
- * the next ingest pass.
- */
-export function compileRulesMetadata(
-	rules: AutoCreateWhenRule[],
-	ruleVersion: number,
-): {
-	autoCreateWhen: AutoCreateWhenRule[];
-	ruleVersion: number;
-	ruleHash: string;
-} {
-	const metadata = {
-		autoCreateWhen: rules,
-		ruleVersion,
-		ruleHash: ruleHashFor(rules),
-	};
-	validateRelationshipTypeIdentityMetadata(metadata);
-	return metadata;
 }
 
 /**
@@ -349,16 +307,19 @@ async function loadIdentityFields(
 	const allowed = new Set<string>();
 	for (const row of rows) {
 		const schema = row.metadata_schema as
-			| { properties?: Record<string, { "x-identity-namespace"?: boolean }> }
+			| {
+					properties?: Record<
+						string,
+						{ "x-identity-namespace"?: boolean | Record<string, unknown> }
+					>;
+				}
 			| null
 			| undefined;
 		if (!schema || typeof schema !== "object" || !schema.properties) continue;
 		for (const [field, def] of Object.entries(schema.properties)) {
-			if (
-				def &&
-				typeof def === "object" &&
-				def["x-identity-namespace"] === true
-			) {
+			if (!def || typeof def !== "object") continue;
+			const marker = def["x-identity-namespace"];
+			if (marker === true || (marker && typeof marker === "object")) {
 				allowed.add(field);
 			}
 		}
@@ -477,12 +438,17 @@ async function recordCollision(
 	relationshipTypeId: number,
 	userId: string,
 ): Promise<number | null> {
+	const candidateEntityIds = candidateMemberIds.slice(
+		0,
+		MAX_COLLISION_CANDIDATES,
+	);
 	const payload = {
 		kind: "identity_match" as const,
 		namespace: fact.namespace,
 		identifier: fact.identifier,
 		normalizedValue: fact.normalizedValue,
-		candidateEntityIds: candidateMemberIds,
+		candidateEntityIds,
+		candidateCount: candidateMemberIds.length,
 		triggeringEventId: factEventId,
 		relationshipTypeId,
 	};
@@ -490,11 +456,25 @@ async function recordCollision(
 	// Key on (connectorKey, providerStableId), not the BetterAuth account row
 	// id, which can be re-issued on reconnect — otherwise a reconnect produces
 	// duplicate pending-approval events for the same underlying collision.
+	const originId = `claim_collision:${accountIdentity.connectorKey}:${accountIdentity.providerStableId}:${fact.namespace}:${fact.normalizedValue}`;
+	const existing = await sql<{ id: number }>`
+    SELECT id
+    FROM current_event_records
+    WHERE organization_id = ${tenantOrgId}
+      AND origin_id = ${originId}
+      AND semantic_type = ${CLAIM_COLLISION_SEMANTIC_TYPE}
+      AND interaction_type = 'approval'
+      AND interaction_status = 'pending'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `;
+	if (existing.length > 0) return Number(existing[0].id);
+
 	const ev = await insertEvent(
 		{
 			organizationId: tenantOrgId,
-			entityIds: candidateMemberIds,
-			originId: `claim_collision:${accountIdentity.connectorKey}:${accountIdentity.providerStableId}:${fact.namespace}:${fact.normalizedValue}`,
+			entityIds: candidateEntityIds,
+			originId,
 			semanticType: CLAIM_COLLISION_SEMANTIC_TYPE,
 			interactionType: "approval",
 			interactionStatus: "pending",
@@ -541,6 +521,7 @@ async function ingestFactsLocked(params: IngestParams): Promise<IngestResult> {
 
 	// 1. Validate every fact up front. All-or-nothing — we do not partially
 	// ingest, since a partial write could leave derivations dangling.
+	const seenFactKeys = new Set<string>();
 	for (const fact of facts) {
 		try {
 			validateConnectorFact(fact);
@@ -569,6 +550,13 @@ async function ingestFactsLocked(params: IngestParams): Promise<IngestResult> {
 				`identity-engine: fact.sourceAccountId mismatches accountIdentity (got ${fact.sourceAccountId}, expected ${accountIdentity.sourceAccountId})`,
 			);
 		}
+		const key = priorKey(fact);
+		if (seenFactKeys.has(key)) {
+			throw new Error(
+				`identity-engine: duplicate fact in batch for namespace/value ${fact.namespace}/${fact.normalizedValue}`,
+			);
+		}
+		seenFactKeys.add(key);
 		// server-side capability cap: a connector may only emit
 		// (namespace, assurance) pairs it declared in its capability. Anything
 		// outside the declared cap is rejected before any side effect.
@@ -764,13 +752,37 @@ async function ingestFactsLocked(params: IngestParams): Promise<IngestResult> {
 
 						if (matches.length === 0) continue;
 
-						if (matches.length > 1 && rule.matchStrategy === "unique_only") {
+						const validMatches: MatchedEntity[] = [];
+						for (const match of matches) {
+							try {
+								await validateTypeRule(
+									ruleSet.relationshipTypeId,
+									memberEntityId,
+									match.entityId,
+									sql,
+								);
+								validMatches.push(match);
+							} catch (err) {
+								log.debug(
+									{
+										err,
+										relationshipTypeId: ruleSet.relationshipTypeId,
+										fromEntityId: memberEntityId,
+										toEntityId: match.entityId,
+									},
+									"identity-engine: metadata match rejected by type-rule prefilter",
+								);
+							}
+						}
+						if (validMatches.length === 0) continue;
+
+						if (validMatches.length > 1 && rule.matchStrategy === "unique_only") {
 							// Surface as a collision event for admin / user resolution.
 							const collisionId = await recordCollision(
 								sql,
 								tenantOrganizationId,
 								ev.eventId,
-								matches.map((m) => m.entityId),
+								validMatches.map((m) => m.entityId),
 								fact,
 								accountIdentity,
 								ruleSet.relationshipTypeId,
@@ -780,7 +792,7 @@ async function ingestFactsLocked(params: IngestParams): Promise<IngestResult> {
 								result.collisionEventIds.push(collisionId);
 							result.skippedRules.push({
 								ruleId: `${ruleSet.relationshipTypeSlug}@${ruleSet.ruleVersion}`,
-								reason: `${matches.length} matches with match_strategy=unique_only`,
+								reason: `${validMatches.length} valid matches with match_strategy=unique_only`,
 							});
 							continue;
 						}
@@ -788,7 +800,7 @@ async function ingestFactsLocked(params: IngestParams): Promise<IngestResult> {
 						// unique_only with one match, or all_matches with N → derive each.
 						// (first_match is rejected at the schema layer in @lobu/owletto-sdk.)
 						const targets =
-							rule.matchStrategy === "unique_only" ? [matches[0]] : matches;
+							rule.matchStrategy === "unique_only" ? [validMatches[0]] : validMatches;
 						for (const target of targets) {
 							const existing = await findExistingRelationship(
 								sql,

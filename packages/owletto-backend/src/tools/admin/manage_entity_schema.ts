@@ -9,9 +9,11 @@
  */
 
 import { type Static, Type } from '@sinclair/typebox';
+import type { AutoCreateWhenRule } from '@lobu/owletto-sdk';
 import { type DbClient, getDb } from '../../db/client';
 import type { Env } from '../../index';
 import logger from '../../utils/logger';
+import { compileRulesMetadata, ruleHashFor } from '../../identity/rules';
 import { ensureMemberEntityType } from '../../utils/member-entity-type';
 import { RESERVED_ENTITY_TYPES } from '../../utils/reserved';
 import { resolveUsernames } from '../../utils/resolve-usernames';
@@ -21,6 +23,22 @@ import { routeAction } from './action-router';
 // ============================================
 // Typebox Schema
 // ============================================
+
+const AutoCreateWhenRuleInputSchema = Type.Object(
+  {
+    sourceNamespace: Type.String({ minLength: 1 }),
+    targetField: Type.String({ minLength: 1 }),
+    assuranceRequired: Type.Union([
+      Type.Literal('oauth_verified_admin_role'),
+      Type.Literal('oauth_verified'),
+      Type.Literal('cookie_session'),
+      Type.Literal('self_attested'),
+    ]),
+    matchStrategy: Type.Union([Type.Literal('unique_only'), Type.Literal('all_matches')]),
+    notes: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false }
+);
 
 export const ManageEntitySchemaSchema = Type.Object({
   schema_type: Type.Union([Type.Literal('entity_type'), Type.Literal('relationship_type')], {
@@ -99,6 +117,13 @@ export const ManageEntitySchemaSchema = Type.Object({
       description: '[relationship_type: create/update] Status. Default active.',
     })
   ),
+  auto_create_when: Type.Optional(
+    Type.Array(AutoCreateWhenRuleInputSchema, {
+      maxItems: 16,
+      description:
+        '[relationship_type: create/update] Identity-engine auto-derivation rules stored on relationship_type.metadata.autoCreateWhen',
+    })
+  ),
 
   // Rule fields (relationship_type only)
   source_entity_type_slug: Type.Optional(
@@ -161,6 +186,7 @@ interface RelationshipTypeRow {
   organization_slug?: string | null;
   created_by?: string | null;
   metadata_schema?: Record<string, unknown> | null;
+  metadata?: Record<string, unknown> | null;
   is_symmetric: boolean;
   inverse_type_id?: number | null;
   inverse_type_slug?: string | null;
@@ -730,6 +756,28 @@ async function requireRelationshipType(
   return { typeId, sql };
 }
 
+function buildRelationshipIdentityMetadata(
+  rules: AutoCreateWhenRule[] | undefined,
+  existingMetadata: unknown,
+): Record<string, unknown> | null | undefined {
+  if (rules === undefined) return undefined;
+  const existing =
+    existingMetadata && typeof existingMetadata === 'object' && !Array.isArray(existingMetadata)
+      ? (existingMetadata as Record<string, unknown>)
+      : {};
+  const nextHash = ruleHashFor(rules);
+  const priorHash = typeof existing.ruleHash === 'string' ? existing.ruleHash : null;
+  const priorVersion =
+    typeof existing.ruleVersion === 'number' && Number.isFinite(existing.ruleVersion)
+      ? existing.ruleVersion
+      : 0;
+  const nextVersion = priorHash === nextHash ? Math.max(priorVersion, 1) : priorVersion + 1;
+  return {
+    ...existing,
+    ...compileRulesMetadata(rules, nextVersion),
+  };
+}
+
 // ============================================
 // Relationship Type Action Handlers
 // ============================================
@@ -745,7 +793,7 @@ async function rtHandleList(
   const rows = await sql.unsafe<RelationshipTypeRow>(
     `SELECT
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
-      rt.metadata_schema, rt.is_symmetric, rt.inverse_type_id,
+      rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
       rt.status, rt.created_at, rt.updated_at, rt.deleted_at,
       o.slug AS organization_slug,
@@ -791,7 +839,7 @@ async function rtHandleGet(
   const rows = await sql`
     SELECT
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
-      rt.metadata_schema, rt.is_symmetric, rt.inverse_type_id,
+      rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
       rt.status, rt.created_at, rt.updated_at, rt.deleted_at,
       o.slug AS organization_slug
@@ -852,10 +900,12 @@ async function rtHandleCreate(
     inverseTypeId = Number(inverseRows[0].id);
   }
 
+  const identityMetadata = buildRelationshipIdentityMetadata(args.auto_create_when, null);
+
   const inserted = await sql`
     INSERT INTO entity_relationship_types (
       slug, name, description, organization_id, created_by,
-      metadata_schema, is_symmetric, inverse_type_id, status,
+      metadata_schema, metadata, is_symmetric, inverse_type_id, status,
       created_at, updated_at
     ) VALUES (
       ${args.slug},
@@ -864,6 +914,7 @@ async function rtHandleCreate(
       ${ctx.organizationId},
       ${ctx.userId},
       ${args.metadata_schema ? sql.json(args.metadata_schema) : null},
+      ${identityMetadata ? sql.json(identityMetadata) : null},
       ${args.is_symmetric ?? false},
       ${inverseTypeId},
       ${args.status ?? 'active'},
@@ -885,7 +936,7 @@ async function rtHandleCreate(
   const created = await sql`
     SELECT
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
-      rt.metadata_schema, rt.is_symmetric, rt.inverse_type_id,
+      rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
       rt.status, rt.created_at, rt.updated_at
     FROM entity_relationship_types rt
@@ -925,6 +976,14 @@ async function rtHandleUpdate(
     }
   }
 
+  const currentMetadataRows = await sql<{ metadata: unknown }>`
+    SELECT metadata FROM entity_relationship_types WHERE id = ${typeId} LIMIT 1
+  `;
+  const identityMetadata = buildRelationshipIdentityMetadata(
+    args.auto_create_when,
+    currentMetadataRows[0]?.metadata ?? null
+  );
+
   await sql`
     UPDATE entity_relationship_types SET
       name = COALESCE(${args.name ?? null}, name),
@@ -935,6 +994,10 @@ async function rtHandleUpdate(
       metadata_schema = CASE
         WHEN ${args.metadata_schema !== undefined} THEN ${args.metadata_schema ? sql.json(args.metadata_schema) : null}
         ELSE metadata_schema
+      END,
+      metadata = CASE
+        WHEN ${identityMetadata !== undefined} THEN ${identityMetadata ? sql.json(identityMetadata) : null}
+        ELSE metadata
       END,
       inverse_type_id = CASE
         WHEN ${inverseTypeId !== undefined} THEN ${inverseTypeId ?? null}
@@ -948,7 +1011,7 @@ async function rtHandleUpdate(
   const updated = await sql`
     SELECT
       rt.id, rt.slug, rt.name, rt.description, rt.organization_id, rt.created_by,
-      rt.metadata_schema, rt.is_symmetric, rt.inverse_type_id,
+      rt.metadata_schema, rt.metadata, rt.is_symmetric, rt.inverse_type_id,
       inv.slug as inverse_type_slug,
       rt.status, rt.created_at, rt.updated_at
     FROM entity_relationship_types rt

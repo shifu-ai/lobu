@@ -34,6 +34,14 @@ metadata_schema:
       type: string
       x-table-column: true
       x-table-label: Location
+    domain:
+      type: string
+      description: Normalized company domain used by identity-engine hosted_domain facts
+      x-identity-namespace:
+        namespace: hosted_domain
+        normalize: lowercase
+      x-table-column: true
+      x-table-label: Domain
     one_liner:
       type: string
     team_size:
