@@ -80,6 +80,7 @@ describe('Public pages', () => {
     const body = await response.text();
     expect(response.status).toBe(200);
     expect(response.headers.get('cache-control')).toContain('public, max-age=300');
+    expect(response.headers.get('vary')).toContain('Cookie');
     expect(body).toContain('<meta name="description"');
     expect(body).toContain('Public SEO Org | Owletto');
     expect(body).toContain('window.__OWLETTO_PUBLIC_BOOTSTRAP__');
@@ -97,6 +98,40 @@ describe('Public pages', () => {
     expect(response.headers.get('content-type')).toContain('text/html');
     expect(body).toContain('Public SEO Org | Owletto');
     expect(body).toContain('Brand launch feedback');
+    expect(body).not.toContain('"mcp_endpoint"');
+  });
+
+  it('serves the SPA shell for signed-in public workspace requests', async () => {
+    const response = await get('/public-seo-org', {
+      headers: { Accept: 'text/html' },
+      cookie: '__Host-better-auth.session_token=test-session-token',
+      env: { PUBLIC_WEB_URL: 'https://www.owletto.test' },
+    });
+
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-cache, no-store');
+    expect(response.headers.get('cache-control')).not.toContain('public, max-age=300');
+    expect(body).toContain('<title>Owletto</title>');
+    expect(body).toContain('<div id="root"></div>');
+    expect(body).not.toContain('window.__OWLETTO_PUBLIC_BOOTSTRAP__');
+    expect(body).not.toContain('Public SEO Org | Owletto');
+  });
+
+  it('serves the SPA shell for signed-in generic public workspace requests', async () => {
+    const response = await get('/public-seo-org', {
+      cookie: 'better-auth.session_token=test-session-token',
+      env: { PUBLIC_WEB_URL: 'https://www.owletto.test' },
+    });
+
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('no-cache, no-store');
+    expect(response.headers.get('cache-control')).not.toContain('public, max-age=300');
+    expect(body).toContain('<title>Owletto</title>');
+    expect(body).toContain('<div id="root"></div>');
+    expect(body).not.toContain('window.__OWLETTO_PUBLIC_BOOTSTRAP__');
+    expect(body).not.toContain('Public SEO Org | Owletto');
     expect(body).not.toContain('"mcp_endpoint"');
   });
 

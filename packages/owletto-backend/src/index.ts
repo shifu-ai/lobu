@@ -212,6 +212,10 @@ function getContentTypeForStaticFile(filePath: string): string {
   );
 }
 
+function hasBetterAuthSessionCookie(cookieHeader: string | null | undefined): boolean {
+  return (cookieHeader ?? '').includes('better-auth.session_token=');
+}
+
 function resolveStaticFilePath(distDir: string, requestPath: string): string | null {
   const normalizedPath = path.posix.normalize(requestPath || '/');
   if (normalizedPath.includes('..')) {
@@ -994,15 +998,17 @@ app.get('*', async (c) => {
   const acceptHeader = c.req.header('accept') ?? '';
   const acceptsHtml = acceptHeader.includes('text/html');
   const acceptsGenericResponse = !acceptHeader || acceptHeader.includes('*/*');
+  const hasSessionCookie = hasBetterAuthSessionCookie(c.req.header('cookie'));
   const hasFileExtension =
     /\.(?:js|css|html|json|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|txt|xml)$/i.test(
       requestPath
     );
-  if (
-    (acceptsHtml || acceptsGenericResponse) &&
-    !hasFileExtension &&
-    !isExcludedSpaPath(requestPath)
-  ) {
+  const isSpaRoute = !hasFileExtension && !isExcludedSpaPath(requestPath);
+  // Generic signed-in requests still need the SPA shell; otherwise they would fall through to the
+  // JSON status response after skipping anonymous public SSR.
+  const shouldServeSpaFallback =
+    (acceptsHtml || (acceptsGenericResponse && hasSessionCookie)) && isSpaRoute;
+  if ((acceptsHtml || acceptsGenericResponse) && !hasSessionCookie && isSpaRoute) {
     const publicPageModel = await buildPublicPageModel(
       requestPath,
       c.env,
@@ -1015,6 +1021,7 @@ app.get('*', async (c) => {
         const rendered = renderPublicPageTemplate(template, publicPageModel);
         const html = viteDev ? await viteDev.transformIndexHtml(c.req.path, rendered) : rendered;
         c.header('Cache-Control', publicPageModel.cacheControl);
+        c.header('Vary', 'Accept, Cookie');
         return c.html(html, publicPageModel.status as 200 | 404);
       }
     }
@@ -1022,7 +1029,7 @@ app.get('*', async (c) => {
 
   // Dev: serve Vite-transformed index.html for SPA routes
   if (viteDev) {
-    if (acceptsHtml && !hasFileExtension) {
+    if (shouldServeSpaFallback) {
       const raw = await fs.readFile(path.resolve(viteDev.config.root, 'index.html'), 'utf-8');
       const html = await viteDev.transformIndexHtml(c.req.path, raw);
       return c.html(html);
@@ -1045,7 +1052,7 @@ app.get('*', async (c) => {
       }
     }
 
-    if (acceptsHtml && !hasFileExtension && !isExcludedSpaPath(requestPath)) {
+    if (shouldServeSpaFallback) {
       try {
         const spaEntry = resolveStaticFilePath(webDistDirectory, '/index.html');
         if (spaEntry) {
