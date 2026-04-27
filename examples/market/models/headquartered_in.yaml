@@ -3,6 +3,8 @@ type: relationship
 slug: headquartered_in
 name: Headquartered In
 description: Company is headquartered in a city (cross-org reference into atlas.city)
+rules:
+  - { source: company, target: city }
 metadata_schema:
   type: object
   properties:

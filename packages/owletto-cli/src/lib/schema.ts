@@ -29,12 +29,25 @@ export interface EntitySchema {
   metadata_schema?: Record<string, unknown>;
 }
 
+export interface RelationshipTypeRule {
+  source: string;
+  target: string;
+}
+
 export interface RelationshipSchema {
   version?: number;
   type: 'relationship';
   slug: string;
   name: string;
   description?: string;
+  /**
+   * Allowed (source_entity_type, target_entity_type) pairs. When omitted, any
+   * pair is permitted (backend `validateTypeRule` short-circuits if there are
+   * no rules). Provide rules to constrain the relationship — especially for
+   * cross-org references where unconstrained types would let any source
+   * entity link to any target.
+   */
+  rules?: RelationshipTypeRule[];
 }
 
 export interface WatcherSchema {
@@ -152,6 +165,42 @@ export function validateModel(parsed: Record<string, unknown>, file: string): Va
   if (modelType === 'watcher') {
     requireString(parsed, 'schedule', file, errors);
     requireString(parsed, 'prompt', file, errors);
+  }
+
+  if (modelType === 'relationship' && parsed.rules !== undefined) {
+    if (!Array.isArray(parsed.rules)) {
+      errors.push({
+        file,
+        field: 'rules',
+        message: '"rules" must be an array of { source, target } pairs',
+      });
+    } else {
+      parsed.rules.forEach((rule, idx) => {
+        if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+          errors.push({
+            file,
+            field: `rules[${idx}]`,
+            message: 'each rule must be an object with "source" and "target" string fields',
+          });
+          return;
+        }
+        const r = rule as Record<string, unknown>;
+        if (typeof r.source !== 'string' || r.source === '') {
+          errors.push({
+            file,
+            field: `rules[${idx}].source`,
+            message: '"source" is required and must be a non-empty entity-type slug',
+          });
+        }
+        if (typeof r.target !== 'string' || r.target === '') {
+          errors.push({
+            file,
+            field: `rules[${idx}].target`,
+            message: '"target" is required and must be a non-empty entity-type slug',
+          });
+        }
+      });
+    }
   }
 
   return errors;

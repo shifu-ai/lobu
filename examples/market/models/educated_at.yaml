@@ -3,6 +3,8 @@ type: relationship
 slug: educated_at
 name: Educated At
 description: Founder was educated at a university (cross-org reference into atlas.university)
+rules:
+  - { source: founder, target: university }
 metadata_schema:
   type: object
   properties:

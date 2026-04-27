@@ -2,7 +2,7 @@ version: 1
 type: entity
 slug: industry
 name: Industry
-description: Industry / sector taxonomy node (NAICS, BICS, or curated)
+description: Industry / sector taxonomy node (NAICS, BICS, or custom)
 icon: factory
 color: "#a855f7"
 metadata_schema:

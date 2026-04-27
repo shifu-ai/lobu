@@ -3,6 +3,9 @@ type: relationship
 slug: operates_in
 name: Operates In
 description: Company operates in a country or region (cross-org reference into atlas.country or atlas.region)
+rules:
+  - { source: company, target: country }
+  - { source: company, target: region }
 metadata_schema:
   type: object
   properties:

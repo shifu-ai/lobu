@@ -3,6 +3,8 @@ type: relationship
 slug: uses_technology
 name: Uses Technology
 description: Company uses a technology in its stack (cross-org reference into atlas.technology)
+rules:
+  - { source: company, target: technology }
 metadata_schema:
   type: object
   properties:

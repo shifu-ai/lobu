@@ -270,15 +270,24 @@ async function seedEntity(entity: Record<string, unknown>, ctx: SeedContext): Pr
 
 async function seedRelationshipType(rel: Record<string, unknown>, ctx: SeedContext): Promise<void> {
   const slug = rel.slug as string;
+  const rules = Array.isArray(rel.rules) ? (rel.rules as Array<Record<string, unknown>>) : [];
+  // Strip `rules` from the create payload — the backend's manage_entity_schema
+  // create handler doesn't accept it; rules are registered via separate
+  // add_rule calls below.
+  const { rules: _unused, ...createPayload } = rel as Record<string, unknown>;
+
   if (ctx.dryRun) {
     printText(`  [dry-run] would create relationship_type: ${slug}`);
+    for (const rule of rules) {
+      printText(`  [dry-run]   + rule: ${rule.source} -> ${rule.target}`);
+    }
     return;
   }
   try {
     await callTool(ctx, 'manage_entity_schema', {
       schema_type: 'relationship_type',
       action: 'create',
-      ...rel,
+      ...createPayload,
     });
     printText(`  + relationship_type: ${slug}`);
   } catch (e) {
@@ -286,6 +295,28 @@ async function seedRelationshipType(rel: Record<string, unknown>, ctx: SeedConte
       printText(`  = relationship_type: ${slug} (exists)`);
     } else {
       throw e;
+    }
+  }
+
+  for (const rule of rules) {
+    const source = String(rule.source ?? '');
+    const target = String(rule.target ?? '');
+    if (!source || !target) continue;
+    try {
+      await callTool(ctx, 'manage_entity_schema', {
+        schema_type: 'relationship_type',
+        action: 'add_rule',
+        slug,
+        source_entity_type_slug: source,
+        target_entity_type_slug: target,
+      });
+      printText(`    + rule: ${source} -> ${target}`);
+    } catch (e) {
+      if (e instanceof Error && e.message?.includes('already exists')) {
+        printText(`    = rule: ${source} -> ${target} (exists)`);
+      } else {
+        throw e;
+      }
     }
   }
 }

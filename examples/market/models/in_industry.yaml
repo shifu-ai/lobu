@@ -3,6 +3,8 @@ type: relationship
 slug: in_industry
 name: In Industry
 description: Company is in an industry (cross-org reference into atlas.industry)
+rules:
+  - { source: company, target: industry }
 metadata_schema:
   type: object
   properties:

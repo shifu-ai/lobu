@@ -7,6 +7,18 @@ icon: briefcase
 color: "#f59e0b"
 metadata_schema:
   type: object
+  # Exactly one of posted_by_founder_id or posted_by_member_id must be set —
+  # the post comes from either a verified founder OR an authorized member,
+  # never both. JSON Schema oneOf enforces the discriminator at validation
+  # time; the audit agent confirms the chosen FK actually points at the
+  # claimed entity type.
+  oneOf:
+    - required: [posted_by_founder_id]
+      not:
+        required: [posted_by_member_id]
+    - required: [posted_by_member_id]
+      not:
+        required: [posted_by_founder_id]
   properties:
     role:
       type: string
@@ -22,9 +34,14 @@ metadata_schema:
       x-table-column: true
       x-table-label: Company
       x-link-entity-type: company
-    posted_by_id:
+    posted_by_founder_id:
       type: integer
-      description: FK to market.founder OR market.$member (the contributor who posted)
+      description: FK to market.founder if posted by a verified founder
+      x-link-entity-type: founder
+    posted_by_member_id:
+      type: integer
+      description: FK to market.$member if posted by an authorized member who isn't a founder
+      x-link-entity-type: $member
     city_id:
       type: integer
       description: FK to atlas.city (cross-org reference, optional)
