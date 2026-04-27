@@ -25,7 +25,7 @@ import {
 
 const MIGRATION_PATH = join(
 	__dirname,
-	"../../../../../../db/migrations/20260427160000_market_founder_to_member.sql",
+	"../../../../../../db/migrations/20260427170000_market_founder_to_member.sql",
 );
 
 function loadMigrationUp(): string {
