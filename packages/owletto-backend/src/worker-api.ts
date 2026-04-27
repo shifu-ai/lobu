@@ -847,19 +847,40 @@ export async function completeAuthRun(c: Context<{ Bindings: Env }>) {
       credentials?: Record<string, unknown>;
       metadata?: Record<string, unknown>;
       error_message?: string;
+      // Diagnostic fields from the subprocess executor (failed-run path only).
+      // The worker redacts output_tail before sending; backend stores as-is.
+      output_tail?: string;
+      exit_code?: number | null;
+      exit_signal?: string | null;
+      exit_reason?: 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
     }>();
 
     const sql = getDb();
 
-    const runRows = (await sql`
+    const runRows =
+      req.status === 'failed'
+        ? ((await sql`
       UPDATE runs
-      SET status = ${req.status === 'success' ? 'completed' : 'failed'},
+      SET status = 'failed',
+          completed_at = current_timestamp,
+          error_message = ${req.error_message ?? null},
+          auth_signal = NULL,
+          output_tail = ${req.output_tail ?? null},
+          exit_code = ${req.exit_code ?? null},
+          exit_signal = ${req.exit_signal ?? null},
+          exit_reason = ${req.exit_reason ?? null}
+      WHERE id = ${req.run_id}
+      RETURNING auth_profile_id, organization_id
+    `) as Array<{ auth_profile_id: number | null; organization_id: string }>)
+        : ((await sql`
+      UPDATE runs
+      SET status = 'completed',
           completed_at = current_timestamp,
           error_message = ${req.error_message ?? null},
           auth_signal = NULL
       WHERE id = ${req.run_id}
       RETURNING auth_profile_id, organization_id
-    `) as Array<{ auth_profile_id: number | null; organization_id: string }>;
+    `) as Array<{ auth_profile_id: number | null; organization_id: string }>);
 
     const authProfileId = runRows[0]?.auth_profile_id ?? null;
     const organizationId = runRows[0]?.organization_id;

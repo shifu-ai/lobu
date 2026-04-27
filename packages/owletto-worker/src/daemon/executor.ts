@@ -440,12 +440,16 @@ async function executeAuthRun(
     clearInterval(heartbeatInterval);
     const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`[executor] Auth run ${run_id} failed:`, errorMessage);
+
+    const diag = extractSubprocessDiagnostics(error);
+
     try {
       await client.completeAuth({
         run_id,
         worker_id: client.id,
         status: 'failed',
         error_message: errorMessage,
+        ...(diag ?? {}),
       });
     } catch (completeErr) {
       console.error('[executor] completeAuth after failure errored:', completeErr);
