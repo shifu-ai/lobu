@@ -13,6 +13,7 @@ import { ManageEntitySchema, manageEntity } from './manage_entity';
 import { ManageEntitySchemaSchema, manageEntitySchema } from './manage_entity_schema';
 import { ManageFeedsSchema, manageFeeds } from './manage_feeds';
 import { ManageOperationsSchema, manageOperations } from './manage_operations';
+import { ManageOrganizationSchema, manageOrganization } from './manage_organization';
 import { ManageViewTemplatesSchema, manageViewTemplates } from './manage_view_templates';
 import { ManageWatchersSchema, manageWatchers } from './manage_watchers';
 
@@ -120,6 +121,17 @@ export const LEGACY_ADMIN_TOOLS: ToolDefinition[] = [
     internal: true,
     handler: async (args: Static<typeof ManageViewTemplatesSchema>, env: Env, ctx: ToolContext) => {
       return await manageViewTemplates(args, env, ctx);
+    },
+  },
+  {
+    name: 'manage_organization',
+    description:
+      'Org-scoped settings (e.g. connector repair-agent kill switch). Frontend-only tool today; external MCP clients should not depend on this surface.',
+    inputSchema: ManageOrganizationSchema,
+    annotations: { destructiveHint: false },
+    internal: true,
+    handler: async (args: Static<typeof ManageOrganizationSchema>, _env: Env, ctx: ToolContext) => {
+      return await manageOrganization(args, ctx);
     },
   },
 ];

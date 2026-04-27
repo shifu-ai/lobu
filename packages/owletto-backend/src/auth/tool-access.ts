@@ -38,6 +38,7 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
     'toggle_connector_login',
     'update_connector_auth',
     'update_connector_default_config',
+    'update_connector_default_repair_agent',
     'set_connector_entity_link_overrides',
   ]),
   manage_feeds: new Set(['create_feed', 'update_feed', 'delete_feed', 'trigger_feed']),
@@ -70,6 +71,7 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
     'classify',
   ]),
   manage_view_templates: new Set(['set', 'rollback', 'remove_tab']),
+  manage_organization: new Set(['get_settings', 'update_settings']),
 };
 
 const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {

@@ -256,6 +256,15 @@ const SetConnectorEntityLinkOverridesAction = Type.Object({
   overrides: EntityLinkOverridesSchema,
 });
 
+const UpdateConnectorDefaultRepairAgentAction = Type.Object({
+  action: Type.Literal('update_connector_default_repair_agent'),
+  connector_key: Type.String({ description: 'Connector key' }),
+  default_repair_agent_id: Type.Union([Type.String(), Type.Null()], {
+    description:
+      'Default repair agent ID for feeds of this connector. Null clears the default.',
+  }),
+});
+
 export const ManageConnectionsSchema = Type.Union([
   ListAction,
   ListConnectorDefinitionsAction,
@@ -271,6 +280,7 @@ export const ManageConnectionsSchema = Type.Union([
   ToggleConnectorLoginAction,
   UpdateConnectorAuthAction,
   UpdateConnectorDefaultConfigAction,
+  UpdateConnectorDefaultRepairAgentAction,
   SetConnectorEntityLinkOverridesAction,
 ]);
 
@@ -354,6 +364,12 @@ type ManageConnectionsResult =
       connector_key: string;
     }
   | {
+      action: 'update_connector_default_repair_agent';
+      success: true;
+      connector_key: string;
+      default_repair_agent_id: string | null;
+    }
+  | {
       action: 'set_connector_entity_link_overrides';
       success: true;
       connector_key: string;
@@ -410,6 +426,14 @@ export async function manageConnections(
     update_connector_default_config: () =>
       handleUpdateConnectorDefaultConfig(
         args as Extract<ConnectionsArgs, { action: 'update_connector_default_config' }>,
+        ctx
+      ),
+    update_connector_default_repair_agent: () =>
+      handleUpdateConnectorDefaultRepairAgent(
+        args as Extract<
+          ConnectionsArgs,
+          { action: 'update_connector_default_repair_agent' }
+        >,
         ctx
       ),
     set_connector_entity_link_overrides: () =>
@@ -1778,6 +1802,35 @@ async function handleUpdateConnectorDefaultConfig(
     action: 'update_connector_default_config',
     success: true,
     connector_key: args.connector_key,
+  };
+}
+
+async function handleUpdateConnectorDefaultRepairAgent(
+  args: Extract<ConnectionsArgs, { action: 'update_connector_default_repair_agent' }>,
+  ctx: ToolContext
+): Promise<ManageConnectionsResult> {
+  const sql = getDb();
+  const { organizationId } = ctx;
+
+  const updated = await sql`
+    UPDATE connector_definitions
+    SET default_repair_agent_id = ${args.default_repair_agent_id}::text,
+        updated_at = NOW()
+    WHERE key = ${args.connector_key}
+      AND organization_id = ${organizationId}
+      AND status = 'active'
+    RETURNING key
+  `;
+
+  if (updated.length === 0) {
+    return { error: `Connector '${args.connector_key}' not found` };
+  }
+
+  return {
+    action: 'update_connector_default_repair_agent',
+    success: true,
+    connector_key: args.connector_key,
+    default_repair_agent_id: args.default_repair_agent_id,
   };
 }
 
