@@ -19,18 +19,25 @@ export const DEFAULT_SCOPES_STRING = DEFAULT_SCOPES.join(' ');
  * admin-tier actions for non-admins anyway, so filtering at consent makes
  * the stored token scope match the user's actual privileges and avoids
  * a confusing "reconnect with admin access" error after grant.
+ *
+ * Returns `null` when the caller requested at least one scope but role-based
+ * filtering removed all of them. The caller must reject the request with
+ * `invalid_scope` (RFC 6749 §4.1.2.1) — silently persisting an empty grant
+ * is unsafe because downstream parsing treats null/empty stored scope as the
+ * default scope set, which would unintentionally widen privileges.
  */
 export function filterScopeByRole(
   scope: string | undefined | null,
   memberRole: string | null
-): string {
+): string | null {
   const requested = (scope || '')
     .split(' ')
     .map((value) => value.trim())
     .filter(Boolean);
   const isAdmin = memberRole === 'owner' || memberRole === 'admin';
-  if (isAdmin) {
-    return requested.join(' ');
+  const granted = isAdmin ? requested : requested.filter((s) => s !== 'mcp:admin');
+  if (requested.length > 0 && granted.length === 0) {
+    return null;
   }
-  return requested.filter((s) => s !== 'mcp:admin').join(' ');
+  return granted.join(' ');
 }

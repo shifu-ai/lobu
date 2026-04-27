@@ -577,7 +577,17 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
       // owner/admin of the resolved org. Without this, a token can be issued
       // with admin scope that the runtime role check immediately rejects,
       // confusing the caller with a "reconnect with admin access" error.
-      params.scope = filterScopeByRole(body.scope, orgResult.memberRole);
+      const filtered = filterScopeByRole(body.scope, orgResult.memberRole);
+      if (filtered === null) {
+        return c.json(
+          createOAuthError(
+            'invalid_scope',
+            'Your role is not authorized for any of the requested scopes'
+          ),
+          400
+        );
+      }
+      params.scope = filtered;
     }
 
     const code = await provider.createAuthorizationCode(params, user.id, organizationId);
@@ -707,6 +717,15 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
     // owner/admin of the resolved org. See the consent submit handler for
     // the full rationale.
     scopeOverride = filterScopeByRole(deviceCode.scope, orgResult.memberRole);
+    if (scopeOverride === null) {
+      return c.json(
+        createOAuthError(
+          'invalid_scope',
+          'Your role is not authorized for any of the requested scopes'
+        ),
+        400
+      );
+    }
   }
 
   const approved = await provider.approveDeviceCode(
