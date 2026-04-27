@@ -262,21 +262,33 @@ export async function maybeOpenOrAppendRepairThread(
   }
 
   const recentRuns = await loadRecentRuns(sql, feedId, 10);
-  const latestRun = recentRuns[0] ?? null;
+  // The completed run we were called for is the canonical signature source —
+  // not whichever run happens to be at the top of recentRuns. Out-of-order
+  // worker completions (later run finishes before an earlier one) would
+  // otherwise attach the wrong run's diagnostics.
+  const completedRun = recentRuns.find((r) => r.id === runId) ?? recentRuns[0] ?? null;
 
   // Branch 1: Thread already open — consider appending.
   if (state.repair_thread_id) {
-    if (!latestRun) return;
-    const hash = hashFailureSignature(latestRun);
+    if (!completedRun) return;
+    const hash = hashFailureSignature(completedRun);
     const isMultipleOf5 = state.consecutive_failures > 0 && state.consecutive_failures % 5 === 0;
-    const lastHashRows = (await sql`
-      SELECT last_repair_post_hash FROM feeds WHERE id = ${feedId} LIMIT 1
+
+    // Atomic dedupe: claim the new hash in one UPDATE that's a no-op when
+    // another concurrent worker just wrote the same hash. Prevents two
+    // workers from observing the same `last_repair_post_hash` and both
+    // posting duplicate appends.
+    const claimRows = (await sql`
+      UPDATE feeds
+      SET last_repair_post_hash = ${hash}
+      WHERE id = ${feedId}
+        AND (last_repair_post_hash IS DISTINCT FROM ${hash} OR ${isMultipleOf5})
+      RETURNING last_repair_post_hash
     `) as unknown as Array<{ last_repair_post_hash: string | null }>;
-    const lastHash = lastHashRows[0]?.last_repair_post_hash ?? null;
-    if (hash === lastHash && !isMultipleOf5) {
+    if (claimRows.length === 0) {
       logger.debug(
         { feed_id: feedId, hash },
-        '[repair-agent] suppressing append — same failure signature, no every-5th override'
+        '[repair-agent] suppressing append — same failure signature claimed by another worker'
       );
       return;
     }
@@ -287,15 +299,12 @@ export async function maybeOpenOrAppendRepairThread(
     try {
       const packet = buildAppendPacket({
         consecutiveFailures: state.consecutive_failures,
-        run: latestRun,
+        run: completedRun,
       });
       await services.enqueueAgentMessage(
         { sessionManager: services.sessionManager, queueProducer: services.queueProducer },
         { threadId: state.repair_thread_id, messageText: packet, source: 'connector-repair' }
       );
-      await sql`
-        UPDATE feeds SET last_repair_post_hash = ${hash} WHERE id = ${feedId}
-      `;
       logger.info(
         { feed_id: feedId, thread_id: state.repair_thread_id, run_id: runId },
         '[repair-agent] appended failure to existing repair thread'
