@@ -94,3 +94,63 @@ jobs:
       - name: Run TypeScript type check
         run: bun run typecheck
 
+  migrations:
+    # Catches the class of bug that has now broken prod twice in one
+    # session: a migration file that's syntactically a SQL file but that
+    # `dbmate up` rejects (missing -- migrate:up directive, constraint
+    # violations against legacy data, etc.). Runs every migration in
+    # order against an empty Postgres on every PR.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: lobu_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint migration directives
+        # Sub-second pre-flight: every file under db/migrations/ must
+        # contain `-- migrate:up`. Catches the most common authoring
+        # mistake before we even spin up Postgres.
+        run: |
+          missing=$(grep -L '^-- migrate:up' db/migrations/*.sql || true)
+          if [ -n "$missing" ]; then
+            echo "::error::Migrations missing '-- migrate:up' directive:"
+            echo "$missing"
+            exit 1
+          fi
+
+      - name: Install dbmate
+        run: |
+          curl -fsSL -o /usr/local/bin/dbmate \
+            https://github.com/amacneil/dbmate/releases/download/v2.21.0/dbmate-linux-amd64
+          chmod +x /usr/local/bin/dbmate
+
+      - name: Apply all migrations against an empty Postgres
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/lobu_ci?sslmode=disable
+        run: dbmate --migrations-dir db/migrations up
+
+      - name: Verify migrations are listed in the schema_migrations table
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/lobu_ci?sslmode=disable
+        run: |
+          dbmate --migrations-dir db/migrations status
+          # Fail if any pending remain
+          pending=$(dbmate --migrations-dir db/migrations status | grep -c '^\[ \]' || true)
+          if [ "$pending" != "0" ]; then
+            echo "::error::$pending migrations still pending after dbmate up"
+            exit 1
+          fi
+
