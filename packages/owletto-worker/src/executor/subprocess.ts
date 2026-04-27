@@ -131,9 +131,14 @@ export class SubprocessExecutor implements SyncExecutor {
       const childRunnerTsPath = join(__dirname, 'child-runner.ts');
 
       const execArgv = [`--max-old-space-size=${this.options.maxOldSpaceSize}`];
+      const isBun = typeof (process.versions as { bun?: string }).bun === 'string';
       if (!existsSync(childRunnerPath) && existsSync(childRunnerTsPath)) {
         childRunnerPath = childRunnerTsPath;
-        execArgv.unshift('--import', 'tsx');
+        // Bun runs .ts natively. Loading tsx as an ESM hook on Bun fails
+        // with "Cannot find module './cjs/index.cjs' from ''" because tsx's
+        // loader.mjs invokes module.register('./cjs/index.cjs') with a parent
+        // URL that Bun's resolver treats as empty. Skip --import tsx on Bun.
+        if (!isBun) execArgv.unshift('--import', 'tsx');
       }
 
       // Node subprocess execution is process isolation, not a security sandbox.
