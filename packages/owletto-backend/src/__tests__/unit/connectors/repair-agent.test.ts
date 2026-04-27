@@ -82,7 +82,6 @@ function feedRow(overrides: Partial<Record<string, any>> = {}): any {
     connector_name: 'Gmail',
     connector_version: '1.2.3',
     default_repair_agent_id: null,
-    org_repair_enabled: true,
     ...overrides,
   };
 }
@@ -219,21 +218,6 @@ describe('maybeOpenOrAppendRepairThread', () => {
       now: () => NOW,
     });
     expect(services.createThreadForAgent).not.toHaveBeenCalled();
-  });
-
-  it('skips when org has repair agents disabled', async () => {
-    const { sql, remaining } = makeMockSql([
-      { match: 'FROM feeds f', rows: [feedRow({ org_repair_enabled: false })] },
-    ]);
-    await maybeOpenOrAppendRepairThread(42, 99, {
-      sql,
-      services,
-      config: TEST_CONFIG,
-      now: () => NOW,
-    });
-    expect(services.createThreadForAgent).not.toHaveBeenCalled();
-    // We never even loaded recent runs.
-    expect(remaining()).toBe(0);
   });
 
   it('only one of two racing callers wins the atomic UPDATE', async () => {

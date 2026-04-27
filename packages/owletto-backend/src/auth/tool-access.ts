@@ -71,7 +71,6 @@ const OWNER_ADMIN_ACTIONS: Record<string, Set<string>> = {
     'classify',
   ]),
   manage_view_templates: new Set(['set', 'rollback', 'remove_tab']),
-  manage_organization: new Set(['get_settings', 'update_settings']),
 };
 
 const PUBLIC_READ_ACTIONS: Record<string, Set<string> | null> = {

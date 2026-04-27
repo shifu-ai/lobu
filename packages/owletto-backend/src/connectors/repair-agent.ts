@@ -64,7 +64,6 @@ interface FeedState {
   config: Record<string, unknown> | null;
   schedule: string | null;
   default_repair_agent_id: string | null;
-  org_repair_enabled: boolean;
   connection_id: number | null;
   connection_display_name: string | null;
   auth_profile_status: string | null;
@@ -101,15 +100,13 @@ async function loadFeedState(
         ap.status AS auth_profile_status,
         cd.name AS connector_name,
         cd.version AS connector_version,
-        cd.default_repair_agent_id,
-        org.repair_agents_enabled AS org_repair_enabled
+        cd.default_repair_agent_id
       FROM feeds f
       LEFT JOIN connections c ON c.id = f.connection_id
       LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
       LEFT JOIN connector_definitions cd ON cd.key = c.connector_key
         AND cd.status = 'active'
         AND (cd.organization_id = f.organization_id OR cd.organization_id IS NULL)
-      LEFT JOIN organization org ON org.id = f.organization_id
       WHERE f.id = ${feedId}
       ORDER BY f.id,
                (cd.organization_id IS NULL) ASC -- org-specific first
@@ -258,14 +255,6 @@ export async function maybeOpenOrAppendRepairThread(
   // path could violate that. Bail at <= 0 so the bucket=0 claim slot
   // doesn't get consumed before the first real failure.
   if (state.consecutive_failures <= 0) return;
-
-  if (!state.org_repair_enabled) {
-    logger.debug(
-      { feed_id: feedId, org: state.organization_id },
-      '[repair-agent] org has repair agents disabled — skipping'
-    );
-    return;
-  }
 
   const recentRuns = await loadRecentRuns(sql, feedId, 10);
   // The completed run we were called for is the canonical signature source —
@@ -419,9 +408,6 @@ export async function maybeOpenOrAppendRepairThread(
         AND (last_repair_at IS NULL
              OR last_repair_at <= current_timestamp - make_interval(secs => ${cooldownSeconds}))
         AND repair_attempt_count < ${cfg.maxAttempts}
-        AND organization_id IN (
-          SELECT id FROM organization WHERE id = ${state.organization_id} AND repair_agents_enabled = TRUE
-        )
       RETURNING repair_thread_id
     `) as unknown as Array<{ repair_thread_id: string | null }>;
     won = claim.length > 0;
