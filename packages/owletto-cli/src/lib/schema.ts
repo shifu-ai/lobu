@@ -11,6 +11,9 @@
  * Bump CURRENT_SCHEMA_VERSION when making breaking changes.
  */
 
+import { AutoCreateWhenRule } from '@lobu/owletto-sdk';
+import { TypeCompiler } from '@sinclair/typebox/compiler';
+
 export const CURRENT_SCHEMA_VERSION = 1;
 
 export type ModelType = 'entity' | 'relationship' | 'watcher';
@@ -34,18 +37,6 @@ export interface RelationshipTypeRule {
   target: string;
 }
 
-export interface AutoCreateWhenRuleSchema {
-  sourceNamespace: string;
-  targetField: string;
-  assuranceRequired:
-    | 'oauth_verified_admin_role'
-    | 'oauth_verified'
-    | 'cookie_session'
-    | 'self_attested';
-  matchStrategy: 'unique_only' | 'all_matches';
-  notes?: string;
-}
-
 export interface RelationshipSchema {
   version?: number;
   type: 'relationship';
@@ -60,7 +51,7 @@ export interface RelationshipSchema {
    * entity link to any target.
    */
   rules?: RelationshipTypeRule[];
-  auto_create_when?: AutoCreateWhenRuleSchema[];
+  auto_create_when?: AutoCreateWhenRule[];
 }
 
 export interface WatcherSchema {
@@ -158,13 +149,10 @@ function requireObject(
   return true;
 }
 
-const ASSURANCE_LEVELS = new Set([
-  'oauth_verified_admin_role',
-  'oauth_verified',
-  'cookie_session',
-  'self_attested',
-]);
-const MATCH_STRATEGIES = new Set(['unique_only', 'all_matches']);
+// Single source of truth for auto_create_when shape lives in
+// `@lobu/owletto-sdk`'s `AutoCreateWhenRule` schema. Compile once at module
+// load and surface every TypeBox error as a ValidationError.
+const compiledRule = TypeCompiler.Compile(AutoCreateWhenRule);
 
 function validateAutoCreateWhenRules(
   value: unknown,
@@ -180,41 +168,13 @@ function validateAutoCreateWhenRules(
     return;
   }
   value.forEach((rule, idx) => {
-    if (!rule || typeof rule !== 'object' || Array.isArray(rule)) {
+    for (const err of compiledRule.Errors(rule)) {
+      // TypeBox paths use JSON-Pointer slashes; translate to dot notation to
+      // match the rest of this file's `field` style.
       errors.push({
         file,
-        field: `auto_create_when[${idx}]`,
-        message: 'each auto_create_when rule must be an object',
-      });
-      return;
-    }
-    const r = rule as Record<string, unknown>;
-    if (typeof r.sourceNamespace !== 'string' || r.sourceNamespace === '') {
-      errors.push({
-        file,
-        field: `auto_create_when[${idx}].sourceNamespace`,
-        message: '"sourceNamespace" is required and must be a non-empty fact namespace',
-      });
-    }
-    if (typeof r.targetField !== 'string' || r.targetField === '') {
-      errors.push({
-        file,
-        field: `auto_create_when[${idx}].targetField`,
-        message: '"targetField" is required and must be a non-empty metadata field',
-      });
-    }
-    if (typeof r.assuranceRequired !== 'string' || !ASSURANCE_LEVELS.has(r.assuranceRequired)) {
-      errors.push({
-        file,
-        field: `auto_create_when[${idx}].assuranceRequired`,
-        message: '"assuranceRequired" must be a supported assurance level',
-      });
-    }
-    if (typeof r.matchStrategy !== 'string' || !MATCH_STRATEGIES.has(r.matchStrategy)) {
-      errors.push({
-        file,
-        field: `auto_create_when[${idx}].matchStrategy`,
-        message: '"matchStrategy" must be one of: unique_only, all_matches',
+        field: `auto_create_when[${idx}]${err.path.replaceAll('/', '.')}`,
+        message: err.message,
       });
     }
   });

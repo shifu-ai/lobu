@@ -73,17 +73,16 @@ async function findMemberEntityIdByEmail(
 }
 
 /**
- * Trust sources whose `entity_identities` rows are accepted for `$member`
- * adoption. User-supplied identity rows (e.g. via raw `manage_entity` calls)
- * MUST NOT appear here — only auth-server writes, vetted migrations, and
- * connector-emitted facts may bind a signing-in user to a curated row.
- * Without this filter, a malicious row could hijack adoption.
+ * `entity_identities.source_connector` values trusted for `$member` adoption.
+ * User-supplied identity rows MUST NOT appear here — only auth-server writes,
+ * vetted migrations, and connector-emitted facts may bind a signing-in user
+ * to a curated row, otherwise a malicious row could hijack adoption.
  */
-const TRUSTED_ADOPTION_SOURCES = new Set<string>([
+const TRUSTED_ADOPTION_SOURCES = [
 	"auth:signup",
 	"identity-engine:fact",
 	"migration:founder_to_member",
-]);
+];
 
 /**
  * Multi-namespace `$member` lookup against `entity_identities`.
@@ -108,7 +107,6 @@ export async function findMemberEntityIdByIdentities(
 ): Promise<number | null> {
 	if (candidates.length === 0) return null;
 	const sql = getDb();
-	const trusted = Array.from(TRUSTED_ADOPTION_SOURCES);
 	for (const cand of candidates) {
 		if (!cand.namespace || !cand.identifier) continue;
 		const rows = await sql<{ entity_id: number }>`
@@ -124,7 +122,7 @@ export async function findMemberEntityIdByIdentities(
         AND ei.namespace = ${cand.namespace}
         AND ei.identifier = ${cand.identifier}
         AND ei.deleted_at IS NULL
-        AND ei.source_connector = ANY(${trusted})
+        AND ei.source_connector = ANY(${TRUSTED_ADOPTION_SOURCES})
         AND et.slug = '$member'
         AND e.deleted_at IS NULL
       LIMIT 1

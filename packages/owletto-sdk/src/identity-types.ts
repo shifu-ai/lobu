@@ -72,8 +72,7 @@ export const ConnectorFact = Type.Object(
      * facts per session for revocation.
      */
     sourceAccountId: Type.String({ minLength: 1, maxLength: 256 }),
-    /** Optional expiry. Required for high-assurance facts in production. */
-    /** ISO-8601 timestamp string. Optional; required for high-assurance facts in production. */
+    /** ISO-8601 timestamp. Optional; required for high-assurance facts in production. */
     validTo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
     /**
      * Optional human-readable note about trust caveats this fact carries.
@@ -115,18 +114,10 @@ export type ConnectorIdentityCapability = Static<typeof ConnectorIdentityCapabil
 // =============================================================================
 
 /**
- * What the engine should do when ambiguous matches are found:
- *  - `unique_only` (default for identity): require exactly one match. Multiple
- *    matches are rejected and surfaced as a `claim_collision` approval event
- *    for an admin/user to deduplicate.
- *  - `all_matches`: derive against every match. Only safe for weak
- *    relationships (e.g. `mentions`); never use for identity adoption or
- *    authority.
- *
- * `first_match` is intentionally NOT a valid strategy — it would silently
- * pick a winner on collision, opening adoption-takeover paths. If a future
- * use case justifies it, add it back via a follow-up that also adds the
- * required guardrails.
+ * `unique_only` rejects ambiguity (writes a collision event for admin
+ * resolution); `all_matches` fans out to every match and is only safe for
+ * weak relationships. `first_match` is deliberately excluded — silently
+ * picking a winner on collision would open adoption-takeover paths.
  */
 export const MatchStrategy = Type.Union(
   [Type.Literal('unique_only'), Type.Literal('all_matches')],

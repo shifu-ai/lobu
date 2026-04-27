@@ -43,7 +43,6 @@ import {
 	validateRelationshipTypeIdentityMetadata,
 } from "./validate";
 import { ruleHashFor } from "./rules";
-export { compileRulesMetadata, ruleHashFor } from "./rules";
 
 type Sql = ReturnType<typeof getDb>;
 

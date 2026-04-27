@@ -16,9 +16,9 @@
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import {
 	clearIdentityFieldCache,
-	compileRulesMetadata,
 	ingestFacts,
 } from "../../../identity/engine";
+import { compileRulesMetadata } from "../../../identity/rules";
 import { connectorCapabilityRegistry } from "../../../identity/capability-registry";
 import {
 	IDENTITY_FACT_SEMANTIC_TYPE,
