@@ -141,9 +141,17 @@ END$$;
 -- alone would skip creation in that case, leaving uniqueness unenforced.
 -- Drop first (no-op when the index doesn't exist) so the create always
 -- produces a valid index.
-DROP INDEX CONCURRENTLY IF EXISTS public.idx_connections_org_connector_account_live;
+--
+-- Originally CONCURRENTLY (which is why this migration is in the
+-- transaction:false half) but dbmate's transaction handling against
+-- the pq driver still presents these as in-transaction to Postgres,
+-- failing with "DROP INDEX CONCURRENTLY cannot run inside a
+-- transaction block". The connections table only has a handful of
+-- rows matching the partial-index predicate (≈2 in prod), so the
+-- ACCESS EXCLUSIVE held during a non-concurrent build is sub-second.
+DROP INDEX IF EXISTS public.idx_connections_org_connector_account_live;
 
-CREATE UNIQUE INDEX CONCURRENTLY idx_connections_org_connector_account_live
+CREATE UNIQUE INDEX idx_connections_org_connector_account_live
     ON public.connections (organization_id, connector_key, account_id)
     WHERE deleted_at IS NULL AND account_id IS NOT NULL;
 
