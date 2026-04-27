@@ -1,0 +1,74 @@
+name: Submodule Drift
+
+# Surfaces when packages/owletto-web (private) has merged commits past the
+# parent's pinned SHA — i.e. the two-PR rule's parent bump is missing.
+# Skips bot tag-update commits so FluxCD's image automation doesn't trip it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - id: submodule
+        uses: ./.github/actions/setup-submodule
+        with:
+          deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
+
+      - name: Skip when deploy key is unavailable (fork PRs)
+        if: steps.submodule.outputs.stubbed == 'true'
+        run: echo "::notice::No deploy key available — skipping submodule drift check."
+
+      - name: Check for unmerged non-bot commits on owletto-web/main
+        if: steps.submodule.outputs.stubbed != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          PINNED=$(git -C packages/owletto-web rev-parse HEAD)
+          git -C packages/owletto-web fetch --quiet origin main
+          REMOTE=$(git -C packages/owletto-web rev-parse origin/main)
+
+          echo "Pinned (parent):   $PINNED"
+          echo "owletto-web/main:  $REMOTE"
+
+          if [ "$PINNED" = "$REMOTE" ]; then
+            echo "Submodule pin matches owletto-web/main — no drift."
+            exit 0
+          fi
+
+          NON_BOT=$(git -C packages/owletto-web log \
+            --invert-grep --grep '^chore: update images' \
+            --pretty='format:%h %s' "$PINNED..origin/main" || true)
+
+          if [ -z "$NON_BOT" ]; then
+            echo "owletto-web/main is ahead, but only by FluxCD image-tag commits — no parent bump needed."
+            exit 0
+          fi
+
+          echo "::error::owletto-web/main has merged commits past the pinned SHA. The parent bump PR is missing."
+          echo ""
+          echo "Pinned:           $PINNED"
+          echo "owletto-web/main: $REMOTE"
+          echo ""
+          echo "Commits needing a parent bump:"
+          echo "$NON_BOT"
+          echo ""
+          echo "Fix (open as a separate PR):"
+          echo "  git -C packages/owletto-web fetch origin"
+          echo "  git -C packages/owletto-web checkout origin/main"
+          echo "  git add packages/owletto-web"
+          echo "  git commit -m 'chore(submodule): bump owletto-web to current main'"
+          exit 1

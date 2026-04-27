@@ -10,7 +10,7 @@ DEPLOYMENT_MODE := $(shell \
 		echo docker; \
 	fi)
 
-.PHONY: help setup build test eval clean logs deploy down build-packages dev
+.PHONY: help setup build test eval clean logs deploy down build-packages dev dev-native ensure-submodule
 
 # Default target
 help:
@@ -36,12 +36,25 @@ build-packages:
 	done
 	@echo "✅ All packages built successfully!"
 
+# Ensure packages/owletto-web is initialized; warn on drift but don't auto-fix
+# (drift may be active feature-branch work — clobbering it silently is worse than the warning).
+ensure-submodule:
+	@status=$$(git submodule status packages/owletto-web 2>/dev/null || true); \
+	case "$$status" in \
+		'-'*) echo ">> owletto-web submodule not initialized — running git submodule update --init"; \
+		      git submodule update --init packages/owletto-web ;; \
+		'+'*) echo ">> WARNING: packages/owletto-web is at a different SHA than the parent pin:"; \
+		      echo "   $$status"; \
+		      echo "   If this is unintentional, run: git submodule update packages/owletto-web" ;; \
+		*) ;; \
+	esac
+
 # Start dev environment with Docker Compose Watch
-dev:
+dev: ensure-submodule
 	docker compose --env-file .env -f docker/docker-compose.yml watch
 
 # Native foreground dev: embedded gateway + workers + Vite HMR, against host redis + remote Postgres.
-dev-native:
+dev-native: ensure-submodule
 	@./scripts/dev-native.sh
 
 # Setup development environment (run once)
