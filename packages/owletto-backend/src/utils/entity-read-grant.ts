@@ -2,8 +2,7 @@
  * Delegated read grant primitive.
  *
  * When a contributor in a private org creates a trust-primitive relationship
- * (`claims_identity`, `has_authority`, `proposes_canonical`,
- * `proposes_merge_with`) pointing at a public-catalog entity, the source
+ * (`claims_identity`, `has_authority`) pointing at a public-catalog entity, the source
  * private entity needs to become readable by the audit agent for one or more
  * reads. We model this as an `entity_read_grant` row (see migration
  * `db/migrations/20260427120000_entity_read_grant.sql`).
@@ -43,8 +42,6 @@ export const AUDIT_AGENT_USER_ID = "user_audit_agent";
 export const TRUST_PRIMITIVE_RELATIONSHIP_SLUGS: ReadonlySet<string> = new Set([
 	"claims_identity",
 	"has_authority",
-	"proposes_canonical",
-	"proposes_merge_with",
 ]);
 
 /**

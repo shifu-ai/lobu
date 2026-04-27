@@ -913,20 +913,6 @@ async function handleLink(
   if (!args.to_entity_id) throw new Error('to_entity_id is required for link');
   if (!args.relationship_type_slug) throw new Error('relationship_type_slug is required for link');
 
-  // Trust-primitive guard: `proposes_canonical` MUST carry
-  // metadata.proposed_entity_id — that's the private entity the audit agent
-  // will read via the issued grant. Without it the relationship is
-  // unauditable; reject pre-insert so we don't end up with a link the
-  // grant hook silently drops.
-  if (args.relationship_type_slug === 'proposes_canonical') {
-    const proposed = (args.metadata ?? {}).proposed_entity_id;
-    if (typeof proposed !== 'number' || !Number.isInteger(proposed) || proposed <= 0) {
-      throw new Error(
-        'proposes_canonical requires metadata.proposed_entity_id (positive integer entity id)'
-      );
-    }
-  }
-
   const sql = getDb();
 
   validateNoSelfReference(args.from_entity_id, args.to_entity_id);
@@ -1013,13 +999,12 @@ async function handleLink(
   `;
   const relationshipId = Number((inserted[0] as { id: unknown }).id);
 
-  // Trust-primitive relationships (claims_identity / has_authority /
-  // proposes_canonical / proposes_merge_with) auto-issue a delegated read
-  // grant so the audit agent can read the contributor's private entity.
+  // Trust-primitive relationships (claims_identity / has_authority)
+  // auto-issue a delegated read grant so the public-org admin can read
+  // the contributor's private $member entity to verify the claim.
   // Issued AFTER the relationship row is inserted so we never leak grants
-  // on validation failure or partial creation. The helper is idempotent;
-  // a grant-issuance bug must NOT roll back the link the user requested,
-  // so we swallow the error here (already logged in the helper).
+  // on validation failure or partial creation. Idempotent; failures are
+  // swallowed so the link succeeds even when grant issuance is degraded.
   try {
     await maybeIssueReadGrantForRelationship({
       relationshipTypeSlug: args.relationship_type_slug,
@@ -1027,7 +1012,6 @@ async function handleLink(
       toEntityId: toId,
       callerOrgId: ctx.organizationId,
       relationshipId,
-      metadata: (args.metadata ?? null) as Record<string, unknown> | null,
     });
   } catch {
     // Logged inside the helper; intentional swallow so the link succeeds

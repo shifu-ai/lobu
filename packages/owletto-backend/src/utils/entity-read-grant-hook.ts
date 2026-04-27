@@ -27,16 +27,6 @@ interface MaybeIssueParams {
 	/** Caller's org id — the grantor whose private entity is being shared. */
 	callerOrgId: string;
 	relationshipId: number;
-	/**
-	 * Relationship metadata as supplied by the caller. For
-	 * `proposes_canonical` the entity to grant access to lives in
-	 * `metadata.proposed_entity_id` (a private entity in the caller's org
-	 * that is being put forward for promotion); the relationship's `from`
-	 * is the caller's `$member`, which the audit agent does not need to
-	 * read. For every other trust primitive the source IS the entity to
-	 * audit, and metadata is ignored.
-	 */
-	metadata?: Record<string, unknown> | null;
 }
 
 /**
@@ -60,26 +50,10 @@ export async function maybeIssueReadGrantForRelationship(
 		return null;
 	}
 
-	// For `proposes_canonical` the relationship's `from` is the caller's
-	// `$member`; the entity to audit is metadata.proposed_entity_id. Reject
-	// the issuance if the metadata is missing — the audit watcher would have
-	// nothing to read otherwise. For every other trust primitive the
-	// relationship's `from` IS the audit target.
-	let auditEntityId = params.fromEntityId;
-	if (params.relationshipTypeSlug === "proposes_canonical") {
-		const proposed = params.metadata?.proposed_entity_id;
-		if (typeof proposed !== "number" || !Number.isInteger(proposed) || proposed <= 0) {
-			logger.warn(
-				{
-					relationshipId: params.relationshipId,
-					relationshipTypeSlug: params.relationshipTypeSlug,
-				},
-				"entity_read_grant: proposes_canonical missing metadata.proposed_entity_id — no grant issued",
-			);
-			return null;
-		}
-		auditEntityId = proposed;
-	}
+	// The relationship's `from` IS the audit target — the contributor's
+	// $member or private entity that the public-org admin (or future audit
+	// agent) needs to read to verify the claim.
+	const auditEntityId = params.fromEntityId;
 
 	const sql = getDb();
 	try {
