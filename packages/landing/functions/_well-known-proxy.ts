@@ -48,7 +48,7 @@ export async function proxyWellKnown(context: PagesContext): Promise<Response> {
   let upstream: Response;
   try {
     upstream = await fetch(upstreamUrl, {
-      method: "GET",
+      method: request.method,
       headers: {
         accept: request.headers.get("accept") ?? "application/json",
         "x-trace-id": traceId,
@@ -60,6 +60,7 @@ export async function proxyWellKnown(context: PagesContext): Promise<Response> {
     logEvent({
       level: "error",
       traceId,
+      method: request.method,
       path: incoming.pathname,
       error: error instanceof Error ? error.message : String(error),
       durationMs: Date.now() - startedAt,
@@ -75,6 +76,7 @@ export async function proxyWellKnown(context: PagesContext): Promise<Response> {
 
   logEvent({
     traceId,
+    method: request.method,
     path: incoming.pathname,
     upstreamStatus: upstream.status,
     durationMs: Date.now() - startedAt,

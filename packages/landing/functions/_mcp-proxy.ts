@@ -81,23 +81,6 @@ function copyHeaders(
   return out;
 }
 
-async function peekJsonRpcMethod(request: Request): Promise<string | null> {
-  if (request.method !== "POST") return null;
-  const contentType = request.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) return null;
-  try {
-    const body = await request.clone().json();
-    if (Array.isArray(body)) {
-      const first = body.find((m) => m && typeof m.method === "string");
-      return first?.method ?? null;
-    }
-    if (body && typeof body.method === "string") return body.method;
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 function logEvent(payload: Record<string, unknown>): void {
   // Structured JSON lands in Workers Logs / Tail / Logpush. Keep it on a
   // single line so log shippers don't fragment it.
@@ -127,8 +110,6 @@ export async function proxyMcp(context: PagesContext): Promise<Response> {
       : Math.random().toString(36).slice(2));
   const cfRay = request.headers.get("cf-ray") ?? null;
   const startedAt = Date.now();
-
-  const jsonRpcMethod = await peekJsonRpcMethod(request);
 
   const upstreamUrl = buildUpstreamUrl(request, upstreamOrigin);
   const upstreamHeaders = copyHeaders(
@@ -160,7 +141,6 @@ export async function proxyMcp(context: PagesContext): Promise<Response> {
       cfRay,
       method: request.method,
       path: incomingUrl.pathname,
-      jsonRpcMethod,
       durationMs: Date.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -192,7 +172,6 @@ export async function proxyMcp(context: PagesContext): Promise<Response> {
     cfRay,
     method: request.method,
     path: incomingUrl.pathname,
-    jsonRpcMethod,
     upstreamStatus: upstreamResponse.status,
     durationMs: Date.now() - startedAt,
   });
