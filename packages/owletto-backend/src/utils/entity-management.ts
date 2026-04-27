@@ -427,6 +427,25 @@ export async function getEntity(
   // public-catalog entity, totals reflect the caller's events/feeds/watchers/
   // children that reference it — never cross-tenant activity around the
   // public row.
+  //
+  // Visibility branches checked here, in priority order:
+  //   1. caller's own org (always readable)
+  //   2. public-catalog entity (anyone reads, except `$member`)
+  //   3. delegated read grant — when the caller has an active row in
+  //      `entity_read_grant` for this (user, entity) pair, the caller can
+  //      read the row. The audit-agent service user reaches private
+  //      contributor entities through this branch only.
+  //
+  // Single-use grants are NOT consumed here: this is a metadata-only
+  // fetch and the audit agent typically calls getEntity multiple times in
+  // one run. Until the Phase-5 audit-agent extraction step lands and
+  // wires `consumeActiveReadGrant` at its single read-of-record, default
+  // `read-once` grants effectively behave as "read-window" until
+  // `expires_at`. That's an acceptable v1 trade-off because the grant
+  // itself is bounded in time and scope (single grantor org, single
+  // grantee user, single entity), and downgrading the agent's behaviour
+  // toward a 30d window is a smaller risk than burning grants on
+  // metadata reads the agent makes mid-evaluation.
   const result = await sql<CreatedEntity>`
     SELECT
       e.id, et.slug AS entity_type, e.name, e.slug, e.parent_id, e.metadata, e.created_at,
@@ -466,6 +485,17 @@ export async function getEntity(
       AND (
         e.organization_id = ${ctx.organizationId}
         OR (eo.visibility = 'public' AND et.slug <> '$member')
+        OR (
+          ${ctx.userId ?? null}::text IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM entity_read_grant g
+            WHERE g.entity_id = e.id
+              AND g.grantee_user_id = ${ctx.userId ?? null}
+              AND g.grantor_org_id = e.organization_id
+              AND g.consumed_at IS NULL
+              AND g.expires_at > NOW()
+          )
+        )
       )
       AND e.deleted_at IS NULL
   `;

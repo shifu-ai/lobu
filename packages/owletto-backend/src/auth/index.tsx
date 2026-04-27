@@ -392,6 +392,13 @@ export async function createAuth(env: Env, request?: Request) {
       account: {
         create: {
           after: async (account, context) => {
+            const accountSummary = {
+              id: account.id,
+              userId: account.userId,
+              providerId: account.providerId,
+              accessToken: (account as Record<string, unknown>).accessToken as string | null,
+              scope: (account as Record<string, unknown>).scope as string | null,
+            };
             try {
               const { provisionConnectorFromSocialLogin } = await import(
                 './social-login-provisioning'
@@ -399,21 +406,38 @@ export async function createAuth(env: Env, request?: Request) {
               await provisionConnectorFromSocialLogin({
                 env,
                 request: context?.request ?? undefined,
-                account: {
-                  id: account.id,
-                  userId: account.userId,
-                  providerId: account.providerId,
-                  accessToken: (account as Record<string, unknown>).accessToken as string | null,
-                  scope: (account as Record<string, unknown>).scope as string | null,
-                },
+                account: accountSummary,
               });
             } catch (error) {
               console.error('[Auth] Failed to auto-provision connector from social login:', error);
             }
+            // Provider-metadata sync (claims_identity / has_authority) runs
+            // after connector provisioning so the auth_profile row exists, but
+            // is fire-and-forget — sign-in must NEVER block on this.
+            void (async () => {
+              try {
+                const { syncProviderMetadataClaims } = await import(
+                  './provider-metadata-sync'
+                );
+                await syncProviderMetadataClaims({
+                  account: accountSummary,
+                  request: context?.request ?? null,
+                });
+              } catch (error) {
+                console.error('[Auth] Provider metadata sync failed:', error);
+              }
+            })();
           },
         },
         update: {
           after: async (account, context) => {
+            const accountSummary = {
+              id: account.id,
+              userId: account.userId,
+              providerId: account.providerId,
+              accessToken: (account as Record<string, unknown>).accessToken as string | null,
+              scope: (account as Record<string, unknown>).scope as string | null,
+            };
             try {
               const { provisionConnectorFromSocialLogin } = await import(
                 './social-login-provisioning'
@@ -421,19 +445,70 @@ export async function createAuth(env: Env, request?: Request) {
               await provisionConnectorFromSocialLogin({
                 env,
                 request: context?.request ?? undefined,
-                account: {
-                  id: account.id,
-                  userId: account.userId,
-                  providerId: account.providerId,
-                  accessToken: (account as Record<string, unknown>).accessToken as string | null,
-                  scope: (account as Record<string, unknown>).scope as string | null,
-                },
+                account: accountSummary,
               });
             } catch (error) {
               console.error(
                 '[Auth] Failed to refresh connector provisioning from social login:',
                 error
               );
+            }
+            // Re-run sync on token refresh so valid_to extends and revoked_at
+            // clears on a re-link. Fire-and-forget for the same reason as
+            // create.after.
+            void (async () => {
+              try {
+                const { syncProviderMetadataClaims } = await import(
+                  './provider-metadata-sync'
+                );
+                await syncProviderMetadataClaims({
+                  account: accountSummary,
+                  request: context?.request ?? null,
+                });
+              } catch (error) {
+                console.error('[Auth] Provider metadata sync failed on update:', error);
+              }
+            })();
+          },
+        },
+        // When a social-login account is unlinked / revoked (better-auth
+        // deletes the account row), mark every claims_identity /
+        // has_authority that was minted off this provider session as
+        // `revoked_at = NOW()` and `status='revoked'`. This is what makes
+        // OAuth-driven authority temporal: a token revocation propagates
+        // immediately to the relationship rows the audit agent reads.
+        //
+        // We revoke in BOTH `before` and `after`:
+        //   - `before` covers the common case (no concurrent sync).
+        //   - `after` closes the codex-flagged race where a sync that
+        //     started before unlink and is still mid-flight observes the
+        //     account row as live (because BetterAuth has not yet deleted
+        //     it) and inserts a fresh active relationship between the
+        //     `before` revoke and the actual delete. After the row is gone
+        //     we re-revoke to mop up anything inserted in that window.
+        delete: {
+          before: async (account) => {
+            try {
+              const { revokeProviderClaimsForSession } = await import(
+                './provider-metadata-sync'
+              );
+              await revokeProviderClaimsForSession({
+                providerSessionId: account.id,
+              });
+            } catch (error) {
+              console.error('[Auth] Provider claim revocation failed (before):', error);
+            }
+          },
+          after: async (account) => {
+            try {
+              const { revokeProviderClaimsForSession } = await import(
+                './provider-metadata-sync'
+              );
+              await revokeProviderClaimsForSession({
+                providerSessionId: account.id,
+              });
+            } catch (error) {
+              console.error('[Auth] Provider claim revocation failed (after):', error);
             }
           },
         },

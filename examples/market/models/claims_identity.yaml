@@ -1,0 +1,46 @@
+version: 1
+type: relationship
+slug: claims_identity
+name: Claims Identity
+description: A contributor's $member entity claims to be a public Market entity (founder or company). Audit agent verifies via evidence + provider metadata before promoting confidence.
+rules:
+  - { source: $member, target: founder }
+  - { source: $member, target: company }
+metadata_schema:
+  type: object
+  properties:
+    method:
+      type: string
+      description: How the claim was made
+      enum: [manual, oauth-google, oauth-github, oauth-linkedin, oauth-microsoft, dns-txt, admin-attest]
+    evidence_url:
+      type: string
+      format: uri
+      description: Public link supporting the claim (profile page, press release, etc.)
+    evidence_tier:
+      type: string
+      description: Audit-agent grade for the supporting evidence
+      enum: [A, B, C, D, E]
+    provider:
+      type: string
+      description: OAuth provider that produced the metadata match (when method=oauth-*)
+    provider_session_id:
+      type: string
+      description: OAuth refresh-token id (or session id) tied to this claim. Setting revoked_at when this session ends keeps authority temporal by construction.
+    confidence:
+      type: number
+      minimum: 0
+      maximum: 1
+    issued_at:
+      type: string
+      format: date-time
+    valid_to:
+      type: string
+      format: date-time
+      description: When the claim expires; mirrored from OAuth session expiry for provider-driven claims
+    revoked_at:
+      type: string
+      format: date-time
+    status:
+      type: string
+      enum: [active, conflicting, revoked, pending, rejected]

@@ -29,6 +29,7 @@ import {
   type RelationshipColumnSpec,
   updateEntity,
 } from '../../utils/entity-management';
+import { maybeIssueReadGrantForRelationship } from '../../utils/entity-read-grant-hook';
 import { recordChangeEvent } from '../../utils/insert-event';
 import {
   canonicalizeSymmetricEdge,
@@ -912,6 +913,20 @@ async function handleLink(
   if (!args.to_entity_id) throw new Error('to_entity_id is required for link');
   if (!args.relationship_type_slug) throw new Error('relationship_type_slug is required for link');
 
+  // Trust-primitive guard: `proposes_canonical` MUST carry
+  // metadata.proposed_entity_id — that's the private entity the audit agent
+  // will read via the issued grant. Without it the relationship is
+  // unauditable; reject pre-insert so we don't end up with a link the
+  // grant hook silently drops.
+  if (args.relationship_type_slug === 'proposes_canonical') {
+    const proposed = (args.metadata ?? {}).proposed_entity_id;
+    if (typeof proposed !== 'number' || !Number.isInteger(proposed) || proposed <= 0) {
+      throw new Error(
+        'proposes_canonical requires metadata.proposed_entity_id (positive integer entity id)'
+      );
+    }
+  }
+
   const sql = getDb();
 
   validateNoSelfReference(args.from_entity_id, args.to_entity_id);
@@ -998,6 +1013,27 @@ async function handleLink(
   `;
   const relationshipId = Number((inserted[0] as { id: unknown }).id);
 
+  // Trust-primitive relationships (claims_identity / has_authority /
+  // proposes_canonical / proposes_merge_with) auto-issue a delegated read
+  // grant so the audit agent can read the contributor's private entity.
+  // Issued AFTER the relationship row is inserted so we never leak grants
+  // on validation failure or partial creation. The helper is idempotent;
+  // a grant-issuance bug must NOT roll back the link the user requested,
+  // so we swallow the error here (already logged in the helper).
+  try {
+    await maybeIssueReadGrantForRelationship({
+      relationshipTypeSlug: args.relationship_type_slug,
+      fromEntityId: fromId,
+      toEntityId: toId,
+      callerOrgId: ctx.organizationId,
+      relationshipId,
+      metadata: (args.metadata ?? null) as Record<string, unknown> | null,
+    });
+  } catch {
+    // Logged inside the helper; intentional swallow so the link succeeds
+    // even when grant issuance is degraded.
+  }
+
   const created = await sql.unsafe<RelationshipRow>(
     `SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`,
     [relationshipId]
@@ -1027,6 +1063,17 @@ async function handleUnlink(args: ManageEntityArgs, ctx: ToolContext): Promise<M
     UPDATE entity_relationships
     SET deleted_at = current_timestamp, updated_at = current_timestamp, updated_by = ${ctx.userId}
     WHERE id = ${args.relationship_id}
+  `;
+
+  // If the unlinked relationship was a trust primitive, revoke any read grants
+  // it issued so audit-agent access does not outlive the contributor's
+  // withdrawal. We mark `consumed_at` rather than deleting so the audit trail
+  // (who had access, until when, why it ended) survives.
+  await sql`
+    UPDATE entity_read_grant
+    SET consumed_at = NOW()
+    WHERE triggering_relationship_id = ${args.relationship_id}
+      AND consumed_at IS NULL
   `;
 
   return {
