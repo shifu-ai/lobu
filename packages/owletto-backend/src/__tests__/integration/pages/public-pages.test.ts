@@ -79,11 +79,25 @@ describe('Public pages', () => {
 
     const body = await response.text();
     expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toContain('public, max-age=300');
     expect(body).toContain('<meta name="description"');
     expect(body).toContain('Public SEO Org | Owletto');
     expect(body).toContain('window.__OWLETTO_PUBLIC_BOOTSTRAP__');
     expect(body).toContain('Tracked public brands');
     expect(body).toContain('Brand launch feedback');
+  });
+
+  it('serves scrapeable public HTML for generic GET clients', async () => {
+    const response = await get('/public-seo-org', {
+      env: { PUBLIC_WEB_URL: 'https://www.owletto.test' },
+    });
+
+    const body = await response.text();
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('text/html');
+    expect(body).toContain('Public SEO Org | Owletto');
+    expect(body).toContain('Brand launch feedback');
+    expect(body).not.toContain('"mcp_endpoint"');
   });
 
   it('renders public entity type pages with crawlable listing content', async () => {

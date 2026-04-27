@@ -991,12 +991,18 @@ app.all('/mcp/:orgSlug/', handleMcp);
  */
 app.get('*', async (c) => {
   const requestPath = c.req.path;
-  const acceptsHtml = c.req.header('accept')?.includes('text/html') ?? false;
+  const acceptHeader = c.req.header('accept') ?? '';
+  const acceptsHtml = acceptHeader.includes('text/html');
+  const acceptsGenericResponse = !acceptHeader || acceptHeader.includes('*/*');
   const hasFileExtension =
     /\.(?:js|css|html|json|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|txt|xml)$/i.test(
       requestPath
     );
-  if (acceptsHtml && !hasFileExtension && !isExcludedSpaPath(requestPath)) {
+  if (
+    (acceptsHtml || acceptsGenericResponse) &&
+    !hasFileExtension &&
+    !isExcludedSpaPath(requestPath)
+  ) {
     const publicPageModel = await buildPublicPageModel(
       requestPath,
       c.env,
