@@ -39,28 +39,14 @@ BEGIN
 END$$;
 
 -- Backfill historical NULLs with the existing 'system' sentinel before
--- VALIDATE. Pre-`created_by` events (and any system-generated events
--- written before the column was tracked) end up here. The chunked loop
--- avoids a single 100k+ row UPDATE holding row locks for too long.
-DO $$
-DECLARE
-    rows_left bigint;
-BEGIN
-    LOOP
-        WITH chunk AS (
-            SELECT id FROM public.events
-             WHERE created_by IS NULL
-             LIMIT 50000
-             FOR UPDATE SKIP LOCKED
-        )
-        UPDATE public.events
-           SET created_by = 'system'
-          FROM chunk
-         WHERE events.id = chunk.id;
-        GET DIAGNOSTICS rows_left = ROW_COUNT;
-        EXIT WHEN rows_left = 0;
-    END LOOP;
-END$$;
+-- VALIDATE. Pre-`created_by` events end up here. A single statement
+-- because `transaction:false` already lets each statement commit on
+-- its own — the previous chunked DO LOOP wrapped the whole backfill
+-- in one PL/pgSQL transaction, holding row locks until the loop
+-- finished, which exceeded the gateway pod's livenessProbe budget
+-- (90 s) on tables with >100k NULL rows. A plain UPDATE on 400k rows
+-- runs in single-digit seconds and commits when it returns.
+UPDATE public.events SET created_by = 'system' WHERE created_by IS NULL;
 
 ALTER TABLE public.events
     VALIDATE CONSTRAINT events_created_by_not_null;
