@@ -33,6 +33,7 @@
       "!**/packages/owletto-extension/**",
       "!**/packages/owletto-web/**",
       "!**/scripts/owletto/**",
+      "!**/scripts/seed-atlas/data/**",
       "!**/benchmarks/**",
       "!**/skills/**"
     ]
