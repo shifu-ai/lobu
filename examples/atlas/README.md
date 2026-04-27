@@ -21,9 +21,10 @@ being duplicated per catalog.
 - **Composition.** Adding a third public catalog later (real estate,
   research, …) reuses Atlas with no migration — same shape as Market
   referencing Atlas today.
-- **Audit policy.** Identity-style claims don't apply to Atlas (no one
-  owns a city); the audit agent can apply a reference-data policy here
-  that's strictly stricter than Market's.
+- **No identity-claim surface.** Identity claims don't apply to Atlas
+  (no one owns a city), so the contribution model here is purely
+  admin-curated. Other catalogs (e.g. `market`) handle identity through
+  the connector-facts engine; Atlas opts out.
 
 ## Entity types (Phase 1 — schema only)
 
@@ -57,6 +58,7 @@ JSON-Schema-style shape as the other `examples/<org>/models/` catalogs.
   `operates_in`, `educated_at`, `uses_technology`, `in_industry`). Those
   are registered on the **source-side org** (`market`), not on Atlas, and
   ship in this PR alongside the rest of the Market schema extension.
-- **Audit agent** (Phase 5). Atlas-specific policy: never accept
-  identity-style relationships, only `proposes_canonical` /
-  `proposes_merge_with` / `fact`-typed events with Tier-A evidence.
+- **Contribution flow.** Atlas is admin-curated for v1 — there is no
+  contributor-driven proposal flow. When a connector-facts engine
+  follow-up adds public-catalog claims, Atlas opts out: no
+  identity-style relationships exist on these entity types.

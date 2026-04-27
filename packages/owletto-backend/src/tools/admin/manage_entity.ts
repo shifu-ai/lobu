@@ -29,7 +29,6 @@ import {
   type RelationshipColumnSpec,
   updateEntity,
 } from '../../utils/entity-management';
-import { maybeIssueReadGrantForRelationship } from '../../utils/entity-read-grant-hook';
 import { recordChangeEvent } from '../../utils/insert-event';
 import {
   canonicalizeSymmetricEdge,
@@ -999,25 +998,6 @@ async function handleLink(
   `;
   const relationshipId = Number((inserted[0] as { id: unknown }).id);
 
-  // Trust-primitive relationships (claims_identity / has_authority)
-  // auto-issue a delegated read grant so the public-org admin can read
-  // the contributor's private $member entity to verify the claim.
-  // Issued AFTER the relationship row is inserted so we never leak grants
-  // on validation failure or partial creation. Idempotent; failures are
-  // swallowed so the link succeeds even when grant issuance is degraded.
-  try {
-    await maybeIssueReadGrantForRelationship({
-      relationshipTypeSlug: args.relationship_type_slug,
-      fromEntityId: fromId,
-      toEntityId: toId,
-      callerOrgId: ctx.organizationId,
-      relationshipId,
-    });
-  } catch {
-    // Logged inside the helper; intentional swallow so the link succeeds
-    // even when grant issuance is degraded.
-  }
-
   const created = await sql.unsafe<RelationshipRow>(
     `SELECT ${RELATIONSHIP_SELECT} ${RELATIONSHIP_JOINS} WHERE r.id = $1`,
     [relationshipId]
@@ -1047,17 +1027,6 @@ async function handleUnlink(args: ManageEntityArgs, ctx: ToolContext): Promise<M
     UPDATE entity_relationships
     SET deleted_at = current_timestamp, updated_at = current_timestamp, updated_by = ${ctx.userId}
     WHERE id = ${args.relationship_id}
-  `;
-
-  // If the unlinked relationship was a trust primitive, revoke any read grants
-  // it issued so audit-agent access does not outlive the contributor's
-  // withdrawal. We mark `consumed_at` rather than deleting so the audit trail
-  // (who had access, until when, why it ended) survives.
-  await sql`
-    UPDATE entity_read_grant
-    SET consumed_at = NOW()
-    WHERE triggering_relationship_id = ${args.relationship_id}
-      AND consumed_at IS NULL
   `;
 
   return {
