@@ -253,6 +253,12 @@ export async function maybeOpenOrAppendRepairThread(
   }
   if (!state) return;
 
+  // Defensive: this function is only meant to fire after the worker-api
+  // failure path has incremented consecutive_failures, but a future caller
+  // path could violate that. Bail at <= 0 so the bucket=0 claim slot
+  // doesn't get consumed before the first real failure.
+  if (state.consecutive_failures <= 0) return;
+
   if (!state.org_repair_enabled) {
     logger.debug(
       { feed_id: feedId, org: state.organization_id },
@@ -265,30 +271,48 @@ export async function maybeOpenOrAppendRepairThread(
   // The completed run we were called for is the canonical signature source —
   // not whichever run happens to be at the top of recentRuns. Out-of-order
   // worker completions (later run finishes before an earlier one) would
-  // otherwise attach the wrong run's diagnostics.
-  const completedRun = recentRuns.find((r) => r.id === runId) ?? recentRuns[0] ?? null;
+  // otherwise attach the wrong run's diagnostics. If the runId we were
+  // called for isn't yet visible in the recent runs (DB read raced the
+  // INSERT), skip silently — the next failure cron will pick it up.
+  const completedRun = recentRuns.find((r) => r.id === runId) ?? null;
 
   // Branch 1: Thread already open — consider appending.
   if (state.repair_thread_id) {
-    if (!completedRun) return;
-    const hash = hashFailureSignature(completedRun);
-    const isMultipleOf5 = state.consecutive_failures > 0 && state.consecutive_failures % 5 === 0;
+    if (!completedRun) {
+      logger.debug(
+        { feed_id: feedId, run_id: runId },
+        '[repair-agent] completed run not yet visible in recent_runs — skipping append'
+      );
+      return;
+    }
+    // Encode (signature, ceil-floor-of-5 bucket) into the claim key so the
+    // dedupe is purely IS-DISTINCT-FROM and doesn't need an OR-clause that
+    // would let concurrent workers both win on multiples of 5. Same hash
+    // within the same 5-failure bucket → same key → only one UPDATE wins;
+    // signature changes OR crossing a 5-boundary → key changes → next post
+    // fires once.
+    //   consec 1..4  → `${hash}@0`   (initial post)
+    //   consec 5..9  → `${hash}@5`   (every-5th override fires once at 5)
+    //   consec 10..14→ `${hash}@10`  (every-5th override fires once at 10)
+    const baseHash = hashFailureSignature(completedRun);
+    const bucket = Math.floor(state.consecutive_failures / 5) * 5;
+    const claimKey = `${baseHash}@${bucket}`;
 
-    // Atomic dedupe: claim the new hash in one UPDATE that's a no-op when
-    // another concurrent worker just wrote the same hash. Prevents two
+    // Atomic dedupe: claim the new key in one UPDATE that's a no-op when
+    // another concurrent worker just wrote the same key. Prevents two
     // workers from observing the same `last_repair_post_hash` and both
     // posting duplicate appends.
     const claimRows = (await sql`
       UPDATE feeds
-      SET last_repair_post_hash = ${hash}
+      SET last_repair_post_hash = ${claimKey}
       WHERE id = ${feedId}
-        AND (last_repair_post_hash IS DISTINCT FROM ${hash} OR ${isMultipleOf5})
+        AND last_repair_post_hash IS DISTINCT FROM ${claimKey}
       RETURNING last_repair_post_hash
     `) as unknown as Array<{ last_repair_post_hash: string | null }>;
     if (claimRows.length === 0) {
       logger.debug(
-        { feed_id: feedId, hash },
-        '[repair-agent] suppressing append — same failure signature claimed by another worker'
+        { feed_id: feedId, claim_key: claimKey },
+        '[repair-agent] suppressing append — same claim key already recorded'
       );
       return;
     }
