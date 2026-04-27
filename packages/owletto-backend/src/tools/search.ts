@@ -455,6 +455,7 @@ function entitySelectColumns(callerOrgParamIdx: number): string {
       FROM feeds f
       JOIN connections cn ON cn.id = f.connection_id
       WHERE e.id = ANY(f.entity_ids)
+        AND f.organization_id = e.organization_id
         AND f.deleted_at IS NULL
         AND cn.deleted_at IS NULL
     ), 0)
@@ -465,6 +466,7 @@ function entitySelectColumns(callerOrgParamIdx: number): string {
       FROM feeds f
       JOIN connections cn ON cn.id = f.connection_id
       WHERE e.id = ANY(f.entity_ids)
+        AND f.organization_id = e.organization_id
         AND f.deleted_at IS NULL
         AND cn.deleted_at IS NULL
         AND cn.status = 'active'

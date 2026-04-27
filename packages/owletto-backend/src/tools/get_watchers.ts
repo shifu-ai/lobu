@@ -1095,9 +1095,13 @@ export async function getWatcher(
           MAX(f.occurred_at) as latest_content_date
         FROM entities e
         JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN feeds fc ON e.id = ANY(fc.entity_ids) AND fc.deleted_at IS NULL
+        LEFT JOIN feeds fc
+          ON e.id = ANY(fc.entity_ids)
+          AND fc.organization_id = e.organization_id
+          AND fc.deleted_at IS NULL
         LEFT JOIN connections c ON c.id = fc.connection_id AND c.organization_id = e.organization_id
         LEFT JOIN current_event_records f ON ${sql.unsafe(entityLinkMatchSql('e.id::bigint', 'f'))}
+          AND f.organization_id = e.organization_id
         WHERE e.id = ${contextEntityId}
         GROUP BY e.id, e.name, et.slug
       `;

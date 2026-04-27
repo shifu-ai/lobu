@@ -26,6 +26,12 @@ interface ValidationResult {
 /**
  * Fetch the metadata schema for an entity type from the database.
  * Returns null if no schema is defined (allowing any metadata).
+ *
+ * Cross-org tolerance: an entity created in the caller's org may carry a
+ * type from a public catalog (resolved via the schema search path in
+ * `entity-management.ts:249-260`). To validate that entity's metadata we
+ * must load the catalog's schema, not the caller's. Same lookup shape as
+ * the create-side resolver: tenant first, then public catalogs.
  */
 async function getEntityTypeSchema(
   entityType: string,
@@ -34,11 +40,13 @@ async function getEntityTypeSchema(
   const sql = getDb();
 
   const rows = await sql.unsafe(
-    `SELECT metadata_schema
-     FROM entity_types
-     WHERE slug = $1
-       AND deleted_at IS NULL
-       AND organization_id = $2
+    `SELECT et.metadata_schema
+     FROM entity_types et
+     LEFT JOIN organization o ON o.id = et.organization_id
+     WHERE et.slug = $1
+       AND et.deleted_at IS NULL
+       AND (et.organization_id = $2 OR o.visibility = 'public')
+     ORDER BY (et.organization_id = $2) DESC, et.id ASC
      LIMIT 1`,
     [entityType, ctx.organizationId]
   );
