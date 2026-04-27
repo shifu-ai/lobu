@@ -10,8 +10,7 @@ metadata_schema:
   # Exactly one of posted_by_founder_id or posted_by_member_id must be set —
   # the post comes from either a verified founder OR an authorized member,
   # never both. JSON Schema oneOf enforces the discriminator at validation
-  # time; the audit agent confirms the chosen FK actually points at the
-  # claimed entity type.
+  # time.
   oneOf:
     - required: [posted_by_founder_id]
       not:

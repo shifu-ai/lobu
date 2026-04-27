@@ -111,22 +111,30 @@ service user) shipped in earlier commits on this branch but were
 that consumed them was dead, and a cleaner replacement is queued
 behind this PR.
 
-**The replacement (follow-up PR):** a connector-facts engine.
+**The replacement (follow-up PR):** a connector-facts engine, where
+facts are just a `semantic_type` of the existing `events` table.
 
-- Connectors emit durable **facts** with assurance metadata: each
-  fact is a row like *"Google says: this user's hosted_domain is
-  bolt.new, recorded at T, provider stable id google:sub:106789,
-  assurance: oauth_verified."* Facts are persisted, not re-derived
-  per session.
+- Connectors emit durable **fact-typed events**: each fact is a row
+  in `events` with `semantic_type='identity_fact'`,
+  `entity_ids=[$member]`, and `metadata={namespace, normalized_value,
+  assurance, provider_stable_id, valid_to}`. Refresh writes a new
+  event that supersedes the old via `supersedes_event_id`; the
+  existing `current_event_records` view shows only live facts.
 - Public-catalog YAMLs declare which entity-type fields participate
   in identity lookup (`identity_namespace:`) and which relationship
   types auto-create from which fact namespaces (`auto_create_when:`).
-- A generic engine reads facts + compiled-rule rows and writes
-  derivations: each auto-created relationship carries provenance
-  (which fact, which rule version) so revocation is exact.
+- A generic engine reads fact-typed events + compiled-rule rows and
+  writes derivations: each auto-created relationship carries
+  provenance (which event, which rule version) so revocation is
+  exact.
 - Adding a new connector or a new claim type is data-only — write a
-  connector that emits new facts, or edit YAML to declare a new
+  connector that emits fact events, or edit YAML to declare a new
   rule. The platform code never changes.
+
+The same machinery also handles bringing in user contacts, followings,
+and emails: those land as `semantic_type='content'` events through
+the existing connector path. One mental model, one supersede
+mechanism, one query path.
 
 What this approach inherits from the killed Phase 4/5:
 - Provider-verified identity (Google email / hosted_domain, GitHub
