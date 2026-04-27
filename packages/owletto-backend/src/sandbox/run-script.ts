@@ -181,7 +181,7 @@ export async function runScript(
       error: {
         name: "RuntimeUnavailable",
         message:
-          "isolated-vm is not installed for this platform. Install with `bun install` on a supported Node version (18–24 with prebuilt binaries, or any version with python3 + build-essential available).",
+          "isolated-vm is not installed for this platform. Install with `bun install` on a supported Node version (22–24 with prebuilt binaries, or any version with python3 + build-essential available).",
       },
       durationMs: Date.now() - started,
       sdkCalls: 0,

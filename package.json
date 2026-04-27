@@ -57,6 +57,9 @@
     "knip": "^5.66.3",
     "typescript": "^5.8.3"
   },
+  "engines": {
+    "node": ">=22 <25"
+  },
   "patchedDependencies": {
     "@chat-adapter/telegram@4.20.0": "patches/@chat-adapter%2Ftelegram@4.20.0.patch"
   },

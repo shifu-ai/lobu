@@ -566,13 +566,32 @@ export class OAuthProvider {
   }
 
   /**
-   * Approve a device code (called after user authenticates and consents)
+   * Approve a device code (called after user authenticates and consents).
+   *
+   * `scopeOverride` lets the consent layer narrow the granted scope based on
+   * the user's role (e.g. drop `mcp:admin` for non-admin members) before the
+   * device code is exchanged for tokens.
    */
   async approveDeviceCode(
     userCode: string,
     userId: string,
-    organizationId: string | null
+    organizationId: string | null,
+    scopeOverride?: string | null
   ): Promise<boolean> {
+    if (scopeOverride !== undefined) {
+      const result = await this.sql`
+        UPDATE oauth_device_codes
+        SET status = 'approved',
+            user_id = ${userId},
+            organization_id = ${organizationId},
+            scope = ${scopeOverride}
+        WHERE user_code = ${userCode}
+          AND status = 'pending'
+          AND expires_at > NOW()
+        RETURNING device_code
+      `;
+      return result.length > 0;
+    }
     const result = await this.sql`
       UPDATE oauth_device_codes
       SET status = 'approved',

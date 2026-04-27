@@ -14,7 +14,7 @@ import { resolveBaseUrl, safeOrigin, safeParseUrl } from '../base-url';
 import { createAuth } from '../index';
 import { requireAuth } from '../middleware';
 import { OAuthProvider } from './provider';
-import { DEFAULT_SCOPES_STRING } from './scopes';
+import { DEFAULT_SCOPES_STRING, filterScopeByRole } from './scopes';
 import type { AuthorizationParams, OAuthClientMetadata, TokenRequestParams } from './types';
 import { createOAuthError, validateRedirectUri } from './utils';
 
@@ -107,7 +107,7 @@ function getOrgSlugFromResource(resource: string | undefined | null): string | n
 }
 
 type OrgResolutionResult =
-  | { organizationId: string }
+  | { organizationId: string; memberRole: string | null }
   | { error: ReturnType<typeof createOAuthError>; status: number }
   | { orgSelectionRequired: true; organizations: { id: unknown; name: unknown; slug: unknown }[] };
 
@@ -125,10 +125,11 @@ async function resolveOrganizationForGrant(params: {
         SELECT
           o.id as organization_id,
           o.visibility,
-          EXISTS (
-            SELECT 1 FROM "member" m
+          (
+            SELECT m.role FROM "member" m
             WHERE m."organizationId" = o.id AND m."userId" = ${userId}
-          ) as is_member
+            LIMIT 1
+          ) as member_role
         FROM "organization" o
         WHERE o.slug = ${value}
         LIMIT 1
@@ -139,10 +140,11 @@ async function resolveOrganizationForGrant(params: {
       SELECT
         o.id as organization_id,
         o.visibility,
-        EXISTS (
-          SELECT 1 FROM "member" m
+        (
+          SELECT m.role FROM "member" m
           WHERE m."organizationId" = o.id AND m."userId" = ${userId}
-        ) as is_member
+          LIMIT 1
+        ) as member_role
       FROM "organization" o
       WHERE o.id = ${value}
       LIMIT 1
@@ -157,24 +159,34 @@ async function resolveOrganizationForGrant(params: {
         status: 400,
       };
     }
-    if (org[0].is_member !== true && org[0].visibility !== 'public') {
+    const memberRole = (org[0].member_role as string | null) ?? null;
+    const isMember = memberRole !== null;
+    if (!isMember && org[0].visibility !== 'public') {
       return {
         error: createOAuthError('access_denied', 'Not a member of requested organization'),
         status: 403,
       };
     }
-    return { organizationId: org[0].organization_id as string };
+    return { organizationId: org[0].organization_id as string, memberRole };
   }
 
   if (explicitOrgId) {
     const org = await lookupOrgAccess('id', explicitOrgId);
-    if (org.length === 0 || (org[0].is_member !== true && org[0].visibility !== 'public')) {
+    if (org.length === 0) {
       return {
         error: createOAuthError('access_denied', 'Not a member of the selected organization'),
         status: 403,
       };
     }
-    return { organizationId: org[0].organization_id as string };
+    const memberRole = (org[0].member_role as string | null) ?? null;
+    const isMember = memberRole !== null;
+    if (!isMember && org[0].visibility !== 'public') {
+      return {
+        error: createOAuthError('access_denied', 'Not a member of the selected organization'),
+        status: 403,
+      };
+    }
+    return { organizationId: org[0].organization_id as string, memberRole };
   }
 
   const memberships = await sql`
@@ -561,6 +573,11 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
         );
       }
       organizationId = orgResult.organizationId;
+      // Drop `mcp:admin` from the granted scope when the user is not an
+      // owner/admin of the resolved org. Without this, a token can be issued
+      // with admin scope that the runtime role check immediately rejects,
+      // confusing the caller with a "reconnect with admin access" error.
+      params.scope = filterScopeByRole(body.scope, orgResult.memberRole);
     }
 
     const code = await provider.createAuthorizationCode(params, user.id, organizationId);
@@ -662,6 +679,7 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
 
   const deviceHasMcpScopes = hasMcpScopes(deviceCode.scope);
   let organizationId: string | null = null;
+  let scopeOverride: string | null | undefined;
 
   if (deviceHasMcpScopes) {
     const sql = createDbClientFromEnv(c.env);
@@ -685,9 +703,18 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
       );
     }
     organizationId = orgResult.organizationId;
+    // Drop `mcp:admin` from the granted scope when the user is not an
+    // owner/admin of the resolved org. See the consent submit handler for
+    // the full rationale.
+    scopeOverride = filterScopeByRole(deviceCode.scope, orgResult.memberRole);
   }
 
-  const approved = await provider.approveDeviceCode(body.user_code, user.id, organizationId);
+  const approved = await provider.approveDeviceCode(
+    body.user_code,
+    user.id,
+    organizationId,
+    scopeOverride
+  );
   if (!approved) {
     return c.json(createOAuthError('invalid_grant', 'Failed to approve device code'), 400);
   }

@@ -16,7 +16,7 @@
     },
     "packages/cli": {
       "name": "@lobu/cli",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "bin": {
         "lobu": "bin/lobu.js",
       },
@@ -40,7 +40,7 @@
     },
     "packages/core": {
       "name": "@lobu/core",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "dependencies": {
         "@opentelemetry/api": "^1.9.0",
         "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
@@ -60,7 +60,7 @@
     },
     "packages/gateway": {
       "name": "@lobu/gateway",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.90.0",
         "@aws-sdk/client-bedrock": "^3.1028.0",
@@ -159,12 +159,12 @@
         "vitest": "^2.1.8",
       },
       "optionalDependencies": {
-        "isolated-vm": "^5.0.4",
+        "isolated-vm": "^6.1.2",
       },
     },
     "packages/owletto-cli": {
       "name": "owletto",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "bin": {
         "owletto": "./dist/bin.js",
       },
@@ -224,7 +224,7 @@
     },
     "packages/owletto-openclaw": {
       "name": "@lobu/owletto-openclaw",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "devDependencies": {
         "@types/node": "^20.10.0",
         "postgres": "^3.4.7",
@@ -234,7 +234,7 @@
     },
     "packages/owletto-sdk": {
       "name": "@lobu/owletto-sdk",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "dependencies": {
         "@sinclair/typebox": "^0.34.41",
         "ky": "^1.14.0",
@@ -336,7 +336,7 @@
     },
     "packages/worker": {
       "name": "@lobu/worker",
-      "version": "4.3.0",
+      "version": "5.0.0",
       "bin": {
         "lobu-worker": "./dist/index.js",
       },
@@ -2526,7 +2526,7 @@
 
     "isexe": ["isexe@2.0.0", "", {}, "sha512-RHxMLp9lnKHGHRng9QFhRCMbYAcVpn69smSGcq3f36xjgVVWThj4qqLbTLlq7Ssj8B+fIQ1EuCEGI2lKsyQeIw=="],
 
-    "isolated-vm": ["isolated-vm@5.0.4", "", { "dependencies": { "prebuild-install": "^7.1.2" } }, "sha512-RYUf/JC4ldWz/oi2BVs8a1XIprQ71q6eQPBwySaF5Apu0KMyf2gIpElbCyPh2OEmRT+FYw1GOKSdkv7jw2KLxw=="],
+    "isolated-vm": ["isolated-vm@6.1.2", "", { "dependencies": { "node-gyp-build": "^4.8.4" } }, "sha512-GGfsHqtlZiiurZaxB/3kY7LLAXR3sgzDul0fom4cSyBjx6ZbjpTrFWiH3z/nUfLJGJ8PIq9LQmQFiAxu24+I7A=="],
 
     "isomorphic-ws": ["isomorphic-ws@5.0.0", "", { "peerDependencies": { "ws": "*" } }, "sha512-muId7Zzn9ywDsyXgTIafTry2sV3nySZeUDe6YedVd1Hvuuep5AsIlqK+XefWpYTyJG5e503F2xIuT2lcU6rCSw=="],
 
