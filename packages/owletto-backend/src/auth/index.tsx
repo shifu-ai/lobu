@@ -392,6 +392,13 @@ export async function createAuth(env: Env, request?: Request) {
       account: {
         create: {
           after: async (account, context) => {
+            const accountSummary = {
+              id: account.id,
+              userId: account.userId,
+              providerId: account.providerId,
+              accessToken: (account as Record<string, unknown>).accessToken as string | null,
+              scope: (account as Record<string, unknown>).scope as string | null,
+            };
             try {
               const { provisionConnectorFromSocialLogin } = await import(
                 './social-login-provisioning'
@@ -399,21 +406,29 @@ export async function createAuth(env: Env, request?: Request) {
               await provisionConnectorFromSocialLogin({
                 env,
                 request: context?.request ?? undefined,
-                account: {
-                  id: account.id,
-                  userId: account.userId,
-                  providerId: account.providerId,
-                  accessToken: (account as Record<string, unknown>).accessToken as string | null,
-                  scope: (account as Record<string, unknown>).scope as string | null,
-                },
+                account: accountSummary,
               });
             } catch (error) {
               console.error('[Auth] Failed to auto-provision connector from social login:', error);
+            }
+            // Identity engine ingest. Fire-and-forget; sign-in never blocks.
+            try {
+              const { scheduleIdentityIngest } = await import('../identity/auth-hook');
+              scheduleIdentityIngest(accountSummary);
+            } catch (error) {
+              console.error('[Auth] Failed to schedule identity ingest:', error);
             }
           },
         },
         update: {
           after: async (account, context) => {
+            const accountSummary = {
+              id: account.id,
+              userId: account.userId,
+              providerId: account.providerId,
+              accessToken: (account as Record<string, unknown>).accessToken as string | null,
+              scope: (account as Record<string, unknown>).scope as string | null,
+            };
             try {
               const { provisionConnectorFromSocialLogin } = await import(
                 './social-login-provisioning'
@@ -421,19 +436,19 @@ export async function createAuth(env: Env, request?: Request) {
               await provisionConnectorFromSocialLogin({
                 env,
                 request: context?.request ?? undefined,
-                account: {
-                  id: account.id,
-                  userId: account.userId,
-                  providerId: account.providerId,
-                  accessToken: (account as Record<string, unknown>).accessToken as string | null,
-                  scope: (account as Record<string, unknown>).scope as string | null,
-                },
+                account: accountSummary,
               });
             } catch (error) {
               console.error(
                 '[Auth] Failed to refresh connector provisioning from social login:',
                 error
               );
+            }
+            try {
+              const { scheduleIdentityIngest } = await import('../identity/auth-hook');
+              scheduleIdentityIngest(accountSummary);
+            } catch (error) {
+              console.error('[Auth] Failed to schedule identity ingest on refresh:', error);
             }
           },
         },

@@ -518,12 +518,17 @@ export async function ingestFacts(params: IngestParams): Promise<IngestResult> {
             factAssurance: fact.assurance,
             derivedAt: new Date().toISOString(),
           };
+          // Relationship's organization_id matches the SOURCE entity's org
+          // per the cross-org guard (AGENTS.md): tenant→public references
+          // are stored in the tenant org. Reads filter by source org +
+          // public-catalog target visibility, so the row is reachable from
+          // both ends.
           const relId = await insertDerivation(
             sql,
             memberEntityId,
             target.entityId,
             ruleSet.relationshipTypeId,
-            target.organizationId,
+            tenantOrganizationId,
             userId,
             provenance
           );
