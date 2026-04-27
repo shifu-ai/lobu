@@ -74,6 +74,7 @@ async function getVerifiedFactsFromGoogle(
 		id?: unknown;
 		email?: unknown;
 		email_verified?: unknown;
+		verified_email?: unknown;
 		hd?: unknown;
 	};
 
@@ -102,10 +103,11 @@ async function getVerifiedFactsFromGoogle(
 
 	const facts: ConnectorFact[] = [];
 
-	// Email — emitted only when explicitly verified by Google.
-	// `!== false` accepts missing/null/string-typed values; require a
-	// boolean-true to upgrade to oauth_verified. Anything else stays out.
-	if (typeof raw.email === "string" && raw.email_verified === true) {
+	// Email — emitted only when explicitly verified by Google. Google's
+	// OAuth2 v2 endpoint returns `verified_email`; OIDC userinfo returns
+	// `email_verified`. Require either field to be boolean true.
+	const emailVerified = raw.email_verified === true || raw.verified_email === true;
+	if (typeof raw.email === "string" && emailVerified) {
 		const normalized = normalizeEmail(raw.email);
 		if (normalized) {
 			facts.push({
