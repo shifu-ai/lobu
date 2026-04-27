@@ -17,7 +17,7 @@ allowed = ["github.com", ".github.com", ".githubusercontent.com", "registry.npmj
 
 [memory.owletto]
 enabled = true
-org = "venture-capital"
+org = "market"
 name = "Agent Community"
 description = "Discover aligned members, explain why they should meet, and draft warm introductions"
 models = "./models"

@@ -17,8 +17,8 @@ allowed = ["github.com", ".github.com", ".githubusercontent.com", "registry.npmj
 
 [memory.owletto]
 enabled = true
-org = "venture-capital"
-name = "Venture Capital"
+org = "market"
+name = "Market"
 description = "Track companies, founders, and investment opportunities for venture firms"
 models = "./models"
 data = "./data"

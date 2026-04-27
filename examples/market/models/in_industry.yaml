@@ -1,0 +1,11 @@
+version: 1
+type: relationship
+slug: in_industry
+name: In Industry
+description: Company is in an industry (cross-org reference into atlas.industry)
+metadata_schema:
+  type: object
+  properties:
+    primary:
+      type: boolean
+      description: Whether this is the company's primary industry classification

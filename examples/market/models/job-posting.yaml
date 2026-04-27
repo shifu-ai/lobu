@@ -1,0 +1,48 @@
+version: 1
+type: entity
+slug: job-posting
+name: Job Posting
+description: Open role at a market.company
+icon: briefcase
+color: "#f59e0b"
+metadata_schema:
+  type: object
+  properties:
+    role:
+      type: string
+      x-table-column: true
+      x-table-label: Role
+    title:
+      type: string
+      x-table-column: true
+      x-table-label: Title
+    company_id:
+      type: integer
+      description: FK to market.company
+      x-table-column: true
+      x-table-label: Company
+      x-link-entity-type: company
+    posted_by_id:
+      type: integer
+      description: FK to market.founder OR market.$member (the contributor who posted)
+    city_id:
+      type: integer
+      description: FK to atlas.city (cross-org reference, optional)
+      x-table-column: true
+      x-table-label: City
+    description:
+      type: string
+    status:
+      type: string
+      enum:
+        - open
+        - filled
+        - closed
+      x-table-column: true
+      x-table-label: Status
+    posted_at:
+      type: string
+      format: date-time
+    expires_at:
+      type: string
+      format: date-time

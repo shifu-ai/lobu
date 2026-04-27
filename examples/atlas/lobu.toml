@@ -1,0 +1,28 @@
+# lobu.toml — Atlas reference catalog
+# Docs: https://lobu.ai/docs/getting-started
+#
+# Atlas is a public, slow-churn reference catalog: countries, cities,
+# regions, industries, technologies, universities. Other public catalogs
+# (market, future siblings) reference these via cross-org relationships.
+
+[agents.atlas-curator]
+name = "atlas-curator"
+description = "Curate Atlas reference data — countries, cities, regions, industries, technologies, universities"
+dir = "./agents/atlas-curator"
+
+[[agents.atlas-curator.providers]]
+id = "anthropic"
+model = "claude/sonnet-4-5"
+key = "$ANTHROPIC_API_KEY"
+
+
+[agents.atlas-curator.network]
+allowed = ["github.com", ".github.com", ".githubusercontent.com"]
+
+[memory.owletto]
+enabled = true
+org = "atlas"
+name = "Atlas"
+description = "Public reference catalog — places, taxonomies, institutions"
+models = "./models"
+data = "./data"

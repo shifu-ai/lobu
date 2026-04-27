@@ -66,3 +66,31 @@ metadata_schema:
     linkedin_url:
       type: string
       format: uri
+    logo_url:
+      type: string
+      format: uri
+      description: Brand logo URL (merged in from market-intelligence.brand)
+    tagline:
+      type: string
+      description: One-line brand tagline
+    brand_voice:
+      type: string
+      description: Brand voice / tone-of-voice notes
+    social_handles:
+      type: object
+      description: Brand social handles by platform (twitter, linkedin, github, …)
+      properties:
+        twitter:
+          type: string
+        linkedin:
+          type: string
+        github:
+          type: string
+        youtube:
+          type: string
+        instagram:
+          type: string
+        tiktok:
+          type: string
+      additionalProperties:
+        type: string

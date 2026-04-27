@@ -2215,13 +2215,13 @@ export const landingUseCases = {
     },
     owlettoOrg: g("ecommerce").owlettoOrg,
   },
-  "venture-capital": {
-    id: "venture-capital",
-    label: "Venture Capital",
-    examplePath: "venture-capital",
-    agent: g("venture-capital").agent,
-    model: g("venture-capital").model,
-    skills: g("venture-capital").skills,
+  market: {
+    id: "market",
+    label: "Market",
+    examplePath: "market",
+    agent: g("market").agent,
+    model: g("market").model,
+    skills: g("market").skills,
     memory: {
       id: "company",
       description:
@@ -2270,7 +2270,7 @@ export const landingUseCases = {
         },
       }),
       watcher: {
-        name: g("venture-capital").watcher!.name,
+        name: g("market").watcher!.name,
         schedule: "Every 12 hours",
         prompt:
           "Check Lovable for new funding, product launches, team growth, and competitive positioning changes.",
@@ -2388,7 +2388,7 @@ export const landingUseCases = {
         },
       ],
     },
-    owlettoOrg: g("venture-capital").owlettoOrg,
+    owlettoOrg: g("market").owlettoOrg,
   },
 } satisfies Record<string, LandingUseCaseDefinition>;
 

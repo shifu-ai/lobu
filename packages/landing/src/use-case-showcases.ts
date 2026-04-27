@@ -446,7 +446,7 @@ const memoryStepPanels: Record<
       ],
     },
   },
-  "venture-capital": {
+  market: {
     connect: {
       title: "Venture capital source inputs",
       description:
@@ -1912,7 +1912,7 @@ const runtimeContent: Record<LandingUseCaseId, RuntimeJourney> = {
       "Shared care coordination across clinical staff",
     ],
   },
-  "venture-capital": {
+  market: {
     schedule:
       "Daily at 8 AM — new Crunchbase activity on portfolio & watchlist",
     outcomeChannel: "#deal-flow",
@@ -2946,7 +2946,7 @@ const chatScenarioContent: Partial<
       ],
     },
   },
-  "venture-capital": {
+  market: {
     permission: {
       id: "vc-permission",
       tabLabel: "Permission",
@@ -3130,7 +3130,7 @@ const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
         description:
           "Run ecommerce workflows with agents that connect store systems, preserve customer context, and act with current operational state.",
       },
-      "venture-capital": {
+      market: {
         title: "Investment agents for deal flow",
         highlight: "deal flow",
         description:
@@ -3159,7 +3159,7 @@ const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
       },
       careops: { title: "Skills for care coordination workflows" },
       ecommerce: { title: "Skills for ecommerce workflows" },
-      "venture-capital": { title: "Skills for sourcing and diligence agents" },
+      market: { title: "Skills for sourcing and diligence agents" },
     },
   },
   memory: {
@@ -3183,7 +3183,7 @@ const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
       },
       careops: { title: "Care memory for coordination agents" },
       ecommerce: { title: "Customer memory for store agents" },
-      "venture-capital": { title: "Deal memory for venture teams" },
+      market: { title: "Deal memory for venture teams" },
     },
   },
 };
@@ -3200,7 +3200,7 @@ const useCaseRoleMap: Record<LandingUseCaseId, LandingUseCaseRole> = {
   ecommerce: "departments",
   careops: "departments",
   leadership: "personal",
-  "venture-capital": "personal",
+  market: "personal",
   "agent-community": "public",
   "market-intelligence": "public",
 };
@@ -3214,7 +3214,7 @@ const useCaseEmojiMap: Record<LandingUseCaseId, string> = {
   delivery: "\uD83D\uDCE6",
   leadership: "\uD83E\uDDED",
   ecommerce: "\uD83D\uDED2",
-  "venture-capital": "\uD83D\uDCBC",
+  market: "\uD83D\uDCBC",
   careops: "\uD83C\uDFE5",
   "agent-community": "\uD83E\uDD1D",
   "market-intelligence": "\uD83D\uDD2D",
