@@ -71,13 +71,63 @@ const DEFAULT_LIMITS: Required<RunLimits> = {
   outputBytes: 262_144,
 };
 
+function clampNumber(value: number | undefined, fallback: number, min: number, max: number) {
+  const n = Number.isFinite(value) ? value : fallback;
+  return Math.max(min, Math.min(n ?? fallback, max));
+}
+
+function clampLimits(limits?: RunLimits): Required<RunLimits> {
+  return {
+    memoryMb: clampNumber(limits?.memoryMb, DEFAULT_LIMITS.memoryMb, 8, DEFAULT_LIMITS.memoryMb),
+    timeoutMs: clampNumber(limits?.timeoutMs, DEFAULT_LIMITS.timeoutMs, 1, DEFAULT_LIMITS.timeoutMs),
+    sdkCallQuota: clampNumber(
+      limits?.sdkCallQuota,
+      DEFAULT_LIMITS.sdkCallQuota,
+      1,
+      DEFAULT_LIMITS.sdkCallQuota,
+    ),
+    outputBytes: clampNumber(
+      limits?.outputBytes,
+      DEFAULT_LIMITS.outputBytes,
+      1024,
+      DEFAULT_LIMITS.outputBytes,
+    ),
+  };
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`TimeoutError: script exceeded ${timeoutMs}ms wall-clock budget`));
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+type IsolatedVmRuntime = typeof import("isolated-vm");
+
 /**
  * Load `isolated-vm` lazily. Returns null when the optional native module is
  * not installed (e.g. local dev on a Node version without a prebuild).
  */
-async function loadIsolatedVm(): Promise<typeof import("isolated-vm") | null> {
+async function loadIsolatedVm(): Promise<IsolatedVmRuntime | null> {
+  const nodeMajor = Number(process.versions.node?.split(".")[0] ?? 0);
+  // isolated-vm is a native V8 addon. Node 25 currently imports but can crash
+  // the process when constructing an isolate; fail closed instead of taking
+  // down the MCP server. The project pins supported runtime to Node 22–24.
+  if (!Number.isFinite(nodeMajor) || nodeMajor < 22 || nodeMajor >= 25) {
+    return null;
+  }
+
   try {
-    return await import("isolated-vm");
+    const mod = (await import("isolated-vm")) as unknown as IsolatedVmRuntime & {
+      default?: IsolatedVmRuntime;
+      "module.exports"?: IsolatedVmRuntime;
+    };
+    return mod.default ?? mod["module.exports"] ?? mod;
   } catch {
     return null;
   }
@@ -109,7 +159,7 @@ function __makeClient(orgPath) {
       if (__isReservedKey(key)) return undefined;
       const k = String(key);
       if (k === 'org') {
-        return async (slug) => __makeClient([...orgPath, String(slug)]);
+        return (slug) => __makeClient([...orgPath, String(slug)]);
       }
       if (k === 'query' || k === 'log') {
         return async (...args) => {
@@ -167,7 +217,7 @@ export async function runScript(
   options: RunScriptOptions,
 ): Promise<RunScriptResult> {
   const started = Date.now();
-  const limits = { ...DEFAULT_LIMITS, ...(options.limits ?? {}) };
+  const limits = clampLimits(options.limits);
 
   const logs: LogEntry[] = [];
   let sdkCalls = 0;
@@ -220,8 +270,9 @@ export async function runScript(
     };
   }
 
-  const isolate = new ivm.Isolate({ memoryLimit: limits.memoryMb });
+  let isolate: import("isolated-vm").Isolate | null = null;
   try {
+    isolate = new ivm.Isolate({ memoryLimit: limits.memoryMb });
     const context = await isolate.createContext();
     const jail = context.global;
     await jail.set("global", jail.derefInto());
@@ -315,7 +366,10 @@ export async function runScript(
       promise: true,
       copy: true,
     });
-    const returnJson = (await resultPromise) as string | null;
+    const returnJson = (await withTimeout(
+      resultPromise as Promise<string | null>,
+      limits.timeoutMs,
+    )) as string | null;
     if (returnJson) {
       outputBytes += returnJson.length;
       if (outputBytes > limits.outputBytes) {
@@ -335,7 +389,7 @@ export async function runScript(
     };
   } catch (err) {
     const e = err as Error;
-    const isTimeout = /script execution timed out/i.test(e.message);
+    const isTimeout = /script execution timed out|TimeoutError/i.test(e.message);
     const isQuota = /QuotaExceeded/.test(e.message);
     const isOom = /memory|allocation|isolate was disposed/i.test(e.message);
     const name = isTimeout
@@ -353,7 +407,7 @@ export async function runScript(
       sdkCalls,
     };
   } finally {
-    if (!isolate.isDisposed) {
+    if (isolate && !isolate.isDisposed) {
       isolate.dispose();
     }
   }
