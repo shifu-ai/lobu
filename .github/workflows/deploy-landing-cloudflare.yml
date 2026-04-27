@@ -51,6 +51,11 @@ jobs:
         run: bun run --filter @lobu/landing build
 
       - name: Deploy to Cloudflare Pages
+        # Run from packages/landing so wrangler discovers the sibling
+        # `functions/` directory (Pages Functions live there). Running from
+        # the repo root with `wrangler pages deploy packages/landing/dist`
+        # only ships static assets and silently drops every function.
+        working-directory: packages/landing
         env:
           CLOUDFLARE_EMAIL: ${{ secrets.CLOUDFLARE_EMAIL }}
           CLOUDFLARE_API_KEY: ${{ secrets.CLOUDFLARE_API_KEY }}
@@ -60,7 +65,7 @@ jobs:
           # being evaluated as subshells / variable expansions.
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
-          bunx wrangler pages deploy packages/landing/dist \
+          bunx wrangler pages deploy dist \
             --project-name lobu-ai \
             --branch main \
             --commit-hash "$COMMIT_SHA" \
