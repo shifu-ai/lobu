@@ -1,6 +1,6 @@
-\restrict PwjQGaJej1kRx35QDCNCfuR07o0LY8kUstkGIScyyKBLopQVzj4KOWcJsHs0Btf
+\restrict 3NagdAXNcah1uiOQHB7wqm5esCsJ1nPiemW2Tdsn9R3snsCP7U4R8pIPZ8dGkFm
 
--- Dumped from database version 18.1 (Debian 18.1-1.pgdg13+2)
+-- Dumped from database version 18.3 (Debian 18.3-1.pgdg12+1)
 -- Dumped by pg_dump version 18.1 (Homebrew)
 
 SET statement_timeout = 0;
@@ -20,13 +20,6 @@ SET row_security = off;
 --
 
 CREATE SCHEMA pgboss;
-
-
---
--- Name: public; Type: SCHEMA; Schema: -; Owner: -
---
-
--- *not* creating schema, since initdb creates it
 
 
 --
@@ -890,9 +883,6 @@ CREATE TABLE public.connector_versions (
     compiled_code_hash text,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     source_code text,
-    source_repository text,
-    source_ref text,
-    source_commit_sha text,
     source_path text
 );
 
@@ -989,7 +979,6 @@ ALTER SEQUENCE public.content_id_seq OWNED BY public.events.id;
 CREATE TABLE public.event_embeddings (
     event_id bigint NOT NULL,
     embedding public.vector(768) NOT NULL,
-    model_key text,
     created_at timestamp with time zone DEFAULT now() NOT NULL
 );
 
@@ -1500,27 +1489,6 @@ ALTER SEQUENCE public.event_classifiers_id_seq OWNED BY public.event_classifiers
 
 
 --
--- Name: event_thread_tree; Type: VIEW; Schema: public; Owner: -
---
-
-CREATE VIEW public.event_thread_tree AS
- SELECT e.id,
-    e.origin_id,
-    e.origin_parent_id,
-    e.occurred_at,
-    COALESCE(parent.origin_id, e.origin_id) AS root_origin_id,
-    COALESCE(parent.occurred_at, e.occurred_at) AS root_occurred_at,
-    COALESCE(parent.score, e.score) AS root_score,
-        CASE
-            WHEN (e.origin_parent_id IS NULL) THEN 0
-            ELSE 1
-        END AS depth,
-    ARRAY[(COALESCE(parent.occurred_at, e.occurred_at))::text, (e.id)::text] AS sort_path
-   FROM (public.current_event_records e
-     LEFT JOIN public.current_event_records parent ON (((e.origin_parent_id = parent.origin_id) AND (e.entity_ids && parent.entity_ids))));
-
-
---
 -- Name: feeds; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1638,8 +1606,7 @@ CREATE TABLE public.member (
     "organizationId" text NOT NULL,
     "userId" text NOT NULL,
     role text DEFAULT 'member'::text NOT NULL,
-    "createdAt" timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "teamId" text
+    "createdAt" timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -1892,19 +1859,6 @@ ALTER SEQUENCE public.personal_access_tokens_id_seq OWNED BY public.personal_acc
 
 
 --
--- Name: rate_limits; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.rate_limits (
-    key text NOT NULL,
-    updated_at timestamp with time zone DEFAULT now(),
-    prev_count integer DEFAULT 0,
-    curr_count integer DEFAULT 0,
-    window_start bigint DEFAULT 0
-);
-
-
---
 -- Name: runs; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -1984,53 +1938,6 @@ CREATE TABLE public.session (
     "userAgent" text,
     "userId" text NOT NULL,
     "activeOrganizationId" text
-);
-
-
---
--- Name: source_type_auth_defaults; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.source_type_auth_defaults (
-    id bigint NOT NULL,
-    organization_id text NOT NULL,
-    crawler_type text NOT NULL,
-    auth_values jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_by text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
-
-
---
--- Name: source_type_auth_defaults_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.source_type_auth_defaults_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: source_type_auth_defaults_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.source_type_auth_defaults_id_seq OWNED BY public.source_type_auth_defaults.id;
-
-
---
--- Name: team; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.team (
-    id text NOT NULL,
-    "organizationId" text NOT NULL,
-    name text NOT NULL,
-    "createdAt" timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    "updatedAt" timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
 
@@ -2193,7 +2100,6 @@ CREATE TABLE public.watcher_versions (
     change_notes text,
     created_by text CONSTRAINT insight_template_versions_created_by_not_null NOT NULL,
     created_at timestamp with time zone DEFAULT now(),
-    sources_schema jsonb,
     keying_config jsonb,
     json_template jsonb,
     prompt text CONSTRAINT insight_template_versions_prompt_not_null NOT NULL,
@@ -2201,23 +2107,12 @@ CREATE TABLE public.watcher_versions (
     classifiers jsonb,
     required_source_types text[] DEFAULT '{}'::text[] CONSTRAINT insight_template_versions_required_source_types_not_null NOT NULL,
     recommended_source_types text[] DEFAULT '{}'::text[] CONSTRAINT insight_template_versions_recommended_source_types_not_null NOT NULL,
-    source_repository text,
-    source_ref text,
-    source_commit_sha text,
-    source_path text,
     reactions_guidance text,
     condensation_prompt text,
     condensation_window_count integer DEFAULT 4,
     watcher_id integer,
     version_sources jsonb
 );
-
-
---
--- Name: COLUMN watcher_versions.sources_schema; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.watcher_versions.sources_schema IS 'JSON Schema defining expected sources. Example: {required: ["content"], properties: {content: {description: "Main content source"}}}. Validates insight sources match template expectations.';
 
 
 --
@@ -2458,15 +2353,11 @@ CREATE TABLE public.watchers (
     description text,
     version integer DEFAULT 1,
     tags text[] DEFAULT '{}'::text[],
-    registry_type text,
-    registry_repo text,
-    registry_ref text,
     current_version_id integer,
     schedule text,
     next_run_at timestamp with time zone,
     agent_id text,
     connection_id text,
-    lobu_schedule_id text,
     scheduler_client_id text,
     source_watcher_id integer,
     watcher_group_id integer NOT NULL,
@@ -2519,99 +2410,6 @@ CREATE SEQUENCE public.watchers_id_seq
 --
 
 ALTER SEQUENCE public.watchers_id_seq OWNED BY public.watchers.id;
-
-
---
--- Name: workers; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.workers (
-    worker_id text NOT NULL,
-    status text DEFAULT 'idle'::text NOT NULL,
-    last_heartbeat_at timestamp with time zone DEFAULT now() NOT NULL,
-    registered_at timestamp with time zone DEFAULT now() NOT NULL,
-    capabilities jsonb DEFAULT '{}'::jsonb NOT NULL,
-    region text,
-    version text,
-    active_jobs integer DEFAULT 0 NOT NULL,
-    total_jobs_claimed integer DEFAULT 0 NOT NULL,
-    total_jobs_completed integer DEFAULT 0 NOT NULL,
-    total_jobs_failed integer DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone DEFAULT now(),
-    updated_at timestamp with time zone DEFAULT now(),
-    user_id text,
-    browser_type text DEFAULT 'playwright'::text,
-    device_name text,
-    CONSTRAINT workers_browser_type_check CHECK ((browser_type = ANY (ARRAY['playwright'::text, 'extension'::text]))),
-    CONSTRAINT workers_status_check CHECK ((status = ANY (ARRAY['active'::text, 'idle'::text, 'offline'::text])))
-);
-
-
---
--- Name: TABLE workers; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON TABLE public.workers IS 'Real-time registry of all workers (local, Lambda, external) with heartbeat tracking';
-
-
---
--- Name: COLUMN workers.worker_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.worker_id IS 'Unique worker identifier (e.g., "local-worker-1", "lambda-us-east-1-abc")';
-
-
---
--- Name: COLUMN workers.status; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.status IS 'Current status: active (has jobs), idle (online but no jobs), offline (stale heartbeat)';
-
-
---
--- Name: COLUMN workers.capabilities; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.capabilities IS 'Worker capabilities: {"browser": true, "browser_type": "playwright", "max_execution_time_ms": 600000}';
-
-
---
--- Name: COLUMN workers.active_jobs; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.active_jobs IS 'Current number of jobs being processed by this worker';
-
-
---
--- Name: COLUMN workers.user_id; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.user_id IS 'User ID for extension workers (NULL for server workers)';
-
-
---
--- Name: COLUMN workers.browser_type; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.browser_type IS 'Browser type: playwright (server) or extension (user browser)';
-
-
---
--- Name: COLUMN workers.device_name; Type: COMMENT; Schema: public; Owner: -
---
-
-COMMENT ON COLUMN public.workers.device_name IS 'User-friendly device name for extension workers';
-
-
---
--- Name: workspace_settings; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.workspace_settings (
-    organization_id text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
-);
 
 
 --
@@ -2752,13 +2550,6 @@ ALTER TABLE ONLY public.personal_access_tokens ALTER COLUMN id SET DEFAULT nextv
 --
 
 ALTER TABLE ONLY public.runs ALTER COLUMN id SET DEFAULT nextval('public.runs_id_seq'::regclass);
-
-
---
--- Name: source_type_auth_defaults id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.source_type_auth_defaults ALTER COLUMN id SET DEFAULT nextval('public.source_type_auth_defaults_id_seq'::regclass);
 
 
 --
@@ -3306,14 +3097,6 @@ ALTER TABLE ONLY public.personal_access_tokens
 
 
 --
--- Name: rate_limits rate_limits_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.rate_limits
-    ADD CONSTRAINT rate_limits_pkey PRIMARY KEY (key);
-
-
---
 -- Name: runs runs_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3343,22 +3126,6 @@ ALTER TABLE ONLY public.session
 
 ALTER TABLE ONLY public.session
     ADD CONSTRAINT session_token_key UNIQUE (token);
-
-
---
--- Name: source_type_auth_defaults source_type_auth_defaults_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.source_type_auth_defaults
-    ADD CONSTRAINT source_type_auth_defaults_pkey PRIMARY KEY (id);
-
-
---
--- Name: team team_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.team
-    ADD CONSTRAINT team_pkey PRIMARY KEY (id);
 
 
 --
@@ -3439,22 +3206,6 @@ ALTER TABLE ONLY public.watcher_reactions
 
 ALTER TABLE ONLY public.watcher_window_field_feedback
     ADD CONSTRAINT watcher_window_field_feedback_pkey PRIMARY KEY (id);
-
-
---
--- Name: workers workers_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workers
-    ADD CONSTRAINT workers_pkey PRIMARY KEY (worker_id);
-
-
---
--- Name: workspace_settings workspace_settings_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workspace_settings
-    ADD CONSTRAINT workspace_settings_pkey PRIMARY KEY (organization_id);
 
 
 --
@@ -4326,13 +4077,6 @@ CREATE INDEX idx_notifications_unread ON public.notifications USING btree (organ
 
 
 --
--- Name: idx_rate_limits_updated_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_rate_limits_updated_at ON public.rate_limits USING btree (updated_at);
-
-
---
 -- Name: idx_runs_active_auth_per_profile; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4578,34 +4322,6 @@ CREATE INDEX idx_watchers_watcher_group_id ON public.watchers USING btree (watch
 
 
 --
--- Name: idx_workers_heartbeat; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_workers_heartbeat ON public.workers USING btree (last_heartbeat_at DESC) WHERE (status = ANY (ARRAY['active'::text, 'idle'::text]));
-
-
---
--- Name: idx_workers_region; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_workers_region ON public.workers USING btree (region) WHERE (region IS NOT NULL);
-
-
---
--- Name: idx_workers_status; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_workers_status ON public.workers USING btree (status, last_heartbeat_at);
-
-
---
--- Name: idx_workers_user; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_workers_user ON public.workers USING btree (user_id) WHERE (user_id IS NOT NULL);
-
-
---
 -- Name: idx_wwff_watcher_field_recent; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4659,13 +4375,6 @@ CREATE INDEX mcp_sessions_user_id_idx ON public.mcp_sessions USING btree (user_i
 --
 
 CREATE INDEX "member_organizationId_idx" ON public.member USING btree ("organizationId");
-
-
---
--- Name: member_teamId_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX "member_teamId_idx" ON public.member USING btree ("teamId");
 
 
 --
@@ -4834,13 +4543,6 @@ CREATE INDEX session_token_idx ON public.session USING btree (token);
 --
 
 CREATE INDEX "session_userId_idx" ON public.session USING btree ("userId");
-
-
---
--- Name: team_organizationId_idx; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX "team_organizationId_idx" ON public.team USING btree ("organizationId");
 
 
 --
@@ -5335,19 +5037,19 @@ ALTER TABLE ONLY public.events
 
 
 --
--- Name: events events_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.events
-    ADD CONSTRAINT events_created_by_fkey FOREIGN KEY (created_by) REFERENCES public."user"(id) ON DELETE SET NULL;
-
-
---
 -- Name: events events_connection_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
 ALTER TABLE ONLY public.events
     ADD CONSTRAINT events_connection_id_fkey FOREIGN KEY (connection_id) REFERENCES public.connections(id) ON DELETE SET NULL;
+
+
+--
+-- Name: events events_created_by_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.events
+    ADD CONSTRAINT events_created_by_fkey FOREIGN KEY (created_by) REFERENCES public."user"(id) ON DELETE SET NULL;
 
 
 --
@@ -5500,14 +5202,6 @@ ALTER TABLE ONLY public.mcp_sessions
 
 ALTER TABLE ONLY public.member
     ADD CONSTRAINT "member_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES public.organization(id) ON DELETE CASCADE;
-
-
---
--- Name: member member_teamId_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.member
-    ADD CONSTRAINT "member_teamId_fkey" FOREIGN KEY ("teamId") REFERENCES public.team(id) ON DELETE SET NULL;
 
 
 --
@@ -5719,14 +5413,6 @@ ALTER TABLE ONLY public.session
 
 
 --
--- Name: team team_organizationId_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.team
-    ADD CONSTRAINT "team_organizationId_fkey" FOREIGN KEY ("organizationId") REFERENCES public.organization(id) ON DELETE CASCADE;
-
-
---
 -- Name: view_template_active_tabs view_template_active_tabs_version_fk; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5799,26 +5485,10 @@ ALTER TABLE ONLY public.watchers
 
 
 --
--- Name: workers workers_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workers
-    ADD CONSTRAINT workers_user_id_fkey FOREIGN KEY (user_id) REFERENCES public."user"(id);
-
-
---
--- Name: workspace_settings workspace_settings_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.workspace_settings
-    ADD CONSTRAINT workspace_settings_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organization(id) ON DELETE CASCADE;
-
-
---
 -- PostgreSQL database dump complete
 --
 
-\unrestrict PwjQGaJej1kRx35QDCNCfuR07o0LY8kUstkGIScyyKBLopQVzj4KOWcJsHs0Btf
+\unrestrict 3NagdAXNcah1uiOQHB7wqm5esCsJ1nPiemW2Tdsn9R3snsCP7U4R8pIPZ8dGkFm
 
 
 --
