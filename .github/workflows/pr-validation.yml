@@ -86,6 +86,18 @@ jobs:
       - name: Build packages
         run: bun run build
 
+      # Frontend (owletto-web) ships in the prod app image but isn't covered by
+      # any other PR check: root `bun run build` skips it, and the root
+      # tsconfig excludes packages/owletto-web. Without this gate, a TS error
+      # in the submodule (or a stale submodule pointer) only surfaces when
+      # build-images.yml runs on main — and silently regresses the deploy.
+      # Build owletto-sdk first because owletto-web imports its compiled dist.
+      - name: Build frontend (owletto-web)
+        if: steps.submodule.outputs.stubbed != 'true'
+        run: |
+          cd packages/owletto-sdk && bun run build && cd ../..
+          cd packages/owletto-web && bun run build
+
       - name: Verify no uncommitted changes
         if: steps.submodule.outputs.stubbed != 'true'
         run: |
