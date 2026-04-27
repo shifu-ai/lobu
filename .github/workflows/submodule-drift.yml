@@ -33,12 +33,24 @@ jobs:
         with:
           deploy-key: ${{ secrets.OWLETTO_WEB_DEPLOY_KEY }}
 
-      - name: Skip on fork PR (no deploy key by design)
+      - name: Fork PR — fail if it modifies the submodule pointer, otherwise skip
         if: |
           steps.submodule.outputs.stubbed == 'true'
           && github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name != github.repository
-        run: echo "::notice::Fork PR — submodule drift check skipped."
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_sha=$(git ls-tree "origin/${{ github.base_ref }}" packages/owletto-web | awk '{print $3}')
+          head_sha=$(git ls-tree HEAD packages/owletto-web | awk '{print $3}')
+          if [ "$base_sha" != "$head_sha" ]; then
+            echo "::error::Fork PRs cannot change the packages/owletto-web pointer."
+            echo "  base: $base_sha"
+            echo "  head: $head_sha"
+            echo "Submodule bumps must come from a same-repo PR (deploy-key-authorized)."
+            exit 1
+          fi
+          echo "::notice::Fork PR with unchanged submodule pointer — drift check skipped."
 
       - name: Fail when deploy key is missing on a same-repo run
         if: |
@@ -81,12 +93,21 @@ jobs:
             --pretty='tformat:%h|%ae|%s' "$PINNED..origin/main")
 
           # Walk each commit; exempt only those whose author email AND exact
-          # subject match the FluxCD image-tag bot.
+          # subject match the FluxCD image-tag bot AND that touch only deploy
+          # paths — a forged "chore: update images" with random contents
+          # outside deploy/ is treated as drift.
           DRIFT=""
           while IFS='|' read -r sha email subject; do
             [ -z "$sha" ] && continue
             if [ "$email" = "$BOT_AUTHOR_EMAIL" ] && [ "$subject" = "$BOT_SUBJECT" ]; then
-              continue
+              outside=$(git -C packages/owletto-web show --name-only \
+                --pretty='format:' "$sha" \
+                | sed '/^$/d' \
+                | grep -v '^deploy/' || true)
+              if [ -z "$outside" ]; then
+                continue
+              fi
+              echo "::warning::Commit $sha matches bot author/subject but touches non-deploy paths; treating as drift."
             fi
             DRIFT+="$sha $subject"$'\n'
           done <<< "$LOG"
