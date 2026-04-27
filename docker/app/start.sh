@@ -45,7 +45,12 @@ fi
 # Bun uses JavaScriptCore and cannot link the V8 ABI surface that
 # isolated-vm requires; the execute MCP tool silently degrades to
 # RuntimeUnavailable under bun. tsx provides the TS loader so the
-# source layout stays uncompiled. cwd needs to be the package so
-# `--import tsx` resolves from owletto-backend's node_modules.
-cd /app/packages/owletto-backend
-exec node --import tsx src/server.ts
+# source layout stays uncompiled.
+#
+# Keep cwd=/app — gateway services and embedded agent routes resolve
+# bundled config (`config/providers.json`) relative to process.cwd().
+# Use the absolute tsx loader path so the resolution doesn't depend
+# on cwd or PATH.
+exec node \
+  --import "file:///app/packages/owletto-backend/node_modules/tsx/dist/loader.mjs" \
+  /app/packages/owletto-backend/src/server.ts
