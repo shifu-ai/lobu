@@ -31,6 +31,14 @@ fi
 echo ""
 echo "Starting backend on port 8787..."
 
-run_migrations
+# When the Helm chart's pre-upgrade migration Job is enabled, it has
+# already applied migrations before this Deployment is rolled. Set
+# SKIP_MIGRATIONS=1 in that environment so the per-pod start doesn't
+# block on a migration that may take longer than livenessProbe allows.
+if [ "${SKIP_MIGRATIONS:-0}" = "1" ]; then
+  echo "SKIP_MIGRATIONS=1 — assuming the pre-upgrade Job applied migrations."
+else
+  run_migrations
+fi
 
 exec bun /app/packages/owletto-backend/src/server.ts
