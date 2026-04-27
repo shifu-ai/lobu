@@ -220,7 +220,44 @@ BEGIN
             AND existing.target_entity_type_slug = '$member'
       );
 
-    -- 5. Soft-delete the source founder rows. Audit trail survives in the
+    -- 5. Repoint any pre-existing entity_identities rows that pointed at
+    -- a founder. Step 2 wrote *new* identity rows for the $member, but if
+    -- some other path had already written identity rows on the founder
+    -- (e.g. an earlier provisioning script), those would dangle once the
+    -- founder is soft-deleted in step 7 — entity-identity lookups join on
+    -- entities.deleted_at IS NULL and silently miss the binding.
+    UPDATE public.entity_identities ei
+    SET entity_id = m.id, updated_at = NOW()
+    FROM public.entities f
+    JOIN public.entities m
+      ON m.organization_id = f.organization_id
+     AND m.entity_type_id = v_member_type_id
+     AND m.metadata->>'migrated_from_founder_id' = f.id::text
+     AND m.deleted_at IS NULL
+    WHERE ei.entity_id = f.id
+      AND ei.organization_id = v_market_org_id
+      AND ei.deleted_at IS NULL
+      AND f.organization_id = v_market_org_id
+      AND f.entity_type_id = v_founder_type_id;
+
+    -- 6. Rewrite event.entity_ids arrays so historical events on founder
+    -- rows resolve to the corresponding $member going forward. array_replace
+    -- is a no-op on a re-run because after the first pass the founder id is
+    -- gone from the array and the WHERE filter excludes the row.
+    UPDATE public.events e
+    SET entity_ids = array_replace(e.entity_ids, f.id, m.id)
+    FROM public.entities f
+    JOIN public.entities m
+      ON m.organization_id = f.organization_id
+     AND m.entity_type_id = v_member_type_id
+     AND m.metadata->>'migrated_from_founder_id' = f.id::text
+     AND m.deleted_at IS NULL
+    WHERE e.entity_ids @> ARRAY[f.id]
+      AND e.organization_id = v_market_org_id
+      AND f.organization_id = v_market_org_id
+      AND f.entity_type_id = v_founder_type_id;
+
+    -- 7. Soft-delete the source founder rows. Audit trail survives in the
     -- entities table itself; queries already filter `deleted_at IS NULL`.
     UPDATE public.entities f
     SET deleted_at = NOW(), updated_at = NOW()

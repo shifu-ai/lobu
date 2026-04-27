@@ -7,95 +7,99 @@
  * jsonb`, so without this discipline the engine silently corrupts.
  */
 
-import { TypeCompiler, type ValueErrorIterator } from '@sinclair/typebox/compiler';
-import type { TSchema, Static } from '@sinclair/typebox';
 import {
-  ConnectorFact,
-  DerivedFromProvenance,
-  FactEventMetadata,
-  RelationshipTypeIdentityMetadata,
-  AutoCreateWhenRule,
-  ClaimCollisionPayload,
-} from '@lobu/owletto-sdk';
+	TypeCompiler,
+	type ValueErrorIterator,
+} from "@sinclair/typebox/compiler";
+import type { TSchema, Static } from "@sinclair/typebox";
+import {
+	ClaimCollisionPayload,
+	ConnectorFact,
+	DerivedRelationshipMetadata,
+	FactEventMetadata,
+	RelationshipTypeIdentityMetadata,
+} from "@lobu/owletto-sdk";
 
 const compiledFact = TypeCompiler.Compile(ConnectorFact);
 const compiledFactEventMetadata = TypeCompiler.Compile(FactEventMetadata);
-const compiledRule = TypeCompiler.Compile(AutoCreateWhenRule);
-const compiledRelTypeMeta = TypeCompiler.Compile(RelationshipTypeIdentityMetadata);
-const compiledDerivedFrom = TypeCompiler.Compile(DerivedFromProvenance);
+const compiledRelTypeMeta = TypeCompiler.Compile(
+	RelationshipTypeIdentityMetadata,
+);
+const compiledDerivedRelMeta = TypeCompiler.Compile(
+	DerivedRelationshipMetadata,
+);
 const compiledClaimCollision = TypeCompiler.Compile(ClaimCollisionPayload);
 
 export class IdentitySchemaError extends Error {
-  constructor(
-    public readonly schemaName: string,
-    public readonly errors: Array<{ path: string; message: string; value: unknown }>
-  ) {
-    const summary = errors
-      .slice(0, 3)
-      .map((e) => `${e.path || '<root>'}: ${e.message}`)
-      .join('; ');
-    const more = errors.length > 3 ? ` (+${errors.length - 3} more)` : '';
-    super(`${schemaName} validation failed: ${summary}${more}`);
-    this.name = 'IdentitySchemaError';
-  }
+	constructor(
+		public readonly schemaName: string,
+		public readonly errors: Array<{
+			path: string;
+			message: string;
+			value: unknown;
+		}>,
+	) {
+		const summary = errors
+			.slice(0, 3)
+			.map((e) => `${e.path || "<root>"}: ${e.message}`)
+			.join("; ");
+		const more = errors.length > 3 ? ` (+${errors.length - 3} more)` : "";
+		super(`${schemaName} validation failed: ${summary}${more}`);
+		this.name = "IdentitySchemaError";
+	}
 }
 
 function collectErrors(iter: ValueErrorIterator): Array<{
-  path: string;
-  message: string;
-  value: unknown;
+	path: string;
+	message: string;
+	value: unknown;
 }> {
-  const errs: Array<{ path: string; message: string; value: unknown }> = [];
-  for (const err of iter) {
-    errs.push({ path: err.path, message: err.message, value: err.value });
-    if (errs.length >= 16) break;
-  }
-  return errs;
+	const errs: Array<{ path: string; message: string; value: unknown }> = [];
+	for (const err of iter) {
+		errs.push({ path: err.path, message: err.message, value: err.value });
+		if (errs.length >= 16) break;
+	}
+	return errs;
 }
 
 function ensure<T extends TSchema>(
-  schemaName: string,
-  compiler: ReturnType<typeof TypeCompiler.Compile<T>>,
-  value: unknown
+	schemaName: string,
+	compiler: ReturnType<typeof TypeCompiler.Compile<T>>,
+	value: unknown,
 ): asserts value is Static<T> {
-  if (compiler.Check(value)) return;
-  throw new IdentitySchemaError(schemaName, collectErrors(compiler.Errors(value)));
+	if (compiler.Check(value)) return;
+	throw new IdentitySchemaError(
+		schemaName,
+		collectErrors(compiler.Errors(value)),
+	);
 }
 
-export function validateConnectorFact(value: unknown): asserts value is Static<typeof ConnectorFact> {
-  ensure('ConnectorFact', compiledFact, value);
+export function validateConnectorFact(
+	value: unknown,
+): asserts value is Static<typeof ConnectorFact> {
+	ensure("ConnectorFact", compiledFact, value);
 }
 
 export function validateFactEventMetadata(
-  value: unknown
+	value: unknown,
 ): asserts value is Static<typeof FactEventMetadata> {
-  ensure('FactEventMetadata', compiledFactEventMetadata, value);
-}
-
-export function validateAutoCreateWhenRule(
-  value: unknown
-): asserts value is Static<typeof AutoCreateWhenRule> {
-  ensure('AutoCreateWhenRule', compiledRule, value);
+	ensure("FactEventMetadata", compiledFactEventMetadata, value);
 }
 
 export function validateRelationshipTypeIdentityMetadata(
-  value: unknown
+	value: unknown,
 ): asserts value is Static<typeof RelationshipTypeIdentityMetadata> {
-  ensure(
-    'RelationshipTypeIdentityMetadata',
-    compiledRelTypeMeta,
-    value
-  );
+	ensure("RelationshipTypeIdentityMetadata", compiledRelTypeMeta, value);
 }
 
-export function validateDerivedFromProvenance(
-  value: unknown
-): asserts value is Static<typeof DerivedFromProvenance> {
-  ensure('DerivedFromProvenance', compiledDerivedFrom, value);
+export function validateDerivedRelationshipMetadata(
+	value: unknown,
+): asserts value is Static<typeof DerivedRelationshipMetadata> {
+	ensure("DerivedRelationshipMetadata", compiledDerivedRelMeta, value);
 }
 
 export function validateClaimCollisionPayload(
-  value: unknown
+	value: unknown,
 ): asserts value is Static<typeof ClaimCollisionPayload> {
-  ensure('ClaimCollisionPayload', compiledClaimCollision, value);
+	ensure("ClaimCollisionPayload", compiledClaimCollision, value);
 }

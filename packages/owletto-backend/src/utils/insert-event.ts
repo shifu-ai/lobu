@@ -189,12 +189,15 @@ function isEventsClientIdForeignKeyViolation(error: unknown): boolean {
  *
  * Returns the inserted row (id, entity_ids, title, semantic_type, created_at).
  * If `onConflictUpdate` is true, performs an upsert on (connection_id, origin_id).
+ * If `sql` is passed, the insert runs on that (transaction-bound) handle
+ * instead of the singleton pool — used by the identity engine to keep its
+ * fact + derivation writes atomic.
  */
 export async function insertEvent(
   params: InsertEventParams,
-  options?: { onConflictUpdate?: boolean }
+  options?: { onConflictUpdate?: boolean; sql?: ReturnType<typeof getDb> }
 ): Promise<InsertedEvent> {
-  const sql = getDb();
+  const sql = options?.sql ?? getDb();
 
   const entityIdsValue = params.entityIds.length > 0 ? `{${params.entityIds.join(',')}}` : null;
   let supersedesEventId = params.supersedesEventId ?? null;

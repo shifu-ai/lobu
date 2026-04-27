@@ -260,13 +260,14 @@ export type DerivedFromProvenance = Static<typeof DerivedFromProvenance>;
 
 /**
  * The metadata blob stored on entity_relationships.metadata for derived
- * rows. Wraps the provenance so other metadata keys can coexist.
+ * rows. Closed shape — extra keys are rejected so the engine can never
+ * accidentally land junk alongside the provenance.
  */
 export const DerivedRelationshipMetadata = Type.Object(
   {
     derivedFrom: DerivedFromProvenance,
   },
-  { $id: 'DerivedRelationshipMetadata', additionalProperties: true }
+  { $id: 'DerivedRelationshipMetadata', additionalProperties: false }
 );
 export type DerivedRelationshipMetadata = Static<typeof DerivedRelationshipMetadata>;
 
