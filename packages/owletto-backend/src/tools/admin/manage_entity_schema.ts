@@ -677,17 +677,42 @@ async function etHandleAudit(
 // ============================================
 
 /**
- * Look up a relationship type by slug and verify the caller's org owns it.
- * Returns the numeric type ID. Throws on not-found or access-denied.
+ * Look up a relationship type by slug.
+ *
+ * - `mode: 'write'` (default): require the caller's org to own the type. Used
+ *   by add_rule / remove_rule / update / delete.
+ * - `mode: 'read'`: also resolve types from any visibility=public catalog the
+ *   caller can see. Used by list_rules so cross-org public RTs surfaced via
+ *   list/get can have their rules read without 403.
+ *
+ * Tenant-first ordering means a tenant slug shadowing a public slug always
+ * wins.
  */
 async function requireRelationshipType(
   slug: string | undefined,
   action: string,
-  ctx: ToolContext
+  ctx: ToolContext,
+  mode: 'read' | 'write' = 'write'
 ): Promise<{ typeId: number; sql: ReturnType<typeof getDb> }> {
   if (!slug) throw new Error(`slug is required for ${action} action`);
 
   const sql = getDb();
+
+  if (mode === 'read') {
+    const rows = await sql`
+      SELECT rt.id
+      FROM entity_relationship_types rt
+      LEFT JOIN organization o ON o.id = rt.organization_id
+      WHERE rt.slug = ${slug}
+        AND rt.deleted_at IS NULL
+        AND (rt.organization_id = ${ctx.organizationId} OR o.visibility = 'public')
+      ORDER BY (rt.organization_id = ${ctx.organizationId}) DESC, rt.id ASC
+      LIMIT 1
+    `;
+    if (rows.length === 0) throw new Error(`Relationship type "${slug}" not found`);
+    return { typeId: Number(rows[0].id), sql };
+  }
+
   const existing = await sql`
     SELECT id, organization_id FROM entity_relationship_types
     WHERE slug = ${slug} AND deleted_at IS NULL
@@ -1057,7 +1082,7 @@ async function rtHandleListRules(
   args: ManageEntitySchemaArgs,
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
-  const { typeId, sql } = await requireRelationshipType(args.slug, 'list_rules', ctx);
+  const { typeId, sql } = await requireRelationshipType(args.slug, 'list_rules', ctx, 'read');
 
   const rules = await sql`
     SELECT id, relationship_type_id, source_entity_type_slug, target_entity_type_slug, created_at
