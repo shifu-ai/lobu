@@ -74,15 +74,22 @@ jobs:
             exit 0
           fi
 
-          # Walk each commit between PINNED..origin/main; exempt only those whose
-          # author email AND exact subject match the FluxCD image-tag bot.
+          # Capture the log first so set -e propagates a git failure (process
+          # substitution would swallow it). tformat: guarantees a trailing
+          # newline so `read` doesn't drop the last commit.
+          LOG=$(git -C packages/owletto-web log \
+            --pretty='tformat:%h|%ae|%s' "$PINNED..origin/main")
+
+          # Walk each commit; exempt only those whose author email AND exact
+          # subject match the FluxCD image-tag bot.
           DRIFT=""
           while IFS='|' read -r sha email subject; do
+            [ -z "$sha" ] && continue
             if [ "$email" = "$BOT_AUTHOR_EMAIL" ] && [ "$subject" = "$BOT_SUBJECT" ]; then
               continue
             fi
             DRIFT+="$sha $subject"$'\n'
-          done < <(git -C packages/owletto-web log --pretty='format:%h|%ae|%s' "$PINNED..origin/main")
+          done <<< "$LOG"
 
           if [ -z "$DRIFT" ]; then
             echo "owletto-web/main is ahead, but only by FluxCD image-tag commits — no parent bump needed."
