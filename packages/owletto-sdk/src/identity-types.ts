@@ -73,7 +73,8 @@ export const ConnectorFact = Type.Object(
      */
     sourceAccountId: Type.String({ minLength: 1, maxLength: 256 }),
     /** Optional expiry. Required for high-assurance facts in production. */
-    validTo: Type.Optional(Type.String({ format: 'date-time' })),
+    /** ISO-8601 timestamp string. Optional; required for high-assurance facts in production. */
+    validTo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
     /**
      * Optional human-readable note about trust caveats this fact carries.
      * Surfaced in audit logs and admin UIs; never used by the engine.
@@ -205,15 +206,24 @@ export type IdentityNamespaceField = Static<typeof IdentityNamespaceField>;
 // persists a connector fact as `semantic_type='identity_fact'`
 // =============================================================================
 
+/**
+ * Stored on `events.metadata` for `semantic_type='identity_fact'` rows.
+ *
+ * Tombstone facts (written when a connector refresh stops emitting a
+ * namespace) carry empty `identifier`/`normalizedValue`/`providerStableId`,
+ * which is why those fields allow empty strings here even though
+ * `ConnectorFact` (the connector-side input) requires non-empty.
+ */
 export const FactEventMetadata = Type.Object(
   {
     namespace: Type.String({ minLength: 1, maxLength: 64 }),
-    identifier: Type.String({ minLength: 1, maxLength: 1024 }),
-    normalizedValue: Type.String({ minLength: 1, maxLength: 1024 }),
+    identifier: Type.String({ minLength: 0, maxLength: 1024 }),
+    normalizedValue: Type.String({ minLength: 0, maxLength: 1024 }),
     assurance: AssuranceLevel,
-    providerStableId: Type.String({ minLength: 1, maxLength: 256 }),
+    providerStableId: Type.String({ minLength: 0, maxLength: 256 }),
     sourceAccountId: Type.String({ minLength: 1, maxLength: 256 }),
-    validTo: Type.Optional(Type.String({ format: 'date-time' })),
+    /** ISO-8601 timestamp string. Optional; required for high-assurance facts in production. */
+    validTo: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
     notes: Type.Optional(Type.String({ maxLength: 512 })),
   },
   { $id: 'FactEventMetadata', additionalProperties: false }
@@ -237,8 +247,8 @@ export const DerivedFromProvenance = Type.Object(
     ruleHash: Type.String({ minLength: 64, maxLength: 64 }),
     /** Echoed for fast assurance audits without joining back to the event. */
     factAssurance: AssuranceLevel,
-    /** ISO-8601. Echoes events.created_at; convenience for relationship-only audits. */
-    derivedAt: Type.String({ format: 'date-time' }),
+    /** ISO-8601 timestamp. Echoes events.created_at; convenience for relationship-only audits. */
+    derivedAt: Type.String({ minLength: 1, maxLength: 64 }),
   },
   { $id: 'DerivedFromProvenance', additionalProperties: false }
 );
