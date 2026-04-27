@@ -73,7 +73,7 @@ Detects supported clients and auto-configures them when possible. Falls back to 
 Authenticates the CLI against an Owletto MCP server using OAuth.
 
 ```bash
-npx owletto@latest login https://app.lobu.ai/mcp
+npx owletto@latest login https://lobu.ai/mcp
 ```
 
 By default, the CLI opens a browser and completes an authorization-code flow with a local callback server.
@@ -87,7 +87,7 @@ Useful flags:
 Example for a headless box:
 
 ```bash
-npx owletto@latest login https://app.lobu.ai/mcp --device
+npx owletto@latest login https://lobu.ai/mcp --device
 ```
 
 ### `owletto token`

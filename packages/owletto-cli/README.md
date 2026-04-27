@@ -23,7 +23,7 @@ npx owletto@latest skills add owletto-openclaw
 ```bash
 npx owletto@latest start
 npx owletto@latest skills list
-npx owletto@latest login https://app.lobu.ai/mcp
+npx owletto@latest login https://lobu.ai/mcp
 npx owletto@latest run search_knowledge '{"query":"Acme"}'
 ```
 
