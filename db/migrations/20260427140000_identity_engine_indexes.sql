@@ -38,12 +38,15 @@ CREATE INDEX IF NOT EXISTS idx_events_identity_fact_lookup
     WHERE semantic_type = 'identity_fact';
 
 -- ── Per-account fact diff ───────────────────────────────────────────────
--- "Find every active fact this connector account currently produces." Used
--- by the engine to diff prior facts vs current set on refresh — drops fall
--- out of the result and get superseded.
+-- "Find every active fact for this provider account." Used by the engine
+-- to diff prior facts vs current set on refresh — drops fall out of the
+-- result and get superseded. Keyed on `providerStableId` (not
+-- `sourceAccountId`): BetterAuth may issue a fresh account row on
+-- reconnect; we want facts to chain across that boundary.
 CREATE INDEX IF NOT EXISTS idx_events_identity_fact_account
     ON public.events (
-        (metadata->>'sourceAccountId'),
+        connector_key,
+        (metadata->>'providerStableId'),
         (metadata->>'namespace')
     )
     WHERE semantic_type = 'identity_fact';

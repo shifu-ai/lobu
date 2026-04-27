@@ -239,10 +239,13 @@ END $$;
 
 -- migrate:down
 
--- Reversing the migration is a manual operation: the founder rows are
--- soft-deleted with deleted_at=NOW() and the new $member rows carry
--- `metadata.migrated_from_founder_id` so an operator can restore by
--- clearing the deleted_at on the founder rows and re-pointing
--- relationships back. Doing it programmatically would require careful
--- reversal of every step above; we don't expect to run this revert.
-SELECT 1;
+-- Fail loudly. A bare `SELECT 1` would let an automatic rollback (CI,
+-- incident response, dbmate down) succeed silently while leaving the DB
+-- in the migrated state, masking the irreversibility. Operators wanting
+-- to revert run a manual playbook: clear deleted_at on the founder rows,
+-- re-point relationships using `metadata.migrated_from_founder_id`, then
+-- delete the new $member rows.
+DO $$
+BEGIN
+    RAISE EXCEPTION 'irreversible: founder→$member is a one-way data migration. Reverse by manual playbook only.';
+END $$;

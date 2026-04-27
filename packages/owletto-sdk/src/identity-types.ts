@@ -287,7 +287,13 @@ export const ClaimCollisionPayload = Type.Object(
     namespace: Type.String({ minLength: 1, maxLength: 64 }),
     identifier: Type.String({ minLength: 1, maxLength: 1024 }),
     normalizedValue: Type.String({ minLength: 1, maxLength: 1024 }),
-    candidateMemberIds: Type.Array(Type.Integer({ minimum: 1 }), {
+    /**
+     * Catalog entity ids that all match this fact's normalized value.
+     * Despite the historical name suggesting `$member`, these are general
+     * catalog entities (founders, companies, etc.) — the resolver picks
+     * which one the user intends to claim.
+     */
+    candidateEntityIds: Type.Array(Type.Integer({ minimum: 1 }), {
       minItems: 2,
       maxItems: 16,
     }),

@@ -484,10 +484,10 @@ describe('identity engine — facts ingestion', () => {
     expect(ev?.semantic_type).toBe(CLAIM_COLLISION_SEMANTIC_TYPE);
     const payload = ev?.metadata as {
       kind: string;
-      candidateMemberIds: number[];
+      candidateEntityIds: number[];
     };
     expect(payload.kind).toBe('identity_match');
-    expect(payload.candidateMemberIds).toHaveLength(2);
+    expect(payload.candidateEntityIds).toHaveLength(2);
   });
 
   it('UC8: rejects a fact whose assurance is below the rule requirement', async () => {
