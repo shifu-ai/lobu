@@ -15,9 +15,11 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
+  clearIdentityFieldCache,
   ingestFacts,
   ruleHashFor,
 } from '../../../identity/engine';
+import { connectorCapabilityRegistry } from '../../../identity/capability-registry';
 import {
   IDENTITY_FACT_SEMANTIC_TYPE,
   CLAIM_COLLISION_SEMANTIC_TYPE,
@@ -42,6 +44,44 @@ interface TestRelationshipType {
 
 async function createPublicCatalog(name: string) {
   return createTestOrganization({ name, visibility: 'public' });
+}
+
+/**
+ * Mark `metadata->>$field` on entity-type `slug` as participating in
+ * identity lookup. The engine's `loadIdentityFields()` reads this
+ * declaration to allow rules to target the field.
+ */
+async function declareIdentityField(
+  organizationId: string,
+  entityTypeSlug: string,
+  field: string
+): Promise<void> {
+  const sql = getTestDb();
+  let typeRows = await sql<{ id: number; metadata_schema: unknown }[]>`
+    SELECT id, metadata_schema FROM entity_types
+    WHERE organization_id = ${organizationId}
+      AND slug = ${entityTypeSlug}
+      AND deleted_at IS NULL
+    LIMIT 1
+  `;
+  if (typeRows.length === 0) {
+    typeRows = await sql<{ id: number; metadata_schema: unknown }[]>`
+      INSERT INTO entity_types (organization_id, slug, name, created_at, updated_at)
+      VALUES (${organizationId}, ${entityTypeSlug}, ${entityTypeSlug}, current_timestamp, current_timestamp)
+      RETURNING id, metadata_schema
+    `;
+  }
+  const existing = (typeRows[0].metadata_schema ?? null) as
+    | { properties?: Record<string, Record<string, unknown>> }
+    | null;
+  const props = { ...(existing?.properties ?? {}) };
+  props[field] = { ...(props[field] ?? { type: 'string' }), 'x-identity-namespace': true };
+  const next = { ...(existing ?? { type: 'object' }), properties: props };
+  await sql`
+    UPDATE entity_types
+    SET metadata_schema = ${sql.json(next)}, updated_at = current_timestamp
+    WHERE id = ${typeRows[0].id}
+  `;
 }
 
 async function createRelationshipTypeWithRules(options: {
@@ -168,10 +208,33 @@ async function getRelationship(id: number) {
 describe('identity engine — facts ingestion', () => {
   beforeAll(async () => {
     await cleanupTestDatabase();
+    // Register a fully-permissive test connector so the capability
+    // registry doesn't reject test facts coming from synthesized
+    // connector keys (google_workspace, linkedin, etc.).
+    for (const connectorKey of [
+      'google_workspace',
+      'linkedin',
+      'cookies_only_connector',
+      'broken',
+    ]) {
+      connectorCapabilityRegistry.register({
+        capability: {
+          connectorKey,
+          produces: [
+            { namespace: 'email', assurance: 'oauth_verified' },
+            { namespace: 'hosted_domain', assurance: 'oauth_verified' },
+            { namespace: 'workspace_admin_domain', assurance: 'oauth_verified_admin_role' },
+            { namespace: 'linkedin_url', assurance: 'oauth_verified' },
+          ],
+        },
+        emit: async () => null,
+      });
+    }
   });
 
   beforeEach(async () => {
     await cleanupTestDatabase();
+    clearIdentityFieldCache();
   });
 
   it('UC1: persists a fact event and derives a relationship to a metadata-matching catalog entity', async () => {
@@ -193,6 +256,8 @@ describe('identity engine — facts ingestion', () => {
       domain: 'bolt.new',
       created_by: user.id,
     });
+    await declareIdentityField(market.id, 'company', 'domain');
+    clearIdentityFieldCache();
 
     const works_at = await createRelationshipTypeWithRules({
       organizationId: market.id,
@@ -221,7 +286,11 @@ describe('identity engine — facts ingestion', () => {
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'google_workspace',
+      accountIdentity: {
+        connectorKey: 'google_workspace',
+        providerStableId: 'google:sub:106789',
+        sourceAccountId: 'acct_uc1_google',
+      },
       facts: [fact],
       options: { shadow: false },
     });
@@ -265,6 +334,8 @@ describe('identity engine — facts ingestion', () => {
       domain: 'bolt.new',
       created_by: user.id,
     });
+    await declareIdentityField(market.id, 'company', 'domain');
+    clearIdentityFieldCache();
     await createRelationshipTypeWithRules({
       organizationId: market.id,
       slug: 'works_at',
@@ -291,20 +362,28 @@ describe('identity engine — facts ingestion', () => {
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'google_workspace',
+      accountIdentity: {
+        connectorKey: 'google_workspace',
+        providerStableId: 'google:sub:leaver',
+        sourceAccountId: 'acct_uc4_google',
+      },
       facts: [initialFact],
     });
     expect(first.derivedRelationshipIds).toHaveLength(1);
 
-    // Refresh: connector emits no facts at all (user left Workspace, hosted_domain dropped).
+    // Refresh: hosted_domain is no longer present. Pass a different fact
+    // (email) to demonstrate that absent namespaces from prior get
+    // tombstoned even when the batch is non-empty.
     const refresh = await ingestFacts({
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'google_workspace',
+      accountIdentity: {
+        connectorKey: 'google_workspace',
+        providerStableId: 'google:sub:leaver',
+        sourceAccountId: 'acct_uc4_google',
+      },
       facts: [
-        // Provide an empty-domain fact via a different namespace to trigger the diff path.
-        // We pass an `email` fact that's still valid; absence of `hosted_domain` is what we want to test.
         {
           namespace: 'email',
           identifier: 'leaver@personal.example',
@@ -359,6 +438,8 @@ describe('identity engine — facts ingestion', () => {
       UPDATE entities SET metadata = metadata || ${sql.json({ linkedin_url: 'linkedin.com/in/albert' })}
       WHERE id = ${founderB.id}
     `;
+    await declareIdentityField(market.id, 'founder', 'linkedin_url');
+    clearIdentityFieldCache();
 
     await createRelationshipTypeWithRules({
       organizationId: market.id,
@@ -378,7 +459,11 @@ describe('identity engine — facts ingestion', () => {
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'linkedin',
+      accountIdentity: {
+        connectorKey: 'linkedin',
+        providerStableId: 'linkedin:12345',
+        sourceAccountId: 'acct_uc6_linkedin',
+      },
       facts: [
         {
           namespace: 'linkedin_url',
@@ -423,6 +508,8 @@ describe('identity engine — facts ingestion', () => {
       domain: 'bolt.new',
       created_by: user.id,
     });
+    await declareIdentityField(market.id, 'company', 'domain');
+    clearIdentityFieldCache();
     await createRelationshipTypeWithRules({
       organizationId: market.id,
       slug: 'works_at',
@@ -441,7 +528,11 @@ describe('identity engine — facts ingestion', () => {
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'cookies_only_connector',
+      accountIdentity: {
+        connectorKey: 'cookies_only_connector',
+        providerStableId: 'cookie:abc',
+        sourceAccountId: 'acct_uc8_cookies',
+      },
       facts: [
         {
           namespace: 'hosted_domain',
@@ -477,6 +568,8 @@ describe('identity engine — facts ingestion', () => {
       domain: 'bolt.new',
       created_by: user.id,
     });
+    await declareIdentityField(market.id, 'company', 'domain');
+    clearIdentityFieldCache();
     await createRelationshipTypeWithRules({
       organizationId: market.id,
       slug: 'works_at',
@@ -495,7 +588,11 @@ describe('identity engine — facts ingestion', () => {
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'google_workspace',
+      accountIdentity: {
+        connectorKey: 'google_workspace',
+        providerStableId: 'google:sub:shadow',
+        sourceAccountId: 'acct_shadow_google',
+      },
       facts: [
         {
           namespace: 'hosted_domain',
@@ -531,7 +628,11 @@ describe('identity engine — facts ingestion', () => {
         tenantOrganizationId: tenant.id,
         memberEntityId,
         userId: user.id,
-        connectorKey: 'broken',
+        accountIdentity: {
+          connectorKey: 'broken',
+          providerStableId: 'broken:1',
+          sourceAccountId: 'broken:1',
+        },
         facts: [
           // Missing required fields.
           {
@@ -565,6 +666,8 @@ describe('identity engine — facts ingestion', () => {
       domain: 'bolt.new',
       created_by: user.id,
     });
+    await declareIdentityField(market.id, 'company', 'domain');
+    clearIdentityFieldCache();
 
     await createRelationshipTypeWithRules({
       organizationId: market.id,
@@ -597,7 +700,11 @@ describe('identity engine — facts ingestion', () => {
       tenantOrganizationId: tenant.id,
       memberEntityId,
       userId: user.id,
-      connectorKey: 'google_workspace',
+      accountIdentity: {
+        connectorKey: 'google_workspace',
+        providerStableId: 'google:sub:admin',
+        sourceAccountId: 'acct_uc5_google',
+      },
       facts: [
         {
           namespace: 'hosted_domain',

@@ -69,9 +69,48 @@ CREATE INDEX IF NOT EXISTS idx_entity_relationships_derived_from_rule
     )
     WHERE metadata ? 'derivedFrom';
 
+-- ── Idempotent derivation insert ────────────────────────────────────────
+-- Pi P0.3 — even with the engine's advisory lock, this partial unique
+-- constraint catches accidental double-inserts (e.g. when a different code
+-- path tries to write the same auto-derived edge). ON CONFLICT DO NOTHING
+-- in the engine relies on this index to fire.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entity_relationships_live_triple
+    ON public.entity_relationships (from_entity_id, to_entity_id, relationship_type_id)
+    WHERE deleted_at IS NULL;
+
+-- ── Per-namespace entity metadata indexes ───────────────────────────────
+-- Pi P1.10 — the engine's findEntitiesByMetadataField does
+-- `WHERE metadata->>$field = $value`. Without per-field expression indexes
+-- this is a sequential scan on the entities table for every fact it
+-- processes. Add the common identity namespaces here; future namespaces
+-- get an entry in this same list when their first rule lands.
+--
+-- `idx_entities_metadata_domain` already exists in the baseline schema.
+
+CREATE INDEX IF NOT EXISTS idx_entities_metadata_email
+    ON public.entities ((metadata->>'email'), organization_id)
+    WHERE (metadata->>'email') IS NOT NULL AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entities_metadata_linkedin_url
+    ON public.entities ((metadata->>'linkedin_url'), organization_id)
+    WHERE (metadata->>'linkedin_url') IS NOT NULL AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entities_metadata_github_handle
+    ON public.entities ((metadata->>'github_handle'), organization_id)
+    WHERE (metadata->>'github_handle') IS NOT NULL AND deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_entities_metadata_twitter_handle
+    ON public.entities ((metadata->>'twitter_handle'), organization_id)
+    WHERE (metadata->>'twitter_handle') IS NOT NULL AND deleted_at IS NULL;
+
 
 -- migrate:down
 
+DROP INDEX IF EXISTS public.idx_entities_metadata_twitter_handle;
+DROP INDEX IF EXISTS public.idx_entities_metadata_github_handle;
+DROP INDEX IF EXISTS public.idx_entities_metadata_linkedin_url;
+DROP INDEX IF EXISTS public.idx_entities_metadata_email;
+DROP INDEX IF EXISTS public.idx_entity_relationships_live_triple;
 DROP INDEX IF EXISTS public.idx_entity_relationships_derived_from_rule;
 DROP INDEX IF EXISTS public.idx_entity_relationships_derived_from_event;
 DROP INDEX IF EXISTS public.idx_events_identity_fact_account;

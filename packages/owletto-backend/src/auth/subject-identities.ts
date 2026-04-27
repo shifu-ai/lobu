@@ -70,6 +70,21 @@ async function findMemberEntityIdByEmail(
 }
 
 /**
+ * Trust sources whose `entity_identities` rows are accepted for `$member`
+ * adoption. User-supplied identity rows (e.g. via raw `manage_entity` calls)
+ * MUST NOT appear here — only auth-server writes, vetted migrations, and
+ * connector-emitted facts may bind a signing-in user to a curated row.
+ *
+ * Pi P0.1 — without this filter a malicious `entity_identities` row could
+ * hijack adoption.
+ */
+const TRUSTED_ADOPTION_SOURCES = new Set<string>([
+  'auth:signup',
+  'identity-engine:fact',
+  'migration:founder_to_member',
+]);
+
+/**
  * Multi-namespace `$member` lookup against `entity_identities`.
  *
  * Used by the identity engine + auth hook to adopt a pre-curated `$member`
@@ -81,6 +96,10 @@ async function findMemberEntityIdByEmail(
  * provider's signal is most authoritative. Within entity_identities we
  * already have a unique index on (organization_id, namespace, identifier),
  * so each (ns, id) pair returns at most one row.
+ *
+ * Pi P0.1 — joins on `e.organization_id = ei.organization_id` to keep
+ * cross-org rows from hijacking adoption, and filters by trusted
+ * `source_connector` so user-supplied identity rows can't bind users.
  */
 export async function findMemberEntityIdByIdentities(
   organizationId: string,
@@ -88,17 +107,23 @@ export async function findMemberEntityIdByIdentities(
 ): Promise<number | null> {
   if (candidates.length === 0) return null;
   const sql = getDb();
+  const trusted = Array.from(TRUSTED_ADOPTION_SOURCES);
   for (const cand of candidates) {
     if (!cand.namespace || !cand.identifier) continue;
     const rows = await sql<{ entity_id: number }>`
       SELECT ei.entity_id
       FROM entity_identities ei
-      JOIN entities e ON e.id = ei.entity_id
-      JOIN entity_types et ON et.id = e.entity_type_id
+      JOIN entities e
+        ON e.id = ei.entity_id
+       AND e.organization_id = ei.organization_id
+      JOIN entity_types et
+        ON et.id = e.entity_type_id
+       AND et.organization_id = e.organization_id
       WHERE ei.organization_id = ${organizationId}
         AND ei.namespace = ${cand.namespace}
         AND ei.identifier = ${cand.identifier}
         AND ei.deleted_at IS NULL
+        AND ei.source_connector = ANY(${trusted})
         AND et.slug = '$member'
         AND e.deleted_at IS NULL
       LIMIT 1

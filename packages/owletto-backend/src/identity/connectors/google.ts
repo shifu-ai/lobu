@@ -13,10 +13,11 @@ import type { ConnectorFact, ConnectorIdentityCapability } from '@lobu/owletto-s
 import { normalizeEmail } from '@lobu/owletto-sdk';
 import { fetchUserInfoWithRaw } from '../../connect/oauth-providers';
 import logger from '../../utils/logger';
+import { registerConnector } from '../capability-registry';
 
 const log = logger.child({ module: 'identity-connector-google' });
 
-export const googleIdentityCapability: ConnectorIdentityCapability = {
+const googleIdentityCapability: ConnectorIdentityCapability = {
   connectorKey: 'google',
   produces: [
     {
@@ -41,15 +42,27 @@ interface GoogleEmitterParams {
 }
 
 /**
- * Fetch Google's userinfo payload and translate into ConnectorFacts. Returns
- * an empty array when the call fails or the payload is missing required
- * fields — engine treats an empty batch as "no facts to derive against",
- * which is the right behavior (silently no-ops, doesn't break sign-in).
+ * Successful emit. `facts` may be empty when the user's Google account is
+ * legitimately producing no relevant attributes (rare). The engine treats
+ * an empty result authoritatively: prior facts get tombstoned. Pi P1.4.
+ */
+export interface GoogleEmitResult {
+  providerStableId: string;
+  facts: ConnectorFact[];
+}
+
+/**
+ * Fetch Google's userinfo payload and translate into ConnectorFacts.
+ *
+ * Returns `null` when the fetch FAILS (network error, no payload, missing
+ * provider stable id) — caller MUST NOT call `ingestFacts` on null.
+ * Returns `{ providerStableId, facts }` on success (facts may be empty if
+ * the account legitimately has no relevant verified attributes).
  */
 export async function getVerifiedFactsFromGoogle(
   params: GoogleEmitterParams
-): Promise<ConnectorFact[]> {
-  if (!params.accessToken) return [];
+): Promise<GoogleEmitResult | null> {
+  if (!params.accessToken) return null;
 
   let payload: Awaited<ReturnType<typeof fetchUserInfoWithRaw>>;
   try {
@@ -59,10 +72,10 @@ export async function getVerifiedFactsFromGoogle(
     });
   } catch (err) {
     log.warn({ err, sourceAccountId: params.sourceAccountId }, 'google userinfo fetch failed');
-    return [];
+    return null;
   }
 
-  if (!payload.raw) return [];
+  if (!payload.raw) return null;
   const raw = payload.raw as {
     sub?: unknown;
     id?: unknown;
@@ -74,13 +87,15 @@ export async function getVerifiedFactsFromGoogle(
   const providerStableId = String(raw.sub ?? raw.id ?? '');
   if (!providerStableId) {
     log.warn({ sourceAccountId: params.sourceAccountId }, 'google userinfo missing sub/id');
-    return [];
+    return null;
   }
 
   const facts: ConnectorFact[] = [];
 
-  // Email — emitted only when verified by Google.
-  if (typeof raw.email === 'string' && raw.email_verified !== false) {
+  // Email — emitted only when explicitly verified by Google.
+  // Pi P1.9 — `!== false` accepts missing/null/string-typed values; require a
+  // boolean-true to upgrade to oauth_verified. Anything else stays out.
+  if (typeof raw.email === 'string' && raw.email_verified === true) {
     const normalized = normalizeEmail(raw.email);
     if (normalized) {
       facts.push({
@@ -107,5 +122,13 @@ export async function getVerifiedFactsFromGoogle(
     });
   }
 
-  return facts;
+  return { providerStableId, facts };
 }
+
+// Self-registration. Importing this module is the only thing core code
+// has to do to enable the Google connector — there's no `case 'google'`
+// branch anywhere in the engine or auth-hook.
+registerConnector({
+  capability: googleIdentityCapability,
+  emit: getVerifiedFactsFromGoogle,
+});

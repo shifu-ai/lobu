@@ -13,9 +13,10 @@
 
 import { getDb } from '../db/client';
 import logger from '../utils/logger';
+import { connectorCapabilityRegistry } from './capability-registry';
+// Side-effect import: each connector module self-registers on load.
+import './connectors';
 import { ingestFacts } from './engine';
-import { getVerifiedFactsFromGoogle } from './connectors/google';
-import type { ConnectorFact } from '@lobu/owletto-sdk';
 
 const log = logger.child({ module: 'identity-auth-hook' });
 
@@ -39,6 +40,10 @@ interface ResolvedTenantMember {
  */
 async function resolveTenantMember(userId: string): Promise<ResolvedTenantMember | null> {
   const sql = getDb();
+  // Pi P0.1 — restrict to entity_identities written by the auth-server
+  // signup hook so user-supplied identity rows can't hijack the lookup, and
+  // join on matching organization_id at every level so a stale cross-org
+  // row can't redirect the bind to another tenant.
   const rows = await sql<{ organization_id: string; entity_id: number }>`
     SELECT m."organizationId" AS organization_id, e.id AS entity_id
     FROM "member" m
@@ -48,8 +53,15 @@ async function resolveTenantMember(userId: string): Promise<ResolvedTenantMember
      AND ei.namespace = 'auth_user_id'
      AND ei.identifier = ${userId}
      AND ei.deleted_at IS NULL
-    JOIN entities e ON e.id = ei.entity_id AND e.deleted_at IS NULL
-    JOIN entity_types et ON et.id = e.entity_type_id AND et.slug = '$member'
+     AND ei.source_connector = 'auth:signup'
+    JOIN entities e
+      ON e.id = ei.entity_id
+     AND e.organization_id = ei.organization_id
+     AND e.deleted_at IS NULL
+    JOIN entity_types et
+      ON et.id = e.entity_type_id
+     AND et.organization_id = e.organization_id
+     AND et.slug = '$member'
     WHERE m."userId" = ${userId}
       AND o.visibility = 'private'
     ORDER BY o."createdAt" ASC
@@ -62,31 +74,33 @@ async function resolveTenantMember(userId: string): Promise<ResolvedTenantMember
   };
 }
 
-async function emitFactsForProvider(account: AuthAccountSummary): Promise<ConnectorFact[]> {
-  if (!account.accessToken) return [];
-  switch (account.providerId) {
-    case 'google':
-      return getVerifiedFactsFromGoogle({
-        accessToken: account.accessToken,
-        sourceAccountId: account.id,
-      });
-    // Future providers register here. Each emitter declares its own
-    // ConnectorIdentityCapability so a future CI lint can verify the
-    // emitted namespaces match the declaration.
-    default:
-      return [];
-  }
-}
-
 /**
  * Schedule the identity-engine ingest for a freshly-created or refreshed
  * social-login account. Fire-and-forget. Errors are logged, not thrown.
+ *
+ * Provider routing is registry-based — there is no per-provider branch in
+ * core code. Each connector self-registers in `connectors/<name>.ts` and
+ * the registry maps `providerId` → emitter.
  */
 export function scheduleIdentityIngest(account: AuthAccountSummary): void {
   void (async () => {
     try {
-      const facts = await emitFactsForProvider(account);
-      if (facts.length === 0) return;
+      if (!account.accessToken) return;
+      const emit = connectorCapabilityRegistry.emitter(account.providerId);
+      if (!emit) {
+        log.debug(
+          { providerId: account.providerId, userId: account.userId },
+          'identity-engine: no connector registered for provider; skipping ingest'
+        );
+        return;
+      }
+      const emitted = await emit({
+        accessToken: account.accessToken,
+        sourceAccountId: account.id,
+      });
+      // Pi P1.4 — fetch failure: do NOT call ingestFacts (would tombstone
+      // everything). emit returning null is the explicit signal.
+      if (!emitted) return;
 
       const resolved = await resolveTenantMember(account.userId);
       if (!resolved) {
@@ -101,8 +115,12 @@ export function scheduleIdentityIngest(account: AuthAccountSummary): void {
         tenantOrganizationId: resolved.tenantOrganizationId,
         memberEntityId: resolved.memberEntityId,
         userId: account.userId,
-        connectorKey: account.providerId,
-        facts,
+        accountIdentity: {
+          connectorKey: account.providerId,
+          providerStableId: emitted.providerStableId,
+          sourceAccountId: account.id,
+        },
+        facts: emitted.facts,
       });
     } catch (err) {
       log.error(

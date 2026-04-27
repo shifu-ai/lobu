@@ -117,15 +117,19 @@ export type ConnectorIdentityCapability = Static<typeof ConnectorIdentityCapabil
 /**
  * What the engine should do when ambiguous matches are found:
  *  - `unique_only` (default for identity): require exactly one match. Multiple
- *    matches are rejected and surfaced as a `match_ambiguous` event for an
- *    admin to deduplicate.
+ *    matches are rejected and surfaced as a `claim_collision` approval event
+ *    for an admin/user to deduplicate.
  *  - `all_matches`: derive against every match. Only safe for weak
  *    relationships (e.g. `mentions`); never use for identity adoption or
  *    authority.
- *  - `first_match`: never allowed in v1. Reserved for future low-stakes use.
+ *
+ * `first_match` is intentionally NOT a valid strategy — it would silently
+ * pick a winner on collision, opening adoption-takeover paths. If a future
+ * use case justifies it, add it back via a follow-up that also adds the
+ * required guardrails.
  */
 export const MatchStrategy = Type.Union(
-  [Type.Literal('unique_only'), Type.Literal('all_matches'), Type.Literal('first_match')],
+  [Type.Literal('unique_only'), Type.Literal('all_matches')],
   { $id: 'MatchStrategy' }
 );
 export type MatchStrategy = Static<typeof MatchStrategy>;
