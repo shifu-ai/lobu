@@ -230,11 +230,7 @@ export class SubprocessExecutor implements SyncExecutor {
         return `[stdout]\n${out}\n[stderr]\n${err}`;
       };
 
-      const computeExitReason = (
-        code: number | null,
-        signal: string | null,
-        tail: string
-      ): SubprocessExitReason => {
+      const computeExitReason = (tail: string): SubprocessExitReason => {
         if (timedOut) return 'timeout';
         if (/javascript heap out of memory/i.test(tail)) return 'oom';
         return 'crash';
@@ -375,7 +371,7 @@ export class SubprocessExecutor implements SyncExecutor {
         }
         settle(() => {
           const tail = redactOutput(combinedTail());
-          const reason = computeExitReason(code, signal, tail);
+          const reason = computeExitReason(tail);
           const prefix =
             reason === 'timeout'
               ? `Feed execution timed out after ${this.options.timeoutMs}ms`
