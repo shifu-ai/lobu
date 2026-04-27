@@ -61,7 +61,6 @@ export {
   DerivedRelationshipMetadata,
   FactEventMetadata,
   IDENTITY_FACT_SEMANTIC_TYPE,
-  IdentityNamespaceField,
   MatchStrategy,
   RelationshipTypeIdentityMetadata,
 } from './identity-types.js';

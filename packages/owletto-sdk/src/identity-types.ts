@@ -50,7 +50,7 @@ export function assuranceMeets(actual: AssuranceLevel, required: AssuranceLevel)
 
 export const ConnectorFact = Type.Object(
   {
-    /** The attribute kind, e.g. 'email', 'hosted_domain', 'linkedin_url'. */
+    /** The attribute kind. Each connector declares which namespaces it produces. */
     namespace: Type.String({ minLength: 1, maxLength: 64 }),
     /** Raw value as the provider returned it. Audit-friendly. */
     identifier: Type.String({ minLength: 1, maxLength: 1024 }),
@@ -62,9 +62,8 @@ export const ConnectorFact = Type.Object(
     /** How the connector verified this fact. */
     assurance: AssuranceLevel,
     /**
-     * Provider's immutable account identifier (Google `sub`, GitHub
-     * `user_id`, etc.). Used as the primary binding key — survives email
-     * changes, recycled emails, etc.
+     * Provider's immutable account identifier — the primary binding key
+     * that survives email changes and account-row reissues.
      */
     providerStableId: Type.String({ minLength: 1, maxLength: 256 }),
     /**
@@ -165,36 +164,6 @@ export const RelationshipTypeIdentityMetadata = Type.Object(
   { $id: 'RelationshipTypeIdentityMetadata', additionalProperties: true }
 );
 export type RelationshipTypeIdentityMetadata = Static<typeof RelationshipTypeIdentityMetadata>;
-
-// =============================================================================
-// IdentityNamespaceField — declared on entity-type field YAMLs
-// =============================================================================
-
-/**
- * Marker placed on an entity-type field's metadata-schema entry to declare
- * that the field's value participates in identity lookup. The seeder reads
- * these markers and the engine uses them to resolve "what entity does this
- * fact's normalizedValue point at?".
- */
-export const IdentityNamespaceField = Type.Object(
-  {
-    namespace: Type.String({ minLength: 1, maxLength: 64 }),
-    /**
-     * Built-in normalizer to apply both at write time (entity creation) and
-     * at lookup time. `lowercase` collapses case; `linkedin_canonical`
-     * strips scheme/www/trailing-slash; `e164_phone` digit-only; `as_is`
-     * means no transformation.
-     */
-    normalize: Type.Union([
-      Type.Literal('lowercase'),
-      Type.Literal('linkedin_canonical'),
-      Type.Literal('e164_phone'),
-      Type.Literal('as_is'),
-    ]),
-  },
-  { $id: 'IdentityNamespaceField', additionalProperties: false }
-);
-export type IdentityNamespaceField = Static<typeof IdentityNamespaceField>;
 
 // =============================================================================
 // Fact event metadata — written into events.metadata when the engine
