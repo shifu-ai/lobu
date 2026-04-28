@@ -2073,6 +2073,8 @@ async function handleList(
       i.model_config,
       i.sources,
       i.tags,
+      i.watcher_group_id,
+      i.source_watcher_id,
       wr.id as watcher_run_id,
       wr.status as watcher_run_status,
       wr.error_message as watcher_run_error,
