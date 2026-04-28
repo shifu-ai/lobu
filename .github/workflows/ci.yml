@@ -209,8 +209,20 @@ jobs:
       - name: Run TypeScript type check
         run: bun run typecheck
 
-      - name: Type check owletto-backend (excluded from root tsconfig)
-        run: cd packages/owletto-backend && bunx tsc --noEmit
+      - name: Type check packages excluded from root tsconfig
+        # Root tsconfig excludes these packages, so `bun run typecheck`
+        # above never sees them. Run each package's own tsc here so a
+        # type error can't reach main and break docker builds at deploy
+        # time. owletto-connectors and landing are intentionally left
+        # out — they need preconditions (DOM lib, `astro sync`) that
+        # belong to their own build pipelines.
+        run: |
+          set -euo pipefail
+          for pkg in owletto-backend owletto-cli owletto-worker owletto-sdk owletto-openclaw owletto-embeddings owletto-extension cli; do
+            echo "::group::typecheck $pkg"
+            (cd "packages/$pkg" && bunx tsc --noEmit)
+            echo "::endgroup::"
+          done
 
   migrations:
     # Catches the class of bug that has now broken prod twice in one
