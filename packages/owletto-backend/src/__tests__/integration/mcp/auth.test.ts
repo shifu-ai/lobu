@@ -881,6 +881,8 @@ describe('MCP Authentication', () => {
       // Verify expected tools are present. The legacy `manage_*`,
       // `read_knowledge`, `get_watcher`, `list_watchers` MCP tools are now
       // internal-only and reachable via the SDK from `run` / `query` scripts.
+      // owletto-cli's browser-auth flow now hits the REST proxy, so
+      // `manage_connections` / `manage_auth_profiles` are no longer public-MCP.
       const toolNames = result.tools.map((t: any) => t.name);
       expect(toolNames).toContain('search_knowledge');
       expect(toolNames).toContain('save_knowledge');
@@ -892,10 +894,8 @@ describe('MCP Authentication', () => {
       expect(toolNames).not.toContain('get_watcher');
       expect(toolNames).not.toContain('list_watchers');
       expect(toolNames).not.toContain('manage_entity');
-      // `manage_connections` and `manage_auth_profiles` stay public-MCP for
-      // owletto-cli's browser-auth flow; flip to internal once the CLI migrates.
-      expect(toolNames).toContain('manage_connections');
-      expect(toolNames).toContain('manage_auth_profiles');
+      expect(toolNames).not.toContain('manage_connections');
+      expect(toolNames).not.toContain('manage_auth_profiles');
       expect(toolNames).not.toContain('join_organization');
     });
 

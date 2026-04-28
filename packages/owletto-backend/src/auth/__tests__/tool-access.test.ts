@@ -445,37 +445,37 @@ describe('first-party tool-name coverage', () => {
     assertRegistered(used);
   });
 
-  // CLI tools that flow through MCP RPC (`mcpRpc(url, 'tools/call', { name })`)
-  // — must be registered AND non-internal, since `tools/list` filters out
-  // `internal: true`. Hardcoded rather than regex-derived so a removal from
-  // the CLI source can't silently shrink the assertion set.
-  const CLI_PUBLIC_MCP_TOOLS = ['manage_connections', 'manage_auth_profiles'] as const;
+  // CLI bootstrap tools that the `owletto browser-auth` flow drives via the
+  // REST proxy (`POST /api/{slug}/{toolName}`). They must be registered AND
+  // `internal: true` so they stay off the external MCP surface — no external
+  // MCP client should see CLI bootstrap tools in `tools/list`.
+  const CLI_REST_BOOTSTRAP_TOOLS = ['manage_connections', 'manage_auth_profiles'] as const;
 
-  it.each(CLI_PUBLIC_MCP_TOOLS)(
-    'CLI MCP tool %s is registered and visible on the public MCP surface',
+  it.each(CLI_REST_BOOTSTRAP_TOOLS)(
+    'CLI bootstrap tool %s is registered and hidden from external MCP tools/list',
     (name) => {
       const tool = getTool(name);
       expect(tool).toBeDefined();
-      // `internal: true` would hide the tool from external `tools/list`,
-      // silently breaking `owletto browser-auth`.
-      expect(tool?.internal ?? false).toBe(false);
+      // `internal: true` keeps these tools reachable via the REST proxy
+      // (`allowInternalTools=true` for non-`/mcp` paths) while hiding them
+      // from external MCP clients like Claude Desktop or Cursor.
+      expect(tool?.internal).toBe(true);
     }
   );
 
-  it('CLI browser-auth tools/call literals match the pinned set', () => {
-    // Drift detector: if browser-auth.ts starts calling a new MCP tool, fail
-    // here rather than silently expand the public-MCP surface unannounced.
+  it('CLI browser-auth no longer calls bootstrap tools over MCP RPC', () => {
+    // After the REST migration, browser-auth.ts must use `restToolCall(...)`
+    // for these tools — never `mcpRpc(..., 'tools/call', ...)`. This drift
+    // detector fails the moment someone re-introduces an MCP RPC call site.
     if (!present(cliSrcRoot)) return;
     const browserAuth = join(cliSrcRoot, 'commands', 'browser-auth.ts');
     if (!present(browserAuth)) return;
     const content = readFileSync(browserAuth, 'utf-8');
-    const used = new Set<string>();
-    // Match `mcpRpc(…, 'tools/call', { … name: 'X' … })` across newlines.
-    for (const match of content.matchAll(
-      /'tools\/call'[\s\S]{0,300}?\bname:\s*['"]([a-zA-Z_][a-zA-Z0-9_]*)['"]/g
-    )) {
-      used.add(match[1]);
+    expect(content).not.toMatch(/'tools\/call'/);
+    for (const tool of CLI_REST_BOOTSTRAP_TOOLS) {
+      // The REST helper takes the tool name as the second positional argument.
+      const restPattern = new RegExp(`restToolCall<[^>]*>\\(\\s*\\w+\\s*,\\s*['"]${tool}['"]`);
+      expect(content).toMatch(restPattern);
     }
-    expect([...used].sort()).toEqual([...CLI_PUBLIC_MCP_TOOLS].sort());
   });
 });

@@ -8,9 +8,6 @@
  * `restToolProxy` sets `allowInternalTools=true` (since the request didn't come
  * in over `/mcp`), so `internal: true` tools are reachable by REST but hidden
  * from MCP `tools/list`.
- *
- * The two non-internal entries (`manage_connections`, `manage_auth_profiles`)
- * stay on the public MCP surface for owletto-cli's `browser-auth` flow.
  */
 
 import type { TSchema } from '@sinclair/typebox';
@@ -42,8 +39,7 @@ interface InternalToolEntry {
   annotations?: ToolAnnotations;
   /**
    * `true` (default) hides from MCP `tools/list` — REST/session callers can
-   * still reach it. `false` keeps it on the public MCP surface (currently
-   * just the two CLI browser-auth tools).
+   * still reach it. `false` keeps it on the public MCP surface.
    */
   internal?: boolean;
 }
@@ -66,11 +62,9 @@ const ENTRIES: InternalToolEntry[] = [
   },
   {
     name: 'manage_connections',
-    description:
-      'Connection management. Kept on the public MCP surface for the owletto-cli browser-auth flow. SDK alternative: client.connections.',
+    description: 'Connection management. SDK alternative: client.connections.',
     schema: ManageConnectionsSchema,
     handler: manageConnections,
-    internal: false,
   },
   {
     name: 'manage_feeds',
@@ -80,11 +74,9 @@ const ENTRIES: InternalToolEntry[] = [
   },
   {
     name: 'manage_auth_profiles',
-    description:
-      'Auth-profile management. Kept on the public MCP surface for the owletto-cli browser-auth flow. SDK alternative: client.authProfiles.',
+    description: 'Auth-profile management. SDK alternative: client.authProfiles.',
     schema: ManageAuthProfilesSchema,
     handler: manageAuthProfiles,
-    internal: false,
   },
   {
     name: 'manage_operations',

@@ -374,15 +374,6 @@ async function extractCookiesCDP(
   }
 }
 
-function parseToolJson(text: string): any {
-  if (!text.trim()) return {};
-  const normalized = text
-    .trim()
-    .replace(/^```json\s*/, '')
-    .replace(/\s*```$/, '');
-  return JSON.parse(normalized);
-}
-
 function scoreAuthCookie(cookie: BrowserCookie): number {
   const name = cookie.name?.toLowerCase() ?? '';
   if (!name) return Number.NEGATIVE_INFINITY;
@@ -415,20 +406,17 @@ async function resolveConnectorDomains(
     return domainsOverride.split(',').map((d) => d.trim());
   }
 
-  const { resolveMcpEndpoint, mcpRpc } = await import('./mcp.ts');
+  const { resolveMcpEndpoint, restToolCall } = await import('./mcp.ts');
   const mcpUrl = resolveMcpEndpoint(cliProfile.config);
   if (!mcpUrl) {
     printText('No MCP URL configured. Use --domains to specify cookie domains manually.');
     return null;
   }
 
-  const result = (await mcpRpc(mcpUrl, 'tools/call', {
-    name: 'manage_connections',
-    arguments: { action: 'list_connector_definitions' },
-  })) as any;
+  const parsed = await restToolCall<any>(mcpUrl, 'manage_connections', {
+    action: 'list_connector_definitions',
+  });
 
-  const text = result?.content?.[0]?.text ?? '';
-  const parsed = parseToolJson(text);
   const connectors: any[] = Array.isArray(parsed)
     ? parsed
     : (parsed?.connector_definitions ?? parsed?.connectors ?? []);
@@ -505,7 +493,7 @@ const browserAuth = defineCommand({
         process.exitCode = 1;
         return;
       }
-      const { resolveMcpEndpoint, mcpRpc } = await import('./mcp.ts');
+      const { resolveMcpEndpoint, restToolCall } = await import('./mcp.ts');
       const mcpUrl = resolveMcpEndpoint(cliProfile.config);
       if (!mcpUrl) {
         printText('No MCP URL configured.');
@@ -513,13 +501,17 @@ const browserAuth = defineCommand({
         return;
       }
 
-      const result = (await mcpRpc(mcpUrl, 'tools/call', {
-        name: 'manage_auth_profiles',
-        arguments: { action: 'test_auth_profile', auth_profile_slug: args.authProfileSlug },
-      })) as any;
-
-      const text = result?.content?.[0]?.text ?? '';
-      const parsed = parseToolJson(text);
+      let parsed: any;
+      try {
+        parsed = await restToolCall<any>(mcpUrl, 'manage_auth_profiles', {
+          action: 'test_auth_profile',
+          auth_profile_slug: args.authProfileSlug,
+        });
+      } catch (err) {
+        printText(`Error: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 1;
+        return;
+      }
       if (parsed?.error) {
         printText(`Error: ${parsed.error}`);
         process.exitCode = 1;
@@ -612,15 +604,14 @@ const browserAuth = defineCommand({
       }
 
       if (args.authProfileSlug) {
-        const { resolveMcpEndpoint, mcpRpc } = await import('./mcp.ts');
+        const { resolveMcpEndpoint, restToolCall } = await import('./mcp.ts');
         const mcpUrl = resolveMcpEndpoint(cliProfile.config);
 
         if (!mcpUrl) {
           printText('No MCP URL configured. Store the CDP URL on the auth profile manually.');
         } else {
-          const result = (await mcpRpc(mcpUrl, 'tools/call', {
-            name: 'manage_auth_profiles',
-            arguments: {
+          try {
+            const parsed = await restToolCall<any>(mcpUrl, 'manage_auth_profiles', {
               action: 'update_auth_profile',
               auth_profile_slug: args.authProfileSlug,
               auth_data: {
@@ -630,17 +621,18 @@ const browserAuth = defineCommand({
                 browser_profile: profileName,
                 user_data_dir: userDataDir,
               },
-            },
-          })) as any;
-
-          const responseText = result?.content?.[0]?.text ?? '';
-          const parsed = parseToolJson(responseText);
-          if (parsed?.error) {
-            printText(`Error: ${parsed.error}`);
+            });
+            if (parsed?.error) {
+              printText(`Error: ${parsed.error}`);
+              process.exitCode = 1;
+              return;
+            }
+            printText(`CDP URL stored on auth profile ${args.authProfileSlug}.`);
+          } catch (err) {
+            printText(`Error: ${err instanceof Error ? err.message : String(err)}`);
             process.exitCode = 1;
             return;
           }
-          printText(`CDP URL stored on auth profile ${args.authProfileSlug}.`);
         }
       }
 
@@ -729,15 +721,14 @@ const browserAuth = defineCommand({
     if (args.authProfileSlug) {
       printText('Saving cookies to auth profile...');
 
-      const { resolveMcpEndpoint, mcpRpc } = await import('./mcp.ts');
+      const { resolveMcpEndpoint, restToolCall } = await import('./mcp.ts');
       const mcpUrl = resolveMcpEndpoint(cliProfile.config);
 
       if (!mcpUrl) {
         printText('No MCP URL configured. Store cookies manually.');
       } else {
-        const result = (await mcpRpc(mcpUrl, 'tools/call', {
-          name: 'manage_auth_profiles',
-          arguments: {
+        try {
+          const parsed = await restToolCall<any>(mcpUrl, 'manage_auth_profiles', {
             action: 'update_auth_profile',
             auth_profile_slug: args.authProfileSlug,
             auth_data: {
@@ -746,15 +737,14 @@ const browserAuth = defineCommand({
               captured_via: 'cli',
               browser_profile: selectedProfile.name,
             },
-          },
-        })) as any;
-
-        const responseText = result?.content?.[0]?.text ?? '';
-        const parsed = parseToolJson(responseText);
-        if (parsed?.error) {
-          printText(`Error: ${parsed.error}`);
-        } else {
-          printText(`Cookies stored on auth profile ${args.authProfileSlug}.`);
+          });
+          if (parsed?.error) {
+            printText(`Error: ${parsed.error}`);
+          } else {
+            printText(`Cookies stored on auth profile ${args.authProfileSlug}.`);
+          }
+        } catch (err) {
+          printText(`Error: ${err instanceof Error ? err.message : String(err)}`);
         }
       }
     } else {

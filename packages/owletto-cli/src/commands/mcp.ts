@@ -1,5 +1,5 @@
 import { ApiError } from '../lib/errors.ts';
-import { getUsableToken, resolveServerUrl } from '../lib/openclaw-auth.ts';
+import { getUsableToken, orgFromMcpUrl, resolveServerUrl } from '../lib/openclaw-auth.ts';
 
 const JSON_MCP_ACCEPT = 'application/json';
 
@@ -181,4 +181,58 @@ export async function mcpRpc(mcpUrl: string, method: string, params?: Record<str
   }
 
   return data.result;
+}
+
+/**
+ * Call an Owletto tool over the REST proxy at `POST /api/{orgSlug}/{toolName}`.
+ *
+ * Reuses the same auth resolution and localhost/docker-host fallback as
+ * `mcpRpc`. Returns the raw handler result as parsed JSON (no MCP envelope).
+ * Throws `ApiError` on non-2xx, surfacing the server's `{ error }` message
+ * when present.
+ */
+export async function restToolCall<T = unknown>(
+  mcpUrl: string,
+  toolName: string,
+  args: Record<string, unknown>
+): Promise<T> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const tokenResult = await getUsableToken(mcpUrl);
+  if (tokenResult) {
+    headers.Authorization = `Bearer ${tokenResult.token}`;
+  }
+
+  // Prefer the org slug pinned in the URL (`/mcp/{slug}`). Fall back to the
+  // session's bound org so callers using a bare `/mcp` URL still resolve.
+  const orgSlug = orgFromMcpUrl(mcpUrl) ?? tokenResult?.session.org ?? null;
+  if (!orgSlug) {
+    throw new ApiError(
+      `Cannot call ${toolName}: no org slug on MCP URL ${mcpUrl} or active session. Reconnect with: owletto login <server>/mcp/<org>`
+    );
+  }
+
+  const baseUrl = new URL(mcpUrl).origin;
+  const endpoint = `${baseUrl}/api/${orgSlug}/${toolName}`;
+
+  const { response: res, usedUrl } = await fetchMcpWithFallback(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(args),
+  });
+
+  const raw = await res.text();
+  if (!res.ok) {
+    let message = `${res.status} ${res.statusText}`;
+    if (raw) {
+      try {
+        const body = JSON.parse(raw) as { error?: string };
+        if (body?.error) message = body.error;
+      } catch {
+        message = raw;
+      }
+    }
+    throw new ApiError(`${toolName} failed via ${usedUrl}: ${message}`, res.status);
+  }
+
+  return (raw.length > 0 ? JSON.parse(raw) : {}) as T;
 }
