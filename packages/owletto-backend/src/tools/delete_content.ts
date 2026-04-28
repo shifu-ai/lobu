@@ -77,7 +77,7 @@ export async function deleteContent(
 
   const sql = getDb();
 
-  const inOrg = await sql<{ id: number }[]>`
+  const inOrg = await sql<{ id: number }>`
     SELECT id FROM events
     WHERE id = ANY(${pgBigintArray(requested)}::bigint[])
       AND organization_id = ${ctx.organizationId}
@@ -88,7 +88,7 @@ export async function deleteContent(
   const candidateIds = [...inOrgIds];
   const alreadySupersededRows =
     candidateIds.length > 0
-      ? await sql<{ supersedes_event_id: number }[]>`
+      ? await sql<{ supersedes_event_id: number }>`
         SELECT supersedes_event_id FROM events
         WHERE supersedes_event_id = ANY(${pgBigintArray(candidateIds)}::bigint[])
       `

@@ -209,6 +209,9 @@ jobs:
       - name: Run TypeScript type check
         run: bun run typecheck
 
+      - name: Type check owletto-backend (excluded from root tsconfig)
+        run: cd packages/owletto-backend && bunx tsc --noEmit
+
   migrations:
     # Catches the class of bug that has now broken prod twice in one
     # session: a migration file that's syntactically a SQL file but that
