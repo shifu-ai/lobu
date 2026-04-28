@@ -203,8 +203,8 @@ jobs:
       - name: Install dependencies
         run: bun install
 
-      - name: Build core package first
-        run: cd packages/core && bun run build
+      - name: Build workspace packages (needed for downstream tsc resolution)
+        run: make build-packages
 
       - name: Run TypeScript type check
         run: bun run typecheck
