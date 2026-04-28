@@ -77,7 +77,7 @@ metadata_schema:
     logo_url:
       type: string
       format: uri
-      description: Brand logo URL (merged in from market-intelligence.brand)
+      description: Brand logo URL
     tagline:
       type: string
       description: One-line brand tagline

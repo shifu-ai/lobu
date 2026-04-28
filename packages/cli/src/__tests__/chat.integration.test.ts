@@ -18,7 +18,7 @@ const originalStdoutWrite = process.stdout.write.bind(process.stdout);
 const originalStderrWrite = process.stderr.write.bind(process.stderr);
 const originalConsoleError = console.error;
 const originalToken = process.env.LOBU_API_TOKEN;
-const exampleDir = join(import.meta.dir, "../../../../examples/careops");
+const exampleDir = join(import.meta.dir, "../../../../examples/market");
 
 function createSseResponse(
   events: Array<{ event: string; data: Record<string, unknown> }>
@@ -186,7 +186,7 @@ describe("chatCommand example integration", () => {
 
     expect(createBodies).toEqual([
       {
-        agentId: "careops",
+        agentId: "vc-tracking",
         forceNew: true,
       },
     ]);
@@ -224,18 +224,18 @@ describe("chatCommand example integration", () => {
         const url = String(input);
 
         if (
-          url === "http://gateway.test/api/v1/agents/careops/messages" &&
+          url === "http://gateway.test/api/v1/agents/vc-tracking/messages" &&
           init?.method === "POST"
         ) {
           return Response.json({
             success: true,
-            eventsUrl: "/api/v1/agents/careops/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/api/v1/agents/careops/events?platform=telegram" &&
+            "http://gateway.test/api/v1/agents/vc-tracking/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
@@ -288,18 +288,18 @@ describe("chatCommand example integration", () => {
         const url = String(input);
 
         if (
-          url === "http://gateway.test/api/v1/agents/careops/messages" &&
+          url === "http://gateway.test/api/v1/agents/vc-tracking/messages" &&
           init?.method === "POST"
         ) {
           return Response.json({
             success: true,
-            eventsUrl: "/api/v1/agents/careops/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/api/v1/agents/careops/events?platform=telegram" &&
+            "http://gateway.test/api/v1/agents/vc-tracking/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
@@ -340,18 +340,18 @@ describe("chatCommand example integration", () => {
         const url = String(input);
 
         if (
-          url === "http://gateway.test/api/v1/agents/careops/messages" &&
+          url === "http://gateway.test/api/v1/agents/vc-tracking/messages" &&
           init?.method === "POST"
         ) {
           return Response.json({
             success: true,
-            eventsUrl: "/api/v1/agents/careops/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/api/v1/agents/careops/events?platform=telegram" &&
+            "http://gateway.test/api/v1/agents/vc-tracking/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([
@@ -388,20 +388,20 @@ describe("chatCommand example integration", () => {
         const url = String(input);
 
         if (
-          url === "http://gateway.test/api/v1/agents/careops/messages" &&
+          url === "http://gateway.test/api/v1/agents/vc-tracking/messages" &&
           init?.method === "POST"
         ) {
           const body = JSON.parse(String(init.body)) as Record<string, unknown>;
           messageBodies.push(body);
           return Response.json({
             success: true,
-            eventsUrl: "/api/v1/agents/careops/events?platform=telegram",
+            eventsUrl: "/api/v1/agents/vc-tracking/events?platform=telegram",
           });
         }
 
         if (
           url ===
-            "http://gateway.test/api/v1/agents/careops/events?platform=telegram" &&
+            "http://gateway.test/api/v1/agents/vc-tracking/events?platform=telegram" &&
           !init?.method
         ) {
           return createSseResponse([

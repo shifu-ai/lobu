@@ -200,7 +200,7 @@ field. Same component everywhere.
 ### 3. Discovery: lean on the existing org dropdown ✅ shipped
 
 A user wanting to *browse* a public catalog already navigates to
-`/{public-org-slug}` (e.g. `/venture-capital`). The org dropdown returns
+`/{public-org-slug}` (e.g. `/market`). The org dropdown returns
 public orgs alongside member orgs.
 
 The "Your Organizations" / "Public Organizations" split with a separator
@@ -253,41 +253,38 @@ first."* Cleaner than retroactive revalidation, no migration cost.
 
 ### 6. Catalog curation pass (data, not code)
 
-Existing public orgs (`venture-capital`, `market-intelligence`,
-`careops`, …) already hold ~200 canonical entities. Some demo cruft is
-mixed in:
-
-- `default` (Market Intelligence) has a `Classification Test Brand` and
-  the user's own `$member` row that aren't catalog content.
-- The 4-5-entity verticals (`leadership`, `sales`, `devops`, …) are likely
-  template seeds, not curated catalogs.
+Existing public orgs (`market`, `atlas`, `agent-community`, …) hold the
+canonical entities. The 4–5-entity verticals (`leadership`, `sales`,
+`devops`, …) are likely template seeds, not curated catalogs.
 
 Before recommending these as references in agent prompts, do a one-off
 prune. Pure SQL pass against prod (we have direct access). No PR needed —
 just a documented changelog of what was removed.
 
-#### 2026-04-27 — first pass
+#### 2026-04-28 — consolidation pass
 
-Inventory taken across all `visibility='public'` orgs (~200 entities, 12
-catalogs). Soft-deleted:
+Dropped three orgs that were either duplicates or no longer in scope:
 
-- `entities.id = 45` `classification-test-brand` "Classification Test
-  Brand" in `market-intelligence` (no inbound rels) — clearly test data.
+- `venture-capital` — entity content was fully duplicated in `market`
+  (companies/investors/funds/products/sectors all matched by name).
+  Dropped: org row + 12,504 events + 13 founder watchers + 55 connections
+  + 78 feeds + 8,271 runs.
+- `careops` (Healthcare) — out of scope; dropped the workspace, agent,
+  watchers, connections, and the seed entities (1 patient, 1 appointment,
+  1 treatment, 26 members).
+- `market-intelligence` — folded into `market`. All 21 brand entities
+  matched existing market companies by name, so brands were remapped to
+  the company rows; 275,147 events, 9 watchers, 78 connections, 84 feeds,
+  9,290 runs, 23 event_classifiers, 10 connector definitions, 2 agents,
+  4 auth_profiles, 1 oauth client all moved over via `organization_id`
+  rewrite. Entity_ids[] arrays in events/watchers/feeds rewritten via
+  the brand→company id map. The 235 MI relationships were exact
+  duplicates of existing market `mentions` triples and soft-deleted
+  before the org drop.
 
-Held back, pending user judgment:
-
-- `$member` rows in public orgs (careops 26, market-intelligence 2,
-  venture-capital 6). These represent real cross-org membership; auto-
-  provisioned when a user joins. Soft-deleting them would either be
-  re-created on next access or break member lookups for those users.
-  Treating them as catalog cruft was a misread.
-- `stripe-test` brand in market-intelligence — name suggests test data
-  but plausibly intentional (Stripe sandbox). Skipped.
-- The ~5-entity verticals (`leadership`, `sales`, `devops`, `delivery`,
-  `ecommerce`, `finance`, `legal-review`, `support`) — generic placeholder
-  rows that look like template seeds. Pruning a whole org is destructive
-  and may break downstream agents pointing at them. Needs explicit user
-  call before any further removal.
+Followup: events + watchers have no FK to organization, so the org drop
+left the rows orphaned and required an explicit cleanup. A separate PR
+adds `ON DELETE CASCADE` so future drops are clean.
 
 ### 7. `is_catalog` flag on `organization` (~30 LOC + migration)
 

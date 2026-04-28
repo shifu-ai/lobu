@@ -93,93 +93,6 @@ const memoryStepPanels: Record<
   LandingUseCaseId,
   Partial<Record<"connect" | "auth" | "reuse", HowItWorksPanel>>
 > = {
-  "market-intelligence": {
-    connect: {
-      title: "Market intel source inputs",
-      description:
-        "Brand and product memory comes from monitoring the channels where competitive signals appear.",
-      items: [
-        {
-          meta: "Product Hunt",
-          label: "Launch tracking",
-          detail:
-            "Monitor product launches, feature announcements, and upvotes for competitive positioning signals.",
-        },
-        {
-          meta: "Crunchbase",
-          label: "Funding database",
-          detail:
-            "Pull funding rounds, investor syndicates, and valuation changes for company growth tracking.",
-        },
-        {
-          meta: "Review sites",
-          label: "Customer feedback",
-          detail:
-            "Aggregate reviews and comparisons to understand how products are positioned against alternatives.",
-        },
-        {
-          meta: "News & social",
-          label: "Market chatter",
-          detail:
-            "Track mentions, feature announcements, and strategic moves across news and social channels.",
-        },
-      ],
-    },
-    auth: {
-      title: "How market data is connected",
-      description:
-        "Connect product and brand data sources while keeping API keys outside the agent runtime.",
-      items: [
-        {
-          meta: "API key",
-          label: "Premium databases",
-          detail:
-            "Store Crunchbase, PitchBook, or other research platform keys centrally for company and funding data.",
-        },
-        {
-          meta: "RSS feeds",
-          label: "News and reviews",
-          detail:
-            "Pull industry news, blog coverage, and review updates through RSS without per-request auth.",
-        },
-        {
-          meta: "Web scraping",
-          label: "Public websites",
-          detail:
-            "Monitor company blogs, changelogs, and pricing pages for product and positioning updates.",
-        },
-        {
-          meta: "Agent boundary",
-          label: "Scoped access",
-          detail:
-            "The market agent receives extracted insights, not raw credentials or database dumps.",
-        },
-      ],
-    },
-    reuse: {
-      title: "Market intelligence agents",
-      description:
-        "The same brand and product memory powers competitive analysis wherever teams work.",
-      items: [
-        {
-          label: "Competitive analysis",
-          detail: "Drafts comparison briefs with latest features and pricing.",
-          platform: { id: "slack", label: "Slack" },
-        },
-        {
-          label: "Deal screen assistant",
-          detail:
-            "Checks company signals and market position before investment.",
-          platform: { id: "openclaw", label: "OpenClaw" },
-        },
-        {
-          label: "Product strategist",
-          detail: "Reuses positioning insights across go-to-market planning.",
-          platform: { id: "claude", label: "Claude" },
-        },
-      ],
-    },
-  },
   "agent-community": {
     connect: {
       title: "Community source inputs",
@@ -353,95 +266,6 @@ const memoryStepPanels: Record<
           detail:
             "Summarizes customer history, preferences, and lifetime value for support and sales.",
           platform: { id: "claude", label: "Claude" },
-        },
-      ],
-    },
-  },
-  careops: {
-    connect: {
-      title: "Care operations source inputs",
-      description:
-        "Patient care memory is built from the systems clinical and operational teams already use.",
-      items: [
-        {
-          meta: "EHR",
-          label: "Patient records",
-          detail:
-            "Pull treatment history, diagnoses, and care plans from the electronic health record system.",
-        },
-        {
-          meta: "Calendar",
-          label: "Appointments",
-          detail:
-            "Sync scheduled sessions, cancellations, and availability from therapist calendars.",
-        },
-        {
-          meta: "Email",
-          label: "Patient communications",
-          detail:
-            "Capture handoff notes, treatment updates, and follow-up commitments from email threads.",
-        },
-        {
-          meta: "Patient portal",
-          label: "Self-reported data",
-          detail:
-            "Import patient-reported outcomes, symptom trackers, and feedback through the patient portal.",
-        },
-      ],
-    },
-    auth: {
-      title: "How patient data is connected",
-      description:
-        "Connect clinical systems while maintaining HIPAA compliance and credential isolation.",
-      items: [
-        {
-          meta: "OAuth",
-          label: "EHR and calendar",
-          detail:
-            "Authorize read-only access to patient schedules and treatment history for care coordination.",
-        },
-        {
-          meta: "Service account",
-          label: "Internal practice tools",
-          detail:
-            "Use practice management credentials for scheduling and insurance verification.",
-        },
-        {
-          meta: "Secure import",
-          label: "Patient records",
-          detail:
-            "Load HIPAA-compliant imports for new patients or transferring from other providers.",
-        },
-        {
-          meta: "Isolation",
-          label: "Agent boundary",
-          detail:
-            "The care agent receives context, not raw patient data or PHI directly.",
-        },
-      ],
-    },
-    reuse: {
-      title: "Care coordination agents",
-      description:
-        "The same patient care memory powers clinical workflows wherever the team works.",
-      items: [
-        {
-          label: "Care coordinator",
-          detail:
-            "Checks appointment availability and treatment progress before scheduling.",
-          platform: { id: "slack", label: "Slack" },
-        },
-        {
-          label: "Handoff assistant",
-          detail:
-            "Summarizes care status and treatment progress when handing off between therapists.",
-          platform: { id: "claude", label: "Claude" },
-        },
-        {
-          label: "Therapist assistant",
-          detail:
-            "Drafts session notes and treatment plan updates based on patient conversations.",
-          platform: { id: "openclaw", label: "OpenClaw" },
         },
       ],
     },
@@ -1726,68 +1550,6 @@ const runtimeContent: Record<LandingUseCaseId, RuntimeJourney> = {
       "Approved outreach with durable match history",
     ],
   },
-  "market-intelligence": {
-    schedule: "Every 30 min — scans competitor launches and reviews",
-    outcomeChannel: "#market-intel",
-    request:
-      "Track competitor launches and review sentiment, compare against our positioning, and surface new signals.",
-    events: [
-      {
-        source: "Product Hunt",
-        time: "11:30",
-        text: "Airtable AI launched with new automation positioning",
-      },
-      {
-        source: "Reddit",
-        time: "11:42",
-        text: "2 new reliability complaints surfaced this week",
-      },
-      {
-        source: "PMM",
-        time: "11:50",
-        text: "needs an Airtable vs Notion comparison before noon",
-      },
-    ],
-    trace: [
-      {
-        kind: "skill",
-        source: "Market",
-        call: "producthunt.launches(since: Mar 11)",
-        result: "Airtable AI · 3 competitors",
-      },
-      {
-        kind: "skill",
-        source: "Market",
-        call: "reddit.reviews(airtable, 7d)",
-        result: "12 posts · 2 flag reliability",
-      },
-      {
-        kind: "memory_recall",
-        source: "Owletto",
-        call: "recall(product: Airtable)",
-        result: "Q3 scan: automation strong, docs weak",
-      },
-      {
-        kind: "memory_upsert",
-        source: "Owletto",
-        call: "upsert(Release airtable-ai-mar18)",
-        result: "linked Product Airtable",
-      },
-      {
-        kind: "memory_link",
-        source: "Owletto",
-        call: "link(Airtable ↔ Notion)",
-        result: "competitor pair updated",
-      },
-    ],
-    response:
-      "Airtable AI launched this week — automation-heavy but Reddit's flagging reliability issues (12 posts, 2 with concerns). Versus Notion: Airtable still leads on automation depth, Notion still leads on docs and collaboration — the Q3 gap hasn't closed.",
-    outcome: [
-      "Weekly competitive scans with feature and pricing changes",
-      "Durable brand and product memory for pattern recognition",
-      "Shared market context across product and strategy teams",
-    ],
-  },
   ecommerce: {
     schedule: "When a subscription request arrives",
     outcomeChannel: "Customer DM",
@@ -1848,68 +1610,6 @@ const runtimeContent: Record<LandingUseCaseId, RuntimeJourney> = {
       "Faster subscription and order changes with approval flows",
       "Customer context that persists across interactions",
       "Shared memory across support, sales, and operations",
-    ],
-  },
-  careops: {
-    schedule: "Daily at 6 AM — scans appointment status and treatment progress",
-    outcomeChannel: "#care-team",
-    request:
-      "Check James McManus's appointment status and summarize his treatment progress.",
-    events: [
-      {
-        source: "Athena",
-        time: "5:58",
-        text: "James McManus is booked Apr 24 at 2:00pm with Dr. Patel",
-      },
-      {
-        source: "Session tracker",
-        time: "6:02",
-        text: "8 of 12 visits complete and PHQ-9 improved from 17 to 9",
-      },
-      {
-        source: "Insurance",
-        time: "6:05",
-        text: "re-auth requirement opens May 1",
-      },
-    ],
-    trace: [
-      {
-        kind: "skill",
-        source: "CareOps",
-        call: "athena.appointments.get(james-mcmanus)",
-        result: "Apr 24 · Dr. Patel · 2:00pm",
-      },
-      {
-        kind: "skill",
-        source: "CareOps",
-        call: "athena.sessions.list(james-mcmanus)",
-        result: "8 of 12 complete · PHQ-9 down 17→9",
-      },
-      {
-        kind: "memory_recall",
-        source: "Owletto",
-        call: "recall(patient: James M)",
-        result: "PHQ-9 baseline 17 · weekly exposure therapy",
-      },
-      {
-        kind: "memory_upsert",
-        source: "Owletto",
-        call: "upsert(Treatment james-12wk)",
-        result: "progress 67% · on-track",
-      },
-      {
-        kind: "skill",
-        source: "CareOps",
-        call: "insurance.reauth.check(james)",
-        result: "re-auth due May 1",
-      },
-    ],
-    response:
-      "James's next appointment is Apr 24 at 2:00pm with Dr. Patel. Treatment progress: 8 of 12 sessions complete, PHQ-9 down from 17 to 9 — on track. Insurance re-auth is due May 1.",
-    outcome: [
-      "Current patient status and appointment availability",
-      "Treatment progress summaries across sessions",
-      "Shared care coordination across clinical staff",
     ],
   },
   market: {
@@ -2708,169 +2408,6 @@ const chatScenarioContent: Partial<
       ],
     },
   },
-  "market-intelligence": {
-    permission: {
-      id: "market-permission",
-      tabLabel: "Permission",
-      title: "Fetch competitor signals",
-      description:
-        "Agent asks to reach Crunchbase before pulling funding data.",
-      settingsLabel: "Domains and tool permissions",
-      chatLabel: "Allow crunchbase.com",
-      botName: "Market Intel",
-      botInitial: "M",
-      botColor: "#eab308",
-      messages: [
-        { role: "user", text: "Did Acme's competitor raise recently?" },
-        {
-          role: "bot",
-          text: "Can't reach crunchbase.com — not in the agent's allowed domains.\n\nGrant access?",
-          buttons: [{ label: "Allow Crunchbase", action: "link" }],
-        },
-        { role: "user", text: "Allow" },
-        {
-          role: "bot",
-          text: "Yes — Northwind raised $48M Series B two weeks ago (led by Sequoia).\nHead count jumped from 42 → 61 on LinkedIn.\nNew product page: launched April 8.",
-        },
-      ],
-    },
-    skill: {
-      id: "market-skill",
-      tabLabel: "Scan",
-      title: "Weekly competitive scan",
-      description:
-        "Agent surfaces launches, pricing changes, and positioning moves.",
-      settingsLabel: "Domains and tool permissions",
-      chatLabel: "Agent scans the competitive landscape",
-      botName: "Market Intel",
-      botInitial: "M",
-      botColor: "#eab308",
-      messages: [
-        { role: "user", text: "What launched in our category this week?" },
-        {
-          role: "bot",
-          text: "6 launches: Northwind Cloud (#2 on PH), 2 OSS entrants, 3 feature expansions by incumbents.\n\nNorthwind added SSO at $199/mo — you bundle it at $149/mo.",
-        },
-        {
-          role: "user",
-          text: "How does their pricing compare to ours overall?",
-        },
-        {
-          role: "bot",
-          text: "Northwind: $49/mo starter vs your $39/mo. Enterprise gap closed on the SSO tier. Their seat limit is stricter — worth flagging in competitive decks.",
-        },
-      ],
-    },
-    settings: {
-      id: "market-settings",
-      tabLabel: "Pricing",
-      title: "Competitor pricing changes this quarter",
-      description:
-        "Agent recalls pricing and positioning moves from the tracked competitor watchlist.",
-      settingsLabel: "Brand memory",
-      chatLabel: "Agent recalls competitive pricing signals",
-      botName: "Market Intel",
-      botInitial: "M",
-      botColor: "#eab308",
-      messages: [
-        {
-          role: "user",
-          text: "Any pricing changes from tracked competitors this quarter?",
-        },
-        {
-          role: "bot",
-          text: "3 moves logged:\n• Northwind Cloud — added SSO tier at $199/mo (Apr 8)\n• Acme Tools — dropped starter from $59 to $39 (Mar 22)\n• Notion — removed seat cap on Pro (Feb 28)\n\nNorthwind and Acme are the biggest shifts.",
-        },
-        {
-          role: "user",
-          text: "How does Acme's new $39 price compare to ours?",
-        },
-        {
-          role: "bot",
-          text: "You're at $39/mo too — now tied on starter price. Acme's $39 includes 5 seats vs your 3. Worth flagging before the next pricing review.",
-        },
-      ],
-    },
-  },
-  careops: {
-    permission: {
-      id: "careops-permission",
-      tabLabel: "Permission",
-      title: "Read the care platform",
-      description:
-        "Agent asks to reach the care platform before reviewing a patient.",
-      settingsLabel: "Domains and tool permissions",
-      chatLabel: "Allow yourco.healthie.com",
-      botName: "CareOps",
-      botInitial: "C",
-      botColor: "#ec4899",
-      messages: [
-        { role: "user", text: "Prep a follow-up plan for Jordan Lee" },
-        {
-          role: "bot",
-          text: "Can't reach yourco.healthie.com — not in the agent's allowed domains.\n\nGrant access?",
-          buttons: [{ label: "Allow Healthie", action: "link" }],
-        },
-        { role: "user", text: "Allow" },
-        {
-          role: "bot",
-          text: "Jordan Lee — intake 3 weeks ago, last visit Tuesday.\n• Outstanding: lab results review\n• Next scheduled: May 2\n• Draft follow-up plan queued for your review.",
-        },
-      ],
-    },
-    skill: {
-      id: "careops-skill",
-      tabLabel: "Check-in",
-      title: "Overdue check-ins and outreach drafts",
-      description:
-        "Agent surfaces overdue patients and drafts outreach for your review before sending.",
-      settingsLabel: "Domains and tool permissions",
-      chatLabel: "Agent surfaces overdue check-ins",
-      botName: "CareOps",
-      botInitial: "C",
-      botColor: "#ec4899",
-      messages: [
-        { role: "user", text: "Which patients are overdue for a check-in?" },
-        {
-          role: "bot",
-          text: "12 overdue, 4 over 60 days.\nTop priorities: Jordan L., Sam C., Priya R., Devon K.",
-        },
-        { role: "user", text: "Draft outreach for Jordan L." },
-        {
-          role: "bot",
-          text: "Draft ready — friendly follow-up referencing their last session (Apr 2) and next available slot. Pending your review before sending.",
-          buttons: [{ label: "Review draft", action: "link" }],
-        },
-      ],
-    },
-    settings: {
-      id: "careops-settings",
-      tabLabel: "Session Notes",
-      title: "Recall last session notes before a visit",
-      description:
-        "Agent pulls what it knows about a patient before the next care interaction.",
-      settingsLabel: "Care memory",
-      chatLabel: "Agent recalls patient session context",
-      botName: "CareOps",
-      botInitial: "C",
-      botColor: "#ec4899",
-      messages: [
-        {
-          role: "user",
-          text: "What were the notes from Jordan's last session?",
-        },
-        {
-          role: "bot",
-          text: "Jordan Lee — last session Apr 2:\n• Focus: anxiety management, CBT progress noted\n• Action: lab results review still outstanding\n• Next scheduled: May 2\n• Therapist: Dr. Reyes",
-        },
-        { role: "user", text: "Any concerns flagged since then?" },
-        {
-          role: "bot",
-          text: "One follow-up flag: Jordan missed the lab results reminder sent Apr 10. No response logged. Suggest reaching out before the May 2 visit.",
-        },
-      ],
-    },
-  },
   ecommerce: {
     permission: {
       id: "ecommerce-permission",
@@ -3027,7 +2564,6 @@ const chatScenarioContent: Partial<
 };
 
 const HIDDEN_USE_CASE_IDS: ReadonlySet<LandingUseCaseId> = new Set([
-  "careops",
   "ecommerce",
   "delivery",
 ]);
@@ -3062,6 +2598,8 @@ export const landingUseCaseRouteEntries: Array<{
     useCaseId: useCase.id,
   })),
   { routeId: "venture-capital", useCaseId: "market" },
+  { routeId: "market-intelligence", useCaseId: "market" },
+  { routeId: "careops", useCaseId: "market" },
 ];
 
 export const DEFAULT_LANDING_USE_CASE_ID: LandingUseCaseId = "engineering";
@@ -3123,18 +2661,6 @@ const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
         description:
           "Build agents that understand member identity, interests, relationships, and intent across your community's real activity.",
       },
-      "market-intelligence": {
-        title: "Market intelligence agents",
-        highlight: "Market intelligence",
-        description:
-          "Track companies, launches, competitors, and market signals with agents that keep research structured and continuously fresh.",
-      },
-      careops: {
-        title: "Care coordination agents",
-        highlight: "Care coordination",
-        description:
-          "Help care teams track people, follow-ups, and operational state with agents that preserve structured context across workflows.",
-      },
       ecommerce: {
         title: "Ecommerce agents for customer operations",
         highlight: "customer operations",
@@ -3165,10 +2691,6 @@ const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
       delivery: { title: "Skills for rollout and status workflows" },
       leadership: { title: "Skills for executive workflows" },
       "agent-community": { title: "Skills for community workflows" },
-      "market-intelligence": {
-        title: "Skills for research and monitoring agents",
-      },
-      careops: { title: "Skills for care coordination workflows" },
       ecommerce: { title: "Skills for ecommerce workflows" },
       market: { title: "Skills for sourcing and diligence agents" },
     },
@@ -3189,10 +2711,6 @@ const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
       delivery: { title: "Project memory for delivery teams" },
       leadership: { title: "Decision memory for leadership agents" },
       "agent-community": { title: "Member memory for community agents" },
-      "market-intelligence": {
-        title: "Shared market memory for research agents",
-      },
-      careops: { title: "Care memory for coordination agents" },
       ecommerce: { title: "Customer memory for store agents" },
       market: { title: "Deal memory for venture teams" },
     },
@@ -3209,11 +2727,9 @@ const useCaseRoleMap: Record<LandingUseCaseId, LandingUseCaseRole> = {
   sales: "departments",
   delivery: "departments",
   ecommerce: "departments",
-  careops: "departments",
   leadership: "personal",
   market: "personal",
   "agent-community": "public",
-  "market-intelligence": "public",
 };
 
 const useCaseEmojiMap: Record<LandingUseCaseId, string> = {
@@ -3226,9 +2742,7 @@ const useCaseEmojiMap: Record<LandingUseCaseId, string> = {
   leadership: "\uD83E\uDDED",
   ecommerce: "\uD83D\uDED2",
   market: "\uD83D\uDCBC",
-  careops: "\uD83C\uDFE5",
   "agent-community": "\uD83E\uDD1D",
-  "market-intelligence": "\uD83D\uDD2D",
 };
 
 const landingUseCaseRoleMeta: Array<{

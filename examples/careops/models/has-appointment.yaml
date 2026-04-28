@@ -1,5 +1,0 @@
-version: 1
-type: relationship
-slug: has-appointment
-name: Has Appointment
-description: Link scheduled appointments to patients and treatment plans.

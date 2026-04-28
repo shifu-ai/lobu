@@ -1,5 +1,0 @@
-version: 1
-type: relationship
-slug: on-treatment
-name: On Treatment
-description: Connect patients to their active treatment plans and care protocols.

@@ -1,5 +1,0 @@
-version: 1
-type: relationship
-slug: assigned-to
-name: Assigned To
-description: Track which therapist is responsible for each patient and their care coordination.

@@ -127,65 +127,6 @@ export const generatedUseCaseModels: Record<string, GeneratedUseCaseModel> = {
     },
     watcher: undefined,
   },
-  careops: {
-    id: "careops",
-    owlettoOrg: "careops",
-    agent: {
-      identity: [
-        "You are a healthcare operations assistant that helps manage patient care, appointments, and treatment workflows.",
-        "You track therapist assignments, treatment plans, and operational coordination for clinical practices.",
-      ],
-      soul: [
-        "- Protect patient privacy and confidentiality.",
-        "- Preserve treatment history and provider assignments.",
-        "- Flag scheduling conflicts and care gaps immediately.",
-        "- Confirm patient identity and authorization before discussing care details.",
-        "- Flag appointments that need rescheduling or therapist follow-up.",
-      ],
-      user: [
-        "- Team: Clinical operations and practice management",
-        "- Priority: Coordinate care and track patient progress",
-        "- Preference: Clear therapist availability and patient status",
-      ],
-    },
-    model: {
-      entities: ["Appointment", "Patient", "Therapist", "Treatment", "Vendor"],
-    },
-    skills: {
-      agentId: "careops",
-      skillId: "careops",
-      description:
-        "Manage patient care, appointments, and treatment workflows for healthcare practices",
-      skills: [],
-      nixPackages: [],
-      allowedDomains: [
-        "github.com",
-        ".github.com",
-        ".githubusercontent.com",
-        "registry.npmjs.org",
-        ".npmjs.org",
-      ],
-      mcpServer: "",
-      providerId: "gemini",
-      model: "gemini/gemini-2.5-flash",
-      apiKeyEnv: "GEMINI_API_KEY",
-      skillInstructions: [
-        "- Protect patient privacy and confidentiality.",
-        "- Preserve treatment history and provider assignments.",
-        "- Flag scheduling conflicts and care gaps immediately.",
-        "- Confirm patient identity and authorization before discussing care details.",
-        "- Flag appointments that need rescheduling or therapist follow-up.",
-      ],
-    },
-    watcher: {
-      name: "Patient care tracker",
-      schedule: "0 7 * * *",
-      prompt:
-        "Check patients for appointment changes, treatment progress, and insurance coverage status. Flag scheduling conflicts and care gaps.",
-      extractionSchema:
-        '{"type":"object","required":["next_appointment","treatment_status","therapist_notes","insurance_status","upcoming_actions"],"properties":{"next_appointment":{"type":"string"},"treatment_status":{"type":"string"},"therapist_notes":{"type":"array","items":{"type":"string"}},"insurance_status":{"type":"string"},"upcoming_actions":{"type":"array","items":{"type":"string"}}}}',
-    },
-  },
   delivery: {
     id: "delivery",
     owlettoOrg: "delivery",
@@ -596,66 +537,6 @@ Produce a structured founder activity report:
 Be specific and cite actual tweets/posts as evidence.`,
       extractionSchema:
         '{"type":"object","required":["summary","founders","notable_signals"],"properties":{"summary":{"type":"string"},"founders":{"type":"array","items":{"type":"object","required":["name","company","activity_level","themes"],"properties":{"name":{"type":"string"},"company":{"type":"string"},"activity_level":{"type":"string","enum":["high","medium","low","inactive"]},"themes":{"type":"array","items":{"type":"string"}},"sentiment":{"type":"string","enum":["bullish","neutral","cautious","concerned"]},"signals":{"type":"array","items":{"type":"string"}},"notable_posts":{"type":"array","items":{"type":"string"}}}}},"cross_patterns":{"type":"array","items":{"type":"object","properties":{"theme":{"type":"string"},"founders_involved":{"type":"array","items":{"type":"string"}}}}},"notable_signals":{"type":"array","items":{"type":"object","required":["signal","founder","impact"],"properties":{"signal":{"type":"string"},"founder":{"type":"string"},"impact":{"type":"string","enum":["high","medium","low"]}}}}}}',
-    },
-  },
-  "market-intelligence": {
-    id: "market-intelligence",
-    owlettoOrg: "market-intelligence",
-    agent: {
-      identity: [
-        "You are a market intelligence agent that tracks brands, products, and market signals across the competitive landscape.",
-        "You monitor company positioning, product launches, and strategic shifts to help teams understand competitive dynamics and customer sentiment.",
-      ],
-      soul: [
-        "- Distinguish signal from noise in market chatter.",
-        "- Preserve source context for every insight.",
-        "- Cross-reference mentions across brands and products.",
-        "- Flag significant product changes and pricing shifts.",
-        "- Track competitive responses to new feature launches.",
-      ],
-      user: [
-        "- Team: Product strategy and competitive intelligence",
-        "- Priority: Track competitive moves and customer sentiment",
-        "- Preference: Weekly market scans with alert-driven updates",
-      ],
-    },
-    model: {
-      entities: ["Brand", "Product"],
-    },
-    skills: {
-      agentId: "market-intel",
-      skillId: "market-intel",
-      description:
-        "Track brands, products, and market signals across the competitive landscape",
-      skills: [],
-      nixPackages: [],
-      allowedDomains: [
-        "producthunt.com",
-        "crunchbase.com",
-        ".techcrunch.com",
-        "github.com",
-        ".github.com",
-        ".githubusercontent.com",
-      ],
-      mcpServer: "",
-      providerId: "anthropic",
-      model: "claude/sonnet-4-5",
-      apiKeyEnv: "ANTHROPIC_API_KEY",
-      skillInstructions: [
-        "- Distinguish signal from noise in market chatter.",
-        "- Preserve source context for every insight.",
-        "- Cross-reference mentions across brands and products.",
-        "- Flag significant product changes and pricing shifts.",
-        "- Track competitive responses to new feature launches.",
-      ],
-    },
-    watcher: {
-      name: "Competitive brand tracker",
-      schedule: "0 */6 * * *",
-      prompt:
-        "Monitor tracked brands for new features, pricing changes, and competitive positioning against similar tools.",
-      extractionSchema:
-        '{"type":"object","required":["new_features","pricing_changes","positioning_shifts","competitive_mentions"],"properties":{"new_features":{"type":"array","items":{"type":"string"}},"pricing_changes":{"type":"array","items":{"type":"string"}},"positioning_shifts":{"type":"array","items":{"type":"string"}},"competitive_mentions":{"type":"array","items":{"type":"string"}}}}',
     },
   },
   "personal-finance": {

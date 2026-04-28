@@ -1,5 +1,0 @@
-version: 1
-type: relationship
-slug: mentions
-name: Mentions
-description: Track content mentions across news, reviews, and social channels to understand market presence.

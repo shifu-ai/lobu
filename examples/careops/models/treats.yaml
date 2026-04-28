@@ -1,5 +1,0 @@
-version: 1
-type: relationship
-slug: treats
-name: Treats
-description: Track therapist-patient relationships and care assignments.
