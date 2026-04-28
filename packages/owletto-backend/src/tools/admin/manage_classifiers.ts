@@ -246,7 +246,7 @@ export async function manageClassifiers(
   ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
   return routeAction<ManageClassifiersResult>('manage_classifiers', args.action, ctx, {
-    create: () => handleCreate(args, env),
+    create: () => handleCreate(args, env, ctx),
     create_version: () => handleCreateVersion(args, env),
     list: () => handleList(args),
     get_versions: () => handleGetVersions(args),
@@ -263,7 +263,8 @@ export async function manageClassifiers(
 
 async function handleCreate(
   args: ManageClassifiersArgs,
-  env: Env
+  env: Env,
+  ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
   const sql = getDb();
 
@@ -297,12 +298,18 @@ async function handleCreate(
     };
   }
 
+  // created_by has a FK to user(id) — fall back to ctx.userId, not a literal
+  // string. Anonymous public reads can't reach this code path (the route is
+  // admin-gated), so ctx.userId is non-null here.
+  const createdBy = args.created_by ?? ctx.userId;
   const classifierResult = await sql`
     INSERT INTO event_classifiers (
-      slug, name, description, attribute_key, status, created_by, entity_id, entity_ids, watcher_id
+      organization_id, slug, name, description, attribute_key, status, created_by,
+      entity_id, entity_ids, watcher_id
     ) VALUES (
+      ${ctx.organizationId},
       ${args.slug}, ${args.name}, ${args.description || null}, ${args.attribute_key},
-      'active', ${args.created_by ?? 'api'}, ${entityId},
+      'active', ${createdBy}, ${entityId},
       CASE WHEN ${entityId}::bigint IS NULL THEN ARRAY[]::bigint[] ELSE ARRAY[${entityId}]::bigint[] END,
       ${args.watcher_id}
     )
@@ -320,7 +327,7 @@ async function handleCreate(
       classifier_id, version, is_current, attribute_values, min_similarity, fallback_value, change_notes, created_by
     ) VALUES (
       ${classifier.id}, 1, true, ${sql.json(withEmbeddings)},
-      ${args.min_similarity ?? 0.7}, ${args.fallback_value ?? null}, 'Initial version', ${args.created_by ?? 'api'}
+      ${args.min_similarity ?? 0.7}, ${args.fallback_value ?? null}, 'Initial version', ${createdBy}
     )
   `;
 

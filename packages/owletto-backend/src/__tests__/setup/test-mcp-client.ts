@@ -1,25 +1,30 @@
 /**
- * Composable test client for the post-#348 MCP surface.
- *
- * Two layers (compose either depending on what you're testing):
+ * Composable test clients for the post-#348 MCP surface.
  *
  *   TestMcpClient  — full HTTP/JSON-RPC round-trip. Exercises auth, session
- *                    init, tool dispatch, and (for `execute`) the isolated-vm
- *                    sandbox. Use one per fixture; sessions are cached.
+ *                    init, tool dispatch, and (for `run`/`query`) the
+ *                    isolated-vm sandbox. Use it for tests that have to
+ *                    verify MCP wire behavior (auth headers, JSON-RPC error
+ *                    framing, sandbox timeouts). Surface mirrors the public
+ *                    MCP tools: `search`, `searchKnowledge`, `saveKnowledge`,
+ *                    `querySql`, `resolvePath`, `listOrganizations`, `run`,
+ *                    `query`, plus a `raw()` escape hatch.
  *
- *   TestApiClient  — direct handler imports. Skips HTTP/sandbox; calls into
- *                    the same namespace builders the sandbox exposes. Fast,
+ *   TestApiClient  — direct handler imports. Skips HTTP/sandbox; calls the
+ *                    same namespace builders the sandbox exposes. Fast,
  *                    deterministic, and the right tool for CRUD permutations,
- *                    cross-org isolation, and error-path edges.
+ *                    cross-org isolation, and error-path edges. Surface is
+ *                    the typed SDK: `client.entities`, `client.watchers`,
+ *                    `client.classifiers`, etc. — `withAuth()` produces a new
+ *                    client with overridden role/scopes for denial-path tests.
  *
- * Both layers share the same fluent surface (`client.entities`, `client.watchers`,
- * etc.), so a test can swap layers without rewriting bodies. Anything that
- * needs to assert behavior of the MCP wire (headers, JSON-RPC errors, sandbox
- * timeouts) uses TestMcpClient; everything else should use TestApiClient.
+ * The two surfaces are deliberately not interchangeable. `TestMcpClient.run()`
+ * is the wire-level analogue of `TestApiClient.entities.create(...)`; pick
+ * the layer that matches what you're testing rather than swapping them.
  */
 
 import type { Env } from '../../index';
-import type { ToolContext } from '../../tools/registry';
+import type { ToolContext, TokenType } from '../../tools/registry';
 import {
   buildAuthProfilesNamespace,
   buildClassifiersNamespace,
@@ -64,6 +69,12 @@ export interface TestClientAuth {
   scopes?: string[];
   /** Optional durable agent identity for the session. */
   agentId?: string;
+  /** Token kind. Defaults to 'oauth' for authenticated users, 'anonymous'
+   * otherwise. Some handlers (e.g. cross-org `client.org()`) gate on this. */
+  tokenType?: TokenType;
+  /** True when the MCP URL pinned an org slug (e.g. `/mcp/acme`). When the
+   * direct-handler client is used, set this to mirror the wire intent. */
+  scopedToOrg?: boolean;
 }
 
 const DEFAULT_TEST_ENV: Env = {
@@ -202,6 +213,9 @@ export class TestApiClient {
    */
   static async for(auth: TestClientAuth, env: Partial<Env> = {}): Promise<TestApiClient> {
     await ensureWorkspaceReady();
+    const tokenType: TokenType =
+      auth.tokenType ?? (auth.userId !== null ? 'oauth' : 'anonymous');
+    const scopedToOrg = auth.scopedToOrg ?? true;
     const ctx: ToolContext = {
       organizationId: auth.organizationId,
       userId: auth.userId,
@@ -210,6 +224,11 @@ export class TestApiClient {
       isAuthenticated: auth.userId !== null,
       clientId: null,
       scopes: auth.scopes ?? ['mcp:read', 'mcp:write', 'mcp:admin'],
+      tokenType,
+      scopedToOrg,
+      // Match production: only OAuth tokens issued without an org-pin can do
+      // cross-org reads via `client.org()`.
+      allowCrossOrg: tokenType === 'oauth' && !scopedToOrg,
     };
     return new TestApiClient({ ...DEFAULT_TEST_ENV, ...env }, ctx);
   }
@@ -220,6 +239,11 @@ export class TestApiClient {
    * Synchronous because workspace init is already cached after `.for()`.
    */
   withAuth(overrides: Partial<TestClientAuth>): TestApiClient {
+    const tokenType =
+      overrides.tokenType ??
+      this.ctx.tokenType ??
+      (this.ctx.userId !== null ? ('oauth' as TokenType) : ('anonymous' as TokenType));
+    const scopedToOrg = overrides.scopedToOrg ?? this.ctx.scopedToOrg ?? true;
     const ctx: ToolContext = {
       organizationId: overrides.organizationId ?? this.ctx.organizationId,
       userId: overrides.userId !== undefined ? overrides.userId : this.ctx.userId,
@@ -232,6 +256,9 @@ export class TestApiClient {
         overrides.userId !== undefined ? overrides.userId !== null : this.ctx.isAuthenticated,
       clientId: this.ctx.clientId ?? null,
       scopes: overrides.scopes ?? this.ctx.scopes ?? null,
+      tokenType,
+      scopedToOrg,
+      allowCrossOrg: tokenType === 'oauth' && !scopedToOrg,
     };
     return new TestApiClient(this.env, ctx);
   }

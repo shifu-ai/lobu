@@ -131,8 +131,10 @@ async function ensureMcpSession(options?: {
   env?: Partial<Env>;
   agentId?: string;
   orgSlug?: string;
+  cookie?: string;
 }): Promise<string> {
-  const cacheKey = `${options?.token ?? '__anonymous__'}:${options?.agentId ?? '__no_agent__'}:${options?.orgSlug ?? '__unscoped__'}`;
+  const cookieKey = options?.cookie ? options.cookie.slice(0, 24) : '__no_cookie__';
+  const cacheKey = `${options?.token ?? '__anonymous__'}:${options?.agentId ?? '__no_agent__'}:${options?.orgSlug ?? '__unscoped__'}:${cookieKey}`;
 
   const existing = mcpSessions.get(cacheKey);
   if (existing) return existing;
@@ -159,6 +161,7 @@ async function ensureMcpSession(options?: {
       },
     },
     token: options?.token,
+    cookie: options?.cookie,
     env: options?.env,
   });
 
@@ -178,6 +181,7 @@ async function ensureMcpSession(options?: {
     },
     headers: { 'mcp-session-id': sessionId },
     token: options?.token,
+    cookie: options?.cookie,
     env: options?.env,
   });
 
@@ -209,7 +213,13 @@ interface MCPResponse<T = any> {
 export async function mcpRequest<T = any>(
   method: string,
   params?: any,
-  options?: { token?: string; env?: Partial<Env>; agentId?: string; orgSlug?: string }
+  options?: {
+    token?: string;
+    env?: Partial<Env>;
+    agentId?: string;
+    orgSlug?: string;
+    cookie?: string;
+  }
 ): Promise<MCPResponse<T>> {
   const sessionId = await ensureMcpSession(options);
   const mcpPath = options?.orgSlug ? `/mcp/${options.orgSlug}` : '/mcp';
@@ -223,6 +233,7 @@ export async function mcpRequest<T = any>(
     },
     headers: { 'mcp-session-id': sessionId },
     token: options?.token,
+    cookie: options?.cookie,
     env: options?.env,
   });
 
@@ -291,6 +302,8 @@ export async function mcpListTools(options?: {
   token?: string;
   env?: Partial<Env>;
   agentId?: string;
+  orgSlug?: string;
+  cookie?: string;
 }): Promise<{ tools: Array<{ name: string; description: string }> }> {
   const response = await mcpRequest('tools/list', {}, options);
 

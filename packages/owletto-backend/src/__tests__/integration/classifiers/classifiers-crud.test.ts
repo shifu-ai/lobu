@@ -13,11 +13,7 @@ import {
 import { TestApiClient } from '../../setup/test-mcp-client';
 import { cleanupTestDatabase } from '../../setup/test-db';
 
-// SKIP: classifier create handler omits organization_id in its INSERT, so the
-// not-null constraint on event_classifiers.organization_id rejects every call.
-// Pre-existing bug in manage_classifiers.ts handleCreate; tracked separately,
-// not blocking this PR. Re-enable once the handler sets ctx.organizationId.
-describe.skip('classifier CRUD', () => {
+describe('classifier CRUD', () => {
   let owner: TestApiClient;
   let entityId: number;
   let watcherId: number;
@@ -54,32 +50,44 @@ describe.skip('classifier CRUD', () => {
   });
 
   it('creates → reads back → deletes a classifier', async () => {
+    // Provide embeddings directly so the test doesn't depend on a live
+    // EMBEDDINGS_SERVICE_URL — the values themselves are arbitrary.
+    const stubEmbedding = Array.from({ length: 768 }, () => 0);
     const created = (await owner.classifiers.create({
       slug: 'sentiment',
       name: 'Sentiment',
       attribute_key: 'sentiment',
       watcher_id: watcherId,
-      attribute_values: { positive: 'positive', negative: 'negative' },
-    })) as { classifier?: { id: number; name: string } };
-    expect(created.classifier?.id).toBeGreaterThan(0);
-    expect(created.classifier?.name).toBe('Sentiment');
+      attribute_values: {
+        positive: { description: 'positive sentiment', examples: ['great'], embedding: stubEmbedding },
+        negative: { description: 'negative sentiment', examples: ['bad'], embedding: stubEmbedding },
+      },
+    })) as { data?: { classifier_id: number } };
+    expect(created.data?.classifier_id).toBeGreaterThan(0);
+    const classifierId = created.data!.classifier_id;
 
-    const list = (await owner.classifiers.list({ entity_id: entityId })) as {
-      classifiers?: Array<{ id: number }>;
+    // List with no filter — the classifier is attached to a watcher, not an
+    // entity, so list({entity_id}) wouldn't include it.
+    const list = (await owner.classifiers.list({})) as {
+      data?: { classifiers?: Array<{ id: number }> };
     };
-    expect(list.classifiers?.some((c) => c.id === created.classifier!.id)).toBe(true);
+    expect(list.data?.classifiers?.some((c) => c.id === classifierId)).toBe(true);
 
-    await owner.classifiers.delete(created.classifier!.id);
+    await owner.classifiers.delete(classifierId);
   });
 
   it('blocks a member from creating classifiers (admin-only)', async () => {
     const member = owner.withAuth({ memberRole: 'member' });
+    const stubEmbedding = Array.from({ length: 768 }, () => 0);
     await expect(
       member.classifiers.create({
         slug: 'blocked-cls',
         name: 'Blocked',
         attribute_key: 'sentiment',
         watcher_id: watcherId,
+        attribute_values: {
+          v: { description: 'v', examples: ['v'], embedding: stubEmbedding },
+        },
       })
     ).rejects.toThrow(/admin|owner|access/i);
   });
