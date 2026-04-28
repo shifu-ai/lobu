@@ -247,13 +247,13 @@ export async function manageClassifiers(
 ): Promise<ManageClassifiersResult> {
   return routeAction<ManageClassifiersResult>('manage_classifiers', args.action, ctx, {
     create: () => handleCreate(args, env, ctx),
-    create_version: () => handleCreateVersion(args, env),
-    list: () => handleList(args),
-    get_versions: () => handleGetVersions(args),
-    set_current_version: () => handleSetCurrentVersion(args),
-    generate_embeddings: () => handleGenerateEmbeddings(args, env),
-    delete: () => handleDelete(args),
-    classify: () => handleClassify(args),
+    create_version: () => handleCreateVersion(args, env, ctx),
+    list: () => handleList(args, ctx),
+    get_versions: () => handleGetVersions(args, ctx),
+    set_current_version: () => handleSetCurrentVersion(args, ctx),
+    generate_embeddings: () => handleGenerateEmbeddings(args, env, ctx),
+    delete: () => handleDelete(args, ctx),
+    classify: () => handleClassify(args, ctx),
   });
 }
 
@@ -286,8 +286,35 @@ async function handleCreate(
 
   const entityId = args.entity_id ?? null;
 
+  const watcher = await sql`
+    SELECT id FROM watchers
+    WHERE id = ${args.watcher_id} AND organization_id = ${ctx.organizationId}
+  `;
+  if (watcher.length === 0) {
+    return {
+      success: false,
+      action: 'create',
+      message: `Watcher not found: ${args.watcher_id}`,
+    };
+  }
+
+  if (entityId !== null) {
+    const entity = await sql`
+      SELECT id FROM entities
+      WHERE id = ${entityId} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+    `;
+    if (entity.length === 0) {
+      return {
+        success: false,
+        action: 'create',
+        message: `Entity not found: ${entityId}`,
+      };
+    }
+  }
+
   const existing = await sql`
-    SELECT id, slug FROM event_classifiers WHERE slug = ${args.slug}
+    SELECT id, slug FROM event_classifiers
+    WHERE slug = ${args.slug} AND organization_id = ${ctx.organizationId}
   `;
   if (existing.length > 0) {
     return {
@@ -344,7 +371,8 @@ async function handleCreate(
 
 async function handleCreateVersion(
   args: ManageClassifiersArgs,
-  env: Env
+  env: Env,
+  ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
   const sql = getDb();
 
@@ -356,8 +384,10 @@ async function handleCreateVersion(
     };
   }
 
-  const classifier =
-    await sql`SELECT id, slug FROM event_classifiers WHERE id = ${args.classifier_id}`;
+  const classifier = await sql`
+    SELECT id, slug FROM event_classifiers
+    WHERE id = ${args.classifier_id} AND organization_id = ${ctx.organizationId}
+  `;
   if (classifier.length === 0) {
     return {
       success: false,
@@ -415,14 +445,18 @@ async function handleCreateVersion(
       classifier_id, version, is_current, attribute_values, min_similarity, fallback_value, change_notes, created_by
     ) VALUES (
       ${args.classifier_id}, ${nextVersion}, ${setAsCurrent}, ${sql.json(withEmbeddings)},
-      ${args.min_similarity ?? 0.7}, ${args.fallback_value ?? null}, ${args.change_notes ?? 'New version'}, ${args.created_by ?? 'api'}
+      ${args.min_similarity ?? 0.7}, ${args.fallback_value ?? null}, ${args.change_notes ?? 'New version'}, ${args.created_by ?? ctx.userId}
     )
   `;
 
   if (setAsCurrent) {
     try {
       const deleteResults = await sql`
-        DELETE FROM event_classifications WHERE classifier_id = ${args.classifier_id} RETURNING id
+        DELETE FROM event_classifications
+        WHERE classifier_version_id IN (
+          SELECT id FROM event_classifier_versions WHERE classifier_id = ${args.classifier_id}
+        )
+        RETURNING id
       `;
       logger.info(
         {
@@ -472,14 +506,17 @@ async function handleCreateVersion(
   };
 }
 
-async function handleList(args: ManageClassifiersArgs): Promise<ManageClassifiersResult> {
+async function handleList(
+  args: ManageClassifiersArgs,
+  ctx: ToolContext
+): Promise<ManageClassifiersResult> {
   const sql = getDb();
   const filterEntityId = args.entity_id ?? null;
   const statusFilter = args.status ?? null;
 
-  const conditions: string[] = ['fc.watcher_id IS NOT NULL'];
-  const params: unknown[] = [];
-  let paramIdx = 1;
+  const conditions: string[] = ['fc.watcher_id IS NOT NULL', 'fc.organization_id = $1'];
+  const params: unknown[] = [ctx.organizationId];
+  let paramIdx = 2;
 
   if (statusFilter) {
     conditions.push(`fc.status = $${paramIdx++}`);
@@ -531,7 +568,10 @@ async function handleList(args: ManageClassifiersArgs): Promise<ManageClassifier
   };
 }
 
-async function handleGetVersions(args: ManageClassifiersArgs): Promise<ManageClassifiersResult> {
+async function handleGetVersions(
+  args: ManageClassifiersArgs,
+  ctx: ToolContext
+): Promise<ManageClassifiersResult> {
   const sql = getDb();
   if (!args.classifier_id) {
     return {
@@ -542,8 +582,13 @@ async function handleGetVersions(args: ManageClassifiersArgs): Promise<ManageCla
   }
 
   const versions = await sql`
-    SELECT id, version, is_current, attribute_values, min_similarity, fallback_value, change_notes, created_at, created_by
-    FROM event_classifier_versions WHERE classifier_id = ${args.classifier_id} ORDER BY version DESC
+    SELECT fcv.id, fcv.version, fcv.is_current, fcv.attribute_values, fcv.min_similarity,
+           fcv.fallback_value, fcv.change_notes, fcv.created_at, fcv.created_by
+    FROM event_classifier_versions fcv
+    JOIN event_classifiers fc ON fc.id = fcv.classifier_id
+    WHERE fcv.classifier_id = ${args.classifier_id}
+      AND fc.organization_id = ${ctx.organizationId}
+    ORDER BY fcv.version DESC
   `;
 
   const resolved = await resolveUsernames(
@@ -565,7 +610,8 @@ async function handleGetVersions(args: ManageClassifiersArgs): Promise<ManageCla
 }
 
 async function handleSetCurrentVersion(
-  args: ManageClassifiersArgs
+  args: ManageClassifiersArgs,
+  ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
   const sql = getDb();
   if (!args.classifier_id || !args.version) {
@@ -579,7 +625,9 @@ async function handleSetCurrentVersion(
   const versionCheck = await sql`
     SELECT fcv.id, fc.slug FROM event_classifier_versions fcv
     JOIN event_classifiers fc ON fc.id = fcv.classifier_id
-    WHERE fcv.classifier_id = ${args.classifier_id} AND fcv.version = ${args.version}
+    WHERE fcv.classifier_id = ${args.classifier_id}
+      AND fcv.version = ${args.version}
+      AND fc.organization_id = ${ctx.organizationId}
   `;
   if (versionCheck.length === 0) {
     return {
@@ -596,7 +644,13 @@ async function handleSetCurrentVersion(
 
   try {
     const deleteResults =
-      await sql`DELETE FROM event_classifications WHERE classifier_id = ${args.classifier_id} RETURNING id`;
+      await sql`
+        DELETE FROM event_classifications
+        WHERE classifier_version_id IN (
+          SELECT id FROM event_classifier_versions WHERE classifier_id = ${args.classifier_id}
+        )
+        RETURNING id
+      `;
     logger.info(
       { deletedCount: deleteResults.length, classifierSlug, version: args.version },
       'Version change: deleted old classifications.'
@@ -625,7 +679,8 @@ async function handleSetCurrentVersion(
 
 async function handleGenerateEmbeddings(
   args: ManageClassifiersArgs,
-  env: Env
+  env: Env,
+  ctx: ToolContext
 ): Promise<ManageClassifiersResult> {
   const sql = getDb();
   if (!args.classifier_id) {
@@ -637,8 +692,12 @@ async function handleGenerateEmbeddings(
   }
 
   const version = await sql`
-    SELECT id, version, attribute_values FROM event_classifier_versions
-    WHERE classifier_id = ${args.classifier_id} AND is_current = true
+    SELECT fcv.id, fcv.version, fcv.attribute_values
+    FROM event_classifier_versions fcv
+    JOIN event_classifiers fc ON fc.id = fcv.classifier_id
+    WHERE fcv.classifier_id = ${args.classifier_id}
+      AND fcv.is_current = true
+      AND fc.organization_id = ${ctx.organizationId}
   `;
   if (version.length === 0) {
     return {
@@ -676,13 +735,28 @@ async function handleGenerateEmbeddings(
   };
 }
 
-async function handleDelete(args: ManageClassifiersArgs): Promise<ManageClassifiersResult> {
+async function handleDelete(
+  args: ManageClassifiersArgs,
+  ctx: ToolContext
+): Promise<ManageClassifiersResult> {
   const sql = getDb();
   if (!args.classifier_id) {
     return { success: false, action: 'delete', message: 'Missing required field: classifier_id' };
   }
 
-  await sql`UPDATE event_classifiers SET status = 'deprecated', updated_at = current_timestamp WHERE id = ${args.classifier_id}`;
+  const result = await sql`
+    UPDATE event_classifiers
+    SET status = 'deprecated', updated_at = current_timestamp
+    WHERE id = ${args.classifier_id} AND organization_id = ${ctx.organizationId}
+    RETURNING id
+  `;
+  if (result.length === 0) {
+    return {
+      success: false,
+      action: 'delete',
+      message: `Classifier not found: ${args.classifier_id}`,
+    };
+  }
 
   return {
     success: true,
@@ -696,7 +770,10 @@ async function handleDelete(args: ManageClassifiersArgs): Promise<ManageClassifi
 // Manual Classification Handler
 // ============================================
 
-async function handleClassify(args: ManageClassifiersArgs): Promise<ManageClassifiersResult> {
+async function handleClassify(
+  args: ManageClassifiersArgs,
+  ctx: ToolContext
+): Promise<ManageClassifiersResult> {
   const sql = getDb();
 
   try {
@@ -720,7 +797,9 @@ async function handleClassify(args: ManageClassifiersArgs): Promise<ManageClassi
       SELECT fc.id as classifier_id, fc.attribute_key, fcv.id as version_id
       FROM event_classifiers fc
       LEFT JOIN event_classifier_versions fcv ON fc.id = fcv.classifier_id AND fcv.is_current = true
-      WHERE fc.slug = ${args.classifier_slug} AND fc.status = 'active'
+      WHERE fc.slug = ${args.classifier_slug}
+        AND fc.status = 'active'
+        AND fc.organization_id = ${ctx.organizationId}
     `) as unknown as Array<{ classifier_id: number; attribute_key: string; version_id: number }>;
 
     if (classifierResult.length === 0) {
@@ -742,6 +821,7 @@ async function handleClassify(args: ManageClassifiersArgs): Promise<ManageClassi
 
       const result = await updateSingleClassification(
         sql,
+        ctx.organizationId,
         args.content_id,
         classifier,
         args.value,
@@ -767,6 +847,7 @@ async function handleClassify(args: ManageClassifiersArgs): Promise<ManageClassi
         args.classifications.map((item) =>
           updateSingleClassification(
             sql,
+            ctx.organizationId,
             item.content_id,
             classifier,
             item.value,
@@ -828,13 +909,17 @@ async function handleClassify(args: ManageClassifiersArgs): Promise<ManageClassi
 
 async function updateSingleClassification(
   sql: DbClient,
+  organizationId: string,
   contentId: number,
   classifier: { classifier_id: number; attribute_key: string; version_id: number },
   value: string | null,
   source: 'llm' | 'user',
   reasoning?: string
 ): Promise<{ success: boolean; message?: string }> {
-  const contentCheck = await sql`SELECT id FROM events WHERE id = ${contentId}`;
+  const contentCheck = await sql`
+    SELECT id FROM events
+    WHERE id = ${contentId} AND organization_id = ${organizationId}
+  `;
   if (contentCheck.length === 0) {
     return { success: false, message: `Content not found: ${contentId}` };
   }

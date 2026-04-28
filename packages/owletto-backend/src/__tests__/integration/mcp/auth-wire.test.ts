@@ -45,11 +45,7 @@ describe('MCP auth (wire)', () => {
     expect(JSON.stringify(result)).toContain(orgSlug);
   });
 
-  it.skip('accepts a valid PAT (owl_pat_*) on /mcp/{slug}', async () => {
-    // SKIP: pre-existing bug — mcp_sessions.client_id has a FK to oauth_clients
-    // but PAT auth tries to insert "pat_<id>" which has no matching oauth_clients
-    // row. Tracked separately; not blocking this PR. Fix is either to relax the
-    // FK or synthesize an oauth_client row when registering a PAT.
+  it('accepts a valid PAT (owl_pat_*) on /mcp/{slug}', async () => {
     const client = new TestMcpClient({ token: patToken, orgSlug });
     const result = await client.listOrganizations();
     expect(JSON.stringify(result)).toContain(orgSlug);
