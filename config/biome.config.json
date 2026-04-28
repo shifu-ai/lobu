@@ -21,13 +21,7 @@
       "!**/node_modules/**",
       "!**/.astro/**",
       "!**/tmp/**",
-<<<<<<< HEAD
       "!**/.connector-child-*.mjs",
-      "!**/provision-careops-watchers*",
-||||||| parent of 024b75a0 (chore: consolidate careops + market-intelligence into market)
-      "!**/provision-careops-watchers*",
-=======
->>>>>>> 024b75a0 (chore: consolidate careops + market-intelligence into market)
       "!**/*.css",
       "!**/packages/owletto-backend/**",
       "!**/packages/owletto-cli/**",
