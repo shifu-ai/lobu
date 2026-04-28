@@ -19,7 +19,7 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import { hasRequiredMcpScope } from '../auth/tool-access';
-import { getDb } from '../db/client';
+import { getDb, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
@@ -79,7 +79,7 @@ export async function deleteContent(
 
   const inOrg = await sql<{ id: number }[]>`
     SELECT id FROM events
-    WHERE id = ANY(${requested}::bigint[])
+    WHERE id = ANY(${pgBigintArray(requested)}::bigint[])
       AND organization_id = ${ctx.organizationId}
   `;
   const inOrgIds = new Set(inOrg.map((row) => Number(row.id)));
@@ -90,7 +90,7 @@ export async function deleteContent(
     candidateIds.length > 0
       ? await sql<{ supersedes_event_id: number }[]>`
         SELECT supersedes_event_id FROM events
-        WHERE supersedes_event_id = ANY(${candidateIds}::bigint[])
+        WHERE supersedes_event_id = ANY(${pgBigintArray(candidateIds)}::bigint[])
       `
       : [];
   const alreadySupersededIds = Array.from(
