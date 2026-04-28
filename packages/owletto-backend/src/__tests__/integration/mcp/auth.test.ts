@@ -895,6 +895,7 @@ describe('MCP Authentication', () => {
       expect(toolNames).not.toContain('list_watchers');
       expect(toolNames).not.toContain('manage_entity');
       expect(toolNames).not.toContain('manage_connections');
+      expect(toolNames).not.toContain('manage_feeds');
       expect(toolNames).not.toContain('manage_auth_profiles');
       expect(toolNames).not.toContain('join_organization');
     });

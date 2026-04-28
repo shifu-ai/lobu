@@ -19,6 +19,7 @@
     "clean": "rm -rf dist runtime",
     "dev": "tsx src/bin.ts",
     "runtime:prepare": "node ./scripts/prepare-runtime.mjs",
+    "test:smoke": "SMOKE=1 bun test src/__tests__/smoke",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
