@@ -61,7 +61,7 @@ describe('MCP Authentication', () => {
   });
 
   describe('Unauthenticated Requests', () => {
-    it('allows unauthenticated tools/list discovery requests including list_organizations', async () => {
+    it('challenges unauthenticated requests on the unscoped /mcp endpoint with 401 + WWW-Authenticate', async () => {
       const response = await post('/mcp', {
         body: {
           jsonrpc: '2.0',
@@ -71,14 +71,10 @@ describe('MCP Authentication', () => {
         },
       });
 
-      expect(response.status).toBe(200);
-      const body = await response.json();
-      expect(body.error).toBeUndefined();
-      expect(body.result.tools).toBeInstanceOf(Array);
-      expect(body.result.tools.length).toBeGreaterThan(0);
-      const toolNames = body.result.tools.map((t: any) => t.name);
-      expect(toolNames).toContain('list_organizations');
-      expect(toolNames).not.toContain('switch_organization');
+      expect(response.status).toBe(401);
+      expect(response.headers.get('WWW-Authenticate')).toContain(
+        '/.well-known/oauth-protected-resource'
+      );
     });
 
     it('returns an OAuth challenge for anonymous root session stream requests', async () => {

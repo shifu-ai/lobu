@@ -768,10 +768,18 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
     const initialize = await readInitializeRequest(req);
     const authCtx = await resolveAuthWithInstructions(c, req);
 
-    // Authenticated OAuth/PAT tokens must carry an org binding on the token
-    // itself — `tokenOrganizationId`, not `organizationId`. The latter is
-    // resolved from URL slug on `/mcp/{slug}` and would mask a legacy null-
-    // org token. Sessions/anonymous are unaffected (no token to bind).
+    // Anonymous on the unscoped `/mcp` endpoint has no workspace context —
+    // there's nothing meaningful to serve. Return 401 + WWW-Authenticate so
+    // standards-compliant MCP clients (Claude Desktop, etc.) discover the
+    // OAuth metadata at /.well-known/oauth-protected-resource and trigger the
+    // auth flow. Public workspace browse remains available on /mcp/{slug}.
+    if (!authCtx.isAuthenticated && !authCtx.scopedToOrg) {
+      return buildUnauthorizedResponse(
+        req,
+        'Authentication required for the unscoped /mcp endpoint. OAuth via the resource metadata advertised in WWW-Authenticate, or connect to /mcp/{workspace-slug} for public workspace browse.'
+      );
+    }
+
     if (
       authCtx.isAuthenticated &&
       authCtx.userId &&
