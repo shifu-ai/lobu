@@ -3,7 +3,7 @@ set -e
 
 MODE="${1:-server}"
 
-echo "Starting Owletto backend (Bun)"
+echo "Starting Owletto backend (Node)"
 echo "================================"
 
 echo "Environment:"
@@ -41,15 +41,15 @@ else
   run_migrations
 fi
 
-# NOTE: prod runs under Bun. The execute MCP tool requires V8
-# (isolated-vm), which Bun's JSC ABI shim cannot load. PR #430 attempted
-# to switch the runtime to `node --import tsx`, but exposed a CJS/ESM
-# interop gap: Node's cjs-module-lexer doesn't detect new named exports
-# of @lobu/core's CJS dist when the static import follows certain
-# reachability paths (e.g. the full server.ts boot chain hits
-# `SyntaxError: ... does not provide an export named 'createBuiltinSecretRef'`,
-# even though a same-imports test entry resolves fine). Reverted on the
-# understanding that fixing properly means making @lobu/core (and other
-# workspace packages) ship dual ESM+CJS output instead of CJS-only with
-# an `import` condition. Tracked separately.
-exec bun /app/packages/owletto-backend/src/server.ts
+# Run under Node so V8 native addons (isolated-vm) load. Bun uses
+# JavaScriptCore and cannot link the V8 ABI surface that isolated-vm needs;
+# the execute MCP tool silently degrades to RuntimeUnavailable under bun.
+#
+# We run a pre-bundled artifact (built by scripts/build-server-bundle.mjs
+# in the builder stage) instead of TS source via tsx. Bundling at build
+# time inlines workspace packages (@lobu/core et al.) so Node never has to
+# bind named imports against their CJS dist barrels — that's what crashed
+# #430. External npm deps are resolved by Node from node_modules, which
+# is hoisted (see Dockerfile `bun install --linker=hoisted`) so the flat
+# layout matches what Node expects.
+exec node /app/packages/owletto-backend/dist/server.bundle.mjs

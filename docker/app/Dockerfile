@@ -44,7 +44,11 @@ RUN mkdir -p packages/cli packages/landing packages/owletto-cli packages/owletto
       done \
     && echo '{"name":"owletto","version":"0.0.0","private":true}' > packages/owletto-cli/package.json
 
-RUN --mount=type=cache,target=/root/.bun/install/cache bun install
+# Hoisted layout (npm-style flat node_modules) is required so the bundled
+# server.bundle.mjs (built below) can resolve transitive npm deps via Node's
+# resolver. Bun's default isolated linker uses .bun/<pkg>@<ver>/ paths that
+# Node doesn't understand.
+RUN --mount=type=cache,target=/root/.bun/install/cache bun install --linker=hoisted
 
 # Force rebuild of source layers
 ARG CACHEBUST=default
@@ -79,6 +83,11 @@ RUN cd packages/core && bunx tsc \
 
 # Type check
 RUN cd packages/owletto-backend && bunx tsc --noEmit
+
+# Bundle the backend so prod runs under Node (so isolated-vm loads). See
+# docker/app/start.sh and packages/owletto-backend/scripts/build-server-bundle.mjs
+# for the full rationale.
+RUN cd packages/owletto-backend && bun run build:server
 
 # Build frontend static assets (production only)
 ARG VITE_API_URL=
