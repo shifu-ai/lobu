@@ -15,7 +15,12 @@ import {
   getNormalizedScoreContent,
   getNormalizedScoreContentCount,
 } from '../utils/content-scoring';
-import { entityLinkMatchSql, searchContentByText } from '../utils/content-search';
+import {
+  buildConnectionVisibilityClause,
+  buildEntityLinkUnion,
+  fetchEntityIdentityScopes,
+  searchContentByText,
+} from '../utils/content-search';
 import { parseDateAlias, toEndOfDay } from '../utils/date-aliases';
 import { type DataSourceContext, executeDataSources } from '../utils/execute-data-sources';
 import { parseJsonObject } from '../utils/json';
@@ -97,6 +102,7 @@ function buildContentQuery(opts: {
 }
 
 import { requireReadAccess } from '../utils/organization-access';
+import { validateNumericId } from '../utils/sql-validation';
 import {
   buildContentUrl,
   buildEventPermalink,
@@ -376,6 +382,12 @@ interface GetContentResult {
       [value: string]: number;
     };
   };
+  /**
+   * Permalink for the entity-scoped events listing in the public web app.
+   * LLM agents calling `read_knowledge` over MCP read this from the response
+   * and format it into chat replies; there is no programmatic consumer in
+   * this repo, but removing the field breaks that user-facing behavior.
+   */
   view_url?: string;
   // Watcher-mode fields (only present when watcher_id is provided)
   window_token?: string;
@@ -523,12 +535,13 @@ export async function getContent(
   if (args.entity_id) {
     await requireReadAccess(pgSql, args.entity_id, ctx);
   }
-  const includeClassificationSummary =
-    !args.include_classification ||
-    args.include_classification
-      .split(',')
-      .map((v) => v.trim())
-      .includes('summary');
+  // Stats are now opt-in: callers must explicitly pass `include_classification=summary`
+  // (the Atlas events page used to set this unconditionally, which fired a heavy
+  // `WITH matching_content` CTE on every first paint — including empty entities).
+  const includeClassificationSummary = !!args.include_classification
+    ?.split(',')
+    .map((v) => v.trim())
+    .includes('summary');
 
   const limit = args.limit || 50;
   const offset = args.offset || 0;
@@ -543,41 +556,51 @@ export async function getContent(
     const sinceDate = args.since ? parseDateAlias(args.since).date : null;
     const untilDate = args.until ? toEndOfDay(parseDateAlias(args.until).date) : null;
 
-    // Resolve org slug for permalink generation
-    const ownerSlug = await getOrganizationSlug(ctx.organizationId);
+    // Run org-slug lookup and entity-info lookup in parallel — they're
+    // independent and on a high-RTT DB the serial form pays the round-trip
+    // twice. view_url builds from both, and we still want it populated for
+    // LLM consumers reading `read_knowledge` over MCP.
+    const [ownerSlug, entityInfoRaw] = await Promise.all([
+      getOrganizationSlug(ctx.organizationId),
+      entityId
+        ? sql`
+          SELECT
+            e.id,
+            et.slug AS entity_type,
+            e.slug,
+            e.parent_id,
+            parent.slug as parent_slug,
+            pet.slug as parent_entity_type,
+            e.organization_id
+          FROM entities e
+          JOIN entity_types et ON et.id = e.entity_type_id
+          LEFT JOIN entities parent ON e.parent_id = parent.id
+          LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
+          WHERE e.id = ${entityId}
+        `
+        : Promise.resolve([] as Array<Record<string, unknown>>),
+    ]);
 
-    // Get entity info for building view URL (only when entity_id is provided)
     let entityInfo: EntityInfo | null = null;
-    if (entityId) {
-      // Get entity info from data tables
-      const entityResult = await sql`
-        SELECT
-          e.id,
-          et.slug AS entity_type,
-          e.slug,
-          e.parent_id,
-          parent.slug as parent_slug,
-          pet.slug as parent_entity_type,
-          e.organization_id
-        FROM entities e
-        JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN entities parent ON e.parent_id = parent.id
-        LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
-        WHERE e.id = ${entityId}
-      `;
-
-      if (entityResult.length > 0) {
-        entityInfo = ownerSlug
-          ? {
-              ownerSlug,
-              entityType: entityResult[0].entity_type as string,
-              slug: entityResult[0].slug as string,
-              parentType: (entityResult[0].parent_entity_type as string) ?? null,
-              parentSlug: (entityResult[0].parent_slug as string) ?? null,
-            }
-          : null;
-      }
+    if (entityId && entityInfoRaw.length > 0) {
+      entityInfo = ownerSlug
+        ? {
+            ownerSlug,
+            entityType: entityInfoRaw[0].entity_type as string,
+            slug: entityInfoRaw[0].slug as string,
+            parentType: (entityInfoRaw[0].parent_entity_type as string) ?? null,
+            parentSlug: (entityInfoRaw[0].parent_slug as string) ?? null,
+          }
+        : null;
     }
+
+    // Visibility scope is folded into the SQL WHERE clause of every list/count
+    // path (chronological list, content_ids, include_superseded, score) via
+    // `buildConnectionVisibilityClause`. The legacy two-step "find private
+    // connections, then find visible connections" round-trip is gone; events
+    // with `connection_id IS NULL` (system events) stay visible to authed and
+    // unauthed callers alike.
+    const visibilityScope = { organizationId: ctx.organizationId, userId: ctx.userId };
 
     // Log incoming classification filters for debugging
     if (args.classification_filters) {
@@ -596,46 +619,6 @@ export async function getContent(
     const platformFilters = (args.platforms ?? []).map((p) => String(p).trim()).filter(Boolean);
 
     let effectiveConnectionIds = args.connection_ids ? [...args.connection_ids] : undefined;
-
-    // Visibility: exclude private connections.
-    // Authenticated users see their own private connections; unauthenticated see only org-visible.
-    {
-      const visibilityRows = ctx.userId
-        ? await sql`
-            SELECT id FROM connections
-            WHERE organization_id = ${ctx.organizationId}
-              AND visibility = 'private'
-              AND created_by != ${ctx.userId}
-              AND deleted_at IS NULL
-          `
-        : await sql`
-            SELECT id FROM connections
-            WHERE organization_id = ${ctx.organizationId}
-              AND visibility = 'private'
-              AND deleted_at IS NULL
-          `;
-      const excludedIds = new Set(visibilityRows.map((r: { id: number }) => r.id));
-      if (excludedIds.size > 0) {
-        if (effectiveConnectionIds) {
-          effectiveConnectionIds = effectiveConnectionIds.filter((id) => !excludedIds.has(id));
-        } else {
-          const visibleRows = ctx.userId
-            ? await sql`
-                SELECT id FROM connections
-                WHERE organization_id = ${ctx.organizationId}
-                  AND (visibility = 'org' OR created_by = ${ctx.userId})
-                  AND deleted_at IS NULL
-              `
-            : await sql`
-                SELECT id FROM connections
-                WHERE organization_id = ${ctx.organizationId}
-                  AND visibility = 'org'
-                  AND deleted_at IS NULL
-              `;
-          effectiveConnectionIds = visibleRows.map((r: { id: number }) => r.id);
-        }
-      }
-    }
 
     let didPlatformFilter = false;
     if (platformFilters.length > 0) {
@@ -748,16 +731,37 @@ export async function getContent(
 
       let entityFilter = '';
       if (args.entity_id) {
-        queryParams.push(args.entity_id);
-        entityFilter = ` AND ${entityLinkMatchSql(`$${queryParams.length}::bigint`)}`;
+        // Use the trimmed entity-link UNION when we know the entity id —
+        // skips namespaces this entity doesn't claim. Identifier values are
+        // bound params; entity id is inlined as a literal so the planner
+        // sees the actual selectivity.
+        const validatedId = validateNumericId(args.entity_id as number, 'entity_id');
+        const scopes = await fetchEntityIdentityScopes(sql, validatedId);
+        const link = buildEntityLinkUnion({
+          entityIdLiteral: validatedId,
+          scopes,
+          alias: 'f',
+          baseParamIndex: queryParams.length + 1,
+        });
+        entityFilter = ` AND ${link.sql}`;
+        queryParams.push(...link.params);
       }
+
+      // Visibility: hide events from connections the caller can't see. Inline,
+      // shared with the count below.
+      const visibility = buildConnectionVisibilityClause({
+        organizationId: visibilityScope.organizationId,
+        userId: visibilityScope.userId,
+        baseParamIndex: queryParams.length + 1,
+      });
+      queryParams.push(...visibility.params);
 
       // Query content by IDs with classifications
       const result = await sql.unsafe(
         buildContentQuery({
           table: 'current_event_records',
           alias: 'f',
-          where: `f.id IN (${idPlaceholders}) ${orgScope}${entityFilter}`,
+          where: `f.id IN (${idPlaceholders}) ${orgScope}${entityFilter} ${visibility.sql}`,
           orderBy: 'f.occurred_at DESC',
           limit,
           offset,
@@ -772,6 +776,7 @@ export async function getContent(
         WHERE f.id IN (${idPlaceholders})
           ${orgScope}
           ${entityFilter}
+          ${visibility.sql}
       `,
         queryParams
       );
@@ -786,12 +791,28 @@ export async function getContent(
     } else if (args.include_superseded) {
       logger.info('[get_content] Listing content including superseded history');
 
+      // Pre-fetch the entity's identity scopes once so the trimmed entity
+      // link UNION skips namespaces this entity doesn't claim. Same pattern
+      // as listContentInternal. Entity id is inlined as a literal, so it's
+      // not a bound param here — identifier values are.
+      const supersededValidatedId = validateNumericId(entityId as number, 'entity_id');
+      const supersededScopes = await fetchEntityIdentityScopes(sql, supersededValidatedId);
+      const supersededLink = buildEntityLinkUnion({
+        entityIdLiteral: supersededValidatedId,
+        scopes: supersededScopes,
+        alias: 'e',
+        baseParamIndex: 2, // org=$1; identifier params start at $2
+      });
+
       const conditions: string[] = [
         'e.organization_id = $1',
-        entityLinkMatchSql('$2::bigint', 'e'),
+        supersededLink.sql,
       ];
-      const queryParams: Array<string | number | null> = [ctx.organizationId, entityId!];
-      let paramIndex = 3;
+      const queryParams: Array<string | number | null> = [
+        ctx.organizationId,
+        ...supersededLink.params,
+      ];
+      let paramIndex = 2 + supersededLink.params.length;
 
       if (effectiveConnectionIds && effectiveConnectionIds.length > 0) {
         const placeholders = effectiveConnectionIds.map(() => `$${paramIndex++}`).join(',');
@@ -848,6 +869,25 @@ export async function getContent(
         paramIndex += 1;
       }
 
+      // Visibility: events from connections the caller can't see drop out.
+      // The clause is appended as an `AND (…)` fragment so it folds cleanly
+      // into the existing `conditions.join(' AND ')`.
+      const visibility = buildConnectionVisibilityClause(
+        {
+          organizationId: visibilityScope.organizationId,
+          userId: visibilityScope.userId,
+          baseParamIndex: paramIndex,
+        },
+        'e'
+      );
+      if (visibility.sql) {
+        // strip the leading "AND " that buildConnectionVisibilityClause emits
+        // since we're joining conditions with ' AND ' ourselves.
+        conditions.push(visibility.sql.replace(/^AND\s+/, ''));
+        queryParams.push(...visibility.params);
+        paramIndex += visibility.params.length;
+      }
+
       const orderDirection = args.sort_order === 'asc' ? 'ASC' : 'DESC';
       const orderBySql = `e.occurred_at ${orderDirection} NULLS LAST, e.id ${orderDirection}`;
 
@@ -898,6 +938,7 @@ export async function getContent(
         ...(args.classification_source && { classification_source: args.classification_source }),
         ...(args.semantic_type && { semantic_type: args.semantic_type }),
         ...(args.interaction_status && { interaction_status: args.interaction_status }),
+        visibility_scope: visibilityScope,
       };
 
       const [contentResult, countResult] = await Promise.all([
@@ -920,6 +961,7 @@ export async function getContent(
           entity_id: args.entity_id,
           organization_id: !args.entity_id ? ctx.organizationId : undefined,
           connection_ids: effectiveConnectionIds,
+          visibility_scope: visibilityScope,
           window_id: args.window_id,
           exclude_watcher_id: args.exclude_watcher_id,
           platform: effectivePlatform,
@@ -965,11 +1007,30 @@ export async function getContent(
       let paramIndex = 1;
 
       if (args.entity_id) {
-        conditions.push(entityLinkMatchSql(`$${paramIndex++}::bigint`));
-        params.push(args.entity_id);
+        // Use the trimmed UNION here too so the stats CTE doesn't pay for
+        // namespaces the entity doesn't have. Identifier values are bound
+        // params; entity id is inlined as a literal.
+        const statsValidatedId = validateNumericId(args.entity_id as number, 'entity_id');
+        const statsScopes = await fetchEntityIdentityScopes(sql, statsValidatedId);
+        const statsLink = buildEntityLinkUnion({
+          entityIdLiteral: statsValidatedId,
+          scopes: statsScopes,
+          alias: 'f',
+          baseParamIndex: paramIndex,
+        });
+        conditions.push(statsLink.sql);
+        params.push(...statsLink.params);
+        paramIndex += statsLink.params.length;
       }
       if (effectiveConnectionIds && effectiveConnectionIds.length > 0) {
-        conditions.push(`f.connection_id IN (${effectiveConnectionIds.join(',')})`);
+        // Parameterize — every other branch in this file does, and an
+        // upstream schema relaxation shouldn't be the thing that turns this
+        // into a string-concat injection sink.
+        const placeholders = effectiveConnectionIds
+          .map(() => `$${paramIndex++}`)
+          .join(',');
+        conditions.push(`f.connection_id IN (${placeholders})`);
+        params.push(...effectiveConnectionIds);
       }
       if (effectivePlatform) {
         conditions.push(`COALESCE(f.connector_key, c.connector_key) = $${paramIndex++}`);
@@ -988,6 +1049,19 @@ export async function getContent(
         windowJoinSql = `JOIN watcher_window_events iwf ON iwf.event_id = f.id AND iwf.window_id = $${paramIndex}`;
         params.push(args.window_id);
         paramIndex++;
+      }
+
+      // Visibility: events from connections the caller can't see must not
+      // skew the classification distribution.
+      const statsVisibility = buildConnectionVisibilityClause({
+        organizationId: visibilityScope.organizationId,
+        userId: visibilityScope.userId,
+        baseParamIndex: paramIndex,
+      });
+      if (statsVisibility.sql) {
+        conditions.push(statsVisibility.sql.replace(/^AND\s+/, ''));
+        params.push(...statsVisibility.params);
+        paramIndex += statsVisibility.params.length;
       }
 
       // Stats query WITHOUT classification filters (to show full distribution)
@@ -1080,51 +1154,54 @@ export async function getContent(
       );
     }
 
-    // Batch-resolve client_name for items without it (search/score paths don't JOIN oauth_clients)
+    // Batch-resolve client_name and parent_context in parallel — the two
+    // queries are independent (one keys by event id, the other by origin_id)
+    // and on a high-RTT DB the serial form pays the round-trip twice.
     const idsNeedingClientName = rawContent.filter((f) => !f.client_name).map((f) => f.id);
-    const clientNameMap = new Map<number, string>();
-    if (idsNeedingClientName.length > 0) {
-      const idList = `{${idsNeedingClientName.join(',')}}`;
-      const clientRows = await sql`
-        SELECT e.id, oc.client_name
-        FROM current_event_records e
-        JOIN oauth_clients oc ON oc.id = e.client_id
-        WHERE e.id = ANY(${idList}::bigint[])
-          AND e.client_id IS NOT NULL
-      `;
-      for (const row of clientRows) {
-        clientNameMap.set(Number(row.id), String(row.client_name));
-      }
-    }
-
-    // Batch-resolve parent_context for replies whose parent isn't in the current result set
     const parentExternalIds = rawContent
       .filter(
         (f) => f.origin_parent_id && !rawContent.some((r) => r.origin_id === f.origin_parent_id)
       )
       .map((f) => f.origin_parent_id as string);
+    const uniqueParentIds = [...new Set(parentExternalIds)];
+
+    const [clientRows, parentRows] = await Promise.all([
+      idsNeedingClientName.length > 0
+        ? sql`
+          SELECT e.id, oc.client_name
+          FROM current_event_records e
+          JOIN oauth_clients oc ON oc.id = e.client_id
+          WHERE e.id = ANY(${`{${idsNeedingClientName.join(',')}}`}::bigint[])
+            AND e.client_id IS NOT NULL
+        `
+        : Promise.resolve([] as Array<{ id: number; client_name: string }>),
+      uniqueParentIds.length > 0
+        ? sql`
+          SELECT origin_id, author_name, title, payload_text, occurred_at, source_url, score
+          FROM current_event_records
+          WHERE origin_id = ANY(${pgTextArray(uniqueParentIds)}::text[])
+            AND organization_id = ${ctx.organizationId}
+          LIMIT ${uniqueParentIds.length}
+        `
+        : Promise.resolve([] as Array<Record<string, unknown>>),
+    ]);
+
+    const clientNameMap = new Map<number, string>();
+    for (const row of clientRows) {
+      clientNameMap.set(Number(row.id), String(row.client_name));
+    }
+
     const parentContextMap = new Map<string, ContentItem['parent_context']>();
-    if (parentExternalIds.length > 0) {
-      const uniqueIds = [...new Set(parentExternalIds)];
-      const pgArray = pgTextArray(uniqueIds);
-      const parentRows = await sql`
-        SELECT origin_id, author_name, title, payload_text, occurred_at, source_url, score
-        FROM current_event_records
-        WHERE origin_id = ANY(${pgArray}::text[])
-          AND organization_id = ${ctx.organizationId}
-        LIMIT ${uniqueIds.length}
-      `;
-      for (const row of parentRows) {
-        const text = String(row.payload_text ?? '');
-        parentContextMap.set(String(row.origin_id), {
-          author_name: String(row.author_name ?? ''),
-          title: row.title ? String(row.title) : null,
-          text_content: text.length > 200 ? `${text.slice(0, 200)}…` : text,
-          occurred_at: String(row.occurred_at ?? ''),
-          source_url: String(row.source_url ?? ''),
-          score: Number(row.score) || 0,
-        });
-      }
+    for (const row of parentRows) {
+      const text = String(row.payload_text ?? '');
+      parentContextMap.set(String(row.origin_id), {
+        author_name: String(row.author_name ?? ''),
+        title: row.title ? String(row.title) : null,
+        text_content: text.length > 200 ? `${text.slice(0, 200)}…` : text,
+        occurred_at: String(row.occurred_at ?? ''),
+        source_url: String(row.source_url ?? ''),
+        score: Number(row.score) || 0,
+      });
     }
 
     // Map to the canonical content item shape used across the app.
@@ -1194,7 +1271,7 @@ export async function getContent(
       result.classification_stats = classificationStats;
     }
 
-    // Add view URL if entity info is available
+    // Add view URL when an entity is in scope. Consumed by LLM agents over MCP.
     if (entityInfo) {
       result.view_url = buildContentUrl(
         entityInfo,

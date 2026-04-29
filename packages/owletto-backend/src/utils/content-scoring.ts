@@ -1,6 +1,12 @@
 import { getDb } from '../db/client';
 import { buildClassificationFilterSQL } from './content-query-filters';
-import { entityLinkMatchSql } from './content-search';
+import {
+  buildConnectionVisibilityClause,
+  buildEntityLinkUnion,
+  type EntityIdentityScope,
+  entityLinkMatchSql,
+  fetchEntityIdentityScopes,
+} from './content-search';
 import logger from './logger';
 import { getScoringFormulaSql, resolveStoredScoringProfile } from './scoring-profiles';
 import { validateAndFormatIds, validateNumericId } from './sql-validation';
@@ -19,6 +25,13 @@ interface NormalizedScoreFilters {
   classification_source?: 'user' | 'embedding' | 'llm';
   semantic_type?: string;
   interaction_status?: 'pending' | 'approved' | 'rejected' | 'completed' | 'failed';
+  /**
+   * Connection-visibility scope. Folds into the WHERE so events from
+   * private connections the caller can't see don't appear in score-sorted
+   * results. Mirrors the clause used by `listContentInternal` and the
+   * `content_ids` / `include_superseded` branches in `get_content.ts`.
+   */
+  visibility_scope?: { organizationId: string; userId: string | null };
 }
 
 /**
@@ -77,12 +90,29 @@ interface NormalizedScoreContent {
 function buildFilterConditionsAndJoins(
   entityId: number,
   filters?: NormalizedScoreFilters,
-  baseParamIndex: number = 1
+  baseParamIndex: number = 1,
+  entityScopes?: EntityIdentityScope[]
 ): { filterConditions: string[]; additionalJoins: string[]; params: unknown[] } {
-  const filterConditions: string[] = [entityLinkMatchSql(`${entityId}::bigint`)];
-  const additionalJoins: string[] = [];
-  const params: unknown[] = [];
   let paramIndex = baseParamIndex;
+  const params: unknown[] = [];
+  // Use the trimmed UNION when scopes were pre-fetched. Falls back to the
+  // legacy 7-branch UNION (kept for the few callers that don't pre-fetch).
+  let entityLinkSql: string;
+  if (entityScopes !== undefined) {
+    const link = buildEntityLinkUnion({
+      entityIdLiteral: entityId,
+      scopes: entityScopes,
+      alias: 'f',
+      baseParamIndex: paramIndex,
+    });
+    entityLinkSql = link.sql;
+    params.push(...link.params);
+    paramIndex += link.params.length;
+  } else {
+    entityLinkSql = entityLinkMatchSql(`${entityId}::bigint`);
+  }
+  const filterConditions: string[] = [entityLinkSql];
+  const additionalJoins: string[] = [];
 
   if (filters?.connection_ids && filters.connection_ids.length > 0) {
     const validatedIds = validateAndFormatIds(filters.connection_ids, 'connection_ids');
@@ -154,6 +184,24 @@ function buildFilterConditionsAndJoins(
     paramIndex += classificationParams.length;
   }
 
+  if (filters?.visibility_scope) {
+    const visibility = buildConnectionVisibilityClause(
+      {
+        organizationId: filters.visibility_scope.organizationId,
+        userId: filters.visibility_scope.userId,
+        baseParamIndex: paramIndex,
+      },
+      'f'
+    );
+    if (visibility.sql) {
+      // Drop the leading "AND " — `filterConditions` is joined with ' AND '
+      // by callers, so the bare predicate is what we want.
+      filterConditions.push(visibility.sql.replace(/^AND\s+/, ''));
+      params.push(...visibility.params);
+      paramIndex += visibility.params.length;
+    }
+  }
+
   return { filterConditions, additionalJoins, params };
 }
 export async function getNormalizedScoreContent(
@@ -168,9 +216,19 @@ export async function getNormalizedScoreContent(
   // Validate entityId to prevent injection
   validateNumericId(entityId, 'entityId');
 
-  const conditions: string[] = [entityLinkMatchSql('$1::bigint')];
-  const params: unknown[] = [entityId];
-  let paramIndex = 2;
+  // Pre-fetch identity scopes once, share across both step 1 (sources) and
+  // step 3 (scored content). Trims unused UNION branches from each.
+  const entityScopes = await fetchEntityIdentityScopes(sql, entityId);
+  const sourcesEntityLink = buildEntityLinkUnion({
+    entityIdLiteral: entityId,
+    scopes: entityScopes,
+    alias: 'f',
+    baseParamIndex: 1,
+  });
+
+  const conditions: string[] = [sourcesEntityLink.sql];
+  const params: unknown[] = [...sourcesEntityLink.params];
+  let paramIndex = 1 + sourcesEntityLink.params.length;
 
   if (filters?.connection_ids && filters.connection_ids.length > 0) {
     // Validate all connection_ids are valid integers before using in SQL
@@ -180,6 +238,29 @@ export async function getNormalizedScoreContent(
   if (filters?.platform) {
     conditions.push(`s.connector_key = $${paramIndex++}`);
     params.push(filters.platform);
+  }
+
+  // Visibility: keep the discovery scan's connection set in lockstep with the
+  // final scored query. Today the leak isn't directly observable (the final
+  // query is visibility-filtered, so a hidden source produces a CASE WHEN
+  // branch that never fires), but counts/aggregates on this CTE could leak
+  // existence info, and a future refactor that promotes its rows into the
+  // returned set would turn this into a real leak. Same helper as the rest
+  // of get_content's branches use.
+  if (filters?.visibility_scope) {
+    const preVisibility = buildConnectionVisibilityClause(
+      {
+        organizationId: filters.visibility_scope.organizationId,
+        userId: filters.visibility_scope.userId,
+        baseParamIndex: paramIndex,
+      },
+      'f'
+    );
+    if (preVisibility.sql) {
+      conditions.push(preVisibility.sql.replace(/^AND\s+/, ''));
+      params.push(...preVisibility.params);
+      paramIndex += preVisibility.params.length;
+    }
   }
 
   const sources = await sql.unsafe(
@@ -221,12 +302,13 @@ export async function getNormalizedScoreContent(
 
   const scoringExpression = `CASE ${caseWhenParts.join(' ')} END`;
 
-  // Step 3: Build and execute the dynamic query
+  // Step 3: Build and execute the dynamic query. Pass the pre-fetched
+  // identity scopes through so the trimmed entity-link UNION is used.
   const {
     filterConditions,
     additionalJoins,
     params: filterParams,
-  } = buildFilterConditionsAndJoins(entityId, filters);
+  } = buildFilterConditionsAndJoins(entityId, filters, 1, entityScopes);
   const whereClause = filterConditions.join(' AND ');
   const joinClause = additionalJoins.join(' ');
 
@@ -348,11 +430,16 @@ export async function getNormalizedScoreContentCount(
 
   validateNumericId(entityId, 'entityId');
 
+  // Pre-fetch scopes here too so the count query also uses the trimmed UNION.
+  // Cheap (~1ms) and runs in parallel with the main scored query in
+  // get_content.ts via Promise.all.
+  const entityScopes = await fetchEntityIdentityScopes(sql, entityId);
+
   const {
     filterConditions,
     additionalJoins,
     params: filterParams,
-  } = buildFilterConditionsAndJoins(entityId, filters);
+  } = buildFilterConditionsAndJoins(entityId, filters, 1, entityScopes);
   const whereClause = filterConditions.join(' AND ');
   const joinClause = additionalJoins.join(' ');
 

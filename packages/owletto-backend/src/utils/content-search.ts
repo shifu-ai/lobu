@@ -6,7 +6,7 @@
  * Falls back to ILIKE-only when embeddings cannot be generated.
  */
 
-import { type DbClient, getDb } from '../db/client';
+import { type DbClient, getDb, pgTextArray } from '../db/client';
 import type { Env } from '../index';
 import {
   buildConnectionFilter,
@@ -199,7 +199,106 @@ export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
   return `${alias}.id IN (\n    ${branches}\n  )`;
 }
 
-const STANDARD_WHERE_SQL = `($1::bigint IS NULL OR ${entityLinkMatchSql('$1::bigint')})
+/**
+ * One identity claim for an entity — `(namespace, identifier)`.
+ *
+ * Used by `fetchEntityIdentityScopes` + `buildEntityLinkUnion` to skip the
+ * UNION branches that would never match for this entity. On a 4.7GB events
+ * table the empty-branches-still-cost-real-time issue is the difference
+ * between 200ms and 1.2s on the candidate_set scan alone.
+ */
+export interface EntityIdentityScope {
+  namespace: string;
+  identifier: string;
+}
+
+/**
+ * Pre-fetch the live `entity_identities` rows for one entity, restricted to
+ * the namespaces we have backing indexes for (`STANDARD_IDENTITY_NAMESPACES`).
+ *
+ * Cheap: indexed scan via `idx_entity_identities_by_entity`. Typical entity
+ * has 0-3 rows. Run once per request, not per query.
+ */
+export async function fetchEntityIdentityScopes(
+  sql: DbClient,
+  entityId: number
+): Promise<EntityIdentityScope[]> {
+  const rows = (await sql`
+    SELECT namespace, identifier
+    FROM entity_identities
+    WHERE entity_id = ${entityId}
+      AND deleted_at IS NULL
+      AND namespace = ANY(${pgTextArray([...STANDARD_IDENTITY_NAMESPACES])}::text[])
+  `) as Array<{ namespace: unknown; identifier: unknown }>;
+  return rows.map((r) => ({
+    namespace: String(r.namespace),
+    identifier: String(r.identifier),
+  }));
+}
+
+/**
+ * Build the same `<alias>.id IN (UNION …)` predicate as `entityLinkMatchSql`,
+ * but emit only the branches an entity actually needs.
+ *
+ * Differences from the legacy helper:
+ *  - The direct `entity_ids @> ARRAY[N]` branch is always included.
+ *  - One `metadata->>'<ns>' = $N` branch per pre-fetched scope (no JOIN to
+ *    `entity_identities`; the identifier is bound as a parameter). For an
+ *    entity with no identities, that's zero extra branches — Postgres only
+ *    plans the direct scan.
+ *  - Uses an inline `entityIdLiteral` (already validated as a numeric id) so
+ *    the planner sees the actual id and picks the entity-specific GIN scan
+ *    instead of building a generic plan.
+ *
+ * Identifier values are bound params (caller appends them to its params
+ * array), defending against tampering even though `entity_identities` is
+ * write-controlled.
+ */
+export function buildEntityLinkUnion(opts: {
+  /** Already-validated entity id, will be inlined as `<id>::bigint`. */
+  entityIdLiteral: number;
+  scopes: EntityIdentityScope[];
+  alias?: string;
+  baseParamIndex: number;
+}): { sql: string; params: string[] } {
+  const alias = opts.alias ?? 'f';
+  const direct = `SELECT e2.id FROM events e2 WHERE e2.entity_ids @> ARRAY[${opts.entityIdLiteral}::bigint]`;
+  const params: string[] = [];
+  let paramIndex = opts.baseParamIndex;
+
+  // Skip namespaces we have no backing index for (e.g. anything outside
+  // STANDARD_IDENTITY_NAMESPACES) — they'd seq-scan events. The fetch helper
+  // already filters to the standard list, but we double-check here so a
+  // future caller that builds scopes manually can't blow up the scan.
+  const indexed = new Set<string>(STANDARD_IDENTITY_NAMESPACES);
+  const scopeBranches: string[] = [];
+  for (const scope of opts.scopes) {
+    if (!indexed.has(scope.namespace)) continue;
+    params.push(scope.identifier);
+    scopeBranches.push(
+      `SELECT e2.id FROM events e2 WHERE e2.metadata->>'${scope.namespace}' = $${paramIndex}`
+    );
+    paramIndex += 1;
+  }
+
+  const branches = [direct, ...scopeBranches].join('\n    UNION\n    ');
+  return {
+    sql: `${alias}.id IN (\n    ${branches}\n  )`,
+    params,
+  };
+}
+
+/**
+ * Build the shared `WHERE` skeleton used by `listContentInternal` for both
+ * its count and list queries.
+ *
+ * `entityLinkSql` is the per-request fragment for "which events belong to
+ * this entity" — see `buildEntityLinkUnion`. Pre-computing it once and
+ * passing it in avoids re-emitting (and re-planning) the 7-branch generic
+ * UNION for every query.
+ */
+function buildStandardWhereSql(entityLinkSql: string): string {
+  return `($1::bigint IS NULL OR ${entityLinkSql})
           AND ($2::text IS NULL OR f.connector_key = $2::text)
           AND ($3::timestamptz IS NULL OR f.occurred_at >= $3::timestamptz)
           AND ($4::timestamptz IS NULL OR f.occurred_at <= $4::timestamptz)
@@ -213,6 +312,7 @@ const STANDARD_WHERE_SQL = `($1::bigint IS NULL OR ${entityLinkMatchSql('$1::big
           ))
           AND ($9::text IS NULL OR f.semantic_type = $9::text)
           AND ($10::text IS NULL OR f.interaction_status = $10::text)`;
+}
 
 const WINDOW_JOIN_SQL = `LEFT JOIN watcher_window_events iwf
           ON iwf.event_id = f.id
@@ -265,7 +365,7 @@ export function buildOrgScopeWhere(options: {
   entity_id?: number;
   organization_id?: string;
   baseParamIndex: number;
-}): { sql: string; params: unknown[] } {
+}): { sql: string; params: Array<string | number | null> } {
   if (options.entity_id || !options.organization_id) return { sql: '', params: [] };
 
   const p = `$${options.baseParamIndex}::text`;
@@ -279,6 +379,44 @@ export function buildOrgScopeWhere(options: {
 }
 
 /**
+ * Build a connection-visibility WHERE clause that lives inline alongside the
+ * other content filters, so the list and count queries don't need a separate
+ * "which connection ids may I see?" round trip.
+ *
+ * Semantics (must match `getContent`'s legacy two-step flow):
+ *  - Authed user: connections with `visibility='org' OR created_by = $userId`.
+ *  - Unauthed:    connections with `visibility='org'`.
+ *  - Soft-deleted connections (`deleted_at IS NOT NULL`) are excluded.
+ *  - Events with `connection_id IS NULL` (system / non-connection events)
+ *    are visible in both authed and unauthed cases.
+ *
+ * Returns an empty fragment when no scope is requested (callers like the
+ * watcher-mode/condensation path that already select by other constraints).
+ */
+export function buildConnectionVisibilityClause(
+  options: {
+    organizationId?: string;
+    userId?: string | null;
+    baseParamIndex: number;
+  },
+  tableAlias: string = 'f'
+): { sql: string; params: Array<string | number | null> } {
+  if (!options.organizationId) return { sql: '', params: [] };
+
+  const orgParam = `$${options.baseParamIndex}::text`;
+  const userParam = `$${options.baseParamIndex + 1}::text`;
+  return {
+    sql: `AND (${tableAlias}.connection_id IS NULL OR ${tableAlias}.connection_id IN (
+      SELECT vc.id FROM connections vc
+      WHERE vc.organization_id = ${orgParam}
+        AND vc.deleted_at IS NULL
+        AND (vc.visibility = 'org' OR (${userParam} IS NOT NULL AND vc.created_by = ${userParam}))
+    ))`,
+    params: [options.organizationId, options.userId ?? null],
+  };
+}
+
+/**
  * Search options for content vector search
  */
 interface ContentSearchOptions {
@@ -287,6 +425,16 @@ interface ContentSearchOptions {
   organization_id?: string; // Required when entity_id is omitted (org-wide mode)
 
   connection_ids?: number[]; // Array of connection IDs to filter by
+  /**
+   * Connection-visibility scope. When set, the SQL WHERE clause inlines a
+   * subquery that hides events from private connections the caller cannot
+   * see. Replaces the older "look up excluded connection ids first, pass them
+   * in as connection_ids" two-query dance that the gateway used to do.
+   *
+   * Authenticated callers pass their user id; unauth callers pass null.
+   * Events with `connection_id IS NULL` are always visible.
+   */
+  visibility_scope?: { organizationId: string; userId: string | null };
   window_id?: number; // Filter by watcher window ID
   exclude_watcher_id?: number; // Exclude content already in any window for this watcher
   platform?: string;
@@ -506,7 +654,22 @@ function buildPageInfo(params: {
   };
 }
 
-function buildThreadMetaCteSql(entityIdParam: string, resultSetAlias = 'result_set'): string {
+function buildThreadMetaCteSql(
+  entityIdParam: string,
+  resultSetAlias = 'result_set',
+  entityLinkSql?: string
+): string {
+  // Pre-built scope-aware fragment beats the legacy 7-branch UNION when the
+  // caller has already pre-fetched scopes; fall back to the legacy form for
+  // call sites that haven't been migrated yet.
+  //
+  // When `entityLinkSql` is provided, the caller has already inlined the
+  // entity id (so there's no `$N IS NULL` guard needed). When it isn't
+  // provided, we keep the legacy `(${entityIdParam} IS NULL OR …)` shape so
+  // org-wide callers can pass `$1` and have it dynamically null-checked.
+  const usePrebuilt = entityLinkSql !== undefined;
+  const linkSql = entityLinkSql ?? entityLinkMatchSql(`${entityIdParam}::bigint`, 'p');
+  const entityFilter = usePrebuilt ? linkSql : `(${entityIdParam} IS NULL OR ${linkSql})`;
   return `
     thread_chain AS (
       SELECT
@@ -532,7 +695,7 @@ function buildThreadMetaCteSql(entityIdParam: string, resultSetAlias = 'result_s
       JOIN current_event_records p ON tc.origin_parent_id = p.origin_id
       WHERE tc.origin_parent_id IS NOT NULL
         AND tc.depth < 25
-        AND (${entityIdParam} IS NULL OR ${entityLinkMatchSql(`${entityIdParam}::bigint`, 'p')})
+        AND ${entityFilter}
         AND NOT (COALESCE(p.origin_id, CAST(p.id AS VARCHAR)) = ANY(tc.path))
     ),
     thread_meta AS (
@@ -776,7 +939,14 @@ async function listContentInternal(
   const filtersBySlug = hasClassificationFilters
     ? groupClassificationFilters(classificationFilters)
     : null;
-  const threadMetaCteSql = buildThreadMetaCteSql('$1');
+
+  // Pre-fetch the entity's identity claims so the entity-link UNION only
+  // emits branches for namespaces this entity actually has. For an entity
+  // with 0 identities (~17% of the rows in real data) the legacy
+  // 7-branch UNION takes ~1s on a 4.7GB events table even though every
+  // branch returns 0 rows; the trimmed UNION takes ~200ms.
+  const entityScopes: EntityIdentityScope[] =
+    entityId != null ? await fetchEntityIdentityScopes(sql, entityId) : [];
   const latestClassificationsCteSql = buildLatestClassificationsCteSql();
 
   const listExtraColumns =
@@ -795,9 +965,36 @@ async function listContentInternal(
     const baseConditions: string[] = [];
     const baseParams: any[] = [];
 
+    // Pre-built entity-link fragment for thread_meta's recursive walk.
+    // When entity_id is set we use the trimmed UNION; otherwise threadMeta
+    // doesn't need an entity filter (org-wide listings already constrain
+    // candidates upstream).
+    let threadEntityLinkSql: string | undefined;
     if (entityId != null) {
-      baseParams.push(entityId);
-      baseConditions.push(entityLinkMatchSql(`$${baseParams.length}::bigint`));
+      // Inline the entity id as a literal so the planner picks the
+      // entity-specific GIN scan instead of building a generic plan that
+      // ignores selectivity. The id is already a number from the typed
+      // option; we further validate via validateNumericId below before
+      // passing to buildEntityLinkUnion.
+      const validatedId = validateNumericId(entityId, 'entity_id');
+      const link = buildEntityLinkUnion({
+        entityIdLiteral: validatedId,
+        scopes: entityScopes,
+        alias: 'f',
+        baseParamIndex: baseParams.length + 1,
+      });
+      baseConditions.push(link.sql);
+      baseParams.push(...link.params);
+      // Same shape, alias `p`, for thread_meta's recursive parent walk.
+      threadEntityLinkSql = buildEntityLinkUnion({
+        entityIdLiteral: validatedId,
+        scopes: entityScopes,
+        alias: 'p',
+        // params don't need fresh slots — they're the same identifier values
+        // emitted by the outer `link` already in baseParams. We re-bind them
+        // by reusing the same $N slots.
+        baseParamIndex: baseParams.length - link.params.length + 1,
+      }).sql;
     } else if (organizationId) {
       baseParams.push(organizationId);
       baseConditions.push(
@@ -870,13 +1067,37 @@ async function listContentInternal(
       options.exclude_watcher_id,
       filterParamsBeforeExclude.length + 1
     );
-    const allFilterParams = [...filterParamsBeforeExclude, ...excludeClause.params];
+    const filterParamsBeforeVisibility = [...filterParamsBeforeExclude, ...excludeClause.params];
+    const visibilityClause = buildConnectionVisibilityClause({
+      organizationId: options.visibility_scope?.organizationId,
+      userId: options.visibility_scope?.userId ?? null,
+      baseParamIndex: filterParamsBeforeVisibility.length + 1,
+    });
+    const allFilterParams = [...filterParamsBeforeVisibility, ...visibilityClause.params];
 
     const countResult = await sql.unsafe<{ total: number | string }>(
-      `SELECT COUNT(*) as total FROM current_event_records f LEFT JOIN connections c ON c.id = f.connection_id WHERE ${whereSql} ${excludeClause.sql}`,
+      `SELECT COUNT(*) as total FROM current_event_records f LEFT JOIN connections c ON c.id = f.connection_id WHERE ${whereSql} ${excludeClause.sql} ${visibilityClause.sql}`,
       allFilterParams
     );
     const total = parseInt(String(countResult[0]?.total ?? '0'), 10);
+
+    // Short-circuit on empty matches — same reasoning as the standard
+    // branch: postgres.js extended protocol pays a real planner cost on
+    // the heavy enrichment query even when server-side execution is fast.
+    if (total === 0) {
+      return {
+        content: [],
+        total: 0,
+        page: buildPageInfo({
+          limit,
+          offset: effectiveOffset,
+          total: 0,
+          returnedCount: 0,
+          useDateFeed,
+          cursor,
+        }),
+      };
+    }
 
     const cursorClause = buildDateCursorClause(
       cursor,
@@ -888,9 +1109,14 @@ async function listContentInternal(
     const limitIndex = queryBaseParams.length + 1;
     const offsetIndex = queryBaseParams.length + 2;
     const validatedLimit = validateNumericId(limit, 'limit');
+    const branchThreadMetaCteSql = buildThreadMetaCteSql(
+      '$1',
+      'result_set',
+      threadEntityLinkSql
+    );
     const ctes = needClassifications
-      ? `${threadMetaCteSql},\n        ${latestClassificationsCteSql}`
-      : threadMetaCteSql;
+      ? `${branchThreadMetaCteSql},\n        ${latestClassificationsCteSql}`
+      : branchThreadMetaCteSql;
 
     const contentQuery = useDateFeed
       ? `
@@ -902,6 +1128,7 @@ async function listContentInternal(
           LEFT JOIN connections c ON c.id = f.connection_id
           WHERE ${whereSql}
             ${excludeClause.sql}
+            ${visibilityClause.sql}
             ${cursorClause.sql}
           ORDER BY ${buildDateCandidateOrderBy(cursor, 'f')}
           LIMIT $${limitIndex}
@@ -923,7 +1150,7 @@ async function listContentInternal(
             NULL::bigint as cursor_fetched_count
           FROM current_event_records f
           LEFT JOIN connections c ON c.id = f.connection_id
-          WHERE ${whereSql} ${excludeClause.sql}
+          WHERE ${whereSql} ${excludeClause.sql} ${visibilityClause.sql}
           ORDER BY ${orderByForResultSet}
           LIMIT $${limitIndex} OFFSET $${offsetIndex}
         ),
@@ -956,33 +1183,101 @@ async function listContentInternal(
 
   const connectionCondition = buildConnectionFilter(connectionIdsArray);
   const standardParams = buildStandardParams(options, { sinceDate, untilDate });
+
+  // Build the entity-link UNION fragment once so both list and count emit
+  // identical SQL — same shape as before but with namespaces trimmed to the
+  // entity's actual identities. Params slot right after $1-$10 standardParams.
+  let standardEntityLinkSql: string;
+  let standardEntityLinkParams: string[] = [];
+  let standardEntityLinkSqlForP: string | undefined;
+  if (entityId != null) {
+    const validatedId = validateNumericId(entityId, 'entity_id');
+    const link = buildEntityLinkUnion({
+      entityIdLiteral: validatedId,
+      scopes: entityScopes,
+      alias: 'f',
+      baseParamIndex: standardParams.length + 1,
+    });
+    standardEntityLinkSql = link.sql;
+    standardEntityLinkParams = link.params;
+    // thread_meta walks parents (alias `p`); reuse the same param slots so
+    // the params array doesn't grow.
+    standardEntityLinkSqlForP = buildEntityLinkUnion({
+      entityIdLiteral: validatedId,
+      scopes: entityScopes,
+      alias: 'p',
+      baseParamIndex: standardParams.length + 1,
+    }).sql;
+  } else {
+    // Org-wide / no-entity path keeps the legacy 7-branch UNION because the
+    // outer `($1::bigint IS NULL OR …)` short-circuits to true and the SQL
+    // is never evaluated. Cheap.
+    standardEntityLinkSql = entityLinkMatchSql('$1::bigint');
+  }
+  const standardWhereSql = buildStandardWhereSql(standardEntityLinkSql);
+
+  const paramsAfterEntityLink = [...standardParams, ...standardEntityLinkParams];
   const orgScope = buildOrgScopeWhere({
     entity_id: entityId,
     organization_id: organizationId,
-    baseParamIndex: standardParams.length + 1,
+    baseParamIndex: paramsAfterEntityLink.length + 1,
   });
-  const paramsBeforeExclude = [...standardParams, ...orgScope.params];
+  const paramsBeforeExclude = [...paramsAfterEntityLink, ...orgScope.params];
   const excludeClause = buildExcludeWatcherClause(
     options.exclude_watcher_id,
     paramsBeforeExclude.length + 1
   );
-  const countParams = [...paramsBeforeExclude, ...excludeClause.params];
+  const paramsBeforeVisibility = [...paramsBeforeExclude, ...excludeClause.params];
+  const visibilityClause = buildConnectionVisibilityClause({
+    organizationId: options.visibility_scope?.organizationId,
+    userId: options.visibility_scope?.userId ?? null,
+    baseParamIndex: paramsBeforeVisibility.length + 1,
+  });
+  const countParams = [...paramsBeforeVisibility, ...visibilityClause.params];
 
   const countResult = await sql.unsafe(
     `SELECT COUNT(*) as total FROM current_event_records f
       LEFT JOIN connections c ON c.id = f.connection_id
       ${WINDOW_JOIN_SQL}
-      WHERE ${STANDARD_WHERE_SQL}
+      WHERE ${standardWhereSql}
         AND ${connectionCondition}
         ${excludeClause.sql}
+        ${visibilityClause.sql}
         ${orgScope.sql}`,
     countParams
   );
   const total = parseInt(String(countResult[0]?.total ?? '0'), 10);
 
+  // Short-circuit on empty matches. Even with the trimmed entity-link UNION,
+  // the enrichment query — recursive thread_meta + classifications +
+  // parent/root LEFT JOINs — pays a real planner cost on a 4.7GB events
+  // table when run via postgres.js's extended protocol. Empirically that's
+  // ~3-4s of the request even when result_set is empty server-side. Better
+  // to spend one extra round-trip on the cheap count and skip the heavy
+  // query entirely when total=0.
+  if (total === 0) {
+    return {
+      content: [],
+      total: 0,
+      page: buildPageInfo({
+        limit,
+        offset: effectiveOffset,
+        total: 0,
+        returnedCount: 0,
+        useDateFeed,
+        cursor,
+      }),
+    };
+  }
+
+  const standardThreadMetaCteSql = buildThreadMetaCteSql(
+    '$1',
+    'result_set',
+    standardEntityLinkSqlForP
+  );
   const ctes = needClassifications
-    ? `${threadMetaCteSql},\n      ${latestClassificationsCteSql}`
-    : threadMetaCteSql;
+    ? `${standardThreadMetaCteSql},\n      ${latestClassificationsCteSql}`
+    : standardThreadMetaCteSql;
 
   const cursorClause = buildDateCursorClause(
     cursor,
@@ -1003,9 +1298,10 @@ async function listContentInternal(
         FROM current_event_records f
         LEFT JOIN connections c ON c.id = f.connection_id
         ${WINDOW_JOIN_SQL}
-        WHERE ${STANDARD_WHERE_SQL}
+        WHERE ${standardWhereSql}
           AND ${connectionCondition}
           ${excludeClause.sql}
+          ${visibilityClause.sql}
           ${orgScope.sql}
           ${cursorClause.sql}
         ORDER BY ${buildDateCandidateOrderBy(cursor, 'f')}
@@ -1029,9 +1325,10 @@ async function listContentInternal(
         FROM current_event_records f
         LEFT JOIN connections c ON c.id = f.connection_id
         ${WINDOW_JOIN_SQL}
-        WHERE ${STANDARD_WHERE_SQL}
+        WHERE ${standardWhereSql}
           AND ${connectionCondition}
           ${excludeClause.sql}
+          ${visibilityClause.sql}
           ${orgScope.sql}
         ORDER BY ${orderByForResultSet}
         LIMIT $${limitIdx} OFFSET $${offsetIdx}
@@ -1042,6 +1339,7 @@ async function listContentInternal(
   const queryParams = useDateFeed
     ? [...queryBaseParams, fetchLimit]
     : [...queryBaseParams, limit, effectiveOffset];
+
   const rawRows = (await sql.unsafe(querySQL, queryParams)) as any[];
 
   const content = needClassifications
@@ -1170,6 +1468,12 @@ async function searchContentBySingleQuery(
 
   const connectionCondition = buildConnectionFilter(connectionIdsArray);
 
+  // Pre-fetch the entity's identity claims so the entity-link UNION trims
+  // unused namespaces. Search path benefits even more than the chronological
+  // path because filtered_ids re-evaluates on every query variant attempt.
+  const searchEntityScopes: EntityIdentityScope[] =
+    entityId != null ? await fetchEntityIdentityScopes(sql, entityId) : [];
+
   const orgScope = buildOrgScopeWhere({
     entity_id: entityId,
     organization_id: options.organization_id,
@@ -1182,13 +1486,50 @@ async function searchContentBySingleQuery(
     options.exclude_watcher_id,
     excludeParamIdx
   );
-  const baseParamIdx = excludeParamIdx + excludeClause.params.length;
+  // Connection-visibility predicate. Same helper used by every other
+  // get_content branch, so authed/unauthed/private/system-event semantics
+  // are guaranteed identical across the search/text-query path and the
+  // chronological list path.
+  const visibilityParamIdx = excludeParamIdx + excludeClause.params.length;
+  const visibilityClause = buildConnectionVisibilityClause({
+    organizationId: options.visibility_scope?.organizationId,
+    userId: options.visibility_scope?.userId ?? null,
+    baseParamIndex: visibilityParamIdx,
+  });
+  const entityLinkParamIdx = visibilityParamIdx + visibilityClause.params.length;
+  // Build entity-link UNION (alias `f` for filtered_ids; alias `p` for thread
+  // walk). Params slot after visibility, before vector/min_similarity.
+  let searchEntityLinkSql: string;
+  let searchEntityLinkSqlForP: string | undefined;
+  let searchEntityLinkParams: string[] = [];
+  if (entityId != null) {
+    const validatedId = validateNumericId(entityId, 'entity_id');
+    const link = buildEntityLinkUnion({
+      entityIdLiteral: validatedId,
+      scopes: searchEntityScopes,
+      alias: 'f',
+      baseParamIndex: entityLinkParamIdx,
+    });
+    searchEntityLinkSql = link.sql;
+    searchEntityLinkParams = link.params;
+    searchEntityLinkSqlForP = buildEntityLinkUnion({
+      entityIdLiteral: validatedId,
+      scopes: searchEntityScopes,
+      alias: 'p',
+      baseParamIndex: entityLinkParamIdx,
+    }).sql;
+  } else {
+    // Org-wide path keeps the legacy 7-branch UNION; outer NULL check
+    // short-circuits when entity_id is absent.
+    searchEntityLinkSql = entityLinkMatchSql('$2::bigint');
+  }
+  const baseParamIdx = entityLinkParamIdx + searchEntityLinkParams.length;
   const vectorParamIdx = hasEmbedding ? baseParamIdx : null;
   // Bind min_similarity as a numeric parameter after the vector slot (when
   // present) so a hostile float can't break out of the comparison expression.
   const minSimilarityParamIdx = baseParamIdx + (hasEmbedding ? 1 : 0);
 
-  const standardFiltersSQL = `($2::bigint IS NULL OR ${entityLinkMatchSql('$2::bigint')})
+  const standardFiltersSQL = `($2::bigint IS NULL OR ${searchEntityLinkSql})
           AND ${connectionCondition}
           AND ($3::text IS NULL OR f.connector_key = $3::text)
           AND ($4::timestamptz IS NULL OR f.occurred_at >= $4::timestamptz)
@@ -1199,6 +1540,7 @@ async function searchContentBySingleQuery(
           AND ($9::text IS NULL OR f.semantic_type = $9::text)
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
           ${excludeClause.sql}
+          ${visibilityClause.sql}
           ${orgScope.sql}`;
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
@@ -1273,7 +1615,11 @@ async function searchContentBySingleQuery(
     orderBy: orderByExpr,
   });
 
-  const searchThreadCteSql = buildThreadMetaCteSql('$2');
+  const searchThreadCteSql = buildThreadMetaCteSql(
+    '$2',
+    'result_set',
+    searchEntityLinkSqlForP
+  );
   const latestClassificationsCteSql = buildLatestClassificationsCteSql();
   const ctes = needClassifications
     ? `${searchThreadCteSql},\n      ${latestClassificationsCteSql}`
@@ -1367,6 +1713,8 @@ async function searchContentBySingleQuery(
     options.interaction_status ?? null,
     ...orgScope.params,
     ...excludeClause.params,
+    ...visibilityClause.params,
+    ...searchEntityLinkParams,
     ...(hasEmbedding ? [toVectorLiteral(queryEmbedding!), minSimilarity] : []),
     ...cursorClause.params,
     ...(useDateFeed ? [fetchLimit] : [limit, effectiveOffset]),
