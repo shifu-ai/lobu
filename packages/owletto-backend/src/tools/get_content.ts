@@ -102,6 +102,7 @@ function buildContentQuery(opts: {
 }
 
 import { requireReadAccess } from '../utils/organization-access';
+import { validateNumericId } from '../utils/sql-validation';
 import {
   buildContentUrl,
   buildEventPermalink,
@@ -734,7 +735,7 @@ export async function getContent(
         // skips namespaces this entity doesn't claim. Identifier values are
         // bound params; entity id is inlined as a literal so the planner
         // sees the actual selectivity.
-        const validatedId = (args.entity_id as number) | 0;
+        const validatedId = validateNumericId(args.entity_id as number, 'entity_id');
         const scopes = await fetchEntityIdentityScopes(sql, validatedId);
         const link = buildEntityLinkUnion({
           entityIdLiteral: validatedId,
@@ -794,7 +795,7 @@ export async function getContent(
       // link UNION skips namespaces this entity doesn't claim. Same pattern
       // as listContentInternal. Entity id is inlined as a literal, so it's
       // not a bound param here — identifier values are.
-      const supersededValidatedId = (entityId as number) | 0;
+      const supersededValidatedId = validateNumericId(entityId as number, 'entity_id');
       const supersededScopes = await fetchEntityIdentityScopes(sql, supersededValidatedId);
       const supersededLink = buildEntityLinkUnion({
         entityIdLiteral: supersededValidatedId,
@@ -1009,7 +1010,7 @@ export async function getContent(
         // Use the trimmed UNION here too so the stats CTE doesn't pay for
         // namespaces the entity doesn't have. Identifier values are bound
         // params; entity id is inlined as a literal.
-        const statsValidatedId = (args.entity_id as number) | 0;
+        const statsValidatedId = validateNumericId(args.entity_id as number, 'entity_id');
         const statsScopes = await fetchEntityIdentityScopes(sql, statsValidatedId);
         const statsLink = buildEntityLinkUnion({
           entityIdLiteral: statsValidatedId,
