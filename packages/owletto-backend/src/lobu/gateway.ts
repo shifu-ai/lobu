@@ -222,7 +222,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
 
     const gatewayConfig = buildGatewayConfig({
       queues: { connectionString: redisUrl },
-      orchestration: { deploymentMode: 'embedded' },
       mcp: { publicGatewayUrl: publicUrl },
     });
 
