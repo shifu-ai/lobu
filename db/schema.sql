@@ -4177,7 +4177,7 @@ CREATE INDEX idx_runs_watcher_id ON public.runs USING btree (watcher_id) WHERE (
 -- Name: runs_idempotency_key_uniq; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX runs_idempotency_key_uniq ON public.runs USING btree (idempotency_key) WHERE (idempotency_key IS NOT NULL);
+CREATE UNIQUE INDEX runs_idempotency_key_uniq ON public.runs USING btree (idempotency_key) WHERE ((idempotency_key IS NOT NULL) AND (status = ANY (ARRAY['pending'::text, 'claimed'::text, 'running'::text])));
 
 
 --

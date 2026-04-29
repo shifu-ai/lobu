@@ -58,12 +58,15 @@ ALTER TABLE public.runs
     ADD COLUMN IF NOT EXISTS max_attempts integer NOT NULL DEFAULT 3,
     ADD COLUMN IF NOT EXISTS run_at timestamp with time zone NOT NULL DEFAULT now();
 
--- Idempotency: partial unique on (idempotency_key) for any run that sets one.
--- Connector lanes don't use this column, so the partial WHERE keeps them
--- unaffected.
+-- Idempotency: partial unique on (idempotency_key) for runs that are still in
+-- a non-terminal state. Once a run completes / fails / cancels / times out it
+-- no longer participates in dedup, so a future enqueue with the same singleton
+-- key (e.g. a Slack retry that lands minutes after the first attempt
+-- finished) can insert a fresh row. Connector lanes never set this column.
 CREATE UNIQUE INDEX IF NOT EXISTS runs_idempotency_key_uniq
     ON public.runs (idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
+    WHERE idempotency_key IS NOT NULL
+      AND status IN ('pending', 'claimed', 'running');
 
 -- Claim index for the in-process poll loop. Limited to lobu-queue run types
 -- so the connector worker's HTTP-poll claim stays on its own indexes.

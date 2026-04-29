@@ -35,6 +35,12 @@ const POLL_INTERVAL_MS = 200;
 const RECONNECT_DELAY_MS = 1000;
 /** Backoff cap (seconds) when retrying a failed run. */
 const MAX_BACKOFF_SECONDS = 300;
+/** How often the stale-claim sweeper runs. */
+const STALE_SWEEP_INTERVAL_MS = 30_000;
+/** Rows in `claimed` for longer than this without a heartbeat are reset to
+ *  pending so a fresh claim can pick them up. Matches typical max agent-turn
+ *  duration with a generous buffer. */
+const CLAIM_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Lobu-queue run types. Inserts/claims are restricted to these so connector
  *  lanes (sync, action, embed_backfill, watcher, auth) are never disturbed. */
@@ -110,6 +116,7 @@ export class RunsQueue implements IMessageQueue {
    *  reconnects. */
   private listenerReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private listenerStopped = false;
+  private staleSweepTimer: ReturnType<typeof setInterval> | null = null;
   private redisClient: Redis | null = null;
   private isConnected = false;
 
@@ -172,6 +179,7 @@ export class RunsQueue implements IMessageQueue {
     this.isConnected = true;
     this.listenerStopped = false;
     await this.connectListener();
+    this.startStaleSweep();
     logger.debug("Runs queue started");
   }
 
@@ -187,6 +195,10 @@ export class RunsQueue implements IMessageQueue {
     this.workers.clear();
     this.subscribersByType.clear();
 
+    if (this.staleSweepTimer) {
+      clearInterval(this.staleSweepTimer);
+      this.staleSweepTimer = null;
+    }
     if (this.listenerReconnectTimer) {
       clearTimeout(this.listenerReconnectTimer);
       this.listenerReconnectTimer = null;
@@ -269,6 +281,13 @@ export class RunsQueue implements IMessageQueue {
     const client = await this.pool.connect();
     try {
       await client.query("BEGIN");
+      // ON CONFLICT must match the index predicate exactly. The
+      // `runs_idempotency_key_uniq` index is partial:
+      //   WHERE idempotency_key IS NOT NULL
+      //     AND status IN ('pending', 'claimed', 'running')
+      // Rows whose status has already moved to a terminal value drop out of
+      // the index, so a later enqueue with the same singleton key inserts a
+      // fresh row instead of being silently swallowed.
       const sql = `
         INSERT INTO public.runs (
           run_type,
@@ -282,7 +301,9 @@ export class RunsQueue implements IMessageQueue {
         ) VALUES (
           $1, $2, $3::jsonb, $4, $5, 0, 'pending', ${runAtSql}
         )
-        ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL
+        ON CONFLICT (idempotency_key)
+          WHERE idempotency_key IS NOT NULL
+            AND status IN ('pending', 'claimed', 'running')
         DO NOTHING
         RETURNING id
       `;
@@ -295,12 +316,16 @@ export class RunsQueue implements IMessageQueue {
       ]);
       await client.query("COMMIT");
 
-      // ON CONFLICT DO NOTHING: row already exists. Look up the existing id
-      // so callers always get something sensible back.
+      // ON CONFLICT DO NOTHING: an active row already holds the key. Return
+      // its id so callers always get something sensible back.
       let id: string;
       if (result.rows.length === 0 && idempotencyKey) {
         const existing = await client.query(
-          "SELECT id FROM public.runs WHERE idempotency_key = $1",
+          `SELECT id FROM public.runs
+           WHERE idempotency_key = $1
+             AND status IN ('pending', 'claimed', 'running')
+           ORDER BY id DESC
+           LIMIT 1`,
           [idempotencyKey],
         );
         id = String(existing.rows[0]?.id ?? "");
@@ -618,6 +643,51 @@ export class RunsQueue implements IMessageQueue {
       onCapture(finish);
       if (worker.stopped) finish();
     });
+  }
+
+  // ── Stale-claim recovery ────────────────────────────────────────────────
+
+  /**
+   * Periodically sweep `runs` for rows that have been `claimed` longer than
+   * `CLAIM_VISIBILITY_TIMEOUT_MS` and reset them to `pending` so another
+   * worker can pick them up. This is the safety net for crashed gateway
+   * processes.
+   */
+  private startStaleSweep(): void {
+    if (this.staleSweepTimer) return;
+    const tick = async () => {
+      if (!this.pool) return;
+      try {
+        const result = await this.pool.query(
+          `UPDATE public.runs
+           SET status = 'pending',
+               claimed_at = NULL,
+               claimed_by = NULL,
+               run_at = now()
+           WHERE status = 'claimed'
+             AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal')
+             AND claimed_at < now() - ($1::int * interval '1 millisecond')
+           RETURNING id`,
+          [CLAIM_VISIBILITY_TIMEOUT_MS],
+        );
+        if (result.rowCount && result.rowCount > 0) {
+          logger.warn(
+            `Reclaimed ${result.rowCount} stale runs (claimed > ${
+              CLAIM_VISIBILITY_TIMEOUT_MS / 1000
+            }s ago)`,
+          );
+        }
+      } catch (err) {
+        logger.warn(
+          `Stale-claim sweep failed: ${(err as Error).message}`,
+        );
+      }
+    };
+    // Kick off immediately so a fresh restart reclaims old rows without
+    // waiting for the first interval.
+    void tick();
+    this.staleSweepTimer = setInterval(tick, STALE_SWEEP_INTERVAL_MS);
+    this.staleSweepTimer.unref?.();
   }
 
   // ── Listener ────────────────────────────────────────────────────────────
