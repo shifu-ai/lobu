@@ -86,6 +86,7 @@
         "@chat-adapter/gchat": "4.26.0",
         "@chat-adapter/slack": "4.26.0",
         "@chat-adapter/state-ioredis": "4.26.0",
+        "@chat-adapter/state-pg": "4.26.0",
         "@chat-adapter/teams": "4.26.0",
         "@chat-adapter/telegram": "4.26.0",
         "@chat-adapter/whatsapp": "4.26.0",
@@ -561,6 +562,8 @@
     "@chat-adapter/slack": ["@chat-adapter/slack@4.26.0", "", { "dependencies": { "@chat-adapter/shared": "4.26.0", "@slack/web-api": "^7.14.0", "chat": "4.26.0" } }, "sha512-NNN47rURI6qpJf4rRK8xyeumjPTAXr7YSU4/FnViU8cFV/vKYFR4xZTzlFMVWNrYi9SmSwasUjcBmQznigK54Q=="],
 
     "@chat-adapter/state-ioredis": ["@chat-adapter/state-ioredis@4.26.0", "", { "dependencies": { "chat": "4.26.0", "ioredis": "^5.4.1" } }, "sha512-DhTkcZv0qq5tYxyOrQTCDkwAepka5pi+gr1g3rjOfklX1AMdON/9N5x/+8v/wm7vahukcQTjG2hsDYE+Xwo+uA=="],
+
+    "@chat-adapter/state-pg": ["@chat-adapter/state-pg@4.26.0", "", { "dependencies": { "chat": "4.26.0", "pg": "^8.20.0" } }, "sha512-YnLDURfimQfZx7qeqoN2IdFpOH0xk4DUQcIDvNNnsgId6z40Lh4CyJqoZpiHE+y8EHAy3kJf43plWfxJVuB50A=="],
 
     "@chat-adapter/teams": ["@chat-adapter/teams@4.26.0", "", { "dependencies": { "@chat-adapter/shared": "4.26.0", "@microsoft/teams.api": "^2.0.6", "@microsoft/teams.apps": "^2.0.6", "@microsoft/teams.cards": "^2.0.6", "@microsoft/teams.graph-endpoints": "^2.0.6", "chat": "4.26.0" } }, "sha512-Hg7TzN7Y/G/PcJr7VWKnv26XBDjP8+KDoe1gp62BAN7Y2MXCPdhsZLSR3cWQ5AH7nw0oz3vPZ38UilWUIhCxFg=="],
 

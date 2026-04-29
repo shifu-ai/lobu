@@ -703,7 +703,7 @@ export class ChatInstanceManager {
   }
 
   private async createStateAdapter(): Promise<any> {
-    return createGatewayStateAdapter(this.redis);
+    return createGatewayStateAdapter();
   }
 
   /**

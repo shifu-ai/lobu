@@ -200,6 +200,7 @@ export class CoreServices {
     providerRegistry?: ProviderRegistryEntry[];
     secretStore?: SecretStoreRegistry;
     providerCredentialResolver?: RuntimeProviderCredentialResolver;
+    stateAdapter?: import("chat").StateAdapter;
   };
 
   constructor(
@@ -211,6 +212,7 @@ export class CoreServices {
       providerRegistry?: ProviderRegistryEntry[];
       secretStore?: SecretStoreRegistry;
       providerCredentialResolver?: RuntimeProviderCredentialResolver;
+      stateAdapter?: import("chat").StateAdapter;
     }
   ) {
     this.options = options;
@@ -350,7 +352,8 @@ export class CoreServices {
 
     const redisClient = this.queue.getRedisClient();
 
-    const stateAdapter = await createGatewayStateAdapter(redisClient);
+    const stateAdapter =
+      this.options?.stateAdapter ?? createGatewayStateAdapter();
     await stateAdapter.connect();
     const sessionStore = new StateAdapterSessionStore(
       new ConversationStateStore(stateAdapter)

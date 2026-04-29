@@ -8,6 +8,7 @@ import {
   type WritableSecretStore,
 } from "../secrets/index.js";
 import { RedisAgentStore } from "../stores/redis-agent-store.js";
+import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import { MockMessageQueue } from "./setup.js";
 
 function createGatewayConfig(
@@ -119,7 +120,9 @@ afterEach(() => {
 
 describe("CoreServices store selection", () => {
   test("uses Redis-backed stores by default when no file-first config is present", async () => {
-    const coreServices = new CoreServices(createGatewayConfig());
+    const coreServices = new CoreServices(createGatewayConfig(), {
+      stateAdapter: new InMemoryStateAdapter(),
+    });
     (coreServices as any).queue = new MockMessageQueue();
 
     await (coreServices as any).initializeSessionServices();
@@ -136,6 +139,7 @@ describe("CoreServices store selection", () => {
     });
     const coreServices = new CoreServices(createGatewayConfig(), {
       secretStore: hostRegistry,
+      stateAdapter: new InMemoryStateAdapter(),
     });
     (coreServices as any).queue = new MockMessageQueue();
 
