@@ -31,6 +31,7 @@
  */
 
 import { beforeAll, describe, expect, it } from 'vitest';
+import { getDb } from '../../../db/client';
 import { getContent } from '../../../tools/get_content';
 import type { ToolContext } from '../../../tools/registry';
 import { initWorkspaceProvider } from '../../../workspace';
@@ -890,5 +891,133 @@ describe('getContent > visibility on the search / query path', () => {
     ]);
     expect(collected.size).toBe(3);
     expect(collected.has(bobPrivateEventId)).toBe(false);
+  });
+});
+
+describe('getContent > empty-entity short-circuit (perf regression guard)', () => {
+  // pi CLI flagged the empty-entity case at 8.4s on real data even after
+  // dropping the classification stats CTE. The dominant cost was the
+  // enrichment chain — thread_meta (recursive), latest_classifications,
+  // parent/root LEFT JOINs — all running BEFORE the planner discovered the
+  // candidate set was empty. Fix: when the cheap count returns 0, skip the
+  // enrichment query entirely. This pins both halves of the contract:
+  //   1. Empty entity hits zero "heavy enrichment" SQL (the chain that
+  //      contains `candidate_set`/`thread_meta`/`latest_classifications`).
+  //   2. Non-empty entity still issues the enrichment query and returns
+  //      content with the same shape as before.
+  let org: Awaited<ReturnType<typeof createTestOrganization>>;
+  let user: Awaited<ReturnType<typeof createTestUser>>;
+  let emptyEntity: Awaited<ReturnType<typeof createTestEntity>>;
+  let populatedEntity: Awaited<ReturnType<typeof createTestEntity>>;
+
+  function ctx(): ToolContext {
+    return {
+      organizationId: org.id,
+      userId: user.id,
+      memberRole: 'owner',
+      isAuthenticated: true,
+      tokenType: 'oauth',
+      scopedToOrg: false,
+      allowCrossOrg: true,
+      scopes: ['mcp:read'],
+    };
+  }
+
+  /**
+   * Wrap `sql.unsafe` to capture the SQL text of every query issued during
+   * the wrapped function's execution. Restores the original method on the
+   * way out so subsequent tests aren't affected.
+   */
+  async function captureUnsafeSql<T>(fn: () => Promise<T>): Promise<{
+    result: T;
+    queries: string[];
+  }> {
+    const sql = getDb() as unknown as {
+      unsafe: (...args: unknown[]) => Promise<unknown>;
+    };
+    const original = sql.unsafe.bind(sql);
+    const queries: string[] = [];
+    sql.unsafe = ((query: string, ...rest: unknown[]) => {
+      queries.push(query);
+      return original(query, ...rest);
+    }) as typeof sql.unsafe;
+    try {
+      const result = await fn();
+      return { result, queries };
+    } finally {
+      sql.unsafe = original;
+    }
+  }
+
+  beforeAll(async () => {
+    await initWorkspaceProvider();
+    await cleanupTestDatabase();
+    await seedSystemEntityTypes();
+
+    org = await createTestOrganization({ name: 'Perf Org' });
+    user = await createTestUser({ email: 'perf@example.com' });
+    await addUserToOrganization(user.id, org.id, 'owner');
+
+    emptyEntity = await createTestEntity({
+      name: 'Empty Perf Entity',
+      organization_id: org.id,
+    });
+    populatedEntity = await createTestEntity({
+      name: 'Populated Perf Entity',
+      organization_id: org.id,
+    });
+
+    // Seed a single event on the populated entity so the non-empty branch
+    // actually runs the enrichment query.
+    await createTestEvent({
+      organization_id: org.id,
+      entity_id: populatedEntity.id,
+      content: 'perf-test event with payload to enrich',
+    });
+  });
+
+  it('empty entity: skips the heavy enrichment query (no candidate_set/thread_meta/latest_classifications scan)', async () => {
+    const { result, queries } = await captureUnsafeSql(() =>
+      getContent(
+        { entity_id: emptyEntity.id, limit: 50, sort_by: 'date', sort_order: 'desc' } as never,
+        {} as never,
+        ctx()
+      )
+    );
+
+    expect(result.content).toEqual([]);
+    expect(result.total).toBe(0);
+
+    // The hot enrichment query is identifiable by its CTE names. None of
+    // them should appear in any SQL issued for an empty entity.
+    const heavyQueries = queries.filter(
+      (q) =>
+        q.includes('candidate_set') ||
+        q.includes('thread_meta') ||
+        q.includes('latest_classifications')
+    );
+    expect(heavyQueries).toEqual([]);
+  });
+
+  it('populated entity: still issues the enrichment query and returns full content shape', async () => {
+    const { result, queries } = await captureUnsafeSql(() =>
+      getContent(
+        { entity_id: populatedEntity.id, limit: 50, sort_by: 'date', sort_order: 'desc' } as never,
+        {} as never,
+        ctx()
+      )
+    );
+
+    expect(result.total).toBe(1);
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0].payload_text).toContain('perf-test event');
+
+    // The enrichment query MUST fire for non-empty results — pin it so a
+    // future refactor that "optimizes" by skipping enrichment universally
+    // doesn't silently regress the response shape.
+    const heavyQueries = queries.filter(
+      (q) => q.includes('candidate_set') || q.includes('thread_meta')
+    );
+    expect(heavyQueries.length).toBeGreaterThan(0);
   });
 });

@@ -265,7 +265,7 @@ export function buildOrgScopeWhere(options: {
   entity_id?: number;
   organization_id?: string;
   baseParamIndex: number;
-}): { sql: string; params: unknown[] } {
+}): { sql: string; params: Array<string | number | null> } {
   if (options.entity_id || !options.organization_id) return { sql: '', params: [] };
 
   const p = `$${options.baseParamIndex}::text`;
@@ -300,7 +300,7 @@ export function buildConnectionVisibilityClause(
     baseParamIndex: number;
   },
   tableAlias: string = 'f'
-): { sql: string; params: unknown[] } {
+): { sql: string; params: Array<string | number | null> } {
   if (!options.organizationId) return { sql: '', params: [] };
 
   const orgParam = `$${options.baseParamIndex}::text`;
@@ -932,6 +932,28 @@ async function listContentInternal(
     );
     const total = parseInt(String(countResult[0]?.total ?? '0'), 10);
 
+    // Short-circuit on empty matches. The enrichment query below pulls in
+    // thread_meta (recursive CTE), latest_classifications, parent_context and
+    // root_context joins — for an empty match set, those CTEs still scan
+    // before the planner discovers there are no candidates. On real data this
+    // was the dominant cost on empty-entity loads (per pg_stat_statements:
+    // 6.5s mean vs 3.8ms for the bare count). Returning here trades one
+    // round-trip we already made for skipping the heavy one.
+    if (total === 0) {
+      return {
+        content: [],
+        total: 0,
+        page: buildPageInfo({
+          limit,
+          offset: effectiveOffset,
+          total: 0,
+          returnedCount: 0,
+          useDateFeed,
+          cursor,
+        }),
+      };
+    }
+
     const cursorClause = buildDateCursorClause(
       cursor,
       'f.occurred_at',
@@ -1041,6 +1063,25 @@ async function listContentInternal(
     countParams
   );
   const total = parseInt(String(countResult[0]?.total ?? '0'), 10);
+
+  // Short-circuit on empty matches — same reasoning as the
+  // hasClassificationFilters branch above. Skips thread_meta + classifications
+  // + parent/root LEFT JOINs that otherwise scan before the planner notices
+  // the candidate set is empty.
+  if (total === 0) {
+    return {
+      content: [],
+      total: 0,
+      page: buildPageInfo({
+        limit,
+        offset: effectiveOffset,
+        total: 0,
+        returnedCount: 0,
+        useDateFeed,
+        cursor,
+      }),
+    };
+  }
 
   const ctes = needClassifications
     ? `${threadMetaCteSql},\n      ${latestClassificationsCteSql}`
