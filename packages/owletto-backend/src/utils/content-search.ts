@@ -1246,7 +1246,17 @@ async function searchContentBySingleQuery(
     options.exclude_watcher_id,
     excludeParamIdx
   );
-  const baseParamIdx = excludeParamIdx + excludeClause.params.length;
+  // Connection-visibility predicate. Same helper used by every other
+  // get_content branch, so authed/unauthed/private/system-event semantics
+  // are guaranteed identical across the search/text-query path and the
+  // chronological list path.
+  const visibilityParamIdx = excludeParamIdx + excludeClause.params.length;
+  const visibilityClause = buildConnectionVisibilityClause({
+    organizationId: options.visibility_scope?.organizationId,
+    userId: options.visibility_scope?.userId ?? null,
+    baseParamIndex: visibilityParamIdx,
+  });
+  const baseParamIdx = visibilityParamIdx + visibilityClause.params.length;
   const vectorParamIdx = hasEmbedding ? baseParamIdx : null;
   // Bind min_similarity as a numeric parameter after the vector slot (when
   // present) so a hostile float can't break out of the comparison expression.
@@ -1263,6 +1273,7 @@ async function searchContentBySingleQuery(
           AND ($9::text IS NULL OR f.semantic_type = $9::text)
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
           ${excludeClause.sql}
+          ${visibilityClause.sql}
           ${orgScope.sql}`;
 
   const textDocumentExpr = buildSearchDocumentExpr('f');
@@ -1431,6 +1442,7 @@ async function searchContentBySingleQuery(
     options.interaction_status ?? null,
     ...orgScope.params,
     ...excludeClause.params,
+    ...visibilityClause.params,
     ...(hasEmbedding ? [toVectorLiteral(queryEmbedding!), minSimilarity] : []),
     ...cursorClause.params,
     ...(useDateFeed ? [fetchLimit] : [limit, effectiveOffset]),

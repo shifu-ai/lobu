@@ -207,6 +207,29 @@ export async function getNormalizedScoreContent(
     params.push(filters.platform);
   }
 
+  // Visibility: keep the discovery scan's connection set in lockstep with the
+  // final scored query. Today the leak isn't directly observable (the final
+  // query is visibility-filtered, so a hidden source produces a CASE WHEN
+  // branch that never fires), but counts/aggregates on this CTE could leak
+  // existence info, and a future refactor that promotes its rows into the
+  // returned set would turn this into a real leak. Same helper as the rest
+  // of get_content's branches use.
+  if (filters?.visibility_scope) {
+    const preVisibility = buildConnectionVisibilityClause(
+      {
+        organizationId: filters.visibility_scope.organizationId,
+        userId: filters.visibility_scope.userId,
+        baseParamIndex: paramIndex,
+      },
+      'f'
+    );
+    if (preVisibility.sql) {
+      conditions.push(preVisibility.sql.replace(/^AND\s+/, ''));
+      params.push(...preVisibility.params);
+      paramIndex += preVisibility.params.length;
+    }
+  }
+
   const sources = await sql.unsafe(
     `
     SELECT DISTINCT

@@ -981,7 +981,14 @@ export async function getContent(
         params.push(args.entity_id);
       }
       if (effectiveConnectionIds && effectiveConnectionIds.length > 0) {
-        conditions.push(`f.connection_id IN (${effectiveConnectionIds.join(',')})`);
+        // Parameterize — every other branch in this file does, and an
+        // upstream schema relaxation shouldn't be the thing that turns this
+        // into a string-concat injection sink.
+        const placeholders = effectiveConnectionIds
+          .map(() => `$${paramIndex++}`)
+          .join(',');
+        conditions.push(`f.connection_id IN (${placeholders})`);
+        params.push(...effectiveConnectionIds);
       }
       if (effectivePlatform) {
         conditions.push(`COALESCE(f.connector_key, c.connector_key) = $${paramIndex++}`);
