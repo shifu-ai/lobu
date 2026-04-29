@@ -113,6 +113,9 @@ function rowToSettings(row: Record<string, any>): AgentSettings {
   const installedProviders = nonEmptyObject(row.installed_providers);
   if (installedProviders !== undefined)
     out.installedProviders = installedProviders as any;
+  if (Array.isArray(row.guardrails) && row.guardrails.length > 0) {
+    out.guardrails = row.guardrails;
+  }
   if (row.verbose_logging) out.verboseLogging = true;
   if (row.template_agent_id) out.templateAgentId = row.template_agent_id;
   return out;
@@ -132,7 +135,7 @@ async function loadSettingsFromPg(agentId: string): Promise<AgentSettings | null
     ? await sql`
         SELECT model, model_selection, provider_model_preferences,
                network_config, nix_config, mcp_servers, mcp_install_notified,
-               soul_md, user_md, identity_md, skills_config, tools_config,
+               soul_md, user_md, identity_md, skills_config, tools_config, guardrails,
                plugins_config, auth_profiles, installed_providers,
                verbose_logging, template_agent_id, updated_at
         FROM agents
@@ -141,7 +144,7 @@ async function loadSettingsFromPg(agentId: string): Promise<AgentSettings | null
     : await sql`
         SELECT model, model_selection, provider_model_preferences,
                network_config, nix_config, mcp_servers, mcp_install_notified,
-               soul_md, user_md, identity_md, skills_config, tools_config,
+               soul_md, user_md, identity_md, skills_config, tools_config, guardrails,
                plugins_config, auth_profiles, installed_providers,
                verbose_logging, template_agent_id, updated_at
         FROM agents
@@ -318,6 +321,7 @@ export class AgentSettingsStore {
           plugins_config = ${sql.json(settings.pluginsConfig ?? {})},
           auth_profiles = ${sql.json(settings.authProfiles ?? [])},
           installed_providers = ${sql.json(settings.installedProviders ?? [])},
+          guardrails = ${settings.guardrails ?? []},
           verbose_logging = ${settings.verboseLogging ?? false},
           template_agent_id = ${settings.templateAgentId ?? null},
           updated_at = ${now}
@@ -341,6 +345,7 @@ export class AgentSettingsStore {
           plugins_config = ${sql.json(settings.pluginsConfig ?? {})},
           auth_profiles = ${sql.json(settings.authProfiles ?? [])},
           installed_providers = ${sql.json(settings.installedProviders ?? [])},
+          guardrails = ${settings.guardrails ?? []},
           verbose_logging = ${settings.verboseLogging ?? false},
           template_agent_id = ${settings.templateAgentId ?? null},
           updated_at = ${now}
@@ -376,8 +381,8 @@ export class AgentSettingsStore {
           network_config = '{}', nix_config = '{}', mcp_servers = '{}',
           mcp_install_notified = '{}', soul_md = '', user_md = '', identity_md = '',
           skills_config = '{"skills": []}', tools_config = '{}', plugins_config = '{}',
-          auth_profiles = '[]', installed_providers = '[]', verbose_logging = false,
-          template_agent_id = NULL, updated_at = now()
+          auth_profiles = '[]', installed_providers = '[]', guardrails = '{}',
+          verbose_logging = false, template_agent_id = NULL, updated_at = now()
         WHERE id = ${agentId} AND organization_id = ${orgId}
       `;
     } else {
@@ -387,8 +392,8 @@ export class AgentSettingsStore {
           network_config = '{}', nix_config = '{}', mcp_servers = '{}',
           mcp_install_notified = '{}', soul_md = '', user_md = '', identity_md = '',
           skills_config = '{"skills": []}', tools_config = '{}', plugins_config = '{}',
-          auth_profiles = '[]', installed_providers = '[]', verbose_logging = false,
-          template_agent_id = NULL, updated_at = now()
+          auth_profiles = '[]', installed_providers = '[]', guardrails = '{}',
+          verbose_logging = false, template_agent_id = NULL, updated_at = now()
         WHERE id = ${agentId}
       `;
     }

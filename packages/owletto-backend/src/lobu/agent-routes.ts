@@ -19,6 +19,7 @@ import { countRuntimeMessagingClientsByAgent } from './client-routes';
 import { getChatInstanceManager, getLobuCoreServices } from './gateway';
 import {
   AGENT_ID_PATTERN,
+  createPostgresAgentAccessStore,
   createPostgresAgentConfigStore,
   createPostgresAgentConnectionStore,
   getAgentOrganizationId,
@@ -29,6 +30,7 @@ const routes = new Hono<{ Bindings: Env }>();
 
 const configStore = createPostgresAgentConfigStore();
 const connectionStore = createPostgresAgentConnectionStore();
+const accessStore = createPostgresAgentAccessStore();
 
 type ProviderAuthType = 'oauth' | 'device-code' | 'api-key';
 
@@ -820,6 +822,72 @@ routes.post('/:agentId/connections/:connId/stop', mcpAuth, async (c) => {
       success: true,
       connection: await connectionStore.getConnection(connId),
     });
+  });
+});
+
+// ============================================================
+// Grant routes (nested under /:agentId/grants)
+//
+// pre_approved MCP tool patterns that bypass the in-thread approval card.
+// Used by `lobu seed` to import [agents.X.tools].pre_approved from templates.
+// ============================================================
+
+routes.get('/:agentId/grants', mcpAuth, async (c) => {
+  return withOrg(c, async () => {
+    const { agentId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    const grants = await accessStore.listGrants(agentId);
+    return c.json({ grants });
+  });
+});
+
+routes.post('/:agentId/grants', mcpAuth, async (c) => {
+  return withOrg(c, async () => {
+    const { agentId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+
+    const body = await c.req.json<{
+      pattern?: string;
+      expiresAt?: number | null;
+      denied?: boolean;
+    }>();
+    const pattern = body.pattern?.trim();
+    if (!pattern) {
+      return c.json({ error: 'pattern is required' }, 400);
+    }
+
+    await accessStore.grant(
+      agentId,
+      pattern,
+      body.expiresAt ?? null,
+      body.denied ?? false
+    );
+
+    return c.json({ success: true }, 201);
+  });
+});
+
+routes.delete('/:agentId/grants', mcpAuth, async (c) => {
+  return withOrg(c, async () => {
+    const { agentId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+
+    const body = await c.req
+      .json<{ pattern?: string }>()
+      .catch(() => ({}) as { pattern?: string });
+    const pattern = body.pattern?.trim();
+    if (!pattern) {
+      return c.json({ error: 'pattern is required' }, 400);
+    }
+
+    await accessStore.revokeGrant(agentId, pattern);
+    return c.json({ success: true });
   });
 });
 

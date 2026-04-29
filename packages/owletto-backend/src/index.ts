@@ -25,6 +25,8 @@ import * as invalidationEmitter from './events/emitter';
 import { isExcludedSpaPath } from './http/spa-route-filter';
 import { agentRoutes } from './lobu/agent-routes';
 import { clientRoutes, platformSchemaRoutes } from './lobu/client-routes';
+import { connectorRoutes } from './lobu/connector-routes';
+import { orgRoutes } from './lobu/org-routes';
 import { isLobuGatewayRunning } from './lobu/gateway';
 import { handleMcp } from './mcp-handler';
 import {
@@ -814,8 +816,10 @@ app.post('/api/:orgSlug/actions/execute', mcpAuth, async (c) => {
   return restToolProxy(c, 'manage_operations', { action: 'execute', ...body });
 });
 
+app.route('/api/orgs', orgRoutes);
 app.route('/api/:orgSlug/agents', agentRoutes);
 app.route('/api/:orgSlug/clients', clientRoutes);
+app.route('/api/:orgSlug/connectors', connectorRoutes);
 app.route('/api/agents/platforms', platformSchemaRoutes);
 
 // ============================================

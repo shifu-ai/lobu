@@ -82,6 +82,10 @@ function rowToSettings(row: Record<string, any>): AgentSettings {
     pluginsConfig: row.plugins_config ?? undefined,
     authProfiles: row.auth_profiles ?? undefined,
     installedProviders: row.installed_providers ?? undefined,
+    guardrails:
+      Array.isArray(row.guardrails) && row.guardrails.length > 0
+        ? row.guardrails
+        : undefined,
     verboseLogging: row.verbose_logging ?? undefined,
     templateAgentId: row.template_agent_id ?? undefined,
     updatedAt:
@@ -245,7 +249,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
             SELECT model, model_selection, provider_model_preferences,
                    network_config, nix_config, mcp_servers, mcp_install_notified,
                    soul_md, user_md, identity_md, skills_config, tools_config,
-                   plugins_config, auth_profiles, installed_providers,
+                   plugins_config, auth_profiles, installed_providers, guardrails,
                    verbose_logging, template_agent_id, updated_at
             FROM agents
             WHERE id = ${agentId} AND organization_id = ${orgId}
@@ -254,7 +258,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
             SELECT model, model_selection, provider_model_preferences,
                    network_config, nix_config, mcp_servers, mcp_install_notified,
                    soul_md, user_md, identity_md, skills_config, tools_config,
-                   plugins_config, auth_profiles, installed_providers,
+                   plugins_config, auth_profiles, installed_providers, guardrails,
                    verbose_logging, template_agent_id, updated_at
             FROM agents
             WHERE id = ${agentId}
@@ -283,6 +287,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           plugins_config = ${sql.json(settings.pluginsConfig ?? {})},
           auth_profiles = ${sql.json(settings.authProfiles ?? [])},
           installed_providers = ${sql.json(settings.installedProviders ?? [])},
+          guardrails = ${settings.guardrails ?? []},
           verbose_logging = ${settings.verboseLogging ?? false},
           template_agent_id = ${settings.templateAgentId ?? null},
           updated_at = ${now}
@@ -303,8 +308,8 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           network_config = '{}', nix_config = '{}', mcp_servers = '{}',
           mcp_install_notified = '{}', soul_md = '', user_md = '', identity_md = '',
           skills_config = '{"skills": []}', tools_config = '{}', plugins_config = '{}',
-          auth_profiles = '[]', installed_providers = '[]', verbose_logging = false,
-          template_agent_id = NULL, updated_at = now()
+          auth_profiles = '[]', installed_providers = '[]', guardrails = '{}',
+          verbose_logging = false, template_agent_id = NULL, updated_at = now()
         WHERE id = ${agentId} AND organization_id = ${orgId}
       `;
     },
