@@ -593,11 +593,10 @@ describe('getContent > visibility matrix on sibling branches (content_ids/includ
   it.each(BRANCH_CASES)(
     '$branch: unauthed caller sees only org-visible + system events; private events hidden',
     async (spec) => {
-      // include_superseded requires authed access (entity-scoped + has its own
-      // validation), so unauthed is exercised only on the other two branches
-      // that actually run for anonymous public-org reads.
-      if (spec.branch === 'include_superseded') return;
-
+      // requireReadAccess (organization-access.ts:36-48) lets unauthed
+      // callers read entities whose org matches ctx.organizationId, so all
+      // three sibling branches are reachable from an unauthed test caller —
+      // including include_superseded, which only requires entity_id.
       const allIds = [orgEventId, alicePrivateEventId, bobPrivateEventId, systemEventId];
       const result = await getContent(
         buildArgs(spec, allIds) as never,
