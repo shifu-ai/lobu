@@ -3,7 +3,8 @@
  *
  * Stream B of the atlas-events-fix plan dropped the two-step "first query
  * private connections, then query visible connections" round trip. Visibility
- * now lives inline in the list/count WHERE clause via
+ * now lives inline in the list/count WHERE clause of every query branch
+ * (`chronological list`, `content_ids`, `include_superseded`, `score`) via
  * `buildConnectionVisibilityClause`. This file pins the semantics:
  *
  *   - Authed user sees connections with visibility='org' OR created_by=userId.
@@ -13,9 +14,12 @@
  *   - Events with connection_id IS NULL (system / non-connection events) are
  *     visible to authed and unauthed callers.
  *   - Pagination count matches list cardinality.
- *   - The default response carries no `view_url` (entity lookup deleted) and
- *     no `classification_stats` (stats are now opt-in via
- *     `include_classification: 'summary'`).
+ *   - The four query branches (chronological list, `content_ids`,
+ *     `include_superseded`, `sort_by=score`) all enforce the same predicate.
+ *   - `view_url` is populated for entity-scoped requests so LLM agents
+ *     reading the response over MCP can include it in chat replies.
+ *   - `classification_stats` only appears when the caller explicitly passes
+ *     `include_classification: 'summary'`.
  *
  * NOTE: vitest is not yet wired into CI for this package. Stream C will fix
  * that. Until then, these tests run locally against the dev Postgres.
@@ -294,7 +298,7 @@ describe('getContent > connection visibility folded into WHERE', () => {
   });
 });
 
-describe('getContent > response shape (no view_url, stats opt-in)', () => {
+describe('getContent > response shape (view_url present, stats opt-in)', () => {
   let org: Awaited<ReturnType<typeof createTestOrganization>>;
   let user: Awaited<ReturnType<typeof createTestUser>>;
   let emptyEntity: Awaited<ReturnType<typeof createTestEntity>>;
@@ -327,7 +331,7 @@ describe('getContent > response shape (no view_url, stats opt-in)', () => {
     });
   });
 
-  it('empty entity returns content=[], total=0, no view_url, no classification_stats by default', async () => {
+  it('empty entity returns content=[], total=0, view_url populated, no classification_stats by default', async () => {
     const result = await getContent(
       { entity_id: emptyEntity.id, limit: 50, sort_by: 'date', sort_order: 'desc' } as never,
       {} as never,
@@ -336,7 +340,11 @@ describe('getContent > response shape (no view_url, stats opt-in)', () => {
 
     expect(result.content).toEqual([]);
     expect(result.total).toBe(0);
-    expect((result as { view_url?: string }).view_url).toBeUndefined();
+    // view_url is consumed by LLM agents reading read_knowledge over MCP.
+    // It must always be populated when an entity is in scope.
+    const viewUrl = (result as { view_url?: string }).view_url;
+    expect(typeof viewUrl).toBe('string');
+    expect(viewUrl).toMatch(/^https?:\/\//);
     expect(result.classification_stats).toBeUndefined();
   });
 
@@ -360,5 +368,161 @@ describe('getContent > response shape (no view_url, stats opt-in)', () => {
       ctx()
     );
     expect(withoutStats.classification_stats).toBeUndefined();
+  });
+});
+
+describe('getContent > visibility on sibling branches (content_ids/include_superseded/score)', () => {
+  let org: Awaited<ReturnType<typeof createTestOrganization>>;
+  let aliceUser: Awaited<ReturnType<typeof createTestUser>>;
+  let bobUser: Awaited<ReturnType<typeof createTestUser>>;
+  let entity: Awaited<ReturnType<typeof createTestEntity>>;
+
+  let orgEventId: number;
+  let alicePrivateEventId: number;
+  let bobPrivateEventId: number;
+
+  function authedCtx(userId: string): ToolContext {
+    return {
+      organizationId: org.id,
+      userId,
+      memberRole: 'owner',
+      isAuthenticated: true,
+      tokenType: 'oauth',
+      scopedToOrg: false,
+      allowCrossOrg: true,
+      scopes: ['mcp:read'],
+    };
+  }
+
+  beforeAll(async () => {
+    await initWorkspaceProvider();
+    await cleanupTestDatabase();
+    await seedSystemEntityTypes();
+
+    org = await createTestOrganization({ name: 'Sibling Branch Org' });
+    aliceUser = await createTestUser({ email: 'alice-branches@example.com' });
+    bobUser = await createTestUser({ email: 'bob-branches@example.com' });
+    await addUserToOrganization(aliceUser.id, org.id, 'owner');
+    await addUserToOrganization(bobUser.id, org.id, 'owner');
+
+    entity = await createTestEntity({
+      name: 'Sibling Branch Entity',
+      organization_id: org.id,
+    });
+
+    await createTestConnectorDefinition({
+      key: 'branch-test-connector',
+      name: 'Branch Test',
+      organization_id: org.id,
+    });
+
+    const orgConn = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'branch-test-connector',
+      entity_ids: [entity.id],
+      visibility: 'org',
+      created_by: aliceUser.id,
+      display_name: 'Branch org-visible',
+    });
+    const alicePriv = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'branch-test-connector',
+      entity_ids: [entity.id],
+      visibility: 'private',
+      created_by: aliceUser.id,
+      display_name: 'Branch alice-private',
+    });
+    const bobPriv = await createTestConnection({
+      organization_id: org.id,
+      connector_key: 'branch-test-connector',
+      entity_ids: [entity.id],
+      visibility: 'private',
+      created_by: bobUser.id,
+      display_name: 'Branch bob-private',
+    });
+
+    orgEventId = (
+      await createTestEvent({
+        organization_id: org.id,
+        entity_id: entity.id,
+        connection_id: orgConn.id,
+        content: 'branch org event',
+      })
+    ).id;
+    alicePrivateEventId = (
+      await createTestEvent({
+        organization_id: org.id,
+        entity_id: entity.id,
+        connection_id: alicePriv.id,
+        content: 'branch alice-private event',
+      })
+    ).id;
+    bobPrivateEventId = (
+      await createTestEvent({
+        organization_id: org.id,
+        entity_id: entity.id,
+        connection_id: bobPriv.id,
+        content: 'branch bob-private event',
+      })
+    ).id;
+  });
+
+  it('content_ids branch: requesting another user\'s private event by id returns nothing', async () => {
+    const result = await getContent(
+      {
+        entity_id: entity.id,
+        content_ids: [orgEventId, alicePrivateEventId, bobPrivateEventId],
+        limit: 100,
+      } as never,
+      {} as never,
+      authedCtx(aliceUser.id)
+    );
+    const visibleIds = new Set(result.content.map((c) => c.id));
+
+    // Alice sees the org event and her own private event …
+    expect(visibleIds.has(orgEventId)).toBe(true);
+    expect(visibleIds.has(alicePrivateEventId)).toBe(true);
+    // … but Bob's private event is filtered out even though Alice asked for it by ID.
+    expect(visibleIds.has(bobPrivateEventId)).toBe(false);
+    // total mirrors the visible set, not the requested set.
+    expect(result.total).toBe(2);
+  });
+
+  it('include_superseded branch: another user\'s private events stay hidden in the historical listing', async () => {
+    const result = await getContent(
+      {
+        entity_id: entity.id,
+        include_superseded: true,
+        limit: 100,
+      } as never,
+      {} as never,
+      authedCtx(aliceUser.id)
+    );
+    const visibleIds = new Set(result.content.map((c) => c.id));
+
+    expect(visibleIds.has(orgEventId)).toBe(true);
+    expect(visibleIds.has(alicePrivateEventId)).toBe(true);
+    expect(visibleIds.has(bobPrivateEventId)).toBe(false);
+  });
+
+  it('score branch: another user\'s private events stay hidden when sorting by score', async () => {
+    const result = await getContent(
+      {
+        entity_id: entity.id,
+        sort_by: 'score',
+        limit: 100,
+      } as never,
+      {} as never,
+      authedCtx(aliceUser.id)
+    );
+    const visibleIds = new Set(result.content.map((c) => c.id));
+
+    expect(visibleIds.has(orgEventId)).toBe(true);
+    expect(visibleIds.has(alicePrivateEventId)).toBe(true);
+    expect(visibleIds.has(bobPrivateEventId)).toBe(false);
+    // Count must match list cardinality on the score path too — the legacy
+    // bug leaked Bob's private event into both list and count when the user
+    // didn't pass connection_ids.
+    expect(result.total).toBe(2);
   });
 });

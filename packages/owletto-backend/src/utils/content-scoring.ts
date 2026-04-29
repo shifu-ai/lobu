@@ -1,6 +1,6 @@
 import { getDb } from '../db/client';
 import { buildClassificationFilterSQL } from './content-query-filters';
-import { entityLinkMatchSql } from './content-search';
+import { buildConnectionVisibilityClause, entityLinkMatchSql } from './content-search';
 import logger from './logger';
 import { getScoringFormulaSql, resolveStoredScoringProfile } from './scoring-profiles';
 import { validateAndFormatIds, validateNumericId } from './sql-validation';
@@ -19,6 +19,13 @@ interface NormalizedScoreFilters {
   classification_source?: 'user' | 'embedding' | 'llm';
   semantic_type?: string;
   interaction_status?: 'pending' | 'approved' | 'rejected' | 'completed' | 'failed';
+  /**
+   * Connection-visibility scope. Folds into the WHERE so events from
+   * private connections the caller can't see don't appear in score-sorted
+   * results. Mirrors the clause used by `listContentInternal` and the
+   * `content_ids` / `include_superseded` branches in `get_content.ts`.
+   */
+  visibility_scope?: { organizationId: string; userId: string | null };
 }
 
 /**
@@ -152,6 +159,24 @@ function buildFilterConditionsAndJoins(
     filterConditions.push(...classificationConditions);
     params.push(...classificationParams);
     paramIndex += classificationParams.length;
+  }
+
+  if (filters?.visibility_scope) {
+    const visibility = buildConnectionVisibilityClause(
+      {
+        organizationId: filters.visibility_scope.organizationId,
+        userId: filters.visibility_scope.userId,
+        baseParamIndex: paramIndex,
+      },
+      'f'
+    );
+    if (visibility.sql) {
+      // Drop the leading "AND " — `filterConditions` is joined with ' AND '
+      // by callers, so the bare predicate is what we want.
+      filterConditions.push(visibility.sql.replace(/^AND\s+/, ''));
+      params.push(...visibility.params);
+      paramIndex += visibility.params.length;
+    }
   }
 
   return { filterConditions, additionalJoins, params };

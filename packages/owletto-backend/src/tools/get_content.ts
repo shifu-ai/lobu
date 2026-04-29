@@ -15,7 +15,11 @@ import {
   getNormalizedScoreContent,
   getNormalizedScoreContentCount,
 } from '../utils/content-scoring';
-import { entityLinkMatchSql, searchContentByText } from '../utils/content-search';
+import {
+  buildConnectionVisibilityClause,
+  entityLinkMatchSql,
+  searchContentByText,
+} from '../utils/content-search';
 import { parseDateAlias, toEndOfDay } from '../utils/date-aliases';
 import { type DataSourceContext, executeDataSources } from '../utils/execute-data-sources';
 import { parseJsonObject } from '../utils/json';
@@ -98,7 +102,9 @@ function buildContentQuery(opts: {
 
 import { requireReadAccess } from '../utils/organization-access';
 import {
+  buildContentUrl,
   buildEventPermalink,
+  type EntityInfo,
   getOrganizationSlug,
   getPublicWebUrl,
 } from '../utils/url-builder';
@@ -374,6 +380,13 @@ interface GetContentResult {
       [value: string]: number;
     };
   };
+  /**
+   * Permalink for the entity-scoped events listing in the public web app.
+   * LLM agents calling `read_knowledge` over MCP read this from the response
+   * and format it into chat replies; there is no programmatic consumer in
+   * this repo, but removing the field breaks that user-facing behavior.
+   */
+  view_url?: string;
   // Watcher-mode fields (only present when watcher_id is provided)
   window_token?: string;
   window_start?: string;
@@ -544,12 +557,47 @@ export async function getContent(
     // Resolve org slug for permalink generation
     const ownerSlug = await getOrganizationSlug(ctx.organizationId);
 
-    // Visibility scope is folded into the SQL WHERE clause inside
-    // `searchContentByText` / `listContentInternal` via
-    // `buildConnectionVisibilityClause`, so we no longer round-trip to the DB
-    // here just to compute "which connection IDs is this caller allowed to
-    // see?". Events with `connection_id IS NULL` (system events) stay visible
-    // to authed and unauthed callers alike.
+    // Get entity info for building view_url. This is a single PK SELECT (~1ms)
+    // and the result is consumed by LLM agents reading `read_knowledge`
+    // responses over MCP — they format `view_url` into chat replies, so the
+    // field has to keep being populated.
+    let entityInfo: EntityInfo | null = null;
+    if (entityId) {
+      const entityResult = await sql`
+        SELECT
+          e.id,
+          et.slug AS entity_type,
+          e.slug,
+          e.parent_id,
+          parent.slug as parent_slug,
+          pet.slug as parent_entity_type,
+          e.organization_id
+        FROM entities e
+        JOIN entity_types et ON et.id = e.entity_type_id
+        LEFT JOIN entities parent ON e.parent_id = parent.id
+        LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
+        WHERE e.id = ${entityId}
+      `;
+
+      if (entityResult.length > 0) {
+        entityInfo = ownerSlug
+          ? {
+              ownerSlug,
+              entityType: entityResult[0].entity_type as string,
+              slug: entityResult[0].slug as string,
+              parentType: (entityResult[0].parent_entity_type as string) ?? null,
+              parentSlug: (entityResult[0].parent_slug as string) ?? null,
+            }
+          : null;
+      }
+    }
+
+    // Visibility scope is folded into the SQL WHERE clause of every list/count
+    // path (chronological list, content_ids, include_superseded, score) via
+    // `buildConnectionVisibilityClause`. The legacy two-step "find private
+    // connections, then find visible connections" round-trip is gone; events
+    // with `connection_id IS NULL` (system events) stay visible to authed and
+    // unauthed callers alike.
     const visibilityScope = { organizationId: ctx.organizationId, userId: ctx.userId };
 
     // Log incoming classification filters for debugging
@@ -637,6 +685,17 @@ export async function getContent(
       if (includeClassificationSummary) {
         result.classification_stats = {};
       }
+      if (entityInfo) {
+        result.view_url = buildContentUrl(
+          entityInfo,
+          {
+            platform: effectivePlatform,
+            since: args.since,
+            until: args.until,
+          },
+          baseUrl
+        );
+      }
       return result;
     }
 
@@ -674,12 +733,21 @@ export async function getContent(
         entityFilter = ` AND ${entityLinkMatchSql(`$${queryParams.length}::bigint`)}`;
       }
 
+      // Visibility: hide events from connections the caller can't see. Inline,
+      // shared with the count below.
+      const visibility = buildConnectionVisibilityClause({
+        organizationId: visibilityScope.organizationId,
+        userId: visibilityScope.userId,
+        baseParamIndex: queryParams.length + 1,
+      });
+      queryParams.push(...visibility.params);
+
       // Query content by IDs with classifications
       const result = await sql.unsafe(
         buildContentQuery({
           table: 'current_event_records',
           alias: 'f',
-          where: `f.id IN (${idPlaceholders}) ${orgScope}${entityFilter}`,
+          where: `f.id IN (${idPlaceholders}) ${orgScope}${entityFilter} ${visibility.sql}`,
           orderBy: 'f.occurred_at DESC',
           limit,
           offset,
@@ -694,6 +762,7 @@ export async function getContent(
         WHERE f.id IN (${idPlaceholders})
           ${orgScope}
           ${entityFilter}
+          ${visibility.sql}
       `,
         queryParams
       );
@@ -770,6 +839,25 @@ export async function getContent(
         paramIndex += 1;
       }
 
+      // Visibility: events from connections the caller can't see drop out.
+      // The clause is appended as an `AND (…)` fragment so it folds cleanly
+      // into the existing `conditions.join(' AND ')`.
+      const visibility = buildConnectionVisibilityClause(
+        {
+          organizationId: visibilityScope.organizationId,
+          userId: visibilityScope.userId,
+          baseParamIndex: paramIndex,
+        },
+        'e'
+      );
+      if (visibility.sql) {
+        // strip the leading "AND " that buildConnectionVisibilityClause emits
+        // since we're joining conditions with ' AND ' ourselves.
+        conditions.push(visibility.sql.replace(/^AND\s+/, ''));
+        queryParams.push(...visibility.params);
+        paramIndex += visibility.params.length;
+      }
+
       const orderDirection = args.sort_order === 'asc' ? 'ASC' : 'DESC';
       const orderBySql = `e.occurred_at ${orderDirection} NULLS LAST, e.id ${orderDirection}`;
 
@@ -820,6 +908,7 @@ export async function getContent(
         ...(args.classification_source && { classification_source: args.classification_source }),
         ...(args.semantic_type && { semantic_type: args.semantic_type }),
         ...(args.interaction_status && { interaction_status: args.interaction_status }),
+        visibility_scope: visibilityScope,
       };
 
       const [contentResult, countResult] = await Promise.all([
@@ -911,6 +1000,19 @@ export async function getContent(
         windowJoinSql = `JOIN watcher_window_events iwf ON iwf.event_id = f.id AND iwf.window_id = $${paramIndex}`;
         params.push(args.window_id);
         paramIndex++;
+      }
+
+      // Visibility: events from connections the caller can't see must not
+      // skew the classification distribution.
+      const statsVisibility = buildConnectionVisibilityClause({
+        organizationId: visibilityScope.organizationId,
+        userId: visibilityScope.userId,
+        baseParamIndex: paramIndex,
+      });
+      if (statsVisibility.sql) {
+        conditions.push(statsVisibility.sql.replace(/^AND\s+/, ''));
+        params.push(...statsVisibility.params);
+        paramIndex += statsVisibility.params.length;
       }
 
       // Stats query WITHOUT classification filters (to show full distribution)
@@ -1115,6 +1217,19 @@ export async function getContent(
 
     if (classificationStats) {
       result.classification_stats = classificationStats;
+    }
+
+    // Add view URL when an entity is in scope. Consumed by LLM agents over MCP.
+    if (entityInfo) {
+      result.view_url = buildContentUrl(
+        entityInfo,
+        {
+          platform: effectivePlatform,
+          since: args.since,
+          until: args.until,
+        },
+        baseUrl
+      );
     }
 
     // Entity summary: when searching org-wide (query provided, no entity_id/watcher_id)
