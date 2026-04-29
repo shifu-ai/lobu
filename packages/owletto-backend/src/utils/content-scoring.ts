@@ -1,6 +1,12 @@
 import { getDb } from '../db/client';
 import { buildClassificationFilterSQL } from './content-query-filters';
-import { buildConnectionVisibilityClause, entityLinkMatchSql } from './content-search';
+import {
+  buildConnectionVisibilityClause,
+  buildEntityLinkUnion,
+  type EntityIdentityScope,
+  entityLinkMatchSql,
+  fetchEntityIdentityScopes,
+} from './content-search';
 import logger from './logger';
 import { getScoringFormulaSql, resolveStoredScoringProfile } from './scoring-profiles';
 import { validateAndFormatIds, validateNumericId } from './sql-validation';
@@ -84,12 +90,29 @@ interface NormalizedScoreContent {
 function buildFilterConditionsAndJoins(
   entityId: number,
   filters?: NormalizedScoreFilters,
-  baseParamIndex: number = 1
+  baseParamIndex: number = 1,
+  entityScopes?: EntityIdentityScope[]
 ): { filterConditions: string[]; additionalJoins: string[]; params: unknown[] } {
-  const filterConditions: string[] = [entityLinkMatchSql(`${entityId}::bigint`)];
-  const additionalJoins: string[] = [];
-  const params: unknown[] = [];
   let paramIndex = baseParamIndex;
+  const params: unknown[] = [];
+  // Use the trimmed UNION when scopes were pre-fetched. Falls back to the
+  // legacy 7-branch UNION (kept for the few callers that don't pre-fetch).
+  let entityLinkSql: string;
+  if (entityScopes !== undefined) {
+    const link = buildEntityLinkUnion({
+      entityIdLiteral: entityId,
+      scopes: entityScopes,
+      alias: 'f',
+      baseParamIndex: paramIndex,
+    });
+    entityLinkSql = link.sql;
+    params.push(...link.params);
+    paramIndex += link.params.length;
+  } else {
+    entityLinkSql = entityLinkMatchSql(`${entityId}::bigint`);
+  }
+  const filterConditions: string[] = [entityLinkSql];
+  const additionalJoins: string[] = [];
 
   if (filters?.connection_ids && filters.connection_ids.length > 0) {
     const validatedIds = validateAndFormatIds(filters.connection_ids, 'connection_ids');
@@ -193,9 +216,19 @@ export async function getNormalizedScoreContent(
   // Validate entityId to prevent injection
   validateNumericId(entityId, 'entityId');
 
-  const conditions: string[] = [entityLinkMatchSql('$1::bigint')];
-  const params: unknown[] = [entityId];
-  let paramIndex = 2;
+  // Pre-fetch identity scopes once, share across both step 1 (sources) and
+  // step 3 (scored content). Trims unused UNION branches from each.
+  const entityScopes = await fetchEntityIdentityScopes(sql, entityId);
+  const sourcesEntityLink = buildEntityLinkUnion({
+    entityIdLiteral: entityId,
+    scopes: entityScopes,
+    alias: 'f',
+    baseParamIndex: 1,
+  });
+
+  const conditions: string[] = [sourcesEntityLink.sql];
+  const params: unknown[] = [...sourcesEntityLink.params];
+  let paramIndex = 1 + sourcesEntityLink.params.length;
 
   if (filters?.connection_ids && filters.connection_ids.length > 0) {
     // Validate all connection_ids are valid integers before using in SQL
@@ -269,12 +302,13 @@ export async function getNormalizedScoreContent(
 
   const scoringExpression = `CASE ${caseWhenParts.join(' ')} END`;
 
-  // Step 3: Build and execute the dynamic query
+  // Step 3: Build and execute the dynamic query. Pass the pre-fetched
+  // identity scopes through so the trimmed entity-link UNION is used.
   const {
     filterConditions,
     additionalJoins,
     params: filterParams,
-  } = buildFilterConditionsAndJoins(entityId, filters);
+  } = buildFilterConditionsAndJoins(entityId, filters, 1, entityScopes);
   const whereClause = filterConditions.join(' AND ');
   const joinClause = additionalJoins.join(' ');
 
@@ -396,11 +430,16 @@ export async function getNormalizedScoreContentCount(
 
   validateNumericId(entityId, 'entityId');
 
+  // Pre-fetch scopes here too so the count query also uses the trimmed UNION.
+  // Cheap (~1ms) and runs in parallel with the main scored query in
+  // get_content.ts via Promise.all.
+  const entityScopes = await fetchEntityIdentityScopes(sql, entityId);
+
   const {
     filterConditions,
     additionalJoins,
     params: filterParams,
-  } = buildFilterConditionsAndJoins(entityId, filters);
+  } = buildFilterConditionsAndJoins(entityId, filters, 1, entityScopes);
   const whereClause = filterConditions.join(' AND ');
   const joinClause = additionalJoins.join(' ');
 
