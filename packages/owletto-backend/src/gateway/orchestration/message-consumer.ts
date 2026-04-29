@@ -14,10 +14,7 @@ import type {
   IMessageQueue,
   QueueJob as SharedQueueJob,
 } from "../infrastructure/queue/index.js";
-import {
-  RedisQueue,
-  type RedisQueueConfig,
-} from "../infrastructure/queue/index.js";
+import { RunsQueue } from "../infrastructure/queue/index.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -35,27 +32,18 @@ export class MessageConsumer {
   private isRunning = false;
   constructor(
     config: OrchestratorConfig,
-    deploymentManager: BaseDeploymentManager
+    deploymentManager: BaseDeploymentManager,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
-    // Parse Redis connection string
-    const url = new URL(config.queues.connectionString);
-    if (url.protocol !== "redis:") {
-      throw new Error(
-        `Unsupported queue protocol: ${url.protocol}. Only redis:// is supported.`
-      );
-    }
-
-    const queueConfig: RedisQueueConfig = {
-      host: url.hostname,
-      port: Number.parseInt(url.port, 10) || 6379,
-      password: url.password || undefined,
-      db: url.pathname ? Number.parseInt(url.pathname.slice(1), 10) : 0,
-      maxRetriesPerRequest: 3,
-    };
-
-    this.queue = new RedisQueue(queueConfig);
+    // Phase 5: queue is the Postgres `runs` table. The legacy
+    // `queues.connectionString` (a redis:// URL) is still threaded through so
+    // the IMessageQueue.getRedisClient() backwards-compat consumers
+    // (deployment lock, failed-deployment tracking) still find a Redis
+    // client. Phase 11 deletes those.
+    this.queue = new RunsQueue({
+      redisUrl: config.queues.connectionString,
+    });
   }
 
   async start(): Promise<void> {

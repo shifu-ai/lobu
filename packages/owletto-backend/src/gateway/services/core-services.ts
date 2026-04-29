@@ -49,8 +49,7 @@ import { WorkerGateway } from "../gateway/index.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import {
   QueueProducer,
-  RedisQueue,
-  type RedisQueueConfig,
+  RunsQueue,
 } from "../infrastructure/queue/index.js";
 import { InteractionService } from "../interactions.js";
 import { getModelProviderModules } from "../modules/module-system.js";
@@ -280,28 +279,17 @@ export class CoreServices {
   // ============================================================================
 
   private async initializeQueue(): Promise<void> {
-    if (!this.config.queues?.connectionString) {
-      throw new Error("Queue connection string is required");
-    }
+    // Phase 5: queue substrate is `public.runs` over Postgres. The legacy
+    // `queues.connectionString` (a redis:// URL) is now ignored for queue
+    // dispatch; it survives only to feed the still-required Redis client
+    // exposed by `IMessageQueue.getRedisClient()` for non-queue consumers
+    // (secret-store, grant-store, scheduled-wakeup, etc.).
+    const redisUrl =
+      this.config.queues?.connectionString ?? process.env.REDIS_URL;
 
-    const url = new URL(this.config.queues.connectionString);
-    if (url.protocol !== "redis:") {
-      throw new Error(
-        `Unsupported queue protocol: ${url.protocol}. Only redis:// is supported.`
-      );
-    }
-
-    const config: RedisQueueConfig = {
-      host: url.hostname,
-      port: Number.parseInt(url.port, 10) || 6379,
-      password: url.password || undefined,
-      db: url.pathname ? Number.parseInt(url.pathname.slice(1), 10) : 0,
-      maxRetriesPerRequest: 3,
-    };
-
-    this.queue = new RedisQueue(config);
+    this.queue = new RunsQueue({ redisUrl });
     await this.queue.start();
-    logger.debug("Queue connection established");
+    logger.debug("Queue connection established (runs-table substrate)");
   }
 
   private async initializeQueueProducer(): Promise<void> {
