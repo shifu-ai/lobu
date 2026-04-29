@@ -384,6 +384,166 @@ describe("InvalidatableCache", () => {
     await cache.close();
   });
 
+  test("NOTIFY for the loaded key during in-flight load discards the result", async () => {
+    let calls = 0;
+    let resolveLoad: ((v: number) => void) | null = null;
+    const cache = new InvalidatableCache<string, number>({
+      channel: "race_key",
+      ttlMs: 60_000,
+      connectionString: "postgres://fake",
+      clientFactory: makeClientFactory(),
+      loader: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<number>((res) => {
+            resolveLoad = res;
+          });
+        }
+        return calls;
+      },
+    });
+
+    const first = cache.get("k");
+    // Wait one tick so the loader is in flight.
+    await new Promise((r) => setTimeout(r, 1));
+    // Writer's NOTIFY arrives mid-load.
+    cache._notifyForTest("k");
+    // Loader resolves with stale data.
+    resolveLoad?.(1);
+    expect(await first).toBe(1);
+
+    // Stale value MUST NOT be cached — next read reloads.
+    expect(cache.size()).toBe(0);
+    expect(await cache.get("k")).toBe(2);
+    expect(calls).toBe(2);
+    await cache.close();
+  });
+
+  test("NOTIFY '*' during in-flight load discards the result", async () => {
+    let calls = 0;
+    let resolveLoad: ((v: number) => void) | null = null;
+    const cache = new InvalidatableCache<string, number>({
+      channel: "race_global",
+      ttlMs: 60_000,
+      connectionString: "postgres://fake",
+      clientFactory: makeClientFactory(),
+      loader: async () => {
+        calls += 1;
+        if (calls === 1) {
+          return new Promise<number>((res) => {
+            resolveLoad = res;
+          });
+        }
+        return calls;
+      },
+    });
+
+    const first = cache.get("k");
+    await new Promise((r) => setTimeout(r, 1));
+    cache._notifyForTest("*");
+    resolveLoad?.(1);
+    expect(await first).toBe(1);
+    expect(cache.size()).toBe(0);
+
+    expect(await cache.get("k")).toBe(2);
+    await cache.close();
+  });
+
+  test("get() during reconnect backoff does not produce two listeners", async () => {
+    const cache = new InvalidatableCache<string, number>({
+      channel: "no_double_listener",
+      ttlMs: 60_000,
+      reconnectDelayMs: 50,
+      connectionString: "postgres://fake",
+      clientFactory: makeClientFactory(),
+      loader: async () => 1,
+    });
+
+    await cache.get("a");
+    expect(clients.length).toBe(1);
+
+    clients[0]?.emitError(new Error("disconnect"));
+    // Reconnect timer is armed (50ms). Trigger an immediate reconnect via
+    // get() during the backoff window.
+    const racingGet = cache.get("a");
+    await racingGet;
+    // After the get path's reconnect, the timer fires — it must short-circuit.
+    await new Promise((r) => setTimeout(r, 80));
+
+    // Exactly one new client (the get-path reconnect), not two.
+    expect(clients.length).toBe(2);
+    await cache.close();
+  });
+
+  test("close() during reconnect backoff cancels the timer", async () => {
+    const cache = new InvalidatableCache<string, number>({
+      channel: "close_during_backoff",
+      ttlMs: 60_000,
+      reconnectDelayMs: 50,
+      connectionString: "postgres://fake",
+      clientFactory: makeClientFactory(),
+      loader: async () => 1,
+    });
+
+    await cache.get("a");
+    clients[0]?.emitError(new Error("disconnect"));
+    await cache.close();
+    // Wait past the original backoff: no new client should have spawned.
+    await new Promise((r) => setTimeout(r, 80));
+    expect(clients.length).toBe(1);
+  });
+
+  test("connect failure cleans up without leaving a half-attached client", async () => {
+    let attempts = 0;
+    const factory = (): MinimalListenClient => {
+      attempts += 1;
+      const c = new FakeListenClient();
+      if (attempts === 1) {
+        c.connectError = new Error("could not connect");
+      }
+      clients.push(c);
+      return c;
+    };
+
+    const cache = new InvalidatableCache<string, number>({
+      channel: "connect_fails_first",
+      ttlMs: 60_000,
+      reconnectDelayMs: 5,
+      connectionString: "postgres://fake",
+      clientFactory: factory,
+      loader: async () => 7,
+    });
+
+    await expect(cache.get("a")).rejects.toThrow(/could not connect/);
+    expect(clients[0]?.ended).toBe(true);
+    // Second attempt succeeds.
+    expect(await cache.get("a")).toBe(7);
+    expect(clients.length).toBe(2);
+    await cache.close();
+  });
+
+  test("repeated error events on the same client only count once", async () => {
+    let calls = 0;
+    const cache = new InvalidatableCache<string, number>({
+      channel: "double_error",
+      ttlMs: 60_000,
+      reconnectDelayMs: 50,
+      connectionString: "postgres://fake",
+      clientFactory: makeClientFactory(),
+      loader: async () => ++calls,
+    });
+
+    await cache.get("a");
+    const c = clients[0];
+    c?.emitError(new Error("once"));
+    // 'end' is fired right after some pg errors. We must not bump generation
+    // twice nor schedule two reconnects.
+    const genAfterFirst = cache.getGeneration();
+    c?.emitError(new Error("twice"));
+    expect(cache.getGeneration()).toBe(genAfterFirst);
+    await cache.close();
+  });
+
   test("keyToString controls the cache key", async () => {
     let calls = 0;
     const cache = new InvalidatableCache<{ id: string }, number>({

@@ -17,8 +17,13 @@
  *   (operators should treat this as a sledgehammer; prefer per-key payloads).
  * - On underlying connection drop, ALL cached entries are dropped on
  *   reconnect — we cannot guarantee no NOTIFY was missed during the gap.
+ *   Note: PG LISTEN/NOTIFY is not durable. NOTIFYs sent during a reconnect
+ *   gap are gone; the TTL is the only backstop. Set ttlMs to a value you're
+ *   willing to be stale for in the worst case.
  * - In-flight loaders are coalesced: concurrent `get(key)` calls that miss
  *   will share the same loader Promise.
+ * - Loads that race a NOTIFY for the same key are NOT cached, so a stale
+ *   row never silently lands in the cache after the writer's invalidation.
  */
 
 import { Client } from "pg";
@@ -27,10 +32,15 @@ import { createLogger, type Logger } from "@lobu/core";
 interface Entry<V> {
   value: V;
   expiresAt: number;
-  /** Generation counter of the listener at the time this entry was loaded.
-   *  Bumped on every reconnect so post-reconnect entries naturally invalidate
-   *  any pre-reconnect cache. */
+  /** Generation counter of the listener at the time this entry was loaded. */
   generation: number;
+  /** Snapshot of `globalEpoch` when the entry was put. Bumped on `*`/`""`
+   *  NOTIFYs so a load that started before such a NOTIFY isn't cached. */
+  globalEpoch: number;
+  /** Snapshot of the per-key epoch when the entry was put. Bumped on every
+   *  per-key NOTIFY for that key so a load that started before the NOTIFY
+   *  isn't cached. */
+  keyEpoch: number;
 }
 
 export interface InvalidatableCacheOptions<K, V> {
@@ -74,8 +84,21 @@ export class InvalidatableCache<K, V> {
   /** In-flight loaders, keyed by stringified key. Used to coalesce concurrent
    *  cache misses for the same key. */
   private inflight = new Map<string, Promise<V>>();
+  /** Bumped on reconnect. Old generation entries are treated as expired. */
   private generation = 0;
+  /** Bumped on every `*`/`""` NOTIFY (and on reconnect). Used to invalidate
+   *  loads that started before a global invalidation. */
+  private globalEpoch = 0;
+  /** Per-key counter, bumped on every per-key NOTIFY. Loads that started
+   *  before the bump must not be cached. */
+  private keyEpochs = new Map<string, number>();
   private client: MinimalListenClient | null = null;
+  /** Set during `connectAndListen` so we can detect double connect attempts
+   *  and tear down the in-flight client on close/disconnect. */
+  private connectingClient: MinimalListenClient | null = null;
+  /** Set when a reconnect timer is armed; lets us short-circuit overlapping
+   *  reconnects in the timer body. */
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
   private connectPromise: Promise<void> | null = null;
   private readonly logger: Logger;
@@ -97,6 +120,10 @@ export class InvalidatableCache<K, V> {
    * `loader(key)`, caches the result, and returns it.
    *
    * Concurrent misses for the same key share a single loader Promise.
+   *
+   * If a NOTIFY for this key (or a global invalidate) lands while the loader
+   * is in flight, the eventual value is returned to callers but NOT cached —
+   * the next read triggers a fresh load.
    */
   async get(key: K): Promise<V> {
     if (this.closed) {
@@ -110,7 +137,9 @@ export class InvalidatableCache<K, V> {
     if (
       cached &&
       cached.expiresAt > now &&
-      cached.generation === this.generation
+      cached.generation === this.generation &&
+      cached.globalEpoch === this.globalEpoch &&
+      cached.keyEpoch === (this.keyEpochs.get(k) ?? 0)
     ) {
       // Touch for LRU.
       this.entries.delete(k);
@@ -123,13 +152,23 @@ export class InvalidatableCache<K, V> {
       return inflight;
     }
 
+    // Snapshot all three counters before kicking off the loader. If ANY of
+    // them have changed by the time we go to put(), it means a NOTIFY (or
+    // reconnect) landed mid-load and we MUST discard the result.
     const startGen = this.generation;
+    const startGlobalEpoch = this.globalEpoch;
+    const startKeyEpoch = this.keyEpochs.get(k) ?? 0;
+
     const promise = (async () => {
       const value = await this.opts.loader(key);
-      // Re-check generation: if we reconnected mid-load, drop the result —
-      // the writer may have NOTIFY'd between the read and the reconnect.
-      if (!this.closed && startGen === this.generation) {
-        this.put(k, value, this.generation);
+      if (this.closed) return value;
+      const cur = this.keyEpochs.get(k) ?? 0;
+      if (
+        startGen === this.generation &&
+        startGlobalEpoch === this.globalEpoch &&
+        startKeyEpoch === cur
+      ) {
+        this.put(k, value, this.generation, this.globalEpoch, cur);
       }
       return value;
     })().finally(() => {
@@ -143,12 +182,15 @@ export class InvalidatableCache<K, V> {
   /** Drop a single key from the cache. Does NOT call NOTIFY — callers that
    *  want other gateway processes to invalidate must call `pg_notify` directly. */
   invalidate(key: K): void {
-    this.entries.delete(this.keyToString(key));
+    const k = this.keyToString(key);
+    this.entries.delete(k);
+    this.keyEpochs.set(k, (this.keyEpochs.get(k) ?? 0) + 1);
   }
 
   /** Drop the entire cache. Does NOT call NOTIFY. */
   invalidateAll(): void {
     this.entries.clear();
+    this.globalEpoch += 1;
   }
 
   /** Returns the current cache size (test/diagnostic only). */
@@ -167,11 +209,19 @@ export class InvalidatableCache<K, V> {
     this.closed = true;
     this.entries.clear();
     this.inflight.clear();
+    this.keyEpochs.clear();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     const client = this.client;
     this.client = null;
-    if (client) {
+    const connecting = this.connectingClient;
+    this.connectingClient = null;
+    for (const c of [client, connecting]) {
+      if (!c) continue;
       try {
-        await client.end();
+        await c.end();
       } catch {
         // best effort
       }
@@ -192,7 +242,13 @@ export class InvalidatableCache<K, V> {
 
   // ── Internals ────────────────────────────────────────────────────────────
 
-  private put(key: string, value: V, generation: number): void {
+  private put(
+    key: string,
+    value: V,
+    generation: number,
+    globalEpoch: number,
+    keyEpoch: number
+  ): void {
     if (this.entries.has(key)) {
       this.entries.delete(key);
     } else if (this.entries.size >= this.maxEntries) {
@@ -203,6 +259,8 @@ export class InvalidatableCache<K, V> {
       value,
       expiresAt: Date.now() + this.opts.ttlMs,
       generation,
+      globalEpoch,
+      keyEpoch,
     });
   }
 
@@ -221,6 +279,8 @@ export class InvalidatableCache<K, V> {
 
   private async connectAndListen(): Promise<void> {
     if (this.closed) return;
+    if (this.client) return; // already connected
+    if (this.connectingClient) return; // another connect in flight
 
     const connectionString =
       this.opts.connectionString ?? process.env.DATABASE_URL;
@@ -233,6 +293,9 @@ export class InvalidatableCache<K, V> {
     const client = this.opts.clientFactory
       ? this.opts.clientFactory(connectionString)
       : defaultClientFactory(connectionString, this.opts.channel);
+    this.connectingClient = client;
+
+    let connectFailed = false;
 
     client.on("notification", (msg) => {
       if (msg.channel !== this.opts.channel) return;
@@ -242,42 +305,70 @@ export class InvalidatableCache<K, V> {
     // `error` MUST have a listener or it propagates as an uncaught exception
     // and crashes the process. Treat any error as a disconnect signal.
     client.on("error", (err: Error) => {
+      // If we error before assignment, mark and let the catch below handle.
+      if (this.connectingClient === client && this.client !== client) {
+        connectFailed = true;
+        return;
+      }
       this.handleDisconnect(err);
     });
     client.on("end", () => {
+      if (this.connectingClient === client && this.client !== client) {
+        connectFailed = true;
+        return;
+      }
       this.handleDisconnect(new Error("connection ended"));
     });
 
-    await client.connect();
-    await client.query(`LISTEN ${quoteIdent(this.opts.channel)}`);
-    if (this.closed) {
-      // Closed during connect; tear down what we just built.
-      await client.end().catch(() => {});
-      return;
+    try {
+      await client.connect();
+      if (connectFailed) {
+        throw new Error("connection failed before LISTEN");
+      }
+      await client.query(`LISTEN ${quoteIdent(this.opts.channel)}`);
+      if (this.closed) {
+        await client.end().catch(() => {});
+        return;
+      }
+      this.client = client;
+      this.connectingClient = null;
+      this.logger.debug(
+        { channel: this.opts.channel },
+        "InvalidatableCache: listening"
+      );
+    } catch (err) {
+      this.connectingClient = null;
+      // best-effort cleanup; the client may already be dead.
+      try {
+        await client.end();
+      } catch {
+        // ignore
+      }
+      throw err;
     }
-    this.client = client;
-    this.logger.debug(
-      { channel: this.opts.channel },
-      "InvalidatableCache: listening"
-    );
   }
 
   private handleNotification(payload: string): void {
     if (payload === "" || payload === "*") {
       this.entries.clear();
+      this.globalEpoch += 1;
       return;
     }
     this.entries.delete(payload);
+    this.keyEpochs.set(payload, (this.keyEpochs.get(payload) ?? 0) + 1);
   }
 
   /**
    * On disconnect, bump the generation (so any in-flight loader's eventual
    * `put` is rejected) and schedule a reconnect. Cache is cleared because
    * we may have missed NOTIFYs during the gap.
+   *
+   * Idempotent: a single disconnect can cause both `error` and `end` to
+   * fire; we only act on the first.
    */
   private handleDisconnect(error: Error): void {
     if (this.closed) return;
-    if (!this.client) {
+    if (!this.client && !this.connectingClient) {
       // Already in the middle of a reconnect.
       return;
     }
@@ -285,34 +376,42 @@ export class InvalidatableCache<K, V> {
       { channel: this.opts.channel, error: error.message },
       "InvalidatableCache: listener disconnected, will reconnect"
     );
-    const oldClient = this.client;
+    const oldClient = this.client ?? this.connectingClient;
     this.client = null;
+    this.connectingClient = null;
     this.generation += 1;
+    this.globalEpoch += 1;
     this.entries.clear();
     // Best-effort cleanup of the dead client.
     try {
-      void oldClient.end().catch(() => {});
+      if (oldClient) {
+        void oldClient.end().catch(() => {});
+      }
     } catch {
       // ignore
     }
     if (this.closed) return;
 
-    const timer = setTimeout(() => {
+    if (this.reconnectTimer) {
+      // Already armed.
+      return;
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (this.closed) return;
+      // If a `get()` raced us and already reconnected, do nothing.
+      if (this.client || this.connectingClient) return;
       this.connectAndListen().catch((err) => {
         this.logger.warn(
           { channel: this.opts.channel, error: String(err) },
           "InvalidatableCache: reconnect failed, will retry"
         );
-        // Pretend we still had a client so handleDisconnect runs its body
-        // and schedules another retry.
-        this.client = oldClient;
         this.handleDisconnect(
           err instanceof Error ? err : new Error(String(err))
         );
       });
     }, this.reconnectDelayMs);
-    timer.unref?.();
+    this.reconnectTimer.unref?.();
   }
 }
 
