@@ -98,9 +98,7 @@ function buildContentQuery(opts: {
 
 import { requireReadAccess } from '../utils/organization-access';
 import {
-  buildContentUrl,
   buildEventPermalink,
-  type EntityInfo,
   getOrganizationSlug,
   getPublicWebUrl,
 } from '../utils/url-builder';
@@ -376,7 +374,6 @@ interface GetContentResult {
       [value: string]: number;
     };
   };
-  view_url?: string;
   // Watcher-mode fields (only present when watcher_id is provided)
   window_token?: string;
   window_start?: string;
@@ -523,12 +520,13 @@ export async function getContent(
   if (args.entity_id) {
     await requireReadAccess(pgSql, args.entity_id, ctx);
   }
-  const includeClassificationSummary =
-    !args.include_classification ||
-    args.include_classification
-      .split(',')
-      .map((v) => v.trim())
-      .includes('summary');
+  // Stats are now opt-in: callers must explicitly pass `include_classification=summary`
+  // (the Atlas events page used to set this unconditionally, which fired a heavy
+  // `WITH matching_content` CTE on every first paint — including empty entities).
+  const includeClassificationSummary = !!args.include_classification
+    ?.split(',')
+    .map((v) => v.trim())
+    .includes('summary');
 
   const limit = args.limit || 50;
   const offset = args.offset || 0;
@@ -546,38 +544,13 @@ export async function getContent(
     // Resolve org slug for permalink generation
     const ownerSlug = await getOrganizationSlug(ctx.organizationId);
 
-    // Get entity info for building view URL (only when entity_id is provided)
-    let entityInfo: EntityInfo | null = null;
-    if (entityId) {
-      // Get entity info from data tables
-      const entityResult = await sql`
-        SELECT
-          e.id,
-          et.slug AS entity_type,
-          e.slug,
-          e.parent_id,
-          parent.slug as parent_slug,
-          pet.slug as parent_entity_type,
-          e.organization_id
-        FROM entities e
-        JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN entities parent ON e.parent_id = parent.id
-        LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
-        WHERE e.id = ${entityId}
-      `;
-
-      if (entityResult.length > 0) {
-        entityInfo = ownerSlug
-          ? {
-              ownerSlug,
-              entityType: entityResult[0].entity_type as string,
-              slug: entityResult[0].slug as string,
-              parentType: (entityResult[0].parent_entity_type as string) ?? null,
-              parentSlug: (entityResult[0].parent_slug as string) ?? null,
-            }
-          : null;
-      }
-    }
+    // Visibility scope is folded into the SQL WHERE clause inside
+    // `searchContentByText` / `listContentInternal` via
+    // `buildConnectionVisibilityClause`, so we no longer round-trip to the DB
+    // here just to compute "which connection IDs is this caller allowed to
+    // see?". Events with `connection_id IS NULL` (system events) stay visible
+    // to authed and unauthed callers alike.
+    const visibilityScope = { organizationId: ctx.organizationId, userId: ctx.userId };
 
     // Log incoming classification filters for debugging
     if (args.classification_filters) {
@@ -596,46 +569,6 @@ export async function getContent(
     const platformFilters = (args.platforms ?? []).map((p) => String(p).trim()).filter(Boolean);
 
     let effectiveConnectionIds = args.connection_ids ? [...args.connection_ids] : undefined;
-
-    // Visibility: exclude private connections.
-    // Authenticated users see their own private connections; unauthenticated see only org-visible.
-    {
-      const visibilityRows = ctx.userId
-        ? await sql`
-            SELECT id FROM connections
-            WHERE organization_id = ${ctx.organizationId}
-              AND visibility = 'private'
-              AND created_by != ${ctx.userId}
-              AND deleted_at IS NULL
-          `
-        : await sql`
-            SELECT id FROM connections
-            WHERE organization_id = ${ctx.organizationId}
-              AND visibility = 'private'
-              AND deleted_at IS NULL
-          `;
-      const excludedIds = new Set(visibilityRows.map((r: { id: number }) => r.id));
-      if (excludedIds.size > 0) {
-        if (effectiveConnectionIds) {
-          effectiveConnectionIds = effectiveConnectionIds.filter((id) => !excludedIds.has(id));
-        } else {
-          const visibleRows = ctx.userId
-            ? await sql`
-                SELECT id FROM connections
-                WHERE organization_id = ${ctx.organizationId}
-                  AND (visibility = 'org' OR created_by = ${ctx.userId})
-                  AND deleted_at IS NULL
-              `
-            : await sql`
-                SELECT id FROM connections
-                WHERE organization_id = ${ctx.organizationId}
-                  AND visibility = 'org'
-                  AND deleted_at IS NULL
-              `;
-          effectiveConnectionIds = visibleRows.map((r: { id: number }) => r.id);
-        }
-      }
-    }
 
     let didPlatformFilter = false;
     if (platformFilters.length > 0) {
@@ -703,17 +636,6 @@ export async function getContent(
       };
       if (includeClassificationSummary) {
         result.classification_stats = {};
-      }
-      if (entityInfo) {
-        result.view_url = buildContentUrl(
-          entityInfo,
-          {
-            platform: effectivePlatform,
-            since: args.since,
-            until: args.until,
-          },
-          baseUrl
-        );
       }
       return result;
     }
@@ -920,6 +842,7 @@ export async function getContent(
           entity_id: args.entity_id,
           organization_id: !args.entity_id ? ctx.organizationId : undefined,
           connection_ids: effectiveConnectionIds,
+          visibility_scope: visibilityScope,
           window_id: args.window_id,
           exclude_watcher_id: args.exclude_watcher_id,
           platform: effectivePlatform,
@@ -1192,19 +1115,6 @@ export async function getContent(
 
     if (classificationStats) {
       result.classification_stats = classificationStats;
-    }
-
-    // Add view URL if entity info is available
-    if (entityInfo) {
-      result.view_url = buildContentUrl(
-        entityInfo,
-        {
-          platform: effectivePlatform,
-          since: args.since,
-          until: args.until,
-        },
-        baseUrl
-      );
     }
 
     // Entity summary: when searching org-wide (query provided, no entity_id/watcher_id)

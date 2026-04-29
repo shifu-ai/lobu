@@ -279,6 +279,44 @@ export function buildOrgScopeWhere(options: {
 }
 
 /**
+ * Build a connection-visibility WHERE clause that lives inline alongside the
+ * other content filters, so the list and count queries don't need a separate
+ * "which connection ids may I see?" round trip.
+ *
+ * Semantics (must match `getContent`'s legacy two-step flow):
+ *  - Authed user: connections with `visibility='org' OR created_by = $userId`.
+ *  - Unauthed:    connections with `visibility='org'`.
+ *  - Soft-deleted connections (`deleted_at IS NOT NULL`) are excluded.
+ *  - Events with `connection_id IS NULL` (system / non-connection events)
+ *    are visible in both authed and unauthed cases.
+ *
+ * Returns an empty fragment when no scope is requested (callers like the
+ * watcher-mode/condensation path that already select by other constraints).
+ */
+export function buildConnectionVisibilityClause(
+  options: {
+    organizationId?: string;
+    userId?: string | null;
+    baseParamIndex: number;
+  },
+  tableAlias: string = 'f'
+): { sql: string; params: unknown[] } {
+  if (!options.organizationId) return { sql: '', params: [] };
+
+  const orgParam = `$${options.baseParamIndex}::text`;
+  const userParam = `$${options.baseParamIndex + 1}::text`;
+  return {
+    sql: `AND (${tableAlias}.connection_id IS NULL OR ${tableAlias}.connection_id IN (
+      SELECT vc.id FROM connections vc
+      WHERE vc.organization_id = ${orgParam}
+        AND vc.deleted_at IS NULL
+        AND (vc.visibility = 'org' OR (${userParam} IS NOT NULL AND vc.created_by = ${userParam}))
+    ))`,
+    params: [options.organizationId, options.userId ?? null],
+  };
+}
+
+/**
  * Search options for content vector search
  */
 interface ContentSearchOptions {
@@ -287,6 +325,16 @@ interface ContentSearchOptions {
   organization_id?: string; // Required when entity_id is omitted (org-wide mode)
 
   connection_ids?: number[]; // Array of connection IDs to filter by
+  /**
+   * Connection-visibility scope. When set, the SQL WHERE clause inlines a
+   * subquery that hides events from private connections the caller cannot
+   * see. Replaces the older "look up excluded connection ids first, pass them
+   * in as connection_ids" two-query dance that the gateway used to do.
+   *
+   * Authenticated callers pass their user id; unauth callers pass null.
+   * Events with `connection_id IS NULL` are always visible.
+   */
+  visibility_scope?: { organizationId: string; userId: string | null };
   window_id?: number; // Filter by watcher window ID
   exclude_watcher_id?: number; // Exclude content already in any window for this watcher
   platform?: string;
@@ -870,10 +918,16 @@ async function listContentInternal(
       options.exclude_watcher_id,
       filterParamsBeforeExclude.length + 1
     );
-    const allFilterParams = [...filterParamsBeforeExclude, ...excludeClause.params];
+    const filterParamsBeforeVisibility = [...filterParamsBeforeExclude, ...excludeClause.params];
+    const visibilityClause = buildConnectionVisibilityClause({
+      organizationId: options.visibility_scope?.organizationId,
+      userId: options.visibility_scope?.userId ?? null,
+      baseParamIndex: filterParamsBeforeVisibility.length + 1,
+    });
+    const allFilterParams = [...filterParamsBeforeVisibility, ...visibilityClause.params];
 
     const countResult = await sql.unsafe<{ total: number | string }>(
-      `SELECT COUNT(*) as total FROM current_event_records f LEFT JOIN connections c ON c.id = f.connection_id WHERE ${whereSql} ${excludeClause.sql}`,
+      `SELECT COUNT(*) as total FROM current_event_records f LEFT JOIN connections c ON c.id = f.connection_id WHERE ${whereSql} ${excludeClause.sql} ${visibilityClause.sql}`,
       allFilterParams
     );
     const total = parseInt(String(countResult[0]?.total ?? '0'), 10);
@@ -902,6 +956,7 @@ async function listContentInternal(
           LEFT JOIN connections c ON c.id = f.connection_id
           WHERE ${whereSql}
             ${excludeClause.sql}
+            ${visibilityClause.sql}
             ${cursorClause.sql}
           ORDER BY ${buildDateCandidateOrderBy(cursor, 'f')}
           LIMIT $${limitIndex}
@@ -923,7 +978,7 @@ async function listContentInternal(
             NULL::bigint as cursor_fetched_count
           FROM current_event_records f
           LEFT JOIN connections c ON c.id = f.connection_id
-          WHERE ${whereSql} ${excludeClause.sql}
+          WHERE ${whereSql} ${excludeClause.sql} ${visibilityClause.sql}
           ORDER BY ${orderByForResultSet}
           LIMIT $${limitIndex} OFFSET $${offsetIndex}
         ),
@@ -966,7 +1021,13 @@ async function listContentInternal(
     options.exclude_watcher_id,
     paramsBeforeExclude.length + 1
   );
-  const countParams = [...paramsBeforeExclude, ...excludeClause.params];
+  const paramsBeforeVisibility = [...paramsBeforeExclude, ...excludeClause.params];
+  const visibilityClause = buildConnectionVisibilityClause({
+    organizationId: options.visibility_scope?.organizationId,
+    userId: options.visibility_scope?.userId ?? null,
+    baseParamIndex: paramsBeforeVisibility.length + 1,
+  });
+  const countParams = [...paramsBeforeVisibility, ...visibilityClause.params];
 
   const countResult = await sql.unsafe(
     `SELECT COUNT(*) as total FROM current_event_records f
@@ -975,6 +1036,7 @@ async function listContentInternal(
       WHERE ${STANDARD_WHERE_SQL}
         AND ${connectionCondition}
         ${excludeClause.sql}
+        ${visibilityClause.sql}
         ${orgScope.sql}`,
     countParams
   );
@@ -1006,6 +1068,7 @@ async function listContentInternal(
         WHERE ${STANDARD_WHERE_SQL}
           AND ${connectionCondition}
           ${excludeClause.sql}
+          ${visibilityClause.sql}
           ${orgScope.sql}
           ${cursorClause.sql}
         ORDER BY ${buildDateCandidateOrderBy(cursor, 'f')}
@@ -1032,6 +1095,7 @@ async function listContentInternal(
         WHERE ${STANDARD_WHERE_SQL}
           AND ${connectionCondition}
           ${excludeClause.sql}
+          ${visibilityClause.sql}
           ${orgScope.sql}
         ORDER BY ${orderByForResultSet}
         LIMIT $${limitIdx} OFFSET $${offsetIdx}
