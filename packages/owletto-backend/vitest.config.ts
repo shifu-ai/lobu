@@ -16,7 +16,14 @@ export default defineConfig({
     include: ["src/**/*.test.ts"],
     // bun:test-style unit tests live alongside vitest integration tests — skip
     // those for vitest. They run via `bun test` (see the existing CI command).
-    exclude: ["src/__tests__/unit/**", "**/node_modules/**", "**/dist/**"],
+    // src/gateway/__tests__ tests are also bun:test-style (carried over from
+    // the merged @lobu/gateway package).
+    exclude: [
+      "src/__tests__/unit/**",
+      "src/gateway/__tests__/**",
+      "**/node_modules/**",
+      "**/dist/**",
+    ],
     testTimeout: 30_000,
     hookTimeout: 60_000,
     // Integration tests share one Postgres/PGlite. Running multiple files in

@@ -29,8 +29,6 @@ packages/**/*.d.ts.map
 
 # CLI bin entrypoint is source-controlled (needed for CI publishing)
 !packages/cli/bin/*.js
-# Tailwind config is a JS config file, not a build artifact
-!packages/gateway/tailwind.config.js
 # Hand-authored type shims for optional native modules (not build output)
 !packages/**/src/types/*.d.ts
 tsconfig.tsbuildinfo
@@ -56,14 +54,14 @@ data/
 dump.rdb
 
 # Auto-generated page CSS
-packages/gateway/src/routes/public/page-styles.ts
+packages/owletto-backend/src/gateway/routes/public/page-styles.ts
 packages/owletto-cli/runtime/
 
 # Auto-generated history page JS bundle
-packages/gateway/src/routes/public/history-page-bundle.ts
-packages/gateway/src/routes/public/agent-page-bundle.ts
-packages/gateway/src/routes/public/agents-page-bundle.ts
-packages/gateway/src/routes/public/agents-page-bundle.raw.js
+packages/owletto-backend/src/gateway/routes/public/history-page-bundle.ts
+packages/owletto-backend/src/gateway/routes/public/agent-page-bundle.ts
+packages/owletto-backend/src/gateway/routes/public/agents-page-bundle.ts
+packages/owletto-backend/src/gateway/routes/public/agents-page-bundle.raw.js
 
 # Astro build artifacts
 packages/landing/.astro/

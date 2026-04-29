@@ -20,4 +20,5 @@ export const authenticateWorker = async (
   }
   c.set("worker", tokenData);
   await next();
+  return undefined;
 };

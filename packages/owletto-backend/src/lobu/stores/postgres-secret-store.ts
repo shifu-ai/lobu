@@ -2,7 +2,7 @@
  * PostgresSecretStore — WritableSecretStore backed by the agent_secrets
  * table. Stores AES-256-GCM ciphertext produced by @lobu/core's encrypt(),
  * keyed by logical name, and returns `secret://<encoded-name>` refs matching
- * @lobu/gateway's RedisSecretStore contract.
+ * the gateway's RedisSecretStore contract.
  *
  * Paired with SecretStoreRegistry and passed as the `secretStore` option to
  * Gateway from src/lobu/gateway.ts so lobu's ChatInstanceManager can persist
@@ -16,11 +16,11 @@ import {
   parseSecretRef,
   type SecretRef,
 } from '@lobu/core';
-import type { WritableSecretStore } from '@lobu/gateway';
 import { getDb } from '../../db/client';
+import type { WritableSecretStore } from '../../gateway/secrets/index';
 import logger from '../../utils/logger';
 
-// SecretListEntry and SecretPutOptions are defined inside @lobu/gateway's
+// SecretListEntry and SecretPutOptions are defined inside the gateway's
 // secrets module but not re-exported from its public barrel. Derive them
 // from WritableSecretStore's method signatures so we stay aligned with
 // upstream without reaching into internal paths.

@@ -10,6 +10,9 @@ import type { SkillConfig } from '@lobu/core';
 import { Hono } from 'hono';
 import { mcpAuth } from '../auth/middleware';
 import { getDb } from '../db/client';
+import { OAuthClient } from '../gateway/auth/oauth/client';
+import { CLAUDE_PROVIDER } from '../gateway/auth/oauth/providers';
+import { createAuthProfileLabel } from '../gateway/auth/settings/auth-profiles-manager';
 import type { Env } from '../index';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { countRuntimeMessagingClientsByAgent } from './client-routes';
@@ -182,36 +185,7 @@ function normalizeRuntimeProvider(provider: any, models: ProviderModelOption[]):
   };
 }
 
-async function getClaudeOAuthRuntime() {
-  const entryUrl = import.meta.resolve('@lobu/gateway');
-  const distRoot = entryUrl.replace(/dist\/index\.js$/, 'dist');
-  const { OAuthClient } = (await import(`${distRoot}/auth/oauth/client.js`)) as {
-    OAuthClient: new (
-      config: unknown
-    ) => {
-      generateCodeVerifier: () => string;
-      buildAuthUrl: (state: string, codeVerifier: string, customRedirectUri?: string) => string;
-      exchangeCodeForToken: (
-        code: string,
-        codeVerifier: string,
-        customRedirectUri?: string,
-        state?: string
-      ) => Promise<{
-        accessToken: string;
-        refreshToken?: string;
-        expiresAt?: number;
-      }>;
-    };
-  };
-  const { CLAUDE_PROVIDER } = (await import(`${distRoot}/auth/oauth/providers.js`)) as {
-    CLAUDE_PROVIDER: unknown;
-  };
-  const { createAuthProfileLabel } = (await import(
-    `${distRoot}/auth/settings/auth-profiles-manager.js`
-  )) as {
-    createAuthProfileLabel: (providerName: string, credential: string) => string;
-  };
-
+function getClaudeOAuthRuntime() {
   return {
     oauthClient: new OAuthClient(CLAUDE_PROVIDER),
     createAuthProfileLabel,
@@ -554,7 +528,7 @@ routes.get('/:agentId/providers/:providerId/oauth/start', mcpAuth, async (c) => 
       return c.json({ error: 'Embedded Lobu auth is not available' }, 503);
     }
 
-    const { oauthClient } = await getClaudeOAuthRuntime();
+    const { oauthClient } = getClaudeOAuthRuntime();
     const codeVerifier = oauthClient.generateCodeVerifier();
     const state = await oauthStateStore.create({
       userId: user.id,
@@ -607,7 +581,7 @@ routes.post('/:agentId/providers/:providerId/oauth/code', mcpAuth, async (c) => 
     if (stateData.agentId !== agentId || stateData.userId !== user.id) {
       return c.json({ error: 'OAuth state does not match this agent session' }, 403);
     }
-    const { oauthClient, createAuthProfileLabel } = await getClaudeOAuthRuntime();
+    const { oauthClient, createAuthProfileLabel } = getClaudeOAuthRuntime();
 
     try {
       const credentials = await oauthClient.exchangeCodeForToken(

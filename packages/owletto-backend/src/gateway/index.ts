@@ -1,10 +1,10 @@
 /**
- * Library entry point for @lobu/gateway.
+ * In-process Lobu gateway barrel.
  *
- * Exports the Gateway, config builders, and the Hono app factory so the
- * gateway can be embedded inside a host process (e.g. `owletto-backend`).
- * The standalone CLI/server lives in `./cli/index.ts` for callers that want
- * to run the gateway as its own process.
+ * Exports the Gateway, config builders, and the Hono app factory used by
+ * `src/lobu/gateway.ts` to mount the gateway inside owletto-backend. The
+ * standalone CLI lives in `./cli/index.ts` for callers that want to run the
+ * gateway as its own process.
  */
 
 // ── Primary API ─────────────────────────────────────────────────────────────

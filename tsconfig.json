@@ -31,8 +31,6 @@
     "paths": {
       "@lobu/core": ["packages/core/src/index.ts"],
       "@lobu/core/*": ["packages/core/src/*"],
-      "@lobu/gateway": ["packages/gateway/src/index.ts"],
-      "@lobu/gateway/*": ["packages/gateway/src/*"],
       "@lobu/worker": ["packages/worker/src/index.ts"],
       "@lobu/worker/*": ["packages/worker/src/*"],
       "@lobu/owletto-sdk": ["packages/owletto-sdk/src/index.ts"],
@@ -59,9 +57,6 @@
     "packages/owletto-connectors/**/*",
     "packages/owletto-embeddings/**/*",
     "packages/owletto-extension/**/*",
-    "packages/owletto-web/**/*",
-    "packages/gateway/src/routes/public/agent-page/**/*",
-    "packages/gateway/src/routes/public/history-page/**/*",
-    "packages/gateway/src/routes/public/agents-page/**/*"
+    "packages/owletto-web/**/*"
   ]
 }

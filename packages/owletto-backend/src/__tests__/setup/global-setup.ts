@@ -61,8 +61,8 @@ export async function setup(): Promise<void> {
     console.log(`\n🗄️  Using external Postgres at ${databaseUrl}`);
   }
 
-  // Deterministic 32-byte hex key for AES-256-GCM in tests. Same value
-  // @lobu/gateway's secret-store test harness uses so behavior is aligned.
+  // Deterministic 32-byte hex key for AES-256-GCM in tests. Same value the
+  // gateway's secret-store test harness uses so behavior is aligned.
   if (!process.env.ENCRYPTION_KEY) {
     process.env.ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   }

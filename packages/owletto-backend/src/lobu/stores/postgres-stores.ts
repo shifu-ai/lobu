@@ -119,7 +119,7 @@ function loadRedisModule(): any | null {
     return runtimeRequire('ioredis');
   } catch {}
 
-  const packageHints = ['@lobu/core', '@lobu/gateway', '@chat-adapter/state-ioredis'];
+  const packageHints = ['@lobu/core', '@lobu/owletto-backend', '@chat-adapter/state-ioredis'];
 
   for (const hint of packageHints) {
     try {

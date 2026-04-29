@@ -14,6 +14,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto';
 import { type DbClient, getDb } from '../db/client';
+import { createThreadForAgent, enqueueAgentMessage } from '../gateway/services/agent-threads';
 import { getLobuCoreServices } from '../lobu/gateway';
 import logger from '../utils/logger';
 import {
@@ -183,24 +184,15 @@ interface CallableServices {
   enqueueAgentMessage: (deps: any, args: any) => Promise<unknown>;
 }
 
-async function loadCallableServices(): Promise<CallableServices | null> {
+function loadCallableServices(): CallableServices | null {
   const core = getLobuCoreServices();
   if (!core) return null;
-  try {
-    const mod = await import('@lobu/gateway');
-    return {
-      sessionManager: core.getSessionManager(),
-      queueProducer: core.getQueueProducer(),
-      createThreadForAgent: mod.createThreadForAgent,
-      enqueueAgentMessage: mod.enqueueAgentMessage,
-    };
-  } catch (error) {
-    logger.warn(
-      { error: String(error) },
-      '[repair-agent] embedded gateway not available — skipping repair trigger'
-    );
-    return null;
-  }
+  return {
+    sessionManager: core.getSessionManager(),
+    queueProducer: core.getQueueProducer(),
+    createThreadForAgent,
+    enqueueAgentMessage,
+  };
 }
 
 export interface RepairTriggerDeps {
@@ -306,7 +298,7 @@ export async function maybeOpenOrAppendRepairThread(
       return;
     }
 
-    const services = deps.services ?? (await loadCallableServices());
+    const services = deps.services ?? loadCallableServices();
     if (!services) return;
 
     try {
@@ -373,7 +365,7 @@ export async function maybeOpenOrAppendRepairThread(
     return;
   }
 
-  const services = deps.services ?? (await loadCallableServices());
+  const services = deps.services ?? loadCallableServices();
   if (!services) return;
 
   // Mint the thread id BEFORE the atomic UPDATE so we can race-guard on
@@ -522,7 +514,7 @@ export async function maybeCloseRepairThread(
 
   if (!claimedThreadId) return;
 
-  const services = deps.services ?? (await loadCallableServices());
+  const services = deps.services ?? loadCallableServices();
   if (!services) return;
 
   try {

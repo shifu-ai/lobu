@@ -1,8 +1,9 @@
 /**
  * Lobu Gateway — embedded initialization
  *
- * Embeds @lobu/gateway directly into Owletto's Hono server using PostgreSQL-backed
- * stores and bridging Owletto's Better Auth sessions to Lobu's settings auth.
+ * Initializes the in-process Lobu gateway (now living under ../gateway/) using
+ * PostgreSQL-backed stores and bridging Owletto's Better Auth sessions to
+ * Lobu's settings auth.
  */
 
 import crypto from 'node:crypto';
@@ -12,6 +13,13 @@ import type { Hono } from 'hono';
 import { Hono as HonoApp } from 'hono';
 import { createAuth } from '../auth';
 import { getDb } from '../db/client';
+import { ApiPlatform } from '../gateway/api';
+import { createGatewayApp } from '../gateway/cli/gateway';
+import { ChatInstanceManager, ChatResponseBridge } from '../gateway/connections';
+import { buildGatewayConfig } from '../gateway/config/index';
+import { Gateway } from '../gateway/gateway-main';
+import { Orchestrator } from '../gateway/orchestration/index';
+import { SecretStoreRegistry } from '../gateway/secrets/index';
 import type { Env } from '../index';
 import logger from '../utils/logger';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
@@ -192,31 +200,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
   ensureEmbeddedGatewaySecrets();
   ensureEmbeddedWorkerLauncher();
   try {
-    const { Gateway, buildGatewayConfig, createGatewayApp, SecretStoreRegistry } = await import(
-      '@lobu/gateway'
-    );
-    const entryUrl = import.meta.resolve('@lobu/gateway');
-    const distRoot = entryUrl.replace(/dist\/index\.js$/, 'dist');
-    const { Orchestrator } = (await import(`${distRoot}/orchestration/index.js`)) as {
-      Orchestrator: new (
-        config: unknown
-      ) => {
-        start: () => Promise<void>;
-        stop: () => Promise<void>;
-        injectCoreServices: (
-          redisClient: unknown,
-          secretStore: unknown,
-          providerCatalogService?: unknown,
-          grantStore?: unknown,
-          policyStore?: unknown
-        ) => Promise<void>;
-      };
-    };
-    const { ChatInstanceManager, ChatResponseBridge } = await import(
-      '@lobu/gateway/dist/connections'
-    );
-    const { ApiPlatform } = await import('@lobu/gateway/dist/api');
-
     const publicWebUrl =
       getConfiguredPublicOrigin() || `http://localhost:${process.env.PORT || '8787'}`;
     const publicUrl = new URL('/lobu/', publicWebUrl).toString().replace(/\/$/, '');
