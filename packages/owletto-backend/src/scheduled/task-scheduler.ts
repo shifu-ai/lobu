@@ -73,6 +73,17 @@ export interface SpawnOptions {
 interface TaskJobData {
   name: string;
   payload: unknown;
+  /** ISO timestamp of the cron tick this row represents. Set only on cron
+   *  seeds (not on `spawn()` calls). Carrying it in the payload makes
+   *  next-tick computation deterministic across pods regardless of local-
+   *  clock drift: every claimer computes nextTick from this field, so the
+   *  idempotency key for the next seed is identical for everyone, and dedup
+   *  on the partial unique index wins. Computing nextTick from local
+   *  `new Date()` would race the row's own claim window — if the pod's
+   *  clock is slightly behind Postgres, `nextRunAt()` returns the SAME
+   *  tick as the currently-claimed row, the seed conflicts, no new row is
+   *  inserted, and the cron permanently stops. */
+  __scheduledTick?: string;
 }
 
 interface TaskRegistration {
@@ -187,18 +198,22 @@ export class TaskScheduler {
       throw new Error(`No handler registered for task "${data.name}"`);
     }
 
-    // Periodic tasks: queue the next tick BEFORE running the handler. If the
-    // handler crashes, the runs-queue retries this row (per its retry path);
-    // the next cron tick is already queued and unaffected.
+    // Periodic tasks: queue the next tick BEFORE running the handler. If
+    // seeding fails, do NOT swallow — re-throw so the runs-queue marks this
+    // row failed/retry; the retry path will re-attempt the seed before next
+    // running the handler. Silent failure here would leave the cron stranded
+    // with no successor row.
+    //
+    // Compute nextTick from the row's own scheduled tick (carried in payload)
+    // not from local `new Date()`. See the comment on TaskJobData.__scheduledTick
+    // for the clock-drift hazard this avoids.
     if (reg.cron) {
-      try {
-        await this.seedNextCronTick(reg);
-      } catch (err) {
-        logger.warn(
-          { err, taskName: reg.name },
-          '[task-scheduler] Failed to seed next cron tick — pod boot will retry',
-        );
-      }
+      const fromTick = data.__scheduledTick
+        ? new Date(data.__scheduledTick)
+        : new Date();
+      // Add 1ms so nextRunAt skips past the current tick when fromTick falls
+      // exactly on a cron boundary.
+      await this.seedNextCronTick(reg, new Date(fromTick.getTime() + 1));
     }
 
     await reg.handler({
@@ -208,20 +223,29 @@ export class TaskScheduler {
   }
 
   /** Insert (or no-op if already present) a row for this task's next cron
-   *  tick. The idempotency key is per-tick so successive ticks each get a
-   *  fresh row. */
-  private async seedNextCronTick(reg: TaskRegistration): Promise<void> {
+   *  tick after `from`. The idempotency key is per-tick so successive ticks
+   *  each get a fresh row.
+   *
+   *  Throws on insert failure — callers (boot + dispatch) decide whether to
+   *  surface or downgrade. The dispatch path re-throws so the run retries;
+   *  the boot path logs and continues so a transient DB hiccup at boot
+   *  doesn't crash the pod (next pod start retries via the same path). */
+  private async seedNextCronTick(
+    reg: TaskRegistration,
+    from: Date = new Date(),
+  ): Promise<void> {
     if (!reg.cron) return;
-    const tick = new Date(nextRunAt(reg.cron));
+    const tick = new Date(nextRunAt(reg.cron, from));
     const delayMs = Math.max(0, tick.getTime() - Date.now());
-    await this.queue.send(
-      TASK_QUEUE_NAME,
-      { name: reg.name, payload: {} },
-      {
-        singletonKey: cronSeedKey(reg.name, tick),
-        delayMs,
-        actionKey: reg.name,
-      },
-    );
+    const data: TaskJobData = {
+      name: reg.name,
+      payload: {},
+      __scheduledTick: tick.toISOString(),
+    };
+    await this.queue.send(TASK_QUEUE_NAME, data, {
+      singletonKey: cronSeedKey(reg.name, tick),
+      delayMs,
+      actionKey: reg.name,
+    });
   }
 }

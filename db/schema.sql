@@ -1730,7 +1730,7 @@ CREATE TABLE public.runs (
     retry_delay_seconds integer,
     CONSTRAINT runs_approval_status_check CHECK ((approval_status = ANY (ARRAY['pending'::text, 'approved'::text, 'rejected'::text, 'auto'::text]))),
     CONSTRAINT runs_legacy_org_required CHECK (((run_type <> ALL (ARRAY['sync'::text, 'action'::text, 'embed_backfill'::text, 'watcher'::text, 'auth'::text])) OR (organization_id IS NOT NULL))),
-    CONSTRAINT runs_run_type_check CHECK ((run_type = ANY (ARRAY['sync'::text, 'action'::text, 'embed_backfill'::text, 'watcher'::text, 'auth'::text, 'chat_message'::text, 'schedule'::text, 'agent_run'::text, 'internal'::text]))),
+    CONSTRAINT runs_run_type_check CHECK ((run_type = ANY (ARRAY['sync'::text, 'action'::text, 'embed_backfill'::text, 'watcher'::text, 'auth'::text, 'chat_message'::text, 'schedule'::text, 'agent_run'::text, 'internal'::text, 'task'::text]))),
     CONSTRAINT runs_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'claimed'::text, 'running'::text, 'completed'::text, 'failed'::text, 'cancelled'::text, 'timeout'::text])))
 );
 
@@ -4600,7 +4600,7 @@ CREATE UNIQUE INDEX runs_idempotency_key_uniq ON public.runs USING btree (idempo
 -- Name: runs_lobu_claim_idx; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX runs_lobu_claim_idx ON public.runs USING btree (run_type, queue_name, priority DESC, run_at, id) WHERE ((status = 'pending'::text) AND (run_type = ANY (ARRAY['chat_message'::text, 'schedule'::text, 'agent_run'::text, 'internal'::text])));
+CREATE INDEX runs_lobu_claim_idx ON public.runs USING btree (run_type, queue_name, priority DESC, run_at, id) WHERE ((status = 'pending'::text) AND (run_type = ANY (ARRAY['chat_message'::text, 'schedule'::text, 'agent_run'::text, 'internal'::text, 'task'::text])));
 
 
 --
@@ -5637,4 +5637,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260429130000'),
     ('20260429140000'),
     ('20260429140100'),
-    ('20260429180000');
+    ('20260429180000'),
+    ('20260430151215');

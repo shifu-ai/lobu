@@ -227,6 +227,78 @@ describe("TaskScheduler.dispatch", () => {
     ).rejects.toThrow(/No handler/);
   });
 
+  test("next-tick is computed from __scheduledTick payload, not local clock", async () => {
+    // Regression for the clock-drift bug: when a row's __scheduledTick falls
+    // exactly on a cron boundary, dispatch must seed nextTick = boundary + 1
+    // tick, NOT recompute from `new Date()` (which can collide with the
+    // current tick under clock skew and strand the cron).
+    const queue = new FakeQueue();
+    const scheduler = new TaskScheduler(queue);
+    scheduler.register("ticker", async () => {}, { cron: "*/5 * * * *" });
+    await scheduler.start();
+    queue.sent = [];
+
+    const handler = queue.workers.get("task");
+    if (!handler) throw new Error("dispatcher not registered");
+
+    // Pretend this row was scheduled for an exact :05 boundary in the past
+    // — what would happen if a pod's clock ran a couple seconds behind the DB.
+    const scheduledTick = new Date("2026-01-01T00:05:00.000Z");
+    await handler({
+      id: "1",
+      data: {
+        name: "ticker",
+        payload: {},
+        __scheduledTick: scheduledTick.toISOString(),
+      },
+      name: "task",
+    });
+
+    expect(queue.sent).toHaveLength(1);
+    const seed = queue.sent[0];
+    // nextTick MUST be 00:10 (the next cron tick after :05), not :05 itself.
+    expect(seed.options?.singletonKey).toBe(
+      "cron:ticker:2026-01-01T00:10:00.000Z",
+    );
+    // Payload must carry __scheduledTick for the NEXT row's dispatcher.
+    expect((seed.data as any).__scheduledTick).toBe("2026-01-01T00:10:00.000Z");
+  });
+
+  test("seed failure during dispatch is re-thrown (runs-queue retries the row)", async () => {
+    const queue = new FakeQueue();
+    const scheduler = new TaskScheduler(queue);
+    let handlerRan = false;
+    scheduler.register(
+      "ticker",
+      async () => {
+        handlerRan = true;
+      },
+      { cron: "*/5 * * * *" },
+    );
+    await scheduler.start();
+    queue.sent = [];
+
+    // Make seed fail.
+    queue.send = async () => {
+      throw new Error("transient db error");
+    };
+
+    const handler = queue.workers.get("task");
+    if (!handler) throw new Error("dispatcher not registered");
+
+    await expect(
+      handler({
+        id: "1",
+        data: { name: "ticker", payload: {} },
+        name: "task",
+      }),
+    ).rejects.toThrow(/transient db error/);
+
+    // Handler must NOT have run — we want the runs-queue to retry the whole
+    // row (seed + handler) rather than completing the row with no successor.
+    expect(handlerRan).toBe(false);
+  });
+
   test("non-periodic task does not enqueue a follow-up", async () => {
     const queue = new FakeQueue();
     const scheduler = new TaskScheduler(queue);
