@@ -151,6 +151,156 @@ export function MemoryGraphic() {
   );
 }
 
+const memoryAgents = [
+  { name: "ChatGPT", detail: "Agent", icon: "✦" },
+  { name: "Claude", detail: "Agent", icon: "◇" },
+  { name: "OpenClaw", detail: "Agent", icon: "⌘" },
+];
+
+export function SharedMemoryGraphic() {
+  return (
+    <div
+      class="w-full max-w-md"
+      role="img"
+      aria-label="ChatGPT, Claude, and OpenClaw agents sharing Lobu Memory through MCP"
+    >
+      <div class="grid grid-cols-3 gap-3">
+        {memoryAgents.map((agent) => (
+          <MemoryAgentCard key={agent.name} {...agent} />
+        ))}
+      </div>
+
+      <div class="flex h-14 items-center justify-center" aria-hidden="true">
+        <span
+          class="inline-flex items-center gap-2 rounded-md px-2.5 py-1 text-[11px] font-medium"
+          style={{
+            background: "var(--color-page-bg)",
+            border: "1px solid var(--color-page-border)",
+            color: "var(--color-page-text-muted)",
+          }}
+        >
+          <span
+            class="font-mono font-semibold uppercase tracking-wide"
+            style={{ color: "var(--color-tg-accent)" }}
+          >
+            MCP
+          </span>
+          <span>shared context</span>
+        </span>
+      </div>
+
+      <div
+        class="rounded-xl bg-white shadow-sm"
+        style={{ border: "1px solid var(--color-page-border)" }}
+      >
+        <div
+          class="flex items-center gap-2 px-4 py-3"
+          style={{ borderBottom: "1px solid var(--color-page-border)" }}
+        >
+          <span
+            class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[14px]"
+            style={{
+              background: "rgba(var(--color-tg-accent-rgb), 0.08)",
+              border: "1px solid rgba(var(--color-tg-accent-rgb), 0.22)",
+            }}
+            aria-hidden="true"
+          >
+            🧠
+          </span>
+          <span
+            class="flex-1 text-[15px] font-semibold"
+            style={{ color: "var(--color-page-text)" }}
+          >
+            Lobu Memory
+          </span>
+          <span
+            class="rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wider"
+            style={{
+              background: "var(--color-page-surface-dim)",
+              border: "1px solid var(--color-page-border)",
+              color: "var(--color-page-text-muted)",
+            }}
+          >
+            Shared
+          </span>
+        </div>
+        <div class="grid grid-cols-3 gap-2 p-3">
+          {[
+            { label: "Entities", value: "typed" },
+            { label: "Events", value: "append-only" },
+            { label: "Recall", value: "semantic" },
+          ].map((item) => (
+            <div
+              key={item.label}
+              class="rounded-lg px-3 py-3 text-center"
+              style={{
+                background: "var(--color-page-surface-dim)",
+                border: "1px solid var(--color-page-border)",
+              }}
+            >
+              <div
+                class="text-[12px] font-semibold"
+                style={{ color: "var(--color-page-text)" }}
+              >
+                {item.label}
+              </div>
+              <div
+                class="mt-1 text-[10px]"
+                style={{ color: "var(--color-page-text-muted)" }}
+              >
+                {item.value}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MemoryAgentCard({
+  name,
+  detail,
+  icon,
+}: {
+  name: string;
+  detail: string;
+  icon: string;
+}) {
+  return (
+    <div
+      class="rounded-xl bg-white shadow-sm"
+      style={{ border: "1px solid var(--color-page-border)" }}
+    >
+      <div class="flex flex-col items-center px-2 py-3 text-center">
+        <span
+          class="mb-2 inline-flex h-7 w-7 items-center justify-center rounded-md text-[13px]"
+          style={{
+            background: "var(--color-page-surface-dim)",
+            border: "1px solid var(--color-page-border)",
+            color: "var(--color-page-text)",
+          }}
+          aria-hidden="true"
+        >
+          {icon}
+        </span>
+        <span
+          class="text-[12px] font-semibold leading-tight"
+          style={{ color: "var(--color-page-text)" }}
+        >
+          {name}
+        </span>
+        <span
+          class="mt-1 text-[10px] uppercase tracking-wider"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          {detail}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export function SkillsGraphic() {
   return (
     <div
@@ -286,10 +436,9 @@ export function HostingGraphic() {
 
 export function BenchmarkGraphic() {
   const rows = [
-    { label: "Lobu Memory", value: 92, accent: true },
-    { label: "Mem0", value: 78 },
-    { label: "Letta", value: 71 },
-    { label: "OpenAI Memory", value: 64 },
+    { label: "Lobu Memory", value: 87.1, accent: true },
+    { label: "Supermemory", value: 69.1 },
+    { label: "Mem0", value: 65.7 },
   ];
 
   return (
@@ -302,7 +451,7 @@ export function BenchmarkGraphic() {
           class="text-[11px] font-semibold tracking-[0.12em] uppercase"
           style={{ color: "var(--color-page-text-muted)" }}
         >
-          LongMemEval · single-session
+          LongMemEval · oracle-50
         </div>
         <div
           class="text-[11px]"
@@ -325,7 +474,7 @@ export function BenchmarkGraphic() {
                 class="font-mono"
                 style={{ color: "var(--color-page-text-muted)" }}
               >
-                {row.value}
+                {row.value.toFixed(1)}%
               </span>
             </div>
             <div
@@ -505,7 +654,7 @@ export function PlatformsGraphic() {
           <span
             class="text-[10px] font-mono px-2 py-0.5 rounded"
             style={{
-              background: "rgba(249, 115, 22, 0.1)",
+              background: "rgba(var(--color-tg-accent-rgb), 0.1)",
               color: "var(--color-tg-accent)",
             }}
           >

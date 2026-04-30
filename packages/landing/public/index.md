@@ -1,34 +1,34 @@
 # Lobu
 
-> Open-source platform for deploying persistent, sandboxed AI agents on Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, and REST API. Self-hosted as a single Node process (bring your own Postgres + Redis) with per-agent MCP tools, skills, and memory.
+> Open-source platform for persistent, sandboxed AI agents with shared memory, installable skills, chat integrations, and MCP access. Self-hosted Lobu runs as a single Node process and uses Postgres with pgvector as the only required external service.
 
 ## What Lobu does
 
-Lobu runs autonomous agents on the messaging platforms your team already uses. Each agent runs in its own sandbox with isolated credentials, scoped network egress, and an approval model for destructive tool calls. Agents share organizational memory through Owletto so context, decisions, and observations persist across conversations and across the agents on your team.
+Lobu runs autonomous agents where your team already works: Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, REST API, and MCP-capable clients. Each agent runs in an isolated worker with gateway-mediated credentials, scoped network egress, and approval flows for sensitive tool calls. Lobu Memory keeps typed entities, decisions, observations, and preferences reusable across conversations and agents.
 
 ## Connect any agent to Lobu
 
-The orgless MCP endpoint at [https://lobu.ai/mcp](https://lobu.ai/mcp) exposes `list_organizations` and `switch_organization` so MCP-capable clients (Claude, ChatGPT, Claude Code, OpenClaw, Gemini CLI) can sign in once and pick a workspace per conversation. See [/mcp](https://lobu.ai/mcp/) for per-client setup.
+The canonical MCP endpoint at [https://lobu.ai/mcp](https://lobu.ai/mcp) lets MCP-capable clients such as Claude, ChatGPT, Claude Code, and OpenClaw sign in once, list available organizations, and switch to the right workspace per conversation. See [/mcp](https://lobu.ai/mcp/) for per-client setup.
 
 ## Start here
 
-- [Home](https://lobu.ai/): Product overview and architecture
+- [Home](https://lobu.ai/): Product overview, memory, skills, platforms, and architecture
 - [Getting started](https://lobu.ai/getting-started/): Install and run your first agent
 - [Comparison](https://lobu.ai/getting-started/comparison/): How Lobu compares to other agent platforms
-- [Pricing](https://lobu.ai/pricing/): Free open source; paid support available
+- [Serverless OpenClaw](https://lobu.ai/serverless-openclaw/): Managed runtime and usage-based billing
 
 ## Core concepts
 
-- [Skills](https://lobu.ai/skills/): Reusable agent capabilities via SKILL.md
-- [Memory](https://lobu.ai/memory/): Persistent agent memory powered by Owletto
-- [Architecture](https://lobu.ai/guides/architecture/): Gateway + worker + orchestration overview
-- [Security](https://lobu.ai/guides/security/): Sandboxing, network policy, credential isolation
+- [Skills](https://lobu.ai/getting-started/skills/): Reusable agent capabilities via SKILL.md
+- [Memory](https://lobu.ai/getting-started/memory/): Persistent typed memory for agents
+- [Architecture](https://lobu.ai/guides/architecture/): Gateway, workers, proxy, and sandboxing model
+- [Security](https://lobu.ai/guides/security/): Sandboxing, network policy, and credential isolation
 - [Tool policy](https://lobu.ai/guides/tool-policy/): Approval model for destructive MCP tools
 
 ## Deployment
 
 - [Getting started](https://lobu.ai/getting-started/): Boot Lobu as a single Node process (`lobu run`)
-- [Embedding](https://lobu.ai/deployment/embedding/): Mount Lobu inside an existing Node app
+- [Architecture](https://lobu.ai/guides/architecture/): Embedded gateway + worker deployment model
 
 ## Messaging platforms
 
@@ -53,7 +53,7 @@ The orgless MCP endpoint at [https://lobu.ai/mcp](https://lobu.ai/mcp) exposes `
 - [SKILL.md](https://lobu.ai/reference/skill-md/)
 - [Providers](https://lobu.ai/reference/providers/)
 - [CLI](https://lobu.ai/reference/cli/)
-- [Lobu Memory CLI](https://lobu.ai/reference/lobu-memory/)
+- [Lobu memory CLI](https://lobu.ai/reference/lobu-memory/)
 
 ## Project
 

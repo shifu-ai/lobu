@@ -1,5 +1,5 @@
-import { darkBase, textColor } from "./memory/styles";
-
+const darkBase = "rgb(8, 10, 14)";
+const textColor = "var(--color-page-text)";
 const primaryAccent = "var(--color-tg-accent)";
 const primaryAccentSoft = "rgba(var(--color-tg-accent-rgb), 0.08)";
 

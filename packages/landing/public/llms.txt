@@ -1,26 +1,26 @@
 # Lobu
 
-> Open-source platform for deploying persistent, sandboxed AI agents on Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, and REST API. Self-hosted as a single Node process (bring your own Postgres + Redis) with per-agent MCP tools, skills, and memory.
+> Open-source platform for persistent, sandboxed AI agents with shared memory, installable skills, chat integrations, and MCP access. Self-hosted Lobu runs as a single Node process and uses Postgres with pgvector as the only required external service.
 
 ## Start here
 
-- [Home](https://lobu.ai/): Product overview and architecture
+- [Home](https://lobu.ai/): Product overview, memory, skills, platforms, and architecture
 - [Getting started](https://lobu.ai/getting-started/): Install and run your first agent
 - [Comparison](https://lobu.ai/getting-started/comparison/): How Lobu compares to other agent platforms
-- [Pricing](https://lobu.ai/pricing/): Free open source; paid support available
+- [Serverless OpenClaw](https://lobu.ai/serverless-openclaw/): Managed runtime and usage-based billing
 
 ## Core concepts
 
 - [Skills](https://lobu.ai/getting-started/skills/): Reusable agent capabilities via SKILL.md
-- [Memory](https://lobu.ai/getting-started/memory/): Persistent agent memory powered by Lobu
-- [Architecture](https://lobu.ai/guides/architecture/): Gateway + worker + orchestration overview
-- [Security](https://lobu.ai/guides/security/): Sandboxing, network policy, credential isolation
+- [Memory](https://lobu.ai/getting-started/memory/): Persistent typed memory for agents
+- [Architecture](https://lobu.ai/guides/architecture/): Gateway, workers, proxy, and sandboxing model
+- [Security](https://lobu.ai/guides/security/): Sandboxing, network policy, and credential isolation
 - [Tool policy](https://lobu.ai/guides/tool-policy/): Approval model for destructive MCP tools
 
 ## Deployment
 
 - [Getting started](https://lobu.ai/getting-started/): Boot Lobu as a single Node process (`lobu run`)
-- [Embedding](https://lobu.ai/deployment/embedding/): Mount Lobu inside an existing Node app
+- [Architecture](https://lobu.ai/guides/architecture/): Embedded gateway + worker deployment model
 
 ## Messaging platforms
 
@@ -62,7 +62,7 @@
 
 - [Filesystem vs database agent memory](https://lobu.ai/blog/filesystem-vs-database-agent-memory/)
 - [MCP is overengineered, skills are too primitive](https://lobu.ai/blog/mcp-is-overengineered-skills-are-too-primitive/)
-- [Add AI agents to Next.js](https://lobu.ai/blog/add-ai-agents-to-nextjs/)
+- [Introducing Lobu](https://lobu.ai/blog/hello-world/)
 
 ## Optional
 

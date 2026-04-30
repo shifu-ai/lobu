@@ -39,21 +39,23 @@ export function PlatformConfigTable({
 
   return (
     <div>
-      <table>
-        <thead>
-          <tr>
-            <th>Field</th>
-            <th>Required</th>
-            <th>Type</th>
-            <th>Description</th>
-          </tr>
-        </thead>
-        <tbody>
-          {config.fields.map((field: FieldInfo) => (
-            <FieldRow key={field.name} field={field} />
-          ))}
-        </tbody>
-      </table>
+      <div class="overflow-x-auto">
+        <table class="min-w-[36rem]">
+          <thead>
+            <tr>
+              <th>Field</th>
+              <th>Required</th>
+              <th>Type</th>
+              <th>Description</th>
+            </tr>
+          </thead>
+          <tbody>
+            {config.fields.map((field: FieldInfo) => (
+              <FieldRow key={field.name} field={field} />
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       {showConnectionSettings &&
         platformConfigs.connectionSettings.fields.length > 0 && (
@@ -63,23 +65,25 @@ export function PlatformConfigTable({
               These settings apply to all platform connections and are passed in
               the <code>settings</code> object.
             </p>
-            <table>
-              <thead>
-                <tr>
-                  <th>Field</th>
-                  <th>Required</th>
-                  <th>Type</th>
-                  <th>Description</th>
-                </tr>
-              </thead>
-              <tbody>
-                {platformConfigs.connectionSettings.fields.map(
-                  (field: FieldInfo) => (
-                    <FieldRow key={field.name} field={field} />
-                  )
-                )}
-              </tbody>
-            </table>
+            <div class="overflow-x-auto">
+              <table class="min-w-[36rem]">
+                <thead>
+                  <tr>
+                    <th>Field</th>
+                    <th>Required</th>
+                    <th>Type</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {platformConfigs.connectionSettings.fields.map(
+                    (field: FieldInfo) => (
+                      <FieldRow key={field.name} field={field} />
+                    )
+                  )}
+                </tbody>
+              </table>
+            </div>
           </>
         )}
     </div>

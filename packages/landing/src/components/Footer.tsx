@@ -24,6 +24,10 @@ const COLUMNS: FooterColumn[] = [
       { label: "Support", href: "/for/support" },
       { label: "Legal", href: "/for/legal" },
       { label: "Sales", href: "/for/sales" },
+      { label: "Finance", href: "/for/finance" },
+      { label: "Leadership", href: "/for/leadership" },
+      { label: "Market", href: "/for/market" },
+      { label: "Community", href: "/for/agent-community" },
     ],
   },
   {

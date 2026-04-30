@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState } from "preact/hooks";
-import { landingUseCaseGroupedOptions } from "../use-case-showcases";
+import {
+  getOwlettoLoginUrl,
+  landingUseCaseGroupedOptions,
+} from "../use-case-showcases";
 
 const GITHUB_URL = "https://github.com/lobu-ai/lobu";
 const GITHUB_STARS_BADGE =
@@ -23,51 +26,48 @@ type MegaMenu = {
   label: string;
   columns: MenuColumn[];
   width: string;
+  widthRem: number;
 };
 
 function buildSolutionsMenu(): MegaMenu {
-  const groups = landingUseCaseGroupedOptions;
+  const personalUseCases = [
+    ...(landingUseCaseGroupedOptions.find((group) => group.label === "Personal")
+      ?.useCases ?? []),
+    ...(landingUseCaseGroupedOptions.find((group) => group.label === "Public")
+      ?.useCases ?? []),
+  ];
+  const groups = landingUseCaseGroupedOptions
+    .filter((group) => group.label !== "Public")
+    .map((group) =>
+      group.label === "Personal"
+        ? { ...group, useCases: personalUseCases }
+        : group
+    );
 
-  const richColumns: MenuColumn[] = groups.slice(0, 2).map((group) => ({
+  const richColumns: MenuColumn[] = groups.map((group) => ({
     heading: group.label.toUpperCase(),
     variant: "rich",
     links: group.useCases.map((uc) => ({
       label: uc.label,
-      description: group.description,
       href: `/for/${uc.id}`,
       emoji: uc.emoji,
     })),
   }));
 
-  const startedLinks: MenuLink[] = [
-    { label: "Memory", href: "/#memory" },
-    { label: "Skills", href: "/#skills" },
-    { label: "Watchers", href: "/#autonomous" },
-    { label: "Platforms", href: "/#platforms" },
-    { label: "Self-host", href: "/#hosting" },
-    { label: "Architecture", href: "/guides/architecture/" },
-    { label: "Benchmarks", href: "/guides/memory-benchmarks/" },
-  ];
-
   return {
     id: "solutions",
     label: "Solutions",
-    width: "min(56rem, calc(100vw - 2rem))",
-    columns: [
-      ...richColumns,
-      {
-        heading: "GET STARTED",
-        variant: "plain",
-        links: startedLinks,
-      },
-    ],
+    width: "min(32rem, calc(100vw - 2rem))",
+    widthRem: 32,
+    columns: richColumns,
   };
 }
 
 const RESOURCES_MENU: MegaMenu = {
   id: "resources",
   label: "Resources",
-  width: "min(36rem, calc(100vw - 2rem))",
+  width: "min(28rem, calc(100vw - 2rem))",
+  widthRem: 28,
   columns: [
     {
       heading: "LEARN",
@@ -135,14 +135,27 @@ function GitHubMark() {
   );
 }
 
-function MegaMenuPanel({ menu }: { menu: MegaMenu }) {
+function MegaMenuPanel({
+  menu,
+  left,
+  onMouseEnter,
+  onMouseLeave,
+}: {
+  menu: MegaMenu;
+  left: number;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
+}) {
   return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: hover bridge keeps the fixed mega menu open while the pointer moves from the trigger into the panel.
     <div
-      class="absolute top-full left-0 pt-2 z-50"
-      style={{ width: menu.width }}
+      class="fixed top-14 pt-2 z-50"
+      style={{ width: menu.width, left }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
     >
       <div
-        class="rounded-2xl bg-white p-6 grid gap-x-8 gap-y-2"
+        class="rounded-2xl bg-white p-4 grid gap-x-6 gap-y-2"
         style={{
           gridTemplateColumns: `repeat(${menu.columns.length}, minmax(0, 1fr))`,
           border: "1px solid var(--color-page-border)",
@@ -152,28 +165,33 @@ function MegaMenuPanel({ menu }: { menu: MegaMenu }) {
         {menu.columns.map((col) => (
           <div key={col.heading} class="min-w-0">
             <div
-              class="text-[11px] font-semibold tracking-[0.12em] uppercase mb-3"
+              class="text-[10px] font-semibold tracking-[0.12em] uppercase mb-2"
               style={{ color: "var(--color-page-text-muted)" }}
             >
               {col.heading}
             </div>
-            <ul class="flex flex-col gap-1">
+            <ul class="flex flex-col gap-0.5">
               {col.links.map((link) => (
                 <li key={link.href}>
                   <a
                     href={link.href}
-                    class="flex items-start gap-3 rounded-lg p-2 -mx-2 transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
+                    class="flex items-start gap-2 rounded-lg p-1.5 -mx-1.5 transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
                   >
+                    {link.emoji ? (
+                      <span class="mt-0.5 text-[13px]" aria-hidden="true">
+                        {link.emoji}
+                      </span>
+                    ) : null}
                     <span class="flex flex-col min-w-0">
                       <span
-                        class="text-[14px] font-semibold leading-snug"
+                        class="text-[13px] font-semibold leading-snug"
                         style={{ color: "var(--color-page-text)" }}
                       >
                         {link.label}
                       </span>
                       {col.variant === "rich" && link.description ? (
                         <span
-                          class="text-[12px] leading-snug mt-0.5 truncate"
+                          class="text-[11px] leading-snug mt-0.5 truncate"
                           style={{ color: "var(--color-page-text-muted)" }}
                         >
                           {link.description}
@@ -201,21 +219,53 @@ function MegaMenuTrigger({
   setOpenId: (id: string | null) => void;
 }) {
   const open = openId === menu.id;
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLDivElement | null>(null);
+  const closeTimerRef = useRef<number | undefined>(undefined);
+  const [panelLeft, setPanelLeft] = useState(16);
+
+  function cancelClose() {
+    if (closeTimerRef.current) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = undefined;
+    }
+  }
+
+  function openMenu() {
+    cancelClose();
+    const rect = triggerRef.current?.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const panelWidth = Math.min(menu.widthRem * 16, viewportWidth - 32);
+    const unclampedLeft = rect?.left ?? 16;
+    const left = Math.max(
+      16,
+      Math.min(unclampedLeft, viewportWidth - panelWidth - 16)
+    );
+
+    setPanelLeft(left);
+    setOpenId(menu.id);
+  }
+
+  function scheduleClose() {
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(() => {
+      setOpenId(null);
+      closeTimerRef.current = undefined;
+    }, 160);
+  }
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: hover disclosure wrapper; the inner button is keyboard-focusable and drives the same open state via onFocus.
     <div
-      ref={containerRef}
+      ref={triggerRef}
       class="relative"
-      onMouseEnter={() => setOpenId(menu.id)}
-      onMouseLeave={() => setOpenId(null)}
+      onMouseEnter={openMenu}
+      onMouseLeave={scheduleClose}
     >
       <button
         type="button"
         aria-haspopup="true"
         aria-expanded={open}
-        onFocus={() => setOpenId(menu.id)}
+        onFocus={openMenu}
         class="inline-flex items-center text-[14px] font-medium px-3 h-9 rounded-full transition-colors"
         style={{
           color: "var(--color-page-text)",
@@ -228,7 +278,14 @@ function MegaMenuTrigger({
         {menu.label}
         <ChevronDown />
       </button>
-      {open ? <MegaMenuPanel menu={menu} /> : null}
+      {open ? (
+        <MegaMenuPanel
+          menu={menu}
+          left={panelLeft}
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+        />
+      ) : null}
     </div>
   );
 }
@@ -240,6 +297,7 @@ type NavProps = {
 export function Nav({ currentPath: _currentPath = "/" }: NavProps) {
   const [openId, setOpenId] = useState<string | null>(null);
   const solutions = buildSolutionsMenu();
+  const loginUrl = getOwlettoLoginUrl();
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -311,7 +369,7 @@ export function Nav({ currentPath: _currentPath = "/" }: NavProps) {
               />
             </a>
             <a
-              href="/getting-started"
+              href={loginUrl}
               class="hidden sm:inline-flex items-center text-[14px] font-medium px-3 h-9 rounded-full transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
               style={{ color: "var(--color-page-text)" }}
             >

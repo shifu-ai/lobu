@@ -4,14 +4,15 @@ import {
   DEFAULT_LANDING_USE_CASE_ID,
   type SurfaceHeroCopy,
 } from "../use-case-showcases";
+import { ArchitectureSection } from "./ArchitectureSection";
 import { CTA } from "./CTA";
 import { DataModelSection } from "./DataModelSection";
 import { FeatureBlock } from "./FeatureBlock";
 import {
-  BenchmarkGraphic,
   HostingGraphic,
   LogoStrip,
   PlatformsGraphic,
+  SharedMemoryGraphic,
   SkillsGraphic,
   WatcherGraphic,
 } from "./FeatureGraphics";
@@ -65,12 +66,12 @@ export function LandingPage(props: {
         id="memory"
       >
         <FeatureBlock
-          eyebrow="Beats other memory systems"
+          eyebrow="Shared memory for every agent"
           title="Turn data into shared, structured memory."
-          description="Tell one agent something and the rest already know. Lobu Memory is the shared brain across your team's agents, pulled from the tools you already use, recalled when it matters."
-          ctaLabel="See benchmark methodology"
-          ctaHref="/guides/memory-benchmarks/"
-          graphic={<BenchmarkGraphic />}
+          description="Tell one agent something and the rest already know. Lobu Memory gives every agent the same typed entities and event history, recalled through MCP when it matters."
+          ctaLabel="Read the memory guide"
+          ctaHref="/getting-started/memory/"
+          graphic={<SharedMemoryGraphic />}
         />
       </SectionCornerLabels>
 
@@ -139,6 +140,8 @@ export function LandingPage(props: {
           graphic={<HostingGraphic />}
         />
       </SectionCornerLabels>
+
+      <ArchitectureSection activeUseCaseId={activeUseCaseId} />
 
       <div class="py-20" id="data-model">
         <DataModelSection />

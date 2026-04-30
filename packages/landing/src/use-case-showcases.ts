@@ -49,9 +49,13 @@ export type SurfaceHeroCopy = {
   description: string;
 };
 
+type SurfaceHeroCopyOverride = Partial<SurfaceHeroCopy> & {
+  title: string;
+};
+
 type SurfaceHeroCopyConfig = {
   default: SurfaceHeroCopy;
-  byUseCase?: Partial<Record<LandingUseCaseId, SurfaceHeroCopy>>;
+  byUseCase?: Partial<Record<LandingUseCaseId, SurfaceHeroCopyOverride>>;
 };
 
 export type ShowcaseSkillWorkspacePreview = SkillWorkspacePreviewData & {
@@ -2599,7 +2603,6 @@ export const landingUseCaseRouteEntries: Array<{
   })),
   { routeId: "venture-capital", useCaseId: "market" },
   { routeId: "market-intelligence", useCaseId: "market" },
-  { routeId: "careops", useCaseId: "market" },
 ];
 
 export const DEFAULT_LANDING_USE_CASE_ID: LandingUseCaseId = "market";

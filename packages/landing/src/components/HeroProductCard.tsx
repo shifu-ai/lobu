@@ -927,7 +927,7 @@ function AppShell({
             <span aria-hidden="true">/</span>
             <span style={{ color: "var(--color-page-text)" }}>{pageTitle}</span>
           </div>
-          <div class="flex items-center gap-3">
+          <div class="flex flex-wrap items-center gap-3">
             <div class="flex flex-col">
               <h3
                 class="font-display text-[20px] font-semibold leading-tight"
@@ -948,7 +948,9 @@ function AppShell({
               ) : null}
             </div>
             {toolbar ? (
-              <div class="ml-auto flex items-center gap-2">{toolbar}</div>
+              <div class="ml-auto hidden max-w-full flex-wrap items-center justify-end gap-2 sm:flex">
+                {toolbar}
+              </div>
             ) : null}
           </div>
         </div>
@@ -1012,12 +1014,13 @@ function GhostButton({
 function SearchInput() {
   return (
     <span
-      class="inline-flex items-center gap-2 h-8 px-3 rounded-md text-[13px]"
+      class="hidden sm:inline-flex items-center gap-2 h-8 px-3 rounded-md text-[13px]"
       style={{
         background: "white",
         color: "var(--color-page-text-muted)",
         border: "1px solid var(--color-page-border)",
-        minWidth: "200px",
+        minWidth: "0",
+        width: "min(200px, 42vw)",
       }}
       aria-hidden="true"
     >
@@ -1198,231 +1201,149 @@ function MembersTable({ rows }: { rows: RecordRow[] }) {
   );
 }
 
-function EditEntitySheet() {
+const SUMMARY_SCHEMA_FIELDS = [
+  { name: "identity", type: "string", required: true },
+  { name: "preferences", type: "json", required: false },
+  { name: "decisions", type: "json[]", required: false },
+  { name: "valid_from", type: "datetime", required: false },
+  { name: "embedding", type: "vector", required: false },
+];
+
+const SUMMARY_RELATIONSHIPS = [
+  { verb: "owns", target: "Asset", cardinality: "1 → many" },
+  { verb: "subscribes to", target: "Subscription", cardinality: "1 → 1" },
+  { verb: "follows", target: "Topic", cardinality: "many → many" },
+];
+
+function EntitySchemaSummary({
+  entityLabel,
+  emoji,
+}: {
+  entityLabel: string;
+  emoji: string;
+}) {
   return (
     <div
-      class="absolute right-0 top-0 bottom-0 w-[350px] hidden lg:flex flex-col"
-      style={{
-        background: "white",
-        borderLeft: "1px solid var(--color-page-border)",
-        boxShadow: "-12px 0 32px rgba(0,0,0,0.06)",
-      }}
+      class="rounded-lg bg-white p-3"
+      style={{ border: "1px solid var(--color-page-border)" }}
     >
-      <div
-        class="px-5 py-4"
-        style={{ borderBottom: "1px solid var(--color-page-border)" }}
-      >
-        <div class="flex items-center gap-2 mb-1">
-          <span class="text-[16px]" aria-hidden="true">
-            👤
-          </span>
-          <h4
-            class="text-[15px] font-semibold"
+      <div class="flex flex-wrap items-start gap-3">
+        <span
+          class="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[15px]"
+          style={{
+            background: "var(--color-page-surface-dim)",
+            border: "1px solid var(--color-page-border)",
+          }}
+          aria-hidden="true"
+        >
+          {emoji}
+        </span>
+        <div class="min-w-0 flex-1">
+          <div
+            class="text-[13px] font-semibold"
             style={{ color: "var(--color-page-text)" }}
           >
-            Edit member entity type
-          </h4>
+            {entityLabel} entity type
+          </div>
+          <p
+            class="mt-0.5 text-[12px] leading-relaxed"
+            style={{ color: "var(--color-page-text-muted)" }}
+          >
+            Structured {entityLabel.toLowerCase()} memory your agents can recall
+            and update.
+          </p>
         </div>
+        <Badge label="Editing schema" tone="amber" />
       </div>
-      <div class="flex-1 px-5 py-4 flex flex-col gap-4 overflow-y-auto">
-        <Field
-          label="Description"
-          value="People your agents remember and act for."
-        />
 
-        <div>
-          <div
-            class="flex items-center mb-2"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            <span class="text-[11px] font-medium uppercase tracking-wider">
-              Metadata schema
-            </span>
-            <span
-              class="ml-auto text-[11px]"
-              style={{ color: "var(--color-page-text-muted)" }}
-            >
-              <PlusIcon size={11} />
-            </span>
-          </div>
-          <div
-            class="rounded-md p-1.5 flex flex-col gap-1 bg-white"
-            style={{ border: "1px solid var(--color-page-border)" }}
-          >
-            {[
-              { name: "identity", type: "string", required: true },
-              { name: "preferences", type: "json", required: false },
-              { name: "decisions", type: "json[]", required: false },
-              { name: "valid_from", type: "datetime", required: false },
-              { name: "embedding", type: "vector(1536)", required: false },
-            ].map((f) => (
-              <div
-                key={f.name}
-                class="flex items-center gap-2 px-2 py-1.5 rounded text-[12px]"
-                style={{
-                  background: "var(--color-page-surface-dim)",
-                  color: "var(--color-page-text)",
-                }}
-              >
-                <span class="font-mono">{f.name}</span>
-                {f.required ? (
-                  <span
-                    class="text-[10px] font-medium uppercase tracking-wider"
-                    style={{ color: "#b45309" }}
-                  >
-                    req
-                  </span>
-                ) : null}
+      <div class="mt-3 grid gap-2 lg:grid-cols-[1.2fr_1fr_0.8fr]">
+        <SummaryGroup title="Metadata schema">
+          {SUMMARY_SCHEMA_FIELDS.map((field) => (
+            <SummaryChip key={field.name}>
+              <span class="font-mono">{field.name}</span>
+              {field.required ? (
                 <span
-                  class="ml-auto text-[11px] font-mono"
-                  style={{ color: "var(--color-page-text-muted)" }}
+                  class="uppercase tracking-wider"
+                  style={{ color: "#b45309" }}
                 >
-                  {f.type}
+                  req
                 </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div
-            class="flex items-center mb-2"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            <span class="text-[11px] font-medium uppercase tracking-wider">
-              Relationships
-            </span>
-            <span
-              class="ml-auto text-[11px]"
-              style={{ color: "var(--color-page-text-muted)" }}
-            >
-              <PlusIcon size={11} />
-            </span>
-          </div>
-          <div
-            class="rounded-md p-1.5 flex flex-col gap-1 bg-white"
-            style={{ border: "1px solid var(--color-page-border)" }}
-          >
-            {[
-              { verb: "owns", target: "Asset", cardinality: "1 → many" },
-              {
-                verb: "subscribes to",
-                target: "Subscription",
-                cardinality: "1 → 1",
-              },
-              { verb: "follows", target: "Topic", cardinality: "many → many" },
-            ].map((r) => (
-              <div
-                key={r.verb}
-                class="flex items-center gap-2 px-2 py-1.5 rounded text-[12px]"
-                style={{
-                  background: "var(--color-page-surface-dim)",
-                  color: "var(--color-page-text)",
-                }}
-              >
-                <span style={{ color: "var(--color-page-text-muted)" }}>→</span>
-                <span class="font-medium">{r.verb}</span>
-                <span style={{ color: "var(--color-page-text)" }}>
-                  {r.target}
-                </span>
-                <span
-                  class="ml-auto text-[10px] font-mono"
-                  style={{ color: "var(--color-page-text-muted)" }}
-                >
-                  {r.cardinality}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        <div>
-          <div
-            class="text-[11px] font-medium uppercase tracking-wider mb-2"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            Watcher templates
-          </div>
-          <div class="flex flex-wrap gap-1">
-            {["new-asset-linked", "first-decision", "inactive-90d"].map((t) => (
+              ) : null}
               <span
-                key={t}
-                class="inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-mono"
-                style={{
-                  background: "var(--color-page-surface-dim)",
-                  color: "var(--color-page-text)",
-                  border: "1px solid var(--color-page-border)",
-                }}
+                class="font-mono"
+                style={{ color: "var(--color-page-text-muted)" }}
               >
-                {t}
+                {field.type}
               </span>
-            ))}
-          </div>
-        </div>
+            </SummaryChip>
+          ))}
+        </SummaryGroup>
 
-        <div>
-          <div
-            class="text-[11px] font-medium uppercase tracking-wider mb-2"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            Permissions
-          </div>
-          <div
-            class="flex items-center justify-between px-2 py-1.5 rounded-md text-[12px]"
-            style={{
-              background: "var(--color-page-surface-dim)",
-              color: "var(--color-page-text)",
-            }}
-          >
-            <span>Public read</span>
-            <span
-              class="font-mono"
-              style={{ color: "var(--color-page-text-muted)" }}
-            >
-              members + agents
-            </span>
-          </div>
-        </div>
-      </div>
-      <div
-        class="px-5 py-3 flex items-center justify-end gap-2"
-        style={{ borderTop: "1px solid var(--color-page-border)" }}
-      >
-        <GhostButton label="Cancel" />
-        <PrimaryButton label="Update" active />
+        <SummaryGroup title="Relationships">
+          {SUMMARY_RELATIONSHIPS.map((rel) => (
+            <SummaryChip key={rel.verb}>
+              <span aria-hidden="true">→</span>
+              <span class="font-medium">{rel.verb}</span>
+              <span>{rel.target}</span>
+              <span
+                class="font-mono"
+                style={{ color: "var(--color-page-text-muted)" }}
+              >
+                {rel.cardinality}
+              </span>
+            </SummaryChip>
+          ))}
+        </SummaryGroup>
+
+        <SummaryGroup title="Automation">
+          {["new-asset-linked", "first-decision", "inactive-90d"].map(
+            (item) => (
+              <SummaryChip key={item}>
+                <span class="font-mono">{item}</span>
+              </SummaryChip>
+            )
+          )}
+        </SummaryGroup>
       </div>
     </div>
   );
 }
 
-function Field({
-  label,
-  value,
-  mono,
+function SummaryGroup({
+  title,
+  children,
 }: {
-  label: string;
-  value: string;
-  mono?: boolean;
+  title: string;
+  children: ComponentChildren;
 }) {
   return (
-    <div class="flex flex-col gap-1">
+    <div
+      class="rounded-md p-2"
+      style={{ background: "var(--color-page-surface-dim)" }}
+    >
       <div
-        class="text-[11px] font-medium uppercase tracking-wider"
+        class="mb-1.5 text-[10px] font-medium uppercase tracking-wider"
         style={{ color: "var(--color-page-text-muted)" }}
       >
-        {label}
+        {title}
       </div>
-      <div
-        class={`px-2.5 h-8 inline-flex items-center rounded-md text-[13px] ${mono ? "font-mono" : ""}`}
-        style={{
-          background: "white",
-          color: "var(--color-page-text)",
-          border: "1px solid var(--color-page-border)",
-        }}
-      >
-        {value}
-      </div>
+      <div class="flex flex-wrap gap-1">{children}</div>
     </div>
+  );
+}
+
+function SummaryChip({ children }: { children: ComponentChildren }) {
+  return (
+    <span
+      class="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px]"
+      style={{
+        background: "white",
+        border: "1px solid var(--color-page-border)",
+        color: "var(--color-page-text)",
+      }}
+    >
+      {children}
+    </span>
   );
 }
 
@@ -2828,10 +2749,13 @@ export function HeroProductCard({
             <PrimaryButton label="New" icon={<PlusIcon size={12} />} />
           </>
         }
-        rightPanel={<EditEntitySheet />}
         onStageChange={onStageChange}
       >
-        <div class="lg:pr-[370px]">
+        <div class="flex flex-col gap-4">
+          <EntitySchemaSummary
+            entityLabel={primaryEntitySingular}
+            emoji={entityEmoji(primaryEntitySingular)}
+          />
           <MembersTable rows={recordRows} />
         </div>
       </AppShell>

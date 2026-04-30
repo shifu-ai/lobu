@@ -41,7 +41,7 @@ const relatedLinks = client.docsRelated.map((link) => {
   if (!showcase) return link;
 
   if (link.href === "/getting-started/memory/") {
-    return { ...link, href: `/memory/for/${showcase.id}/` };
+    return link;
   }
 
   if (link.href.startsWith("/connect-from/")) {

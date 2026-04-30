@@ -86,9 +86,8 @@ export function HeroSection(props: {
     setCycleSeed((s) => s + 1);
   };
 
-  const headlineText =
-    props.heroCopy?.title ?? "Proactive agents that never forget.";
-  const headlineHighlight = props.heroCopy?.highlight ?? "never forget";
+  const headlineText = "Proactive agents that never forget.";
+  const headlineHighlight = "never forget";
   const subhead =
     props.heroCopy?.description ??
     "Build autonomous agents that take action and stay reachable from any chat or AI client.";
@@ -177,7 +176,7 @@ export function HeroSection(props: {
                 key={tab.id}
                 type="button"
                 onClick={() => handleTabClick(tab.id)}
-                class="relative flex items-center justify-center gap-1.5 h-14 text-[15px] font-medium transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
+                class="relative flex items-center justify-center gap-1 sm:gap-1.5 h-14 text-[12px] sm:text-[15px] font-medium transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
                 style={{
                   color: isActive
                     ? "var(--color-page-text)"
@@ -214,8 +213,7 @@ export function HeroSection(props: {
           })}
         </div>
       </div>
-      {/* Active use-case is forwarded down so DemoSection can update */}
-      <span class="sr-only">{activeUseCase.label}</span>
+      <span class="sr-only">Active use case: {activeUseCase.label}</span>
     </section>
   );
 }

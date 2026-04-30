@@ -238,7 +238,6 @@ const gatewayBadges = [
 ];
 
 function GatewayColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
-  const suffix = useCaseId ? `/for/${useCaseId}` : "";
   return (
     <div class="flex flex-col items-center flex-1 min-w-0">
       <div
@@ -250,20 +249,20 @@ function GatewayColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
       <AgentStack useCaseId={useCaseId} />
       <AttachmentPill
         label="Lobu Memory"
-        href={`/memory${suffix}`}
+        href="/getting-started/memory/"
         icon={<MemoryIcon size={11} />}
       />
       <DashedConnector />
       <div
-        class="rounded-lg px-4 py-3 text-center w-full max-w-[200px]"
+        class="rounded-xl px-4 py-3 text-center w-full max-w-[220px] shadow-sm"
         style={{
-          backgroundColor: "rgba(var(--color-tg-accent-rgb), 0.12)",
-          border: "1px solid var(--color-tg-accent)",
+          backgroundColor: "var(--color-page-bg)",
+          border: "1px solid var(--color-page-border)",
         }}
       >
         <div
           class="text-sm font-semibold"
-          style={{ color: "var(--color-tg-accent)" }}
+          style={{ color: "var(--color-page-text)" }}
         >
           {gatewayLayer.label}
         </div>
@@ -278,9 +277,9 @@ function GatewayColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
             const cls =
               "inline-flex items-center gap-1 rounded-full px-2 py-0.5 transition-colors";
             const style = {
-              backgroundColor: "rgba(0,0,0,0.25)",
+              backgroundColor: "var(--color-page-surface-dim)",
               border: "1px solid var(--color-page-border)",
-              color: "var(--color-page-text-muted)",
+              color: "var(--color-page-text)",
             };
             const inner = (
               <>
@@ -307,8 +306,7 @@ function GatewayColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
   );
 }
 
-function RuntimeColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
-  const suffix = useCaseId ? `/for/${useCaseId}` : "";
+function RuntimeColumn() {
   return (
     <div class="flex flex-col items-center flex-1 min-w-0">
       <div
@@ -319,7 +317,7 @@ function RuntimeColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
       </div>
       <AttachmentPill
         label="Lobu Skills"
-        href={`/skills${suffix}`}
+        href="/getting-started/skills/"
         icon={<SkillsIcon size={11} />}
       />
       <DashedConnector />
@@ -418,9 +416,9 @@ function AttachmentPill({
       href={href}
       class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 transition-colors"
       style={{
-        backgroundColor: "rgba(var(--color-tg-accent-rgb), 0.12)",
-        border: "1px solid var(--color-tg-accent)",
-        color: "var(--color-tg-accent)",
+        backgroundColor: "var(--color-page-bg)",
+        border: "1px solid var(--color-page-border)",
+        color: "var(--color-page-text)",
       }}
     >
       {icon}
@@ -602,7 +600,7 @@ export function ArchitectureDiagram({
       <Arrow />
       <GatewayColumn useCaseId={useCaseId} />
       <Arrow />
-      <RuntimeColumn useCaseId={useCaseId} />
+      <RuntimeColumn />
     </div>
   );
 }

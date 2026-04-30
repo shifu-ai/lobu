@@ -18,8 +18,8 @@
   --color-tg-bg-secondary: rgb(15, 15, 15);
   --color-tg-bubble-out: #c2410c;
   --color-tg-bubble-in: rgb(33, 33, 33);
-  --color-tg-accent: #f97316;
-  --color-tg-accent-rgb: 249, 115, 22;
+  --color-tg-accent: #c2410c;
+  --color-tg-accent-rgb: 194, 65, 12;
   --color-tg-border: rgb(48, 48, 48);
   --color-tg-text: white;
   --color-tg-meta: rgba(255, 255, 255, 0.533);
@@ -155,8 +155,8 @@ button.chat-action-btn {
 
 button.chat-action-btn:hover {
   transform: translateY(-1px) scale(1.04);
-  box-shadow: 0 2px 14px var(--chat-btn-glow, rgba(249, 115, 22, 0.4));
-  background-color: var(--chat-btn-glow, rgba(249, 115, 22, 0.12)) !important;
+  box-shadow: 0 2px 14px var(--chat-btn-glow, rgba(194, 65, 12, 0.4));
+  background-color: var(--chat-btn-glow, rgba(194, 65, 12, 0.12)) !important;
 }
 
 /* Schedule dialog */
@@ -296,7 +296,7 @@ button.chat-action-btn:hover {
 }
 
 .blog-prose blockquote {
-  border-left: 3px solid rgba(249, 115, 22, 0.45);
+  border-left: 3px solid rgba(194, 65, 12, 0.45);
   padding: 0.125rem 0 0.125rem 1rem;
   color: rgba(11, 11, 13, 0.7);
 }
