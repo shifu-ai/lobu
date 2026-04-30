@@ -580,10 +580,13 @@ export async function getWatcher(
       FROM watchers i
       LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
       LEFT JOIN watcher_versions sv
-        ON ($3::bigint IS NOT NULL AND sv.id = $3::bigint)
-        OR ($3::bigint IS NULL
-             AND sv.watcher_id = i.watcher_group_id
-             AND sv.version = COALESCE($2::int, i.version))
+        ON sv.id = COALESCE(
+             $3::bigint,
+             (SELECT id FROM watcher_versions
+                WHERE watcher_id = i.watcher_group_id
+                  AND version = COALESCE($2::int, i.version)
+                LIMIT 1)
+           )
       ${buildLatestWatcherRunJoinSql('i', 'wr')}
       WHERE i.id = $1
     `,
