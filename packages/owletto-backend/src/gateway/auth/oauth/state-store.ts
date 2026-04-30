@@ -10,9 +10,9 @@ import { getDb } from "../../../db/client.js";
  * table can hold every flow's nonces; the unique 32-byte token is the row id.
  *
  * Tokens have a 5-minute TTL. Reads are lazy: an expired row is filtered by
- * `expires_at > now()` and best-effort deleted on the same SELECT. A periodic
- * sweeper (run from CoreServices via `setInterval`) deletes any leftover rows
- * older than the window.
+ * `expires_at > now()` and best-effort deleted on the same SELECT. The
+ * periodic `sweep-ephemeral-tables` task (registered with TaskScheduler in
+ * `scheduled/jobs.ts`) deletes any leftover rows older than the window.
  */
 export class OAuthStateStore<T extends object> {
   private static readonly TTL_SECONDS = 5 * 60; // 5 minutes

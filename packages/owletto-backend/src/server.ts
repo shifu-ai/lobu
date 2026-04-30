@@ -130,15 +130,21 @@ async function main() {
   app.route('/', mainApp);
 
   // Boot the unified task scheduler. Periodic platform-internal jobs (token
-  // refresh, classification reconciliation, watcher automation, etc.) live as
-  // rows in `public.runs` (run_type='task') with cron-driven self-rescheduling.
-  // No setInterval, no per-job advisory locks — the runs-queue's claim path
-  // handles cross-pod coordination.
+  // refresh, MCP session cleanup, classification reconciliation, watcher
+  // automation, etc.) live as rows in `public.runs` (run_type='task') with
+  // cron-driven self-rescheduling. No setInterval, no per-job advisory locks
+  // — the runs-queue's claim path handles cross-pod coordination.
   const { TaskScheduler } = await import('./scheduled/task-scheduler');
   const { registerMaintenanceTasks } = await import('./scheduled/jobs');
   const { getLobuCoreServices } = await import('./lobu/gateway');
-  const taskScheduler = new TaskScheduler(getLobuCoreServices().getQueue());
-  registerMaintenanceTasks(taskScheduler, env);
+  const { cleanupExpiredMcpSessions } = await import('./mcp-handler');
+  const coreServices = getLobuCoreServices();
+  const taskScheduler = new TaskScheduler(coreServices.getQueue());
+  registerMaintenanceTasks(taskScheduler, env, {
+    runTokenRefresh: () => coreServices.getTokenRefreshJob().runOnce(),
+    runMcpSessionCleanup: () => cleanupExpiredMcpSessions(),
+    runSweepEphemeralTables: () => coreServices.sweepEphemeralTables(),
+  });
   await taskScheduler.start();
 
   const port = parseInt(process.env.PORT || '8787', 10);

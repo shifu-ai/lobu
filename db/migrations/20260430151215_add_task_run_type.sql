@@ -49,16 +49,21 @@ ALTER TABLE public.runs VALIDATE CONSTRAINT runs_run_type_check_v2;
 ALTER TABLE public.runs DROP CONSTRAINT IF EXISTS runs_run_type_check;
 ALTER TABLE public.runs RENAME CONSTRAINT runs_run_type_check_v2 TO runs_run_type_check;
 
--- 2. Replace the lobu claim index — non-blocking via CONCURRENTLY. Build
---    the new index under a temporary name, then swap.
-CREATE INDEX CONCURRENTLY IF NOT EXISTS runs_lobu_claim_idx_v2
+-- 2. Replace the lobu claim index. Originally written with CONCURRENTLY,
+--    but dbmate's transaction wrapper still presents these to PG as
+--    in-transaction even with `transaction:false`, which breaks
+--    CREATE/DROP INDEX CONCURRENTLY (see comments in
+--    20260426130001_db_integrity_cleanup_concurrent.sql for the same
+--    workaround). The partial index only covers `status = 'pending'`
+--    rows in the lobu lanes — typically a small set since pending rows
+--    are claimed within milliseconds — so the ACCESS EXCLUSIVE held
+--    during the non-concurrent build is sub-second in practice.
+DROP INDEX IF EXISTS public.runs_lobu_claim_idx;
+
+CREATE INDEX runs_lobu_claim_idx
     ON public.runs (run_type, queue_name, priority DESC, run_at ASC, id ASC)
     WHERE status = 'pending'
       AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task');
-
-DROP INDEX CONCURRENTLY IF EXISTS public.runs_lobu_claim_idx;
-
-ALTER INDEX public.runs_lobu_claim_idx_v2 RENAME TO runs_lobu_claim_idx;
 
 -- migrate:down
 

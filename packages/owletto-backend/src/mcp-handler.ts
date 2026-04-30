@@ -50,7 +50,11 @@ const mcpSessionStore = new McpSessionStore();
 
 type SessionAuthContext = AuthContext & { instructions?: string };
 
-// Periodic cleanup of stale in-memory sessions
+// Periodic cleanup of stale IN-MEMORY sessions. This must stay as a per-pod
+// setInterval — each pod owns its own `sessions` Map of live MCP transports
+// and only it can call `entry.transport.close?.()`. The DB-side cleanup
+// (mcpSessionStore.deleteExpiredSessions) is registered as a cross-pod
+// scheduler task in scheduled/jobs.ts so it runs once per cluster per tick.
 setInterval(() => {
   const now = Date.now();
   for (const [id, entry] of sessions) {
@@ -59,8 +63,12 @@ setInterval(() => {
       entry.transport.close?.();
     }
   }
-  void mcpSessionStore.deleteExpiredSessions();
 }, SESSION_CLEANUP_INTERVAL_MS).unref();
+
+/** DB-side cleanup of expired MCP sessions. Wired by `registerMaintenanceTasks`. */
+export async function cleanupExpiredMcpSessions(): Promise<void> {
+  await mcpSessionStore.deleteExpiredSessions();
+}
 
 export function clearInMemoryMcpSessionsForTests(): void {
   sessions.clear();

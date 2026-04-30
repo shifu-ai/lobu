@@ -140,8 +140,14 @@ async function main() {
   await initLobuGateway();
 
   const env = getEnvFromProcess();
-  const taskScheduler = new TaskScheduler(getLobuCoreServices().getQueue());
-  registerMaintenanceTasks(taskScheduler, env);
+  const { cleanupExpiredMcpSessions } = await import('./mcp-handler');
+  const coreServices = getLobuCoreServices();
+  const taskScheduler = new TaskScheduler(coreServices.getQueue());
+  registerMaintenanceTasks(taskScheduler, env, {
+    runTokenRefresh: () => coreServices.getTokenRefreshJob().runOnce(),
+    runMcpSessionCleanup: () => cleanupExpiredMcpSessions(),
+    runSweepEphemeralTables: () => coreServices.sweepEphemeralTables(),
+  });
   await taskScheduler.start();
   const stopScheduler = () => taskScheduler.stop();
 

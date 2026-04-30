@@ -12,12 +12,64 @@ import type { Env } from '@lobu/owletto-sdk';
 import logger from '../utils/logger';
 import { TaskScheduler } from './task-scheduler';
 
+/** Cross-cutting handle to platform services owned by CoreServices that the
+ *  task registry needs to invoke. Boot wires this from getLobuCoreServices(). */
+export interface MaintenanceDeps {
+  /** Periodic token refresh — `runOnce()` does one full scan. */
+  runTokenRefresh: () => Promise<void>;
+  /** MCP-session DB cleanup — drops rows whose expiry has passed. */
+  runMcpSessionCleanup: () => Promise<void>;
+  /** Sweep oauth_states / cli_sessions / rate_limits / grants + archive
+   *  completed runs. Was a per-pod setInterval inside CoreServices. */
+  runSweepEphemeralTables: () => Promise<void>;
+}
+
 /** Reset orphaned scheduled watcher runs once per process on the first
  *  watcher-automation tick. Mirrors the previous behavior gated on
  *  `orphanedWatcherRunsReset` in the old jobs.ts. */
 let orphanedWatcherRunsReset = false;
 
-export function registerMaintenanceTasks(scheduler: TaskScheduler, env: Env): void {
+export function registerMaintenanceTasks(
+  scheduler: TaskScheduler,
+  env: Env,
+  deps: MaintenanceDeps,
+): void {
+  // OAuth token refresh — proactively rotates tokens that will expire within
+  // EXPIRY_BUFFER_MS. Runs every 2 minutes (was a per-pod setInterval inside
+  // TokenRefreshJob; now cross-pod-coordinated via the runs queue).
+  scheduler.register(
+    'token-refresh',
+    async () => {
+      await deps.runTokenRefresh();
+    },
+    { cron: '*/2 * * * *' },
+  );
+
+  // MCP session cleanup — drops expired session rows from the DB. Lives in the
+  // scheduler instead of an mcp-handler module-level setInterval so it runs
+  // once per cluster per tick instead of once per pod. The IN-MEMORY part of
+  // session cleanup stays as a setInterval in mcp-handler.ts because it must
+  // run per-pod (see comment there).
+  scheduler.register(
+    'mcp-session-cleanup',
+    async () => {
+      await deps.runMcpSessionCleanup();
+    },
+    { cron: '*/10 * * * *' },
+  );
+
+  // Hygiene sweep — drops expired rows from oauth_states, cli_sessions,
+  // rate_limits, grants, and archives completed runs. Was previously a
+  // 5-min setInterval inside CoreServices; running it here means one
+  // sweep per cluster per tick instead of one per pod.
+  scheduler.register(
+    'sweep-ephemeral-tables',
+    async () => {
+      await deps.runSweepEphemeralTables();
+    },
+    { cron: '*/5 * * * *' },
+  );
+
   scheduler.register(
     'check-stalled-executions',
     async () => {

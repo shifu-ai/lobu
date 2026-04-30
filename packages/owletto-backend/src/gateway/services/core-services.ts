@@ -169,9 +169,9 @@ export class CoreServices {
   private commandRegistry?: CommandRegistry;
 
   // ============================================================================
-  // Ephemeral-table sweeper (oauth_states, cli_sessions, rate_limits)
+  // Ephemeral-table sweeper — now scheduler-driven, no per-instance state.
+  // See `sweepEphemeralTables` (public method) registered as a periodic task.
   // ============================================================================
-  private ephemeralSweepHandle?: ReturnType<typeof setInterval>;
 
   // ============================================================================
   // Agent Sub-Stores (injectable — host can provide its own implementations)
@@ -267,30 +267,19 @@ export class CoreServices {
     this.initializeCommandRegistry();
     logger.debug("Command registry initialized");
 
-    // 8. Periodic sweeper for the Phase-7 ephemeral PG tables. The lazy
-    // `expires_at > now()` filter on read makes the sweeper a hygiene
-    // task, not a correctness one — running every 5 minutes is plenty.
-    this.ephemeralSweepHandle = setInterval(() => {
-      // In-progress guard: skip the next tick if the previous sweep is still
-      // running. With the multi-table fanout below, a slow PG (or a freshly
-      // restored snapshot with millions of rows to delete) could overlap.
-      if (this.ephemeralSweepInFlight) {
-        logger.debug("Ephemeral sweeper still in progress; skipping tick");
-        return;
-      }
-      this.ephemeralSweepInFlight = true;
-      void this.sweepEphemeralTables().finally(() => {
-        this.ephemeralSweepInFlight = false;
-      });
-    }, 5 * 60 * 1000);
-    logger.debug("Ephemeral PG-table sweeper started (5 min interval)");
+    // Ephemeral-table sweeper used to live here as a per-pod setInterval.
+    // It now runs as a cross-pod-coordinated scheduler task — see
+    // `getRunSweepEphemeralTables()` and the `sweep-ephemeral-tables`
+    // registration in `scheduled/jobs.ts`.
 
     logger.info("Core services initialized successfully");
   }
 
-  private ephemeralSweepInFlight = false;
-
-  private async sweepEphemeralTables(): Promise<void> {
+  /** Public entry point for the scheduler-registered ephemeral-table sweep.
+   *  Deletes expired rows from oauth_states, cli_sessions, rate_limits,
+   *  grants, and archives completed runs. Lazy `expires_at > now()` filters
+   *  on read make this a hygiene task — running ~5 minutes apart is plenty. */
+  async sweepEphemeralTables(): Promise<void> {
     try {
       const [oauth, cli, rate, grants, completedRuns] = await Promise.all([
         sweepExpiredOAuthStates(),
@@ -582,7 +571,8 @@ export class CoreServices {
       `Secret proxy initialized (upstream: ${this.config.anthropicProxy.anthropicBaseUrl || "https://api.anthropic.com"})`
     );
 
-    // Start background token refresh job
+    // Construct the token refresh job — actual scheduling is wired by the
+    // TaskScheduler at boot (see `scheduled/jobs.ts:registerMaintenanceTasks`).
     if (!this.authProfilesManager) {
       throw new Error(
         "Auth profiles manager must be initialized before token refresh job"
@@ -591,8 +581,7 @@ export class CoreServices {
     this.tokenRefreshJob = new TokenRefreshJob(this.authProfilesManager, [
       { providerId: "claude", oauthClient: new OAuthClient(CLAUDE_PROVIDER) },
     ]);
-    this.tokenRefreshJob.start();
-    logger.debug("Token refresh job started");
+    logger.debug("Token refresh job constructed");
 
     // Register Claude OAuth module
     this.oauthStateStore = createOAuthStateStore("claude");
@@ -1026,14 +1015,8 @@ export class CoreServices {
   async shutdown(): Promise<void> {
     logger.info("Shutting down core services...");
 
-    if (this.ephemeralSweepHandle) {
-      clearInterval(this.ephemeralSweepHandle);
-      this.ephemeralSweepHandle = undefined;
-    }
-
-    if (this.tokenRefreshJob) {
-      this.tokenRefreshJob.stop();
-    }
+    // Ephemeral sweeper + token refresh have no per-instance lifecycle anymore
+    // — scheduling is owned by the TaskScheduler. Nothing to stop here.
 
     if (this.queueProducer) {
       await this.queueProducer.stop();
@@ -1058,6 +1041,13 @@ export class CoreServices {
   getQueue(): IMessageQueue {
     if (!this.queue) throw new Error("Queue not initialized");
     return this.queue;
+  }
+
+  getTokenRefreshJob(): TokenRefreshJob {
+    if (!this.tokenRefreshJob) {
+      throw new Error("Token refresh job not initialized");
+    }
+    return this.tokenRefreshJob;
   }
 
   getQueueProducer(): QueueProducer {
