@@ -29,12 +29,26 @@ describe('getMcpInstallTargets', () => {
       value: `codex mcp add owletto --url ${mcpUrl}`,
     });
 
-    const openclawCommands = openclaw?.actions.filter(
-      (action): action is { type: 'command'; label: string; value: string } =>
-        action.type === 'command'
-    );
-    expect(openclawCommands?.length).toBeGreaterThan(0);
-    expect(openclawCommands?.some((action) => action.value.includes(mcpUrl))).toBe(true);
+    expect(openclaw?.actions).toContainEqual({
+      type: 'command',
+      label: 'Install plugin',
+      value: 'openclaw plugins install owletto-openclaw-plugin',
+    });
+    expect(openclaw?.actions).toContainEqual({
+      type: 'command',
+      label: 'Log in to Lobu',
+      value: 'lobu login',
+    });
+    expect(openclaw?.actions).toContainEqual({
+      type: 'command',
+      label: 'Write plugin config',
+      value: `lobu memory configure --url ${mcpUrl}`,
+    });
+    expect(openclaw?.actions).toContainEqual({
+      type: 'command',
+      label: 'Verify connectivity',
+      value: `lobu memory health --url ${mcpUrl}`,
+    });
   });
 
   it('encodes the runtime mcpUrl into the Cursor install link', () => {
