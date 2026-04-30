@@ -88,7 +88,13 @@ export const GetWatcherSchema = Type.Object({
   template_version: Type.Optional(
     Type.Number({
       description:
-        "Override template version for viewing results. If not provided, uses the watcher's current pinned version. Useful for viewing results with a different renderer or schema.",
+        "Override template version *number* for viewing results. If not provided, uses the watcher's current pinned version. Useful for viewing results with a different renderer or schema. Prefer `template_version_id` when you need a stable reference (version numbers can change if a chain is reorganized).",
+    })
+  ),
+  template_version_id: Type.Optional(
+    Type.Number({
+      description:
+        "Pin to a specific watcher_versions.id. Workers receive this from runs.approved_input.version_id and pass it back so the agent loop reads the same version it extracted with, even if the group is edited mid-run.",
     })
   ),
   page: Type.Optional(Type.Number({ description: 'Page number for pagination (default: 1)' })),
@@ -493,10 +499,21 @@ export async function getWatcher(
   // for condensation columns); when it differs, the JOIN still resolves
   // the right row via (watcher_id, version) which is unique.
   //
+  // Two override mechanisms:
+  //   - template_version_id (preferred): an exact watcher_versions.id. Used
+  //     by the worker run loop to read the snapshotted version even after a
+  //     mid-run group edit. Joins by id so it works regardless of which
+  //     watcher in the group owns the version row.
+  //   - template_version (legacy): a version *number*. Resolves via the
+  //     group's root watcher_id (watcher_group_id), since after the group-
+  //     edit refactor version chains live on the group root, not on each
+  //     non-root assignment.
+  //
   // Tagged-template + sql.unsafe() inside the template breaks PGlite's
   // simple-query mode (prepare=false), so we keep this path as a single
   // unsafe call instead.
   const requestedVersion = args.template_version ?? null;
+  const requestedVersionId = args.template_version_id ?? null;
   const namespacesLiteral = STANDARD_IDENTITY_NAMESPACES.map((n) => `'${n}'`).join(',');
   const watcherQueryPromise = args.watcher_id
     ? sql.unsafe(
@@ -563,12 +580,14 @@ export async function getWatcher(
       FROM watchers i
       LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
       LEFT JOIN watcher_versions sv
-        ON sv.watcher_id = i.id
-        AND sv.version = COALESCE($2::int, i.version)
+        ON ($3::bigint IS NOT NULL AND sv.id = $3::bigint)
+        OR ($3::bigint IS NULL
+             AND sv.watcher_id = i.watcher_group_id
+             AND sv.version = COALESCE($2::int, i.version))
       ${buildLatestWatcherRunJoinSql('i', 'wr')}
       WHERE i.id = $1
     `,
-        [args.watcher_id, requestedVersion]
+        [args.watcher_id, requestedVersion, requestedVersionId]
       )
     : null;
 
@@ -706,6 +725,8 @@ export async function getWatcher(
     // watcherRow directly — no separate round-trip.
     //
     // available_versions list is opt-in (edit sheet) — still its own query.
+    // Reads from the group root's chain (watcher_group_id) so non-root
+    // assignments see the same version history as the root.
     const versionsQuery = args.include_versions
       ? await sql`
           SELECT
@@ -714,7 +735,9 @@ export async function getWatcher(
             wv.created_at,
             (wv.id = ${watcherRow.current_version_id}) as is_current
           FROM watcher_versions wv
-          WHERE wv.watcher_id = ${args.watcher_id}
+          WHERE wv.watcher_id = (
+            SELECT watcher_group_id FROM watchers WHERE id = ${args.watcher_id}
+          )
           ORDER BY wv.version DESC
         `
       : ([] as unknown[]);

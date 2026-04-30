@@ -576,6 +576,50 @@ export async function deleteEntity(
           WHERE COALESCE(entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[]
         )
       `;
+      // Before hard-deleting watchers: if any of those rows are group roots
+      // (id = watcher_group_id) with surviving siblings, transfer ownership
+      // of the shared watcher_versions chain to a sibling so the upcoming
+      // ON DELETE CASCADE doesn't wipe out the version row that the rest
+      // of the group still depends on.
+      await tx`
+        UPDATE watcher_versions wv
+        SET watcher_id = s.new_root
+        FROM (
+          SELECT r.old_root, MIN(s.id) AS new_root
+          FROM (
+            SELECT w.id AS old_root
+            FROM watchers w
+            WHERE w.id = w.watcher_group_id
+              AND COALESCE(w.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[]
+          ) r
+          JOIN watchers s
+            ON s.watcher_group_id = r.old_root
+           AND s.id <> r.old_root
+           AND NOT (COALESCE(s.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[])
+          GROUP BY r.old_root
+        ) s
+        WHERE wv.watcher_id = s.old_root
+      `;
+      await tx`
+        UPDATE watchers w
+        SET watcher_group_id = s.new_root,
+            source_watcher_id = CASE WHEN w.source_watcher_id = s.old_root THEN s.new_root ELSE w.source_watcher_id END
+        FROM (
+          SELECT r.old_root, MIN(s.id) AS new_root
+          FROM (
+            SELECT w.id AS old_root
+            FROM watchers w
+            WHERE w.id = w.watcher_group_id
+              AND COALESCE(w.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[]
+          ) r
+          JOIN watchers s
+            ON s.watcher_group_id = r.old_root
+           AND s.id <> r.old_root
+           AND NOT (COALESCE(s.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[])
+          GROUP BY r.old_root
+        ) s
+        WHERE w.watcher_group_id = s.old_root
+      `;
       await tx`
         DELETE FROM watchers
         WHERE COALESCE(entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[]
@@ -605,6 +649,48 @@ export async function deleteEntity(
           FROM watchers
           WHERE cardinality(COALESCE(entity_ids, '{}'::bigint[])) = 0
         )
+      `;
+      // Same group-root ownership transfer as above — predicate here is
+      // "now-orphaned watcher rows" (entity_ids is empty after the array
+      // pruning a few statements up).
+      await tx`
+        UPDATE watcher_versions wv
+        SET watcher_id = s.new_root
+        FROM (
+          SELECT r.old_root, MIN(s.id) AS new_root
+          FROM (
+            SELECT w.id AS old_root
+            FROM watchers w
+            WHERE w.id = w.watcher_group_id
+              AND cardinality(COALESCE(w.entity_ids, '{}'::bigint[])) = 0
+          ) r
+          JOIN watchers s
+            ON s.watcher_group_id = r.old_root
+           AND s.id <> r.old_root
+           AND cardinality(COALESCE(s.entity_ids, '{}'::bigint[])) > 0
+          GROUP BY r.old_root
+        ) s
+        WHERE wv.watcher_id = s.old_root
+      `;
+      await tx`
+        UPDATE watchers w
+        SET watcher_group_id = s.new_root,
+            source_watcher_id = CASE WHEN w.source_watcher_id = s.old_root THEN s.new_root ELSE w.source_watcher_id END
+        FROM (
+          SELECT r.old_root, MIN(s.id) AS new_root
+          FROM (
+            SELECT w.id AS old_root
+            FROM watchers w
+            WHERE w.id = w.watcher_group_id
+              AND cardinality(COALESCE(w.entity_ids, '{}'::bigint[])) = 0
+          ) r
+          JOIN watchers s
+            ON s.watcher_group_id = r.old_root
+           AND s.id <> r.old_root
+           AND cardinality(COALESCE(s.entity_ids, '{}'::bigint[])) > 0
+          GROUP BY r.old_root
+        ) s
+        WHERE w.watcher_group_id = s.old_root
       `;
       await tx`
         DELETE FROM watchers

@@ -22,6 +22,13 @@ export interface WatcherRunPayload {
   window_start: string;
   window_end: string;
   dispatch_source: WatcherDispatchSource;
+  /**
+   * Snapshot of the watcher's `current_version_id` at run-creation time.
+   * The agent and `complete_window` use this fixed version for the entire
+   * extraction lifecycle so a mid-run group edit cannot validate v1's output
+   * against v2's schema.
+   */
+  version_id: number | null;
 }
 
 // ============================================
@@ -194,12 +201,23 @@ async function createWatcherRunWithClient(
     return { runId: existing.id, status: existing.status, created: false };
   }
 
+  // Snapshot the watcher's current_version_id at run-creation time so the
+  // entire run uses a fixed version even if the group is edited mid-run.
+  const versionRows = await sql`
+    SELECT current_version_id FROM watchers WHERE id = ${params.watcherId} LIMIT 1
+  `;
+  const snapshotVersionId =
+    versionRows.length > 0 && versionRows[0].current_version_id != null
+      ? Number(versionRows[0].current_version_id)
+      : null;
+
   const payload: WatcherRunPayload = {
     watcher_id: params.watcherId,
     agent_id: params.agentId,
     window_start: params.windowStart,
     window_end: params.windowEnd,
     dispatch_source: params.dispatchSource,
+    version_id: snapshotVersionId,
   };
 
   const inserted = await sql`
