@@ -82,9 +82,12 @@ function listProfiles(profileDir: string): ChromeProfile[] {
 }
 
 function sanitizeDirSegment(value: string): string {
-  return (
-    value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "default"
-  );
+  const sanitized = value.replace(/[^a-zA-Z0-9._-]+/g, "-");
+  let start = 0;
+  let end = sanitized.length;
+  while (start < end && sanitized[start] === "-") start++;
+  while (end > start && sanitized[end - 1] === "-") end--;
+  return sanitized.slice(start, end) || "default";
 }
 
 function getDedicatedChromeProfileDir(name: string): string {

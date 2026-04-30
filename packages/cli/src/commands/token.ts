@@ -21,5 +21,5 @@ export async function tokenCommand(options: {
 
   console.log(chalk.cyan(`\n  Context: ${target.name}`));
   console.log(chalk.dim(`  API URL: ${target.apiUrl}`));
-  console.log(`  Token: ${token}\n`);
+  console.log("  Token: available (use `lobu token --raw` to print it)\n");
 }
