@@ -392,6 +392,56 @@ describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
   });
 });
 
+describe('platform ownership checks', () => {
+  beforeEach(async () => {
+    await resetTestDatabase();
+    await seedOrg(ORG_A);
+    await seedAgent(ORG_A, 'owner-agent');
+    await seedAgent(ORG_A, 'other-agent');
+    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
+    authStash.organizationId = ORG_A;
+    authStash.authSource = 'session';
+    authStash.mcpAuthInfo = null;
+    chatManagerStash.manager = null;
+  });
+
+  test('GET /:agentId/platforms/:platformId rejects platforms bound to another agent', async () => {
+    const app = await importAgentRoutes();
+    const create = await app.request('/owner-agent/platforms/by-stable-id/owner-agent-slack', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ platform: 'slack', config: { botToken: 'xoxb-test' } }),
+    });
+    expect(create.status).toBe(201);
+
+    const leaked = await app.request('/other-agent/platforms/owner-agent-slack');
+    expect(leaked.status).toBe(404);
+
+    const allowed = await app.request('/owner-agent/platforms/owner-agent-slack');
+    expect(allowed.status).toBe(200);
+  });
+
+  test('start/stop reject platforms bound to another agent', async () => {
+    const app = await importAgentRoutes();
+    const create = await app.request('/owner-agent/platforms/by-stable-id/owner-agent-telegram', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ platform: 'telegram', config: { botToken: 'tg-test' } }),
+    });
+    expect(create.status).toBe(201);
+
+    const start = await app.request('/other-agent/platforms/owner-agent-telegram/start', {
+      method: 'POST',
+    });
+    expect(start.status).toBe(404);
+
+    const stop = await app.request('/other-agent/platforms/owner-agent-telegram/stop', {
+      method: 'POST',
+    });
+    expect(stop.status).toBe(404);
+  });
+});
+
 describe('concurrent-apply race fixes', () => {
   beforeEach(async () => {
     await resetTestDatabase();

@@ -114,7 +114,14 @@ async function executePlan(ctx: ApplyContext): Promise<void> {
     if (!row.desired) continue;
     const desired = ctx.state.agents.find((a) => a.metadata.agentId === row.id);
     if (!desired) continue;
-    await ctx.client.upsertAgent(desired.metadata);
+    if (row.verb === "create") {
+      await ctx.client.upsertAgent(desired.metadata);
+    } else {
+      await ctx.client.patchAgentMetadata(row.id, {
+        name: desired.metadata.name,
+        description: desired.metadata.description,
+      });
+    }
     printText(renderProgress(row.verb, "agent", row.id));
   }
 

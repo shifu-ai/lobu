@@ -136,6 +136,60 @@ describe("apply diff — settings", () => {
     }
     expect(renderPlan(plan)).toMatchSnapshot();
   });
+
+  test("updates when provider declarations change but ignores installedAt churn", () => {
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        settings: {
+          installedProviders: [
+            { providerId: "anthropic", installedAt: 200 },
+            { providerId: "openai", installedAt: 200 },
+          ],
+        },
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([
+        [
+          "triage",
+          {
+            installedProviders: [{ providerId: "anthropic", installedAt: 100 }],
+            updatedAt: 0,
+          },
+        ],
+      ]),
+      platformsByAgent: new Map([["triage", []]]),
+    };
+    const plan = computeDiff(desired, remote);
+    const settingsRow = plan.rows.find((r) => r.kind === "settings");
+    expect(settingsRow?.verb).toBe("update");
+    if (settingsRow?.kind === "settings") {
+      expect(settingsRow.changedFields).toContain("installedProviders");
+    }
+
+    const unchanged = computeDiff(desired, {
+      ...remote,
+      agentSettings: new Map<string, AgentSettings | null>([
+        [
+          "triage",
+          {
+            installedProviders: [
+              { providerId: "anthropic", installedAt: 1 },
+              { providerId: "openai", installedAt: 2 },
+            ],
+            updatedAt: 0,
+          },
+        ],
+      ]),
+    });
+    const unchangedSettingsRow = unchanged.rows.find(
+      (r) => r.kind === "settings"
+    );
+    expect(unchangedSettingsRow?.verb).toBe("noop");
+  });
 });
 
 describe("apply diff — platforms", () => {

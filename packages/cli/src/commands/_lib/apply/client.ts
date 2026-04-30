@@ -109,7 +109,7 @@ async function resolveAuth(
 ): Promise<{ token: string; mcpUrl: string; orgSlug: string }> {
   const org = resolveOrg(orgFlag);
   if (org) {
-    const orgSession = getSessionForOrg(org, storePath);
+    const orgSession = getSessionForOrg(org, storePath, urlFlag);
     if (orgSession) {
       const result = await getUsableToken(orgSession.key, storePath);
       if (result) {
@@ -256,6 +256,17 @@ export class ApplyClient {
       [200, 201]
     );
     return body;
+  }
+
+  async patchAgentMetadata(
+    agentId: string,
+    agent: { name?: string; description?: string }
+  ): Promise<void> {
+    await this.request(
+      "PATCH",
+      `/api/${this.orgSlug}/agents/${agentId}`,
+      agent
+    );
   }
 
   async getAgentSettings(agentId: string): Promise<AgentSettings | null> {

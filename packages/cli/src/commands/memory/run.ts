@@ -22,7 +22,7 @@ export async function memoryRunCommand(
   let mcpUrl: string;
 
   if (org) {
-    const orgSession = getSessionForOrg(org);
+    const orgSession = getSessionForOrg(org, undefined, options.url);
     if (orgSession) {
       mcpUrl = orgSession.key;
     } else {

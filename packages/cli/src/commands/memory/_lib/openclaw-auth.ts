@@ -137,11 +137,12 @@ export function getActiveSession(storePath?: string): {
 
 export function getSessionForOrg(
   orgSlug: string,
-  storePath?: string
+  storePath?: string,
+  urlFlag?: string
 ): { session: MemorySession; key: string; path: string } | null {
   validateOrgSlug(orgSlug);
   const path = getMemoryPreferencesPath(storePath);
-  const base = resolveServerUrl(undefined, storePath) ?? DEFAULT_MCP_URL;
+  const base = resolveServerUrl(urlFlag, storePath) ?? DEFAULT_MCP_URL;
   const key = mcpUrlForOrg(base, orgSlug);
   return {
     session: {

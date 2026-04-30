@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AgentSettings, LobuTomlConfig, TomlAgentEntry } from "@lobu/core";
 import { parse as parseToml } from "smol-toml";
@@ -149,11 +149,172 @@ function collectEnvRefs(config: LobuTomlConfig, out: Set<string>): void {
   }
 }
 
+interface SkillFrontmatter {
+  name?: string;
+  description?: string;
+  nixPackages?: string[];
+  network?: {
+    allow?: string[];
+    deny?: string[];
+    judge?: Array<string | { domain: string; judge?: string }>;
+  };
+  judges?: Record<string, string>;
+  mcpServers?: Record<
+    string,
+    {
+      url?: string;
+      type?: string;
+      command?: string;
+      args?: string[];
+    }
+  >;
+}
+
+interface LoadedSkillFile {
+  name: string;
+  content: string;
+  frontmatter?: SkillFrontmatter;
+}
+
+function normalizeDomainPattern(pattern: string): string {
+  const trimmed = pattern.trim().toLowerCase();
+  if (!trimmed) return "";
+  if (trimmed === "*") return "*";
+  if (trimmed.startsWith("*.")) return `.${trimmed.slice(2)}`;
+  return trimmed;
+}
+
+function normalizeDomainPatterns(patterns?: string[]): string[] | undefined {
+  if (!patterns?.length) return undefined;
+  const normalized = [
+    ...new Set(patterns.map(normalizeDomainPattern).filter(Boolean)),
+  ];
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+async function parseSkillFrontmatter(raw: string): Promise<{
+  frontmatter: SkillFrontmatter | null;
+  body: string;
+}> {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match?.[1]) return { frontmatter: null, body: raw.trim() };
+  const { parse: parseYaml } = await import("yaml");
+  const parsed = parseYaml(match[1]) as SkillFrontmatter | null;
+  return {
+    frontmatter: parsed && typeof parsed === "object" ? parsed : null,
+    body: (match[2] || "").trim(),
+  };
+}
+
+async function loadSkillFiles(dirs: string[]): Promise<LoadedSkillFile[]> {
+  const skillMap = new Map<string, LoadedSkillFile>();
+
+  for (const dir of dirs) {
+    let entries: string[];
+    try {
+      entries = (await readdir(resolve(dir))).sort();
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = join(dir, entry);
+      let entryStat;
+      try {
+        entryStat = await stat(entryPath);
+      } catch {
+        continue;
+      }
+
+      if (entryStat.isDirectory()) {
+        try {
+          const raw = await readFile(join(entryPath, "SKILL.md"), "utf-8");
+          if (!raw.trim()) continue;
+          const { frontmatter, body } = await parseSkillFrontmatter(raw.trim());
+          const name = frontmatter?.name || entry;
+          skillMap.set(name, {
+            name,
+            content: body,
+            ...(frontmatter ? { frontmatter } : {}),
+          });
+        } catch {
+          // Directory without a SKILL.md is not a local skill.
+        }
+        continue;
+      }
+
+      if (!entry.endsWith(".md")) continue;
+      try {
+        const content = await readFile(entryPath, "utf-8");
+        if (content.trim()) {
+          skillMap.set(entry.slice(0, -3), {
+            name: entry.slice(0, -3),
+            content: content.trim(),
+          });
+        }
+      } catch {
+        // Skip unreadable files.
+      }
+    }
+  }
+
+  return Array.from(skillMap.values());
+}
+
+function buildLocalSkills(
+  skillFiles: LoadedSkillFile[]
+): NonNullable<AgentSettings["skillsConfig"]>["skills"] {
+  return skillFiles.map((skillFile) => {
+    const skill: NonNullable<AgentSettings["skillsConfig"]>["skills"][number] =
+      {
+        repo: `local/${skillFile.name}`,
+        name: skillFile.name,
+        content: skillFile.content,
+        enabled: true,
+      };
+    const fm = skillFile.frontmatter;
+    if (!fm) return skill;
+    if (fm.description) skill.description = fm.description;
+    if (fm.nixPackages?.length) skill.nixPackages = fm.nixPackages;
+    if (fm.network || fm.judges) {
+      const judgedDomains = (fm.network?.judge ?? []).map((entry) =>
+        typeof entry === "string"
+          ? { domain: normalizeDomainPattern(entry) }
+          : {
+              domain: normalizeDomainPattern(entry.domain),
+              ...(entry.judge ? { judge: entry.judge } : {}),
+            }
+      );
+      skill.networkConfig = {
+        allowedDomains: normalizeDomainPatterns(fm.network?.allow),
+        deniedDomains: normalizeDomainPatterns(fm.network?.deny),
+        ...(judgedDomains.length > 0 ? { judgedDomains } : {}),
+        ...(fm.judges ? { judges: fm.judges } : {}),
+      };
+    }
+    if (fm.mcpServers && Object.keys(fm.mcpServers).length > 0) {
+      skill.mcpServers = Object.entries(fm.mcpServers).map(([id, mcp]) => ({
+        id,
+        url: mcp.url,
+        type: mcp.type as "sse" | "stdio" | undefined,
+        command: mcp.command,
+        args: mcp.args,
+      }));
+    }
+    return skill;
+  });
+}
+
 function buildAgentSettings(
   agentConfig: TomlAgentEntry,
-  markdown: { identityMd?: string; soulMd?: string; userMd?: string }
+  markdown: { identityMd?: string; soulMd?: string; userMd?: string },
+  skillFiles: LoadedSkillFile[] = []
 ): Partial<AgentSettings> {
   const settings: Partial<AgentSettings> = { ...markdown };
+  const localSkills = buildLocalSkills(skillFiles);
+  if (localSkills.length > 0) {
+    settings.skillsConfig = { skills: localSkills };
+  }
 
   // Providers (ordered, index 0 = primary)
   if (agentConfig.providers.length > 0) {
@@ -172,19 +333,64 @@ function buildAgentSettings(
     }
   }
 
-  // Network — agent-level only (skill merging happens server-side once
-  // skills_config is patched. Pre-merging here would race the server's own
-  // merge step.)
-  const network = agentConfig.network;
-  if (network) {
-    const cfg: AgentSettings["networkConfig"] = {};
-    if (network.allowed?.length) cfg.allowedDomains = [...network.allowed];
-    if (network.denied?.length) cfg.deniedDomains = [...network.denied];
-    if (network.judge?.length) cfg.judgedDomains = [...network.judge];
-    if (network.judges && Object.keys(network.judges).length > 0) {
-      cfg.judges = { ...network.judges };
+  // Network — merge agent-level config with local-skill declarations. Operator
+  // policy in lobu.toml wins on named judges / judged-domain rules.
+  const mergedAllowedDomains = [...(agentConfig.network?.allowed ?? [])];
+  const mergedDeniedDomains = [...(agentConfig.network?.denied ?? [])];
+  const mergedJudgedDomains = new Map<
+    string,
+    { domain: string; judge?: string }
+  >();
+  const mergedJudges: Record<string, string> = {};
+
+  for (const skill of localSkills) {
+    if (skill.networkConfig?.allowedDomains?.length) {
+      mergedAllowedDomains.push(
+        ...skill.networkConfig.allowedDomains.filter((domain) => domain !== "*")
+      );
     }
-    if (Object.keys(cfg).length > 0) settings.networkConfig = cfg;
+    if (skill.networkConfig?.deniedDomains?.length) {
+      mergedDeniedDomains.push(...skill.networkConfig.deniedDomains);
+    }
+    if (skill.networkConfig?.judgedDomains?.length) {
+      for (const rule of skill.networkConfig.judgedDomains) {
+        mergedJudgedDomains.set(rule.domain, rule);
+      }
+    }
+    if (skill.networkConfig?.judges) {
+      Object.assign(mergedJudges, skill.networkConfig.judges);
+    }
+  }
+
+  if (agentConfig.network?.judge) {
+    for (const rule of agentConfig.network.judge) {
+      mergedJudgedDomains.set(rule.domain, rule);
+    }
+  }
+  if (agentConfig.network?.judges) {
+    Object.assign(mergedJudges, agentConfig.network.judges);
+  }
+
+  const hasJudgedDomains = mergedJudgedDomains.size > 0;
+  const hasJudges = Object.keys(mergedJudges).length > 0;
+  if (
+    mergedAllowedDomains.length > 0 ||
+    mergedDeniedDomains.length > 0 ||
+    hasJudgedDomains ||
+    hasJudges
+  ) {
+    settings.networkConfig = {
+      ...(mergedAllowedDomains.length > 0
+        ? { allowedDomains: [...new Set(mergedAllowedDomains)] }
+        : {}),
+      ...(mergedDeniedDomains.length > 0
+        ? { deniedDomains: [...new Set(mergedDeniedDomains)] }
+        : {}),
+      ...(hasJudgedDomains
+        ? { judgedDomains: Array.from(mergedJudgedDomains.values()) }
+        : {}),
+      ...(hasJudges ? { judges: mergedJudges } : {}),
+    };
   }
 
   // Egress (PR-1 persists this column)
@@ -227,20 +433,21 @@ function buildAgentSettings(
     settings.guardrails = [...new Set(agentConfig.guardrails)];
   }
 
-  // Nix
-  if (agentConfig.worker?.nix_packages?.length) {
+  // Nix — merge agent-level packages with local-skill declarations.
+  const mergedNixPackages = [
+    ...(agentConfig.worker?.nix_packages ?? []),
+    ...localSkills.flatMap((skill) => skill.nixPackages ?? []),
+  ];
+  if (mergedNixPackages.length > 0) {
     settings.nixConfig = {
-      packages: [...new Set(agentConfig.worker.nix_packages)],
+      packages: [...new Set(mergedNixPackages)],
     };
   }
 
-  // MCP servers — agent-level only. Skill-derived MCP entries land server-side
-  // once skills_config is patched. The on-wire shape extends McpServerConfig
-  // with `oauth` + `authScope`, both of which the gateway store accepts as
-  // pass-through JSON. Built as a typed-but-loose record because the core
-  // McpServerConfig interface omits oauth/authScope.
+  // MCP servers — start with agent-level toml config, then merge local-skill
+  // entries without overriding operator-defined IDs.
+  const mcpServers: Record<string, Record<string, unknown>> = {};
   if (agentConfig.skills.mcp) {
-    const mcpServers: Record<string, Record<string, unknown>> = {};
     for (const [id, mcp] of Object.entries(agentConfig.skills.mcp)) {
       const mapped: Record<string, unknown> = {};
       if (mcp.url) mapped.url = mcp.url;
@@ -267,9 +474,20 @@ function buildAgentSettings(
       if (mcp.env) mapped.env = { ...mcp.env };
       mcpServers[id] = mapped;
     }
-    if (Object.keys(mcpServers).length > 0) {
-      settings.mcpServers = mcpServers as AgentSettings["mcpServers"];
+  }
+  for (const skill of localSkills) {
+    for (const mcp of skill.mcpServers ?? []) {
+      if (mcpServers[mcp.id]) continue;
+      mcpServers[mcp.id] = {
+        ...(mcp.url ? { url: mcp.url } : {}),
+        ...(mcp.type ? { type: mcp.type } : {}),
+        ...(mcp.command ? { command: mcp.command } : {}),
+        ...(mcp.args ? { args: mcp.args } : {}),
+      };
     }
+  }
+  if (Object.keys(mcpServers).length > 0) {
+    settings.mcpServers = mcpServers as AgentSettings["mcpServers"];
   }
 
   return settings;
@@ -531,7 +749,11 @@ export async function loadDesiredState(
   for (const [agentId, agentConfig] of Object.entries(config.agents)) {
     const agentDir = resolve(opts.cwd, agentConfig.dir);
     const markdown = await readMarkdown(agentDir);
-    const settings = buildAgentSettings(agentConfig, markdown);
+    const skillFiles = await loadSkillFiles([
+      join(opts.cwd, "skills"),
+      join(agentDir, "skills"),
+    ]);
+    const settings = buildAgentSettings(agentConfig, markdown, skillFiles);
     const platforms = buildPlatforms(agentId, agentConfig, env);
     const metadata: DesiredAgentMetadata = {
       agentId,

@@ -1126,29 +1126,40 @@ function configsShallowEqual(
 
 // ── Get platform ─────────────────────────────────────────────────────────────
 
+function platformBelongsToAgent(platform: { templateAgentId?: string | null }, agentId: string) {
+  return platform.templateAgentId === agentId;
+}
+
+async function getStoredPlatformForAgent(agentId: string, platformId: string) {
+  const platform = await connectionStore.getConnection(platformId);
+  if (!platform || !platformBelongsToAgent(platform, agentId)) return null;
+  return platform;
+}
+
 routes.get('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
   return withOrg(c, async () => {
-    const { platformId } = c.req.param();
-    const chatManager = getChatInstanceManager();
-    let platform = null;
+    const { agentId, platformId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
 
+    const storedPlatform = await getStoredPlatformForAgent(agentId, platformId);
+    if (!storedPlatform) return c.json({ error: 'Platform not found' }, 404);
+
+    const chatManager = getChatInstanceManager();
     if (chatManager) {
       try {
-        platform = await chatManager.getConnection(platformId);
-        if (platform) {
-          await persistConnectionSnapshot(platform);
+        const runtimePlatform = await chatManager.getConnection(platformId);
+        if (runtimePlatform && platformBelongsToAgent(runtimePlatform, agentId)) {
+          await persistConnectionSnapshot(runtimePlatform);
+          return c.json(runtimePlatform);
         }
       } catch {
-        platform = null;
+        // Fall back to the org-scoped PostgreSQL snapshot.
       }
     }
 
-    if (!platform) {
-      platform = await connectionStore.getConnection(platformId);
-    }
-
-    if (!platform) return c.json({ error: 'Platform not found' }, 404);
-    return c.json(platform);
+    return c.json(storedPlatform);
   });
 });
 
@@ -1158,8 +1169,11 @@ routes.delete('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
   const denied = requireSessionOrAdminPat(c);
   if (denied) return denied;
   return withOrg(c, async () => {
-    const { platformId } = c.req.param();
-    const platform = await connectionStore.getConnection(platformId);
+    const { agentId, platformId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
+    const platform = await getStoredPlatformForAgent(agentId, platformId);
     if (!platform) return c.json({ error: 'Platform not found' }, 404);
 
     const chatManager = getChatInstanceManager();
@@ -1181,15 +1195,18 @@ routes.post('/:agentId/platforms/:platformId/start', mcpAuth, async (c) => {
   const denied = requireSessionOrAdminPat(c);
   if (denied) return denied;
   return withOrg(c, async () => {
-    const { platformId } = c.req.param();
+    const { agentId, platformId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
     const chatManager = getChatInstanceManager();
-    const platform = await connectionStore.getConnection(platformId);
+    const platform = await getStoredPlatformForAgent(agentId, platformId);
     if (!platform) return c.json({ error: 'Platform not found' }, 404);
 
     if (chatManager) {
       await chatManager.restartConnection(platformId);
       const runtimePlatform = await chatManager.getConnection(platformId);
-      if (runtimePlatform) {
+      if (runtimePlatform && platformBelongsToAgent(runtimePlatform, agentId)) {
         await persistConnectionSnapshot(runtimePlatform);
         return c.json({ success: true, platform: runtimePlatform });
       }
@@ -1209,15 +1226,18 @@ routes.post('/:agentId/platforms/:platformId/stop', mcpAuth, async (c) => {
   const denied = requireSessionOrAdminPat(c);
   if (denied) return denied;
   return withOrg(c, async () => {
-    const { platformId } = c.req.param();
+    const { agentId, platformId } = c.req.param();
+    if (!(await configStore.hasAgent(agentId))) {
+      return c.json({ error: 'Agent not found' }, 404);
+    }
     const chatManager = getChatInstanceManager();
-    const platform = await connectionStore.getConnection(platformId);
+    const platform = await getStoredPlatformForAgent(agentId, platformId);
     if (!platform) return c.json({ error: 'Platform not found' }, 404);
 
     if (chatManager) {
       await chatManager.stopConnection(platformId);
       const runtimePlatform = await chatManager.getConnection(platformId);
-      if (runtimePlatform) {
+      if (runtimePlatform && platformBelongsToAgent(runtimePlatform, agentId)) {
         await persistConnectionSnapshot(runtimePlatform);
         return c.json({ success: true, platform: runtimePlatform });
       }

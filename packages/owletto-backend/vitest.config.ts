@@ -22,6 +22,8 @@ export default defineConfig({
     exclude: [
       "src/__tests__/unit/**",
       "src/gateway/**/__tests__/**",
+      "src/lobu/**/__tests__/**",
+      "src/workspace/**/__tests__/**",
       "**/node_modules/**",
       "**/dist/**",
     ],

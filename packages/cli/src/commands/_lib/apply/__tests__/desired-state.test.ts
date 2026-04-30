@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildStablePlatformId, loadDesiredState } from "../desired-state.js";
@@ -112,6 +112,48 @@ botToken = "y"
     await expect(loadDesiredState({ cwd: dir })).rejects.toThrow(
       /multiple "slack" platforms/
     );
+  });
+
+  test("loads local skills and merges skill network, nix, and MCP declarations", async () => {
+    const dir = mkProject(
+      `[agents.triage]
+name = "Triage"
+dir = "./agents/triage"
+
+[agents.triage.network]
+allowed = ["api.operator.example.com"]
+
+[agents.triage.worker]
+nix_packages = ["git"]
+`
+    );
+    const skillDir = join(dir, "agents", "triage", "skills", "docs-search");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      `---
+name: docs-search
+description: Search docs safely
+nixPackages: [ripgrep]
+network:
+  allow: ["*.docs.example.com", "*"]
+mcpServers:
+  docs:
+    url: "https://docs.example.com/mcp"
+---
+Use the docs MCP before answering.
+`
+    );
+
+    const { state } = await loadDesiredState({ cwd: dir });
+    const settings = state.agents[0]!.settings;
+    expect(settings.skillsConfig?.skills[0]?.name).toBe("docs-search");
+    expect(settings.networkConfig?.allowedDomains).toEqual([
+      "api.operator.example.com",
+      ".docs.example.com",
+    ]);
+    expect(settings.nixConfig?.packages).toEqual(["git", "ripgrep"]);
+    expect(settings.mcpServers?.docs?.url).toBe("https://docs.example.com/mcp");
   });
 
   test("rejects watcher blocks (v1 doesn't sync watchers)", async () => {

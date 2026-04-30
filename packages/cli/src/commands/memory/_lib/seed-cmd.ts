@@ -570,7 +570,7 @@ async function resolveAuth(
   const org = resolveOrg(orgFlag);
 
   if (org) {
-    const orgSession = getSessionForOrg(org, storePath);
+    const orgSession = getSessionForOrg(org, storePath, urlFlag);
     if (orgSession) {
       const result = await getUsableToken(orgSession.key, storePath);
       if (result) {

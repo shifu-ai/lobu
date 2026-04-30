@@ -199,6 +199,12 @@ jobs:
         working-directory: packages/owletto-backend
         run: bun test src/gateway/__tests__
 
+      - name: owletto-backend lobu route suite (bun:test, needs Postgres)
+        # These bun:test files live outside src/gateway and are also excluded
+        # from vitest because they import bun:test directly.
+        working-directory: packages/owletto-backend
+        run: bun test src/lobu/__tests__ src/workspace/__tests__
+
   format-lint:
     runs-on: ubuntu-latest
     timeout-minutes: 20

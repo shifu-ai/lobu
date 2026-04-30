@@ -158,11 +158,18 @@ const SETTINGS_FIELDS: Array<keyof AgentSettings> = [
   "guardrails",
   "preApprovedTools",
   "providerModelPreferences",
+  "installedProviders",
   "modelSelection",
   "soulMd",
   "userMd",
   "identityMd",
 ];
+
+function normalizeInstalledProviders(
+  providers: AgentSettings["installedProviders"] | undefined
+): string[] | undefined {
+  return providers?.map((provider) => provider.providerId);
+}
 
 function diffSettings(
   agentId: string,
@@ -172,6 +179,17 @@ function diffSettings(
   const changed: string[] = [];
   for (const field of SETTINGS_FIELDS) {
     if (!(field in desired)) continue;
+    if (field === "installedProviders") {
+      if (
+        !deepEqual(
+          normalizeInstalledProviders(desired.installedProviders),
+          normalizeInstalledProviders(remote?.installedProviders)
+        )
+      ) {
+        changed.push(field);
+      }
+      continue;
+    }
     if (!deepEqual(desired[field], remote?.[field])) {
       changed.push(field);
     }
