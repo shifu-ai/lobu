@@ -79,6 +79,16 @@ async function batchCountUnanalyzedContent(
 
   const placeholders = watcherIds.map((_, i) => `$${i + 1}`).join(', ');
 
+  // The "total content" count joins current_event_records on the entity link
+  // for every watcher in the result. On high-volume entities this scans
+  // 100K+ rows per watcher and dominates list_watchers latency (8-12s on
+  // prod for orgs with even a single Reddit-Digest-class watcher).
+  //
+  // Cap the per-watcher total at TOTAL_CAP rows. The badge derived from
+  // `pending_count = total - analyzed` becomes "TOTAL_CAP+ - analyzed"
+  // semantics above the cap; the only consumer is a list-row badge that
+  // doesn't need exact counts above a threshold.
+  const TOTAL_CAP = 1000;
   const result = await sql.unsafe(
     `
     WITH watcher_entities AS (
@@ -98,15 +108,18 @@ async function batchCountUnanalyzedContent(
     ),
     total_counts AS (
       SELECT
-        ie.watcher_id,
-        COUNT(DISTINCT f.id) as total_count
-      FROM watcher_entities ie
-      JOIN current_event_records f ON ${entityLinkMatchSql('ie.entity_id::bigint', 'f')}
-      GROUP BY ie.watcher_id
+        wid AS watcher_id,
+        (SELECT COUNT(*) FROM (
+          SELECT 1 FROM watcher_entities ie
+          JOIN current_event_records f ON ${entityLinkMatchSql('ie.entity_id::bigint', 'f')}
+          WHERE ie.watcher_id = wid
+          LIMIT ${TOTAL_CAP}
+        ) capped) AS total_count
+      FROM (SELECT DISTINCT watcher_id AS wid FROM watcher_entities) per_watcher
     )
     SELECT
       ac.watcher_id,
-      CAST(COALESCE(tc.total_count, 0) - COALESCE(ac.analyzed_count, 0) AS INTEGER) as pending_count,
+      CAST(GREATEST(COALESCE(tc.total_count, 0) - COALESCE(ac.analyzed_count, 0), 0) AS INTEGER) as pending_count,
       0 as historical_count
     FROM analyzed_counts ac
     LEFT JOIN total_counts tc ON tc.watcher_id = ac.watcher_id
