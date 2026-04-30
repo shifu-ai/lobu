@@ -661,47 +661,51 @@ routes.patch('/:agentId/config', mcpAuth, async (c) => {
 });
 
 // ============================================================
-// Connection routes (nested under /:agentId/connections)
+// Platform routes (nested under /:agentId/platforms)
+//
+// Storage internals still live in the `agent_connections` table — the rename
+// is user-facing only. ChatInstanceManager and the connection store keep
+// their existing names because they're used by other (chat-side) callers.
 // ============================================================
 
-// ── List connections ─────────────────────────────────────────────────────────
+// ── List platforms ───────────────────────────────────────────────────────────
 
-routes.get('/:agentId/connections', mcpAuth, async (c) => {
+routes.get('/:agentId/platforms', mcpAuth, async (c) => {
   return withOrg(c, async () => {
     const { agentId } = c.req.param();
     if (!(await configStore.hasAgent(agentId))) {
       return c.json({ error: 'Agent not found' }, 404);
     }
     const chatManager = getChatInstanceManager();
-    let connections = await connectionStore.listConnections({
+    let platforms = await connectionStore.listConnections({
       templateAgentId: agentId,
     });
 
     if (chatManager) {
       try {
-        const runtimeConnections = await chatManager.listConnections({
+        const runtimePlatforms = await chatManager.listConnections({
           templateAgentId: agentId,
         });
         await Promise.all(
-          runtimeConnections.map((connection: Record<string, any>) =>
-            persistConnectionSnapshot(connection)
+          runtimePlatforms.map((platform: Record<string, any>) =>
+            persistConnectionSnapshot(platform)
           )
         );
-        if (runtimeConnections.length > 0) {
-          connections = runtimeConnections;
+        if (runtimePlatforms.length > 0) {
+          platforms = runtimePlatforms;
         }
       } catch {
         // Fall back to PostgreSQL snapshot.
       }
     }
 
-    return c.json({ connections });
+    return c.json({ platforms });
   });
 });
 
-// ── Create connection ────────────────────────────────────────────────────────
+// ── Create platform ──────────────────────────────────────────────────────────
 
-routes.post('/:agentId/connections', mcpAuth, async (c) => {
+routes.post('/:agentId/platforms', mcpAuth, async (c) => {
   return withOrg(c, async () => {
     const { agentId } = c.req.param();
     if (!(await configStore.hasAgent(agentId))) {
@@ -719,16 +723,16 @@ routes.post('/:agentId/connections', mcpAuth, async (c) => {
     const chatManager = getChatInstanceManager();
     if (chatManager) {
       try {
-        const connection = await chatManager.addConnection(
+        const created = await chatManager.addConnection(
           platform,
           agentId,
           { platform, ...config },
           { allowGroups: true, ...settings }
         );
-        await persistConnectionSnapshot(connection);
-        return c.json({ connection }, 201);
+        await persistConnectionSnapshot(created);
+        return c.json({ platform: created }, 201);
       } catch (error: any) {
-        return c.json({ error: error.message || 'Failed to create connection' }, 400);
+        return c.json({ error: error.message || 'Failed to create platform' }, 400);
       }
     }
 
@@ -746,19 +750,19 @@ routes.post('/:agentId/connections', mcpAuth, async (c) => {
       createdAt: now,
       updatedAt: now,
     });
-    return c.json({ connection: { id, platform, status: 'stopped' } }, 201);
+    return c.json({ platform: { id, platform, status: 'stopped' } }, 201);
   });
 });
 
-// ── Upsert connection by stable ID ───────────────────────────────────────────
+// ── Upsert platform by stable ID ─────────────────────────────────────────────
 //
 // `lobu apply` derives a deterministic ID from `(agentId, type, name)` via
-// buildStableConnectionId() and PUTs to this endpoint so re-runs converge:
+// buildStablePlatformId() and PUTs to this endpoint so re-runs converge:
 // matching config → noop; changed config → update + restart; missing → create
 // with the supplied ID (not random). The route trusts the stable ID — it's
 // computed by the CLI from the same lobu.toml that produced the body.
 
-routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) => {
+routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
   return withOrg(c, async () => {
     const { agentId, stableId } = c.req.param();
     if (!(await configStore.hasAgent(agentId))) {
@@ -821,7 +825,7 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
               stableId
             );
             await persistConnectionSnapshot(created);
-            return c.json({ connection: created }, 201);
+            return c.json({ platform: created }, 201);
           } catch (error: any) {
             // Roll back the placeholder so a retry doesn't see a half-baked
             // row that fails the `existing.templateAgentId` check inconsistently.
@@ -830,7 +834,7 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
             } catch {
               // best-effort
             }
-            return c.json({ error: error.message || 'Failed to create connection' }, 400);
+            return c.json({ error: error.message || 'Failed to create platform' }, 400);
           }
         }
 
@@ -853,7 +857,7 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
           updatedAt: fallbackNow,
         });
         return c.json(
-          { connection: { id: stableId, platform, status: 'stopped' } },
+          { platform: { id: stableId, platform, status: 'stopped' } },
           201
         );
       }
@@ -867,7 +871,7 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
         // and we don't expose a delete that races with create). Treat as a
         // create-failure to surface the inconsistency rather than 200-OK on
         // missing data.
-        return c.json({ error: 'Connection vanished after conflict' }, 500);
+        return c.json({ error: 'Platform vanished after conflict' }, 500);
       }
       if (reread.templateAgentId && reread.templateAgentId !== agentId) {
         return c.json(
@@ -896,14 +900,14 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
 
     const configChanged = !configsShallowEqual(merged, previousConfig);
     // Settings (allowFrom, allowGroups, etc.) are persisted alongside the
-    // connection config and are part of "did anything change?" — a
+    // platform config and are part of "did anything change?" — a
     // settings-only update must trigger willRestart, not be silently noop'd.
     const previousSettings = (current.settings ?? {}) as Record<string, unknown>;
     const mergedSettings = { allowGroups: true, ...settings } as Record<string, unknown>;
     const settingsChanged = !configsShallowEqual(mergedSettings, previousSettings);
 
     if (!configChanged && !settingsChanged) {
-      return c.json({ noop: true, connection: current }, 200);
+      return c.json({ noop: true, platform: current }, 200);
     }
 
     if (chatManager) {
@@ -914,11 +918,11 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
         });
         await persistConnectionSnapshot(updated);
         return c.json(
-          { updated: true, willRestart: true, connection: updated },
+          { updated: true, willRestart: true, platform: updated },
           200
         );
       } catch (error: any) {
-        return c.json({ error: error.message || 'Failed to update connection' }, 400);
+        return c.json({ error: error.message || 'Failed to update platform' }, 400);
       }
     }
 
@@ -937,7 +941,7 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
     });
     const refreshed = await connectionStore.getConnection(stableId);
     return c.json(
-      { updated: true, willRestart: true, connection: refreshed },
+      { updated: true, willRestart: true, platform: refreshed },
       200
     );
   });
@@ -957,103 +961,103 @@ function configsShallowEqual(
   return true;
 }
 
-// ── Get connection ───────────────────────────────────────────────────────────
+// ── Get platform ─────────────────────────────────────────────────────────────
 
-routes.get('/:agentId/connections/:connId', mcpAuth, async (c) => {
+routes.get('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
   return withOrg(c, async () => {
-    const { connId } = c.req.param();
+    const { platformId } = c.req.param();
     const chatManager = getChatInstanceManager();
-    let conn = null;
+    let platform = null;
 
     if (chatManager) {
       try {
-        conn = await chatManager.getConnection(connId);
-        if (conn) {
-          await persistConnectionSnapshot(conn);
+        platform = await chatManager.getConnection(platformId);
+        if (platform) {
+          await persistConnectionSnapshot(platform);
         }
       } catch {
-        conn = null;
+        platform = null;
       }
     }
 
-    if (!conn) {
-      conn = await connectionStore.getConnection(connId);
+    if (!platform) {
+      platform = await connectionStore.getConnection(platformId);
     }
 
-    if (!conn) return c.json({ error: 'Connection not found' }, 404);
-    return c.json(conn);
+    if (!platform) return c.json({ error: 'Platform not found' }, 404);
+    return c.json(platform);
   });
 });
 
-// ── Delete connection ────────────────────────────────────────────────────────
+// ── Delete platform ──────────────────────────────────────────────────────────
 
-routes.delete('/:agentId/connections/:connId', mcpAuth, async (c) => {
+routes.delete('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
   return withOrg(c, async () => {
-    const { connId } = c.req.param();
-    const conn = await connectionStore.getConnection(connId);
-    if (!conn) return c.json({ error: 'Connection not found' }, 404);
+    const { platformId } = c.req.param();
+    const platform = await connectionStore.getConnection(platformId);
+    if (!platform) return c.json({ error: 'Platform not found' }, 404);
 
     const chatManager = getChatInstanceManager();
     if (chatManager) {
       try {
-        await chatManager.removeConnection(connId);
+        await chatManager.removeConnection(platformId);
       } catch {
         // Fall through to direct store delete
       }
     }
-    await connectionStore.deleteConnection(connId);
+    await connectionStore.deleteConnection(platformId);
     return c.json({ success: true });
   });
 });
 
-// ── Start connection ─────────────────────────────────────────────────────────
+// ── Start platform ───────────────────────────────────────────────────────────
 
-routes.post('/:agentId/connections/:connId/start', mcpAuth, async (c) => {
+routes.post('/:agentId/platforms/:platformId/start', mcpAuth, async (c) => {
   return withOrg(c, async () => {
-    const { connId } = c.req.param();
+    const { platformId } = c.req.param();
     const chatManager = getChatInstanceManager();
-    const conn = await connectionStore.getConnection(connId);
-    if (!conn) return c.json({ error: 'Connection not found' }, 404);
+    const platform = await connectionStore.getConnection(platformId);
+    if (!platform) return c.json({ error: 'Platform not found' }, 404);
 
     if (chatManager) {
-      await chatManager.restartConnection(connId);
-      const runtimeConnection = await chatManager.getConnection(connId);
-      if (runtimeConnection) {
-        await persistConnectionSnapshot(runtimeConnection);
-        return c.json({ success: true, connection: runtimeConnection });
+      await chatManager.restartConnection(platformId);
+      const runtimePlatform = await chatManager.getConnection(platformId);
+      if (runtimePlatform) {
+        await persistConnectionSnapshot(runtimePlatform);
+        return c.json({ success: true, platform: runtimePlatform });
       }
     }
 
-    await connectionStore.updateConnection(connId, { status: 'active' });
+    await connectionStore.updateConnection(platformId, { status: 'active' });
     return c.json({
       success: true,
-      connection: await connectionStore.getConnection(connId),
+      platform: await connectionStore.getConnection(platformId),
     });
   });
 });
 
-// ── Stop connection ──────────────────────────────────────────────────────────
+// ── Stop platform ────────────────────────────────────────────────────────────
 
-routes.post('/:agentId/connections/:connId/stop', mcpAuth, async (c) => {
+routes.post('/:agentId/platforms/:platformId/stop', mcpAuth, async (c) => {
   return withOrg(c, async () => {
-    const { connId } = c.req.param();
+    const { platformId } = c.req.param();
     const chatManager = getChatInstanceManager();
-    const conn = await connectionStore.getConnection(connId);
-    if (!conn) return c.json({ error: 'Connection not found' }, 404);
+    const platform = await connectionStore.getConnection(platformId);
+    if (!platform) return c.json({ error: 'Platform not found' }, 404);
 
     if (chatManager) {
-      await chatManager.stopConnection(connId);
-      const runtimeConnection = await chatManager.getConnection(connId);
-      if (runtimeConnection) {
-        await persistConnectionSnapshot(runtimeConnection);
-        return c.json({ success: true, connection: runtimeConnection });
+      await chatManager.stopConnection(platformId);
+      const runtimePlatform = await chatManager.getConnection(platformId);
+      if (runtimePlatform) {
+        await persistConnectionSnapshot(runtimePlatform);
+        return c.json({ success: true, platform: runtimePlatform });
       }
     }
 
-    await connectionStore.updateConnection(connId, { status: 'stopped' });
+    await connectionStore.updateConnection(platformId, { status: 'stopped' });
     return c.json({
       success: true,
-      connection: await connectionStore.getConnection(connId),
+      platform: await connectionStore.getConnection(platformId),
     });
   });
 });

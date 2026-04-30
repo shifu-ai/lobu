@@ -9,24 +9,24 @@ import {
   loadConfig,
 } from "../../../config/loader.js";
 
-// ── Stable connection IDs (mirror of file-loader.ts:56) ────────────────────
+// ── Stable platform IDs (mirror of file-loader.ts) ─────────────────────────
 //
-// keep in sync with packages/owletto-backend/src/gateway/config/file-loader.ts:56
-function slugifyForConnectionId(input: string): string {
+// keep in sync with packages/owletto-backend/src/gateway/config/file-loader.ts
+function slugifyForPlatformId(input: string): string {
   return input
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
 }
 
-// keep in sync with packages/owletto-backend/src/gateway/config/file-loader.ts:56
-export function buildStableConnectionId(
+// keep in sync with packages/owletto-backend/src/gateway/config/file-loader.ts
+export function buildStablePlatformId(
   agentId: string,
   type: string,
   name?: string
 ): string {
-  const parts = [slugifyForConnectionId(agentId), slugifyForConnectionId(type)];
-  if (name) parts.push(slugifyForConnectionId(name));
+  const parts = [slugifyForPlatformId(agentId), slugifyForPlatformId(type)];
+  if (name) parts.push(slugifyForPlatformId(name));
   return parts.join("-");
 }
 
@@ -38,7 +38,7 @@ export interface DesiredAgentMetadata {
   description?: string;
 }
 
-export interface DesiredConnection {
+export interface DesiredPlatform {
   /** Stable, content-addressed ID derived from `(agentId, type, name?)`. */
   stableId: string;
   type: string;
@@ -76,7 +76,7 @@ export interface DesiredAgent {
    * Persistence of egressConfig/preApprovedTools/guardrails depends on PR-1.
    */
   settings: Partial<AgentSettings>;
-  connections: DesiredConnection[];
+  platforms: DesiredPlatform[];
 }
 
 export interface DesiredState {
@@ -114,8 +114,8 @@ function collectEnvRefs(config: LobuTomlConfig, out: Set<string>): void {
         if (ref) out.add(ref);
       }
     }
-    for (const conn of agentConfig.connections) {
-      for (const value of Object.values(conn.config)) {
+    for (const platform of agentConfig.platforms) {
+      for (const value of Object.values(platform.config)) {
         const ref = asEnvRef(value);
         if (ref) out.add(ref);
       }
@@ -297,7 +297,7 @@ async function readMarkdown(
 
 function resolveConfigValue(
   agentId: string,
-  connType: string,
+  platformType: string,
   key: string,
   value: string,
   env: NodeJS.ProcessEnv
@@ -307,41 +307,41 @@ function resolveConfigValue(
   const resolved = env[ref];
   if (resolved === undefined || resolved === "") {
     throw new ValidationError(
-      `agent "${agentId}" connection "${connType}" config key "${key}" references $${ref}, but it is unset or empty in the apply environment`
+      `agent "${agentId}" platform "${platformType}" config key "${key}" references $${ref}, but it is unset or empty in the apply environment`
     );
   }
   return resolved;
 }
 
-function buildConnections(
+function buildPlatforms(
   agentId: string,
   agentConfig: TomlAgentEntry,
   env: NodeJS.ProcessEnv
-): DesiredConnection[] {
+): DesiredPlatform[] {
   // Reject duplicate (type, name) pairs — same rule the file-loader enforces
   // so stable IDs stay collision-free.
   const seen = new Set<string>();
-  const out: DesiredConnection[] = [];
-  for (const conn of agentConfig.connections) {
-    const key = `${conn.type}:${conn.name ?? ""}`;
+  const out: DesiredPlatform[] = [];
+  for (const platform of agentConfig.platforms) {
+    const key = `${platform.type}:${platform.name ?? ""}`;
     if (seen.has(key)) {
       throw new ValidationError(
-        conn.name
-          ? `agent "${agentId}" has duplicate connection (type=${conn.type}, name=${conn.name})`
-          : `agent "${agentId}" has multiple "${conn.type}" connections — add a unique \`name = "..."\` to each to disambiguate`
+        platform.name
+          ? `agent "${agentId}" has duplicate platform (type=${platform.type}, name=${platform.name})`
+          : `agent "${agentId}" has multiple "${platform.type}" platforms — add a unique \`name = "..."\` to each to disambiguate`
       );
     }
     seen.add(key);
     const resolvedConfig: Record<string, string> = {};
-    for (const [k, v] of Object.entries(conn.config)) {
-      resolvedConfig[k] = resolveConfigValue(agentId, conn.type, k, v, env);
+    for (const [k, v] of Object.entries(platform.config)) {
+      resolvedConfig[k] = resolveConfigValue(agentId, platform.type, k, v, env);
     }
-    const desired: DesiredConnection = {
-      stableId: buildStableConnectionId(agentId, conn.type, conn.name),
-      type: conn.type,
+    const desired: DesiredPlatform = {
+      stableId: buildStablePlatformId(agentId, platform.type, platform.name),
+      type: platform.type,
       config: resolvedConfig,
     };
-    if (conn.name) desired.name = conn.name;
+    if (platform.name) desired.name = platform.name;
     out.push(desired);
   }
   return out;
@@ -532,13 +532,13 @@ export async function loadDesiredState(
     const agentDir = resolve(opts.cwd, agentConfig.dir);
     const markdown = await readMarkdown(agentDir);
     const settings = buildAgentSettings(agentConfig, markdown);
-    const connections = buildConnections(agentId, agentConfig, env);
+    const platforms = buildPlatforms(agentId, agentConfig, env);
     const metadata: DesiredAgentMetadata = {
       agentId,
       name: agentConfig.name,
     };
     if (agentConfig.description) metadata.description = agentConfig.description;
-    agents.push({ metadata, settings, connections });
+    agents.push({ metadata, settings, platforms });
   }
 
   const memorySchema = await loadMemorySchema(config, opts.cwd);

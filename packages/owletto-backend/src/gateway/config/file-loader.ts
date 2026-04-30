@@ -32,7 +32,7 @@ export interface FileLoadedAgent {
     key?: string;
     secretRef?: string;
   }>;
-  connections: Array<{
+  platforms: Array<{
     /** Stable, human-readable ID derived from agentId + type (+ name). */
     id: string;
     type: string;
@@ -40,8 +40,8 @@ export interface FileLoadedAgent {
   }>;
 }
 
-/** Slugify agent IDs and platform names for use in connection IDs. */
-function slugifyForConnectionId(input: string): string {
+/** Slugify agent IDs and platform names for use in stable platform IDs. */
+function slugifyForPlatformId(input: string): string {
   return input
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
@@ -49,17 +49,17 @@ function slugifyForConnectionId(input: string): string {
 }
 
 /**
- * Build the stable connection ID: `{agent}-{type}` or `{agent}-{type}-{name}`.
+ * Build the stable platform ID: `{agent}-{type}` or `{agent}-{type}-{name}`.
  * Used to make webhook URLs (e.g. `/api/v1/webhooks/<id>`) survive
  * fresh-clone setups — the ID is a pure function of lobu.toml.
  */
-export function buildStableConnectionId(
+export function buildStablePlatformId(
   agentId: string,
   type: string,
   name?: string
 ): string {
-  const parts = [slugifyForConnectionId(agentId), slugifyForConnectionId(type)];
-  if (name) parts.push(slugifyForConnectionId(name));
+  const parts = [slugifyForPlatformId(agentId), slugifyForPlatformId(type)];
+  if (name) parts.push(slugifyForPlatformId(name));
   return parts.join("-");
 }
 
@@ -126,6 +126,17 @@ async function loadAndValidateToml(
     return null;
   }
 
+  // Migration check: the per-agent `connections` key was renamed to
+  // `platforms`. Surface a loud validation error so users update their
+  // lobu.toml instead of silently dropping the now-unknown block.
+  const renamedAgentIds = findAgentsWithLegacyConnectionsKey(parsed);
+  if (renamedAgentIds.length > 0) {
+    const firstAgent = renamedAgentIds[0];
+    throw new Error(
+      `[[agents.${firstAgent}.connections]] was renamed to [[agents.${firstAgent}.platforms]] — update your lobu.toml`
+    );
+  }
+
   const result = lobuConfigSchema.safeParse(parsed);
   if (!result.success) {
     const details = result.error.issues.map(
@@ -136,6 +147,29 @@ async function loadAndValidateToml(
   }
 
   return result.data;
+}
+
+/**
+ * Surface the old `connections` key as a validation error so apply/run users
+ * get a pointer at the new key instead of a silently dropped block. Returns
+ * the agent IDs whose blocks still declare `connections`.
+ */
+function findAgentsWithLegacyConnectionsKey(
+  parsed: Record<string, unknown>
+): string[] {
+  const agents = parsed.agents;
+  if (!agents || typeof agents !== "object") return [];
+  const out: string[] = [];
+  for (const [agentId, agentConfig] of Object.entries(
+    agents as Record<string, unknown>
+  )) {
+    if (!agentConfig || typeof agentConfig !== "object") continue;
+    const value = (agentConfig as Record<string, unknown>).connections;
+    if (Array.isArray(value) && value.length > 0) {
+      out.push(agentId);
+    }
+  }
+  return out;
 }
 
 function normalizeOwlettoMcpBaseUrl(input: string): string | null {
@@ -462,35 +496,35 @@ async function buildAgentConfig(
     }))
     .filter((c) => c.key || c.secretRef);
 
-  // Connections
+  // Platforms
   // Reject duplicate `(type, name)` pairs so the stable ID derivation stays
   // collision-free. Users must set an explicit `name` when they want >1
-  // connection of the same platform under the same agent.
-  const seenConnKeys = new Set<string>();
-  for (const conn of agentConfig.connections) {
-    const key = `${conn.type}:${conn.name ?? ""}`;
-    if (seenConnKeys.has(key)) {
+  // platform instance of the same type under the same agent.
+  const seenPlatformKeys = new Set<string>();
+  for (const platform of agentConfig.platforms) {
+    const key = `${platform.type}:${platform.name ?? ""}`;
+    if (seenPlatformKeys.has(key)) {
       throw new Error(
-        conn.name
-          ? `agent "${agentId}" has duplicate connection (type=${conn.type}, name=${conn.name})`
-          : `agent "${agentId}" has multiple "${conn.type}" connections — add a unique \`name = "..."\` to each to disambiguate`
+        platform.name
+          ? `agent "${agentId}" has duplicate platform (type=${platform.type}, name=${platform.name})`
+          : `agent "${agentId}" has multiple "${platform.type}" platforms — add a unique \`name = "..."\` to each to disambiguate`
       );
     }
-    seenConnKeys.add(key);
+    seenPlatformKeys.add(key);
   }
 
-  const connections = agentConfig.connections
-    .map((conn) => ({
-      id: buildStableConnectionId(agentId, conn.type, conn.name),
-      type: conn.type,
+  const platforms = agentConfig.platforms
+    .map((platform) => ({
+      id: buildStablePlatformId(agentId, platform.type, platform.name),
+      type: platform.type,
       config: Object.fromEntries(
-        Object.entries(conn.config).map(([k, v]) => [
+        Object.entries(platform.config).map(([k, v]) => [
           k,
           resolveEnvVar(v as string),
         ])
       ) as Record<string, string>,
     }))
-    .filter((conn) => Object.values(conn.config).every((v) => v !== ""));
+    .filter((platform) => Object.values(platform.config).every((v) => v !== ""));
 
   return {
     agentId,
@@ -498,7 +532,7 @@ async function buildAgentConfig(
     description: agentConfig.description,
     settings,
     credentials,
-    connections,
+    platforms,
   };
 }
 

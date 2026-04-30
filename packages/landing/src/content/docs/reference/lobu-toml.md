@@ -5,7 +5,7 @@ sidebar:
   order: 1
 ---
 
-`lobu.toml` is the project configuration file created by `lobu init`. It defines agents, providers, connections, skills, network access, worker settings, and optional file-first Owletto memory configuration.
+`lobu.toml` is the project configuration file created by `lobu init`. It defines agents, providers, platforms, skills, network access, worker settings, and optional file-first Owletto memory configuration.
 
 ## Minimal example
 
@@ -47,15 +47,15 @@ key = "$OPENROUTER_API_KEY"
 id = "gemini"
 key = "$GEMINI_API_KEY"
 
-# Platform connections
-[[agents.support.connections]]
+# Chat platforms
+[[agents.support.platforms]]
 type = "telegram"
-[agents.support.connections.config]
+[agents.support.platforms.config]
 botToken = "$TELEGRAM_BOT_TOKEN"
 
-[[agents.support.connections]]
+[[agents.support.platforms]]
 type = "slack"
-[agents.support.connections.config]
+[agents.support.platforms.config]
 botToken = "$SLACK_BOT_TOKEN"
 signingSecret = "$SLACK_SIGNING_SECRET"
 
@@ -141,7 +141,7 @@ Top-level table keyed by agent ID. IDs must match `^[a-z0-9][a-z0-9-]*$` (lowerc
 | `description` | string | no | Short description shown in admin UI |
 | `dir` | string | yes | Path to agent content directory containing `IDENTITY.md`, `SOUL.md`, `USER.md`, and optional `skills/` |
 | `providers` | array | no | LLM provider list (order = priority) |
-| `connections` | array | no | Platform connections |
+| `platforms` | array | no | Chat platforms |
 | `skills` | table | no | Skills and MCP servers |
 | `network` | table | no | Network access policy |
 | `tools` | table | no | Tool policy: pre-approval bypass + worker-side visibility |
@@ -160,33 +160,33 @@ Each entry configures an LLM provider. The first available provider is used at r
 
 Provider credentials are optional. A provider entry may omit both `key` and `secret_ref`, or set exactly one of them. Setting both is invalid.
 
-### `[[agents.<id>.connections]]`
+### `[[agents.<id>.platforms]]`
 
-Each entry connects the agent to a messaging platform.
+Each entry connects the agent to a chat platform.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | yes | Platform type: `telegram`, `slack`, `discord`, `whatsapp`, `teams`, `gchat` |
 | `config` | table | yes | Platform-specific configuration (see below) |
 
-#### Connection config by platform
+#### Platform config by type
 
 **Telegram**
 ```toml
-[agents.x.connections.config]
+[agents.x.platforms.config]
 botToken = "$TELEGRAM_BOT_TOKEN"
 ```
 
 **Slack**
 ```toml
-[agents.x.connections.config]
+[agents.x.platforms.config]
 botToken = "$SLACK_BOT_TOKEN"
 signingSecret = "$SLACK_SIGNING_SECRET"
 ```
 
 **Discord**
 ```toml
-[agents.x.connections.config]
+[agents.x.platforms.config]
 botToken = "$DISCORD_BOT_TOKEN"
 applicationId = "$DISCORD_APPLICATION_ID"
 publicKey = "$DISCORD_PUBLIC_KEY"
@@ -194,7 +194,7 @@ publicKey = "$DISCORD_PUBLIC_KEY"
 
 **WhatsApp** (Cloud API)
 ```toml
-[agents.x.connections.config]
+[agents.x.platforms.config]
 accessToken = "$WHATSAPP_ACCESS_TOKEN"
 phoneNumberId = "$WHATSAPP_PHONE_NUMBER_ID"
 verifyToken = "$WHATSAPP_WEBHOOK_VERIFY_TOKEN"
@@ -203,7 +203,7 @@ appSecret = "$WHATSAPP_APP_SECRET"
 
 **Teams**
 ```toml
-[agents.x.connections.config]
+[agents.x.platforms.config]
 appId = "$TEAMS_APP_ID"
 appPassword = "$TEAMS_APP_PASSWORD"
 appTenantId = "$TEAMS_APP_TENANT_ID"
@@ -212,7 +212,7 @@ appType = "MultiTenant"
 
 **Google Chat**
 ```toml
-[agents.x.connections.config]
+[agents.x.platforms.config]
 credentials = "$GOOGLE_CHAT_CREDENTIALS"
 ```
 

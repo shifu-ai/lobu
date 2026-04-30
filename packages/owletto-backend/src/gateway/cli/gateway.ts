@@ -1223,31 +1223,31 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
     const fileLoadedAgents = coreServices.getFileLoadedAgents();
     if (fileLoadedAgents.length > 0) {
       for (const agent of fileLoadedAgents) {
-        if (!agent.connections?.length) continue;
+        if (!agent.platforms?.length) continue;
         // Look up by stable id — `(platform, templateAgentId)` alone collapses
-        // multi-connection agents (e.g. two Slack workspaces) into one seed.
+        // multi-platform agents (e.g. two Slack workspaces) into one seed.
         const existingForAgent = await chatInstanceManager.listConnections({
           platform: undefined,
           templateAgentId: agent.agentId,
         });
         const existingIds = new Set(existingForAgent.map((c: any) => c.id));
-        for (const conn of agent.connections) {
-          if (existingIds.has(conn.id)) continue;
+        for (const platform of agent.platforms) {
+          if (existingIds.has(platform.id)) continue;
           try {
             await chatInstanceManager.addConnection(
-              conn.type,
+              platform.type,
               agent.agentId,
-              { platform: conn.type as any, ...conn.config },
+              { platform: platform.type as any, ...platform.config },
               { allowGroups: true },
               {},
-              conn.id
+              platform.id
             );
             logger.debug(
-              `Created ${conn.type} connection for agent "${agent.agentId}" as "${conn.id}"`
+              `Created ${platform.type} platform for agent "${agent.agentId}" as "${platform.id}"`
             );
           } catch (err) {
             logger.error(
-              `Failed to create ${conn.type} connection for agent "${agent.agentId}"`,
+              `Failed to create ${platform.type} platform for agent "${agent.agentId}"`,
               { error: err instanceof Error ? err.message : String(err) }
             );
           }

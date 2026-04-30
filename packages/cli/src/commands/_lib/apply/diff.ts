@@ -1,14 +1,14 @@
 import type { AgentSettings } from "@lobu/core";
 import type {
   RemoteAgent,
-  RemoteConnection,
   RemoteEntityType,
+  RemotePlatform,
   RemoteRelationshipType,
 } from "./client.js";
 import type {
   DesiredAgent,
-  DesiredConnection,
   DesiredEntityType,
+  DesiredPlatform,
   DesiredRelationshipType,
 } from "./desired-state.js";
 
@@ -36,11 +36,11 @@ export interface SettingsDiffRow extends BaseRow {
   changedFields?: string[];
 }
 
-export interface ConnectionDiffRow extends BaseRow {
-  kind: "connection";
+export interface PlatformDiffRow extends BaseRow {
+  kind: "platform";
   agentId: string;
-  desired?: DesiredConnection;
-  remote?: RemoteConnection;
+  desired?: DesiredPlatform;
+  remote?: RemotePlatform;
   changedFields?: string[];
   /** True when an update will restart the live worker — surfaced in the plan. */
   willRestart?: boolean;
@@ -63,7 +63,7 @@ export interface RelationshipTypeDiffRow extends BaseRow {
 export type DiffRow =
   | AgentDiffRow
   | SettingsDiffRow
-  | ConnectionDiffRow
+  | PlatformDiffRow
   | EntityTypeDiffRow
   | RelationshipTypeDiffRow;
 
@@ -192,14 +192,14 @@ function diffSettings(
   };
 }
 
-function diffConnection(
+function diffPlatform(
   agentId: string,
-  desired: DesiredConnection,
-  remote: RemoteConnection | undefined
-): ConnectionDiffRow {
+  desired: DesiredPlatform,
+  remote: RemotePlatform | undefined
+): PlatformDiffRow {
   if (!remote) {
     return {
-      kind: "connection",
+      kind: "platform",
       verb: "create",
       id: desired.stableId,
       agentId,
@@ -211,14 +211,14 @@ function diffConnection(
   if (desired.type !== remote.platform) changed.push("type");
   // The route handler stores `platform` inside `config` for stable-id matching,
   // so a noop round-trip from GET will have an extra `platform` key the CLI
-  // never wrote. Strip it before diffing so an unchanged connection doesn't
+  // never wrote. Strip it before diffing so an unchanged platform doesn't
   // show as drift on every plan.
   const remoteConfig: Record<string, unknown> = { ...(remote.config ?? {}) };
   delete remoteConfig.platform;
   if (!deepEqual(desired.config, remoteConfig)) changed.push("config");
   if (changed.length === 0) {
     return {
-      kind: "connection",
+      kind: "platform",
       verb: "noop",
       id: desired.stableId,
       agentId,
@@ -227,7 +227,7 @@ function diffConnection(
     };
   }
   return {
-    kind: "connection",
+    kind: "platform",
     verb: "update",
     id: desired.stableId,
     agentId,
@@ -321,7 +321,7 @@ export interface RemoteSnapshot {
   /** keyed by agentId */
   agentSettings: Map<string, AgentSettings | null>;
   /** keyed by agentId */
-  connectionsByAgent: Map<string, RemoteConnection[]>;
+  platformsByAgent: Map<string, RemotePlatform[]>;
   entityTypes: RemoteEntityType[];
   relationshipTypes: RemoteRelationshipType[];
 }
@@ -375,30 +375,28 @@ export function computeDiff(
         rows.push(settingsRow);
       }
 
-      const remoteConns =
-        remote.connectionsByAgent.get(agent.metadata.agentId) ?? [];
-      const remoteByStableId = new Map(remoteConns.map((c) => [c.id, c]));
-      const desiredStableIds = new Set(
-        agent.connections.map((c) => c.stableId)
-      );
+      const remotePlatforms =
+        remote.platformsByAgent.get(agent.metadata.agentId) ?? [];
+      const remoteByStableId = new Map(remotePlatforms.map((p) => [p.id, p]));
+      const desiredStableIds = new Set(agent.platforms.map((p) => p.stableId));
 
-      for (const conn of agent.connections) {
+      for (const platform of agent.platforms) {
         rows.push(
-          diffConnection(
+          diffPlatform(
             agent.metadata.agentId,
-            conn,
-            remoteByStableId.get(conn.stableId)
+            platform,
+            remoteByStableId.get(platform.stableId)
           )
         );
       }
-      for (const remoteConn of remoteConns) {
-        if (!desiredStableIds.has(remoteConn.id)) {
+      for (const remotePlatform of remotePlatforms) {
+        if (!desiredStableIds.has(remotePlatform.id)) {
           rows.push({
-            kind: "connection",
+            kind: "platform",
             verb: "drift",
-            id: remoteConn.id,
+            id: remotePlatform.id,
             agentId: agent.metadata.agentId,
-            remote: remoteConn,
+            remote: remotePlatform,
           });
         }
       }

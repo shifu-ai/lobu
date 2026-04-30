@@ -137,7 +137,7 @@ id = "anthropic"
 model = "claude/sonnet-4-5"
 key = "$ANTHROPIC_API_KEY"
 
-[[agents.triage.connections]]
+[[agents.triage.platforms]]
 type = "telegram"
 config = { botToken = "$TELEGRAM_BOT_TOKEN", chatId = "12345" }
 
@@ -229,8 +229,8 @@ echo "${DRY_OUT}" | grep -E "\+\s+agent\s+triage" >/dev/null || {
   echo "dry-run missing '+ agent triage' line" >&2
   exit 1
 }
-echo "${DRY_OUT}" | grep -E "\+\s+connection" >/dev/null || {
-  echo "dry-run missing '+ connection' line" >&2
+echo "${DRY_OUT}" | grep -E "\+\s+platform" >/dev/null || {
+  echo "dry-run missing '+ platform' line" >&2
   exit 1
 }
 echo "${DRY_OUT}" | grep -E "\+\s+entity[-_]type" >/dev/null || {
@@ -251,17 +251,17 @@ echo "${APPLY_OUT}" | grep -E "Apply complete" >/dev/null || {
 echo "==> step 9: lobu apply --dry-run (expect noop)"
 NOOP_OUT="$(${LOBU} apply --dry-run --org "${ORG_SLUG}" --url "${SERVER_URL}" 2>&1)"
 echo "${NOOP_OUT}" | sed 's/^/    /'
-if echo "${NOOP_OUT}" | grep -E "^\s*\+\s+(agent|connection|entity)" >/dev/null; then
+if echo "${NOOP_OUT}" | grep -E "^\s*\+\s+(agent|platform|entity)" >/dev/null; then
   echo "second dry-run still shows + creates — not idempotent" >&2
   exit 1
 fi
-if echo "${NOOP_OUT}" | grep -E "^\s*~\s+(agent|connection|entity)" >/dev/null; then
+if echo "${NOOP_OUT}" | grep -E "^\s*~\s+(agent|platform|entity)" >/dev/null; then
   echo "second dry-run shows ~ updates — drift detected unexpectedly" >&2
   exit 1
 fi
 
-# ─── 10. mutate connection chatId, expect ~ update ─────────────────────
-echo "==> step 10: edit connection chatId, expect connection update + restart"
+# ─── 10. mutate platform chatId, expect ~ update ──────────────────────
+echo "==> step 10: edit platform chatId, expect platform update + restart"
 
 # Same shape, different chatId.
 sed -i.bak \
@@ -271,12 +271,12 @@ rm -f "${PROJECT_DIR}/lobu.toml.bak"
 
 UPDATE_OUT="$(${LOBU} apply --dry-run --org "${ORG_SLUG}" --url "${SERVER_URL}" 2>&1)"
 echo "${UPDATE_OUT}" | sed 's/^/    /'
-echo "${UPDATE_OUT}" | grep -E "~\s+connection" >/dev/null || {
-  echo "expected '~ connection' line after edit" >&2
+echo "${UPDATE_OUT}" | grep -E "~\s+platform" >/dev/null || {
+  echo "expected '~ platform' line after edit" >&2
   exit 1
 }
 echo "${UPDATE_OUT}" | grep -E "will restart" >/dev/null || {
-  echo "expected 'will restart' marker after connection config change" >&2
+  echo "expected 'will restart' marker after platform config change" >&2
   exit 1
 }
 
@@ -297,10 +297,10 @@ echo "${AGENTS_JSON}" | grep -q '"agentId":"triage"' || {
   exit 1
 }
 
-CONNS_JSON="$(curl -sf -H "Authorization: Bearer ${PAT}" "${SERVER_URL}/api/${ORG_SLUG}/agents/triage/connections")"
-echo "${CONNS_JSON}" | grep -q '"platform":"telegram"' || {
-  echo "telegram connection not found" >&2
-  echo "${CONNS_JSON}"
+PLATFORMS_JSON="$(curl -sf -H "Authorization: Bearer ${PAT}" "${SERVER_URL}/api/${ORG_SLUG}/agents/triage/platforms")"
+echo "${PLATFORMS_JSON}" | grep -q '"platform":"telegram"' || {
+  echo "telegram platform not found" >&2
+  echo "${PLATFORMS_JSON}"
   exit 1
 }
 

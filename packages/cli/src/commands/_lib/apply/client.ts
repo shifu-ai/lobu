@@ -21,7 +21,7 @@ export interface RemoteAgentDetail extends RemoteAgent {
   settings?: AgentSettings | null;
 }
 
-export interface RemoteConnection {
+export interface RemotePlatform {
   id: string;
   platform: string;
   templateAgentId?: string;
@@ -44,14 +44,14 @@ export interface RemoteRelationshipType {
   rules?: Array<{ source: string; target: string }>;
 }
 
-export interface UpsertConnectionResult {
+export interface UpsertPlatformResult {
   /** Server reports `noop: true` when the desired config matches what's stored. */
   noop?: boolean;
   /** When the config materially changed, the live worker is restarted. */
   willRestart?: boolean;
   updated?: boolean;
   created?: boolean;
-  connection?: RemoteConnection;
+  platform?: RemotePlatform;
 }
 
 export interface UpsertEntityTypeResult {
@@ -282,34 +282,34 @@ export class ApplyClient {
     );
   }
 
-  // ── Connections ───────────────────────────────────────────────────────────
+  // ── Platforms ─────────────────────────────────────────────────────────────
 
-  async listConnections(agentId: string): Promise<RemoteConnection[]> {
-    const { body } = await this.request<{ connections?: RemoteConnection[] }>(
+  async listPlatforms(agentId: string): Promise<RemotePlatform[]> {
+    const { body } = await this.request<{ platforms?: RemotePlatform[] }>(
       "GET",
-      `/api/${this.orgSlug}/agents/${agentId}/connections`
+      `/api/${this.orgSlug}/agents/${agentId}/platforms`
     );
-    return body.connections ?? [];
+    return body.platforms ?? [];
   }
 
   /**
-   * Stable-ID upsert (PR-2 introduces this route).
+   * Stable-ID upsert.
    *
    * Server contract:
-   *   PUT /:agentId/connections/by-stable-id/:stableId
+   *   PUT /:agentId/platforms/by-stable-id/:stableId
    *   body: { platform, name?, config }
-   *   response when unchanged: { noop: true, connection }
-   *   response when changed:   { updated: true, willRestart: true, connection }
-   *   response on first write: { created: true, connection }
+   *   response when unchanged: { noop: true, platform }
+   *   response when changed:   { updated: true, willRestart: true, platform }
+   *   response on first write: { created: true, platform }
    */
-  async upsertConnection(
+  async upsertPlatform(
     agentId: string,
     stableId: string,
     payload: { platform: string; name?: string; config: Record<string, string> }
-  ): Promise<UpsertConnectionResult> {
-    const { body } = await this.request<UpsertConnectionResult>(
+  ): Promise<UpsertPlatformResult> {
+    const { body } = await this.request<UpsertPlatformResult>(
       "PUT",
-      `/api/${this.orgSlug}/agents/${agentId}/connections/by-stable-id/${encodeURIComponent(stableId)}`,
+      `/api/${this.orgSlug}/agents/${agentId}/platforms/by-stable-id/${encodeURIComponent(stableId)}`,
       payload
     );
     return body;

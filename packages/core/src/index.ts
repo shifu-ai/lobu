@@ -52,8 +52,8 @@ export type {
 // lobu.toml zod schema (canonical — used by CLI and gateway)
 export {
   type AgentEntry as TomlAgentEntry,
-  type ConnectionEntry as TomlConnectionEntry,
   type EgressEntry as TomlEgressEntry,
+  type PlatformEntry as TomlPlatformEntry,
   type LobuTomlConfig,
   lobuConfigSchema,
   type McpServerEntry as TomlMcpServerEntry,

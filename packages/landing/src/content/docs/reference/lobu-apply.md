@@ -13,7 +13,7 @@ Mental model: `terraform apply` lite. Files are the source of truth; the cloud i
 lobu apply                       # plan + prompt + apply
 lobu apply --dry-run             # plan only
 lobu apply --yes                 # plan + apply, no prompt (CI)
-lobu apply --only agents         # restrict to agent + connection resources
+lobu apply --only agents         # restrict to agent + platform resources
 lobu apply --only memory         # restrict to entity + relationship types
 lobu apply --org my-org          # override active org
 ```
@@ -24,7 +24,7 @@ Authentication is shared with the rest of the CLI. Run `lobu login` once.
 
 - Agents (metadata: `agentId`, `name`, `description`)
 - Agent settings: `networkConfig`, `egressConfig`, `nixConfig`, `mcpServers`, `skillsConfig`, `toolsConfig`, `guardrails`, `preApprovedTools`, `providerModelPreferences`, `modelSelection`, `IDENTITY.md` / `SOUL.md` / `USER.md`
-- Messaging connections under `[[agents.<id>.connections]]`, keyed by a stable ID derived from `(agentId, type, name?)`
+- Chat platforms under `[[agents.<id>.platforms]]`, keyed by a stable ID derived from `(agentId, type, name?)`
 - Memory entity types and relationship types (from `models/*.yaml` referenced by `[memory.owletto].models`)
 
 ## What is not synced (v1)
@@ -45,7 +45,7 @@ Each row is one of four verbs:
 | `= noop` | resource exists and matches the desired state |
 | `? drift` | cloud has a resource not declared in `lobu.toml` — **reported only**, never deleted in v1 |
 
-When a connection update will restart the live worker, the plan adds an inline warning line.
+When a platform update will restart the live worker, the plan adds an inline warning line.
 
 ## Apply order
 
@@ -56,7 +56,7 @@ upsertAgent          (POST /api/:org/agents/)
         ↓
 patchAgentSettings   (PATCH /api/:org/agents/:id/config)
         ↓
-upsertConnection     (PUT /api/:org/agents/:id/connections/by-stable-id/:stableId)
+upsertPlatform       (PUT /api/:org/agents/:id/platforms/by-stable-id/:stableId)
         ↓
 upsertEntityType        (manage_entity_schema)
         ↓
@@ -70,7 +70,7 @@ If any call fails, the CLI prints partial progress and exits non-zero. Every end
 Before any mutation, `lobu apply` walks `lobu.toml` for `$VAR` references in:
 
 - `[[agents.<id>.providers]]` — `key`, `secret_ref`
-- `[[agents.<id>.connections]]` — every value in `[agents.<id>.connections.config]`
+- `[[agents.<id>.platforms]]` — every value in `[agents.<id>.platforms.config]`
 - `[agents.<id>.skills.mcp.<id>]` — `headers`, `env`, `oauth.client_id`, `oauth.client_secret`
 
 Each name must be set in the apply runner's environment (e.g. via `.env` loaded by your shell). Any missing name short-circuits the apply with a list of every missing var.
@@ -79,17 +79,17 @@ Secret values are never uploaded by `lobu apply`. Use your deployment's secret m
 
 ## Drift
 
-Cloud-side resources not declared in `lobu.toml` are reported but never deleted. v1 has no `--prune`. To remove a cloud-side agent or connection, use the admin UI or the underlying CRUD endpoints directly; the next `lobu apply` will continue to surface it as drift until you remove it from the cloud or add it to your files.
+Cloud-side resources not declared in `lobu.toml` are reported but never deleted. v1 has no `--prune`. To remove a cloud-side agent or platform, use the admin UI or the underlying CRUD endpoints directly; the next `lobu apply` will continue to surface it as drift until you remove it from the cloud or add it to your files.
 
-## Stable connection IDs
+## Stable platform IDs
 
-Each connection's URL — including webhook URLs (`/api/v1/webhooks/<id>`) — is derived from `(agentId, type, name)`:
+Each platform's URL — including webhook URLs (`/api/v1/webhooks/<id>`) — is derived from `(agentId, type, name)`:
 
 ```
 {slugify(agentId)}-{slugify(type)}[-{slugify(name)}]
 ```
 
-When you have more than one connection of the same `type` under the same agent, `name = "..."` is required. The same rule applies in `lobu run` (file-loader.ts) — both paths build identical stable IDs.
+When you have more than one platform of the same `type` under the same agent, `name = "..."` is required. The same rule applies in `lobu run` (file-loader.ts) — both paths build identical stable IDs.
 
 ## CI usage
 

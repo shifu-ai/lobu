@@ -4,7 +4,7 @@ import { printError, printText } from "../../memory/_lib/output.js";
 import {
   type ApplyClient,
   type RemoteAgent,
-  type RemoteConnection,
+  type RemotePlatform,
   resolveApplyClient,
 } from "./client.js";
 import {
@@ -60,7 +60,7 @@ async function fetchRemoteSnapshot(
     string,
     Awaited<ReturnType<ApplyClient["getAgentSettings"]>>
   >();
-  const connectionsByAgent = new Map<string, RemoteConnection[]>();
+  const platformsByAgent = new Map<string, RemotePlatform[]>();
 
   if (only !== "memory") {
     const desiredAgentIds = state.agents.map((a) => a.metadata.agentId);
@@ -72,7 +72,7 @@ async function fetchRemoteSnapshot(
     );
     for (const agentId of targetAgentIds) {
       agentSettings.set(agentId, await client.getAgentSettings(agentId));
-      connectionsByAgent.set(agentId, await client.listConnections(agentId));
+      platformsByAgent.set(agentId, await client.listPlatforms(agentId));
     }
   }
 
@@ -83,7 +83,7 @@ async function fetchRemoteSnapshot(
   return {
     agents,
     agentSettings,
-    connectionsByAgent,
+    platformsByAgent,
     entityTypes,
     relationshipTypes,
   };
@@ -134,12 +134,12 @@ async function executePlan(ctx: ApplyContext): Promise<void> {
     );
   }
 
-  // 3) Connections
-  for (const row of rowsByKind("connection")) {
-    if (row.kind !== "connection") continue;
+  // 3) Platforms
+  for (const row of rowsByKind("platform")) {
+    if (row.kind !== "platform") continue;
     const desired = row.desired;
     if (!desired) continue;
-    const result = await ctx.client.upsertConnection(
+    const result = await ctx.client.upsertPlatform(
       row.agentId,
       desired.stableId,
       {
@@ -154,7 +154,7 @@ async function executePlan(ctx: ApplyContext): Promise<void> {
         ? "(noop on server)"
         : undefined;
     printText(
-      renderProgress(row.verb, "connection", `${row.agentId}/${row.id}`, detail)
+      renderProgress(row.verb, "platform", `${row.agentId}/${row.id}`, detail)
     );
   }
 

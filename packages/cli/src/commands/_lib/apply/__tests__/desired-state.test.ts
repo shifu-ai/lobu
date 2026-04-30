@@ -2,21 +2,19 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildStableConnectionId, loadDesiredState } from "../desired-state.js";
+import { buildStablePlatformId, loadDesiredState } from "../desired-state.js";
 
-describe("buildStableConnectionId — keep in sync with file-loader.ts:56", () => {
+describe("buildStablePlatformId — keep in sync with file-loader.ts", () => {
   test("two parts when no name", () => {
-    expect(buildStableConnectionId("triage", "telegram")).toBe(
-      "triage-telegram"
-    );
+    expect(buildStablePlatformId("triage", "telegram")).toBe("triage-telegram");
   });
   test("three parts when name provided", () => {
-    expect(buildStableConnectionId("triage", "slack", "ops")).toBe(
+    expect(buildStablePlatformId("triage", "slack", "ops")).toBe(
       "triage-slack-ops"
     );
   });
   test("slugifies non-alphanumeric chars in agent + type + name", () => {
-    expect(buildStableConnectionId("Tri Age", "Slack/Ops", "Bot 1")).toBe(
+    expect(buildStablePlatformId("Tri Age", "Slack/Ops", "Bot 1")).toBe(
       "tri-age-slack-ops-bot-1"
     );
   });
@@ -39,7 +37,7 @@ describe("loadDesiredState", () => {
     return dir;
   }
 
-  test("collects $VAR references from connections + providers", async () => {
+  test("collects $VAR references from platforms + providers", async () => {
     const dir = mkProject(
       `[agents.triage]
 name = "Triage"
@@ -50,9 +48,9 @@ dir = "./agents/triage"
 id = "anthropic"
 key = "$ANTHROPIC_API_KEY"
 
-[[agents.triage.connections]]
+[[agents.triage.platforms]]
 type = "telegram"
-[agents.triage.connections.config]
+[agents.triage.platforms.config]
 botToken = "$TELEGRAM_BOT_TOKEN"
 `
     );
@@ -70,22 +68,22 @@ botToken = "$TELEGRAM_BOT_TOKEN"
     ]);
     expect(state.agents).toHaveLength(1);
     expect(state.agents[0]!.metadata.agentId).toBe("triage");
-    expect(state.agents[0]!.connections).toHaveLength(1);
-    expect(state.agents[0]!.connections[0]!.stableId).toBe("triage-telegram");
-    expect(state.agents[0]!.connections[0]!.config.botToken).toBe(
+    expect(state.agents[0]!.platforms).toHaveLength(1);
+    expect(state.agents[0]!.platforms[0]!.stableId).toBe("triage-telegram");
+    expect(state.agents[0]!.platforms[0]!.config.botToken).toBe(
       "tg-fake-token"
     );
   });
 
-  test("throws when a connection $VAR ref is unset in the apply env", async () => {
+  test("throws when a platform $VAR ref is unset in the apply env", async () => {
     const dir = mkProject(
       `[agents.triage]
 name = "Triage"
 dir = "./agents/triage"
 
-[[agents.triage.connections]]
+[[agents.triage.platforms]]
 type = "telegram"
-[agents.triage.connections.config]
+[agents.triage.platforms.config]
 botToken = "$TELEGRAM_BOT_TOKEN"
 `
     );
@@ -94,25 +92,25 @@ botToken = "$TELEGRAM_BOT_TOKEN"
     );
   });
 
-  test("rejects duplicate (type, name) connection pairs", async () => {
+  test("rejects duplicate (type, name) platform pairs", async () => {
     const dir = mkProject(
       `[agents.triage]
 name = "Triage"
 dir = "./agents/triage"
 
-[[agents.triage.connections]]
+[[agents.triage.platforms]]
 type = "slack"
-[agents.triage.connections.config]
+[agents.triage.platforms.config]
 botToken = "x"
 
-[[agents.triage.connections]]
+[[agents.triage.platforms]]
 type = "slack"
-[agents.triage.connections.config]
+[agents.triage.platforms.config]
 botToken = "y"
 `
     );
     await expect(loadDesiredState({ cwd: dir })).rejects.toThrow(
-      /multiple "slack" connections/
+      /multiple "slack" platforms/
     );
   });
 

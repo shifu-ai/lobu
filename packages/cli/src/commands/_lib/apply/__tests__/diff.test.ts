@@ -16,7 +16,7 @@ function buildDesiredAgent(
   return {
     metadata: { agentId, name: agentId, description: undefined },
     settings: {},
-    connections: [],
+    platforms: [],
     ...overrides,
   };
 }
@@ -33,7 +33,7 @@ function emptyRemote(): RemoteSnapshot {
   return {
     agents: [],
     agentSettings: new Map(),
-    connectionsByAgent: new Map(),
+    platformsByAgent: new Map(),
     entityTypes: [],
     relationshipTypes: [],
   };
@@ -66,7 +66,7 @@ describe("apply diff — agents", () => {
       ...emptyRemote(),
       agents: [{ agentId: "triage", name: "Triage" }],
       agentSettings: new Map([["triage", null]]),
-      connectionsByAgent: new Map([["triage", []]]),
+      platformsByAgent: new Map([["triage", []]]),
     };
     const plan = computeDiff(desired, remote);
     expect(plan.counts.noop).toBeGreaterThan(0);
@@ -85,7 +85,7 @@ describe("apply diff — agents", () => {
       ...emptyRemote(),
       agents: [{ agentId: "triage", name: "Original" }],
       agentSettings: new Map([["triage", null]]),
-      connectionsByAgent: new Map([["triage", []]]),
+      platformsByAgent: new Map([["triage", []]]),
     };
     const plan = computeDiff(desired, remote);
     expect(plan.counts.update).toBeGreaterThan(0);
@@ -126,7 +126,7 @@ describe("apply diff — settings", () => {
           },
         ],
       ]),
-      connectionsByAgent: new Map([["triage", []]]),
+      platformsByAgent: new Map([["triage", []]]),
     };
     const plan = computeDiff(desired, remote);
     const settingsRow = plan.rows.find((r) => r.kind === "settings");
@@ -138,12 +138,12 @@ describe("apply diff — settings", () => {
   });
 });
 
-describe("apply diff — connections", () => {
+describe("apply diff — platforms", () => {
   test("create on empty remote", () => {
     const desired = buildState([
       buildDesiredAgent("triage", {
         metadata: { agentId: "triage", name: "Triage" },
-        connections: [
+        platforms: [
           {
             stableId: "triage-telegram",
             type: "telegram",
@@ -153,8 +153,8 @@ describe("apply diff — connections", () => {
       }),
     ]);
     const plan = computeDiff(desired, emptyRemote());
-    const connRow = plan.rows.find((r) => r.kind === "connection");
-    expect(connRow?.verb).toBe("create");
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("create");
     expect(renderPlan(plan)).toMatchSnapshot();
   });
 
@@ -162,7 +162,7 @@ describe("apply diff — connections", () => {
     const desired = buildState([
       buildDesiredAgent("triage", {
         metadata: { agentId: "triage", name: "Triage" },
-        connections: [
+        platforms: [
           {
             stableId: "triage-telegram",
             type: "telegram",
@@ -175,7 +175,7 @@ describe("apply diff — connections", () => {
       ...emptyRemote(),
       agents: [{ agentId: "triage", name: "Triage" }],
       agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
-      connectionsByAgent: new Map([
+      platformsByAgent: new Map([
         [
           "triage",
           [
@@ -189,10 +189,10 @@ describe("apply diff — connections", () => {
       ]),
     };
     const plan = computeDiff(desired, remote);
-    const connRow = plan.rows.find((r) => r.kind === "connection");
-    expect(connRow?.verb).toBe("update");
-    if (connRow?.kind === "connection") {
-      expect(connRow.willRestart).toBe(true);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("update");
+    if (platformRow?.kind === "platform") {
+      expect(platformRow.willRestart).toBe(true);
     }
     expect(renderPlan(plan)).toMatchSnapshot();
   });
@@ -263,7 +263,7 @@ describe("apply diff — empty container preservation", () => {
           },
         ],
       ]),
-      connectionsByAgent: new Map([["triage", []]]),
+      platformsByAgent: new Map([["triage", []]]),
     };
     const plan = computeDiff(desired, remote);
     const settingsRow = plan.rows.find((r) => r.kind === "settings");
@@ -298,7 +298,7 @@ describe("apply diff — empty container preservation", () => {
           },
         ],
       ]),
-      connectionsByAgent: new Map([["triage", []]]),
+      platformsByAgent: new Map([["triage", []]]),
     };
     const plan = computeDiff(desiredEmpty, remoteWithItems);
     expect(plan.counts.update).toBeGreaterThan(0);
@@ -309,7 +309,7 @@ describe("apply diff — empty container preservation", () => {
     const desired = buildState([
       buildDesiredAgent("triage", {
         metadata: { agentId: "triage", name: "Triage" },
-        connections: [
+        platforms: [
           {
             stableId: "triage-telegram",
             type: "telegram",
@@ -322,7 +322,7 @@ describe("apply diff — empty container preservation", () => {
       ...emptyRemote(),
       agents: [{ agentId: "triage", name: "Triage" }],
       agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
-      connectionsByAgent: new Map([
+      platformsByAgent: new Map([
         [
           "triage",
           [
@@ -336,8 +336,8 @@ describe("apply diff — empty container preservation", () => {
       ]),
     };
     const plan = computeDiff(desired, remote);
-    const connRow = plan.rows.find((r) => r.kind === "connection");
-    expect(connRow?.verb).toBe("update");
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("update");
   });
 });
 

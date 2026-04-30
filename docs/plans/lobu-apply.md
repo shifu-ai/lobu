@@ -26,7 +26,7 @@ desired state (lobu.toml + agent dirs)
    CLI: call existing endpoints in order
         │   POST /api/:orgSlug/agents/        (upsert)
         │   PATCH /:agentId/config            (settings + skills_config)
-        │   PUT  /:agentId/connections/by-stable-id/:stableId  (NEW route)
+        │   PUT  /:agentId/platforms/by-stable-id/:stableId  (NEW route)
         │   POST /api/:orgSlug/manage_entity_schema     (existing admin tool)
         │   POST /api/:orgSlug/manage_relationship_schema
         │
@@ -104,11 +104,11 @@ Validation:
 
 **Branch**: `feat/idempotent-apply-endpoints` · **Risk**: Medium · **LOC**: ~150
 
-Today `agent-routes.ts:POST /` returns 409 on same-org duplicate (`agent-routes.ts:319-321`). Connections create with random ID (`POST /:agentId/connections`), no upsert.
+Today `agent-routes.ts:POST /` returns 409 on same-org duplicate (`agent-routes.ts:319-321`). Connections create with random ID (`POST /:agentId/platforms`), no upsert.
 
 Scope:
 - **Modify `POST /` in agent-routes.ts** (around line 293): same-org duplicate returns `200` with the existing agent payload instead of `409`. Cross-org duplicate keeps the existing 409 (separate concern, will be fixed by future org-scoped IDs work). The Owletto-MCP auto-injection in `saveSettings` (line 339-344) must be preserved on first create but skipped on the idempotent-return path.
-- **New route** `PUT /:agentId/connections/by-stable-id/:stableId` mounted in agent-routes.ts. Uses `buildStableConnectionId(agentId, type, name)` from `gateway/config/file-loader.ts:56` for ID generation client-side; route receives the stable ID in URL. Body shape mirrors `POST /:agentId/connections`. Behavior:
+- **New route** `PUT /:agentId/platforms/by-stable-id/:stableId` mounted in agent-routes.ts. Uses `buildStablePlatformId(agentId, type, name)` from `gateway/config/file-loader.ts:56` for ID generation client-side; route receives the stable ID in URL. Body shape mirrors `POST /:agentId/platforms`. Behavior:
   - If stable ID exists: update config in place. If config materially changes, return `{ updated: true, willRestart: true }`. If unchanged, return `{ noop: true }`.
   - If stable ID doesn't exist: create with that ID (skip the random-ID path).
   - Reuses existing `ChatInstanceManager.addConnection` / equivalent — does **not** duplicate connection-creation logic.
@@ -127,7 +127,7 @@ Validation: `bun test packages/owletto-backend/src/lobu`, typecheck, biome, buil
 Scope:
 - New `packages/cli/src/commands/apply.ts` (top-level command).
 - New `packages/cli/src/commands/_lib/apply/`:
-  - `desired-state.ts` — wraps `loadConfig` from `cli/src/config/loader.ts`. Walks `$VAR` refs and produces a `requiredSecrets: string[]` list. Reuses `buildStableConnectionId` (re-export from cli or inline a copy with a comment pointing at the source of truth).
+  - `desired-state.ts` — wraps `loadConfig` from `cli/src/config/loader.ts`. Walks `$VAR` refs and produces a `requiredSecrets: string[]` list. Reuses `buildStablePlatformId` (re-export from cli or inline a copy with a comment pointing at the source of truth).
   - `client.ts` — thin wrapper over fetch using `_lib/openclaw-auth.ts` (`getUsableToken`) and `_lib/openclaw-cmd.ts:postJson` from PR #459. One method per resource: `getAgents`, `upsertAgent`, `patchSettings`, `getConnections`, `upsertConnection`, `getEntityTypes`, `upsertEntityType`, etc.
   - `diff.ts` — given desired and current, return `{ creates, updates, noops, drift }`. Drift = remote has resource not in desired. No deletes (no `--prune` in v1).
   - `render.ts` — pretty diff output via chalk: `+` for creates, `~` for updates, `=` for noops, `?` for drift.

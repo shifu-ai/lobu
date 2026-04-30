@@ -5,7 +5,7 @@ import {
   setSecrets,
 } from "../../config/agent-helpers.js";
 import { CONFIG_FILENAME } from "../../config/loader.js";
-import { PLATFORM_LABELS, promptPlatformConfig } from "./platforms.js";
+import { PLATFORM_LABELS, promptPlatformConfig } from "./platform-prompts.js";
 
 const SUPPORTED = [
   "telegram",
@@ -16,7 +16,7 @@ const SUPPORTED = [
   "gchat",
 ];
 
-export async function connectionsAddCommand(
+export async function platformsAddCommand(
   cwd: string,
   platform: string
 ): Promise<void> {
@@ -29,13 +29,13 @@ export async function connectionsAddCommand(
   const ctx = await loadAgentContext(cwd);
   if (!ctx) return;
 
-  const existing = (ctx.agent.connections ?? []) as Array<
+  const existing = (ctx.agent.platforms ?? []) as Array<
     Record<string, unknown>
   >;
-  if (existing.some((c) => c.type === platform)) {
+  if (existing.some((p) => p.type === platform)) {
     console.log(
       chalk.yellow(
-        `\n  Connection "${platform}" is already configured for agent "${ctx.agentId}".\n`
+        `\n  Platform "${platform}" is already configured for agent "${ctx.agentId}".\n`
       )
     );
     return;
@@ -43,39 +43,37 @@ export async function connectionsAddCommand(
 
   console.log(
     chalk.dim(
-      `\n  Adding ${PLATFORM_LABELS[platform]} connection to agent "${ctx.agentId}".\n`
+      `\n  Adding ${PLATFORM_LABELS[platform]} platform to agent "${ctx.agentId}".\n`
     )
   );
 
-  const { connectionConfig, connectionSecrets } =
+  const { platformConfig, platformSecrets } =
     await promptPlatformConfig(platform);
 
-  if (Object.keys(connectionConfig).length === 0) {
+  if (Object.keys(platformConfig).length === 0) {
     console.log(chalk.yellow("\n  No credentials provided. Aborting.\n"));
     return;
   }
 
   const lines = [
     "",
-    `[[agents.${ctx.agentId}.connections]]`,
+    `[[agents.${ctx.agentId}.platforms]]`,
     `type = "${platform}"`,
     "",
-    `[agents.${ctx.agentId}.connections.config]`,
-    ...Object.entries(connectionConfig).map(
+    `[agents.${ctx.agentId}.platforms.config]`,
+    ...Object.entries(platformConfig).map(
       ([key, value]) => `${key} = "${value}"`
     ),
   ];
   await appendTomlBlock(ctx, lines);
-  await setSecrets(cwd, connectionSecrets);
+  await setSecrets(cwd, platformSecrets);
 
   console.log(
     chalk.green(
-      `\n  Added ${PLATFORM_LABELS[platform]} connection to ${CONFIG_FILENAME}`
+      `\n  Added ${PLATFORM_LABELS[platform]} platform to ${CONFIG_FILENAME}`
     )
   );
   console.log(
-    chalk.dim(
-      "  Run `lobu run -d` to start the stack with the new connection.\n"
-    )
+    chalk.dim("  Run `lobu run -d` to start the stack with the new platform.\n")
   );
 }

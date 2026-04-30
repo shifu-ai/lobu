@@ -4,7 +4,7 @@
  *   1. POST /agents — same-org duplicate returns 200 (idempotent), cross-org
  *      collision still 409, and the Owletto MCP auto-injection only runs on
  *      the create path (never on the idempotent return).
- *   2. PUT /agents/:agentId/connections/by-stable-id/:stableId — caller-supplied
+ *   2. PUT /agents/:agentId/platforms/by-stable-id/:stableId — caller-supplied
  *      stable-ID upsert. Same config → noop. Changed config → updated +
  *      willRestart. Missing → create with the supplied ID.
  *
@@ -194,7 +194,7 @@ describe('POST /agents — idempotent same-org create', () => {
   });
 });
 
-describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
+describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
   beforeEach(async () => {
     await resetTestDatabase();
     await seedOrg(ORG_A);
@@ -203,11 +203,11 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     authStash.organizationId = ORG_A;
   });
 
-  test('new stable ID creates a connection with that exact ID', async () => {
+  test('new stable ID creates a platform with that exact ID', async () => {
     const app = await importAgentRoutes();
 
     const response = await app.request(
-      '/host-agent/connections/by-stable-id/host-agent-telegram-prod',
+      '/host-agent/platforms/by-stable-id/host-agent-telegram-prod',
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -219,7 +219,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     );
     expect(response.status).toBe(201);
     const body = (await response.json()) as any;
-    expect(body.connection?.id).toBe('host-agent-telegram-prod');
+    expect(body.platform?.id).toBe('host-agent-telegram-prod');
 
     const { getDb } = await import('../../db/client.js');
     const sql = getDb();
@@ -246,7 +246,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
 
     // First PUT creates.
     const create = await app.request(
-      `/host-agent/connections/by-stable-id/${stableId}`,
+      `/host-agent/platforms/by-stable-id/${stableId}`,
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -267,7 +267,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     const second = await app.request(
-      `/host-agent/connections/by-stable-id/${stableId}`,
+      `/host-agent/platforms/by-stable-id/${stableId}`,
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -277,7 +277,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     expect(second.status).toBe(200);
     const body = (await second.json()) as any;
     expect(body.noop).toBe(true);
-    expect(body.connection?.id).toBe(stableId);
+    expect(body.platform?.id).toBe(stableId);
 
     const after = await sql`
       SELECT updated_at FROM agent_connections WHERE id = ${stableId}
@@ -293,7 +293,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
 
     // First create.
     await app.request(
-      `/host-agent/connections/by-stable-id/${stableId}`,
+      `/host-agent/platforms/by-stable-id/${stableId}`,
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -306,7 +306,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
 
     // Then PUT with a changed config (different value + new key).
     const response = await app.request(
-      `/host-agent/connections/by-stable-id/${stableId}`,
+      `/host-agent/platforms/by-stable-id/${stableId}`,
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -320,7 +320,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     const body = (await response.json()) as any;
     expect(body.updated).toBe(true);
     expect(body.willRestart).toBe(true);
-    expect(body.connection?.id).toBe(stableId);
+    expect(body.platform?.id).toBe(stableId);
   });
 
   test('PUT with settings-only change returns updated + willRestart', async () => {
@@ -329,7 +329,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
 
     // First create with default settings.
     const create = await app.request(
-      `/host-agent/connections/by-stable-id/${stableId}`,
+      `/host-agent/platforms/by-stable-id/${stableId}`,
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -343,7 +343,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
 
     // Same config, but settings change (allowFrom from undefined to ['user-1']).
     const response = await app.request(
-      `/host-agent/connections/by-stable-id/${stableId}`,
+      `/host-agent/platforms/by-stable-id/${stableId}`,
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -365,7 +365,7 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     const app = await importAgentRoutes();
 
     const response = await app.request(
-      '/missing-agent/connections/by-stable-id/missing-agent-x-y',
+      '/missing-agent/platforms/by-stable-id/missing-agent-x-y',
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
@@ -475,7 +475,7 @@ describe('concurrent-apply race fixes', () => {
     });
   });
 
-  test('PUT /connections/by-stable-id — two concurrent identical PUTs converge to one row', async () => {
+  test('PUT /platforms/by-stable-id — two concurrent identical PUTs converge to one row', async () => {
     const app = await importAgentRoutes();
     await seedAgent(ORG_A, 'race-host');
 
@@ -483,12 +483,12 @@ describe('concurrent-apply race fixes', () => {
     const config = { chatId: '12345', endpoint: 'https://example.com' };
 
     const [r1, r2] = await Promise.all([
-      app.request(`/race-host/connections/by-stable-id/${stableId}`, {
+      app.request(`/race-host/platforms/by-stable-id/${stableId}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ platform: 'telegram', config }),
       }),
-      app.request(`/race-host/connections/by-stable-id/${stableId}`, {
+      app.request(`/race-host/platforms/by-stable-id/${stableId}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ platform: 'telegram', config }),
@@ -498,9 +498,9 @@ describe('concurrent-apply race fixes', () => {
     expect([r1.status, r2.status].sort()).toEqual([200, 201]);
 
     const bodies = [(await r1.json()) as any, (await r2.json()) as any];
-    const created = bodies.find((b) => b.connection && !b.noop && !b.updated);
+    const created = bodies.find((b) => b.platform && !b.noop && !b.updated);
     expect(created).toBeTruthy();
-    expect(created?.connection?.id).toBe(stableId);
+    expect(created?.platform?.id).toBe(stableId);
 
     // The other response must be either noop:true (config unchanged) or
     // updated:true (the loser observed the placeholder/empty config first
