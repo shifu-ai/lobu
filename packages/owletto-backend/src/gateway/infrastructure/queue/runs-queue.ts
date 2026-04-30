@@ -115,6 +115,7 @@ const LOBU_RUN_TYPES = [
   "schedule",
   "agent_run",
   "internal",
+  "task",
 ] as const;
 
 type LobuRunType = (typeof LOBU_RUN_TYPES)[number];
@@ -137,6 +138,7 @@ interface QueueWorker {
 
 /** Map a queue name to a lobu-queue `run_type`. */
 export function classifyQueue(queueName: string): LobuRunType {
+  if (queueName === "task" || queueName.startsWith("task:")) return "task";
   if (queueName.startsWith("schedule")) return "schedule";
   if (queueName === "agent_run" || queueName.startsWith("agent_run:"))
     return "agent_run";
@@ -215,7 +217,7 @@ export class RunsQueue implements IMessageQueue {
             claimed_by = NULL,
             run_at = now()
         WHERE status IN ('claimed', 'running')
-          AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal')
+          AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
           AND (claimed_at IS NULL
                OR claimed_at < now() - (${recoveryWindowMs}::int * interval '1 millisecond'))
         RETURNING id
@@ -329,6 +331,7 @@ export class RunsQueue implements IMessageQueue {
     const priority = options?.priority ?? 0;
     const retryDelaySeconds = options?.retryDelay ?? null;
     const expireInSeconds = options?.expireInSeconds;
+    const actionKey = options?.actionKey ?? null;
     const runAtSql = delayMs > 0
       ? `now() + ${Number(delayMs) / 1000}::float * interval '1 second'`
       : "now()";
@@ -359,6 +362,7 @@ export class RunsQueue implements IMessageQueue {
         `INSERT INTO public.runs (
           run_type,
           queue_name,
+          action_key,
           action_input,
           idempotency_key,
           max_attempts,
@@ -369,7 +373,7 @@ export class RunsQueue implements IMessageQueue {
           expires_at,
           retry_delay_seconds
         ) VALUES (
-          $1, $2, $3::jsonb, $4, $5, 0, 'pending', ${runAtSql}, $6, ${expiresAtSql}, $7
+          $1, $2, $3, $4::jsonb, $5, $6, 0, 'pending', ${runAtSql}, $7, ${expiresAtSql}, $8
         )
         ON CONFLICT (idempotency_key)
           WHERE idempotency_key IS NOT NULL
@@ -379,6 +383,7 @@ export class RunsQueue implements IMessageQueue {
         [
           runType,
           queueName,
+          actionKey,
           actionInput,
           idempotencyKey,
           maxAttempts,
@@ -829,7 +834,7 @@ export class RunsQueue implements IMessageQueue {
                claimed_by = NULL,
                run_at = now()
            WHERE status = 'claimed'
-             AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal')
+             AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
              AND claimed_at < now() - (${thresholdMs} * interval '1 millisecond')
            RETURNING id`,
         );
@@ -884,7 +889,7 @@ export async function sweepCompletedRuns(): Promise<number> {
       WHERE expires_at IS NOT NULL
         AND expires_at <= now()
         AND status = 'pending'
-        AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal')
+        AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
       RETURNING id
     )
     SELECT count(*)::int AS count FROM d
@@ -895,7 +900,7 @@ export async function sweepCompletedRuns(): Promise<number> {
     WITH d AS (
       DELETE FROM runs
       WHERE status IN ('completed', 'failed', 'cancelled', 'timeout')
-        AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal')
+        AND run_type IN ('chat_message', 'schedule', 'agent_run', 'internal', 'task')
         AND completed_at IS NOT NULL
         AND completed_at < now() - (${retentionDays}::int * interval '1 day')
       RETURNING id

@@ -21,6 +21,9 @@ export interface QueueOptions {
   singletonKey?: string;
   /** Delay in milliseconds before the job is processed */
   delayMs?: number;
+  /** Optional `runs.action_key` value — the task lane uses this to encode the
+   *  task name so admin/ops queries can filter without unpacking JSON. */
+  actionKey?: string;
 }
 
 export interface QueueStats {

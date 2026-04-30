@@ -132,12 +132,18 @@ async function main() {
 
   const { app: mainApp } = await import('./index');
   const { initWorkspaceProvider } = await import('./workspace');
-  const { startMaintenanceScheduler } = await import('./scheduled/jobs');
+  const { initLobuGateway, getLobuCoreServices } = await import('./lobu/gateway');
+  const { TaskScheduler } = await import('./scheduled/task-scheduler');
+  const { registerMaintenanceTasks } = await import('./scheduled/jobs');
 
   await initWorkspaceProvider();
+  await initLobuGateway();
 
   const env = getEnvFromProcess();
-  const stopScheduler = startMaintenanceScheduler(env);
+  const taskScheduler = new TaskScheduler(getLobuCoreServices().getQueue());
+  registerMaintenanceTasks(taskScheduler, env);
+  await taskScheduler.start();
+  const stopScheduler = () => taskScheduler.stop();
 
   const wrapper = new Hono<{ Bindings: Env }>();
   wrapper.use('*', async (c, next) => {

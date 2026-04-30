@@ -38,6 +38,10 @@ describe("classifyQueue", () => {
     expect(classifyQueue("internal")).toBe("internal");
     expect(classifyQueue("internal:metrics")).toBe("internal");
   });
+  test("task -> task", () => {
+    expect(classifyQueue("task")).toBe("task");
+    expect(classifyQueue("task:cron-tick")).toBe("task");
+  });
 });
 
 describe("backoffSeconds", () => {
