@@ -450,10 +450,25 @@ export async function getWatcher(
   // ============================================
   // Step 4: Total window count for pagination
   // ============================================
-  // Now derived from `COUNT(*) OVER ()` baked into the windows SELECT — no
-  // separate round-trip. Empty pages report total = 0.
-  const totalCount =
+  // Derived from `COUNT(*) OVER ()` baked into the windows SELECT — no
+  // separate round-trip on the common path. The COUNT is attached to each
+  // returned row, so when `OFFSET` skips past every match we lose the
+  // count. Pi-review fix: fall back to a dedicated `COUNT(*)` only when
+  // the page is empty AND we requested a non-zero offset (page > 1).
+  // Page-1 empty pages legitimately mean "no matches → total 0".
+  let totalCount =
     windows.length > 0 ? Number((windows[0] as unknown as WindowRow).total_count ?? 0) : 0;
+  if (windows.length === 0 && offset > 0) {
+    const countQuery = `
+      SELECT COUNT(*) as count
+      FROM watcher_windows iw
+      JOIN watchers i ON iw.watcher_id = i.id
+      LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
+      WHERE ${whereClause}
+    `;
+    const countResult = await sql.unsafe(countQuery, params.slice(0, -2));
+    totalCount = Number.parseInt(String(countResult[0].count), 10);
+  }
 
   // ============================================
   // Step 4.5: Fetch classification stats for all windows
