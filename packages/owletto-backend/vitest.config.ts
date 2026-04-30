@@ -23,6 +23,7 @@ export default defineConfig({
       "src/__tests__/unit/**",
       "src/gateway/**/__tests__/**",
       "src/lobu/**/__tests__/**",
+      "src/scheduled/**/__tests__/**",
       "src/workspace/**/__tests__/**",
       "**/node_modules/**",
       "**/dist/**",
