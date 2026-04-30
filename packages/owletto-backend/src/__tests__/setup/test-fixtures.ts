@@ -540,6 +540,7 @@ export async function createTestConnection(options: {
   status?: string;
   display_name?: string;
   created_by?: string;
+  visibility?: 'org' | 'private';
 }): Promise<TestConnection> {
   const sql = getTestDb();
 
@@ -547,13 +548,14 @@ export async function createTestConnection(options: {
   const [inserted] = await sql`
     INSERT INTO connections (
       organization_id, connector_key, display_name, status,
-      created_by, created_at, updated_at
+      created_by, visibility, created_at, updated_at
     ) VALUES (
       ${options.organization_id},
       ${options.connector_key},
       ${options.display_name ?? `Test Connection ${options.connector_key}`},
       ${options.status ?? 'active'},
       ${options.created_by ?? null},
+      ${options.visibility ?? 'org'},
       NOW(), NOW()
     )
     RETURNING id, connector_key, status
