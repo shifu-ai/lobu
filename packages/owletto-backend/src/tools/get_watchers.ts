@@ -15,7 +15,6 @@ import { type Static, Type } from '@sinclair/typebox';
 import { createDbClientFromEnv, getDb } from '../db/client';
 import type { Env } from '../index';
 import type {
-  EntityContext,
   PendingAnalysis,
   WatcherMetadata,
   WatcherSource,
@@ -24,7 +23,6 @@ import type {
 } from '../types/watchers';
 import {
   buildEntityLinkUnion,
-  entityLinkMatchSql,
   fetchEntityIdentityScopes,
 } from '../utils/content-search';
 import {
@@ -121,13 +119,6 @@ export const GetWatcherSchema = Type.Object({
 
 type GetWatcherArgs = Static<typeof GetWatcherSchema>;
 
-interface WatcherStatus {
-  watcher_id: string;
-  watcher_name: string;
-  status: string;
-  total_windows: number;
-}
-
 interface WindowGap {
   start: string;
   end: string;
@@ -160,8 +151,6 @@ interface GetWatcherResult {
     required_count: number;
     window_range?: { start: string; end: string };
   };
-  watcher_statuses?: WatcherStatus[];
-  entity_context?: EntityContext;
   warnings?: string[];
   view_url?: string;
 }
@@ -221,25 +210,6 @@ interface WatcherQueryRow {
   watcher_run_error: string | null;
   watcher_run_created_at: string | null;
   watcher_run_completed_at: string | null;
-}
-
-/** Row type for entity context query results */
-interface EntityContextRow {
-  entity_id: string;
-  entity_name: string;
-  entity_type: string;
-  total_content: string;
-  active_connections: string;
-  latest_content_date: string | null;
-}
-
-/** Row type for watcher status query results */
-interface WatcherStatusRow {
-  id: string;
-  name: string;
-  status: string;
-  entity_ids: string | number[];
-  total_windows: string | number;
 }
 
 function parseWatcherSources(value: unknown): WatcherSource[] {
@@ -757,11 +727,33 @@ export async function getWatcher(
     // forcing N extra full scans of `events` per query — fine on tiny dev
     // datasets, catastrophic on a multi-GB prod events table (3 parallel
     // queries × 5+ namespaces = >10s and the frontend aborts).
-    const entityScopes = await fetchEntityIdentityScopes(sql, watcherEntityId);
-    // Two link fragments: queries that join on $1 = watcher_id use baseParamIndex=2,
-    // queries that don't need watcher_id use baseParamIndex=1. Sharing one fragment
-    // and binding a phantom $1 fails the postgres.js parse step when the entity has
-    // no identity scopes (query has zero placeholders, params has one).
+    // Pre-fetch the entity's identity scopes + the watcher's latest window end
+    // in parallel. The scopes drive the entity-link UNION (only emits branches
+    // for namespaces the entity actually owns — the legacy
+    // `entityLinkMatchSql` UNIONed every standard namespace unconditionally,
+    // which on a multi-GB events table cost seconds per branch). The latest
+    // window end bounds the unprocessed-count scan so the planner uses
+    // `idx_events_entity_ids_occurred_at` for an indexed range scan instead
+    // of walking the entity's full event history.
+    const [entityScopes, latestWindowResult] = await Promise.all([
+      fetchEntityIdentityScopes(sql, watcherEntityId),
+      sql`
+        SELECT MAX(window_end) as latest_end
+        FROM watcher_windows
+        WHERE watcher_id = ${args.watcher_id}
+      `,
+    ]);
+    const latestEnd = (latestWindowResult[0]?.latest_end as string | null) ?? null;
+    // 90-day fallback for fresh watchers that have never run.
+    const PENDING_DEFAULT_DAYS = 90;
+    const pendingSinceIso =
+      latestEnd ?? new Date(Date.now() - PENDING_DEFAULT_DAYS * 86_400_000).toISOString();
+
+    // Two entity-link fragments: one with `$1 = watcher_id` reserved (for
+    // queries that join on the watcher's windows), one without (for queries
+    // that only need the entity scope). Sharing one fragment and passing a
+    // phantom `$1` fails the postgres.js parse step when the entity has zero
+    // identity scopes (query has zero placeholders, bind has one).
     const entityLinkWatcherScoped = buildEntityLinkUnion({
       entityIdLiteral: watcherEntityId,
       scopes: entityScopes,
@@ -776,6 +768,10 @@ export async function getWatcher(
     const entityScopeOnlyCondition = entityLinkOnly.sql;
     const entityLinkParams = entityLinkWatcherScoped.params;
     const entityLinkOnlyParams = entityLinkOnly.params;
+    const pendingSinceParamIndex = 2 + entityLinkParams.length;
+    const pendingSinceParamIndexNoWatcher = 1 + entityLinkOnlyParams.length;
+    const occurredAtBound = `f.occurred_at >= $${pendingSinceParamIndex}::timestamptz`;
+    const occurredAtBoundNoWatcher = `f.occurred_at >= $${pendingSinceParamIndexNoWatcher}::timestamptz`;
 
     const notInWindowClause = `NOT EXISTS (
         SELECT 1 FROM watcher_window_events iwc
@@ -783,19 +779,20 @@ export async function getWatcher(
         WHERE iwc.event_id = f.id AND iw.watcher_id = $1
       )`;
 
-    // unprocessed_count drives the badge ("N pending analysis"). Cheap: one
+    // unprocessed_count drives the badge ("N pending analysis"). Bounded
     // entity-scoped COUNT with the not-in-window anti-join.
     //
     // monthlyContent / monthlyLinked build the per-month histogram for
     // unprocessed_ranges, only used inside the (collapsed-by-default) summary
     // view. Off by default; the summary expand path sets include_pending_ranges
-    // to true. Saves two unbounded events-table aggregates per page open.
+    // to true.
     const unprocessedCountPromise = sql.unsafe(
       `SELECT CAST(COUNT(*) AS INTEGER) as count
             FROM current_event_records f
             WHERE ${entityScopeCondition}
+              AND ${occurredAtBound}
               AND ${notInWindowClause}`,
-      [args.watcher_id, ...entityLinkParams]
+      [args.watcher_id, ...entityLinkParams, pendingSinceIso]
     );
 
     const histogramPromise = args.include_pending_ranges
@@ -804,9 +801,10 @@ export async function getWatcher(
             `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(*) as total
               FROM current_event_records f
               WHERE ${entityScopeOnlyCondition}
+                AND ${occurredAtBoundNoWatcher}
               GROUP BY DATE_TRUNC('month', f.occurred_at)
               ORDER BY month`,
-            entityLinkOnlyParams
+            [...entityLinkOnlyParams, pendingSinceIso]
           ),
           sql.unsafe(
             `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(DISTINCT f.id) as linked
@@ -814,9 +812,10 @@ export async function getWatcher(
               JOIN watcher_window_events iwc ON f.id = iwc.event_id
               JOIN watcher_windows iw ON iwc.window_id = iw.id
               WHERE ${entityScopeCondition}
+                AND ${occurredAtBound}
                 AND iw.watcher_id = $1
               GROUP BY DATE_TRUNC('month', f.occurred_at)`,
-            [args.watcher_id, ...entityLinkParams]
+            [args.watcher_id, ...entityLinkParams, pendingSinceIso]
           ),
         ])
       : Promise.resolve([[], []] as [unknown[], unknown[]]);
@@ -827,34 +826,29 @@ export async function getWatcher(
 
     const unprocessedCount = Number(unprocessedCountResult[0]?.count ?? 0);
 
-    // Calculate next window bounds based on granularity
+    // Calculate next window bounds based on granularity using the
+    // already-fetched latestEnd (no extra round-trip).
     let nextWindow: PendingAnalysis['next_window'] = null;
 
     if (unprocessedCount > 0) {
-      // Get the latest window's end date, or earliest unprocessed content date
-      const latestWindowResult = await sql`
-          SELECT MAX(window_end) as latest_end
-          FROM watcher_windows
-          WHERE watcher_id = ${args.watcher_id}
-        `;
-      const latestEnd = latestWindowResult[0]?.latest_end as string | null;
-
-      // Calculate window bounds based on granularity
       const now = new Date();
       let windowStart: Date;
       let windowEnd: Date;
 
       if (latestEnd) {
-        // Continue from where we left off
+        // Continue from where we left off.
         windowStart = new Date(latestEnd);
       } else {
-        // No windows yet - get earliest unprocessed content date
+        // No windows yet — earliest unprocessed event within the pending
+        // bound. Without the bound this was an unbounded MIN scan over the
+        // entity's full event history.
         const earliestResult = await sql.unsafe(
           `SELECT MIN(f.occurred_at) as earliest
             FROM current_event_records f
             WHERE ${entityScopeCondition}
+              AND ${occurredAtBound}
               AND ${notInWindowClause}`,
-          [args.watcher_id, ...entityLinkParams]
+          [args.watcher_id, ...entityLinkParams, pendingSinceIso]
         );
         const earliest = earliestResult[0]?.earliest as string | null;
         windowStart = earliest ? new Date(earliest) : now;
@@ -967,103 +961,22 @@ export async function getWatcher(
   }
 
   // ============================================
-  // Step 7: Fetch watcher statuses (diagnostic info when no windows)
+  // Step 7: Diagnostic warnings for the no-windows case
   // ============================================
+  // Replaces the previous cold-path block (a watchers re-fetch + a
+  // 5-table-join entity_context aggregate that ran ~20s/call in prod for
+  // entities with any volume — measured via pg_stat_statements). Both
+  // produced fields (`watcher_statuses`, `entity_context`) had zero UI
+  // consumers; the only live output was the warnings, which we can derive
+  // from data already in scope.
 
-  const watcherStatuses: WatcherStatus[] = [];
   const warnings: string[] = [];
-  let entityContext: EntityContext | undefined;
 
-  if (formattedWindows.length === 0) {
-    // No windows found - fetch diagnostic information
-
-    // Get watcher status info
-    let watchersQuery;
-    if (args.watcher_id) {
-      watchersQuery = await sql`
-        SELECT
-          i.id, i.name, i.status,
-          i.entity_ids,
-          (SELECT COUNT(*) FROM watcher_windows WHERE watcher_id = i.id) as total_windows
-        FROM watchers i
-        WHERE i.id = ${args.watcher_id}
-      `;
+  if (formattedWindows.length === 0 && watcherRow) {
+    if (watcherRow.status === 'archived') {
+      warnings.push(`Watcher "${watcherRow.name ?? args.watcher_id}" is archived.`);
     } else {
-      watchersQuery = await sql`
-        SELECT
-          i.id, i.name, i.status,
-          i.entity_ids,
-          (SELECT COUNT(*) FROM watcher_windows WHERE watcher_id = i.id) as total_windows
-        FROM watchers i
-        WHERE ${args.entity_id ?? null} = ANY(i.entity_ids)
-      `;
-    }
-
-    for (const watcher of watchersQuery as unknown as WatcherStatusRow[]) {
-      watcherStatuses.push({
-        watcher_id: watcher.id,
-        watcher_name: watcher.name,
-        status: watcher.status,
-        total_windows:
-          typeof watcher.total_windows === 'number'
-            ? watcher.total_windows
-            : Number.parseInt(watcher.total_windows, 10) || 0,
-      });
-
-      // Generate warnings based on status
-      if (watcher.status === 'archived') {
-        warnings.push(`Watcher "${watcher.name}" is archived.`);
-      } else if (Number(watcher.total_windows) === 0) {
-        warnings.push(`Watcher "${watcher.name}" has no windows yet.`);
-      }
-    }
-
-    // Get entity context
-    const contextEntityId = args.entity_id || parseBigintArray(watchersQuery[0]?.entity_ids)[0];
-    if (contextEntityId) {
-      const entityContextQuery = await sql`
-        SELECT
-          CAST(e.id AS TEXT) as entity_id,
-          e.name as entity_name,
-          et.slug AS entity_type,
-          COUNT(DISTINCT f.id) as total_content,
-          COUNT(DISTINCT c.connector_key) as active_connections,
-          MAX(f.occurred_at) as latest_content_date
-        FROM entities e
-        JOIN entity_types et ON et.id = e.entity_type_id
-        LEFT JOIN feeds fc
-          ON e.id = ANY(fc.entity_ids)
-          AND fc.organization_id = e.organization_id
-          AND fc.deleted_at IS NULL
-        LEFT JOIN connections c ON c.id = fc.connection_id AND c.organization_id = e.organization_id
-        LEFT JOIN current_event_records f ON ${sql.unsafe(entityLinkMatchSql('e.id::bigint', 'f'))}
-          AND f.organization_id = e.organization_id
-        WHERE e.id = ${contextEntityId}
-        GROUP BY e.id, e.name, et.slug
-      `;
-
-      if (entityContextQuery.length > 0) {
-        const ctx = entityContextQuery[0] as unknown as EntityContextRow;
-        entityContext = {
-          entity_id: ctx.entity_id,
-          entity_name: ctx.entity_name,
-          entity_type: ctx.entity_type,
-          total_content: Number.parseInt(ctx.total_content, 10) || 0,
-          active_connections: Number.parseInt(ctx.active_connections, 10) || 0,
-          latest_content_date: ctx.latest_content_date,
-        };
-
-        // Add context-specific warnings
-        if (entityContext.active_connections === 0) {
-          warnings.push(
-            `Entity "${entityContext.entity_name}" has no active connections. Create connections to collect content.`
-          );
-        } else if (entityContext.total_content === 0) {
-          warnings.push(
-            `Entity "${entityContext.entity_name}" has ${entityContext.active_connections} active connection(s) but no content collected yet. Initial collection may still be running.`
-          );
-        }
-      }
+      warnings.push(`Watcher "${watcherRow.name ?? args.watcher_id}" has no windows yet.`);
     }
   }
 
@@ -1119,9 +1032,6 @@ export async function getWatcher(
       granularity_fallback_used: usedFallback,
     },
     ...(condensationStatus && { condensation: condensationStatus }),
-    ...(watcherStatuses.length > 0 &&
-      formattedWindows.length === 0 && { watcher_statuses: watcherStatuses }),
-    ...(entityContext && formattedWindows.length === 0 && { entity_context: entityContext }),
     ...(warnings.length > 0 && { warnings }),
     ...(entityInfoForUrl && { view_url: buildWatchersUrl(entityInfoForUrl, baseUrl) }),
   };
