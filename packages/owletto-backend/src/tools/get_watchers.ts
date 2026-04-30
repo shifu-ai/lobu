@@ -867,23 +867,20 @@ export async function getWatcher(
     // planner walks the entity's full event history; with it, the planner
     // uses `idx_events_entity_ids_occurred_at` for an indexed range scan.
     //
-    // For fresh watchers (latestEnd === null), we deliberately leave the
-    // scan unbounded so that `unprocessed_count` and `next_window` reflect
-    // the full backlog of pre-existing entity content the user wants to
-    // bootstrap from. This is rare (one-shot per never-run watcher); steady
-    // state is bounded.
-    const occurredAtBound =
-      latestEnd === null ? null : `f.occurred_at >= $${2 + entityLinkParams.length}::timestamptz`;
-    const occurredAtBoundNoWatcher =
-      latestEnd === null
-        ? null
-        : `f.occurred_at >= $${1 + entityLinkOnlyParams.length}::timestamptz`;
-    const watcherScopedParams =
-      latestEnd === null
-        ? [args.watcher_id, ...entityLinkParams]
-        : [args.watcher_id, ...entityLinkParams, latestEnd];
-    const noWatcherParams =
-      latestEnd === null ? entityLinkOnlyParams : [...entityLinkOnlyParams, latestEnd];
+    // For fresh watchers (latestEnd === null), bound by 90 days ago. The
+    // older "unbounded so the badge reflects the full backlog" path blows
+    // the 10s frontend timeout on high-volume entities (e.g. 78K+ events
+    // → 9.5s scan, then "Failed to load watcher"). 90 days matches the
+    // per-month histogram's natural horizon, keeps the scan indexed, and
+    // the badge is a notification — not a backlog audit.
+    const FRESH_WATCHER_LOOKBACK_DAYS = 90;
+    const effectiveBound =
+      latestEnd ??
+      new Date(Date.now() - FRESH_WATCHER_LOOKBACK_DAYS * 24 * 60 * 60 * 1000).toISOString();
+    const occurredAtBound = `f.occurred_at >= $${2 + entityLinkParams.length}::timestamptz`;
+    const occurredAtBoundNoWatcher = `f.occurred_at >= $${1 + entityLinkOnlyParams.length}::timestamptz`;
+    const watcherScopedParams = [args.watcher_id, ...entityLinkParams, effectiveBound];
+    const noWatcherParams = [...entityLinkOnlyParams, effectiveBound];
 
     const notInWindowClause = `NOT EXISTS (
         SELECT 1 FROM watcher_window_events iwc
