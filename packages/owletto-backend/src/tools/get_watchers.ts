@@ -587,6 +587,7 @@ export async function getWatcher(
                   AND version = COALESCE($2::int, i.version)
                 LIMIT 1)
            )
+       AND sv.watcher_id = i.watcher_group_id
       ${buildLatestWatcherRunJoinSql('i', 'wr')}
       WHERE i.id = $1
     `,

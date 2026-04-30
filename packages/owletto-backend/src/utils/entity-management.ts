@@ -596,6 +596,9 @@ export async function deleteEntity(
             ON s.watcher_group_id = r.old_root
            AND s.id <> r.old_root
            AND NOT (COALESCE(s.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[])
+           AND NOT EXISTS (
+             SELECT 1 FROM watcher_versions vv WHERE vv.watcher_id = s.id
+           )
           GROUP BY r.old_root
         ) s
         WHERE wv.watcher_id = s.old_root
@@ -616,6 +619,9 @@ export async function deleteEntity(
             ON s.watcher_group_id = r.old_root
            AND s.id <> r.old_root
            AND NOT (COALESCE(s.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[])
+           AND NOT EXISTS (
+             SELECT 1 FROM watcher_versions vv WHERE vv.watcher_id = s.id
+           )
           GROUP BY r.old_root
         ) s
         WHERE w.watcher_group_id = s.old_root
@@ -668,6 +674,9 @@ export async function deleteEntity(
             ON s.watcher_group_id = r.old_root
            AND s.id <> r.old_root
            AND cardinality(COALESCE(s.entity_ids, '{}'::bigint[])) > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM watcher_versions vv WHERE vv.watcher_id = s.id
+           )
           GROUP BY r.old_root
         ) s
         WHERE wv.watcher_id = s.old_root
@@ -688,6 +697,9 @@ export async function deleteEntity(
             ON s.watcher_group_id = r.old_root
            AND s.id <> r.old_root
            AND cardinality(COALESCE(s.entity_ids, '{}'::bigint[])) > 0
+           AND NOT EXISTS (
+             SELECT 1 FROM watcher_versions vv WHERE vv.watcher_id = s.id
+           )
           GROUP BY r.old_root
         ) s
         WHERE w.watcher_group_id = s.old_root

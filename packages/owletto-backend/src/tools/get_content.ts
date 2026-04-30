@@ -138,6 +138,12 @@ export const GetContentSchema = Type.Object({
         "Watcher ID to fetch content for. When provided, uses watcher's sources and computes pending window. Returns window_token for complete_window action.",
     })
   ),
+  template_version_id: Type.Optional(
+    Type.Number({
+      description:
+        "Pin to a specific watcher_versions.id when reading the prompt/schema. Workers receive this from runs.approved_input.version_id and pass it back so a group edit landing mid-run can't make extraction use a different schema. When omitted, defaults to the watcher's current_version_id.",
+    })
+  ),
   connection_ids: Type.Optional(
     Type.Array(Type.Number(), {
       description: 'Connection IDs to filter by',
@@ -1420,7 +1426,12 @@ async function handleWatcherMode(
 
   const watcherId = args.watcher_id!;
 
-  // Fetch watcher with template info and entity name
+  // Workers pass `template_version_id` (snapshotted at run-creation time)
+  // so the prompt/schema we hand back matches the version this run was
+  // queued for, even if the group has been edited since. The version row
+  // is owned by the group root (watcher_id = i.watcher_group_id), and we
+  // require it to live in the same group to prevent cross-watcher pinning.
+  const pinnedVersionId = args.template_version_id ?? null;
   const watcherResult = await sql`
     SELECT
       i.id,
@@ -1436,7 +1447,9 @@ async function handleWatcherMode(
       cv.version_sources,
       (SELECT COALESCE(json_agg(json_build_object('id', e.id, 'name', e.name, 'type', et.slug)), '[]'::json) FROM entities e JOIN entity_types et ON et.id = e.entity_type_id WHERE e.id = ANY(i.entity_ids)) as entities
     FROM watchers i
-    LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
+    LEFT JOIN watcher_versions cv
+      ON cv.id = COALESCE(${pinnedVersionId}::bigint, i.current_version_id)
+     AND cv.watcher_id = i.watcher_group_id
     WHERE i.id = ${watcherId}
     LIMIT 1
   `;

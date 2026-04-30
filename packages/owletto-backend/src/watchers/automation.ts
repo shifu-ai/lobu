@@ -102,12 +102,25 @@ export function parseWatcherRunPayload(value: unknown): WatcherRunPayload | null
     return null;
   }
 
+  // version_id was added when the watcher group-edit refactor introduced
+  // a per-run version snapshot. Older runs (queued before the change) have
+  // no version_id in approved_input — coerce to null and the agent loop
+  // falls back to current_version_id, matching pre-refactor behavior.
+  const rawVersionId = payload.version_id;
+  const versionId =
+    typeof rawVersionId === 'number' && Number.isFinite(rawVersionId)
+      ? rawVersionId
+      : typeof rawVersionId === 'string' && rawVersionId.trim() !== ''
+        ? Number(rawVersionId)
+        : null;
+
   return {
     watcher_id: watcherId,
     agent_id: agentId,
     window_start: windowStart,
     window_end: windowEnd,
     dispatch_source: dispatchSource,
+    version_id: Number.isFinite(versionId as number) ? (versionId as number) : null,
   };
 }
 
@@ -411,6 +424,14 @@ function buildDispatchMessage(params: {
     .toISOString()
     .split('T')[0];
 
+  // The version snapshot taken at run-creation time pins this run to a
+  // specific watcher_template_versions row. Pass it to read_knowledge AND
+  // complete_window so a group edit landing mid-run can't make the agent
+  // extract with prompt v1 and have its output validated against schema v2.
+  const versionPin = params.payload.version_id != null
+    ? `, "template_version_id": ${params.payload.version_id}`
+    : '';
+
   return [
     'Run this Owletto watcher now using the Owletto MCP tools.',
     '',
@@ -421,11 +442,14 @@ function buildDispatchMessage(params: {
     `Queued window start: ${params.payload.window_start}`,
     `Queued window end: ${params.payload.window_end}`,
     `Dispatch source: ${params.payload.dispatch_source}`,
+    ...(params.payload.version_id != null
+      ? [`Pinned template version id: ${params.payload.version_id}`]
+      : []),
     '',
     'Required steps:',
-    `1. Call read_knowledge with {"watcher_id": ${params.watcherId}, "since": "${readKnowledgeSince}", "until": "${readKnowledgeUntil}"}.`,
+    `1. Call read_knowledge with {"watcher_id": ${params.watcherId}, "since": "${readKnowledgeSince}", "until": "${readKnowledgeUntil}"${versionPin}}.`,
     '2. Analyze the returned content using prompt_rendered and extraction_schema.',
-    '3. Call manage_watchers(action="complete_window") with the returned window_token and your extracted_data.',
+    `3. Call manage_watchers(action="complete_window") with the returned window_token and your extracted_data${params.payload.version_id != null ? `, including "template_version_id": ${params.payload.version_id}` : ''}.`,
     '4. Include this run_metadata object in complete_window exactly, and add any extra provider/job fields you know:',
     JSON.stringify(
       {

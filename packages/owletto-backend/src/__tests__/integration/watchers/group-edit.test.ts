@@ -20,6 +20,7 @@ import type { Env } from '../../../index';
 import { manageWatchers } from '../../../tools/admin/manage_watchers';
 import type { ToolContext } from '../../../tools/registry';
 import { createWatcherRun } from '../../../utils/queue-helpers';
+import { parseWatcherRunPayload } from '../../../watchers/automation';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestEntity } from '../../setup/test-fixtures';
 import { TestWorkspace } from '../../setup/test-workspace';
@@ -318,5 +319,129 @@ describe('watcher group edit contract', () => {
       SELECT current_version_id FROM watchers WHERE id = ${rootId}
     `;
     expect(Number(watcherAfter.current_version_id)).not.toBe(snapshotVersionId);
+  });
+
+  it('parseWatcherRunPayload returns the snapshot version_id', async () => {
+    const sql = getTestDb();
+    const workspace = await TestWorkspace.create({ name: 'Payload Parse Org' });
+    const { watcherId: rootId } = await seedRootWatcher(workspace, 'parse');
+
+    const queued = await createWatcherRun({
+      organizationId: workspace.org.id,
+      watcherId: rootId,
+      agentId: 'parse-agent',
+      windowStart: new Date().toISOString(),
+      windowEnd: new Date().toISOString(),
+      dispatchSource: 'scheduled',
+    });
+
+    const [run] = await sql`SELECT approved_input FROM runs WHERE id = ${queued.runId}`;
+    const parsed = parseWatcherRunPayload(run.approved_input);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.version_id).not.toBeNull();
+    expect(Number.isFinite(parsed!.version_id as number)).toBe(true);
+  });
+
+  it('parseWatcherRunPayload tolerates legacy runs missing version_id', () => {
+    const legacyPayload = {
+      watcher_id: 1,
+      agent_id: 'a',
+      window_start: '2024-01-01',
+      window_end: '2024-01-02',
+      dispatch_source: 'scheduled',
+    };
+    const parsed = parseWatcherRunPayload(legacyPayload);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.version_id).toBeNull();
+  });
+
+  it('complete_window scopes the run lookup by watcher_id', async () => {
+    const sql = getTestDb();
+    const workspace = await TestWorkspace.create({ name: 'Run Scope Org' });
+    const { watcherId: aId } = await seedRootWatcher(workspace, 'scope-a');
+    const { watcherId: bId } = await seedRootWatcher(workspace, 'scope-b');
+
+    // Create a run for watcher A. The run's snapshot version is A's current.
+    const aRun = await createWatcherRun({
+      organizationId: workspace.org.id,
+      watcherId: aId,
+      agentId: 'a-agent',
+      windowStart: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+      windowEnd: new Date().toISOString(),
+      dispatchSource: 'scheduled',
+    });
+
+    // Now bump A's current_version_id to v2 — the snapshot in aRun still
+    // points at v1, but if complete_window for B mistakenly uses aRun's id
+    // it must NOT pick up A's v1 snapshot.
+    await manageWatchers(
+      {
+        action: 'create_version',
+        watcher_id: String(aId),
+        prompt: "A's v2",
+        change_notes: 'bump A',
+      } as never,
+      {} as Env,
+      ownerCtx(workspace)
+    );
+
+    // Confirm the run lookup we use in complete_window won't return A's
+    // snapshot when scoped by watcher_id = B.
+    const [scopedToB] = await sql`
+      SELECT (approved_input->>'version_id')::bigint AS version_id
+      FROM runs WHERE id = ${aRun.runId} AND watcher_id = ${bId}
+      LIMIT 1
+    `;
+    expect(scopedToB).toBeUndefined();
+    const [scopedToA] = await sql`
+      SELECT (approved_input->>'version_id')::bigint AS version_id
+      FROM runs WHERE id = ${aRun.runId} AND watcher_id = ${aId}
+      LIMIT 1
+    `;
+    expect(scopedToA).toBeDefined();
+    expect(Number(scopedToA.version_id)).toBeGreaterThan(0);
+  });
+
+  it('serializes concurrent create_version calls on the same group', async () => {
+    const sql = getTestDb();
+    const workspace = await TestWorkspace.create({ name: 'Concurrent Edit Org' });
+    const { watcherId: rootId } = await seedRootWatcher(workspace, 'concurrent');
+
+    // Fire two create_version calls in parallel. The advisory lock should
+    // serialize them; one ends up at v2, the other at v3 — neither errors,
+    // neither collides on (watcher_id, version) unique index.
+    const [r1, r2] = await Promise.all([
+      manageWatchers(
+        {
+          action: 'create_version',
+          watcher_id: String(rootId),
+          prompt: 'edit A',
+          change_notes: 'A',
+        } as never,
+        {} as Env,
+        ownerCtx(workspace)
+      ),
+      manageWatchers(
+        {
+          action: 'create_version',
+          watcher_id: String(rootId),
+          prompt: 'edit B',
+          change_notes: 'B',
+        } as never,
+        {} as Env,
+        ownerCtx(workspace)
+      ),
+    ]);
+
+    const versions = [r1, r2]
+      .map((r) => Number((r as { version: number }).version))
+      .sort((a, b) => a - b);
+    expect(versions).toEqual([2, 3]);
+
+    const versionRows = await sql`
+      SELECT version FROM watcher_versions WHERE watcher_id = ${rootId} ORDER BY version
+    `;
+    const stored = versionRows.map((r) => Number(r.version));
+    expect(stored).toEqual([1, 2, 3]);
   });
 });

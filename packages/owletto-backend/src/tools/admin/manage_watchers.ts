@@ -445,6 +445,12 @@ export const ManageWatchersSchema = Type.Object({
         '[complete_window] Optional structured execution metadata for provenance (provider, session id, parameters, etc.).',
     })
   ),
+  template_version_id: Type.Optional(
+    Type.Number({
+      description:
+        "[complete_window] Pin to a specific watcher_versions.id. Workers receive this from the run dispatch payload (snapshotted from current_version_id at run-creation) and pass it back here so validation uses the same version that produced the extraction. Defaults to the run row's snapshot if available, else the watcher's current_version_id.",
+    })
+  ),
 
   // Fields for action="set_reaction_script"
   reaction_script: Type.Optional(
@@ -1346,19 +1352,31 @@ async function handleCompleteWindow(
   // ============================================
   // Resolve the version this run was started against. The agent extracted
   // data using that version's prompt/schema; we MUST validate against the
-  // same version even if the group has been edited mid-run. Fall back to
-  // the watcher's current_version_id only when called outside a run.
-  let snapshotVersionId: number | null = null;
-  if (watcherRunId != null) {
+  // same version even if the group has been edited mid-run.
+  //
+  // Resolution order:
+  //   1. explicit args.template_version_id (the agent passes this back)
+  //   2. runs.approved_input.version_id (snapshotted at run-creation)
+  //   3. watchers.current_version_id (fallback for callers outside a run)
+  //
+  // The run lookup is scoped by watcher_id so a wrong/stale watcher_run_id
+  // can't read another watcher's snapshot.
+  let snapshotVersionId: number | null =
+    typeof args.template_version_id === 'number' ? args.template_version_id : null;
+  if (snapshotVersionId == null && watcherRunId != null) {
     const runRows = await sql`
       SELECT (approved_input->>'version_id')::bigint AS version_id
-      FROM runs WHERE id = ${watcherRunId} LIMIT 1
+      FROM runs
+      WHERE id = ${watcherRunId} AND watcher_id = ${watcherId}
+      LIMIT 1
     `;
     if (runRows.length > 0 && runRows[0].version_id != null) {
       snapshotVersionId = Number(runRows[0].version_id);
     }
   }
 
+  // The version row must belong to this watcher's group — prevents pinning
+  // to another group's version via a forged template_version_id arg.
   const watcherRows = await sql`
     SELECT
       i.id,
@@ -1374,6 +1392,7 @@ async function handleCompleteWindow(
     FROM watchers i
     LEFT JOIN watcher_versions wv
       ON wv.id = COALESCE(${snapshotVersionId}::bigint, i.current_version_id)
+     AND wv.watcher_id = i.watcher_group_id
     WHERE i.id = ${watcherId}
     LIMIT 1
   `;
@@ -1720,6 +1739,9 @@ async function handleCompleteWindow(
 
     let runMarkedCompleted = false;
     if (watcherRunId && Number.isFinite(watcherRunId)) {
+      // Scope by watcher_id so a wrong/stale watcher_run_id (passed in
+      // run_metadata) cannot mark another watcher's run completed against
+      // this watcher's window.
       const completedRows = await tx`
         UPDATE runs
         SET status = 'completed',
@@ -1727,6 +1749,7 @@ async function handleCompleteWindow(
             completed_at = current_timestamp,
             error_message = NULL
         WHERE id = ${watcherRunId}
+          AND watcher_id = ${watcherId}
           AND run_type = 'watcher'
           AND status IN ('running', 'claimed')
         RETURNING id
@@ -2256,7 +2279,7 @@ async function handleCreateVersion(
   // identify the group and to apply the per-assignment writes (sources,
   // schedule, scheduler_client_id) to that specific row.
   const watcherRows = await sql`
-    SELECT i.id, i.version, i.current_version_id, i.watcher_group_id
+    SELECT i.id, i.version, i.current_version_id, i.watcher_group_id, i.sources
     FROM watchers i WHERE i.id = ${args.watcher_id}
   `;
   if (watcherRows.length === 0) {
@@ -2290,9 +2313,16 @@ async function handleCreateVersion(
   const extractionSchema =
     parseJsonInput<Record<string, unknown>>(args.extraction_schema, 'extraction_schema') ??
     normalizeStoredJsonField(prev.extraction_schema, {} as Record<string, unknown>);
+  // Sources are per-assignment now. When the caller omits args.sources we
+  // keep the seed watcher's existing sources; we deliberately do not fall
+  // back to prev.version_sources from the prior version row, because
+  // version_sources is no longer written and is a vestigial column.
   const sources =
     args.sources ??
-    normalizeStoredJsonField(prev.version_sources, [] as Array<{ name: string; query: string }>);
+    normalizeStoredJsonField(
+      watcherRows[0].sources,
+      [] as Array<{ name: string; query: string }>
+    );
   const jsonTemplate =
     parseJsonInput<unknown>(args.json_template, 'json_template') ??
     normalizeStoredJsonField(prev.json_template, undefined as unknown);
@@ -2333,10 +2363,32 @@ async function handleCreateVersion(
 
   const createdBy = ctx.userId ?? 'system';
   const versionId = await getNextWatcherVersionId(sql);
+  let lockedNextVersion = nextVersion;
   await sql.begin(async (tx) => {
+    // Serialize concurrent create_version calls on the same group. The
+    // unique (watcher_id, version) index would otherwise reject one of two
+    // simultaneous N+1 inserts and surface as a 500. The advisory lock is
+    // tx-scoped (auto-released on commit/rollback) and keyed by group id,
+    // so unrelated groups are unaffected.
+    await tx`SELECT pg_advisory_xact_lock(hashtext('watcher_create_version'), ${groupId})`;
+
+    // Re-resolve the latest version under the lock so we don't race with a
+    // call that already committed N+1 while we were computing nextVersion.
+    const latestRows = await tx`
+      SELECT MAX(version) AS v FROM watcher_versions WHERE watcher_id = ${groupId}
+    `;
+    lockedNextVersion =
+      latestRows.length > 0 && latestRows[0].v != null ? Number(latestRows[0].v) + 1 : nextVersion;
+
     // The new version row is owned by the group root, not the assignment
     // the caller named. Every watcher in the group will later point at
     // this row via current_version_id.
+    // version_sources is intentionally NULL on the new version row: sources
+    // are per-assignment now, so storing one assignment's sources in the
+    // shared version row would let one assignment's source list override
+    // every other assignment's sources via get_content's preference order.
+    // get_content falls through to watchers.sources when version_sources is
+    // empty, which is the right per-assignment behavior.
     await tx`
       INSERT INTO watcher_versions (
         id, watcher_id, version, name, description,
@@ -2345,10 +2397,10 @@ async function handleCreateVersion(
         condensation_prompt, condensation_window_count,
         reactions_guidance, change_notes, created_by, created_at
       ) VALUES (
-        ${versionId}, ${groupId}, ${nextVersion},
+        ${versionId}, ${groupId}, ${lockedNextVersion},
         ${args.name ?? (prev.name as string) ?? 'Watcher'},
         ${args.description !== undefined ? (args.description ?? null) : ((prev.description as string) ?? null)},
-        ${prompt}, ${toJsonParam(tx, extractionSchema)}, ${toJsonParam(tx, sources)},
+        ${prompt}, ${toJsonParam(tx, extractionSchema)}, NULL,
         ${toJsonParam(tx, jsonTemplate)}, ${toJsonParam(tx, keyingConfig)}, ${toJsonParam(tx, classifiers)},
         ${args.condensation_prompt ?? (prev.condensation_prompt as string) ?? null},
         ${args.condensation_window_count ?? (prev.condensation_window_count as number) ?? null},
@@ -2372,7 +2424,7 @@ async function handleCreateVersion(
         UPDATE watchers
         SET
           current_version_id = ${versionId},
-          version = ${nextVersion},
+          version = ${lockedNextVersion},
           name = ${args.name ?? (prev.name as string)},
           updated_at = NOW()
         WHERE watcher_group_id = ${groupId}
@@ -2395,7 +2447,7 @@ async function handleCreateVersion(
     action: 'create_version',
     watcher_id: args.watcher_id,
     version_id: String(versionId),
-    version: nextVersion,
+    version: lockedNextVersion,
     previous_version: previousVersion,
   };
 }
