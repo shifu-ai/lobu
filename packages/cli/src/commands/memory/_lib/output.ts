@@ -18,17 +18,3 @@ export function printText(text: string) {
 export function printError(message: string) {
   process.stderr.write(`error: ${message}\n`);
 }
-
-export function printTable(headers: string[], rows: string[][]) {
-  if (jsonMode) return;
-  const widths = headers.map((h, i) =>
-    Math.max(h.length, ...rows.map((r) => (r[i] || "").length))
-  );
-  const line = (cells: string[]) =>
-    cells.map((c, i) => c.padEnd(widths[i]!)).join("  ");
-  process.stdout.write(`${line(headers)}\n`);
-  process.stdout.write(`${widths.map((w) => "-".repeat(w)).join("  ")}\n`);
-  for (const row of rows) {
-    process.stdout.write(`${line(row)}\n`);
-  }
-}

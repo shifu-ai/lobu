@@ -79,14 +79,3 @@ export async function memoryInitCommand(
 
   p.outro("Done");
 }
-
-/** Reusable from `lobu init` after scaffold when the user opts into memory. */
-export async function runMemoryInit(
-  options: MemoryInitOptions = {}
-): Promise<void> {
-  const mcpUrl = await chooseMcpUrl(options.url);
-  await runInitWizard(mcpUrl, {
-    skipAuth: options.skipAuth,
-    agent: options.agent,
-  });
-}
