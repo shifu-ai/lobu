@@ -34,7 +34,7 @@ const latestPosts = await getLatestPosts(3);
       "--grid-max-w": "72rem",
     }}
   >
-    <Nav currentPath={Astro.url.pathname} />
+    <Nav client:load currentPath={Astro.url.pathname} />
     <main class="relative z-[1]">
       <LandingPage
         client:load

@@ -20,7 +20,7 @@ type EntityMemoryDiagramProps = {
   entities: EntityMemoryNode[];
 };
 
-const guideColor = "rgba(255,255,255,0.16)";
+const guideColor = "rgba(0,0,0,0.16)";
 
 function TreeBranch({ children }: { children: ComponentChildren }) {
   return (
@@ -51,7 +51,7 @@ function TreeRow({
         <span
           aria-hidden="true"
           class="absolute left-[-21px] top-[14px] block h-[calc(100%_-_14px)] w-px"
-          style={{ background: "var(--color-page-bg, #0b0b10)" }}
+          style={{ background: "var(--color-page-surface-dim)" }}
         />
       )}
       {children}
@@ -67,8 +67,8 @@ export function EntityMemoryDiagram({
   entities,
 }: EntityMemoryDiagramProps) {
   return (
-    <div class="my-8 rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[linear-gradient(180deg,rgba(18,18,24,0.96),rgba(11,11,16,0.96))] p-4 sm:p-5">
-      <div class="rounded-lg border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2.5 sm:px-4 sm:py-3">
+    <div class="my-8 rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-surface-dim)] p-4 sm:p-5">
+      <div class="rounded-lg border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-2.5 sm:px-4 sm:py-3">
         <div class="grid gap-1.5 sm:grid-cols-[minmax(0,12rem)_1fr] sm:gap-3">
           <div>
             <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-page-text-muted)]">
@@ -92,11 +92,11 @@ export function EntityMemoryDiagram({
         ↓
       </div>
 
-      <div class="rounded-lg border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-3 sm:px-5 sm:py-4">
+      <div class="rounded-lg border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-3 sm:px-5 sm:py-4">
         <div class="flex items-center gap-2 text-[0.95rem] font-semibold text-[var(--color-page-text)]">
           {rootEmoji && <span aria-hidden="true">{rootEmoji}</span>}
           <span>{rootLabel}</span>
-          <span class="ml-1 rounded-full border border-[rgba(255,255,255,0.1)] px-2 py-[1px] text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-page-text-muted)]">
+          <span class="ml-1 rounded-full border border-[var(--color-page-border)] px-2 py-[1px] text-[10px] font-medium uppercase tracking-[0.16em] text-[var(--color-page-text-muted)]">
             entity type
           </span>
         </div>

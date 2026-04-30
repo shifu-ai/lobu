@@ -11,13 +11,13 @@ const latestPosts = await getLatestPosts(3);
 
 <BaseLayout>
   <div
-    class="min-h-screen grid-lines"
+    class="min-h-screen grid-lines overflow-x-hidden"
     style={{
       backgroundColor: "var(--color-page-bg)",
       "--grid-max-w": "72rem",
     }}
   >
-    <Nav currentPath={Astro.url.pathname} />
+    <Nav client:load currentPath={Astro.url.pathname} />
     <main class="relative z-[1]">
       <LandingPage client:load linkTabsToCampaigns latestPosts={latestPosts} />
     </main>

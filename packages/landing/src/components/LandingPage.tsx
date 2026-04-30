@@ -4,12 +4,21 @@ import {
   DEFAULT_LANDING_USE_CASE_ID,
   type SurfaceHeroCopy,
 } from "../use-case-showcases";
-import { ArchitectureSection } from "./ArchitectureSection";
-import { BenchmarkSection } from "./BenchmarkSection";
 import { CTA } from "./CTA";
-import { DemoSection } from "./DemoSection";
-import { HeroSection } from "./HeroSection";
+import { DataModelSection } from "./DataModelSection";
+import { FeatureBlock } from "./FeatureBlock";
+import {
+  BenchmarkGraphic,
+  HostingGraphic,
+  LogoStrip,
+  PlatformsGraphic,
+  SkillsGraphic,
+  WatcherGraphic,
+} from "./FeatureGraphics";
+import { HeroProductCard } from "./HeroProductCard";
+import { HeroSection, type HeroStageId } from "./HeroSection";
 import { LatestBlogPosts, type LatestBlogPost } from "./LatestBlogPosts";
+import { SectionCornerLabels } from "./SectionCornerLabels";
 
 export function LandingPage(props: {
   defaultUseCaseId?: LandingUseCaseId;
@@ -17,42 +26,129 @@ export function LandingPage(props: {
   heroCopy?: SurfaceHeroCopy;
   latestPosts?: LatestBlogPost[];
 }) {
-  const [activeUseCaseId, setActiveUseCaseId] = useState<LandingUseCaseId>(
+  const [activeUseCaseId] = useState<LandingUseCaseId>(
     props.defaultUseCaseId ?? DEFAULT_LANDING_USE_CASE_ID
   );
-  const useScopedOwlettoUrl = Boolean(props.heroCopy);
+  const [activeStage, setActiveStage] = useState<HeroStageId>("model");
+  const [autoAdvance, setAutoAdvance] = useState(true);
+
+  const handleStageChange = (id: HeroStageId) => {
+    setAutoAdvance(false);
+    setActiveStage(id);
+  };
 
   return (
     <>
       <HeroSection
         activeUseCaseId={activeUseCaseId}
-        onActiveUseCaseChange={setActiveUseCaseId}
-        linkTabsToCampaigns={props.linkTabsToCampaigns}
+        activeStage={activeStage}
+        onActiveStageChange={setActiveStage}
+        autoAdvance={autoAdvance}
+        onStopAutoAdvance={() => setAutoAdvance(false)}
         heroCopy={props.heroCopy}
-        useScopedOwlettoUrl={useScopedOwlettoUrl}
       />
-      <DemoSection
-        activeUseCaseId={activeUseCaseId}
-        onActiveUseCaseChange={setActiveUseCaseId}
-        showTabs={false}
-        linkTabsToCampaigns={props.linkTabsToCampaigns}
-      />
-      <div class="hidden md:block">
-        <div class="section-divider" />
-        <ArchitectureSection activeUseCaseId={activeUseCaseId} />
-        <div class="section-divider" />
+
+      <section class="px-4 sm:px-6 pt-2 pb-12">
+        <HeroProductCard
+          stage={activeStage}
+          onStageChange={handleStageChange}
+          useCaseId={activeUseCaseId}
+        />
+      </section>
+
+      <LogoStrip />
+
+      <SectionCornerLabels
+        index={1}
+        leftLabel="Memory"
+        rightLabel="Agents ↔ Recall"
+        id="memory"
+      >
+        <FeatureBlock
+          eyebrow="Beats other memory systems"
+          title="Turn data into shared, structured memory."
+          description="Tell one agent something and the rest already know. Lobu Memory is the shared brain across your team's agents, pulled from the tools you already use, recalled when it matters."
+          ctaLabel="See benchmark methodology"
+          ctaHref="/guides/memory-benchmarks/"
+          graphic={<BenchmarkGraphic />}
+        />
+      </SectionCornerLabels>
+
+      <SectionCornerLabels
+        index={2}
+        leftLabel="Skills"
+        rightLabel="Capability ↔ Bundle"
+        id="skills"
+      >
+        <FeatureBlock
+          eyebrow="Drop in, ready to work"
+          title="Give your agent new capabilities."
+          description="A skill bundles everything an agent needs to do something: instructions, tools, and access, all in one folder. No glue code, no IT ticket. Drop it in and the agent picks it up."
+          ctaLabel="Explore skills"
+          ctaHref="/getting-started/skills/"
+          graphic={<SkillsGraphic />}
+          reverse
+        />
+      </SectionCornerLabels>
+
+      <SectionCornerLabels
+        index={3}
+        leftLabel="Autonomous"
+        rightLabel="Watchers ↔ Memory"
+        id="autonomous"
+      >
+        <FeatureBlock
+          eyebrow="Working while you're away"
+          title="Turn schedules into agents that act on their own."
+          description="A watcher wakes on a schedule, reads recent activity, filters with a prompt you wrote, and writes the signal (not the noise) into entity memory. The agent isn't online, but the memory is moving."
+          ctaLabel="How watchers work"
+          ctaHref="/getting-started/memory/#watchers"
+          graphic={<WatcherGraphic />}
+        />
+      </SectionCornerLabels>
+
+      <SectionCornerLabels
+        index={4}
+        leftLabel="Available everywhere"
+        rightLabel="Chat ↔ MCP"
+        id="platforms"
+      >
+        <FeatureBlock
+          eyebrow="Built into your tools"
+          title="Talk to your agents from any chat or AI client."
+          description="Lobu agents live where your team already works: Slack, Telegram, Discord, Teams, WhatsApp, Google Chat. Or pull them into ChatGPT, Claude, Cursor, and any MCP-capable client over the same protocol."
+          ctaLabel="Connect via MCP"
+          ctaHref="/mcp/"
+          graphic={<PlatformsGraphic />}
+          reverse
+        />
+      </SectionCornerLabels>
+
+      <SectionCornerLabels
+        index={5}
+        leftLabel="Own your data"
+        rightLabel="Self-host ↔ Managed"
+        id="hosting"
+      >
+        <FeatureBlock
+          eyebrow="Self-host or managed"
+          title="You own your data."
+          description="Run open-source Lobu on your own servers for full control over your data and credentials, or use our managed runtime. With per-second billing you only pay for the time your agents are awake."
+          ctaLabel="Self-host guide"
+          ctaHref="/getting-started/"
+          graphic={<HostingGraphic />}
+        />
+      </SectionCornerLabels>
+
+      <div class="py-20" id="data-model">
+        <DataModelSection />
       </div>
-      <BenchmarkSection />
+
+      <CTA />
+
       {props.latestPosts?.length ? (
-        <>
-          <div class="section-divider" />
-          <LatestBlogPosts posts={props.latestPosts} />
-        </>
+        <LatestBlogPosts posts={props.latestPosts} />
       ) : null}
-      <CTA
-        activeUseCaseId={activeUseCaseId}
-        useScopedOwlettoUrl={useScopedOwlettoUrl}
-      />
     </>
   );
 }

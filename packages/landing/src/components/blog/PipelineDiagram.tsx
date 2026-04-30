@@ -11,7 +11,7 @@ type PipelineDiagramProps = {
 
 export function PipelineDiagram({ title, steps }: PipelineDiagramProps) {
   return (
-    <div class="my-8 rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[linear-gradient(180deg,rgba(18,18,24,0.96),rgba(11,11,16,0.96))] p-4 sm:p-5">
+    <div class="my-8 rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-surface-dim)] p-4 sm:p-5">
       {title && (
         <div class="mb-4 text-[11px] font-semibold uppercase tracking-[0.22em] text-[var(--color-page-text-muted)]">
           {title}
@@ -20,7 +20,7 @@ export function PipelineDiagram({ title, steps }: PipelineDiagramProps) {
       <div class="flex flex-col gap-1.5">
         {steps.map((step, index) => (
           <div key={step.title} class="contents">
-            <div class="rounded-lg border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-2.5 sm:px-4 sm:py-3">
+            <div class="rounded-lg border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-2.5 sm:px-4 sm:py-3">
               <div class="grid gap-1.5 sm:grid-cols-[minmax(0,12rem)_1fr] sm:gap-3">
                 <div>
                   <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-page-text-muted)]">

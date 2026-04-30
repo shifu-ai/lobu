@@ -1,19 +1,15 @@
+import { useEffect, useState } from "preact/hooks";
 import type { LandingUseCaseId } from "../use-case-definitions";
 import {
-  getLandingPrompt,
   getLandingUseCaseShowcase,
-  getOwlettoUrl,
-  landingUseCaseGroupedOptions,
   type SurfaceHeroCopy,
 } from "../use-case-showcases";
-import { CopyPromptButton } from "./CopyPromptButton";
 import { HighlightedText } from "./HighlightedText";
-import { ScopedUseCaseTabs } from "./ScopedUseCaseTabs";
 
 const GitHubIcon = () => (
   <svg
-    width="12"
-    height="12"
+    width="14"
+    height="14"
     viewBox="0 0 24 24"
     fill="currentColor"
     aria-hidden="true"
@@ -22,129 +18,204 @@ const GitHubIcon = () => (
   </svg>
 );
 
+const ArrowRightIcon = () => (
+  <svg
+    width="12"
+    height="12"
+    viewBox="0 0 12 12"
+    fill="none"
+    aria-hidden="true"
+    class="ml-1"
+  >
+    <path
+      d="M2.5 6h7m0 0L6 2.5M9.5 6 6 9.5"
+      stroke="currentColor"
+      stroke-width="1.4"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+  </svg>
+);
+
 const GITHUB_URL = "https://github.com/lobu-ai/lobu";
+
+export type HeroStageId =
+  | "model"
+  | "integrate"
+  | "watch"
+  | "connect"
+  | "knowledge";
+
+const STAGE_TABS: Array<{ id: HeroStageId; label: string; index: number }> = [
+  { id: "model", label: "Model", index: 1 },
+  { id: "integrate", label: "Integrate", index: 2 },
+  { id: "watch", label: "Watch", index: 3 },
+  { id: "connect", label: "Connect", index: 4 },
+];
+
+const TAB_CYCLE_MS = 5000;
 
 export function HeroSection(props: {
   activeUseCaseId?: LandingUseCaseId;
-  onActiveUseCaseChange?: (id: LandingUseCaseId) => void;
-  linkTabsToCampaigns?: boolean;
+  activeStage?: HeroStageId;
+  onActiveStageChange?: (id: HeroStageId) => void;
+  autoAdvance?: boolean;
+  onStopAutoAdvance?: () => void;
   heroCopy?: SurfaceHeroCopy;
-  useScopedOwlettoUrl?: boolean;
 }) {
   const activeUseCase = getLandingUseCaseShowcase(props.activeUseCaseId);
-  const owlettoUrl = getOwlettoUrl(
-    props.useScopedOwlettoUrl ? activeUseCase.id : undefined
-  );
-  const primaryCtaLabel = props.heroCopy
-    ? `Try the ${activeUseCase.label} demo`
-    : "Try it live";
+  const activeStage = props.activeStage ?? "model";
+  const autoAdvance = props.autoAdvance ?? true;
+  const [cycleSeed, setCycleSeed] = useState(0);
+
+  useEffect(() => {
+    if (!autoAdvance) return;
+    const idx = STAGE_TABS.findIndex((s) => s.id === activeStage);
+    if (idx === -1) return;
+    const t = setTimeout(() => {
+      const next = STAGE_TABS[(idx + 1) % STAGE_TABS.length];
+      props.onActiveStageChange?.(next.id);
+      setCycleSeed((s) => s + 1);
+    }, TAB_CYCLE_MS);
+    return () => clearTimeout(t);
+  }, [activeStage, cycleSeed, autoAdvance]);
+
+  const handleTabClick = (id: HeroStageId) => {
+    props.onStopAutoAdvance?.();
+    props.onActiveStageChange?.(id);
+    setCycleSeed((s) => s + 1);
+  };
+
+  const headlineText =
+    props.heroCopy?.title ?? "Proactive agents that never forget.";
+  const headlineHighlight = props.heroCopy?.highlight ?? "never forget";
+  const subhead =
+    props.heroCopy?.description ??
+    "Build autonomous agents that take action and stay reachable from any chat or AI client.";
 
   return (
-    <section class="pt-24 pb-4 px-8 relative">
+    <section class="pt-16 pb-8 px-6 relative">
       <div class="max-w-5xl mx-auto text-center relative">
         <a
-          href={GITHUB_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          class="hero-rise hero-rise-1 inline-flex items-center gap-2 text-xs font-semibold tracking-wider uppercase px-3 py-1 mb-5 rounded-full transition-all hover:opacity-80"
+          href="/guides/memory-benchmarks/"
+          class="hero-rise hero-rise-1 inline-flex items-center gap-2 text-[12px] font-medium px-3 py-1.5 mb-8 rounded-full transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
           style={{
-            color: "var(--color-page-text-muted)",
+            color: "var(--color-page-text)",
             border: "1px solid var(--color-page-border)",
           }}
         >
-          Open source · Self-hosted
+          Lobu Memory scores 87.1% on LongMemEval, highest of any system
+          <ArrowRightIcon />
         </a>
+
         <h1
-          class="hero-rise hero-rise-2 text-4xl sm:text-5xl font-bold tracking-tight leading-[1.1] mb-5"
-          style={{ color: "var(--color-page-text)" }}
+          class="hero-rise hero-rise-2 font-display font-semibold leading-[1.02] mb-6"
+          style={{
+            color: "var(--color-page-text)",
+            fontSize: "clamp(2.5rem, 6vw, 4.25rem)",
+            letterSpacing: "-0.025em",
+          }}
         >
-          <HighlightedText
-            text="The agent that never forgets."
-            highlight="never forgets"
-          />
-          <br />
-          <HighlightedText
-            text="And never waits to be asked."
-            highlight="never waits"
-          />
+          <HighlightedText text={headlineText} highlight={headlineHighlight} />
         </h1>
-        {props.heroCopy ? (
-          <p
-            class="hero-rise hero-rise-3 text-lg mx-auto mb-4 leading-relaxed max-w-3xl"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            {props.heroCopy.description}
-          </p>
-        ) : (
-          <p
-            class="hero-rise hero-rise-3 text-lg mx-auto mb-4 leading-relaxed max-w-3xl"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            Ingests any data, connects any tool, and ships in your chat.
-            <br />
-            Sandboxed on the OpenClaw runtime and fully self-hostable.
-          </p>
-        )}
-        {/* CTA buttons */}
-        <div class="hero-rise hero-rise-4 relative z-20 flex flex-wrap gap-3 mb-6 justify-center items-center">
+
+        <p
+          class="hero-rise hero-rise-3 text-[17px] sm:text-[18px] mx-auto mb-8 leading-relaxed max-w-4xl"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          {subhead}
+        </p>
+
+        <div class="hero-rise hero-rise-4 relative z-20 flex flex-wrap gap-3 justify-center items-center">
           <a
-            href={owlettoUrl}
+            href={GITHUB_URL}
             target="_blank"
             rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 text-sm font-semibold px-5 py-2.5 rounded-lg transition-all hover:opacity-90"
+            class="inline-flex items-center text-[14px] font-medium px-5 h-10 rounded-lg transition-opacity hover:opacity-90"
             style={{
-              backgroundColor: "var(--color-page-text)",
-              color: "var(--color-page-bg)",
+              background: "#0b0b0d",
+              color: "#ffffff",
             }}
           >
-            {primaryCtaLabel}
+            Start for free
           </a>
-          {props.heroCopy ? (
-            <a
-              href={`${GITHUB_URL}/tree/main/examples/${activeUseCase.examplePath}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              class="inline-flex items-center gap-2 text-sm font-medium px-5 py-2.5 rounded-lg transition-all hover:opacity-90"
-              style={{
-                color: "var(--color-page-text-muted)",
-                border: "1px solid var(--color-page-border)",
-              }}
-            >
-              <GitHubIcon />
-              View source on GitHub
-            </a>
-          ) : (
-            <CopyPromptButton
-              prompt={getLandingPrompt(activeUseCase)}
-              label="Copy prompt to your agent"
-              triggerLabel="Integrate"
-              supportedClients={["chatgpt", "openclaw", "claude", "mcp-client"]}
-              supportedClientHrefForId={(clientId) => {
-                if (clientId === "mcp-client") {
-                  return "/getting-started/memory/";
-                }
-
-                return `/connect-from/${clientId}/for/${activeUseCase.id}/`;
-              }}
-            />
-          )}
-        </div>
-
-        <div class="hero-rise hero-rise-5 mt-8 mb-6">
-          <ScopedUseCaseTabs
-            groups={landingUseCaseGroupedOptions}
-            activeId={activeUseCase.id}
-            onSelect={
-              props.linkTabsToCampaigns
-                ? undefined
-                : (id) => props.onActiveUseCaseChange?.(id as LandingUseCaseId)
-            }
-            hrefForId={
-              props.linkTabsToCampaigns ? (id) => `/for/${id}` : undefined
-            }
-          />
+          <a
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 text-[14px] font-medium px-5 h-10 rounded-lg transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
+            style={{
+              color: "var(--color-page-text)",
+              background: "#ffffff",
+              border: "1px solid var(--color-page-border)",
+            }}
+          >
+            <GitHubIcon />
+            View on GitHub
+          </a>
         </div>
       </div>
+
+      <div
+        class="hero-rise hero-rise-5 mt-16 max-w-[72rem] mx-auto"
+        style={
+          { "--hero-tab-cycle": `${TAB_CYCLE_MS}ms` } as Record<string, string>
+        }
+      >
+        <div
+          class="grid"
+          style={{
+            gridTemplateColumns: `repeat(${STAGE_TABS.length}, minmax(0, 1fr))`,
+            borderTop: "1px solid var(--color-page-border)",
+          }}
+          role="tablist"
+        >
+          {STAGE_TABS.map((tab) => {
+            const isActive = tab.id === activeStage;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => handleTabClick(tab.id)}
+                class="relative flex items-center justify-center gap-1.5 h-14 text-[15px] font-medium transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
+                style={{
+                  color: isActive
+                    ? "var(--color-page-text)"
+                    : "var(--color-page-text-muted)",
+                  fontWeight: isActive ? 600 : 500,
+                }}
+                aria-selected={isActive}
+                role="tab"
+              >
+                {isActive ? (
+                  autoAdvance ? (
+                    <span
+                      key={`${tab.id}-${cycleSeed}`}
+                      class="hero-tab-progress"
+                      aria-hidden="true"
+                    />
+                  ) : (
+                    <span
+                      class="absolute top-[-1px] left-0 right-0 h-[2px]"
+                      style={{ background: "var(--color-tg-accent)" }}
+                      aria-hidden="true"
+                    />
+                  )
+                ) : null}
+                <span
+                  style={{
+                    color: "var(--color-page-text-muted)",
+                    opacity: 0.55,
+                  }}
+                >{`${tab.index}.`}</span>
+                <span>{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {/* Active use-case is forwarded down so DemoSection can update */}
+      <span class="sr-only">{activeUseCase.label}</span>
     </section>
   );
 }

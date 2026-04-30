@@ -1,0 +1,6 @@
+/memory       /#memory       301
+/memory/*     /#memory       301
+/skills       /#skills       301
+/skills/*     /#skills       301
+/pricing      /              301
+/pricing/*    /              301

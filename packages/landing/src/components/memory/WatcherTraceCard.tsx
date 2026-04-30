@@ -1,5 +1,6 @@
 import type { HowItWorksPanelTrace } from "../../use-case-definitions";
-import { accentCyan } from "./styles";
+
+const accentTeal = "#0e7490";
 
 export function WatcherTraceCard({
   schedule,
@@ -10,13 +11,13 @@ export function WatcherTraceCard({
   consolidated,
 }: HowItWorksPanelTrace) {
   return (
-    <div class="my-8 rounded-2xl border border-[rgba(255,255,255,0.08)] bg-[linear-gradient(180deg,rgba(18,18,24,0.96),rgba(11,11,16,0.96))] p-4 sm:p-5">
+    <div class="my-8 rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-surface-dim)] p-4 sm:p-5">
       <div class="mb-3 text-[10px] font-semibold uppercase tracking-[0.22em] text-[var(--color-page-text-muted)]">
         Trace
       </div>
 
-      <div class="rounded-lg border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-3 sm:px-4 sm:py-3.5">
-        <div class="mb-3 rounded-md border border-[rgba(255,255,255,0.06)] bg-[rgba(255,255,255,0.02)] px-3 py-2">
+      <div class="rounded-lg border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-3 sm:px-4 sm:py-3.5">
+        <div class="mb-3 rounded-md border border-[var(--color-page-border)] bg-[var(--color-page-surface-dim)] px-3 py-2">
           <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-page-text-muted)]">
             Watcher prompt
           </div>
@@ -30,9 +31,9 @@ export function WatcherTraceCard({
             aria-hidden="true"
             class="inline-flex h-5 w-5 items-center justify-center rounded-full border text-[12px]"
             style={{
-              color: accentCyan,
-              backgroundColor: "rgba(103, 232, 249, 0.12)",
-              borderColor: "rgba(103, 232, 249, 0.4)",
+              color: accentTeal,
+              backgroundColor: "rgba(14, 116, 144, 0.08)",
+              borderColor: "rgba(14, 116, 144, 0.32)",
             }}
           >
             ◉
@@ -46,7 +47,7 @@ export function WatcherTraceCard({
         </div>
         <div
           class="ml-7 mt-1 font-mono text-[0.8rem]"
-          style={{ color: accentCyan }}
+          style={{ color: accentTeal }}
         >
           → {events.length} event{events.length === 1 ? "" : "s"} collected
         </div>
@@ -86,7 +87,7 @@ export function WatcherTraceCard({
         <span class="text-base text-[var(--color-tg-accent)]">↓</span>
       </div>
 
-      <div class="rounded-lg border border-[rgba(255,255,255,0.08)] bg-[rgba(255,255,255,0.03)] px-3 py-3 sm:px-4 sm:py-3.5">
+      <div class="rounded-lg border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-3 sm:px-4 sm:py-3.5">
         <div class="flex items-center gap-2 text-[0.92rem] font-semibold text-[var(--color-page-text)]">
           <span aria-hidden="true">🧠</span>
           <span>New memory written to</span>

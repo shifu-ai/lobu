@@ -39,7 +39,7 @@ const markdownURL = new URL(markdownPath, Astro.site);
     <link rel="canonical" href={canonicalURL} />
     <link rel="icon" href="/favicon.ico" />
     <link rel="icon" type="image/png" href="/lobster-icon.png" />
-    <meta name="theme-color" content="#09090b" />
+    <meta name="theme-color" content="#ffffff" />
 
     <!-- Open Graph -->
     <meta property="og:type" content={ogType} />
@@ -66,10 +66,11 @@ const markdownURL = new URL(markdownPath, Astro.site);
     <meta name="twitter:description" content={description} />
     <meta name="twitter:image" content={ogImage} />
 
-    <!-- Geist font -->
-    <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
+    <!-- Inter + Inter Display (matches attio.com typography) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://cdn.jsdelivr.net/npm/geist@1/dist/fonts/geist-sans/style.css"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Inter+Tight:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
 

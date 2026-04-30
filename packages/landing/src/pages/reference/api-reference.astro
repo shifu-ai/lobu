@@ -1,28 +1,39 @@
 ---
 import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
 
-// Fetch spec server-side (build time for prod, per-request in dev) — no CORS issues
-const specOrigin = import.meta.env.DEV
-  ? "http://localhost:8080"
-  : "https://app.lobu.ai";
+// Fetch spec server-side (build time for prod, per-request in dev) — no CORS issues.
+// Try the local dev gateway first, then fall back to production so the page
+// always renders something useful even when the local gateway is offline.
+const specOrigins = import.meta.env.DEV
+  ? ["http://localhost:8080", "https://app.lobu.ai"]
+  : ["https://app.lobu.ai"];
 
 let spec: string | null = null;
-try {
-  const res = await fetch(`${specOrigin}/openapi.json`);
-  if (res.ok) {
-    const text = await res.text();
-    if (text.length > 0) spec = text;
+let resolvedOrigin = specOrigins[specOrigins.length - 1];
+for (const origin of specOrigins) {
+  try {
+    const res = await fetch(`${origin}/openapi.json`);
+    if (res.ok) {
+      const text = await res.text();
+      if (text.length > 0) {
+        spec = text;
+        resolvedOrigin = origin;
+        break;
+      }
+    }
+  } catch {
+    // try next origin
   }
-} catch {
-  // Fall back to loading the spec from the public URL when server-side fetch fails.
 }
 
 const config = JSON.stringify({
-  ...(spec ? { content: spec } : { url: `${specOrigin}/openapi.json` }),
-  theme: "kepler",
+  ...(spec ? { content: spec } : { url: `${resolvedOrigin}/openapi.json` }),
+  theme: "default",
   layout: "modern",
+  darkMode: false,
+  forceDarkModeState: "light",
   defaultHttpClient: { targetKey: "js", clientKey: "fetch" },
-  servers: [{ url: "http://localhost:8080", description: "Local development" }],
+  servers: [{ url: resolvedOrigin, description: "Lobu API" }],
 });
 ---
 

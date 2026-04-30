@@ -7,15 +7,15 @@
 
 /* Import the same theme tokens as globals.css */
 @theme {
-  --color-page-bg: rgb(9, 9, 11);
-  --color-page-bg-elevated: rgb(14, 14, 18);
-  --color-page-bg-overlay: rgba(9, 9, 11, 0.8);
-  --color-page-surface: rgba(18, 18, 22, 0.8);
-  --color-page-surface-dim: rgba(18, 18, 22, 0.4);
-  --color-page-border: rgba(45, 54, 67, 0.5);
-  --color-page-border-active: rgba(148, 163, 184, 0.5);
-  --color-page-text: rgb(250, 250, 250);
-  --color-page-text-muted: rgb(120, 130, 150);
+  --color-page-bg: #ffffff;
+  --color-page-bg-elevated: #fafafa;
+  --color-page-bg-overlay: rgba(255, 255, 255, 0.85);
+  --color-page-surface: #ffffff;
+  --color-page-surface-dim: #f5f5f7;
+  --color-page-border: rgba(0, 0, 0, 0.08);
+  --color-page-border-active: rgba(0, 0, 0, 0.16);
+  --color-page-text: #0b0b0d;
+  --color-page-text-muted: #6b7280;
 
   --color-tg-bg: rgb(33, 33, 33);
   --color-tg-bg-secondary: rgb(15, 15, 15);

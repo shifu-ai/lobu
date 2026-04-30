@@ -2602,7 +2602,7 @@ export const landingUseCaseRouteEntries: Array<{
   { routeId: "careops", useCaseId: "market" },
 ];
 
-export const DEFAULT_LANDING_USE_CASE_ID: LandingUseCaseId = "engineering";
+export const DEFAULT_LANDING_USE_CASE_ID: LandingUseCaseId = "market";
 
 const surfaceHeroCopy: Record<SurfaceId, SurfaceHeroCopyConfig> = {
   landing: {
