@@ -888,19 +888,28 @@ export async function getWatcher(
         WHERE iwc.event_id = f.id AND iw.watcher_id = $1
       )`;
 
-    // unprocessed_count drives the badge ("N pending analysis"). Bounded
-    // entity-scoped COUNT with the not-in-window anti-join.
+    // unprocessed_count drives the badge ("N pending analysis"). Cap the
+    // scan at 1000 rows: the badge shows "1000+" semantics above that, and
+    // the cap keeps the page query under the 10s frontend timeout even on
+    // entities with 100K+ events in the lookback window. The 90-day bound
+    // above lets the planner pick `idx_events_entity_ids_occurred_at`, but
+    // on a high-volume entity that index range still has ~78K rows; the
+    // LIMIT short-circuits row fetches once we've passed the cap.
     //
     // monthlyContent / monthlyLinked build the per-month histogram for
     // unprocessed_ranges, only used inside the (collapsed-by-default) summary
     // view. Off by default; the summary expand path sets include_pending_ranges
     // to true.
+    const UNPROCESSED_COUNT_CAP = 1000;
     const unprocessedCountPromise = sql.unsafe(
-      `SELECT CAST(COUNT(*) AS INTEGER) as count
-            FROM current_event_records f
-            WHERE ${entityScopeCondition}
-              ${occurredAtBound ? `AND ${occurredAtBound}` : ''}
-              AND ${notInWindowClause}`,
+      `SELECT CAST(COUNT(*) AS INTEGER) as count FROM (
+        SELECT 1
+        FROM current_event_records f
+        WHERE ${entityScopeCondition}
+          ${occurredAtBound ? `AND ${occurredAtBound}` : ''}
+          AND ${notInWindowClause}
+        LIMIT ${UNPROCESSED_COUNT_CAP}
+      ) capped`,
       watcherScopedParams
     );
 
