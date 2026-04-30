@@ -1095,7 +1095,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
         platform,
         templateAgentId: agentId,
         config: merged as Record<string, any>,
-        settings: { ...(current.settings ?? {}), ...settings } as any,
+        settings: { allowGroups: true, ...settings } as any,
         metadata: current.metadata ?? {},
         status: current.status ?? 'stopped',
         createdAt: current.createdAt ?? Date.now(),
