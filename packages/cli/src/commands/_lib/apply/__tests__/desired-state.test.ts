@@ -6,9 +6,7 @@ import { buildStablePlatformId, loadDesiredState } from "../desired-state.js";
 
 describe("buildStablePlatformId — keep in sync with file-loader.ts", () => {
   test("two parts when no name", () => {
-    expect(buildStablePlatformId("triage", "telegram")).toBe(
-      "triage-telegram"
-    );
+    expect(buildStablePlatformId("triage", "telegram")).toBe("triage-telegram");
   });
   test("three parts when name provided", () => {
     expect(buildStablePlatformId("triage", "slack", "ops")).toBe(

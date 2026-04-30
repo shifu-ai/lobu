@@ -378,9 +378,7 @@ export function computeDiff(
       const remotePlatforms =
         remote.platformsByAgent.get(agent.metadata.agentId) ?? [];
       const remoteByStableId = new Map(remotePlatforms.map((p) => [p.id, p]));
-      const desiredStableIds = new Set(
-        agent.platforms.map((p) => p.stableId)
-      );
+      const desiredStableIds = new Set(agent.platforms.map((p) => p.stableId));
 
       for (const platform of agent.platforms) {
         rows.push(

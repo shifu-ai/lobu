@@ -74,8 +74,6 @@ export async function platformsAddCommand(
     )
   );
   console.log(
-    chalk.dim(
-      "  Run `lobu run -d` to start the stack with the new platform.\n"
-    )
+    chalk.dim("  Run `lobu run -d` to start the stack with the new platform.\n")
   );
 }

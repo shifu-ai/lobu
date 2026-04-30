@@ -6,7 +6,7 @@ Status: **planning** · Owner: @buremba · Reviewed against pi second-opinion 20
 
 Provide a one-way `lobu.toml` → Lobu Cloud org converger. Mental model: `terraform apply` lite. Files declare desired state, the CLI shows a plan, the user confirms, the CLI calls existing server endpoints (which are idempotent) in dependency order. Re-running converges.
 
-**Reuse-first**: deliberately *not* building a new server-side apply API or state substrate. Every existing endpoint is already idempotent or near-idempotent — the gap is one connection upsert route. Total v1: 3 PRs, ~600 LOC.
+**Reuse-first**: deliberately *not* building a new server-side apply API or state substrate. Every existing endpoint is already idempotent or near-idempotent — the gap is one platform upsert route. Total v1: 3 PRs, ~600 LOC.
 
 ## Mental model
 
@@ -26,7 +26,7 @@ desired state (lobu.toml + agent dirs)
    CLI: call existing endpoints in order
         │   POST /api/:orgSlug/agents/        (upsert)
         │   PATCH /:agentId/config            (settings + skills_config)
-        │   PUT  /:agentId/connections/by-stable-id/:stableId  (NEW route)
+        │   PUT  /:agentId/platforms/by-stable-id/:stableId  (NEW route)
         │   POST /api/:orgSlug/manage_entity_schema     (existing admin tool)
         │   POST /api/:orgSlug/manage_relationship_schema
         │
@@ -53,7 +53,7 @@ desired state (lobu.toml + agent dirs)
 
 CLI-visible:
 - `lobu apply [--dry-run] [--yes] [--only agents|memory] [--org <slug>]`
-- Resources synced: agents (metadata + prompt files + settings, including 3 newly-persisted fields), local skills (normalized into `skills_config`), provider declarations + availability check, memory entity types, memory relationship types, connections.
+- Resources synced: agents (metadata + prompt files + settings, including 3 newly-persisted fields), local skills (normalized into `skills_config`), provider declarations + availability check, memory entity types, memory relationship types, platforms.
 - Diff renderer client-side with create/update/noop markers (no drift/delete in v1).
 
 ### v2 — after v1 has real users
@@ -100,15 +100,15 @@ Validation:
 - `bun run check` (biome) clean
 - New unit test passes
 
-### PR-2 — idempotent agent create + stable-id connection upsert
+### PR-2 — idempotent agent create + stable-id platform upsert
 
 **Branch**: `feat/idempotent-apply-endpoints` · **Risk**: Medium · **LOC**: ~150
 
-Today `agent-routes.ts:POST /` returns 409 on same-org duplicate (`agent-routes.ts:319-321`). Connections create with random ID (`POST /:agentId/connections`), no upsert.
+Today `agent-routes.ts:POST /` returns 409 on same-org duplicate (`agent-routes.ts:319-321`). Connections create with random ID (`POST /:agentId/platforms`), no upsert.
 
 Scope:
 - **Modify `POST /` in agent-routes.ts** (around line 293): same-org duplicate returns `200` with the existing agent payload instead of `409`. Cross-org duplicate keeps the existing 409 (separate concern, will be fixed by future org-scoped IDs work). The Owletto-MCP auto-injection in `saveSettings` (line 339-344) must be preserved on first create but skipped on the idempotent-return path.
-- **New route** `PUT /:agentId/connections/by-stable-id/:stableId` mounted in agent-routes.ts. Uses `buildStableConnectionId(agentId, type, name)` from `gateway/config/file-loader.ts:56` for ID generation client-side; route receives the stable ID in URL. Body shape mirrors `POST /:agentId/connections`. Behavior:
+- **New route** `PUT /:agentId/platforms/by-stable-id/:stableId` mounted in agent-routes.ts. Uses `buildStableConnectionId(agentId, type, name)` from `gateway/config/file-loader.ts:56` for ID generation client-side; route receives the stable ID in URL. Body shape mirrors `POST /:agentId/platforms`. Behavior:
   - If stable ID exists: update config in place. If config materially changes, return `{ updated: true, willRestart: true }`. If unchanged, return `{ noop: true }`.
   - If stable ID doesn't exist: create with that ID (skip the random-ID path).
   - Reuses existing `ChatInstanceManager.addConnection` / equivalent — does **not** duplicate connection-creation logic.
@@ -128,12 +128,12 @@ Scope:
 - New `packages/cli/src/commands/apply.ts` (top-level command).
 - New `packages/cli/src/commands/_lib/apply/`:
   - `desired-state.ts` — wraps `loadConfig` from `cli/src/config/loader.ts`. Walks `$VAR` refs and produces a `requiredSecrets: string[]` list. Reuses `buildStableConnectionId` (re-export from cli or inline a copy with a comment pointing at the source of truth).
-  - `client.ts` — thin wrapper over fetch using `_lib/openclaw-auth.ts` (`getUsableToken`) and `_lib/openclaw-cmd.ts:postJson` from PR #459. One method per resource: `getAgents`, `upsertAgent`, `patchSettings`, `getConnections`, `upsertConnection`, `getEntityTypes`, `upsertEntityType`, etc.
+  - `client.ts` — thin wrapper over fetch using `_lib/openclaw-auth.ts` (`getUsableToken`) and `_lib/openclaw-cmd.ts:postJson` from PR #459. One method per resource: `getAgents`, `upsertAgent`, `patchSettings`, `getConnections`, `upsertPlatform`, `getEntityTypes`, `upsertEntityType`, etc.
   - `diff.ts` — given desired and current, return `{ creates, updates, noops, drift }`. Drift = remote has resource not in desired. No deletes (no `--prune` in v1).
   - `render.ts` — pretty diff output via chalk: `+` for creates, `~` for updates, `=` for noops, `?` for drift.
   - `prompt.ts` — confirmation prompt; honors `--yes`; non-TTY without `--yes` exits non-zero.
 - Wire into `packages/cli/src/index.ts` as `lobu apply` (~20 lines, mirrors how `lobu memory seed` is wired).
-- Apply order per agent: `upsertAgent` → `patchSettings` → for each connection `upsertConnection` → for each memory entity type `upsertEntityType` → relationship types.
+- Apply order per agent: `upsertAgent` → `patchSettings` → for each platform `upsertPlatform` → for each memory entity type `upsertEntityType` → relationship types.
 - Required-secrets check: before any mutation, GET org secret names; for each `$VAR` in desired state, assert presence; on first miss, print all missing then exit 1 with clear message.
 - Tests: snapshot tests for diff rendering (no real network); fake client implementing the same interface for unit tests.
 - Doc: `packages/landing/src/content/docs/reference/lobu-apply.md` — short reference page mirroring `lobu-memory.md` structure.
@@ -150,7 +150,7 @@ Pi flagged these — explicit do-not-copy list for the CLI agent:
 4. Casting parsed YAML/TOML to `Record<string, unknown>` without validation. Use existing Zod schemas from `packages/core/src/lobu-toml-schema.ts`.
 5. Dry-run that says "would create" without showing actual diff. `--dry-run` runs the GET phase + diff render, same output as the prompt-confirm phase.
 6. Watcher fallback to "first seeded entity" when ref unresolvable (apply doesn't sync watchers in v1, but the principle: never invent a target).
-7. Topological retry loop with bounded iteration count. Apply uses an explicit dependency order: agents → settings → connections → entity types → relationship types. Fail fast if dependencies are unresolvable.
+7. Topological retry loop with bounded iteration count. Apply uses an explicit dependency order: agents → settings → platforms → entity types → relationship types. Fail fast if dependencies are unresolvable.
 
 ## Testing strategy
 
@@ -168,11 +168,11 @@ The script:
 1. Builds packages + CLI.
 2. Boots `start-local.ts` against PGlite with `LOBU_LOCAL_BOOTSTRAP=true`. The bootstrap path mints a default user/org (slug `dev`)/PAT and saves the token to `${OWLETTO_DATA_DIR}/bootstrap-pat.txt`.
 3. Reads the PAT, configures a CLI context pointing at the local server, and `lobu login --token <PAT>`.
-4. Drops a sample project at `/tmp/e2e-project/` with one agent, one telegram connection, one provider, and one entity-type yaml.
-5. `lobu apply --dry-run` → asserts `+ agent`, `+ connection`, `+ entity-type` rows.
+4. Drops a sample project at `/tmp/e2e-project/` with one agent, one telegram platform, one provider, and one entity-type yaml.
+5. `lobu apply --dry-run` → asserts `+ agent`, `+ platform`, `+ entity-type` rows.
 6. `lobu apply --yes` → asserts "Apply complete".
 7. Re-runs `--dry-run` → asserts no `+`/`~` rows (full noop round-trip).
-8. Mutates `chatId` in `lobu.toml`, re-runs apply → asserts `~ connection` + "will restart" marker.
+8. Mutates `chatId` in `lobu.toml`, re-runs apply → asserts `~ platform` + "will restart" marker.
 9. Curls REST endpoints with the bootstrap PAT to verify rows landed in Postgres.
 10. Cleans up the server, data dir, and project dir.
 
@@ -182,7 +182,7 @@ Manual steps from the original plan (DB-first `lobu run`, postgres editing) are 
 
 - **Provider credentials**: provider declarations live in `installed_providers` JSONB. Apply pushing them alone doesn't grant the agent the secret. v1 documents that provider keys must be set in cloud secrets first, same as the rest of the secrets story.
 - **Runtime cache invalidation**: cloud workers may cache settings. Existing PG NOTIFY infrastructure (`agent_changed_notify` migration on main) handles this; apply just writes through the same paths.
-- **Connection restart side effects**: PR-2's PUT response includes `willRestart`. PR-3's diff renderer surfaces this in the plan output ("connection X — will restart") so users aren't surprised by dropped in-flight messages.
+- **Connection restart side effects**: PR-2's PUT response includes `willRestart`. PR-3's diff renderer surfaces this in the plan output ("platform X — will restart") so users aren't surprised by dropped in-flight messages.
 - **Redacted values**: when comparing remote settings to desired, never diff `***1234` against the desired plaintext. v1 normalizer treats redacted values from GET as opaque; CLI uses `has_value` boolean only.
 - **Cloud-injected MCP server on agent create**: `agent-routes.ts:339-344` auto-injects an Owletto MCP server. PR-2 must preserve this on first create but skip it on the idempotent-existing-agent return so we don't reset it on every apply.
 

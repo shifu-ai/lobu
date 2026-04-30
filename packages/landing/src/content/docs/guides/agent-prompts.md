@@ -5,7 +5,7 @@ description: How agent files are organized across prompt files, local skills, ev
 
 Every Lobu agent has a workspace directory such as `agents/my-agent/`. `lobu.toml` points each agent at that directory with `dir = "./agents/my-agent"`.
 
-The workspace contains the agent's prompt files plus any agent-local skills and evals. Operator-controlled configuration such as providers, connections, network policy, tool policy, and enabled registry skills lives in [`lobu.toml`](/reference/lobu-toml/).
+The workspace contains the agent's prompt files plus any agent-local skills and evals. Operator-controlled configuration such as providers, platforms, network policy, tool policy, and enabled registry skills lives in [`lobu.toml`](/reference/lobu-toml/).
 
 At runtime, Lobu gives each user, DM, or channel its own isolated sandbox workspace. The files in `agents/<agent>/` are templates for that sandbox, so every new workspace starts from the same `IDENTITY.md`, `SOUL.md`, `USER.md`, skills, and eval setup for that agent.
 
@@ -38,7 +38,7 @@ skills/
 | Agent-local skills | `agents/<agent>/skills/<name>/SKILL.md` | Available only to one agent |
 | Shared skills | `skills/<name>/SKILL.md` | Available to all agents in the project |
 | Evaluations | `agents/<agent>/evals/` | Test cases for behavior and quality |
-| Providers, connections, network, tool policy, enabled registry skills | `lobu.toml` | Operator-controlled runtime config |
+| Providers, platforms, network, tool policy, enabled registry skills | `lobu.toml` | Operator-controlled runtime config |
 
 ## Runtime model
 
@@ -129,7 +129,7 @@ Use this page to understand where those files live. Use the [`SKILL.md` Referenc
 `lobu.toml` is the runtime wiring layer for the workspace. It tells Lobu:
 
 - which agent directories exist
-- which providers and connections to use
+- which providers and platforms to use
 - which registry skills are enabled
 - which custom MCP servers are attached directly to the agent
 - what network and tool policy applies

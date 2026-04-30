@@ -1,6 +1,6 @@
 ---
 title: Agent Management
-description: Manage agents, providers, connections, and skills through the settings API and admin page.
+description: Manage agents, providers, platforms, and skills through the settings API and admin page.
 ---
 
 Lobu exposes a settings API at `/api/v1/agents` for managing agents at runtime. Both the admin page and CLI commands use this API.

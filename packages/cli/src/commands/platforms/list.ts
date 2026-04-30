@@ -8,9 +8,7 @@ export async function platformsListCommand(cwd: string): Promise<void> {
 
   console.log();
   for (const [agentId, agent] of Object.entries(ctx.agents)) {
-    const platforms = (agent.platforms ?? []) as Array<
-      Record<string, unknown>
-    >;
+    const platforms = (agent.platforms ?? []) as Array<Record<string, unknown>>;
     console.log(chalk.bold(`  ${agentId}`));
     if (platforms.length === 0) {
       console.log(chalk.dim("    (no platforms configured)"));

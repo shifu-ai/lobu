@@ -30,7 +30,7 @@ npx @lobu/cli@latest init my-agent
 
 Generates:
 
-- `lobu.toml` — agent configuration (skills, providers, connections, network)
+- `lobu.toml` — agent configuration (skills, providers, platforms, network)
 - `.env` — credentials and environment variables (set `DATABASE_URL` after init)
 - `agents/{name}/` — agent directory with `IDENTITY.md`, `SOUL.md`, `USER.md`, and `skills/`
 - `skills/` — shared skills directory (available to all agents)
