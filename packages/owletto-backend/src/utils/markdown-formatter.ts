@@ -645,7 +645,7 @@ function formatSearchChildEntityResult(result: any, _options: FormatterOptions):
  * Format get_watcher result (window-based)
  */
 function formatGetWatcherResult(result: any, _options: FormatterOptions): string {
-  const { windows, warnings, entity_context, watcher_statuses, pending_analysis, watcher } = result;
+  const { windows, warnings, pending_analysis, watcher } = result;
 
   // No windows found - show diagnostic info
   if (!windows || windows.length === 0) {
@@ -657,27 +657,6 @@ function formatGetWatcherResult(result: any, _options: FormatterOptions): string
         md += `- ${warning}\n`;
       });
       md += '\n';
-    }
-
-    if (entity_context) {
-      md += '## 📊 Entity Context\n\n';
-      md += `- **Entity**: ${entity_context.entity_name}\n`;
-      md += `- **Total Content**: ${entity_context.total_content}\n`;
-      md += `- **Active Connectors**: ${entity_context.active_connections ?? 0}\n`;
-      if (entity_context.latest_content_date) {
-        md += `- **Latest Content**: ${new Date(entity_context.latest_content_date).toLocaleDateString()}\n`;
-      }
-      md += '\n';
-    }
-
-    if (watcher_statuses && watcher_statuses.length > 0) {
-      md += '## 📋 Watcher Status\n\n';
-      watcher_statuses.forEach((status: any) => {
-        md += `### ${status.watcher_name}\n\n`;
-        md += `- **Status**: ${status.status}\n`;
-        md += `- **Total Windows**: ${status.total_windows}\n`;
-        md += '\n';
-      });
     }
 
     return md;

@@ -744,11 +744,6 @@ export async function getWatcher(
       `,
     ]);
     const latestEnd = (latestWindowResult[0]?.latest_end as string | null) ?? null;
-    // 90-day fallback for fresh watchers that have never run.
-    const PENDING_DEFAULT_DAYS = 90;
-    const pendingSinceIso =
-      latestEnd ?? new Date(Date.now() - PENDING_DEFAULT_DAYS * 86_400_000).toISOString();
-
     // Two entity-link fragments: one with `$1 = watcher_id` reserved (for
     // queries that join on the watcher's windows), one without (for queries
     // that only need the entity scope). Sharing one fragment and passing a
@@ -768,10 +763,29 @@ export async function getWatcher(
     const entityScopeOnlyCondition = entityLinkOnly.sql;
     const entityLinkParams = entityLinkWatcherScoped.params;
     const entityLinkOnlyParams = entityLinkOnly.params;
-    const pendingSinceParamIndex = 2 + entityLinkParams.length;
-    const pendingSinceParamIndexNoWatcher = 1 + entityLinkOnlyParams.length;
-    const occurredAtBound = `f.occurred_at >= $${pendingSinceParamIndex}::timestamptz`;
-    const occurredAtBoundNoWatcher = `f.occurred_at >= $${pendingSinceParamIndexNoWatcher}::timestamptz`;
+
+    // Bound the entity-scoped scans by `f.occurred_at >= latestEnd` only when
+    // the watcher has actually produced a window. Without the bound the
+    // planner walks the entity's full event history; with it, the planner
+    // uses `idx_events_entity_ids_occurred_at` for an indexed range scan.
+    //
+    // For fresh watchers (latestEnd === null), we deliberately leave the
+    // scan unbounded so that `unprocessed_count` and `next_window` reflect
+    // the full backlog of pre-existing entity content the user wants to
+    // bootstrap from. This is rare (one-shot per never-run watcher); steady
+    // state is bounded.
+    const occurredAtBound =
+      latestEnd === null ? null : `f.occurred_at >= $${2 + entityLinkParams.length}::timestamptz`;
+    const occurredAtBoundNoWatcher =
+      latestEnd === null
+        ? null
+        : `f.occurred_at >= $${1 + entityLinkOnlyParams.length}::timestamptz`;
+    const watcherScopedParams =
+      latestEnd === null
+        ? [args.watcher_id, ...entityLinkParams]
+        : [args.watcher_id, ...entityLinkParams, latestEnd];
+    const noWatcherParams =
+      latestEnd === null ? entityLinkOnlyParams : [...entityLinkOnlyParams, latestEnd];
 
     const notInWindowClause = `NOT EXISTS (
         SELECT 1 FROM watcher_window_events iwc
@@ -790,9 +804,9 @@ export async function getWatcher(
       `SELECT CAST(COUNT(*) AS INTEGER) as count
             FROM current_event_records f
             WHERE ${entityScopeCondition}
-              AND ${occurredAtBound}
+              ${occurredAtBound ? `AND ${occurredAtBound}` : ''}
               AND ${notInWindowClause}`,
-      [args.watcher_id, ...entityLinkParams, pendingSinceIso]
+      watcherScopedParams
     );
 
     const histogramPromise = args.include_pending_ranges
@@ -801,10 +815,10 @@ export async function getWatcher(
             `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(*) as total
               FROM current_event_records f
               WHERE ${entityScopeOnlyCondition}
-                AND ${occurredAtBoundNoWatcher}
+                ${occurredAtBoundNoWatcher ? `AND ${occurredAtBoundNoWatcher}` : ''}
               GROUP BY DATE_TRUNC('month', f.occurred_at)
               ORDER BY month`,
-            [...entityLinkOnlyParams, pendingSinceIso]
+            noWatcherParams
           ),
           sql.unsafe(
             `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(DISTINCT f.id) as linked
@@ -812,10 +826,10 @@ export async function getWatcher(
               JOIN watcher_window_events iwc ON f.id = iwc.event_id
               JOIN watcher_windows iw ON iwc.window_id = iw.id
               WHERE ${entityScopeCondition}
-                AND ${occurredAtBound}
+                ${occurredAtBound ? `AND ${occurredAtBound}` : ''}
                 AND iw.watcher_id = $1
               GROUP BY DATE_TRUNC('month', f.occurred_at)`,
-            [args.watcher_id, ...entityLinkParams, pendingSinceIso]
+            watcherScopedParams
           ),
         ])
       : Promise.resolve([[], []] as [unknown[], unknown[]]);
@@ -839,16 +853,17 @@ export async function getWatcher(
         // Continue from where we left off.
         windowStart = new Date(latestEnd);
       } else {
-        // No windows yet — earliest unprocessed event within the pending
-        // bound. Without the bound this was an unbounded MIN scan over the
-        // entity's full event history.
+        // No windows yet — find the earliest unprocessed event for this
+        // entity. Unbounded by occurred_at: pi review (#481) flagged that
+        // a 90-day default would silently strip pre-existing backlogs from
+        // the next_window calculation when a user creates a watcher on top
+        // of long-since-ingested data.
         const earliestResult = await sql.unsafe(
           `SELECT MIN(f.occurred_at) as earliest
             FROM current_event_records f
             WHERE ${entityScopeCondition}
-              AND ${occurredAtBound}
               AND ${notInWindowClause}`,
-          [args.watcher_id, ...entityLinkParams, pendingSinceIso]
+          [args.watcher_id, ...entityLinkParams]
         );
         const earliest = earliestResult[0]?.earliest as string | null;
         windowStart = earliest ? new Date(earliest) : now;
