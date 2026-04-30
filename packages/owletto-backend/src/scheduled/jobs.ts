@@ -15,8 +15,13 @@ import { TaskScheduler } from './task-scheduler';
 /** Cross-cutting handle to platform services owned by CoreServices that the
  *  task registry needs to invoke. Boot wires this from getLobuCoreServices(). */
 export interface MaintenanceDeps {
-  /** Periodic token refresh — `runOnce()` does one full scan. */
+  /** Periodic token refresh — `runOnce()` does one full scan. Now a 30min
+   *  safety net since lazy at-use-time refresh handles active users. */
   runTokenRefresh: () => Promise<void>;
+  /** Refresh OAuth tokens for a specific (userId, agentId). Used by the
+   *  `refresh-token-for-user-agent` task that AuthProfilesManager spawns
+   *  lazily when it sees a soon-expiring token at use time. */
+  refreshTokenForUserAgent: (userId: string, agentId: string) => Promise<void>;
   /** MCP-session DB cleanup — drops rows whose expiry has passed. */
   runMcpSessionCleanup: () => Promise<void>;
   /** Sweep oauth_states / cli_sessions / rate_limits / grants + archive
@@ -34,15 +39,36 @@ export function registerMaintenanceTasks(
   env: Env,
   deps: MaintenanceDeps,
 ): void {
-  // OAuth token refresh — proactively rotates tokens that will expire within
-  // EXPIRY_BUFFER_MS. Runs every 2 minutes (was a per-pod setInterval inside
-  // TokenRefreshJob; now cross-pod-coordinated via the runs queue).
+  // OAuth token refresh — periodic safety-net at 30min intervals. The hot path
+  // is at-use-time lazy refresh in AuthProfilesManager.ensureFreshCredential,
+  // which spawns `refresh-token-for-user-agent` per-user when a soon-expiring
+  // token is read. This periodic scan only catches tokens for users who
+  // haven't accessed the system in a while.
   scheduler.register(
     'token-refresh',
     async () => {
       await deps.runTokenRefresh();
     },
-    { cron: '*/2 * * * *' },
+    { cron: '*/30 * * * *' },
+  );
+
+  // Lazy refresh handler — spawned by AuthProfilesManager when a soon-expiring
+  // OAuth token is read. Not periodic (no cron). Idempotency-keyed by
+  // (userId, agentId) so concurrent reads for the same user collapse to one
+  // refresh.
+  scheduler.register(
+    'refresh-token-for-user-agent',
+    async (ctx) => {
+      const { userId, agentId } = ctx.payload as {
+        userId: string;
+        agentId: string;
+      };
+      if (!userId || !agentId) {
+        logger.warn({ payload: ctx.payload }, '[task] refresh-token-for-user-agent missing userId/agentId');
+        return;
+      }
+      await deps.refreshTokenForUserAgent(userId, agentId);
+    },
   );
 
   // MCP session cleanup — drops expired session rows from the DB. Lives in the

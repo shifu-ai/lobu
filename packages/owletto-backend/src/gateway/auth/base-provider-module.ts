@@ -194,11 +194,17 @@ export abstract class BaseProviderModule
         undefined,
         context
       );
-      if (profile?.credential) {
+      const credential = profile && context?.userId
+        ? await this.authProfilesManager.ensureFreshCredential(profile, {
+            userId: context.userId,
+            agentId,
+          })
+        : profile?.credential;
+      if (credential) {
         logger.info(
           `Injecting ${credVar} for agent ${agentId} (${this.providerId})`
         );
-        envVars[credVar] = profile.credential;
+        envVars[credVar] = credential;
       }
     }
     return envVars;
@@ -218,8 +224,14 @@ export abstract class BaseProviderModule
       undefined,
       context
     );
-    if (profile?.credential) {
-      return profile.credential;
+    const credential = profile && context?.userId
+      ? await this.authProfilesManager.ensureFreshCredential(profile, {
+          userId: context.userId,
+          agentId,
+        })
+      : profile?.credential;
+    if (credential) {
+      return credential;
     }
     const sysVar =
       this.providerConfig.systemEnvVarName ||

@@ -145,10 +145,29 @@ async function main() {
   const taskScheduler = new TaskScheduler(coreServices.getQueue());
   registerMaintenanceTasks(taskScheduler, env, {
     runTokenRefresh: () => coreServices.getTokenRefreshJob().runOnce(),
+    refreshTokenForUserAgent: (userId, agentId) =>
+      coreServices.getTokenRefreshJob().refreshForUserAgent(userId, agentId),
     runMcpSessionCleanup: () => cleanupExpiredMcpSessions(),
     runSweepEphemeralTables: () => coreServices.sweepEphemeralTables(),
   });
   await taskScheduler.start();
+  const authProfilesManager = coreServices.getAuthProfilesManager();
+  if (authProfilesManager) {
+    authProfilesManager.setLazyRefreshHooks({
+      triggerAsync: async (userId: string, agentId: string) => {
+        await taskScheduler.spawn(
+          'refresh-token-for-user-agent',
+          { userId, agentId },
+          { idempotencyKey: `refresh-token:${userId}:${agentId}` },
+        );
+      },
+      refreshNow: async (userId: string, agentId: string) => {
+        await coreServices
+          .getTokenRefreshJob()
+          .refreshForUserAgent(userId, agentId);
+      },
+    });
+  }
   const stopScheduler = () => taskScheduler.stop();
 
   const wrapper = new Hono<{ Bindings: Env }>();

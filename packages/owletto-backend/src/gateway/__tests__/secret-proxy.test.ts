@@ -126,6 +126,10 @@ describe("SecretProxy user-scoped provider routing", () => {
           createdAt: Date.now(),
         };
       },
+      // ensureFreshCredential is the lazy-refresh wrapper. For non-OAuth
+      // profiles (this test uses 'api-key') it just passes through.
+      ensureFreshCredential: async (profile: { credential?: string }) =>
+        profile.credential,
     } as any);
 
     const originalFetch = globalThis.fetch;

@@ -12,6 +12,24 @@ const logger = createLogger("auth-profiles-manager");
 
 const ANY_MODEL_SCOPE = "*";
 
+/** Refresh tokens that expire within this window from now. */
+const LAZY_REFRESH_BUFFER_MS = 5 * 60 * 1000;
+
+/**
+ * Hooks the AuthProfilesManager calls when a profile read encounters a token
+ * that's near or past expiry. Wired by boot after the TaskScheduler is up;
+ * before that point, lazy refresh is a no-op and the periodic safety-net task
+ * handles everything.
+ */
+export interface LazyRefreshHooks {
+  /** Fire-and-forget — used when the token is still valid but expiring soon.
+   *  Implementation should dedup across pods (idempotency-keyed scheduler spawn). */
+  triggerAsync: (userId: string, agentId: string) => Promise<void>;
+  /** Inline refresh — used when the token is already expired and the caller
+   *  is about to use it. Awaits completion. Per-pod dedup expected. */
+  refreshNow: (userId: string, agentId: string) => Promise<void>;
+}
+
 interface UpsertAuthProfileInput {
   agentId: string;
   /** Owning user. Required for persistent writes. */
@@ -56,6 +74,7 @@ export class AuthProfilesManager {
   private readonly userAuthProfiles: UserAuthProfileStore;
   private readonly secretStore: WritableSecretStore;
   private readonly runtimeCredentialResolver?: RuntimeProviderCredentialResolver;
+  private lazyRefreshHooks?: LazyRefreshHooks;
 
   constructor(options: AuthProfilesManagerOptions) {
     this.ephemeralProfiles = options.ephemeralProfiles;
@@ -63,6 +82,73 @@ export class AuthProfilesManager {
     this.userAuthProfiles = options.userAuthProfiles;
     this.secretStore = options.secretStore;
     this.runtimeCredentialResolver = options.runtimeCredentialResolver;
+  }
+
+  /** Wired by boot after TaskScheduler is up. Until then, lazy refresh is a
+   *  no-op (the periodic safety-net handles everything). */
+  setLazyRefreshHooks(hooks: LazyRefreshHooks): void {
+    this.lazyRefreshHooks = hooks;
+  }
+
+  /**
+   * Returns a credential guaranteed valid right now for the given profile.
+   * Three paths:
+   *  - Token has > 5min until expiry, or profile is non-OAuth: returns
+   *    `profile.credential` immediately (fast path).
+   *  - Token expires within 5min but is still valid: fires a fire-and-forget
+   *    refresh task (idempotency-keyed) and returns the current credential
+   *    (still valid for the buffer window).
+   *  - Token has already expired: blocks on inline refresh, re-reads the
+   *    profile, returns the new credential.
+   *
+   * If LazyRefreshHooks aren't wired (boot order, tests), returns
+   * `profile.credential` unchanged — periodic safety-net catches it later.
+   */
+  async ensureFreshCredential(
+    profile: AuthProfile,
+    ctx: { userId: string; agentId: string },
+  ): Promise<string | undefined> {
+    const credential = profile.credential;
+    if (!credential) return credential;
+    if (profile.authType !== "oauth") return credential;
+    if (!this.lazyRefreshHooks) return credential;
+
+    const expiresAt = profile.metadata?.expiresAt ?? 0;
+    if (!expiresAt) return credential; // no expiry tracked
+
+    const now = Date.now();
+    if (expiresAt > now + LAZY_REFRESH_BUFFER_MS) return credential;
+
+    if (expiresAt > now) {
+      // Soon-expiring: fire async, return current credential.
+      this.lazyRefreshHooks
+        .triggerAsync(ctx.userId, ctx.agentId)
+        .catch((err) =>
+          logger.warn(
+            { err, profileId: profile.id, userId: ctx.userId },
+            "[lazy-refresh] async trigger failed; periodic task will retry",
+          ),
+        );
+      return credential;
+    }
+
+    // Already expired: inline refresh + re-read.
+    try {
+      await this.lazyRefreshHooks.refreshNow(ctx.userId, ctx.agentId);
+      const refreshed = await this.getProviderProfiles(
+        ctx.agentId,
+        profile.provider,
+        ctx.userId,
+      );
+      const fresh = refreshed.find((p) => p.id === profile.id);
+      return fresh?.credential ?? credential;
+    } catch (err) {
+      logger.error(
+        { err, profileId: profile.id, userId: ctx.userId },
+        "[lazy-refresh] inline refresh failed; returning stale credential",
+      );
+      return credential;
+    }
   }
 
   getDeclaredAgents(): DeclaredAgentRegistry {

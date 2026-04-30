@@ -142,10 +142,34 @@ async function main() {
   const taskScheduler = new TaskScheduler(coreServices.getQueue());
   registerMaintenanceTasks(taskScheduler, env, {
     runTokenRefresh: () => coreServices.getTokenRefreshJob().runOnce(),
+    refreshTokenForUserAgent: (userId, agentId) =>
+      coreServices.getTokenRefreshJob().refreshForUserAgent(userId, agentId),
     runMcpSessionCleanup: () => cleanupExpiredMcpSessions(),
     runSweepEphemeralTables: () => coreServices.sweepEphemeralTables(),
   });
   await taskScheduler.start();
+
+  // Wire lazy at-use-time refresh hooks now that the scheduler is up.
+  // AuthProfilesManager.ensureFreshCredential becomes a no-op until this
+  // runs, so during a brief startup window the periodic safety-net is
+  // the only refresh path — that's fine.
+  const authProfilesManager = coreServices.getAuthProfilesManager();
+  if (authProfilesManager) {
+    authProfilesManager.setLazyRefreshHooks({
+      triggerAsync: async (userId: string, agentId: string) => {
+        await taskScheduler.spawn(
+          'refresh-token-for-user-agent',
+          { userId, agentId },
+          { idempotencyKey: `refresh-token:${userId}:${agentId}` },
+        );
+      },
+      refreshNow: async (userId: string, agentId: string) => {
+        await coreServices
+          .getTokenRefreshJob()
+          .refreshForUserAgent(userId, agentId);
+      },
+    });
+  }
 
   const port = parseInt(process.env.PORT || '8787', 10);
   const host = process.env.HOST?.trim() || '0.0.0.0';

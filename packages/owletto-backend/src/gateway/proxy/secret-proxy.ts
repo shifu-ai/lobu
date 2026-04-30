@@ -362,8 +362,15 @@ export class SecretProxy {
           undefined,
           providerContext
         );
-        if (profile?.credential) {
-          headers.authorization = `Bearer ${profile.credential}`;
+        const userIdForRefresh = providerContext?.userId;
+        const credential = profile && userIdForRefresh
+          ? await this.authProfilesManager.ensureFreshCredential(profile, {
+              userId: userIdForRefresh,
+              agentId: urlAgentId,
+            })
+          : profile?.credential;
+        if (credential) {
+          headers.authorization = `Bearer ${credential}`;
         } else if (this.systemKeyResolver) {
           const systemKey = this.systemKeyResolver(providerId);
           if (systemKey) {

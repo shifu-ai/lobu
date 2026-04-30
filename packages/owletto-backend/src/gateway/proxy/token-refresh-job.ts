@@ -31,12 +31,25 @@ export class TokenRefreshJob {
     private refreshableProviders: RefreshableProvider[]
   ) {}
 
-  /** One-shot scan + refresh. Invoked by the TaskScheduler. */
+  /** One-shot scan + refresh of every OAuth profile. Invoked by the
+   *  TaskScheduler as the every-30min safety net for users who haven't
+   *  exercised any token-using path recently — the lazy at-use-time
+   *  refresh handles everyone else. */
   async runOnce(): Promise<void> {
     const userAuthProfiles = this.authProfilesManager.getUserAuthProfileStore();
     for await (const { userId, agentId } of userAuthProfiles.scanAllOAuth()) {
       await this.maybeRefresh(userId, agentId);
     }
+  }
+
+  /**
+   * Refresh tokens for a single (userId, agentId). Public so the
+   * `refresh-token-for-user-agent` task and AuthProfilesManager's at-use-time
+   * lazy path can both call it. Per-pod `refreshLocks` dedup concurrent calls
+   * for the same key in this process.
+   */
+  async refreshForUserAgent(userId: string, agentId: string): Promise<void> {
+    return this.maybeRefresh(userId, agentId);
   }
 
   private async maybeRefresh(userId: string, agentId: string): Promise<void> {
