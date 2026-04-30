@@ -162,16 +162,21 @@ Pi flagged these — explicit do-not-copy list for the CLI agent:
 
 ### End-to-end (this plan's exit criterion)
 
-After all 3 PRs merge:
-1. `make build-packages`
-2. Spin up local Postgres, apply all migrations
-3. Boot `lobu run` configured in **DB-first mode** (host-provided stores) — this matches the cloud topology
-4. Author a sample `lobu.toml` with one agent, one telegram connection, one memory entity type, one provider
-5. `lobu apply --dry-run` — verify diff shows 4 creates
-6. `lobu apply` — accept prompt, verify Postgres rows
-7. `lobu apply --dry-run` again — should report all noops
-8. Edit one connection's config, re-run `lobu apply` — verify only that connection shows update + "will restart"
-9. Manually edit the connection in Postgres, re-run `lobu apply` — verify update path runs (we don't have drift detection in v1, so the change is just overwritten — document this as expected v1 behavior)
+**Status: proven via `scripts/e2e-lobu-apply.sh` (see hardening PR).**
+
+The script:
+1. Builds packages + CLI.
+2. Boots `start-local.ts` against PGlite with `LOBU_LOCAL_BOOTSTRAP=true`. The bootstrap path mints a default user/org (slug `dev`)/PAT and saves the token to `${OWLETTO_DATA_DIR}/bootstrap-pat.txt`.
+3. Reads the PAT, configures a CLI context pointing at the local server, and `lobu login --token <PAT>`.
+4. Drops a sample project at `/tmp/e2e-project/` with one agent, one telegram connection, one provider, and one entity-type yaml.
+5. `lobu apply --dry-run` → asserts `+ agent`, `+ connection`, `+ entity-type` rows.
+6. `lobu apply --yes` → asserts "Apply complete".
+7. Re-runs `--dry-run` → asserts no `+`/`~` rows (full noop round-trip).
+8. Mutates `chatId` in `lobu.toml`, re-runs apply → asserts `~ connection` + "will restart" marker.
+9. Curls REST endpoints with the bootstrap PAT to verify rows landed in Postgres.
+10. Cleans up the server, data dir, and project dir.
+
+Manual steps from the original plan (DB-first `lobu run`, postgres editing) are obsolete — the bootstrap path is the supported dev loop.
 
 ## Cross-cutting concerns
 

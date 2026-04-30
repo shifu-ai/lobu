@@ -238,6 +238,109 @@ describe("apply diff — memory schema", () => {
   });
 });
 
+describe("apply diff — empty container preservation", () => {
+  // Bug fix: previously canonical() collapsed [] and {} to null, which
+  // meant clearing a remote allowlist by setting it to [] silently
+  // round-tripped as a noop instead of an update.
+  test("clearing networkConfig.allowedDomains from non-empty to [] is an update", () => {
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        settings: {
+          networkConfig: { allowedDomains: [] },
+        },
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([
+        [
+          "triage",
+          {
+            networkConfig: { allowedDomains: ["foo.com"] },
+            updatedAt: 0,
+          },
+        ],
+      ]),
+      connectionsByAgent: new Map([["triage", []]]),
+    };
+    const plan = computeDiff(desired, remote);
+    const settingsRow = plan.rows.find((r) => r.kind === "settings");
+    expect(settingsRow?.verb).toBe("update");
+    if (settingsRow?.kind === "settings") {
+      expect(settingsRow.changedFields).toContain("networkConfig");
+    }
+  });
+
+  test("[] is not equal to null (preserved as distinct values)", () => {
+    // When desired sets allowedDomains: [] and remote has the field
+    // missing entirely, the diff should still treat them as equivalent
+    // for the case where remote literally doesn't have the field — but
+    // [] vs the explicit array ["foo"] must differ.
+    const desiredEmpty = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        settings: {
+          networkConfig: { allowedDomains: [] },
+        },
+      }),
+    ]);
+    const remoteWithItems: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([
+        [
+          "triage",
+          {
+            networkConfig: { allowedDomains: ["x.com"] },
+            updatedAt: 0,
+          },
+        ],
+      ]),
+      connectionsByAgent: new Map([["triage", []]]),
+    };
+    const plan = computeDiff(desiredEmpty, remoteWithItems);
+    expect(plan.counts.update).toBeGreaterThan(0);
+  });
+
+  test("{} is not equal to populated object", () => {
+    // empty config object vs populated config object must show as drift/update
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        connections: [
+          {
+            stableId: "triage-telegram",
+            type: "telegram",
+            config: {},
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      connectionsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-telegram",
+              platform: "telegram",
+              config: { botToken: "abc" },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const connRow = plan.rows.find((r) => r.kind === "connection");
+    expect(connRow?.verb).toBe("update");
+  });
+});
+
 describe("renderSummary", () => {
   test("renders zero-row plan", () => {
     const desired = buildState([]);

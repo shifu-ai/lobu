@@ -79,10 +79,10 @@ export interface DiffPlan {
  * Stable structural equality for JSON-shaped values. Sorts object keys before
  * stringifying so `{a:1,b:2}` and `{b:2,a:1}` compare equal.
  *
- * Returns false (i.e. "different") when either side is `undefined` and the
- * other isn't — but treats `[]` vs `undefined` and `{}` vs `undefined` as
- * **equal**, since empty containers carry no semantic state and the server
- * commonly omits them.
+ * `undefined` and `null` both canonicalize to `"null"` so missing-on-one-side
+ * fields don't show as drift. Empty arrays and empty objects are preserved
+ * as themselves — clearing a remote allowlist by setting it to `[]` must
+ * produce an `update`, not a `noop`.
  */
 function deepEqual(a: unknown, b: unknown): boolean {
   return canonical(a) === canonical(b);
@@ -91,14 +91,12 @@ function deepEqual(a: unknown, b: unknown): boolean {
 function canonical(value: unknown): string {
   if (value === undefined || value === null) return "null";
   if (Array.isArray(value)) {
-    if (value.length === 0) return "null";
     return `[${value.map(canonical).join(",")}]`;
   }
   if (typeof value === "object") {
     const entries = Object.entries(value as Record<string, unknown>)
       .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => a.localeCompare(b));
-    if (entries.length === 0) return "null";
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
   }
   return JSON.stringify(value);
@@ -211,7 +209,13 @@ function diffConnection(
   }
   const changed: string[] = [];
   if (desired.type !== remote.platform) changed.push("type");
-  if (!deepEqual(desired.config, remote.config ?? {})) changed.push("config");
+  // The route handler stores `platform` inside `config` for stable-id matching,
+  // so a noop round-trip from GET will have an extra `platform` key the CLI
+  // never wrote. Strip it before diffing so an unchanged connection doesn't
+  // show as drift on every plan.
+  const remoteConfig: Record<string, unknown> = { ...(remote.config ?? {}) };
+  delete remoteConfig.platform;
+  if (!deepEqual(desired.config, remoteConfig)) changed.push("config");
   if (changed.length === 0) {
     return {
       kind: "connection",

@@ -323,6 +323,44 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     expect(body.connection?.id).toBe(stableId);
   });
 
+  test('PUT with settings-only change returns updated + willRestart', async () => {
+    const app = await importAgentRoutes();
+    const stableId = 'host-agent-tg-settings';
+
+    // First create with default settings.
+    const create = await app.request(
+      `/host-agent/connections/by-stable-id/${stableId}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          platform: 'telegram',
+          config: { chatId: 'C-1' },
+        }),
+      }
+    );
+    expect(create.status).toBe(201);
+
+    // Same config, but settings change (allowFrom from undefined to ['user-1']).
+    const response = await app.request(
+      `/host-agent/connections/by-stable-id/${stableId}`,
+      {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          platform: 'telegram',
+          config: { chatId: 'C-1' },
+          settings: { allowFrom: ['user-1'], allowGroups: true },
+        }),
+      }
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as any;
+    expect(body.updated).toBe(true);
+    expect(body.willRestart).toBe(true);
+    expect(body.noop).toBeUndefined();
+  });
+
   test('PUT against an unknown agent returns 404', async () => {
     const app = await importAgentRoutes();
 

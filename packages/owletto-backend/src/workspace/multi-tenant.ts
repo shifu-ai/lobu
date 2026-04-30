@@ -386,11 +386,48 @@ export class MultiTenantProvider implements WorkspaceProvider {
         );
       }
 
+      // Populate `user` for PAT/OAuth-bearer paths so REST routes that read
+      // `c.get('user')` (e.g. POST /agents owner attribution) have a value.
+      // Mirrors the cli-token branch above so the two bearer flavours behave
+      // identically downstream.
+      let bearerUser: { id: string; email: string; name: string; emailVerified: boolean } | null =
+        null;
+      try {
+        const userRows = await simpleQuery(sql`
+          SELECT id, email, name, "emailVerified"
+          FROM "user"
+          WHERE id = ${authInfo.userId}
+          LIMIT 1
+        `);
+        if (userRows.length > 0) {
+          const row = userRows[0] as {
+            id: string;
+            email: string;
+            name: string;
+            emailVerified: boolean | string | number | null;
+          };
+          bearerUser = {
+            id: row.id,
+            email: row.email ?? '',
+            name: row.name ?? '',
+            emailVerified:
+              typeof row.emailVerified === 'boolean'
+                ? row.emailVerified
+                : row.emailVerified === 't' ||
+                  row.emailVerified === 'true' ||
+                  row.emailVerified === 1,
+          };
+        }
+      } catch {
+        bearerUser = null;
+      }
+
       await setContextAndContinue({
         mcpAuthInfo: authInfo,
         mcpIsAuthenticated: true,
         organizationId: effectiveOrgId,
         memberRole: role,
+        user: bearerUser,
       });
       return undefined;
     }

@@ -12,7 +12,7 @@
 
 import { fork } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -22,6 +22,8 @@ import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+import { generatePAT, getPATPrefix, hashToken } from './auth/oauth/utils';
 
 import { PGlite } from '@electric-sql/pglite';
 import { pg_trgm } from '@electric-sql/pglite/contrib/pg_trgm';
@@ -166,6 +168,18 @@ async function main() {
     logger.info(`Owletto running at http://${HOST}:${PORT}`);
     logger.info(`Data: ${DATA_DIR}`);
   });
+
+  // ─── Bootstrap PAT (dev-only) ────────────────────────────────
+  // Gated behind LOBU_LOCAL_BOOTSTRAP=true; production deployments never set
+  // this flag, so the path is dead in cloud. Used by `scripts/e2e-lobu-apply.sh`
+  // to obtain a CLI-usable bearer without OAuth or admin-password.
+  if (isTruthyEnv('LOBU_LOCAL_BOOTSTRAP')) {
+    try {
+      await ensureBootstrapPat(dbUrl);
+    } catch (err) {
+      logger.warn({ err }, 'Bootstrap PAT setup failed');
+    }
+  }
 }
 
 // ─── Migrations ──────────────────────────────────────────────────
@@ -336,6 +350,122 @@ async function applyEmbeddedSchemaPatches(sql: MigrationSqlClient) {
   for (const patch of EMBEDDED_SCHEMA_PATCHES) {
     logger.info({ patch: patch.id }, 'Applying embedded schema patch');
     await patch.apply(sql);
+  }
+}
+
+// ─── Bootstrap PAT (dev-only — LOBU_LOCAL_BOOTSTRAP=true) ─────────
+//
+// Mints a default user, personal org (slug `dev`), member, and PAT scoped to
+// both. Idempotent: if `bootstrap-pat.txt` already exists under
+// OWLETTO_DATA_DIR the function is a no-op (log only). Production deployments
+// never set LOBU_LOCAL_BOOTSTRAP — main() guards the call.
+
+const BOOTSTRAP_USER_ID = 'bootstrap-user';
+const BOOTSTRAP_USER_EMAIL = 'dev@local';
+const BOOTSTRAP_USER_NAME = 'Local Developer';
+const BOOTSTRAP_USERNAME = 'dev-local';
+const BOOTSTRAP_ORG_ID = 'org-bootstrap-dev';
+const BOOTSTRAP_ORG_SLUG = 'dev';
+const BOOTSTRAP_ORG_NAME = 'Local Dev';
+const BOOTSTRAP_MEMBER_ID = 'member-bootstrap-dev';
+const BOOTSTRAP_PAT_FILENAME = 'bootstrap-pat.txt';
+
+async function ensureBootstrapPat(dbUrl: string): Promise<void> {
+  const patFilePath = join(DATA_DIR, BOOTSTRAP_PAT_FILENAME);
+  if (existsSync(patFilePath)) {
+    logger.info(
+      { path: patFilePath, org: BOOTSTRAP_ORG_SLUG },
+      'Bootstrap PAT already provisioned (set LOBU_LOCAL_BOOTSTRAP=false to skip)'
+    );
+    return;
+  }
+
+  // Reuse the same dynamic-import shape `runMigrations` above uses so we share
+  // postgres' module init cost with that path on first boot.
+  const pg = await import('postgres');
+  const sql = pg.default(dbUrl, { max: 1 });
+
+  try {
+    // Idempotent user/org/member upsert. Re-runs of the embedded schema (e.g.
+    // OWLETTO_DATA_DIR pre-existing without the PAT file) skip ON CONFLICT.
+    await sql`
+      INSERT INTO "user" (id, name, email, username, "emailVerified", "createdAt", "updatedAt")
+      VALUES (
+        ${BOOTSTRAP_USER_ID},
+        ${BOOTSTRAP_USER_NAME},
+        ${BOOTSTRAP_USER_EMAIL},
+        ${BOOTSTRAP_USERNAME},
+        true,
+        NOW(),
+        NOW()
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    const metadata = JSON.stringify({ personal_org_for_user_id: BOOTSTRAP_USER_ID });
+    await sql`
+      INSERT INTO "organization" (id, name, slug, visibility, metadata, "createdAt")
+      VALUES (
+        ${BOOTSTRAP_ORG_ID},
+        ${BOOTSTRAP_ORG_NAME},
+        ${BOOTSTRAP_ORG_SLUG},
+        'private',
+        ${metadata},
+        NOW()
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    await sql`
+      INSERT INTO "member" (id, "userId", "organizationId", role, "createdAt")
+      VALUES (
+        ${BOOTSTRAP_MEMBER_ID},
+        ${BOOTSTRAP_USER_ID},
+        ${BOOTSTRAP_ORG_ID},
+        'owner',
+        NOW()
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    // Mint the PAT. Reuse the auth utils so the hash + prefix shapes stay in
+    // lock-step with PersonalAccessTokenService.create().
+    const token = generatePAT();
+    const tokenHash = hashToken(token);
+    const tokenPrefix = getPATPrefix(token);
+
+    // Owner-tier scopes so admin-only tools (manage_entity_schema, etc.) work.
+    // The bootstrap user is the org owner — no separate consent step here, the
+    // user explicitly opted in by setting LOBU_LOCAL_BOOTSTRAP=true.
+    const bootstrapScope = 'mcp:read mcp:write mcp:admin';
+    await sql`
+      INSERT INTO personal_access_tokens (
+        token_hash, token_prefix, user_id, organization_id,
+        name, description, scope, expires_at
+      ) VALUES (
+        ${tokenHash},
+        ${tokenPrefix},
+        ${BOOTSTRAP_USER_ID},
+        ${BOOTSTRAP_ORG_ID},
+        'bootstrap',
+        'LOBU_LOCAL_BOOTSTRAP — printed once on first boot',
+        ${bootstrapScope},
+        NULL
+      )
+    `;
+
+    writeFileSync(patFilePath, `${token}\n`, { mode: 0o600 });
+
+    const url = `http://localhost:${PORT}`;
+    process.stdout.write(`[bootstrap PAT] ${token}\n`);
+    process.stdout.write(`[bootstrap PAT] org=${BOOTSTRAP_ORG_SLUG} url=${url}\n`);
+    process.stdout.write(`[bootstrap PAT] saved to ${patFilePath}\n`);
+    logger.info(
+      { path: patFilePath, org: BOOTSTRAP_ORG_SLUG, url },
+      'Bootstrap PAT minted (printed once)'
+    );
+  } finally {
+    await sql.end();
   }
 }
 

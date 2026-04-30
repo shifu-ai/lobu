@@ -249,7 +249,9 @@ export class ApplyClient {
   }): Promise<RemoteAgent> {
     const { body } = await this.request<RemoteAgent>(
       "POST",
-      `/api/${this.orgSlug}/agents/`,
+      // No trailing slash — Hono matches `routes.post('/', ...)` mounted at
+      // `/api/:orgSlug/agents` against `/api/dev/agents`, not `/api/dev/agents/`.
+      `/api/${this.orgSlug}/agents`,
       agent,
       [200, 201]
     );

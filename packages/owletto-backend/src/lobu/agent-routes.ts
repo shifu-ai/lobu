@@ -784,8 +784,14 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
       merged.platform = platform;
 
       const configChanged = !configsShallowEqual(merged, previousConfig);
+      // Settings (allowFrom, allowGroups, etc.) are persisted alongside the
+      // connection config and are part of "did anything change?" — a
+      // settings-only update must trigger willRestart, not be silently noop'd.
+      const previousSettings = (existing.settings ?? {}) as Record<string, unknown>;
+      const mergedSettings = { allowGroups: true, ...settings } as Record<string, unknown>;
+      const settingsChanged = !configsShallowEqual(mergedSettings, previousSettings);
 
-      if (!configChanged) {
+      if (!configChanged && !settingsChanged) {
         return c.json({ noop: true, connection: existing }, 200);
       }
 
@@ -846,14 +852,16 @@ routes.put('/:agentId/connections/by-stable-id/:stableId', mcpAuth, async (c) =>
     // Fallback path mirrors the POST handler's no-manager branch but uses
     // the supplied stable ID instead of a synthesized one. Platform is kept
     // in config (matching the manager path) so subsequent idempotent PUTs
-    // see a stable previousConfig.
+    // see a stable previousConfig. Settings default `allowGroups: true` to
+    // match the manager-path default — symmetric with the noop comparison
+    // above so a follow-up PUT with no settings field round-trips as noop.
     const now = Date.now();
     await connectionStore.saveConnection({
       id: stableId,
       platform,
       templateAgentId: agentId,
       config: { platform, ...config } as Record<string, any>,
-      settings: settings as any,
+      settings: { allowGroups: true, ...settings } as any,
       metadata: {},
       status: 'stopped',
       createdAt: now,
