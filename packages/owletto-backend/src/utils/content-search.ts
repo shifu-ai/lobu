@@ -153,7 +153,7 @@ function buildStandardParams(
  * a matching index the identity branch seq-scans `events`, which blows up the
  * entire content query. If a connector needs a new namespace, add the index.
  */
-const STANDARD_IDENTITY_NAMESPACES = [
+export const STANDARD_IDENTITY_NAMESPACES = [
   'email',
   'phone',
   'wa_jid',
