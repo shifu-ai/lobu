@@ -23,7 +23,8 @@ import type {
 } from '../types/watchers';
 import {
   buildEntityLinkUnion,
-  fetchEntityIdentityScopes,
+  STANDARD_IDENTITY_NAMESPACES,
+  type EntityIdentityScope,
 } from '../utils/content-search';
 import {
   daysBetween,
@@ -177,6 +178,7 @@ interface WindowRow {
   created_at: string | null;
   version_id: number | null;
   json_template: unknown | null;
+  total_count: number; // COUNT(*) OVER () — same value on every row
 }
 
 /** Row type for classification stats query results */
@@ -210,6 +212,33 @@ interface WatcherQueryRow {
   watcher_run_error: string | null;
   watcher_run_created_at: string | null;
   watcher_run_completed_at: string | null;
+  // Selected version row (pinned current_version unless template_version overrides)
+  sel_version_id: number | null;
+  sel_version: number | null;
+  sel_version_name: string | null;
+  sel_version_description: string | null;
+  sel_version_prompt: string | null;
+  sel_version_extraction_schema: Record<string, unknown> | null;
+  sel_version_version_sources: unknown;
+  sel_version_classifiers: unknown;
+  sel_version_json_template: unknown;
+  // Latest window end (folded MAX(window_end) lookup)
+  latest_window_end: string | null;
+  // jsonb_agg of entities (folded entityCheck/watcherEntityQuery)
+  entities:
+    | Array<{
+        id: string | number;
+        name: string;
+        entity_type: string;
+        slug: string;
+        parent_id: string | number | null;
+        parent_slug: string | null;
+        parent_entity_type: string | null;
+        organization_id: string;
+      }>
+    | null;
+  // jsonb_agg of identity scopes for primary entity
+  entity_scopes: Array<{ namespace: string; identifier: string }> | null;
 }
 
 function parseWatcherSources(value: unknown): WatcherSource[] {
@@ -287,6 +316,16 @@ export async function getWatcher(
     throw new Error('watcher_id is required. Use list_watchers to discover available watchers.');
   }
 
+  // Entity resolution is deferred — for the typical case (only watcher_id
+  // given), the watcher metadata query below already returns the watcher's
+  // entities as a nested jsonb_agg, so we build entityInfoForUrl /
+  // entitiesForTemplate from that single result rather than firing a
+  // dedicated entity lookup.
+  //
+  // The exception is when args.entity_id is passed and we need to validate
+  // the entity exists / is accessible — that's a cheap PK check we keep
+  // up-front so we throw early. (The page doesn't pass entity_id on default
+  // load, so this branch is rare.)
   let entityInfoForUrl: EntityInfo | null = null;
   let entitiesForTemplate: Array<{ name: string; type: string }> = [];
 
@@ -309,27 +348,6 @@ export async function getWatcher(
     const info = await buildEntityInfo(entityCheck[0]);
     entityInfoForUrl = info.entityInfoForUrl;
     entitiesForTemplate = [{ name: info.entityName ?? '', type: info.entityType ?? '' }];
-  } else if (args.watcher_id) {
-    const watcherEntityQuery = await sql`
-      SELECT e.id, e.name, et.slug AS entity_type, e.slug, e.parent_id,
-        parent.slug as parent_slug, pet.slug as parent_entity_type,
-        e.organization_id
-      FROM watchers i
-      JOIN entities e ON e.id = ANY(i.entity_ids)
-      JOIN entity_types et ON et.id = e.entity_type_id
-      LEFT JOIN entities parent ON e.parent_id = parent.id
-      LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
-      WHERE i.id = ${args.watcher_id}
-    `;
-
-    if (watcherEntityQuery.length > 0) {
-      const info = await buildEntityInfo(watcherEntityQuery[0]);
-      entityInfoForUrl = info.entityInfoForUrl;
-      entitiesForTemplate = watcherEntityQuery.map((row) => ({
-        name: String(row.name),
-        type: String(row.entity_type),
-      }));
-    }
   }
 
   const page = Math.max(1, args.page || 1);
@@ -430,19 +448,12 @@ export async function getWatcher(
   }
 
   // ============================================
-  // Step 4: Get total count
+  // Step 4: Total window count for pagination
   // ============================================
-
-  const countQuery = `
-    SELECT COUNT(*) as count
-    FROM watcher_windows iw
-    JOIN watchers i ON iw.watcher_id = i.id
-    LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
-    WHERE ${whereClause}
-  `;
-
-  const countResult = await sql.unsafe(countQuery, params.slice(0, -2)); // Remove LIMIT/OFFSET params
-  const totalCount = Number.parseInt(String(countResult[0].count), 10);
+  // Now derived from `COUNT(*) OVER ()` baked into the windows SELECT — no
+  // separate round-trip. Empty pages report total = 0.
+  const totalCount =
+    windows.length > 0 ? Number((windows[0] as unknown as WindowRow).total_count ?? 0) : 0;
 
   // ============================================
   // Step 4.5: Fetch classification stats for all windows
@@ -452,11 +463,26 @@ export async function getWatcher(
   const windowIds = typedWindows.map((w) => ensureNumber(w.window_id));
   const classificationStatsMap: Map<number, Record<string, Record<string, number>>> = new Map();
 
-  // Fire watcher details query early (awaited after classification stats).
-  // Use sql.unsafe() with a $N parameter so the latest-run LATERAL JOIN can
-  // be string-interpolated safely. Tagged-template + sql.unsafe() inside the
-  // template breaks PGlite's simple-query mode (prepare=false), so we keep
-  // this path as a single unsafe call instead.
+  // Fire watcher metadata query early (awaited after classification stats).
+  // This single statement is the consolidated "Q-meta": watcher row +
+  // condensation columns + selected version row + entities (with parent
+  // info) + identity scopes for the watcher's primary entity + MAX(window_end)
+  // + latest run via lateral. Replaces what used to be five separate
+  // round-trips (entityCheck/watcherEntityQuery, watcher row, fetchEntityIdentityScopes,
+  // MAX(window_end) lookup, version row).
+  //
+  // The version row is *the requested version* — usually the watcher's
+  // pinned current_version, but the optional template_version arg can
+  // override it. We pass the resolved version number as $2; when it equals
+  // the pinned version, we read off `cv` directly (the join already there
+  // for condensation columns); when it differs, the JOIN still resolves
+  // the right row via (watcher_id, version) which is unique.
+  //
+  // Tagged-template + sql.unsafe() inside the template breaks PGlite's
+  // simple-query mode (prepare=false), so we keep this path as a single
+  // unsafe call instead.
+  const requestedVersion = args.template_version ?? null;
+  const namespacesLiteral = STANDARD_IDENTITY_NAMESPACES.map((n) => `'${n}'`).join(',');
   const watcherQueryPromise = args.watcher_id
     ? sql.unsafe(
         `
@@ -477,6 +503,43 @@ export async function getWatcher(
         cv.condensation_prompt,
         cv.condensation_window_count,
         i.organization_id,
+        -- Selected version row (pinned current_version unless template_version overrides)
+        sv.id as sel_version_id,
+        sv.version as sel_version,
+        sv.name as sel_version_name,
+        sv.description as sel_version_description,
+        sv.prompt as sel_version_prompt,
+        sv.extraction_schema as sel_version_extraction_schema,
+        sv.version_sources as sel_version_version_sources,
+        sv.classifiers as sel_version_classifiers,
+        sv.json_template as sel_version_json_template,
+        -- Latest window end for the unprocessedCount bound
+        (SELECT MAX(window_end) FROM watcher_windows WHERE watcher_id = i.id) as latest_window_end,
+        -- Entities + parent info for entityInfoForUrl / entitiesForTemplate
+        (SELECT jsonb_agg(jsonb_build_object(
+          'id', e.id,
+          'name', e.name,
+          'entity_type', et.slug,
+          'slug', e.slug,
+          'parent_id', e.parent_id,
+          'parent_slug', parent.slug,
+          'parent_entity_type', pet.slug,
+          'organization_id', e.organization_id
+        ))
+        FROM entities e
+        JOIN entity_types et ON et.id = e.entity_type_id
+        LEFT JOIN entities parent ON e.parent_id = parent.id
+        LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
+        WHERE e.id = ANY(i.entity_ids)) as entities,
+        -- Identity scopes for the primary entity (entity_ids[1]) — drives
+        -- the entity-link UNION in the unprocessedCount query.
+        (SELECT jsonb_agg(jsonb_build_object('namespace', namespace, 'identifier', identifier))
+         FROM entity_identities ei
+         WHERE ei.entity_id = (i.entity_ids)[1]
+           AND ei.deleted_at IS NULL
+           AND ei.namespace IN (${namespacesLiteral})
+        ) as entity_scopes,
+        -- Latest run via lateral
         wr.id as watcher_run_id,
         wr.status as watcher_run_status,
         wr.error_message as watcher_run_error,
@@ -484,10 +547,13 @@ export async function getWatcher(
         wr.completed_at as watcher_run_completed_at
       FROM watchers i
       LEFT JOIN watcher_versions cv ON i.current_version_id = cv.id
+      LEFT JOIN watcher_versions sv
+        ON sv.watcher_id = i.id
+        AND sv.version = COALESCE($2::int, i.version)
       ${buildLatestWatcherRunJoinSql('i', 'wr')}
       WHERE i.id = $1
     `,
-        [args.watcher_id]
+        [args.watcher_id, requestedVersion]
       )
     : null;
 
@@ -556,6 +622,20 @@ export async function getWatcher(
     watcherRow = watcherQuery.length > 0 ? (watcherQuery[0] as unknown as WatcherQueryRow) : null;
   }
 
+  // Resolve entityInfoForUrl / entitiesForTemplate from the entities array
+  // that was folded into the watcher metadata query — only for the typical
+  // case (no args.entity_id), which has been deferred from the start of the
+  // function. When args.entity_id is set we already populated these above
+  // from the dedicated entityCheck query.
+  if (!args.entity_id && watcherRow?.entities && watcherRow.entities.length > 0) {
+    const info = await buildEntityInfo(watcherRow.entities[0] as unknown as Record<string, unknown>);
+    entityInfoForUrl = info.entityInfoForUrl;
+    entitiesForTemplate = watcherRow.entities.map((e) => ({
+      name: String(e.name),
+      type: String(e.entity_type),
+    }));
+  }
+
   // ============================================
   // Step 5: Format results
   // ============================================
@@ -605,30 +685,14 @@ export async function getWatcher(
     watcherCondensationPrompt = watcherRow.condensation_prompt;
     watcherCondensationWindowCount = watcherRow.condensation_window_count;
 
-    // Determine which version to use
-    const requestedVersion = args.template_version || pinnedVersion;
-
-    // Always need the selected version row (prompt/schema/template). The
-    // available_versions list is only used by the edit sheet, so it's gated
-    // behind include_versions to save a second round-trip on every page load.
-    const versionQueryPromise = sql`
-        SELECT
-          wv.id as version_id,
-          wv.version,
-          wv.name,
-          wv.description,
-          wv.prompt,
-          wv.extraction_schema,
-          wv.version_sources,
-          wv.classifiers,
-          wv.json_template
-        FROM watcher_versions wv
-        WHERE wv.watcher_id = ${args.watcher_id}
-          AND wv.version = ${requestedVersion}
-      `;
-
-    const versionsListPromise = args.include_versions
-      ? sql`
+    // The selected version row (prompt/schema/template) was folded into the
+    // watcher metadata query above via a `LEFT JOIN watcher_versions sv …`,
+    // resolved against `args.template_version ?? i.version`. Reads from
+    // watcherRow directly — no separate round-trip.
+    //
+    // available_versions list is opt-in (edit sheet) — still its own query.
+    const versionsQuery = args.include_versions
+      ? await sql`
           SELECT
             wv.version,
             wv.name,
@@ -638,15 +702,21 @@ export async function getWatcher(
           WHERE wv.watcher_id = ${args.watcher_id}
           ORDER BY wv.version DESC
         `
-      : Promise.resolve([] as unknown[]);
+      : ([] as unknown[]);
 
-    const [versionQuery, versionsQuery] = await Promise.all([
-      versionQueryPromise,
-      versionsListPromise,
-    ]);
-
-    const version =
-      versionQuery.length > 0 ? (versionQuery[0] as unknown as Record<string, unknown>) : null;
+    const version: Record<string, unknown> | null = watcherRow.sel_version_id
+      ? {
+          version_id: watcherRow.sel_version_id,
+          version: watcherRow.sel_version,
+          name: watcherRow.sel_version_name,
+          description: watcherRow.sel_version_description,
+          prompt: watcherRow.sel_version_prompt,
+          extraction_schema: watcherRow.sel_version_extraction_schema,
+          version_sources: watcherRow.sel_version_version_sources,
+          classifiers: watcherRow.sel_version_classifiers,
+          json_template: watcherRow.sel_version_json_template,
+        }
+      : null;
 
     const availableVersions: WatcherVersionInfo[] | undefined = args.include_versions
       ? (
@@ -721,29 +791,15 @@ export async function getWatcher(
     const watcherEntityId = watcherEntityIds[0] ?? 0;
     const timeGranularity = inferWatcherGranularityFromSchedule(watcherRow.schedule);
 
-    // Pre-fetch the entity's live identity scopes so the entity-link UNION only
-    // emits branches for namespaces this entity actually owns. The legacy
-    // `entityLinkMatchSql` UNIONed every standard namespace unconditionally,
-    // forcing N extra full scans of `events` per query — fine on tiny dev
-    // datasets, catastrophic on a multi-GB prod events table (3 parallel
-    // queries × 5+ namespaces = >10s and the frontend aborts).
-    // Pre-fetch the entity's identity scopes + the watcher's latest window end
-    // in parallel. The scopes drive the entity-link UNION (only emits branches
-    // for namespaces the entity actually owns — the legacy
-    // `entityLinkMatchSql` UNIONed every standard namespace unconditionally,
-    // which on a multi-GB events table cost seconds per branch). The latest
-    // window end bounds the unprocessed-count scan so the planner uses
-    // `idx_events_entity_ids_occurred_at` for an indexed range scan instead
-    // of walking the entity's full event history.
-    const [entityScopes, latestWindowResult] = await Promise.all([
-      fetchEntityIdentityScopes(sql, watcherEntityId),
-      sql`
-        SELECT MAX(window_end) as latest_end
-        FROM watcher_windows
-        WHERE watcher_id = ${args.watcher_id}
-      `,
-    ]);
-    const latestEnd = (latestWindowResult[0]?.latest_end as string | null) ?? null;
+    // Identity scopes + latest window end were folded into the watcher
+    // metadata query above. Read both off watcherRow — no extra round-trip.
+    // Scopes drive the entity-link UNION (only emit branches for namespaces
+    // the entity actually owns); latestEnd bounds the unprocessedCount scan
+    // so the planner uses idx_events_entity_ids_occurred_at.
+    const entityScopes: EntityIdentityScope[] = (watcherRow.entity_scopes ?? []).filter((s) =>
+      (STANDARD_IDENTITY_NAMESPACES as readonly string[]).includes(s.namespace)
+    );
+    const latestEnd = watcherRow.latest_window_end;
     // Two entity-link fragments: one with `$1 = watcher_id` reserved (for
     // queries that join on the watcher's windows), one without (for queries
     // that only need the entity scope). Sharing one fragment and passing a
