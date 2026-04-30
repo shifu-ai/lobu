@@ -31,18 +31,23 @@ describe('getMcpInstallTargets', () => {
 
     expect(openclaw?.actions).toContainEqual({
       type: 'command',
-      label: 'Log in to Lobu memory',
-      value: `owletto login --mcpUrl ${mcpUrl}`,
+      label: 'Install plugin',
+      value: 'openclaw plugins install owletto-openclaw-plugin',
+    });
+    expect(openclaw?.actions).toContainEqual({
+      type: 'command',
+      label: 'Log in to Lobu',
+      value: 'lobu login',
     });
     expect(openclaw?.actions).toContainEqual({
       type: 'command',
       label: 'Write plugin config',
-      value: `owletto configure --mcpUrl ${mcpUrl}`,
+      value: `lobu memory configure --url ${mcpUrl}`,
     });
     expect(openclaw?.actions).toContainEqual({
       type: 'command',
       label: 'Verify connectivity',
-      value: `owletto health --mcpUrl ${mcpUrl}`,
+      value: `lobu memory health --url ${mcpUrl}`,
     });
   });
 
