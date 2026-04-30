@@ -78,9 +78,6 @@ COPY --from=builder --chown=worker:worker /app/packages/owletto-connectors ./pac
 COPY --from=builder --chown=worker:worker /app/packages/owletto-embeddings ./packages/owletto-embeddings
 COPY --from=builder --chown=worker:worker /app/packages/owletto-worker ./packages/owletto-worker
 
-COPY --chown=worker:worker docker/worker/healthcheck.sh /healthcheck.sh
-RUN chmod +x /healthcheck.sh
-
 # Install patchright's Chromium (declared as `playwright` alias in worker package.json).
 # Use bunx from the worker workspace so bun's resolver finds the alias.
 USER worker

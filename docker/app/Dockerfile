@@ -70,10 +70,12 @@ COPY packages/owletto-web packages/owletto-web
 
 # Build dist for shared workspace packages whose `exports` map points at
 # dist subpaths. owletto-backend imports @lobu/core from its dist barrel,
-# so core must be built before the bundle step.
+# and worker/openclaw plugin-loader resolves @lobu/owletto-openclaw by name
+# at runtime (ESM-only export, not bundled), so dist/ must exist on disk.
 RUN cd packages/core && bunx tsc \
     && cd ../owletto-sdk && bunx tsc \
-    && cd ../owletto-worker && bunx tsc
+    && cd ../owletto-worker && bunx tsc \
+    && cd ../owletto-openclaw && bun run build
 
 # Type check
 RUN cd packages/owletto-backend && bunx tsc --noEmit

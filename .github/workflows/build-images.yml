@@ -31,7 +31,11 @@ jobs:
 
   build-app:
     runs-on: ubuntu-latest
-    needs: [generate-tag]
+    # Push the app image last. Flux's ImageUpdateAutomation only watches the
+    # app image policy, but the chart applies one shared tag to app, worker,
+    # and embeddings. If app pushed before the others, Flux could roll the
+    # release to a tag that does not yet exist for worker/embeddings.
+    needs: [generate-tag, build-worker, build-embeddings-service]
     permissions:
       contents: read
       packages: write
