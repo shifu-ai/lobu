@@ -671,18 +671,42 @@ describe('admin-tier auth admission (requireSessionOrAdminPat)', () => {
     expect(rows.length).toBe(1);
   });
 
-  test('PUT /:agentId/connections/by-stable-id rejects a write-only PAT', async () => {
+  test('PUT /:agentId/platforms/by-stable-id rejects a write-only PAT', async () => {
     const app = await importAgentRoutes();
     await seedAgent(ORG_A, 'conn-host');
     authStash.authSource = 'pat';
     authStash.mcpAuthInfo = { scopes: ['mcp:read', 'mcp:write'] };
     const response = await app.request(
-      '/conn-host/connections/by-stable-id/conn-host-tg',
+      '/conn-host/platforms/by-stable-id/conn-host-tg',
       {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ platform: 'telegram', config: { chatId: '1' } }),
       }
+    );
+    expect(response.status).toBe(403);
+  });
+
+  test('POST /:agentId/platforms/:platformId/start rejects a write-only PAT', async () => {
+    const app = await importAgentRoutes();
+    await seedAgent(ORG_A, 'lifecycle-host-start');
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:read', 'mcp:write'] };
+    const response = await app.request(
+      '/lifecycle-host-start/platforms/some-platform-id/start',
+      { method: 'POST' }
+    );
+    expect(response.status).toBe(403);
+  });
+
+  test('POST /:agentId/platforms/:platformId/stop rejects a write-only PAT', async () => {
+    const app = await importAgentRoutes();
+    await seedAgent(ORG_A, 'lifecycle-host-stop');
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:read', 'mcp:write'] };
+    const response = await app.request(
+      '/lifecycle-host-stop/platforms/some-platform-id/stop',
+      { method: 'POST' }
     );
     expect(response.status).toBe(403);
   });

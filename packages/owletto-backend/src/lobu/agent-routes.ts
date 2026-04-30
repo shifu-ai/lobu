@@ -1083,6 +1083,8 @@ routes.delete('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
 // ── Start platform ───────────────────────────────────────────────────────────
 
 routes.post('/:agentId/platforms/:platformId/start', mcpAuth, async (c) => {
+  const denied = requireSessionOrAdminPat(c);
+  if (denied) return denied;
   return withOrg(c, async () => {
     const { platformId } = c.req.param();
     const chatManager = getChatInstanceManager();
@@ -1109,6 +1111,8 @@ routes.post('/:agentId/platforms/:platformId/start', mcpAuth, async (c) => {
 // ── Stop platform ────────────────────────────────────────────────────────────
 
 routes.post('/:agentId/platforms/:platformId/stop', mcpAuth, async (c) => {
+  const denied = requireSessionOrAdminPat(c);
+  if (denied) return denied;
   return withOrg(c, async () => {
     const { platformId } = c.req.param();
     const chatManager = getChatInstanceManager();
