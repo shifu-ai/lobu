@@ -375,3 +375,147 @@ describe('PUT /agents/:agentId/connections/by-stable-id/:stableId', () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe('concurrent-apply race fixes', () => {
+  beforeEach(async () => {
+    await resetTestDatabase();
+    await seedOrg(ORG_A);
+    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
+    authStash.organizationId = ORG_A;
+  });
+
+  test('POST /agents — two concurrent creates resolve to one 201 + one 200, single row', async () => {
+    const app = await importAgentRoutes();
+
+    const payload = JSON.stringify({
+      agentId: 'race-agent',
+      name: 'Race Agent',
+      description: 'concurrent',
+    });
+
+    // Both requests fire before either response — exercises the
+    // ON CONFLICT (id) DO NOTHING claim path.
+    const [r1, r2] = await Promise.all([
+      app.request('/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload,
+      }),
+      app.request('/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: payload,
+      }),
+    ]);
+
+    const statuses = [r1.status, r2.status].sort();
+    expect(statuses).toEqual([200, 201]);
+
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+
+    // Exactly one row.
+    const rows = await sql`SELECT id FROM agents WHERE id = 'race-agent'`;
+    expect(rows.length).toBe(1);
+
+    // The auto-injected MCP server is exactly one entry — not double-written
+    // by both handlers (which would have left the same value but proved both
+    // ran the saveSettings path).
+    const settings = await sql`
+      SELECT mcp_servers FROM agents WHERE id = 'race-agent'
+    `;
+    expect(settings[0].mcp_servers).toEqual({
+      owletto: { url: expect.stringContaining('/mcp/') },
+    });
+  });
+
+  test('POST /agents — concurrent create cannot overwrite operator-set MCP servers', async () => {
+    const app = await importAgentRoutes();
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+
+    // First, do a normal create so the row + initial MCP server exist.
+    const initial = await app.request('/', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId: 'preserved-agent', name: 'Preserved' }),
+    });
+    expect(initial.status).toBe(201);
+
+    // Operator overrides mcp_servers (e.g. via a subsequent PATCH /config).
+    await sql`
+      UPDATE agents
+      SET mcp_servers = ${sql.json({ owletto: { url: 'http://operator-set' } })},
+          updated_at = NOW()
+      WHERE id = 'preserved-agent'
+    `;
+
+    // Two concurrent re-applies must both take the idempotent path; neither
+    // should re-run the MCP auto-injection.
+    const [r1, r2] = await Promise.all([
+      app.request('/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agentId: 'preserved-agent', name: 'Preserved' }),
+      }),
+      app.request('/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ agentId: 'preserved-agent', name: 'Preserved' }),
+      }),
+    ]);
+    expect(r1.status).toBe(200);
+    expect(r2.status).toBe(200);
+
+    const after = await sql`
+      SELECT mcp_servers FROM agents WHERE id = 'preserved-agent'
+    `;
+    expect(after[0].mcp_servers).toEqual({
+      owletto: { url: 'http://operator-set' },
+    });
+  });
+
+  test('PUT /connections/by-stable-id — two concurrent identical PUTs converge to one row', async () => {
+    const app = await importAgentRoutes();
+    await seedAgent(ORG_A, 'race-host');
+
+    const stableId = 'race-host-telegram-prod';
+    const config = { chatId: '12345', endpoint: 'https://example.com' };
+
+    const [r1, r2] = await Promise.all([
+      app.request(`/race-host/connections/by-stable-id/${stableId}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ platform: 'telegram', config }),
+      }),
+      app.request(`/race-host/connections/by-stable-id/${stableId}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ platform: 'telegram', config }),
+      }),
+    ]);
+
+    expect([r1.status, r2.status].sort()).toEqual([200, 201]);
+
+    const bodies = [(await r1.json()) as any, (await r2.json()) as any];
+    const created = bodies.find((b) => b.connection && !b.noop && !b.updated);
+    expect(created).toBeTruthy();
+    expect(created?.connection?.id).toBe(stableId);
+
+    // The other response must be either noop:true (config unchanged) or
+    // updated:true (the loser observed the placeholder/empty config first
+    // and went down the update path). Both are correct per the race-fix
+    // contract: the row is consistent and we did not double-spawn.
+    const other = bodies.find((b) => b !== created);
+    expect(other?.noop === true || other?.updated === true).toBe(true);
+
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    const rows = await sql`
+      SELECT id, agent_id, platform FROM agent_connections WHERE id = ${stableId}
+    `;
+    expect(rows.length).toBe(1);
+    expect(rows[0].agent_id).toBe('race-host');
+    expect(rows[0].platform).toBe('telegram');
+  });
+});
