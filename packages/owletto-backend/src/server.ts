@@ -129,47 +129,13 @@ async function main() {
   // Mount the main app after any embedded sub-app routes are registered.
   app.route('/', mainApp);
 
-  // Boot the unified task scheduler. Periodic platform-internal jobs (token
-  // refresh, MCP session cleanup, classification reconciliation, watcher
-  // automation, etc.) live as rows in `public.runs` (run_type='task') with
-  // cron-driven self-rescheduling. No setInterval, no per-job advisory locks
-  // — the runs-queue's claim path handles cross-pod coordination.
-  const { TaskScheduler } = await import('./scheduled/task-scheduler');
-  const { registerMaintenanceTasks } = await import('./scheduled/jobs');
+  // Boot the unified task scheduler. Every periodic platform-internal job —
+  // token refresh, MCP DB cleanup, watcher automation, etc. — runs as a row
+  // in `public.runs` (run_type='task') with cron-driven self-rescheduling.
+  // Cross-pod coordination is the runs-queue claim path.
   const { getLobuCoreServices } = await import('./lobu/gateway');
-  const { cleanupExpiredMcpSessions } = await import('./mcp-handler');
-  const coreServices = getLobuCoreServices();
-  const taskScheduler = new TaskScheduler(coreServices.getQueue());
-  registerMaintenanceTasks(taskScheduler, env, {
-    runTokenRefresh: () => coreServices.getTokenRefreshJob().runOnce(),
-    refreshTokenForUserAgent: (userId, agentId) =>
-      coreServices.getTokenRefreshJob().refreshForUserAgent(userId, agentId),
-    runMcpSessionCleanup: () => cleanupExpiredMcpSessions(),
-    runSweepEphemeralTables: () => coreServices.sweepEphemeralTables(),
-  });
-  await taskScheduler.start();
-
-  // Wire lazy at-use-time refresh hooks now that the scheduler is up.
-  // AuthProfilesManager.ensureFreshCredential becomes a no-op until this
-  // runs, so during a brief startup window the periodic safety-net is
-  // the only refresh path — that's fine.
-  const authProfilesManager = coreServices.getAuthProfilesManager();
-  if (authProfilesManager) {
-    authProfilesManager.setLazyRefreshHooks({
-      triggerAsync: async (userId: string, agentId: string) => {
-        await taskScheduler.spawn(
-          'refresh-token-for-user-agent',
-          { userId, agentId },
-          { idempotencyKey: `refresh-token:${userId}:${agentId}` },
-        );
-      },
-      refreshNow: async (userId: string, agentId: string) => {
-        await coreServices
-          .getTokenRefreshJob()
-          .refreshForUserAgent(userId, agentId);
-      },
-    });
-  }
+  const { bootTaskScheduler } = await import('./scheduled/jobs');
+  const taskScheduler = await bootTaskScheduler(getLobuCoreServices(), env);
 
   const port = parseInt(process.env.PORT || '8787', 10);
   const host = process.env.HOST?.trim() || '0.0.0.0';

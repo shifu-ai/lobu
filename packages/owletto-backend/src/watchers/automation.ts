@@ -299,10 +299,11 @@ export async function sweepStaleWatcherRuns(
 }
 
 /**
- * Startup reconciliation: recover scheduled watcher runs that were claimed
- * by the dispatcher but never transitioned to `running` (i.e. the process
- * crashed between claim and POST). Called on first maintenance tick after
- * boot, under the MAINTENANCE_LOCK_KEY advisory lock.
+ * Recover scheduled watcher runs that were claimed by the dispatcher but
+ * never transitioned to `running` (i.e. the process crashed between claim
+ * and POST). Run every watcher-automation tick — the UPDATE is bounded and
+ * a no-op when no rows match, so cross-pod coordination via the runs-queue
+ * claim path is sufficient.
  *
  * Why this is narrow by design:
  * - `status='claimed'` only. `running` rows are NOT reset — in a multi-pod

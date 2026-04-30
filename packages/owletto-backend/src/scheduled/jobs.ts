@@ -1,105 +1,114 @@
 /**
- * Periodic platform-internal jobs, registered with the TaskScheduler.
+ * TaskScheduler boot + periodic platform-internal jobs.
  *
- * The TaskScheduler (see `./task-scheduler.ts`) replaces the previous
- * setInterval-driven maintenance loop. Each job is now a standalone task
- * with its own cron schedule, durable as a row in `public.runs` (run_type
- * 'task'). Coordination across pods is handled by the runs-queue claim path
- * — no per-job advisory locks needed.
+ * Each job is a standalone task with its own cron schedule, durable as a row
+ * in `public.runs` (run_type='task'). Cross-pod coordination is the
+ * runs-queue claim path — no per-job advisory locks.
  */
 
 import type { Env } from '@lobu/owletto-sdk';
+import type { CoreServices } from '../gateway/services/core-services';
+import { cleanupExpiredMcpSessions } from '../mcp-handler';
 import logger from '../utils/logger';
+import {
+  dispatchPendingWatcherRuns,
+  materializeDueWatcherRuns,
+  reconcileWatcherRuns,
+  resetOrphanedWatcherRuns,
+} from '../watchers/automation';
+import { checkStalledExecutions } from './check-stalled-executions';
+import { runClassificationReconciliation } from './classification-reconciliation';
 import { TaskScheduler } from './task-scheduler';
+import { triggerEmbedBackfill } from './trigger-embed-backfill';
 
-/** Cross-cutting handle to platform services owned by CoreServices that the
- *  task registry needs to invoke. Boot wires this from getLobuCoreServices(). */
-export interface MaintenanceDeps {
-  /** Periodic token refresh — `runOnce()` does one full scan. Now a 30min
-   *  safety net since lazy at-use-time refresh handles active users. */
-  runTokenRefresh: () => Promise<void>;
-  /** Refresh OAuth tokens for a specific (userId, agentId). Used by the
-   *  `refresh-token-for-user-agent` task that AuthProfilesManager spawns
-   *  lazily when it sees a soon-expiring token at use time. */
-  refreshTokenForUserAgent: (userId: string, agentId: string) => Promise<void>;
-  /** MCP-session DB cleanup — drops rows whose expiry has passed. */
-  runMcpSessionCleanup: () => Promise<void>;
-  /** Sweep oauth_states / cli_sessions / rate_limits / grants + archive
-   *  completed runs. Was a per-pod setInterval inside CoreServices. */
-  runSweepEphemeralTables: () => Promise<void>;
+/**
+ * Construct the TaskScheduler, register every periodic task, start dispatch,
+ * and wire the lazy at-use-time refresh hooks into AuthProfilesManager.
+ * Single call site for both `server.ts` (prod) and `start-local.ts` (PGlite).
+ */
+export async function bootTaskScheduler(
+  coreServices: CoreServices,
+  env: Env,
+): Promise<TaskScheduler> {
+  const scheduler = new TaskScheduler(coreServices.getQueue());
+  registerMaintenanceTasks(scheduler, env, coreServices);
+  await scheduler.start();
+
+  // AuthProfilesManager.ensureFreshCredential is a no-op until these hooks
+  // are wired; during the brief startup window before scheduler.start()
+  // returns, the periodic safety-net is the only refresh path.
+  const authProfilesManager = coreServices.getAuthProfilesManager();
+  if (authProfilesManager) {
+    authProfilesManager.setLazyRefreshHooks({
+      triggerAsync: async (userId, agentId) => {
+        await scheduler.spawn(
+          'refresh-token-for-user-agent',
+          { userId, agentId },
+          { idempotencyKey: `refresh-token:${userId}:${agentId}` },
+        );
+      },
+      refreshNow: (userId, agentId) =>
+        coreServices.getTokenRefreshJob().refreshForUserAgent(userId, agentId),
+    });
+  }
+
+  return scheduler;
 }
 
-/** Reset orphaned scheduled watcher runs once per process on the first
- *  watcher-automation tick. Mirrors the previous behavior gated on
- *  `orphanedWatcherRunsReset` in the old jobs.ts. */
-let orphanedWatcherRunsReset = false;
-
-export function registerMaintenanceTasks(
+function registerMaintenanceTasks(
   scheduler: TaskScheduler,
   env: Env,
-  deps: MaintenanceDeps,
+  coreServices: CoreServices,
 ): void {
   // OAuth token refresh — periodic safety-net at 30min intervals. The hot path
   // is at-use-time lazy refresh in AuthProfilesManager.ensureFreshCredential,
   // which spawns `refresh-token-for-user-agent` per-user when a soon-expiring
-  // token is read. This periodic scan only catches tokens for users who
-  // haven't accessed the system in a while.
+  // token is read. This periodic scan only catches users who haven't accessed
+  // the system in a while.
   scheduler.register(
     'token-refresh',
-    async () => {
-      await deps.runTokenRefresh();
-    },
+    () => coreServices.getTokenRefreshJob().runOnce(),
     { cron: '*/30 * * * *' },
   );
 
   // Lazy refresh handler — spawned by AuthProfilesManager when a soon-expiring
-  // OAuth token is read. Not periodic (no cron). Idempotency-keyed by
-  // (userId, agentId) so concurrent reads for the same user collapse to one
-  // refresh.
-  scheduler.register(
-    'refresh-token-for-user-agent',
-    async (ctx) => {
-      const { userId, agentId } = ctx.payload as {
-        userId: string;
-        agentId: string;
-      };
-      if (!userId || !agentId) {
-        logger.warn({ payload: ctx.payload }, '[task] refresh-token-for-user-agent missing userId/agentId');
-        return;
-      }
-      await deps.refreshTokenForUserAgent(userId, agentId);
-    },
-  );
+  // OAuth token is read. Idempotency-keyed by (userId, agentId) so concurrent
+  // reads collapse to one refresh.
+  scheduler.register('refresh-token-for-user-agent', async (ctx) => {
+    const { userId, agentId } = ctx.payload as {
+      userId: string;
+      agentId: string;
+    };
+    if (!userId || !agentId) {
+      logger.warn(
+        { payload: ctx.payload },
+        '[task] refresh-token-for-user-agent missing userId/agentId',
+      );
+      return;
+    }
+    await coreServices.getTokenRefreshJob().refreshForUserAgent(userId, agentId);
+  });
 
-  // MCP session cleanup — drops expired session rows from the DB. Lives in the
-  // scheduler instead of an mcp-handler module-level setInterval so it runs
-  // once per cluster per tick instead of once per pod. The IN-MEMORY part of
-  // session cleanup stays as a setInterval in mcp-handler.ts because it must
-  // run per-pod (see comment there).
+  // MCP session cleanup — drops expired session rows from the DB. Lives here
+  // (cross-pod-coordinated) instead of as an mcp-handler module-level
+  // setInterval. The IN-MEMORY part stays per-pod (see mcp-handler.ts).
   scheduler.register(
     'mcp-session-cleanup',
-    async () => {
-      await deps.runMcpSessionCleanup();
-    },
+    () => cleanupExpiredMcpSessions(),
     { cron: '*/10 * * * *' },
   );
 
   // Hygiene sweep — drops expired rows from oauth_states, cli_sessions,
-  // rate_limits, grants, and archives completed runs. Was previously a
-  // 5-min setInterval inside CoreServices; running it here means one
-  // sweep per cluster per tick instead of one per pod.
+  // rate_limits, grants, and archives completed runs.
   scheduler.register(
     'sweep-ephemeral-tables',
-    async () => {
-      await deps.runSweepEphemeralTables();
-    },
+    () => coreServices.sweepEphemeralTables(),
     { cron: '*/5 * * * *' },
   );
 
   scheduler.register(
     'check-stalled-executions',
     async () => {
-      const { checkStalledExecutions } = await import('./check-stalled-executions');
       await checkStalledExecutions(env);
       logger.info('[task] check-stalled-executions completed');
     },
@@ -109,7 +118,6 @@ export function registerMaintenanceTasks(
   scheduler.register(
     'trigger-embed-backfill',
     async () => {
-      const { triggerEmbedBackfill } = await import('./trigger-embed-backfill');
       const result = await triggerEmbedBackfill(env);
       if (result.runsCreated > 0) {
         logger.info({ ...result }, '[task] trigger-embed-backfill enqueued runs');
@@ -121,37 +129,22 @@ export function registerMaintenanceTasks(
   scheduler.register(
     'classification-reconciliation',
     async () => {
-      const { runClassificationReconciliation } = await import(
-        './classification-reconciliation'
-      );
       const result = await runClassificationReconciliation(env);
       logger.info({ ...result }, '[task] classification-reconciliation completed');
     },
     { cron: '*/5 * * * *' },
   );
 
-  // Watcher automation runs every minute (was previously bundled into the 5min
-  // maintenance loop, which was too lazy for user-defined watchers expecting
-  // sub-5min granularity). Composite of: reconcile in-flight runs, materialize
-  // newly-due runs, dispatch pending runs.
+  // Watcher automation: reconcile in-flight runs, materialize newly-due runs,
+  // dispatch pending runs. The orphaned-runs reset is bounded and idempotent
+  // so it runs every tick — no per-pod first-tick latch needed.
   scheduler.register(
     'watcher-automation',
     async () => {
-      const {
-        dispatchPendingWatcherRuns,
-        materializeDueWatcherRuns,
-        reconcileWatcherRuns,
-        resetOrphanedWatcherRuns,
-      } = await import('../watchers/automation');
-
-      if (!orphanedWatcherRunsReset) {
-        const { reset } = await resetOrphanedWatcherRuns();
-        orphanedWatcherRunsReset = true;
-        if (reset > 0) {
-          logger.info({ reset }, '[task] watcher-automation: reset orphaned runs on first tick');
-        }
+      const { reset } = await resetOrphanedWatcherRuns();
+      if (reset > 0) {
+        logger.info({ reset }, '[task] watcher-automation: reset orphaned runs');
       }
-
       const reconciliation = await reconcileWatcherRuns();
       const materialize = await materializeDueWatcherRuns(env);
       const dispatch = await dispatchPendingWatcherRuns(env);

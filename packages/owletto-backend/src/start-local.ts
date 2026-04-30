@@ -133,41 +133,13 @@ async function main() {
   const { app: mainApp } = await import('./index');
   const { initWorkspaceProvider } = await import('./workspace');
   const { initLobuGateway, getLobuCoreServices } = await import('./lobu/gateway');
-  const { TaskScheduler } = await import('./scheduled/task-scheduler');
-  const { registerMaintenanceTasks } = await import('./scheduled/jobs');
+  const { bootTaskScheduler } = await import('./scheduled/jobs');
 
   await initWorkspaceProvider();
   await initLobuGateway();
 
   const env = getEnvFromProcess();
-  const { cleanupExpiredMcpSessions } = await import('./mcp-handler');
-  const coreServices = getLobuCoreServices();
-  const taskScheduler = new TaskScheduler(coreServices.getQueue());
-  registerMaintenanceTasks(taskScheduler, env, {
-    runTokenRefresh: () => coreServices.getTokenRefreshJob().runOnce(),
-    refreshTokenForUserAgent: (userId, agentId) =>
-      coreServices.getTokenRefreshJob().refreshForUserAgent(userId, agentId),
-    runMcpSessionCleanup: () => cleanupExpiredMcpSessions(),
-    runSweepEphemeralTables: () => coreServices.sweepEphemeralTables(),
-  });
-  await taskScheduler.start();
-  const authProfilesManager = coreServices.getAuthProfilesManager();
-  if (authProfilesManager) {
-    authProfilesManager.setLazyRefreshHooks({
-      triggerAsync: async (userId: string, agentId: string) => {
-        await taskScheduler.spawn(
-          'refresh-token-for-user-agent',
-          { userId, agentId },
-          { idempotencyKey: `refresh-token:${userId}:${agentId}` },
-        );
-      },
-      refreshNow: async (userId: string, agentId: string) => {
-        await coreServices
-          .getTokenRefreshJob()
-          .refreshForUserAgent(userId, agentId);
-      },
-    });
-  }
+  const taskScheduler = await bootTaskScheduler(getLobuCoreServices(), env);
   const stopScheduler = () => taskScheduler.stop();
 
   const wrapper = new Hono<{ Bindings: Env }>();
