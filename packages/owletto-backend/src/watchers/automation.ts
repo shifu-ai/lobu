@@ -298,12 +298,18 @@ export async function sweepStaleWatcherRuns(
   return { timedOut };
 }
 
+/** Stale-claim threshold for orphan recovery: a watcher run stuck in `claimed`
+ *  this long without progressing to `running` is taken to be from a crashed
+ *  dispatcher (real session-create + fetch + POST takes seconds, not minutes).
+ *  Any tighter and we'd race a legitimate slow dispatch on the same row. */
+const ORPHANED_CLAIM_THRESHOLD = '5 minutes';
+
 /**
  * Recover scheduled watcher runs that were claimed by the dispatcher but
- * never transitioned to `running` (i.e. the process crashed between claim
- * and POST). Run every watcher-automation tick — the UPDATE is bounded and
- * a no-op when no rows match, so cross-pod coordination via the runs-queue
- * claim path is sufficient.
+ * never transitioned to `running` (process crashed between claim and POST).
+ * Run every watcher-automation tick — the staleness threshold means the
+ * UPDATE is a no-op for rows currently being dispatched, so cross-pod
+ * coordination via the runs-queue claim path is sufficient.
  *
  * Why this is narrow by design:
  * - `status='claimed'` only. `running` rows are NOT reset — in a multi-pod
@@ -312,6 +318,8 @@ export async function sweepStaleWatcherRuns(
  *   instead self-heal: sweepStaleWatcherRuns marks them `timeout` after 2h,
  *   then materializeDueWatcherRuns creates a fresh pending run on the next
  *   tick since next_run_at is still in the past.
+ * - `claimed_at < now() - 5min` to avoid racing the dispatcher on a row it
+ *   just claimed but hasn't yet moved to `running`.
  * - `dispatch_source='scheduled'` only. Manual triggers are not auto-retried;
  *   the caller would see the failure and decide whether to re-trigger.
  */
@@ -329,11 +337,12 @@ export async function resetOrphanedWatcherRuns(
     WHERE run_type = 'watcher'
       AND status = 'claimed'
       AND claimed_by = 'lobu-dispatcher'
+      AND claimed_at < now() - ${ORPHANED_CLAIM_THRESHOLD}::interval
       AND COALESCE(approved_input->>'dispatch_source', 'scheduled') = 'scheduled'
   `;
   const reset = Number(result.count ?? 0);
   if (reset > 0) {
-    logger.info({ reset }, '[watchers] Reset orphaned watcher runs on startup');
+    logger.info({ reset }, '[watchers] Reset orphaned watcher runs');
   }
   return { reset };
 }
