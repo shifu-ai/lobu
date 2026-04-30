@@ -158,13 +158,15 @@ function isSecretField(key: string): boolean {
   return SECRET_PATTERN.test(key);
 }
 
-function encryptConfig(config: Record<string, any>): Record<string, any> {
+const ENC_PREFIX = 'enc:v1:';
+
+export function encryptConfig(config: Record<string, any>): Record<string, any> {
   try {
     const { encrypt } = require('@lobu/core');
     const result = { ...config };
     for (const [key, value] of Object.entries(result)) {
-      if (isSecretField(key) && typeof value === 'string' && !value.startsWith('enc:v1:')) {
-        result[key] = encrypt(value);
+      if (isSecretField(key) && typeof value === 'string' && !value.startsWith(ENC_PREFIX)) {
+        result[key] = `${ENC_PREFIX}${encrypt(value)}`;
       }
     }
     return result;
@@ -177,14 +179,14 @@ function isRedactedSecretValue(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('***');
 }
 
-function decryptConfig(config: Record<string, any>): Record<string, any> {
+export function decryptConfig(config: Record<string, any>): Record<string, any> {
   try {
     const { decrypt } = require('@lobu/core');
     const result = { ...config };
     for (const [key, value] of Object.entries(result)) {
-      if (typeof value === 'string' && value.startsWith('enc:v1:')) {
+      if (typeof value === 'string' && value.startsWith(ENC_PREFIX)) {
         try {
-          result[key] = decrypt(value);
+          result[key] = decrypt(value.slice(ENC_PREFIX.length));
         } catch {
           // Leave encrypted if decryption fails.
         }
