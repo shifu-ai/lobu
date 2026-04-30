@@ -8,7 +8,6 @@
 import {
   addWatcherPeriod,
   getFinerWatcherGranularities,
-  getWatcherDateTruncUnit,
   inferWatcherGranularityFromSchedule,
   type WatcherTimeGranularity,
 } from '@lobu/owletto-sdk';
@@ -16,7 +15,6 @@ import { type Static, Type } from '@sinclair/typebox';
 import { createDbClientFromEnv, getDb } from '../db/client';
 import type { Env } from '../index';
 import type {
-  ClassificationTimeline,
   EntityContext,
   PendingAnalysis,
   WatcherMetadata,
@@ -24,7 +22,11 @@ import type {
   WatcherVersionInfo,
   WatcherWindow,
 } from '../types/watchers';
-import { entityLinkMatchSql } from '../utils/content-search';
+import {
+  buildEntityLinkUnion,
+  entityLinkMatchSql,
+  fetchEntityIdentityScopes,
+} from '../utils/content-search';
 import {
   daysBetween,
   formatDateISO,
@@ -96,8 +98,19 @@ export const GetWatcherSchema = Type.Object({
   ),
   include_classification: Type.Optional(
     Type.String({
+      description: 'Include per-window classification stats. Use "summary" to enable.',
+    })
+  ),
+  include_versions: Type.Optional(
+    Type.Boolean({
       description:
-        'Include classification data. Values: "summary", "timeline", or "summary,timeline".',
+        'Include the full available_versions list. Off by default; the edit sheet sets it true. Saves one query per page open.',
+    })
+  ),
+  include_pending_ranges: Type.Optional(
+    Type.Boolean({
+      description:
+        'Include pending_analysis.unprocessed_ranges (per-month histogram). Off by default; the summary view sets it true on expand. Saves two events-table aggregates per page open.',
     })
   ),
 });
@@ -122,7 +135,6 @@ interface WindowGap {
 
 interface GetWatcherResult {
   windows: WatcherWindow[];
-  classification_timeline?: ClassificationTimeline;
   watcher?: WatcherMetadata;
   pending_analysis?: PendingAnalysis;
   gaps?: WindowGap[];
@@ -183,21 +195,6 @@ interface ClassificationStatsRow {
   window_id: number;
   classifier_slug: string;
   value: string;
-  count: number;
-}
-
-/** Row type for classification timeline query results */
-interface TimelineRow {
-  date: string;
-  classifier_slug: string;
-  classifier_name: string;
-  value: string;
-  count: number;
-}
-
-/** Row type for totals (distinct content counts per date bucket) */
-interface TotalsRow {
-  date: string;
   count: number;
 }
 
@@ -304,7 +301,6 @@ export async function getWatcher(
     .filter(Boolean);
   const includeClassificationSummary =
     includeClassification.length === 0 || includeClassification.includes('summary');
-  const includeClassificationTimeline = includeClassification.includes('timeline');
 
   // ============================================
   // Step 1: Validate inputs
@@ -477,9 +473,7 @@ export async function getWatcher(
 
   const typedWindows = windows as unknown as WindowRow[];
   const windowIds = typedWindows.map((w) => ensureNumber(w.window_id));
-  const windowIdList = windowIds.join(',');
   const classificationStatsMap: Map<number, Record<string, Record<string, number>>> = new Map();
-  let classificationTimeline: ClassificationTimeline | undefined;
 
   // Fire watcher details query early (awaited after classification stats).
   // Use sql.unsafe() with a $N parameter so the latest-run LATERAL JOIN can
@@ -586,121 +580,6 @@ export async function getWatcher(
   }
 
   // ============================================
-  // Step 4.7: Fetch classification timeline for selected watcher
-  // ============================================
-
-  if (includeClassificationTimeline && args.watcher_id && windowIds.length > 0) {
-    const watcherstring = inferWatcherGranularityFromSchedule(watcherRow?.schedule);
-    const watcherEntityId = parseBigintArray(watcherRow?.entity_ids)[0] ?? 0;
-    const dateTruncValue = getWatcherDateTruncUnit(watcherstring);
-
-    const windowDates = (field: 'window_start' | 'window_end') =>
-      typedWindows
-        .map((w) => w[field])
-        .filter(Boolean)
-        .map((d) => new Date(d).getTime());
-    const startTimes = windowDates('window_start');
-    const endTimes = windowDates('window_end');
-    const fallbackStart = startTimes.length > 0 ? new Date(Math.min(...startTimes)) : null;
-    const fallbackEnd = endTimes.length > 0 ? new Date(Math.max(...endTimes)) : null;
-
-    const timelineStart = parsedSince ? new Date(parsedSince) : fallbackStart;
-    const timelineEndRaw = parsedUntil ? new Date(parsedUntil) : fallbackEnd;
-
-    if (timelineStart && timelineEndRaw) {
-      const timelineEnd = new Date(timelineEndRaw);
-      timelineEnd.setHours(23, 59, 59, 999);
-
-      const rangeStart = formatDateISO(timelineStart);
-      const rangeEnd = formatDateISO(timelineEnd);
-
-      try {
-        // Query total signals per date bucket (distinct content count)
-        const totalsQuery = `
-          WITH matched_content AS (
-            SELECT DISTINCT iwc.event_id
-            FROM watcher_window_events iwc
-            WHERE iwc.window_id IN (${windowIdList})
-          )
-          SELECT
-            CAST(DATE_TRUNC($1, f.occurred_at) AS DATE)::TEXT as date,
-            CAST(COUNT(DISTINCT mc.event_id) AS INTEGER) as count
-          FROM matched_content mc
-          JOIN current_event_records f ON f.id = mc.event_id
-          GROUP BY date
-          ORDER BY date ASC
-        `;
-
-        const timelineQuery = `
-          WITH matched_content AS (
-            SELECT DISTINCT iwc.event_id
-            FROM watcher_window_events iwc
-            WHERE iwc.window_id IN (${windowIdList})
-          )
-          SELECT
-            CAST(DATE_TRUNC($4, f.occurred_at) AS DATE)::TEXT as date,
-            cc.slug as classifier_slug,
-            cc.name as classifier_name,
-            value as value,
-            CAST(COUNT(*) AS INTEGER) as count
-          FROM matched_content mc
-          JOIN current_event_records f ON f.id = mc.event_id
-          JOIN event_classifications cls ON cls.event_id = f.id
-          JOIN event_classifier_versions ccv ON cls.classifier_version_id = ccv.id
-          JOIN event_classifiers cc ON ccv.classifier_id = cc.id
-          CROSS JOIN unnest(cls."values") AS t(value)
-          WHERE (
-              (CAST($1 AS BOOLEAN) = true AND cc.watcher_id = $2)
-              OR (CAST($1 AS BOOLEAN) = false AND cc.watcher_id IS NULL AND cc.entity_id = $3)
-            )
-          GROUP BY date, cc.slug, cc.name, value
-          ORDER BY date ASC, cc.slug ASC, count DESC
-        `;
-
-        // Run totals in parallel with (hasClassifiers → timeline) chain
-        const [totalsResult, timelineResult] = await Promise.all([
-          sql.unsafe(totalsQuery, [dateTruncValue]),
-          (async () => {
-            const hasWatcherClassifiersResult = await sql`
-              SELECT COUNT(*) > 0 as has_classifiers FROM event_classifiers WHERE watcher_id = ${args.watcher_id}
-            `;
-            const useWatcherScope = hasWatcherClassifiersResult[0]?.has_classifiers === true;
-            return sql.unsafe(timelineQuery, [
-              useWatcherScope,
-              args.watcher_id,
-              watcherEntityId,
-              dateTruncValue,
-            ]);
-          })(),
-        ]);
-
-        const totals = totalsResult as unknown as TotalsRow[];
-
-        // Derive range from totals data (more reliable than series which may be empty)
-        const totalsDates = totals.map((t) => t.date).sort();
-        const actualRangeStart = totalsDates.length > 0 ? totalsDates[0] : rangeStart;
-        const actualRangeEnd =
-          totalsDates.length > 0 ? totalsDates[totalsDates.length - 1] : rangeEnd;
-
-        classificationTimeline = {
-          granularity: watcherstring,
-          range: {
-            start: actualRangeStart,
-            end: actualRangeEnd,
-          },
-          totals,
-          series: timelineResult as unknown as TimelineRow[],
-        };
-      } catch (error) {
-        logger.warn(
-          { error, watcher_id: args.watcher_id },
-          '[get_watcher] Failed to fetch classification timeline'
-        );
-      }
-    }
-  }
-
-  // ============================================
   // Step 5: Format results
   // ============================================
 
@@ -752,9 +631,10 @@ export async function getWatcher(
     // Determine which version to use
     const requestedVersion = args.template_version || pinnedVersion;
 
-    // Fetch version details and available versions in parallel
-    const [versionQuery, versionsQuery] = await Promise.all([
-      sql`
+    // Always need the selected version row (prompt/schema/template). The
+    // available_versions list is only used by the edit sheet, so it's gated
+    // behind include_versions to save a second round-trip on every page load.
+    const versionQueryPromise = sql`
         SELECT
           wv.id as version_id,
           wv.version,
@@ -768,35 +648,44 @@ export async function getWatcher(
         FROM watcher_versions wv
         WHERE wv.watcher_id = ${args.watcher_id}
           AND wv.version = ${requestedVersion}
-      `,
-      sql`
-        SELECT
-          wv.version,
-          wv.name,
-          wv.created_at,
-          (wv.id = ${watcherRow.current_version_id}) as is_current
-        FROM watcher_versions wv
-        WHERE wv.watcher_id = ${args.watcher_id}
-        ORDER BY wv.version DESC
-      `,
+      `;
+
+    const versionsListPromise = args.include_versions
+      ? sql`
+          SELECT
+            wv.version,
+            wv.name,
+            wv.created_at,
+            (wv.id = ${watcherRow.current_version_id}) as is_current
+          FROM watcher_versions wv
+          WHERE wv.watcher_id = ${args.watcher_id}
+          ORDER BY wv.version DESC
+        `
+      : Promise.resolve([] as unknown[]);
+
+    const [versionQuery, versionsQuery] = await Promise.all([
+      versionQueryPromise,
+      versionsListPromise,
     ]);
 
     const version =
       versionQuery.length > 0 ? (versionQuery[0] as unknown as Record<string, unknown>) : null;
 
-    const availableVersions: WatcherVersionInfo[] = (
-      versionsQuery as unknown as Array<{
-        version: number;
-        name: string;
-        created_at: string;
-        is_current: boolean;
-      }>
-    ).map((v) => ({
-      version: v.version,
-      name: v.name,
-      created_at: v.created_at,
-      is_current: v.is_current,
-    }));
+    const availableVersions: WatcherVersionInfo[] | undefined = args.include_versions
+      ? (
+          versionsQuery as unknown as Array<{
+            version: number;
+            name: string;
+            created_at: string;
+            is_current: boolean;
+          }>
+        ).map((v) => ({
+          version: v.version,
+          name: v.name,
+          created_at: v.created_at,
+          is_current: v.is_current,
+        }))
+      : undefined;
 
     // Sources come from watcher row (or version if present)
     const watcherSources = parseWatcherSources(watcherRow.sources);
@@ -819,7 +708,7 @@ export async function getWatcher(
       rendered_prompt: version?.prompt
         ? renderPromptPreview(version.prompt as string, entitiesForTemplate)
         : undefined,
-      available_versions: availableVersions,
+      ...(availableVersions !== undefined && { available_versions: availableVersions }),
       reaction_script: watcherRow.reaction_script || undefined,
       watcher_run:
         watcherRow.watcher_run_id && watcherRow.watcher_run_status
@@ -854,8 +743,21 @@ export async function getWatcher(
     const watcherEntityIds = parseBigintArray(watcherRow.entity_ids);
     const watcherEntityId = watcherEntityIds[0] ?? 0;
     const timeGranularity = inferWatcherGranularityFromSchedule(watcherRow.schedule);
-    // Build the entity scoping SQL fragment
-    const entityScopeCondition = entityLinkMatchSql(`${watcherEntityId}::bigint`);
+
+    // Pre-fetch the entity's live identity scopes so the entity-link UNION only
+    // emits branches for namespaces this entity actually owns. The legacy
+    // `entityLinkMatchSql` UNIONed every standard namespace unconditionally,
+    // forcing N extra full scans of `events` per query — fine on tiny dev
+    // datasets, catastrophic on a multi-GB prod events table (3 parallel
+    // queries × 5+ namespaces = >10s and the frontend aborts).
+    const entityScopes = await fetchEntityIdentityScopes(sql, watcherEntityId);
+    const entityLink = buildEntityLinkUnion({
+      entityIdLiteral: watcherEntityId,
+      scopes: entityScopes,
+      baseParamIndex: 2, // $1 is reserved for args.watcher_id below
+    });
+    const entityScopeCondition = entityLink.sql;
+    const entityLinkParams = entityLink.params;
 
     const notInWindowClause = `NOT EXISTS (
         SELECT 1 FROM watcher_window_events iwc
@@ -863,33 +765,48 @@ export async function getWatcher(
         WHERE iwc.event_id = f.id AND iw.watcher_id = $1
       )`;
 
-    // Fire all three independent queries in parallel
-    const [unprocessedCountResult, monthlyContentResult, monthlyLinkedResult] = await Promise.all([
-      sql.unsafe(
-        `SELECT CAST(COUNT(*) AS INTEGER) as count
+    // unprocessed_count drives the badge ("N pending analysis"). Cheap: one
+    // entity-scoped COUNT with the not-in-window anti-join.
+    //
+    // monthlyContent / monthlyLinked build the per-month histogram for
+    // unprocessed_ranges, only used inside the (collapsed-by-default) summary
+    // view. Off by default; the summary expand path sets include_pending_ranges
+    // to true. Saves two unbounded events-table aggregates per page open.
+    const unprocessedCountPromise = sql.unsafe(
+      `SELECT CAST(COUNT(*) AS INTEGER) as count
             FROM current_event_records f
             WHERE ${entityScopeCondition}
               AND ${notInWindowClause}`,
-        [args.watcher_id]
-      ),
-      sql.unsafe(
-        `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(*) as total
-          FROM current_event_records f
-          WHERE ${entityScopeCondition}
-          GROUP BY DATE_TRUNC('month', f.occurred_at)
-          ORDER BY month`
-      ),
-      sql.unsafe(
-        `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(DISTINCT f.id) as linked
-          FROM current_event_records f
-          JOIN watcher_window_events iwc ON f.id = iwc.event_id
-          JOIN watcher_windows iw ON iwc.window_id = iw.id
-          WHERE ${entityScopeCondition}
-            AND iw.watcher_id = $1
-          GROUP BY DATE_TRUNC('month', f.occurred_at)`,
-        [args.watcher_id]
-      ),
-    ]);
+      [args.watcher_id, ...entityLinkParams]
+    );
+
+    const histogramPromise = args.include_pending_ranges
+      ? Promise.all([
+          sql.unsafe(
+            `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(*) as total
+              FROM current_event_records f
+              WHERE ${entityScopeCondition}
+              GROUP BY DATE_TRUNC('month', f.occurred_at)
+              ORDER BY month`,
+            // $1 is unused here but harmless — keeps a single param list shape.
+            [args.watcher_id, ...entityLinkParams]
+          ),
+          sql.unsafe(
+            `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(DISTINCT f.id) as linked
+              FROM current_event_records f
+              JOIN watcher_window_events iwc ON f.id = iwc.event_id
+              JOIN watcher_windows iw ON iwc.window_id = iw.id
+              WHERE ${entityScopeCondition}
+                AND iw.watcher_id = $1
+              GROUP BY DATE_TRUNC('month', f.occurred_at)`,
+            [args.watcher_id, ...entityLinkParams]
+          ),
+        ])
+      : Promise.resolve([[], []] as [unknown[], unknown[]]);
+
+    const [unprocessedCountResult, [monthlyContentResult, monthlyLinkedResult]] = await Promise.all(
+      [unprocessedCountPromise, histogramPromise]
+    );
 
     const unprocessedCount = Number(unprocessedCountResult[0]?.count ?? 0);
 
@@ -920,7 +837,7 @@ export async function getWatcher(
             FROM current_event_records f
             WHERE ${entityScopeCondition}
               AND ${notInWindowClause}`,
-          [args.watcher_id]
+          [args.watcher_id, ...entityLinkParams]
         );
         const earliest = earliestResult[0]?.earliest as string | null;
         windowStart = earliest ? new Date(earliest) : now;
@@ -941,35 +858,37 @@ export async function getWatcher(
       };
     }
 
-    const linkedByMonth = new Map<string, number>();
-    for (const row of monthlyLinkedResult) {
-      const monthKey = new Date(row.month as string).toISOString().slice(0, 7);
-      linkedByMonth.set(monthKey, Number(row.linked));
-    }
-
     const unprocessedRanges: import('../types/watchers').UnprocessedRange[] = [];
-    for (const row of monthlyContentResult) {
-      const monthDate = new Date(row.month as string);
-      const monthKey = monthDate.toISOString().slice(0, 7);
-      const total = Number(row.total);
-      const linked = linkedByMonth.get(monthKey) || 0;
-      const unprocessed = total - linked;
+    if (args.include_pending_ranges) {
+      const linkedByMonth = new Map<string, number>();
+      for (const row of monthlyLinkedResult as Array<Record<string, unknown>>) {
+        const monthKey = new Date(row.month as string).toISOString().slice(0, 7);
+        linkedByMonth.set(monthKey, Number(row.linked));
+      }
 
-      const rangeStart = new Date(monthDate);
-      const rangeEnd = new Date(monthDate);
-      rangeEnd.setMonth(rangeEnd.getMonth() + 1);
-      rangeEnd.setMilliseconds(-1);
+      for (const row of monthlyContentResult as Array<Record<string, unknown>>) {
+        const monthDate = new Date(row.month as string);
+        const monthKey = monthDate.toISOString().slice(0, 7);
+        const total = Number(row.total);
+        const linked = linkedByMonth.get(monthKey) || 0;
+        const unprocessed = total - linked;
 
-      if (unprocessed > 0) {
-        unprocessedRanges.push({
-          month: monthKey,
-          window_start: rangeStart.toISOString(),
-          window_end: rangeEnd.toISOString(),
-          total_content: total,
-          processed_content: linked,
-          unprocessed_content: unprocessed,
-          status: linked === 0 ? 'unprocessed' : 'partial',
-        });
+        const rangeStart = new Date(monthDate);
+        const rangeEnd = new Date(monthDate);
+        rangeEnd.setMonth(rangeEnd.getMonth() + 1);
+        rangeEnd.setMilliseconds(-1);
+
+        if (unprocessed > 0) {
+          unprocessedRanges.push({
+            month: monthKey,
+            window_start: rangeStart.toISOString(),
+            window_end: rangeEnd.toISOString(),
+            total_content: total,
+            processed_content: linked,
+            unprocessed_content: unprocessed,
+            status: linked === 0 ? 'unprocessed' : 'partial',
+          });
+        }
       }
     }
 
@@ -1163,7 +1082,6 @@ export async function getWatcher(
 
   const result: GetWatcherResult = {
     windows: formattedWindows,
-    ...(classificationTimeline && { classification_timeline: classificationTimeline }),
     ...(watcherMetadata && { watcher: watcherMetadata }),
     ...(pendingAnalysis && { pending_analysis: pendingAnalysis }),
     ...(windowGaps && { gaps: windowGaps }),
