@@ -136,6 +136,8 @@ export async function restGetWatchers(c: Context<{ Bindings: Env }>) {
       page: safeParseInt(c.req.query('page'), { min: 1 }),
       page_size: safeParseInt(c.req.query('page_size'), { min: 1, max: 500 }),
       include_classification: c.req.query('include_classification') || undefined,
+      include_versions: c.req.query('include_versions') === 'true',
+      include_pending_ranges: c.req.query('include_pending_ranges') === 'true',
       // Always include template details when fetching a specific watcher (prompt/schema/json_template)
       include_template_details: true,
     };
@@ -163,6 +165,8 @@ export async function publicRestGetWatchers(c: Context<{ Bindings: Env }>) {
         'page',
         'page_size',
         'include_classification',
+        'include_versions',
+        'include_pending_ranges',
       ].some((key) => c.req.query(key) !== undefined);
 
     if (!detailRequested) {
@@ -188,6 +192,8 @@ export async function publicRestGetWatchers(c: Context<{ Bindings: Env }>) {
         page: safeParseInt(c.req.query('page'), { min: 1 }),
         page_size: safeParseInt(c.req.query('page_size'), { min: 1, max: 500 }),
         include_classification: c.req.query('include_classification') || undefined,
+        include_versions: c.req.query('include_versions') === 'true',
+        include_pending_ranges: c.req.query('include_pending_ranges') === 'true',
         include_template_details: watcherId ? true : undefined,
       } as any,
       c.env,

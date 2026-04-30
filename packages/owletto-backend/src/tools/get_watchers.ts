@@ -299,8 +299,15 @@ export async function getWatcher(
     .split(',')
     .map((value) => value.trim())
     .filter(Boolean);
+  // Default to "summary" when nothing requested. The "timeline" value used to
+  // ship a separate classification_timeline payload — that path was removed,
+  // but we treat it as a summary alias so existing MCP callers passing
+  // "timeline" or "summary,timeline" still get the per-window stats they were
+  // already getting (deleting the timeline must not silently strip summary).
   const includeClassificationSummary =
-    includeClassification.length === 0 || includeClassification.includes('summary');
+    includeClassification.length === 0 ||
+    includeClassification.includes('summary') ||
+    includeClassification.includes('timeline');
 
   // ============================================
   // Step 1: Validate inputs
@@ -751,13 +758,24 @@ export async function getWatcher(
     // datasets, catastrophic on a multi-GB prod events table (3 parallel
     // queries × 5+ namespaces = >10s and the frontend aborts).
     const entityScopes = await fetchEntityIdentityScopes(sql, watcherEntityId);
-    const entityLink = buildEntityLinkUnion({
+    // Two link fragments: queries that join on $1 = watcher_id use baseParamIndex=2,
+    // queries that don't need watcher_id use baseParamIndex=1. Sharing one fragment
+    // and binding a phantom $1 fails the postgres.js parse step when the entity has
+    // no identity scopes (query has zero placeholders, params has one).
+    const entityLinkWatcherScoped = buildEntityLinkUnion({
       entityIdLiteral: watcherEntityId,
       scopes: entityScopes,
-      baseParamIndex: 2, // $1 is reserved for args.watcher_id below
+      baseParamIndex: 2,
     });
-    const entityScopeCondition = entityLink.sql;
-    const entityLinkParams = entityLink.params;
+    const entityLinkOnly = buildEntityLinkUnion({
+      entityIdLiteral: watcherEntityId,
+      scopes: entityScopes,
+      baseParamIndex: 1,
+    });
+    const entityScopeCondition = entityLinkWatcherScoped.sql;
+    const entityScopeOnlyCondition = entityLinkOnly.sql;
+    const entityLinkParams = entityLinkWatcherScoped.params;
+    const entityLinkOnlyParams = entityLinkOnly.params;
 
     const notInWindowClause = `NOT EXISTS (
         SELECT 1 FROM watcher_window_events iwc
@@ -785,11 +803,10 @@ export async function getWatcher(
           sql.unsafe(
             `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(*) as total
               FROM current_event_records f
-              WHERE ${entityScopeCondition}
+              WHERE ${entityScopeOnlyCondition}
               GROUP BY DATE_TRUNC('month', f.occurred_at)
               ORDER BY month`,
-            // $1 is unused here but harmless — keeps a single param list shape.
-            [args.watcher_id, ...entityLinkParams]
+            entityLinkOnlyParams
           ),
           sql.unsafe(
             `SELECT DATE_TRUNC('month', f.occurred_at) as month, COUNT(DISTINCT f.id) as linked
