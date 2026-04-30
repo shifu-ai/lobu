@@ -10,6 +10,12 @@ import {
   type StoredConnection,
 } from '@lobu/core';
 import { getDb } from '../../db/client';
+import {
+  agentSettingsWithDefinedValues,
+  deleteAgentSettingsFromPg,
+  loadAgentSettingsFromPg,
+  saveAgentSettingsToPg,
+} from './agent-settings-persistence';
 import { getOrgId, tryGetOrgId } from './org-context';
 
 type ExtendedAgentConfigStore = AgentConfigStore & {
@@ -65,33 +71,6 @@ export async function touchAgentLastUsed(organizationId: string, agentId: string
   `;
 }
 
-function rowToSettings(row: Record<string, any>): AgentSettings {
-  return {
-    model: row.model ?? undefined,
-    modelSelection: row.model_selection ?? undefined,
-    providerModelPreferences: row.provider_model_preferences ?? undefined,
-    networkConfig: row.network_config ?? undefined,
-    egressConfig: row.egress_config ?? undefined,
-    nixConfig: row.nix_config ?? undefined,
-    mcpServers: row.mcp_servers ?? undefined,
-    mcpInstallNotified: row.mcp_install_notified ?? undefined,
-    soulMd: row.soul_md ?? undefined,
-    userMd: row.user_md ?? undefined,
-    identityMd: row.identity_md ?? undefined,
-    skillsConfig: row.skills_config ?? undefined,
-    toolsConfig: row.tools_config ?? undefined,
-    pluginsConfig: row.plugins_config ?? undefined,
-    authProfiles: row.auth_profiles ?? undefined,
-    installedProviders: row.installed_providers ?? undefined,
-    verboseLogging: row.verbose_logging ?? undefined,
-    templateAgentId: row.template_agent_id ?? undefined,
-    preApprovedTools: row.pre_approved_tools ?? undefined,
-    guardrails: row.guardrails ?? undefined,
-    updatedAt:
-      row.updated_at instanceof Date ? row.updated_at.getTime() : (row.updated_at ?? Date.now()),
-  };
-}
-
 function rowToMetadata(row: Record<string, any>): AgentMetadata {
   return {
     agentId: row.id,
@@ -111,10 +90,6 @@ function rowToMetadata(row: Record<string, any>): AgentMetadata {
         ? row.last_used_at.getTime()
         : (row.last_used_at ?? undefined),
   };
-}
-
-function withDefinedValues<T extends Record<string, any>>(value: T): T {
-  return Object.fromEntries(Object.entries(value).filter(([, field]) => field !== undefined)) as T;
 }
 
 async function resolveTemplateAgentId(
@@ -240,64 +215,17 @@ function rowToGrant(row: Record<string, any>): Grant {
 export function createPostgresAgentConfigStore(): AgentConfigStore {
   const store: ExtendedAgentConfigStore = {
     async getSettings(agentId) {
-      const sql = getDb();
       // Worker gateway calls this without orgContext — agent IDs are globally
       // unique (primary key on id alone), and the worker token already proves
       // authenticity, so falling back to id-only lookup is safe.
-      const orgId = tryGetOrgId();
-      const rows = orgId
-        ? await sql`
-            SELECT model, model_selection, provider_model_preferences,
-                   network_config, egress_config, nix_config, mcp_servers,
-                   mcp_install_notified, soul_md, user_md, identity_md,
-                   skills_config, tools_config, plugins_config, auth_profiles,
-                   installed_providers, verbose_logging, template_agent_id,
-                   pre_approved_tools, guardrails, updated_at
-            FROM agents
-            WHERE id = ${agentId} AND organization_id = ${orgId}
-          `
-        : await sql`
-            SELECT model, model_selection, provider_model_preferences,
-                   network_config, egress_config, nix_config, mcp_servers,
-                   mcp_install_notified, soul_md, user_md, identity_md,
-                   skills_config, tools_config, plugins_config, auth_profiles,
-                   installed_providers, verbose_logging, template_agent_id,
-                   pre_approved_tools, guardrails, updated_at
-            FROM agents
-            WHERE id = ${agentId}
-          `;
-      if (rows.length === 0) return null;
-      return rowToSettings(rows[0]);
+      return loadAgentSettingsFromPg(getDb(), agentId, tryGetOrgId(), {
+        includeHostFields: true,
+      });
     },
     async saveSettings(agentId, settings) {
-      const sql = getDb();
-      const orgId = getOrgId();
-      const now = new Date();
-      await sql`
-        UPDATE agents SET
-          model = ${settings.model ?? null},
-          model_selection = ${sql.json(settings.modelSelection ?? {})},
-          provider_model_preferences = ${sql.json(settings.providerModelPreferences ?? {})},
-          network_config = ${sql.json(settings.networkConfig ?? {})},
-          egress_config = ${sql.json(settings.egressConfig ?? {})},
-          nix_config = ${sql.json(settings.nixConfig ?? {})},
-          mcp_servers = ${sql.json(settings.mcpServers ?? {})},
-          mcp_install_notified = ${sql.json(settings.mcpInstallNotified ?? {})},
-          soul_md = ${settings.soulMd ?? ''},
-          user_md = ${settings.userMd ?? ''},
-          identity_md = ${settings.identityMd ?? ''},
-          skills_config = ${sql.json(settings.skillsConfig ?? { skills: [] })},
-          tools_config = ${sql.json(settings.toolsConfig ?? {})},
-          plugins_config = ${sql.json(settings.pluginsConfig ?? {})},
-          auth_profiles = ${sql.json(settings.authProfiles ?? [])},
-          installed_providers = ${sql.json(settings.installedProviders ?? [])},
-          verbose_logging = ${settings.verboseLogging ?? false},
-          template_agent_id = ${settings.templateAgentId ?? null},
-          pre_approved_tools = ${sql.json(settings.preApprovedTools ?? [])},
-          guardrails = ${sql.json(settings.guardrails ?? [])},
-          updated_at = ${now}
-        WHERE id = ${agentId} AND organization_id = ${orgId}
-      `;
+      await saveAgentSettingsToPg(getDb(), agentId, settings, getOrgId(), {
+        includeHostFields: true,
+      });
     },
     async updateSettings(agentId, updates) {
       const existing = await store.getSettings(agentId);
@@ -305,20 +233,9 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
       await store.saveSettings(agentId, { ...existing, ...updates, updatedAt: Date.now() });
     },
     async deleteSettings(agentId) {
-      const sql = getDb();
-      const orgId = getOrgId();
-      await sql`
-        UPDATE agents SET
-          model = NULL, model_selection = '{}', provider_model_preferences = '{}',
-          network_config = '{}', egress_config = '{}', nix_config = '{}',
-          mcp_servers = '{}', mcp_install_notified = '{}',
-          soul_md = '', user_md = '', identity_md = '',
-          skills_config = '{"skills": []}', tools_config = '{}', plugins_config = '{}',
-          auth_profiles = '[]', installed_providers = '[]', verbose_logging = false,
-          template_agent_id = NULL, pre_approved_tools = '[]', guardrails = '[]',
-          updated_at = now()
-        WHERE id = ${agentId} AND organization_id = ${orgId}
-      `;
+      await deleteAgentSettingsFromPg(getDb(), agentId, getOrgId(), {
+        includeHostFields: true,
+      });
     },
     async hasSettings(agentId) {
       return store.hasAgent(agentId);
@@ -352,7 +269,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
         localSettings,
         effectiveSettings: {
           ...templateSettings,
-          ...withDefinedValues(localSettings),
+          ...agentSettingsWithDefinedValues(localSettings),
           templateAgentId,
         },
         templateAgentId,

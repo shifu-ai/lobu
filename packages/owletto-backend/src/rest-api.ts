@@ -30,6 +30,7 @@ import { toJsonSafe } from './utils/json';
 import logger from './utils/logger';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from './utils/run-statuses';
 import { getRuntimeInfo } from './utils/runtime-info';
+import { sseStreamResponse } from './utils/sse';
 
 function clamp(value: number, options?: { min?: number; max?: number }): number {
   let result = value;
@@ -598,47 +599,13 @@ export async function publicRestEventsStream(c: Context<{ Bindings: Env }>) {
   const organizationId = await resolvePublicOrganizationId(orgSlug);
   if (!organizationId) return c.json({ error: 'Not found' }, 404);
 
-  const encoder = new TextEncoder();
-  let cleanup: (() => void) | null = null;
-
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode('event: connected\ndata: {}\n\n'));
-
-      const unsubscribe = invalidationEmitter.subscribe(organizationId, (event) => {
-        const publicKeys = event.keys.filter((k) => PUBLIC_INVALIDATION_KEYS.has(k));
-        if (publicKeys.length === 0) return;
-        try {
-          const data = JSON.stringify({ ...event, keys: publicKeys });
-          controller.enqueue(encoder.encode(`event: invalidate\ndata: ${data}\n\n`));
-        } catch {
-          // Connection closed
-        }
-      });
-
-      const keepAlive = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(': keepalive\n\n'));
-        } catch {
-          clearInterval(keepAlive);
-        }
-      }, 30000);
-
-      cleanup = () => {
-        unsubscribe();
-        clearInterval(keepAlive);
-      };
-    },
-    cancel() {
-      cleanup?.();
-    },
-  });
-
-  c.header('Content-Type', 'text/event-stream');
-  c.header('Cache-Control', 'no-cache');
-  c.header('Connection', 'keep-alive');
-
-  return c.body(stream);
+  return sseStreamResponse(c, (emit) =>
+    invalidationEmitter.subscribe(organizationId, (event) => {
+      const publicKeys = event.keys.filter((key) => PUBLIC_INVALIDATION_KEYS.has(key));
+      if (publicKeys.length === 0) return;
+      emit('invalidate', { ...event, keys: publicKeys });
+    })
+  );
 }
 
 /**

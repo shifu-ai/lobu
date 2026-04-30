@@ -28,7 +28,7 @@ import { orgContext } from './stores/org-context';
 const routes = new Hono<{ Bindings: Env }>();
 
 const configStore = createPostgresAgentConfigStore();
-const connectionStore = createPostgresAgentConnectionStore();
+const agentPlatformStore = createPostgresAgentConnectionStore();
 
 type ProviderAuthType = 'oauth' | 'device-code' | 'api-key';
 
@@ -192,10 +192,10 @@ function getClaudeOAuthRuntime() {
   };
 }
 
-async function persistConnectionSnapshot(connection: Record<string, any>): Promise<void> {
+async function persistAgentPlatformSnapshot(connection: Record<string, any>): Promise<void> {
   if (!connection?.id) return;
 
-  await connectionStore.saveConnection({
+  await agentPlatformStore.saveConnection({
     id: connection.id,
     platform: connection.platform,
     templateAgentId: connection.templateAgentId,
@@ -739,7 +739,7 @@ routes.get('/:agentId/platforms', mcpAuth, async (c) => {
       return c.json({ error: 'Agent not found' }, 404);
     }
     const chatManager = getChatInstanceManager();
-    let platforms = await connectionStore.listConnections({
+    let platforms = await agentPlatformStore.listConnections({
       templateAgentId: agentId,
     });
 
@@ -750,7 +750,7 @@ routes.get('/:agentId/platforms', mcpAuth, async (c) => {
         });
         await Promise.all(
           runtimePlatforms.map((platform: Record<string, any>) =>
-            persistConnectionSnapshot(platform)
+            persistAgentPlatformSnapshot(platform)
           )
         );
         if (runtimePlatforms.length > 0) {
@@ -793,7 +793,7 @@ routes.post('/:agentId/platforms', mcpAuth, async (c) => {
           { platform, ...config },
           { allowGroups: true, ...settings }
         );
-        await persistConnectionSnapshot(created);
+        await persistAgentPlatformSnapshot(created);
         return c.json({ platform: created }, 201);
       } catch (error: any) {
         return c.json({ error: error.message || 'Failed to create platform' }, 400);
@@ -803,7 +803,7 @@ routes.post('/:agentId/platforms', mcpAuth, async (c) => {
     // Fallback: store directly if ChatInstanceManager not available
     const id = `${platform}-${agentId}-${Date.now()}`;
     const now = Date.now();
-    await connectionStore.saveConnection({
+    await agentPlatformStore.saveConnection({
       id,
       platform,
       templateAgentId: agentId,
@@ -876,7 +876,7 @@ const stablePlatformLockChains: Map<string, Promise<unknown>> = new Map();
  *          gateway processes against the same DB.
  *
  * Wrapping the whole flow in a single `sql.begin(...)` is not viable: the
- * tx connection plus parent-pool writes via `connectionStore` /
+ * tx connection plus parent-pool writes via `agentPlatformStore` /
  * `chatManager.addConnection` would self-deadlock both on the pglite-mode
  * serialized-client queue and on row-level locks against an uncommitted
  * placeholder row from a different connection.
@@ -943,7 +943,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
     // queues subsequent PUTs at the chain entry; they only proceed after the
     // first one's manager-side work has fully committed.
     return await withStablePlatformLock(stableId, async () => {
-      let existing = await connectionStore.getConnection(stableId);
+      let existing = await agentPlatformStore.getConnection(stableId);
       if (existing && existing.templateAgentId && existing.templateAgentId !== agentId) {
         return c.json(
           { error: 'Stable ID already used by a different agent' },
@@ -989,13 +989,13 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
                 {},
                 stableId
               );
-              await persistConnectionSnapshot(created);
+              await persistAgentPlatformSnapshot(created);
               return c.json({ platform: created }, 201);
             } catch (error: any) {
               // Roll back the placeholder so a retry doesn't see a half-baked
               // row that fails the `existing.templateAgentId` check inconsistently.
               try {
-                await connectionStore.deleteConnection(stableId);
+                await agentPlatformStore.deleteConnection(stableId);
               } catch {
                 // best-effort
               }
@@ -1010,7 +1010,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
           // match the manager-path default — symmetric with the noop comparison
           // below so a follow-up PUT with no settings field round-trips as noop.
           const fallbackNow = Date.now();
-          await connectionStore.saveConnection({
+          await agentPlatformStore.saveConnection({
             id: stableId,
             platform,
             templateAgentId: agentId,
@@ -1031,7 +1031,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
         // initial read and INSERT. With the advisory lock held we shouldn't
         // reach this in the same-process case, but keep the re-read as
         // defense-in-depth against multi-host writers that bypass the route.
-        const reread = await connectionStore.getConnection(stableId);
+        const reread = await agentPlatformStore.getConnection(stableId);
         if (!reread) {
           return c.json({ error: 'Platform vanished after conflict' }, 500);
         }
@@ -1078,7 +1078,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
             config: { platform, ...config },
             settings: { allowGroups: true, ...settings },
           });
-          await persistConnectionSnapshot(updated);
+          await persistAgentPlatformSnapshot(updated);
           return c.json(
             { updated: true, willRestart: true, platform: updated },
             200
@@ -1090,7 +1090,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
 
       // Fallback when ChatInstanceManager is not available (e.g. boot races,
       // tests). Persist the merged config directly.
-      await connectionStore.saveConnection({
+      await agentPlatformStore.saveConnection({
         id: stableId,
         platform,
         templateAgentId: agentId,
@@ -1101,7 +1101,7 @@ routes.put('/:agentId/platforms/by-stable-id/:stableId', mcpAuth, async (c) => {
         createdAt: current.createdAt ?? Date.now(),
         updatedAt: Date.now(),
       });
-      const refreshed = await connectionStore.getConnection(stableId);
+      const refreshed = await agentPlatformStore.getConnection(stableId);
       return c.json(
         { updated: true, willRestart: true, platform: refreshed },
         200
@@ -1131,7 +1131,7 @@ function platformBelongsToAgent(platform: { templateAgentId?: string | null }, a
 }
 
 async function getStoredPlatformForAgent(agentId: string, platformId: string) {
-  const platform = await connectionStore.getConnection(platformId);
+  const platform = await agentPlatformStore.getConnection(platformId);
   if (!platform || !platformBelongsToAgent(platform, agentId)) return null;
   return platform;
 }
@@ -1151,7 +1151,7 @@ routes.get('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
       try {
         const runtimePlatform = await chatManager.getConnection(platformId);
         if (runtimePlatform && platformBelongsToAgent(runtimePlatform, agentId)) {
-          await persistConnectionSnapshot(runtimePlatform);
+          await persistAgentPlatformSnapshot(runtimePlatform);
           return c.json(runtimePlatform);
         }
       } catch {
@@ -1184,7 +1184,7 @@ routes.delete('/:agentId/platforms/:platformId', mcpAuth, async (c) => {
         // Fall through to direct store delete
       }
     }
-    await connectionStore.deleteConnection(platformId);
+    await agentPlatformStore.deleteConnection(platformId);
     return c.json({ success: true });
   });
 });
@@ -1207,15 +1207,15 @@ routes.post('/:agentId/platforms/:platformId/start', mcpAuth, async (c) => {
       await chatManager.restartConnection(platformId);
       const runtimePlatform = await chatManager.getConnection(platformId);
       if (runtimePlatform && platformBelongsToAgent(runtimePlatform, agentId)) {
-        await persistConnectionSnapshot(runtimePlatform);
+        await persistAgentPlatformSnapshot(runtimePlatform);
         return c.json({ success: true, platform: runtimePlatform });
       }
     }
 
-    await connectionStore.updateConnection(platformId, { status: 'active' });
+    await agentPlatformStore.updateConnection(platformId, { status: 'active' });
     return c.json({
       success: true,
-      platform: await connectionStore.getConnection(platformId),
+      platform: await agentPlatformStore.getConnection(platformId),
     });
   });
 });
@@ -1238,15 +1238,15 @@ routes.post('/:agentId/platforms/:platformId/stop', mcpAuth, async (c) => {
       await chatManager.stopConnection(platformId);
       const runtimePlatform = await chatManager.getConnection(platformId);
       if (runtimePlatform && platformBelongsToAgent(runtimePlatform, agentId)) {
-        await persistConnectionSnapshot(runtimePlatform);
+        await persistAgentPlatformSnapshot(runtimePlatform);
         return c.json({ success: true, platform: runtimePlatform });
       }
     }
 
-    await connectionStore.updateConnection(platformId, { status: 'stopped' });
+    await agentPlatformStore.updateConnection(platformId, { status: 'stopped' });
     return c.json({
       success: true,
-      platform: await connectionStore.getConnection(platformId),
+      platform: await agentPlatformStore.getConnection(platformId),
     });
   });
 });

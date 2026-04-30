@@ -12,6 +12,7 @@ import logger from '../utils/logger';
 import { createWatcherRun, type WatcherRunPayload } from '../utils/queue-helpers';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { computePendingWindow } from '../utils/window-utils';
+import { buildWatcherDispatchMessage } from './dispatch-message';
 
 type WatcherRunStatus =
   | 'pending'
@@ -399,50 +400,6 @@ export async function materializeDueWatcherRuns(
   };
 }
 
-function buildDispatchMessage(params: {
-  watcherId: number;
-  runId: number;
-  agentId: string;
-  sessionAgentId: string;
-  payload: WatcherRunPayload;
-}): string {
-  const readKnowledgeSince = new Date(params.payload.window_start).toISOString().split('T')[0];
-  const readKnowledgeUntil = new Date(new Date(params.payload.window_end).getTime() - 1)
-    .toISOString()
-    .split('T')[0];
-
-  return [
-    'Run this Owletto watcher now using the Owletto MCP tools.',
-    '',
-    `Watcher ID: ${params.watcherId}`,
-    `Watcher run ID: ${params.runId}`,
-    `Assigned agent ID: ${params.agentId}`,
-    `Session agent ID: ${params.sessionAgentId}`,
-    `Queued window start: ${params.payload.window_start}`,
-    `Queued window end: ${params.payload.window_end}`,
-    `Dispatch source: ${params.payload.dispatch_source}`,
-    '',
-    'Required steps:',
-    `1. Call read_knowledge with {"watcher_id": ${params.watcherId}, "since": "${readKnowledgeSince}", "until": "${readKnowledgeUntil}"}.`,
-    '2. Analyze the returned content using prompt_rendered and extraction_schema.',
-    '3. Call manage_watchers(action="complete_window") with the returned window_token and your extracted_data.',
-    '4. Include this run_metadata object in complete_window exactly, and add any extra provider/job fields you know:',
-    JSON.stringify(
-      {
-        executor: 'lobu-agent',
-        agent_id: params.agentId,
-        watcher_run_id: params.runId,
-        dispatch_source: params.payload.dispatch_source,
-        session_agent_id: params.sessionAgentId,
-      },
-      null,
-      2
-    ),
-    '',
-    'If there is no content, do not fabricate results.',
-  ].join('\n');
-}
-
 async function failWatcherRun(sql: DbClient, runId: number, message: string): Promise<void> {
   await markWatcherRunFailedIdempotent(sql, runId, message);
 }
@@ -597,7 +554,7 @@ async function dispatchWatcherRun(
       headers,
       body: JSON.stringify({
         messageId,
-        content: buildDispatchMessage({
+        content: buildWatcherDispatchMessage({
           watcherId: run.watcher_id,
           runId: run.id,
           agentId: payload.agent_id,

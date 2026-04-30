@@ -5,7 +5,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Readable } from "node:stream";
 import { createLogger, isSecretRef } from "@lobu/core";
 import type { CoreServices, PlatformAdapter } from "../platform.js";
 import type { IFileHandler } from "../platform/file-handler.js";
@@ -24,6 +23,7 @@ import {
   type HistoryEntry,
 } from "./conversation-state-store.js";
 import { createGatewayStateAdapter } from "./state-adapter.js";
+import { readStreamToBuffer } from "../../utils/streams.js";
 import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
 import { SlackInstructionProvider } from "./slack-instruction-provider.js";
 import { registerSlackPlatformHandlers } from "./slack-platform-bridge.js";
@@ -986,16 +986,6 @@ export class ChatInstanceManager {
         ? connection.metadata.botUsername.replace(/^@/, "")
         : undefined;
 
-    const readStreamToBuffer = async (
-      fileStream: Readable
-    ): Promise<Buffer> => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of fileStream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      return Buffer.concat(chunks);
-    };
-
     const parseTelegramTarget = (
       channelId: string,
       conversationId?: string
@@ -1098,16 +1088,6 @@ export class ChatInstanceManager {
     const chat = instance.chat;
     const platform = instance.connection.platform;
 
-    const readStreamToBuffer = async (
-      fileStream: Readable
-    ): Promise<Buffer> => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of fileStream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      return Buffer.concat(chunks);
-    };
-
     // For Slack, `conversationId` is the Chat SDK's canonical `thread.id`
     // (`slack:{channel}:{parent_thread_ts}`) for group threads, or the bare
     // channel id for DMs/channel-level posts (no thread_ts).
@@ -1197,16 +1177,6 @@ export class ChatInstanceManager {
   private createChatSdkFileHandler(instance: ManagedInstance): IFileHandler {
     const { chat, connection } = instance;
     const platform = connection.platform;
-
-    const readStreamToBuffer = async (
-      fileStream: Readable
-    ): Promise<Buffer> => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of fileStream) {
-        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      }
-      return Buffer.concat(chunks);
-    };
 
     return {
       uploadFile: async (fileStream, options) => {

@@ -15,6 +15,7 @@ import {
   isValidEmbedding,
   validateEmbeddingsService,
 } from '../utils/embeddings';
+import { parseJsonValue } from '../utils/json';
 import logger from '../utils/logger';
 import { cosineSimilarity } from '../utils/vector-math';
 
@@ -140,16 +141,6 @@ function parsePostgresArray(value: string | string[] | null | undefined): string
     }
     return trimmed;
   });
-}
-
-/**
- * Parse a JSONB column value that postgres.js may return as a string.
- * Falls back to the provided default when the value is null/undefined.
- */
-function parseJsonb<T>(raw: unknown, fallback: T): T {
-  if (raw == null) return fallback;
-  if (typeof raw === 'string') return JSON.parse(raw) as T;
-  return raw as T;
 }
 
 // ============================================
@@ -496,7 +487,7 @@ async function updateClassifierValues(
 
   for (const classifier of classifiers as any[]) {
     // Parse extraction_config if it's a string (postgres.js may return JSONB as string)
-    const config = parseJsonb<ClassifierDefinition | null>(classifier.extraction_config, null);
+    const config = parseJsonValue<ClassifierDefinition | null>(classifier.extraction_config, null);
 
     logger.debug(
       { slug: classifier.slug, hasConfig: !!config, sourcePath: config?.source_path },
@@ -527,7 +518,7 @@ async function updateClassifierValues(
     }
 
     // Get existing values (parse if string)
-    const existingValues = parseJsonb<AttributeValues>(classifier.attribute_values, {});
+    const existingValues = parseJsonValue<AttributeValues>(classifier.attribute_values, {});
 
     for (const extracted of extractedValues) {
       if (extracted.embedding !== undefined && !isValidEmbedding(extracted.embedding)) {
@@ -704,7 +695,7 @@ async function updateClassifierValues(
     }
 
     // Parse attribute_values if string (postgres.js may return JSONB as string)
-    const existingValues = parseJsonb<AttributeValues>(parentClassifier.attribute_values, {});
+    const existingValues = parseJsonValue<AttributeValues>(parentClassifier.attribute_values, {});
     const updatedValues: AttributeValues = { ...existingValues };
     let hasChanges = false;
 

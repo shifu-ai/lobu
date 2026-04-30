@@ -70,6 +70,7 @@ import {
 } from './utils/public-origin';
 import { getClientIP, getRateLimiter, RateLimitPresets } from './utils/rate-limiter';
 import { getRuntimeInfo } from './utils/runtime-info';
+import { sseStreamResponse } from './utils/sse';
 import { getWorkspaceProvider } from './workspace';
 import { joinPublicOrganization } from './workspace/join-public';
 
@@ -825,45 +826,11 @@ app.get('/api/:orgSlug/events', mcpAuth, async (c) => {
   const orgId = c.get('organizationId');
   if (!orgId) return c.json({ error: 'Organization context required' }, 401);
 
-  const encoder = new TextEncoder();
-  let cleanup: (() => void) | null = null;
-
-  const stream = new ReadableStream({
-    start(controller) {
-      controller.enqueue(encoder.encode('event: connected\ndata: {}\n\n'));
-
-      const unsubscribe = invalidationEmitter.subscribe(String(orgId), (event) => {
-        try {
-          const data = JSON.stringify(event);
-          controller.enqueue(encoder.encode(`event: invalidate\ndata: ${data}\n\n`));
-        } catch {
-          // Connection closed
-        }
-      });
-
-      const keepAlive = setInterval(() => {
-        try {
-          controller.enqueue(encoder.encode(': keepalive\n\n'));
-        } catch {
-          clearInterval(keepAlive);
-        }
-      }, 30000);
-
-      cleanup = () => {
-        unsubscribe();
-        clearInterval(keepAlive);
-      };
-    },
-    cancel() {
-      cleanup?.();
-    },
-  });
-
-  c.header('Content-Type', 'text/event-stream');
-  c.header('Cache-Control', 'no-cache');
-  c.header('Connection', 'keep-alive');
-
-  return c.body(stream);
+  return sseStreamResponse(c, (emit) =>
+    invalidationEmitter.subscribe(String(orgId), (event) => {
+      emit('invalidate', event);
+    })
+  );
 });
 
 /**

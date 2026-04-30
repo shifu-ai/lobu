@@ -32,19 +32,21 @@ export function toJsonSafe<T>(value: T): T {
  * as a string) into a plain object.  Returns `{}` when the input is falsy,
  * not valid JSON, or not a plain object.
  */
-export function parseJsonObject(value: unknown): Record<string, unknown> {
-  if (!value) return {};
+export function parseJsonValue<T>(value: unknown, fallback: T): T {
+  if (value == null) return fallback;
   if (typeof value === 'string') {
     try {
-      const parsed = JSON.parse(value);
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : {};
+      return JSON.parse(value) as T;
     } catch {
-      return {};
+      return fallback;
     }
   }
-  return typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
+  return value as T;
+}
+
+export function parseJsonObject(value: unknown): Record<string, unknown> {
+  const parsed = parseJsonValue<unknown>(value, {});
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
     : {};
 }
