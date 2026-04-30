@@ -1,5 +1,5 @@
 /**
- * Shared helpers for the `lobu {providers,skills,connections} add` commands.
+ * Shared helpers for the `lobu {providers,skills,platforms} add` commands.
  * All three follow the same pattern: read lobu.toml, locate the first agent,
  * apply a mutation, write the updated file, and optionally set secrets.
  */

@@ -1,13 +1,13 @@
 /**
- * Shared platform connection prompt/config logic.
- * Used by both `lobu init` and `lobu connections add <platform>`.
+ * Shared platform prompt/config logic.
+ * Used by both `lobu init` and `lobu platforms add <platform>`.
  */
 
 import { input, password } from "@inquirer/prompts";
 
 interface PlatformPromptResult {
-  connectionConfig: Record<string, string>;
-  connectionSecrets: Array<{ envVar: string; value: string }>;
+  platformConfig: Record<string, string>;
+  platformSecrets: Array<{ envVar: string; value: string }>;
 }
 
 export const PLATFORM_LABELS: Record<string, string> = {
@@ -22,8 +22,8 @@ export const PLATFORM_LABELS: Record<string, string> = {
 export async function promptPlatformConfig(
   platform: string
 ): Promise<PlatformPromptResult> {
-  const connectionConfig: Record<string, string> = {};
-  const connectionSecrets: Array<{ envVar: string; value: string }> = [];
+  const platformConfig: Record<string, string> = {};
+  const platformSecrets: Array<{ envVar: string; value: string }> = [];
 
   if (platform === "telegram") {
     const botToken = await password({
@@ -31,8 +31,8 @@ export async function promptPlatformConfig(
       mask: true,
     });
     if (botToken) {
-      connectionConfig.botToken = "$TELEGRAM_BOT_TOKEN";
-      connectionSecrets.push({ envVar: "TELEGRAM_BOT_TOKEN", value: botToken });
+      platformConfig.botToken = "$TELEGRAM_BOT_TOKEN";
+      platformSecrets.push({ envVar: "TELEGRAM_BOT_TOKEN", value: botToken });
     }
   } else if (platform === "slack") {
     console.log(
@@ -68,15 +68,15 @@ export async function promptPlatformConfig(
       mask: true,
     });
     if (slackBotToken) {
-      connectionConfig.botToken = "$SLACK_BOT_TOKEN";
-      connectionSecrets.push({
+      platformConfig.botToken = "$SLACK_BOT_TOKEN";
+      platformSecrets.push({
         envVar: "SLACK_BOT_TOKEN",
         value: slackBotToken,
       });
     }
     if (slackSigningSecret) {
-      connectionConfig.signingSecret = "$SLACK_SIGNING_SECRET";
-      connectionSecrets.push({
+      platformConfig.signingSecret = "$SLACK_SIGNING_SECRET";
+      platformSecrets.push({
         envVar: "SLACK_SIGNING_SECRET",
         value: slackSigningSecret,
       });
@@ -87,8 +87,8 @@ export async function promptPlatformConfig(
       mask: true,
     });
     if (botToken) {
-      connectionConfig.botToken = "$DISCORD_BOT_TOKEN";
-      connectionSecrets.push({ envVar: "DISCORD_BOT_TOKEN", value: botToken });
+      platformConfig.botToken = "$DISCORD_BOT_TOKEN";
+      platformSecrets.push({ envVar: "DISCORD_BOT_TOKEN", value: botToken });
     }
   } else if (platform === "whatsapp") {
     const accessToken = await password({
@@ -99,15 +99,15 @@ export async function promptPlatformConfig(
       message: "WhatsApp phone number ID:",
     });
     if (accessToken) {
-      connectionConfig.accessToken = "$WHATSAPP_ACCESS_TOKEN";
-      connectionSecrets.push({
+      platformConfig.accessToken = "$WHATSAPP_ACCESS_TOKEN";
+      platformSecrets.push({
         envVar: "WHATSAPP_ACCESS_TOKEN",
         value: accessToken,
       });
     }
     if (phoneNumberId) {
-      connectionConfig.phoneNumberId = "$WHATSAPP_PHONE_NUMBER_ID";
-      connectionSecrets.push({
+      platformConfig.phoneNumberId = "$WHATSAPP_PHONE_NUMBER_ID";
+      platformSecrets.push({
         envVar: "WHATSAPP_PHONE_NUMBER_ID",
         value: phoneNumberId,
       });
@@ -121,15 +121,15 @@ export async function promptPlatformConfig(
       mask: true,
     });
     if (appId) {
-      connectionConfig.appId = "$TEAMS_APP_ID";
-      connectionSecrets.push({
+      platformConfig.appId = "$TEAMS_APP_ID";
+      platformSecrets.push({
         envVar: "TEAMS_APP_ID",
         value: appId,
       });
     }
     if (appPassword) {
-      connectionConfig.appPassword = "$TEAMS_APP_PASSWORD";
-      connectionSecrets.push({
+      platformConfig.appPassword = "$TEAMS_APP_PASSWORD";
+      platformSecrets.push({
         envVar: "TEAMS_APP_PASSWORD",
         value: appPassword,
       });
@@ -140,13 +140,13 @@ export async function promptPlatformConfig(
       mask: true,
     });
     if (credentials) {
-      connectionConfig.credentials = "$GOOGLE_CHAT_CREDENTIALS";
-      connectionSecrets.push({
+      platformConfig.credentials = "$GOOGLE_CHAT_CREDENTIALS";
+      platformSecrets.push({
         envVar: "GOOGLE_CHAT_CREDENTIALS",
         value: credentials,
       });
     }
   }
 
-  return { connectionConfig, connectionSecrets };
+  return { platformConfig, platformSecrets };
 }

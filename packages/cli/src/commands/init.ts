@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { confirm, input, password, select } from "@inquirer/prompts";
 import chalk from "chalk";
 import ora from "ora";
-import { promptPlatformConfig } from "../commands/connections/platforms.js";
+import { promptPlatformConfig } from "../commands/platforms/platform-prompts.js";
 import { secretsSetCommand } from "../commands/secrets.js";
 import {
   getProviderById,
@@ -149,7 +149,7 @@ export async function initCommand(
   // Define skills locally via skills/<name>/SKILL.md or
   // agents/<id>/skills/<name>/SKILL.md.
 
-  // Connection (messaging platform) selection
+  // Chat platform selection
   const platformChoices = [
     { name: "Skip — I'll connect a platform later", value: "" },
     { name: "Telegram", value: "telegram" },
@@ -161,14 +161,14 @@ export async function initCommand(
   ];
 
   const platformType = await select<string>({
-    message: "Connect a messaging platform?",
+    message: "Connect a chat platform?",
     choices: platformChoices,
     default: "",
   });
 
-  const { connectionConfig, connectionSecrets } = platformType
+  const { platformConfig, platformSecrets } = platformType
     ? await promptPlatformConfig(platformType)
-    : { connectionConfig: {}, connectionSecrets: [] };
+    : { platformConfig: {}, platformSecrets: [] };
 
   // Memory
   const memoryChoice = await select<
@@ -286,9 +286,9 @@ export async function initCommand(
       providerId: providerId || undefined,
       providerEnvVar: selectedProvider?.providers?.[0]?.envVarName,
       providerModel: selectedProvider?.providers?.[0]?.defaultModel,
-      connectionType: platformType || undefined,
-      connectionConfig:
-        Object.keys(connectionConfig).length > 0 ? connectionConfig : undefined,
+      platformType: platformType || undefined,
+      platformConfig:
+        Object.keys(platformConfig).length > 0 ? platformConfig : undefined,
       includeOwlettoMemory,
       owlettoOrg: includeOwlettoMemory ? projectName : undefined,
       owlettoName: includeOwlettoMemory ? humanizeSlug(projectName) : undefined,
@@ -325,8 +325,8 @@ export async function initCommand(
       );
     }
 
-    // Save connection secrets to .env
-    for (const secret of connectionSecrets) {
+    // Save platform secrets to .env
+    for (const secret of platformSecrets) {
       await secretsSetCommand(projectDir, secret.envVar, secret.value);
     }
 
@@ -497,8 +497,8 @@ export async function generateLobuToml(
     providerId?: string;
     providerEnvVar?: string;
     providerModel?: string;
-    connectionType?: string;
-    connectionConfig?: Record<string, string>;
+    platformType?: string;
+    platformConfig?: Record<string, string>;
     includeOwlettoMemory?: boolean;
     owlettoOrg?: string;
     owlettoName?: string;
@@ -540,21 +540,21 @@ export async function generateLobuToml(
 
   lines.push("");
 
-  if (options.connectionType && options.connectionConfig) {
+  if (options.platformType && options.platformConfig) {
     lines.push(
-      `[[agents.${id}.connections]]`,
-      `type = "${options.connectionType}"`
+      `[[agents.${id}.platforms]]`,
+      `type = "${options.platformType}"`
     );
-    lines.push(`[agents.${id}.connections.config]`);
-    for (const [key, value] of Object.entries(options.connectionConfig)) {
+    lines.push(`[agents.${id}.platforms.config]`);
+    for (const [key, value] of Object.entries(options.platformConfig)) {
       lines.push(`${key} = "${value}"`);
     }
   } else {
     lines.push(
-      "# Messaging platform (add via the gateway configuration APIs or uncomment below):",
-      `# [[agents.${id}.connections]]`,
+      "# Chat platform (add via the gateway configuration APIs or uncomment below):",
+      `# [[agents.${id}.platforms]]`,
       '# type = "telegram"',
-      `# [agents.${id}.connections.config]`,
+      `# [agents.${id}.platforms.config]`,
       '# botToken = "$TELEGRAM_BOT_TOKEN"'
     );
   }

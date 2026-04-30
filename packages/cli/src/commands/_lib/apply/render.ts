@@ -11,7 +11,7 @@ const VERB_PREFIX = {
 const KIND_LABEL: Record<DiffRow["kind"], string> = {
   agent: "agent",
   settings: "settings",
-  connection: "connection",
+  platform: "platform",
   "entity-type": "entity-type",
   "relationship-type": "relationship-type",
 };
@@ -24,7 +24,7 @@ function fieldsList(fields: string[] | undefined): string {
 function renderRow(row: DiffRow): string[] {
   const prefix = VERB_PREFIX[row.verb];
   const label = chalk.bold(KIND_LABEL[row.kind]);
-  const id = row.kind === "connection" ? `${row.agentId}/${row.id}` : row.id;
+  const id = row.kind === "platform" ? `${row.agentId}/${row.id}` : row.id;
   const lines: string[] = [];
 
   switch (row.verb) {
@@ -33,9 +33,9 @@ function renderRow(row: DiffRow): string[] {
       break;
     case "update":
       lines.push(`  ${prefix} ${label} ${id}${fieldsList(row.changedFields)}`);
-      if (row.kind === "connection" && row.willRestart) {
+      if (row.kind === "platform" && row.willRestart) {
         lines.push(
-          `      ${chalk.yellow("⚠")} will restart connection — in-flight messages may drop`
+          `      ${chalk.yellow("⚠")} will restart platform — in-flight messages may drop`
         );
       }
       break;
@@ -61,7 +61,7 @@ export function renderPlan(plan: DiffPlan): string {
   const order: DiffRow["kind"][] = [
     "agent",
     "settings",
-    "connection",
+    "platform",
     "entity-type",
     "relationship-type",
   ];
