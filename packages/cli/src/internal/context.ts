@@ -174,7 +174,9 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
     contexts[name] = {
       apiUrl: normalizeApiUrl(value.apiUrl),
       activeOrg:
-        typeof value.activeOrg === "string" ? value.activeOrg.trim() : undefined,
+        typeof value.activeOrg === "string"
+          ? value.activeOrg.trim()
+          : undefined,
     };
   }
 

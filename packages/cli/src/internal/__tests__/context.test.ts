@@ -1,11 +1,11 @@
 import { describe, expect, test, mock, beforeEach, afterEach } from "bun:test";
-import { 
-  loadContextConfig, 
-  getActiveOrg, 
-  setActiveOrg, 
-  resolveContext, 
+import {
+  loadContextConfig,
+  getActiveOrg,
+  setActiveOrg,
+  resolveContext,
   findContextByUrl,
-  DEFAULT_CONTEXT_NAME
+  DEFAULT_CONTEXT_NAME,
 } from "../context";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 
@@ -35,15 +35,18 @@ describe("context management", () => {
     const configData = {
       currentContext: "prod",
       contexts: {
-        "lobu": { apiUrl: "https://app.lobu.ai/api/v1", activeOrg: "default-org" },
-        "prod": { apiUrl: "https://prod.lobu.ai/api/v1", activeOrg: "prod-org" }
-      }
+        lobu: {
+          apiUrl: "https://app.lobu.ai/api/v1",
+          activeOrg: "default-org",
+        },
+        prod: { apiUrl: "https://prod.lobu.ai/api/v1", activeOrg: "prod-org" },
+      },
     };
     readFileMock.mockResolvedValue(JSON.stringify(configData));
 
     expect(await getActiveOrg("lobu")).toBe("default-org");
     expect(await getActiveOrg("prod")).toBe("prod-org");
-    
+
     // Test currentContext default
     expect(await getActiveOrg()).toBe("prod-org");
   });
@@ -53,8 +56,8 @@ describe("context management", () => {
       currentContext: "lobu",
       activeOrg: "legacy-org",
       contexts: {
-        "lobu": { apiUrl: "https://app.lobu.ai/api/v1" }
-      }
+        lobu: { apiUrl: "https://app.lobu.ai/api/v1" },
+      },
     };
     readFileMock.mockResolvedValue(JSON.stringify(legacyData));
 
@@ -66,9 +69,9 @@ describe("context management", () => {
     const configData = {
       currentContext: "lobu",
       contexts: {
-        "lobu": { apiUrl: "https://app.lobu.ai/api/v1" },
-        "custom": { apiUrl: "https://custom.lobu.ai/api/v1" }
-      }
+        lobu: { apiUrl: "https://app.lobu.ai/api/v1" },
+        custom: { apiUrl: "https://custom.lobu.ai/api/v1" },
+      },
     };
     readFileMock.mockResolvedValue(JSON.stringify(configData));
 
