@@ -39,6 +39,8 @@ export interface ThreadSession {
   agentId?: string;
   /** Process without persisting history */
   dryRun?: boolean;
+  /** Internal automation intent for one-shot system sessions. */
+  intent?: { kind: "watcher_run"; runId: number; watcherId: number };
   /**
    * True when the session was created without a caller-supplied agentId and
    * the gateway auto-provisioned both the agent and its settings. Only

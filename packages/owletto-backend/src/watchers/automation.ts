@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { generateWorkerToken } from '@lobu/core';
 import { inferWatcherGranularityFromSchedule } from '@lobu/owletto-sdk';
 import type { DbClient } from '../db/client';
 import { getDb } from '../db/client';
@@ -433,7 +434,7 @@ function buildDispatchMessage(params: {
     : '';
 
   return [
-    'Run this Owletto watcher now using the Owletto MCP tools.',
+    'Run this watcher now using the lobu-memory MCP tools.',
     '',
     `Watcher ID: ${params.watcherId}`,
     `Watcher run ID: ${params.runId}`,
@@ -524,6 +525,61 @@ async function ensureWatcherAgentExists(
   return rows.length > 0;
 }
 
+const LOBU_MEMORY_MCP_ID = 'lobu-memory';
+const WATCHER_REQUIRED_TOOLS = ['read_knowledge', 'manage_watchers'];
+
+async function preflightWatcherMemoryTools(params: {
+  port: string;
+  agentId: string;
+  runId: number;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const conversationId = `${params.agentId}_watcher_${params.runId}_preflight`;
+  const token = generateWorkerToken(params.agentId, conversationId, `watcher-${params.runId}`, {
+    channelId: `api_watcher_${params.runId}`,
+    agentId: params.agentId,
+    platform: 'api',
+    sessionKey: `watcher_${params.runId}`,
+  });
+  const url = `http://127.0.0.1:${params.port}/lobu/mcp/${LOBU_MEMORY_MCP_ID}/tools`;
+
+  try {
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = (await response.json().catch(() => null)) as
+      | { tools?: Array<{ name?: unknown }>; error?: unknown }
+      | null;
+
+    if (!response.ok) {
+      const detail = typeof body?.error === 'string' ? body.error : response.statusText;
+      return {
+        ok: false,
+        error: `${LOBU_MEMORY_MCP_ID} tools preflight failed (${response.status}): ${detail}`,
+      };
+    }
+
+    const toolNames = new Set(
+      (body?.tools ?? [])
+        .map((tool) => (typeof tool.name === 'string' ? tool.name : ''))
+        .filter(Boolean)
+    );
+    const missing = WATCHER_REQUIRED_TOOLS.filter((name) => !toolNames.has(name));
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        error: `${LOBU_MEMORY_MCP_ID} tools preflight failed: missing ${missing.join(', ')}`,
+      };
+    }
+
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `${LOBU_MEMORY_MCP_ID} tools preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
 async function dispatchWatcherRun(
   sql: DbClient,
   run: ClaimedWatcherRunRow
@@ -562,6 +618,16 @@ async function dispatchWatcherRun(
   }
 
   const port = process.env.PORT || '8787';
+  const preflight = await preflightWatcherMemoryTools({
+    port,
+    agentId: payload.agent_id,
+    runId: run.id,
+  });
+  if (!preflight.ok) {
+    await failWatcherRun(sql, run.id, preflight.error);
+    return 'failed';
+  }
+
   const baseUrl = `http://127.0.0.1:${port}/lobu/api/v1/agents`;
   const headers = {
     Authorization: `Bearer ${serviceToken}`,
@@ -573,7 +639,12 @@ async function dispatchWatcherRun(
     const sessionResponse = await fetch(baseUrl, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ agentId: payload.agent_id }),
+      body: JSON.stringify({
+        agentId: payload.agent_id,
+        forceNew: true,
+        dryRun: false,
+        intent: { kind: 'watcher_run', runId: run.id, watcherId: run.watcher_id },
+      }),
     });
 
     if (!sessionResponse.ok) {
@@ -682,7 +753,7 @@ function registerWatcherRunHandle(params: {
         return;
       }
       // Fail closed when the agent's reply finished but no window was
-      // produced. Without this guard a no-op agent (no Owletto MCP, missing
+      // produced. Without this guard a no-op agent (no lobu-memory MCP, missing
       // tools, or a chatty reply that skipped read_knowledge / complete_window)
       // would silently mark the run "completed" — which is what masked the
       // Reddit watcher being broken for a week. complete_window is the only
@@ -693,7 +764,7 @@ function registerWatcherRunHandle(params: {
           db,
           params.runId,
           'Agent reply finished without calling manage_watchers(action="complete_window"). ' +
-            'Check that the assigned agent has the Owletto MCP attached and that read_knowledge / ' +
+            'Check that the assigned agent has the lobu-memory MCP attached and that read_knowledge / ' +
             'manage_watchers tools are approved for it.'
         );
         return;

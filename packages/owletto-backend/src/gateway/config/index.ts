@@ -117,6 +117,14 @@ export interface GatewayConfig {
   mcp: {
     publicGatewayUrl: string;
   };
+  auth: {
+    /** OIDC issuer used to validate external/service tokens. */
+    issuerUrl?: string;
+  };
+  lobuMemory: {
+    /** Public origin that serves org-scoped LOBU memory MCP endpoints under /mcp/:orgSlug. */
+    publicBaseUrl?: string;
+  };
   secrets: {
     /** Read-only AWS Secrets Manager backend for `aws-sm://` refs. */
     aws: {
@@ -260,7 +268,7 @@ export function buildMemoryPlugins(options?: {
       slot: "memory",
       enabled: true,
       config: {
-        mcpUrl: `${gatewayUrl}/mcp/owletto`,
+        mcpUrl: `${gatewayUrl}/mcp/lobu-memory`,
         gatewayAuthUrl: gatewayUrl,
       },
     },
@@ -487,6 +495,12 @@ export function buildGatewayConfig(
     },
     mcp: {
       publicGatewayUrl,
+    },
+    auth: {
+      issuerUrl: getOptionalEnv("EXTERNAL_AUTH_ISSUER_URL", undefined),
+    },
+    lobuMemory: {
+      publicBaseUrl: getOptionalEnv("LOBU_MEMORY_PUBLIC_BASE_URL", undefined),
     },
     secrets: {
       aws: {

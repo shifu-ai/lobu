@@ -54,7 +54,7 @@ const NetworkConfigSchema = z.object({
 
 const McpServerConfigSchema = z.object({
   url: z.string().optional(),
-  type: z.enum(["sse", "stdio"]).optional(),
+  type: z.enum(["sse", "stdio", "streamable-http"]).optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
@@ -67,6 +67,12 @@ const NixConfigSchema = z.object({
   packages: z.array(z.string()).optional(),
 });
 
+const WatcherRunIntentSchema = z.object({
+  kind: z.literal("watcher_run"),
+  runId: z.number().int().positive(),
+  watcherId: z.number().int().positive(),
+});
+
 const CreateAgentRequestSchema = z.object({
   provider: z.string().default("claude").optional(),
   model: z.string().optional(),
@@ -75,6 +81,7 @@ const CreateAgentRequestSchema = z.object({
   thread: z.string().optional(),
   forceNew: z.boolean().optional(),
   dryRun: z.boolean().optional(),
+  intent: WatcherRunIntentSchema.optional(),
   networkConfig: NetworkConfigSchema.optional(),
   mcpServers: z.record(z.string(), McpServerConfigSchema).optional(),
   nix: NixConfigSchema.optional(),
@@ -619,6 +626,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       thread,
       forceNew,
       dryRun,
+      intent,
       networkConfig,
       mcpServers,
       nix: nixConfig,
@@ -717,18 +725,28 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       }
     }
 
-    const userId = requestedUserId || agentId;
+    const watcherIntent = intent?.kind === "watcher_run" ? intent : null;
+    const userId = watcherIntent
+      ? `watcher_${watcherIntent.watcherId}`
+      : requestedUserId || agentId;
+    const effectiveThread = watcherIntent
+      ? `run_${watcherIntent.runId}`
+      : thread;
+    const effectiveForceNew = watcherIntent ? true : forceNew;
+    const effectiveDryRun = watcherIntent ? false : dryRun || false;
 
-    // Build composite conversationId for user-specific sessions
-    // Uses _ separator (colons not allowed in BullMQ custom IDs)
-    const conversationId = thread
-      ? `${agentId}_${userId}_${thread}`
+    // Build composite conversationId for user-specific sessions.
+    // Uses _ separator (colons not allowed in BullMQ custom IDs). Watcher
+    // automation gets one deterministic one-shot session per run and never
+    // resumes human/API sessions such as marketing_marketing.
+    const conversationId = effectiveThread
+      ? `${agentId}_${userId}_${effectiveThread}`
       : `${agentId}_${userId}`;
     const channelId = `api_${userId}`;
     const deploymentName = `api-${agentId.slice(0, 8)}`;
 
     // Try to resume existing session (unless forceNew is requested)
-    if (!forceNew) {
+    if (!effectiveForceNew) {
       const existing = await sessMgr.getSession(conversationId);
       if (existing) {
         // Reuse existing session — touch lastActivity and return existing token
@@ -792,7 +810,8 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         : undefined,
       nixConfig,
       agentId,
-      dryRun: dryRun || false,
+      dryRun: effectiveDryRun,
+      intent: watcherIntent ?? undefined,
       isEphemeral,
     };
     await sessMgr.setSession(session);
@@ -1214,9 +1233,10 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         messageText: messageContent,
         platformMetadata: {
           agentId: realAgentId,
-          source: "direct-api",
+          source: session.intent?.kind === "watcher_run" ? "watcher-run" : "direct-api",
           traceparent: traceparent || undefined,
           dryRun: session.dryRun || false,
+          intent: session.intent,
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,

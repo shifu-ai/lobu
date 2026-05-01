@@ -14,7 +14,7 @@ const EXTERNAL_AUTH_CACHE_KEY = "external:auth:client:v3";
 const DISCOVERY_CACHE_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_SCOPE = "profile:read";
 
-interface ExternalAuthConfig {
+export interface ExternalAuthConfig {
   issuerUrl: string;
   clientId?: string;
   clientSecret?: string;
@@ -237,23 +237,23 @@ export class ExternalAuthClient {
     };
   }
 
-  static isConfigured(): boolean {
-    return !!process.env.MEMORY_URL;
+  static isConfigured(config?: { issuerUrl?: string | null }): boolean {
+    return !!config?.issuerUrl?.trim();
   }
 
-  static fromEnv(
-    publicGatewayUrl: string,
-    cacheStore?: ExternalAuthConfig["cacheStore"]
-  ): ExternalAuthClient | null {
-    const authMcpUrl = process.env.MEMORY_URL;
-    if (!authMcpUrl) return null;
+  static fromConfig(config: {
+    issuerUrl?: string | null;
+    publicGatewayUrl: string;
+    cacheStore?: ExternalAuthConfig["cacheStore"];
+  }): ExternalAuthClient | null {
+    const issuerUrl = config.issuerUrl?.trim().replace(/\/+$/, "");
+    if (!issuerUrl) return null;
 
-    const issuerUrl = authMcpUrl.replace(/\/+$/, "");
     const callbackPath = "/connect/oauth/callback";
 
     // Register redirect URIs for both the configured public URL and localhost
-    // so OAuth works regardless of how the user accesses the gateway
-    const redirectUri = `${publicGatewayUrl}${callbackPath}`;
+    // so OAuth works regardless of how the user accesses the gateway.
+    const redirectUri = `${config.publicGatewayUrl}${callbackPath}`;
     const additionalRedirectUris = [
       `http://localhost:8080${callbackPath}`,
     ].filter((uri) => uri !== redirectUri);
@@ -263,7 +263,7 @@ export class ExternalAuthClient {
       redirectUri,
       additionalRedirectUris,
       scope: DEFAULT_SCOPE,
-      cacheStore,
+      cacheStore: config.cacheStore,
     });
   }
 

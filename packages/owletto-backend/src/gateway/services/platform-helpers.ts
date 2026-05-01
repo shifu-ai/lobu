@@ -35,7 +35,7 @@ function readOwlettoRuntimeDefaults(): PluginConfig | null {
     slot: "memory",
     enabled: true,
     config: {
-      mcpUrl: `${gatewayUrl}/mcp/owletto`,
+      mcpUrl: `${gatewayUrl}/mcp/lobu-memory`,
       gatewayAuthUrl: gatewayUrl,
     },
   };
@@ -74,7 +74,7 @@ function normalizeOwlettoPluginConfig(
     typeof storedMcpUrl === "string" &&
     typeof runtimeMcpUrl === "string" &&
     runtimeMcpUrl !== storedMcpUrl &&
-    /^https?:\/\/gateway(?::\d+)?\/mcp\/owletto\/?$/.test(storedMcpUrl);
+    /^https?:\/\/gateway(?::\d+)?\/mcp\/lobu-memory\/?$/.test(storedMcpUrl);
   const shouldReplaceGatewayAuthUrl =
     typeof storedGatewayAuthUrl === "string" &&
     typeof runtimeGatewayAuthUrl === "string" &&

@@ -7,6 +7,7 @@ import type { ProviderConfigResolver } from "../../services/provider-config-reso
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 
 const logger = createLogger("mcp-config-service");
+const LOBU_MEMORY_MCP_ID = "lobu-memory";
 
 interface McpInput {
   type: "promptString";
@@ -50,16 +51,22 @@ interface LoadedConfig {
 interface McpConfigServiceOptions {
   agentSettingsStore?: AgentSettingsStore;
   configResolver?: ProviderConfigResolver;
+  lobuMemory?: {
+    publicBaseUrl?: string;
+    resolveOrgSlug?: (agentId: string) => Promise<string | null>;
+  };
 }
 
 export class McpConfigService {
   private cache?: LoadedConfig;
   private agentSettingsStore?: AgentSettingsStore;
   private configResolver?: ProviderConfigResolver;
+  private lobuMemory?: McpConfigServiceOptions["lobuMemory"];
 
   constructor(options: McpConfigServiceOptions = {}) {
     this.agentSettingsStore = options.agentSettingsStore;
     this.configResolver = options.configResolver;
+    this.lobuMemory = options.lobuMemory;
     logger.debug(`McpConfigService initialized`);
   }
 
@@ -157,17 +164,13 @@ export class McpConfigService {
       workerConfig.mcpServers[id] = cloned;
     }
 
-    // Merge per-agent MCPs from live agent settings
+    // Merge per-agent MCPs from live agent settings. Per-agent entries always
+    // win over global defaults; otherwise a broken global MCP can silently
+    // shadow the exact server an agent was configured to use.
     const agentSettingsMcpServers =
       (await this.getAgentMcpServers(effectiveAgentId)) || {};
     for (const [id, serverConfig] of Object.entries(agentSettingsMcpServers)) {
-      if (workerConfig.mcpServers[id]) {
-        logger.warn(
-          `Per-agent MCP ${id} skipped - global MCP with same ID exists`
-        );
-        continue;
-      }
-
+      const overridesGlobal = !!workerConfig.mcpServers[id];
       const cloned = cloneConfig(serverConfig);
 
       if (cloned.enabled === false) {
@@ -188,6 +191,9 @@ export class McpConfigService {
       }
 
       workerConfig.mcpServers[id] = cloned;
+      if (overridesGlobal) {
+        logger.info(`Per-agent MCP ${id} overrides global MCP with same ID`);
+      }
     }
 
     if (Object.keys(agentSettingsMcpServers).length > 0) {
@@ -260,10 +266,11 @@ export class McpConfigService {
     if (agentId) {
       const agentMcpServers = await this.getAgentMcpServers(agentId);
       for (const [id, serverConfig] of Object.entries(agentMcpServers)) {
-        if (merged.has(id)) continue;
         const httpServer = toHttpServerConfig(id, serverConfig);
         if (httpServer) {
           merged.set(id, httpServer);
+        } else if (merged.has(id)) {
+          merged.delete(id);
         }
       }
     }
@@ -298,19 +305,49 @@ export class McpConfigService {
   private async getAgentMcpServers(
     agentId: string
   ): Promise<Record<string, any>> {
-    if (!this.agentSettingsStore) {
-      return {};
+    let servers: Record<string, any> = {};
+
+    if (this.agentSettingsStore) {
+      try {
+        const settings =
+          await this.agentSettingsStore.getEffectiveSettings(agentId);
+        servers = { ...(settings?.mcpServers || {}) };
+      } catch (error) {
+        logger.warn(`Failed to load per-agent MCP settings for ${agentId}`, {
+          error,
+        });
+      }
     }
 
+    if (!servers[LOBU_MEMORY_MCP_ID]) {
+      const derived = await this.resolveLobuMemoryServer(agentId);
+      if (derived) {
+        servers[LOBU_MEMORY_MCP_ID] = derived;
+      }
+    }
+
+    return servers;
+  }
+
+  private async resolveLobuMemoryServer(
+    agentId: string
+  ): Promise<Record<string, any> | null> {
+    const baseUrl = this.lobuMemory?.publicBaseUrl?.trim();
+    const resolveOrgSlug = this.lobuMemory?.resolveOrgSlug;
+    if (!baseUrl || !resolveOrgSlug) return null;
+
     try {
-      const settings =
-        await this.agentSettingsStore.getEffectiveSettings(agentId);
-      return settings?.mcpServers || {};
+      const orgSlug = await resolveOrgSlug(agentId);
+      if (!orgSlug) return null;
+      return {
+        url: buildLobuMemoryScopedMcpUrl(baseUrl, orgSlug),
+        type: "streamable-http",
+      };
     } catch (error) {
-      logger.warn(`Failed to load per-agent MCP settings for ${agentId}`, {
+      logger.warn(`Failed to resolve ${LOBU_MEMORY_MCP_ID} for ${agentId}`, {
         error,
       });
-      return {};
+      return null;
     }
   }
 
@@ -451,6 +488,14 @@ function parseAuthScope(raw: any): "user" | "channel" | undefined {
 
 function cloneConfig(config: any) {
   return JSON.parse(JSON.stringify(config));
+}
+
+export function buildLobuMemoryScopedMcpUrl(baseUrl: string, orgSlug: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = `/mcp/${orgSlug}`;
+  url.hash = "";
+  url.search = "";
+  return url.toString().replace(/\/+$/, "");
 }
 
 function isHttpUrl(candidate: string): boolean {

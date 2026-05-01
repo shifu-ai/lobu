@@ -58,6 +58,7 @@ import {
 import { InteractionService } from "../interactions.js";
 import { getModelProviderModules } from "../modules/module-system.js";
 import { GrantStore } from "../permissions/grant-store.js";
+import { getDb } from "../../db/client";
 import { PolicyStore } from "../permissions/policy-store.js";
 import { SecretProxy } from "../proxy/secret-proxy.js";
 import { TokenRefreshJob } from "../proxy/token-refresh-job.js";
@@ -457,7 +458,10 @@ export class CoreServices {
     // (the `state` parameter is opaque to the AS, so any replica can verify).
     const externalAuthKv = new Map<string, { value: string; expiresAt: number }>();
     this.externalAuthClient =
-      ExternalAuthClient.fromEnv(this.config.mcp.publicGatewayUrl, {
+      ExternalAuthClient.fromConfig({
+        issuerUrl: this.config.auth.issuerUrl,
+        publicGatewayUrl: this.config.mcp.publicGatewayUrl,
+        cacheStore: {
         get: async (key) => {
           const entry = externalAuthKv.get(key);
           if (!entry) return null;
@@ -473,7 +477,8 @@ export class CoreServices {
             expiresAt: Date.now() + ttlSeconds * 1000,
           });
         },
-      }) ?? undefined;
+      },
+    }) ?? undefined;
     if (this.externalAuthClient) {
       logger.debug("External OAuth client initialized");
     }
@@ -726,9 +731,21 @@ export class CoreServices {
     this.mcpConfigService = new McpConfigService({
       agentSettingsStore: this.agentSettingsStore,
       configResolver: this.providerConfigResolver,
+      lobuMemory: {
+        publicBaseUrl: this.config.lobuMemory.publicBaseUrl,
+        resolveOrgSlug: async (agentId: string) => {
+          const rows = await getDb()`
+            SELECT o.slug
+            FROM agents a
+            JOIN organization o ON o.id = a.organization_id
+            WHERE a.id = ${agentId}
+            LIMIT 1
+          `;
+          const slug = rows[0]?.slug;
+          return typeof slug === "string" && slug.trim() ? slug.trim() : null;
+        },
+      },
     });
-
-    this.syncOwlettoMcpFromEnv();
 
     // Initialize instruction service (needed by WorkerGateway)
     this.instructionService = new InstructionService(
@@ -854,30 +871,6 @@ export class CoreServices {
   // File-First Helpers
   // ============================================================================
 
-  /**
-   * Mirror the resolved `MEMORY_URL` env var into the MCP config service as a
-   * global `owletto` server. Without this, requests to `/mcp/owletto` (issued
-   * by the Owletto plugin running inside workers) fail with "MCP server
-   * 'owletto' not found" because `getHttpServer("owletto")` would otherwise
-   * return undefined — the upstream URL only lives in env, not in any
-   * agent settings entry.
-   *
-   * NOTE: do NOT set `oauth: {}` here. Owletto auth is owned by the
-   * worker-side `owletto_login` plugin tool (device-code flow). Adding
-   * `oauth: {}` would trigger the gateway's MCP OAuth auth-code/PKCE
-   * discovery as a parallel flow, producing two competing login links
-   * for the user.
-   */
-  private syncOwlettoMcpFromEnv(): void {
-    if (!this.mcpConfigService) return;
-    const memoryUrl = process.env.MEMORY_URL?.trim();
-    if (!memoryUrl) return;
-    this.mcpConfigService.upsertGlobalServer("owletto", {
-      url: memoryUrl,
-      type: "streamable-http",
-    });
-  }
-
   private async populateStoreFromFiles(
     store: InMemoryAgentStore,
     agents: FileLoadedAgent[]
@@ -929,7 +922,6 @@ export class CoreServices {
     }
 
     await applyOwlettoMemoryEnvFromProject(this.projectPath);
-    this.syncOwlettoMcpFromEnv();
 
     // Re-load from disk
     this.fileLoadedAgents = await loadAgentConfigFromFiles(this.projectPath);

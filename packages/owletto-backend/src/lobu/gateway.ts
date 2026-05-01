@@ -146,19 +146,13 @@ export async function initLobuGateway(): Promise<Hono | null> {
     const publicUrl = new URL('/lobu/', publicWebUrl).toString().replace(/\/$/, '');
     const env = process.env as unknown as Env;
 
-    // Embedded gateway shares the process with the Owletto OIDC provider — use
-    // it as the external auth issuer. Without MEMORY_URL set,
-    // ExternalAuthClient.fromEnv() returns null and the api-auth-middleware
-    // can't validate service tokens, so every dispatcher → /lobu/api/v1/agents
-    // call gets a 401 (silently fails the watcher run). Point at the local
-    // public origin so OIDC discovery + /oauth/userinfo resolve to ourselves.
-    if (!process.env.MEMORY_URL) {
-      process.env.MEMORY_URL = publicWebUrl;
-      logger.info({ memoryUrl: publicWebUrl }, '[Lobu] Defaulted MEMORY_URL for embedded auth');
-    }
-
+    // Embedded gateway shares the process with the app's OIDC provider — pass
+    // that issuer explicitly instead of overloading MEMORY_URL. LOBU memory MCP
+    // endpoints are resolved separately per organization/agent.
     const gatewayConfig = buildGatewayConfig({
       mcp: { publicGatewayUrl: publicUrl },
+      auth: { issuerUrl: publicWebUrl },
+      lobuMemory: { publicBaseUrl: publicWebUrl },
     });
 
     logger.info('[Lobu] Starting embedded orchestrator');

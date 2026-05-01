@@ -10,6 +10,7 @@ import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
 import type { ResponseRenderer } from "../platform/response-renderer.js";
 import type { SseManager } from "../services/sse-manager.js";
 import type { WatcherRunTracker } from "../watchers/run-tracker.js";
+import { resolveWatcherRunsByMessageIds } from "../../watchers/run-completion";
 
 const logger = createLogger("api-response-renderer");
 
@@ -130,6 +131,7 @@ export class ApiResponseRenderer implements ResponseRenderer {
     for (const id of payload.processedMessageIds ?? []) {
       if (id) ids.add(id);
     }
+    await resolveWatcherRunsByMessageIds(ids, result);
     for (const id of ids) {
       await this.watcherRunTracker.resolve(id, result);
     }
