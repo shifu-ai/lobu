@@ -19,6 +19,10 @@ let proxyServer: Server | null = null;
  * - Both set: Allowlist with exceptions
  */
 export async function startFilteringProxy(): Promise<void> {
+  if (proxyServer) {
+    return;
+  }
+
   const parsedPort = Number.parseInt(
     process.env.WORKER_PROXY_PORT || "8118",
     10
@@ -40,7 +44,7 @@ export async function startFilteringProxy(): Promise<void> {
 /**
  * Stop filtering proxy (cleanup on shutdown)
  */
-async function stopFilteringProxy(): Promise<void> {
+export async function stopFilteringProxy(): Promise<void> {
   if (proxyServer) {
     logger.info("Stopping HTTP proxy...");
     await stopHttpProxy(proxyServer);

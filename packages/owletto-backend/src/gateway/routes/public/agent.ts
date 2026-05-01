@@ -54,7 +54,7 @@ const NetworkConfigSchema = z.object({
 
 const McpServerConfigSchema = z.object({
   url: z.string().optional(),
-  type: z.enum(["sse", "stdio", "streamable-http"]).optional(),
+  type: z.enum(["sse", "streamable-http", "stdio"]).optional(),
   command: z.string().optional(),
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
@@ -1240,9 +1240,9 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,
-        mcpConfig:
-          session.mcpConfig ||
-          (settingsMcpServers ? { mcpServers: settingsMcpServers } : undefined),
+        mcpConfig: settingsMcpServers
+          ? { mcpServers: settingsMcpServers }
+          : session.mcpConfig,
       });
 
       rootSpan?.end();

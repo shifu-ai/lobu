@@ -16,7 +16,6 @@ import type { ChatInstanceManager } from "../../connections/chat-instance-manage
 import type { CoreServices } from "../../platform.js";
 import {
   buildMessagePayload,
-  hasConfiguredProvider,
   resolveAgentOptions,
 } from "../../services/platform-helpers.js";
 
@@ -60,19 +59,6 @@ export async function postOAuthCompletionPrompt(
   } = params;
 
   const agentSettingsStore = coreServices.getAgentSettingsStore();
-  if (
-    !(await hasConfiguredProvider(
-      agentId,
-      agentSettingsStore,
-      coreServices.getDeclaredAgentRegistry()
-    ))
-  ) {
-    logger.warn("Skipping OAuth resume: agent has no configured provider", {
-      agentId,
-    });
-    return;
-  }
-
   const agentOptions = await resolveAgentOptions(
     agentId,
     {},

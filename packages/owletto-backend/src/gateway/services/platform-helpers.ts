@@ -13,8 +13,6 @@ import { resolveEffectiveModelRef } from "../auth/settings/model-selection.js";
 import type { ChannelBindingService } from "../channels/index.js";
 import { buildMemoryPlugins, getInternalGatewayUrl } from "../config/index.js";
 import type { MessagePayload } from "../infrastructure/queue/queue-producer.js";
-import { getModelProviderModules } from "../modules/module-system.js";
-import type { DeclaredAgentRegistry } from "./declared-agent-registry.js";
 import { platformAgentId } from "../spaces/index.js";
 
 const logger = createLogger("platform-helpers");
@@ -53,53 +51,40 @@ function normalizeOwlettoPluginConfig(
     return plugin;
   }
 
-  const runtimeMcpUrl = runtimeDefault.config.mcpUrl;
-  const runtimeGatewayAuthUrl = runtimeDefault.config.gatewayAuthUrl;
-
-  const storedMcpUrl = plugin.config?.mcpUrl;
-  const storedGatewayAuthUrl = plugin.config?.gatewayAuthUrl;
-
-  // Inject runtime defaults when the override omits mcpUrl / gatewayAuthUrl
-  // entirely — users shouldn't need to hand-write internal gateway URLs.
-  const shouldInjectMcpUrl =
-    storedMcpUrl === undefined && typeof runtimeMcpUrl === "string";
-  const shouldInjectGatewayAuthUrl =
-    storedGatewayAuthUrl === undefined &&
-    typeof runtimeGatewayAuthUrl === "string";
-
-  // Rewrite stale internal URLs that look like they were captured from a
-  // previous runtime (e.g. `http://gateway:8080/mcp/owletto`) so they match
-  // the current gateway address.
-  const shouldReplaceMcpUrl =
-    typeof storedMcpUrl === "string" &&
-    typeof runtimeMcpUrl === "string" &&
-    runtimeMcpUrl !== storedMcpUrl &&
-    /^https?:\/\/gateway(?::\d+)?\/mcp\/lobu-memory\/?$/.test(storedMcpUrl);
-  const shouldReplaceGatewayAuthUrl =
-    typeof storedGatewayAuthUrl === "string" &&
-    typeof runtimeGatewayAuthUrl === "string" &&
-    runtimeGatewayAuthUrl !== storedGatewayAuthUrl &&
-    /^https?:\/\/gateway(?::\d+)?\/?$/.test(storedGatewayAuthUrl);
-
-  if (
-    !shouldInjectMcpUrl &&
-    !shouldInjectGatewayAuthUrl &&
-    !shouldReplaceMcpUrl &&
-    !shouldReplaceGatewayAuthUrl
-  ) {
-    return plugin;
-  }
-
   return {
     ...plugin,
     config: {
       ...plugin.config,
-      ...(shouldInjectMcpUrl || shouldReplaceMcpUrl
-        ? { mcpUrl: runtimeMcpUrl }
-        : {}),
-      ...(shouldInjectGatewayAuthUrl || shouldReplaceGatewayAuthUrl
-        ? { gatewayAuthUrl: runtimeGatewayAuthUrl }
-        : {}),
+      mcpUrl: runtimeDefault.config.mcpUrl,
+      gatewayAuthUrl: runtimeDefault.config.gatewayAuthUrl,
+    },
+  };
+}
+
+function normalizeLobuMemoryMcpServers(
+  mcpServers: Record<string, any> | undefined
+): Record<string, any> | undefined {
+  if (!mcpServers?.["lobu-memory"]) {
+    return mcpServers;
+  }
+
+  const port = process.env.PORT || process.env.GATEWAY_PORT || "8787";
+  const configuredUrl = mcpServers["lobu-memory"]?.url;
+  let normalizedUrl = `http://127.0.0.1:${port}/mcp/lobu-memory`;
+  if (typeof configuredUrl === "string") {
+    try {
+      const parsed = new URL(configuredUrl);
+      normalizedUrl = `http://127.0.0.1:${port}${parsed.pathname}`;
+    } catch {
+      // Keep the stable fallback above.
+    }
+  }
+  return {
+    ...mcpServers,
+    "lobu-memory": {
+      ...mcpServers["lobu-memory"],
+      url: normalizedUrl,
+      type: "streamable-http",
     },
   };
 }
@@ -178,7 +163,9 @@ export async function resolveAgentOptions(
     mergedOptions.preApprovedTools = settings.preApprovedTools;
   }
   if (settings.mcpServers) {
-    mergedOptions.mcpServers = settings.mcpServers;
+    mergedOptions.mcpServers = normalizeLobuMemoryMcpServers(
+      settings.mcpServers
+    );
   }
   if (settings.pluginsConfig) {
     mergedOptions.pluginsConfig = normalizePluginsConfig(
@@ -194,33 +181,6 @@ export async function resolveAgentOptions(
   }
 
   return mergedOptions;
-}
-
-export async function hasConfiguredProvider(
-  agentId: string,
-  agentSettingsStore?: AgentSettingsStore,
-  declaredAgents?: DeclaredAgentRegistry
-): Promise<boolean> {
-  if (!agentSettingsStore) return true;
-
-  const declaredEntry = declaredAgents?.get(agentId);
-  if (declaredEntry?.credentials.length) return true;
-
-  const settings = await agentSettingsStore.getEffectiveSettings(agentId);
-  const installedProviderIds = new Set<string>([
-    ...(settings?.installedProviders ?? []).map((p) => p.providerId),
-    ...(declaredEntry?.settings.installedProviders ?? []).map(
-      (p) => p.providerId
-    ),
-  ]);
-
-  const modules = getModelProviderModules();
-  if (installedProviderIds.size === 0) {
-    return modules.some((m) => m.hasSystemKey());
-  }
-  return modules.some(
-    (m) => installedProviderIds.has(m.providerId) && m.hasSystemKey()
-  );
 }
 
 /**

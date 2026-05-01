@@ -181,11 +181,9 @@ export function getInternalGatewayUrl(): string {
 }
 
 /**
- * Build the default memory plugin list based on the effective MEMORY_URL env var.
- * In file-first projects, gateway startup may derive MEMORY_URL from
- * `[memory.owletto]` in lobu.toml before this runs.
- * MEMORY_URL set → Owletto MCP plugin when installed
- * MEMORY_URL empty → @openclaw/native-memory (filesystem-based)
+ * Build the default memory plugin list. LOBU memory MCP routing is resolved by
+ * the gateway at request time, so the worker only needs the stable gateway MCP
+ * proxy URL; it must not depend on a process-global MEMORY_URL.
  */
 function isPluginInstalled(source: string): boolean {
   const resolverPaths = new Set<string>([__filename]);
@@ -235,16 +233,6 @@ export function buildMemoryPlugins(options?: {
   const hasNativeMemoryPlugin =
     options?.hasNativeMemoryPlugin ??
     isPluginInstalled(NATIVE_MEMORY_PLUGIN_SOURCE);
-
-  if (!process.env.MEMORY_URL) {
-    if (hasNativeMemoryPlugin) {
-      return [nativeMemoryPlugin];
-    }
-    logger.warn(
-      `${NATIVE_MEMORY_PLUGIN_SOURCE} is not installed; continuing without a memory plugin`
-    );
-    return [];
-  }
 
   const hasOwlettoPlugin =
     options?.hasOwlettoPlugin ?? isPluginInstalled(OWLETTO_PLUGIN_SOURCE);

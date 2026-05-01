@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  hasConfiguredProvider,
   resolveAgentId,
   resolveAgentOptions,
 } from "../services/platform-helpers.js";
@@ -116,7 +115,7 @@ describe("resolveAgentOptions model resolution", () => {
                 slot: "memory",
                 enabled: true,
                 config: {
-                  mcpUrl: "http://gateway:8080/mcp/owletto",
+                  mcpUrl: "http://gateway:8080/mcp/lobu-memory",
                   gatewayAuthUrl: "http://gateway:8080",
                 },
               },
@@ -138,7 +137,7 @@ describe("resolveAgentOptions model resolution", () => {
           slot: "memory",
           enabled: true,
           config: {
-            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/owletto",
+            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/lobu-memory",
             gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
           },
         },
@@ -146,7 +145,7 @@ describe("resolveAgentOptions model resolution", () => {
     });
   });
 
-  test("preserves custom Owletto endpoints", async () => {
+  test("normalizes custom Owletto endpoints to the embedded gateway", async () => {
     process.env.PORT = "8787";
 
     const settingsStore = {
@@ -181,8 +180,8 @@ describe("resolveAgentOptions model resolution", () => {
           slot: "memory",
           enabled: true,
           config: {
-            mcpUrl: "https://owletto.example.com/mcp",
-            gatewayAuthUrl: "https://owletto.example.com",
+            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/lobu-memory",
+            gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
           },
         },
       ],
@@ -220,45 +219,41 @@ describe("resolveAgentOptions model resolution", () => {
           slot: "memory",
           enabled: true,
           config: {
-            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/owletto",
+            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/lobu-memory",
             gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
           },
         },
       ],
     });
   });
-});
 
-describe("hasConfiguredProvider", () => {
-  test("accepts declared agents with credentials regardless of system keys", async () => {
-    const { DeclaredAgentRegistry } = await import(
-      "../services/declared-agent-registry.js"
-    );
+  test("normalizes lobu-memory MCP servers to the local embedded upstream", async () => {
+    process.env.PORT = "8787";
+
     const settingsStore = {
-      getEffectiveSettings: async () => null,
-    };
-    const declaredAgents = new DeclaredAgentRegistry();
-    declaredAgents.replaceAll(
-      new Map([
-        [
-          "telegram-6570514069",
-          {
-            settings: {
-              installedProviders: [{ providerId: "z-ai", installedAt: 1 }],
+      getEffectiveSettings: async () =>
+        ({
+          mcpServers: {
+            "lobu-memory": {
+              url: "https://app.example.test/mcp/buremba",
+              type: "streamable-http",
             },
-            credentials: [{ provider: "z-ai", key: "secret" }],
           },
-        ],
-      ])
+        }) as any,
+    };
+
+    const resolved = await resolveAgentOptions(
+      "agent-1",
+      {},
+      settingsStore as any
     );
 
-    await expect(
-      hasConfiguredProvider(
-        "telegram-6570514069",
-        settingsStore as any,
-        declaredAgents
-      )
-    ).resolves.toBe(true);
+    expect(resolved.mcpServers).toEqual({
+      "lobu-memory": {
+        url: "http://127.0.0.1:8787/mcp/buremba",
+        type: "streamable-http",
+      },
+    });
   });
 });
 

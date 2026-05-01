@@ -64,7 +64,8 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     baseUrl: getConfiguredPublicOrigin() ?? '',
     scopedToOrg,
     allowCrossOrg: tokenType === 'oauth' && !scopedToOrg,
-    allowInternalTools: !pathname.startsWith('/mcp'),
+    allowInternalTools:
+      !pathname.startsWith('/mcp') || c.req.header('x-lobu-memory-direct-auth') === '1',
   };
 }
 

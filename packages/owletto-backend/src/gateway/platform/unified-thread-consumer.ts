@@ -90,11 +90,19 @@ export class UnifiedThreadResponseConsumer {
     });
 
     try {
-      // Check if this response belongs to a Chat SDK connection — handle before legacy routing
+      // Check if this response belongs to a Chat SDK connection — handle before legacy routing.
+      // If a Chat SDK connectionId is present but this gateway instance does not manage it,
+      // fail the job so another instance can retry instead of silently completing an undelivered reply.
+      const chatConnectionId = data.platformMetadata?.connectionId as string | undefined;
       if (this.chatResponseBridge?.canHandle(data)) {
         const sessionKey = `${data.userId}:${data.originalMessageId || data.messageId}`;
         await this.routeToRenderer(this.chatResponseBridge, data, sessionKey);
         return;
+      }
+      if (chatConnectionId) {
+        throw new Error(
+          `Chat SDK connection ${chatConnectionId} is not managed by this gateway instance`
+        );
       }
 
       // Use platform field, fall back to teamId

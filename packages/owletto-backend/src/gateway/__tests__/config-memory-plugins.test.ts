@@ -1,38 +1,34 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { buildMemoryPlugins } from "../config/index.js";
 
-const originalMemoryUrl = process.env.MEMORY_URL;
+const originalPort = process.env.PORT;
 
 afterEach(() => {
-  if (originalMemoryUrl === undefined) {
-    delete process.env.MEMORY_URL;
+  if (originalPort === undefined) {
+    delete process.env.PORT;
   } else {
-    process.env.MEMORY_URL = originalMemoryUrl;
+    process.env.PORT = originalPort;
   }
 });
 
 describe("buildMemoryPlugins", () => {
-  test("returns native memory when MEMORY_URL is unset and plugin exists", () => {
-    delete process.env.MEMORY_URL;
+  test("uses LOBU memory plugin when installed without MEMORY_URL", () => {
+    process.env.PORT = "8787";
 
-    expect(buildMemoryPlugins({ hasNativeMemoryPlugin: true })).toEqual([
+    expect(buildMemoryPlugins({ hasOwlettoPlugin: true })).toEqual([
       {
-        source: "@openclaw/native-memory",
+        source: "@lobu/owletto-openclaw",
         slot: "memory",
         enabled: true,
+        config: {
+          mcpUrl: "http://127.0.0.1:8787/lobu/mcp/lobu-memory",
+          gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
+        },
       },
     ]);
   });
 
-  test("returns no plugin when MEMORY_URL is unset and native memory is unavailable", () => {
-    delete process.env.MEMORY_URL;
-
-    expect(buildMemoryPlugins({ hasNativeMemoryPlugin: false })).toEqual([]);
-  });
-
-  test("falls back to native memory when Owletto plugin is unavailable", () => {
-    process.env.MEMORY_URL = "https://memory.example.com";
-
+  test("falls back to native memory when LOBU memory plugin is unavailable", () => {
     expect(
       buildMemoryPlugins({
         hasOwlettoPlugin: false,
@@ -47,31 +43,12 @@ describe("buildMemoryPlugins", () => {
     ]);
   });
 
-  test("returns no plugin when neither Owletto nor native memory plugin exists", () => {
-    process.env.MEMORY_URL = "https://memory.example.com";
-
+  test("returns no plugin when neither LOBU memory nor native memory plugin exists", () => {
     expect(
       buildMemoryPlugins({
         hasOwlettoPlugin: false,
         hasNativeMemoryPlugin: false,
       })
     ).toEqual([]);
-  });
-
-  test("uses Owletto plugin when installed and MEMORY_URL is set", () => {
-    process.env.MEMORY_URL = "https://memory.example.com";
-    process.env.PORT = "8787";
-
-    expect(buildMemoryPlugins({ hasOwlettoPlugin: true })).toEqual([
-      {
-        source: "@lobu/owletto-openclaw",
-        slot: "memory",
-        enabled: true,
-        config: {
-          mcpUrl: "http://127.0.0.1:8787/lobu/mcp/owletto",
-          gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
-        },
-      },
-    ]);
   });
 });

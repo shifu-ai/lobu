@@ -13,6 +13,7 @@ import logger from '../utils/logger';
 import { createWatcherRun, type WatcherRunPayload } from '../utils/queue-helpers';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { computePendingWindow } from '../utils/window-utils';
+import { resolveWatcherRunsByMessageIds } from './run-completion';
 
 type WatcherRunStatus =
   | 'pending'
@@ -274,6 +275,40 @@ export async function reconcileWatcherRuns(db?: DbClient): Promise<ReconcileWatc
 
     await markWatcherRunCompleted(sql, runId, windowId);
     reconciled++;
+  }
+
+  const terminalRows = await sql`
+    WITH response_payloads AS (
+      SELECT
+        CASE
+          WHEN jsonb_typeof(action_input) = 'string' THEN (action_input #>> '{}')::jsonb
+          ELSE action_input
+        END AS payload
+      FROM runs
+      WHERE run_type = 'chat_message'
+        AND queue_name = 'thread_response'
+        AND status = 'completed'
+        AND action_input IS NOT NULL
+    )
+    SELECT DISTINCT r.dispatched_message_id
+    FROM runs r
+    JOIN response_payloads rp
+      ON rp.payload ? 'processedMessageIds'
+     AND rp.payload->'processedMessageIds' ? r.dispatched_message_id
+    WHERE r.run_type = 'watcher'
+      AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+      AND r.dispatched_message_id IS NOT NULL
+    ORDER BY r.dispatched_message_id ASC
+    LIMIT 100
+  `;
+
+  const completedMessageIds = terminalRows
+    .map((row) => (row as { dispatched_message_id?: unknown }).dispatched_message_id)
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+
+  if (completedMessageIds.length > 0) {
+    await resolveWatcherRunsByMessageIds(completedMessageIds, { ok: true }, sql);
+    reconciled += completedMessageIds.length;
   }
 
   return { reconciled };
@@ -641,6 +676,8 @@ async function dispatchWatcherRun(
       headers,
       body: JSON.stringify({
         agentId: payload.agent_id,
+        userId: `watcher-${run.id}`,
+        thread: `watcher-${run.id}`,
         forceNew: true,
         dryRun: false,
         intent: { kind: 'watcher_run', runId: run.id, watcherId: run.watcher_id },

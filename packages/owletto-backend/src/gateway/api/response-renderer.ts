@@ -10,7 +10,7 @@ import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
 import type { ResponseRenderer } from "../platform/response-renderer.js";
 import type { SseManager } from "../services/sse-manager.js";
 import type { WatcherRunTracker } from "../watchers/run-tracker.js";
-import { resolveWatcherRunsByMessageIds } from "../../watchers/run-completion";
+import { resolveWatcherRunsByMessageIds } from "../../watchers/run-completion.js";
 
 const logger = createLogger("api-response-renderer");
 
@@ -125,13 +125,19 @@ export class ApiResponseRenderer implements ResponseRenderer {
     payload: ThreadResponsePayload,
     result: { ok: true } | { ok: false; error: string }
   ): Promise<void> {
-    if (!this.watcherRunTracker) return;
     const ids = new Set<string>();
     if (payload.messageId) ids.add(payload.messageId);
     for (const id of payload.processedMessageIds ?? []) {
       if (id) ids.add(id);
     }
-    await resolveWatcherRunsByMessageIds(ids, result);
+    try {
+      await resolveWatcherRunsByMessageIds(ids, result);
+    } catch (error) {
+      logger.error("Failed to resolve watcher runs from terminal API payload", {
+        error,
+      });
+    }
+    if (!this.watcherRunTracker) return;
     for (const id of ids) {
       await this.watcherRunTracker.resolve(id, result);
     }

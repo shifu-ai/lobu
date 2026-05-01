@@ -151,7 +151,7 @@ export interface SkillMcpServer {
   id: string;
   name?: string;
   url?: string;
-  type?: "sse" | "stdio";
+  type?: "sse" | "streamable-http" | "stdio";
   command?: string;
   args?: string[];
   oauth?: McpOAuthConfig;
@@ -352,8 +352,8 @@ export interface ToolsConfig {
 export interface McpServerConfig {
   /** For HTTP/SSE MCPs: upstream URL */
   url?: string;
-  /** Server type: "sse" for HTTP MCPs, "stdio" for command-based */
-  type?: "sse" | "stdio";
+  /** Server type: HTTP MCP transport or "stdio" for command-based */
+  type?: "sse" | "streamable-http" | "stdio";
   /** For stdio MCPs: command to execute */
   command?: string;
   /** For stdio MCPs: command arguments */

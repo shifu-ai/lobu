@@ -115,6 +115,16 @@ export async function querySql(
 ): Promise<QuerySqlResult> {
   const startTime = Date.now();
 
+  if (!args || typeof args !== 'object') {
+    return errorResult('Tool arguments must be an object.', startTime);
+  }
+  if (typeof args.sql !== 'string') {
+    return errorResult('sql (string) is required.', startTime);
+  }
+  if (typeof args.sort_by !== 'string' || args.sort_by.length === 0) {
+    return errorResult('sort_by (string column name) is required.', startTime);
+  }
+
   const baseSql = args.sql.trim();
   if (!baseSql) return errorResult('SQL query is required.', startTime);
 

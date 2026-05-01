@@ -19,6 +19,7 @@ import { ChatInstanceManager, ChatResponseBridge } from '../gateway/connections'
 import { buildGatewayConfig } from '../gateway/config/index';
 import { Gateway } from '../gateway/gateway-main';
 import { Orchestrator } from '../gateway/orchestration/index';
+import { startFilteringProxy, stopFilteringProxy } from '../gateway/proxy/proxy-manager';
 import { SecretStoreRegistry } from '../gateway/secrets/index';
 import type { Env } from '../index';
 import logger from '../utils/logger';
@@ -46,6 +47,7 @@ let chatInstanceManager: any = null;
 let coreServices: any = null;
 let orchestrator: any = null;
 let socketModeClient: any = null;
+let filteringProxyStarted = false;
 
 function ensureEmbeddedWorkerLauncher(): void {
   const shimDir = path.resolve('scripts/runtime-shims');
@@ -154,6 +156,10 @@ export async function initLobuGateway(): Promise<Hono | null> {
       auth: { issuerUrl: publicWebUrl },
       lobuMemory: { publicBaseUrl: publicWebUrl },
     });
+
+    await startFilteringProxy();
+    filteringProxyStarted = true;
+    logger.info('[Lobu] Embedded worker egress proxy started');
 
     logger.info('[Lobu] Starting embedded orchestrator');
     orchestrator = new Orchestrator(gatewayConfig.orchestration);
@@ -296,6 +302,14 @@ export async function initLobuGateway(): Promise<Hono | null> {
       }
       orchestrator = null;
     }
+    if (filteringProxyStarted) {
+      try {
+        await stopFilteringProxy();
+      } catch (stopError) {
+        logger.warn({ error: String(stopError) }, '[Lobu] Failed to stop proxy after init');
+      }
+      filteringProxyStarted = false;
+    }
     logger.error({ error: String(error) }, '[Lobu] Failed to initialize embedded gateway');
     return null;
   }
@@ -318,6 +332,10 @@ export async function stopLobuGateway(): Promise<void> {
     }
     if (orchestrator) {
       await orchestrator.stop();
+    }
+    if (filteringProxyStarted) {
+      await stopFilteringProxy();
+      filteringProxyStarted = false;
     }
     orchestrator = null;
     gateway = null;

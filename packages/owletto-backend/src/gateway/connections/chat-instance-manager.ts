@@ -14,10 +14,7 @@ import {
   persistSecretValue,
   resolveSecretValue,
 } from "../secrets/index.js";
-import {
-  hasConfiguredProvider,
-  resolveAgentOptions,
-} from "../services/platform-helpers.js";
+import { resolveAgentOptions } from "../services/platform-helpers.js";
 import { ChatConnectionStore } from "./chat-connection-store.js";
 import {
   ConversationStateStore,
@@ -50,6 +47,7 @@ function configsEqual(
 }
 
 const logger = createLogger("chat-instance-manager");
+
 const ADAPTER_FACTORIES: Record<string, (config: any) => Promise<any>> = {
   telegram: async (c) =>
     (await import("@chat-adapter/telegram")).createTelegramAdapter(c),
@@ -573,6 +571,7 @@ export class ChatInstanceManager {
       if (useWebhook && this.publicGatewayUrl) {
         const webhookUrl = `${this.publicGatewayUrl}/api/v1/webhooks/${connection.id}`;
         logger.info({ id: connection.id, webhookUrl }, "Setting webhook");
+        await this.configurePlatformWebhook(connection, webhookUrl);
       }
 
       const cleanup = async () => {
@@ -673,6 +672,35 @@ export class ChatInstanceManager {
    * Register slash commands with the platform's native command menu.
    * Currently supports Telegram (setMyCommands) and Slack (via manifest).
    */
+  private async configurePlatformWebhook(
+    connection: PlatformConnection,
+    webhookUrl: string
+  ): Promise<void> {
+    if (connection.platform !== "telegram") return;
+
+    const botToken = (connection.config as any).botToken;
+    if (!botToken || typeof botToken !== "string") return;
+
+    const apiBase =
+      (connection.config as any).apiBaseUrl || "https://api.telegram.org";
+    const body: Record<string, unknown> = { url: webhookUrl };
+    const secretToken = (connection.config as any).secretToken;
+    if (typeof secretToken === "string" && secretToken.length > 0) {
+      body.secret_token = secretToken;
+    }
+
+    const resp = await fetch(`${apiBase}/bot${botToken}/setWebhook`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`Telegram setWebhook failed: ${resp.status} ${text}`);
+    }
+  }
+
   private async registerPlatformCommands(
     connection: PlatformConnection
   ): Promise<void> {
@@ -1334,18 +1362,6 @@ export class ChatInstanceManager {
     const conversationId = options.conversationId || options.channelId;
     const sessionId = `platform-chat:${name}:${options.channelId}:${conversationId}`;
     const sessionUserId = `${name}-${token.slice(0, 8) || "anonymous"}`;
-
-    if (
-      !(await hasConfiguredProvider(
-        options.agentId,
-        agentSettingsStore,
-        this.services.getDeclaredAgentRegistry()
-      ))
-    ) {
-      throw new Error(
-        "No model configured. Ask an admin to connect a provider for the base agent."
-      );
-    }
 
     const agentOptions = await resolveAgentOptions(
       options.agentId,

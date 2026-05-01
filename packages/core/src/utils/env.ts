@@ -15,7 +15,15 @@ export function getRequiredEnv(name: string): string {
 /**
  * Get optional environment variable with default
  */
-export function getOptionalEnv(name: string, defaultValue: string): string {
+export function getOptionalEnv(name: string, defaultValue: string): string;
+export function getOptionalEnv(
+  name: string,
+  defaultValue?: string
+): string | undefined;
+export function getOptionalEnv(
+  name: string,
+  defaultValue?: string
+): string | undefined {
   return process.env[name] || defaultValue;
 }
 

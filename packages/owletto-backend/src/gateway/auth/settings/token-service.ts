@@ -21,7 +21,7 @@ interface PrefillMcpServer {
   /** Server URL (for SSE type) */
   url?: string;
   /** Server type */
-  type?: "sse" | "stdio";
+  type?: "sse" | "streamable-http" | "stdio";
   /** Command (for stdio type) */
   command?: string;
   /** Args (for stdio type) */

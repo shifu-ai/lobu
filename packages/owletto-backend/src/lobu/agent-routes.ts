@@ -378,17 +378,18 @@ routes.post('/', mcpAuth, async (c) => {
     const publicUrl =
       getConfiguredPublicOrigin() || `http://localhost:${process.env.PORT || '8787'}`;
     const ownerMcpServers = {
-      owletto: { url: `${publicUrl}/mcp/${orgSlug}` },
+      'lobu-memory': { url: `${publicUrl}/mcp/${orgSlug}`, type: 'streamable-http' },
     };
+    const ownerPreApprovedTools = ['/mcp/lobu-memory/tools/*'];
     const inserted = await sql`
       INSERT INTO agents (
         id, organization_id, name, description, owner_platform, owner_user_id,
-        mcp_servers, created_at, updated_at
+        mcp_servers, pre_approved_tools, created_at, updated_at
       )
       VALUES (
         ${agentId}, ${orgId}, ${name}, ${description ?? null},
         'owletto', ${user.id},
-        ${sql.json(ownerMcpServers)}, ${now}, ${now}
+        ${sql.json(ownerMcpServers)}, ${sql.json(ownerPreApprovedTools)}, ${now}, ${now}
       )
       ON CONFLICT (id) DO NOTHING
       RETURNING id

@@ -54,6 +54,8 @@ function createGatewayConfig(
     mcp: {
       publicGatewayUrl: "http://localhost:8080",
     },
+    auth: {},
+    lobuMemory: {},
     health: {
       checkIntervalMs: 1000,
       staleThresholdMs: 2000,

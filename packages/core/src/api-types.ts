@@ -69,7 +69,7 @@ export interface SkillMcpServerInfo {
   id: string;
   name?: string;
   url?: string;
-  type?: "sse" | "stdio";
+  type?: "sse" | "streamable-http" | "stdio";
   command?: string;
   args?: string[];
 }

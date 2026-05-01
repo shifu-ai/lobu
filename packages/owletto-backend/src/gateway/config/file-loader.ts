@@ -603,7 +603,7 @@ function buildLocalSkills(skillFiles: LoadedSkillFile[]): SkillConfig[] {
         skill.mcpServers = Object.entries(fm.mcpServers).map(([id, mcp]) => ({
           id,
           url: mcp.url,
-          type: mcp.type as "sse" | "stdio" | undefined,
+          type: mcp.type as "sse" | "streamable-http" | "stdio" | undefined,
           command: mcp.command,
           args: mcp.args,
         }));

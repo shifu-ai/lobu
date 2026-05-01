@@ -1,3 +1,4 @@
+import { verifyWorkerToken } from '@lobu/core';
 import type { Next } from 'hono';
 import { getAuthConfig as getAuthConfigFromEnv } from '../auth/config';
 import { createAuth } from '../auth/index';
@@ -235,7 +236,83 @@ export class MultiTenantProvider implements WorkspaceProvider {
       return next();
     }
 
-    // 1) Bearer token auth (PAT or OAuth)
+    // 1) Embedded worker direct-auth for the in-process lobu-memory MCP.
+    // The gateway MCP proxy sets this header after validating/issuing the worker
+    // token. Treat it as an internal admin-scoped MCP session for the URL org so
+    // unattended watcher runs can use memory tools without a second OAuth loop.
+    if (authHeader?.startsWith('Bearer ') && c.req.header('x-lobu-memory-direct-auth') === '1') {
+      const workerToken = authHeader.slice(7);
+      const tokenData = verifyWorkerToken(workerToken);
+      if (!tokenData) {
+        return c.json(
+          { error: 'invalid_token', error_description: 'Invalid or expired worker token' },
+          401,
+          {
+            'WWW-Authenticate': `Bearer realm="${baseUrl}/.well-known/oauth-protected-resource", error="invalid_token"`,
+          }
+        );
+      }
+      if (!requestedOrgId) {
+        return c.json(
+          { error: 'invalid_request', error_description: 'Organization slug required in URL' },
+          400
+        );
+      }
+      if (!tokenData.agentId) {
+        return c.json(
+          { error: 'invalid_token', error_description: 'Worker token missing agent context' },
+          401,
+          {
+            'WWW-Authenticate': `Bearer realm="${baseUrl}/.well-known/oauth-protected-resource", error="invalid_token"`,
+          }
+        );
+      }
+      const agentRows = await simpleQuery(sql`
+        SELECT owner_user_id
+        FROM agents
+        WHERE id = ${tokenData.agentId}
+          AND organization_id = ${requestedOrgId}
+        LIMIT 1
+      `);
+      if (agentRows.length === 0) {
+        return c.json(
+          { error: 'insufficient_scope', error_description: 'Worker token is not valid for this organization' },
+          403
+        );
+      }
+      const directAuthUserId = (agentRows[0]?.owner_user_id as string | undefined) ?? tokenData.userId;
+      const roleRows = await simpleQuery(sql`
+        SELECT role
+        FROM "member"
+        WHERE "organizationId" = ${requestedOrgId}
+          AND "userId" = ${directAuthUserId}
+        LIMIT 1
+      `);
+      const directAuthRole = roleRows[0]?.role as string | undefined;
+      if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
+        return c.json(
+          { error: 'insufficient_scope', error_description: 'Agent owner is not an organization admin' },
+          403
+        );
+      }
+      await setContextAndContinue({
+        mcpAuthInfo: {
+          userId: directAuthUserId,
+          organizationId: requestedOrgId,
+          clientId: 'lobu-worker',
+          scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
+          expiresAt: Math.floor((tokenData.timestamp + 2 * 60 * 60 * 1000) / 1000),
+          tokenType: 'pat',
+        },
+        mcpIsAuthenticated: true,
+        organizationId: requestedOrgId,
+        memberRole: directAuthRole,
+        authSource: 'pat',
+      });
+      return undefined;
+    }
+
+    // 2) Bearer token auth (PAT or OAuth)
     if (authHeader?.startsWith('Bearer ')) {
       const token = authHeader.slice(7);
       const isPat = token.startsWith('owl_pat_');

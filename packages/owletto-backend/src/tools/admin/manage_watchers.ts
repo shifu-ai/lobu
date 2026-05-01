@@ -1281,13 +1281,14 @@ async function handleCompleteWindow(
   const provenanceClientId = args.client_id ?? ctx.clientId ?? null;
   const provenanceModel =
     typeof args.model === 'string' && args.model.trim() ? args.model : 'external-client';
-  const provenanceMetadata =
+  const provenanceMetadata: Record<string, unknown> =
     args.run_metadata && typeof args.run_metadata === 'object' && !Array.isArray(args.run_metadata)
       ? (args.run_metadata as Record<string, unknown>)
       : {};
+  const watcherRunIdRaw = provenanceMetadata.watcher_run_id;
   const watcherRunId =
-    provenanceMetadata.watcher_run_id !== undefined && provenanceMetadata.watcher_run_id !== null
-      ? Number(provenanceMetadata.watcher_run_id)
+    watcherRunIdRaw !== undefined && watcherRunIdRaw !== null && Number.isFinite(Number(watcherRunIdRaw))
+      ? Number(watcherRunIdRaw)
       : null;
 
   // ============================================
@@ -1619,7 +1620,7 @@ async function handleCompleteWindow(
           model_used = ${provenanceModel},
           client_id = ${provenanceClientId},
           run_metadata = ${sql.json(provenanceMetadata)},
-          run_id = COALESCE(run_id, ${watcherRunId}),
+          run_id = COALESCE(${watcherRunId}, run_id),
           created_at = COALESCE(created_at, NOW())
         WHERE id = ${tokenWindowId} AND watcher_id = ${watcherId}
         RETURNING id
@@ -1652,10 +1653,11 @@ async function handleCompleteWindow(
           logger.info(
             `[complete_window] Deleted existing window ${windowId} (replace_existing=true)`
           );
-        } else if (uniqueContentIds.length === 0) {
-          // Idempotent empty-content replay: reuse the existing window. Only
-          // refresh provenance if the existing row was itself a no-op write
-          // — never overwrite a successful completion's data.
+        } else if (watcherRunId != null || uniqueContentIds.length === 0) {
+          // Idempotent replay: reuse the existing window so retries/manual
+          // runs can still mark their run completed. Only refresh analysis
+          // payload if the existing row was itself a no-op write — never
+          // overwrite a successful completion's extracted data.
           windowId = existingWindow[0].id as number;
           reuseExistingWindow = true;
           if (Number(existingWindow[0].content_analyzed ?? 0) === 0) {
@@ -1665,7 +1667,13 @@ async function handleCompleteWindow(
                   model_used = ${provenanceModel},
                   client_id = ${provenanceClientId},
                   run_metadata = ${sql.json(provenanceMetadata)},
-                  run_id = COALESCE(run_id, ${watcherRunId})
+                  run_id = COALESCE(${watcherRunId}, run_id)
+              WHERE id = ${windowId} AND watcher_id = ${watcherId}
+            `;
+          } else if (watcherRunId != null) {
+            await tx`
+              UPDATE watcher_windows
+              SET run_id = COALESCE(${watcherRunId}, run_id)
               WHERE id = ${windowId} AND watcher_id = ${watcherId}
             `;
           }

@@ -169,7 +169,7 @@ describe('POST /agents — idempotent same-org create', () => {
     // directly to the column.
     await sql`
       UPDATE agents
-      SET mcp_servers = ${sql.json({ owletto: { url: 'http://operator-set' } })},
+      SET mcp_servers = ${sql.json({ 'lobu-memory': { url: 'http://operator-set' } })},
           updated_at = NOW()
       WHERE id = 'mcp-agent'
     `;
@@ -186,7 +186,7 @@ describe('POST /agents — idempotent same-org create', () => {
       SELECT mcp_servers FROM agents WHERE id = 'mcp-agent'
     `;
     expect(rows[0].mcp_servers).toEqual({
-      owletto: { url: 'http://operator-set' },
+      'lobu-memory': { url: 'http://operator-set' },
     });
   });
 
@@ -490,11 +490,12 @@ describe('concurrent-apply race fixes', () => {
     // by both handlers (which would have left the same value but proved both
     // ran the saveSettings path).
     const settings = await sql`
-      SELECT mcp_servers FROM agents WHERE id = 'race-agent'
+      SELECT mcp_servers, pre_approved_tools FROM agents WHERE id = 'race-agent'
     `;
     expect(settings[0].mcp_servers).toEqual({
-      owletto: { url: expect.stringContaining('/mcp/') },
+      'lobu-memory': { url: expect.stringContaining('/mcp/'), type: 'streamable-http' },
     });
+    expect(settings[0].pre_approved_tools).toEqual(['/mcp/lobu-memory/tools/*']);
   });
 
   test('POST /agents — concurrent create cannot overwrite operator-set MCP servers', async () => {
@@ -513,7 +514,7 @@ describe('concurrent-apply race fixes', () => {
     // Operator overrides mcp_servers (e.g. via a subsequent PATCH /config).
     await sql`
       UPDATE agents
-      SET mcp_servers = ${sql.json({ owletto: { url: 'http://operator-set' } })},
+      SET mcp_servers = ${sql.json({ 'lobu-memory': { url: 'http://operator-set' } })},
           updated_at = NOW()
       WHERE id = 'preserved-agent'
     `;
@@ -539,7 +540,7 @@ describe('concurrent-apply race fixes', () => {
       SELECT mcp_servers FROM agents WHERE id = 'preserved-agent'
     `;
     expect(after[0].mcp_servers).toEqual({
-      owletto: { url: 'http://operator-set' },
+      'lobu-memory': { url: 'http://operator-set' },
     });
   });
 
@@ -801,7 +802,7 @@ describe('residual-race fixes (PR-466 follow-up)', () => {
         const statuses = [r1.status, r2.status].sort();
         expect(statuses).toEqual([200, 201]);
 
-        // The agent row exists exactly once and `mcp_servers.owletto.url` is
+        // The agent row exists exactly once and `mcp_servers["lobu-memory"].url` is
         // populated regardless of which request handler ran the INSERT and
         // which observed it via the idempotent branch.
         const rows = await sql`
@@ -809,10 +810,10 @@ describe('residual-race fixes (PR-466 follow-up)', () => {
         `;
         expect(rows.length).toBe(1);
         const mcpServers = rows[0].mcp_servers as
-          | { owletto?: { url?: string } }
+          | { 'lobu-memory'?: { url?: string } }
           | undefined;
-        expect(mcpServers?.owletto?.url).toBeTruthy();
-        expect(mcpServers?.owletto?.url).toContain('/mcp/');
+        expect(mcpServers?.['lobu-memory']?.url).toBeTruthy();
+        expect(mcpServers?.['lobu-memory']?.url).toContain('/mcp/');
       }
     }
   );

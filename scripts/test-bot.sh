@@ -80,9 +80,10 @@ TG_SESSION_COPY_DIRS=()
 
 cleanup_tg_session_copies() {
     local dir
-    for dir in "${TG_SESSION_COPY_DIRS[@]}"; do
+    for dir in "${TG_SESSION_COPY_DIRS[@]:-}"; do
         [ -n "$dir" ] && [ -d "$dir" ] && rm -rf "$dir"
     done
+    return 0
 }
 
 trap cleanup_tg_session_copies EXIT

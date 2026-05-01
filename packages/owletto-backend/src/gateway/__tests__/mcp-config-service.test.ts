@@ -213,7 +213,7 @@ describe("McpConfigService", () => {
     expect(config.mcpServers["enabled-mcp"]).toBeDefined();
   });
 
-  test("getWorkerConfig - global takes precedence over per-agent", async () => {
+  test("getWorkerConfig - per-agent takes precedence over global", async () => {
     const mockAgentSettingsStore = {
       getEffectiveSettings: async () => ({
         mcpServers: {
@@ -240,9 +240,44 @@ describe("McpConfigService", () => {
       workerToken: makeToken("agent1"),
     });
 
-    // Global should win - no perAgent flag
     expect(config.mcpServers["shared-mcp"]).toBeDefined();
-    expect(config.mcpServers["shared-mcp"].perAgent).toBeUndefined();
+    expect(config.mcpServers["shared-mcp"].perAgent).toBe(true);
+
+    const servers = await service.getAllHttpServers("agent1");
+    expect(servers.get("shared-mcp")?.upstreamUrl).toBe(
+      "https://agent-version.example.com/mcp"
+    );
+  });
+
+  test("getWorkerConfig - derives lobu-memory from agent organization", async () => {
+    const service = new McpConfigService({
+      agentSettingsStore: {
+        getEffectiveSettings: async () => ({ mcpServers: {} }),
+      } as any,
+      lobuMemory: {
+        publicBaseUrl: "https://app.lobu.ai",
+        resolveOrgSlug: async (agentId) => (agentId === "agent1" ? "buremba" : null),
+      },
+    });
+
+    const config = await service.getWorkerConfig({
+      baseUrl: BASE_URL,
+      workerToken: makeToken("agent1"),
+    });
+
+    expect(config.mcpServers["lobu-memory"]).toBeDefined();
+    expect(config.mcpServers["lobu-memory"].url).toBe(BASE_URL);
+    expect(config.mcpServers["lobu-memory"].headers["X-Mcp-Id"]).toBe(
+      "lobu-memory"
+    );
+    expect(config.mcpServers["lobu-memory"].internal).toBe(true);
+
+    const servers = await service.getAllHttpServers("agent1");
+    const lobuMemoryServer = servers.get("lobu-memory");
+    expect(lobuMemoryServer?.upstreamUrl).toBe(
+      "https://app.lobu.ai/mcp/buremba"
+    );
+    expect(lobuMemoryServer?.internal).toBe(true);
   });
 
   test("getMcpStatus - returns correct auth and input flags", async () => {

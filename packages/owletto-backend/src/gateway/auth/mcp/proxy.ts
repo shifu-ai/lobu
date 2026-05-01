@@ -121,6 +121,8 @@ interface HttpMcpServerConfig {
   headers?: Record<string, string>;
   /** Credential scoping strategy: "user" (default) or "channel" (shared in a Slack channel). */
   authScope?: "user" | "channel";
+  /** True when the upstream is the same embedded Owletto process (lobu-memory). */
+  internal?: boolean;
 }
 
 interface McpConfigSource {
@@ -328,7 +330,8 @@ export class McpProxy {
   async fetchToolsForMcp(
     mcpId: string,
     agentId: string,
-    tokenData: any
+    tokenData: any,
+    workerToken?: string
   ): Promise<{ tools: McpTool[]; instructions?: string }> {
     if (this.toolCache) {
       const cached = await this.toolCache.getServerInfo(mcpId, agentId);
@@ -369,7 +372,8 @@ export class McpProxy {
           mcpId,
           "POST",
           initBody,
-          scopeKey
+          scopeKey,
+          workerToken
         );
 
         // Tool discovery runs before the agent has a chance to call anything.
@@ -415,7 +419,8 @@ export class McpProxy {
           mcpId,
           "POST",
           notifyBody,
-          scopeKey
+          scopeKey,
+          workerToken
         ).catch(() => {
           /* noop */
         });
@@ -441,7 +446,8 @@ export class McpProxy {
         mcpId,
         "POST",
         jsonRpcBody,
-        scopeKey
+        scopeKey,
+        workerToken
       );
 
       if (response.status === 401) {
@@ -490,7 +496,8 @@ export class McpProxy {
           mcpId,
           "POST",
           retryBody,
-          scopeKey
+          scopeKey,
+          workerToken
         );
         const retryData = (await parseJsonRpcResponse(
           retryResponse
@@ -752,7 +759,8 @@ export class McpProxy {
         mcpId,
         "POST",
         jsonRpcBody,
-        scopeKey
+        scopeKey,
+        auth.token
       );
 
       // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
@@ -872,7 +880,7 @@ export class McpProxy {
           mcpId,
           toolName,
         });
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, auth.token);
 
         response = await this.sendUpstreamRequest(
           httpServer,
@@ -880,7 +888,8 @@ export class McpProxy {
           mcpId,
           "POST",
           jsonRpcBody,
-          scopeKey
+          scopeKey,
+          auth.token
         );
         data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
       }
@@ -993,7 +1002,8 @@ export class McpProxy {
         const { tools } = await this.fetchToolsForMcp(
           mcpId,
           agentId,
-          auth.tokenData
+          auth.tokenData,
+          auth.token
         );
         return { mcpId, tools };
       })
@@ -1164,6 +1174,7 @@ export class McpProxy {
           conversationId: tokenData.conversationId || "",
           teamId: tokenData.teamId,
           connectionId: tokenData.connectionId,
+          workerToken: sessionToken,
         }
       );
     } catch (error) {
@@ -1203,7 +1214,8 @@ export class McpProxy {
   private buildUpstreamHeaders(
     sessionId: string | null,
     configHeaders?: Record<string, string>,
-    credentialToken?: string
+    credentialToken?: string,
+    internal?: boolean
   ): Record<string, string> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -1222,6 +1234,12 @@ export class McpProxy {
     // Per-user credential takes precedence over config headers for Authorization
     if (credentialToken) {
       headers.Authorization = `Bearer ${credentialToken}`;
+    }
+
+    // Stamp internal MCP requests so the embedded Owletto multi-tenant
+    // middleware promotes the worker JWT to admin scope for this org.
+    if (internal) {
+      headers["X-Lobu-Memory-Direct-Auth"] = "1";
     }
 
     if (sessionId) {
@@ -1274,20 +1292,24 @@ export class McpProxy {
     mcpId: string,
     method: string,
     body?: string,
-    scopeKey?: string
+    scopeKey?: string,
+    directAuthToken?: string
   ): Promise<Response> {
     const sessionKey = this.buildSessionKey(agentId, mcpId, scopeKey);
     const sessionId = await this.getSession(sessionKey);
 
-    // Look up scope-specific credential for this MCP
+    // Internal MCPs (lobu-memory) live in the same Owletto process and accept
+    // the worker JWT directly; forcing a second OAuth login would block
+    // unattended watcher runs. Non-internal MCPs use per-user credentials.
     let credentialToken: string | undefined;
-    if (scopeKey) {
+    if (httpServer.internal) {
+      credentialToken = directAuthToken;
+    } else if (scopeKey) {
       const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
       if (token) credentialToken = token;
     }
 
-    // SSRF protection: block requests to internal networks
-    if (await isInternalUrl(httpServer.upstreamUrl)) {
+    if (!httpServer.internal && (await isInternalUrl(httpServer.upstreamUrl))) {
       logger.warn("Blocked SSRF attempt to internal URL", {
         url: httpServer.upstreamUrl,
         mcpId,
@@ -1309,7 +1331,8 @@ export class McpProxy {
     const headers = this.buildUpstreamHeaders(
       sessionId,
       httpServer.headers,
-      credentialToken
+      credentialToken,
+      httpServer.internal === true
     );
 
     const response = await fetch(httpServer.upstreamUrl, {
@@ -1340,10 +1363,10 @@ export class McpProxy {
       conversationId: string;
       teamId?: string;
       connectionId?: string;
+      workerToken?: string;
     }
   ): Promise<Response> {
-    // SSRF protection: block requests to internal networks
-    if (await isInternalUrl(httpServer.upstreamUrl)) {
+    if (!httpServer.internal && (await isInternalUrl(httpServer.upstreamUrl))) {
       logger.warn("Blocked SSRF attempt to internal URL", {
         url: httpServer.upstreamUrl,
         mcpId,
@@ -1371,10 +1394,21 @@ export class McpProxy {
       return new Response("Request body too large", { status: 413 });
     }
 
+    // Internal MCPs (lobu-memory) accept the worker JWT directly; forcing a
+    // second OAuth login would block unattended watcher runs. Non-internal
+    // MCPs use per-user credentials.
+    let credentialToken: string | undefined;
+    if (httpServer.internal) {
+      credentialToken = authContext?.workerToken;
+    } else if (scopeKey) {
+      const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
+      if (token) credentialToken = token;
+    }
+
     // If no active session exists, re-initialize before forwarding
     if (!sessionId && c.req.method === "POST") {
       try {
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, credentialToken);
         sessionId = await this.getSession(sessionKey);
       } catch (error) {
         logger.warn("Pre-emptive MCP re-initialization failed", {
@@ -1392,17 +1426,11 @@ export class McpProxy {
       bodyLength: bodyText.length,
     });
 
-    // Look up per-user/per-channel credential for this MCP
-    let credentialToken: string | undefined;
-    if (scopeKey) {
-      const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
-      if (token) credentialToken = token;
-    }
-
     const headers = this.buildUpstreamHeaders(
       sessionId,
       httpServer.headers,
-      credentialToken
+      credentialToken,
+      httpServer.internal === true
     );
 
     let response = await fetch(httpServer.upstreamUrl, {
@@ -1480,12 +1508,13 @@ export class McpProxy {
         { mcpId, agentId }
       );
       try {
-        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, credentialToken);
         sessionId = await this.getSession(sessionKey);
         const retryHeaders = this.buildUpstreamHeaders(
           sessionId,
           httpServer.headers,
-          credentialToken
+          credentialToken,
+          httpServer.internal === true
         );
         response = await fetch(httpServer.upstreamUrl, {
           method: c.req.method,
@@ -1545,7 +1574,8 @@ export class McpProxy {
     httpServer: HttpMcpServerConfig,
     agentId: string,
     mcpId: string,
-    scopeKey?: string
+    scopeKey?: string,
+    directAuthToken?: string
   ): Promise<void> {
     // Clear stale session
     const sessionKey = this.buildSessionKey(agentId, mcpId, scopeKey);
@@ -1569,7 +1599,8 @@ export class McpProxy {
       mcpId,
       "POST",
       initBody,
-      scopeKey
+      scopeKey,
+      directAuthToken
     );
 
     await initResponse.text(); // consume response (may be JSON or SSE-framed)
@@ -1585,7 +1616,8 @@ export class McpProxy {
       mcpId,
       "POST",
       notifyBody,
-      scopeKey
+      scopeKey,
+      directAuthToken
     ).catch(() => {
       /* noop */
     });

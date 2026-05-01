@@ -113,7 +113,7 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
   // tools/list — return our TypeBox JSON Schemas
   // Read auth state dynamically so the list updates after auth upgrades.
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const includeInternalTools = authCtx.allowInternalTools === true && !authCtx.clientId;
+    const includeInternalTools = authCtx.allowInternalTools === true;
     const publicOnly = !!authCtx.organizationId && !authCtx.memberRole;
     const roleAccessLevel = !authCtx.memberRole
       ? 'read'

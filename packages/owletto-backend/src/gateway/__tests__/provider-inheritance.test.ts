@@ -25,7 +25,6 @@ import {
 } from "../auth/settings/resolved-settings-view.js";
 import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
 import { DeclaredAgentRegistry } from "../services/declared-agent-registry.js";
-import { hasConfiguredProvider } from "../services/platform-helpers.js";
 import {
   ensureEncryptionKey,
   ensurePgliteForGatewayTests,
@@ -234,26 +233,6 @@ describe("sandbox provider inheritance", () => {
     expect(effective?.networkConfig?.allowedDomains).toEqual([
       "api.openai.com",
     ]);
-  });
-
-  test("treats declared agent as configured even without system key", async () => {
-    declaredAgents.replaceAll(
-      new Map([
-        [
-          "template-agent",
-          {
-            settings: {
-              installedProviders: [{ providerId: "z-ai", installedAt: 1 }],
-            },
-            credentials: [{ provider: "z-ai", key: "declared-secret" }],
-          },
-        ],
-      ])
-    );
-
-    await expect(
-      hasConfiguredProvider("template-agent", store, declaredAgents)
-    ).resolves.toBe(true);
   });
 
   test("exposes inherited provider state with read-only model visibility", async () => {

@@ -424,7 +424,8 @@ export class WorkerGateway {
             const result = await this.mcpProxy?.fetchToolsForMcp(
               mcp.id,
               agentId || userId,
-              auth.tokenData
+              auth.tokenData,
+              auth.token
             );
             return { mcpId: mcp.id, ...(result || { tools: [] }) };
           })

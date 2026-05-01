@@ -30,6 +30,13 @@ interface HttpMcpServerConfig {
    *   in lobu.toml.
    */
   authScope?: "user" | "channel";
+  /**
+   * Marks an MCP whose upstream is the same embedded Owletto process. The
+   * gateway proxy passes the worker JWT directly (no OAuth), bypasses the
+   * SSRF localhost guard, and stamps the upstream request with the
+   * direct-auth header so Owletto promotes it to admin scope.
+   */
+  internal?: boolean;
 }
 
 interface WorkerMcpConfig {
@@ -48,20 +55,22 @@ interface LoadedConfig {
   httpServers: Map<string, HttpMcpServerConfig>;
 }
 
+interface LobuMemoryConfigOptions {
+  publicBaseUrl?: string;
+  resolveOrgSlug?: (agentId: string) => Promise<string | null>;
+}
+
 interface McpConfigServiceOptions {
   agentSettingsStore?: AgentSettingsStore;
   configResolver?: ProviderConfigResolver;
-  lobuMemory?: {
-    publicBaseUrl?: string;
-    resolveOrgSlug?: (agentId: string) => Promise<string | null>;
-  };
+  lobuMemory?: LobuMemoryConfigOptions;
 }
 
 export class McpConfigService {
   private cache?: LoadedConfig;
   private agentSettingsStore?: AgentSettingsStore;
   private configResolver?: ProviderConfigResolver;
-  private lobuMemory?: McpConfigServiceOptions["lobuMemory"];
+  private lobuMemory?: LobuMemoryConfigOptions;
 
   constructor(options: McpConfigServiceOptions = {}) {
     this.agentSettingsStore = options.agentSettingsStore;
@@ -97,9 +106,8 @@ export class McpConfigService {
   }
 
   /**
-   * Register or replace a single global MCP server. Used for runtime-derived
-   * entries (e.g. the Owletto memory MCP, whose upstream URL is resolved
-   * from `MEMORY_URL` at startup and may change when `lobu.toml` reloads).
+   * Register or replace a single global MCP server. Global MCPs are fallback
+   * defaults only; explicit per-agent MCP settings override them.
    */
   upsertGlobalServer(id: string, serverConfig: Record<string, any>): void {
     if (!this.cache) {
@@ -164,18 +172,23 @@ export class McpConfigService {
       workerConfig.mcpServers[id] = cloned;
     }
 
-    // Merge per-agent MCPs from live agent settings. Per-agent entries always
-    // win over global defaults; otherwise a broken global MCP can silently
-    // shadow the exact server an agent was configured to use.
-    const agentSettingsMcpServers =
-      (await this.getAgentMcpServers(effectiveAgentId)) || {};
+    // Merge per-agent MCPs from live agent settings. Per-agent settings are
+    // authoritative: they override global fallback entries, and `enabled:false`
+    // disables a same-id global default for this agent.
+    const agentSettingsMcpServers = await this.getEffectiveAgentMcpServers(
+      effectiveAgentId
+    );
     for (const [id, serverConfig] of Object.entries(agentSettingsMcpServers)) {
-      const overridesGlobal = !!workerConfig.mcpServers[id];
       const cloned = cloneConfig(serverConfig);
 
       if (cloned.enabled === false) {
         logger.debug(`Skipping disabled per-agent MCP ${id}`);
+        delete workerConfig.mcpServers[id];
         continue;
+      }
+
+      if (workerConfig.mcpServers[id]) {
+        logger.info(`Per-agent MCP ${id} overrides global MCP with same ID`);
       }
 
       if (cloned.url) {
@@ -191,9 +204,6 @@ export class McpConfigService {
       }
 
       workerConfig.mcpServers[id] = cloned;
-      if (overridesGlobal) {
-        logger.info(`Per-agent MCP ${id} overrides global MCP with same ID`);
-      }
     }
 
     if (Object.keys(agentSettingsMcpServers).length > 0) {
@@ -264,8 +274,12 @@ export class McpConfigService {
     const merged = new Map(config.httpServers);
 
     if (agentId) {
-      const agentMcpServers = await this.getAgentMcpServers(agentId);
+      const agentMcpServers = await this.getEffectiveAgentMcpServers(agentId);
       for (const [id, serverConfig] of Object.entries(agentMcpServers)) {
+        if (serverConfig?.enabled === false) {
+          merged.delete(id);
+          continue;
+        }
         const httpServer = toHttpServerConfig(id, serverConfig);
         if (httpServer) {
           merged.set(id, httpServer);
@@ -300,6 +314,36 @@ export class McpConfigService {
       result[id] = { url: raw.url, type };
     }
     return result;
+  }
+
+  private async getEffectiveAgentMcpServers(
+    agentId: string
+  ): Promise<Record<string, any>> {
+    const servers = await this.getAgentMcpServers(agentId);
+    const derived = await this.deriveLobuMemoryServer(agentId);
+    if (!derived) {
+      const withoutLobuMemory = { ...servers };
+      delete withoutLobuMemory["lobu-memory"];
+      return withoutLobuMemory;
+    }
+
+    const existing = servers["lobu-memory"];
+    if (existing && typeof existing === "object") {
+      return {
+        ...servers,
+        "lobu-memory": {
+          ...existing,
+          url: derived.url,
+          type: derived.type,
+          internal: true,
+        },
+      };
+    }
+
+    return {
+      ...servers,
+      "lobu-memory": derived,
+    };
   }
 
   private async getAgentMcpServers(
@@ -347,6 +391,40 @@ export class McpConfigService {
       logger.warn(`Failed to resolve ${LOBU_MEMORY_MCP_ID} for ${agentId}`, {
         error,
       });
+      return null;
+    }
+  }
+
+  private async deriveLobuMemoryServer(
+    agentId: string
+  ): Promise<Record<string, any> | null> {
+    const resolveOrgSlug = this.lobuMemory?.resolveOrgSlug;
+    if (!resolveOrgSlug) {
+      return null;
+    }
+
+    try {
+      const orgSlug = await resolveOrgSlug(agentId);
+      if (!orgSlug) {
+        return null;
+      }
+      const publicBaseUrl = (this.lobuMemory?.publicBaseUrl || "").replace(
+        /\/+$/,
+        ""
+      );
+      if (!publicBaseUrl) {
+        logger.warn(
+          `Cannot derive lobu-memory MCP for ${agentId}: public base URL is not configured`
+        );
+        return null;
+      }
+      return {
+        url: `${publicBaseUrl}/mcp/${encodeURIComponent(orgSlug)}`,
+        type: "streamable-http",
+        internal: true,
+      };
+    } catch (error) {
+      logger.warn(`Failed to derive lobu-memory MCP for ${agentId}`, { error });
       return null;
     }
   }
@@ -433,6 +511,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
             ? cloned.headers
             : undefined,
         authScope: parseAuthScope(cloned),
+        internal: cloned.internal === true,
       });
     }
   }
@@ -472,6 +551,7 @@ function toHttpServerConfig(
         ? cloned.headers
         : undefined,
     authScope: parseAuthScope(cloned),
+    internal: cloned.internal === true,
   };
 }
 

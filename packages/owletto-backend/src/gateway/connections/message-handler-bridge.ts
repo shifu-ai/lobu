@@ -16,7 +16,6 @@ import type { ArtifactStore } from "../files/artifact-store.js";
 import type { CoreServices } from "../platform.js";
 import {
   buildMessagePayload,
-  hasConfiguredProvider,
   resolveAgentId,
   resolveAgentOptions,
 } from "../services/platform-helpers.js";
@@ -529,20 +528,6 @@ export class MessageHandlerBridge {
     });
 
     try {
-      // Check if agent has any provider credentials before enqueuing
-      if (
-        !(await hasConfiguredProvider(
-          agentId,
-          agentSettingsStore,
-          this.services.getDeclaredAgentRegistry()
-        ))
-      ) {
-        await thread.post(
-          "No AI provider is configured yet. Provider setup is not available in the end-user chat flow yet. Ask an admin to connect a provider for the base agent."
-        );
-        return;
-      }
-
       const agentOptions = await resolveAgentOptions(
         agentId,
         {},
@@ -702,19 +687,6 @@ export class MessageHandlerBridge {
     );
 
     try {
-      if (
-        !(await hasConfiguredProvider(
-          agentId,
-          agentSettingsStore,
-          this.services.getDeclaredAgentRegistry()
-        ))
-      ) {
-        await thread.post(
-          "No AI provider is configured yet. Provider setup is not available in the end-user chat flow yet. Ask an admin to connect a provider for the base agent."
-        );
-        return;
-      }
-
       const agentOptions = await resolveAgentOptions(
         agentId,
         {},
