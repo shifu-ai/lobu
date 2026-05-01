@@ -6,7 +6,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import ora from "ora";
-import { isLoadError, loadConfig } from "../config/loader.js";
 import { parseEnvContent } from "../internal/index.js";
 
 /**
@@ -22,38 +21,22 @@ export async function devCommand(
   cwd: string,
   passthroughArgs: string[]
 ): Promise<void> {
-  const result = await loadConfig(cwd);
-
-  if (isLoadError(result)) {
-    console.error(chalk.red(`\n  ${result.error}`));
-    if (result.details) {
-      for (const detail of result.details) {
-        console.error(chalk.dim(`  ${detail}`));
-      }
-    }
-    console.log();
-    process.exit(1);
-  }
-
-  const { config } = result;
   const spinner = ora("Validating environment...").start();
 
   const envPath = join(cwd, ".env");
-  let envContent = "";
+  let envVars: Record<string, string> = {};
   try {
-    envContent = await readFile(envPath, "utf-8");
+    envVars = parseEnvContent(await readFile(envPath, "utf-8"));
   } catch {
-    spinner.fail(".env not found");
-    console.error(
-      chalk.red(`\n  No .env file at ${envPath}. Run \`lobu init\` first.\n`)
-    );
-    process.exit(1);
+    envVars = {};
   }
 
-  const envVars = parseEnvContent(envContent);
-  if (!envVars.DATABASE_URL) {
+  const mergedEnv = { ...envVars, ...(process.env as Record<string, string>) };
+  if (!mergedEnv.DATABASE_URL) {
     spinner.fail("DATABASE_URL is missing");
-    console.error(chalk.red(`\n  Set the following in .env:\n`));
+    console.error(
+      chalk.red(`\n  Set the following in your environment or .env:\n`)
+    );
     console.error(chalk.dim(`    DATABASE_URL=`));
     console.error(
       chalk.dim(
@@ -93,26 +76,24 @@ export async function devCommand(
     process.exit(1);
   }
 
-  const agentCount = Object.keys(config.agents).length;
-  spinner.succeed(`Loaded ${agentCount} agent(s) from lobu.toml`);
+  spinner.succeed("Environment ready");
 
-  const port = envVars.GATEWAY_PORT || envVars.PORT || "8787";
+  const port = mergedEnv.GATEWAY_PORT || mergedEnv.PORT || "8787";
   const gatewayUrl = `http://localhost:${port}`;
 
   console.log(chalk.cyan(`\n  Starting Lobu...\n`));
   console.log(chalk.dim(`  bundle:        ${bundlePath}`));
   console.log(
-    chalk.dim(`  database:      ${redactUrl(envVars.DATABASE_URL!)}`)
+    chalk.dim(`  database:      ${redactUrl(mergedEnv.DATABASE_URL!)}`)
   );
   console.log(chalk.dim(`  api docs:      ${gatewayUrl}/api/docs`));
   console.log();
 
   // Pass-through env: process.env wins so users can override per-invocation,
-  // .env values fill in the rest. LOBU_DEV_PROJECT_PATH points the gateway at
-  // this project so it loads lobu.toml and agent files.
+  // .env values fill in the rest. LOBU_DEV_PROJECT_PATH is optional and only
+  // used by file-first local workflows that still have a lobu.toml.
   const childEnv: Record<string, string> = {
-    ...envVars,
-    ...(process.env as Record<string, string>),
+    ...mergedEnv,
     LOBU_DEV_PROJECT_PATH:
       process.env.LOBU_DEV_PROJECT_PATH || envVars.LOBU_DEV_PROJECT_PATH || cwd,
     PORT: port,

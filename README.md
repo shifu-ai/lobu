@@ -30,19 +30,17 @@ cd my-bot
 npx @lobu/cli@latest run
 ```
 
-## Starter Skills
+## Agent configuration
 
-Install the Lobu starter skill into any local `skills/` directory:
-
-```bash
-npx @lobu/cli@latest skills add lobu
-```
-
-The bundled Lobu starter skill includes memory guidance. Configure local MCP clients when needed:
+Runtime configuration is managed through the web app or the same org-scoped REST API used by the CLI:
 
 ```bash
-npx @lobu/cli@latest memory init
+npx @lobu/cli@latest login
+npx @lobu/cli@latest org set my-org
+npx @lobu/cli@latest agent list
 ```
+
+Local `lobu.toml` projects are still useful for `lobu validate` and `lobu apply` workflows.
 
 ### Deployment
 

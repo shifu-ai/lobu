@@ -12,7 +12,7 @@ const localDev = {
       label: "Set DATABASE_URL in .env, then boot",
       code: "cd my-agent && npx @lobu/cli@latest run",
     },
-    { label: "Open the docs", code: "open http://localhost:8080/api/docs" },
+    { label: "Open the docs", code: "open http://localhost:8787/api/docs" },
   ],
 };
 

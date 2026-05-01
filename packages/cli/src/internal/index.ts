@@ -1,8 +1,10 @@
 export {
   addContext,
+  getActiveOrg,
   getCurrentContextName,
   loadContextConfig,
   resolveContext,
+  setActiveOrg,
   setCurrentContext,
 } from "./context.js";
 export {
@@ -16,6 +18,11 @@ export {
 } from "./credentials.js";
 export { parseEnvContent } from "./env-file.js";
 export {
-  GATEWAY_DEFAULT_URL,
-  resolveGatewayUrl,
-} from "./gateway-url.js";
+  type OrganizationInfo,
+  ApiClient,
+  ApiClientError,
+  apiBaseFromContextUrl,
+  listOrganizations,
+  resolveApiClient,
+} from "./api-client.js";
+export { GATEWAY_DEFAULT_URL, resolveGatewayUrl } from "./gateway-url.js";

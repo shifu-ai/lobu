@@ -1,6 +1,6 @@
 /**
  * Shared platform prompt/config logic.
- * Used by both `lobu init` and `lobu platforms add <platform>`.
+ * Used by `lobu init` when scaffolding optional local platform config.
  */
 
 import { input, password } from "@inquirer/prompts";

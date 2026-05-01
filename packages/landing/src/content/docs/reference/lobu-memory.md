@@ -143,7 +143,7 @@ Useful flags:
 The old standalone Owletto starter skills are folded into the bundled Lobu starter skill:
 
 ```bash
-lobu skills add lobu
+# Enable the Lobu skill from the agent settings UI
 ```
 
 Local skills are still discovered from `skills/<id>/SKILL.md` and `agents/<agent-id>/skills/<id>/SKILL.md`.

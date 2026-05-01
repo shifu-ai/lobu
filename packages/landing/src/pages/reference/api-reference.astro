@@ -5,7 +5,7 @@ import StarlightPage from "@astrojs/starlight/components/StarlightPage.astro";
 // Try the local dev gateway first, then fall back to production so the page
 // always renders something useful even when the local gateway is offline.
 const specOrigins = import.meta.env.DEV
-  ? ["http://localhost:8080", "https://app.lobu.ai"]
+  ? ["http://localhost:8787", "https://app.lobu.ai"]
   : ["https://app.lobu.ai"];
 
 let spec: string | null = null;

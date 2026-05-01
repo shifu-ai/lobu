@@ -95,29 +95,21 @@ Lobu supports two configuration approaches depending on how you deploy:
 
 ### CLI
 
-After `init`, your project is configured through `lobu.toml`. Use the CLI to add providers and install starter skills at any time:
+Runtime agent configuration lives in the web app/API. Use the UI for providers, platforms, and skills; use local files for validate/apply workflows:
 
 ```bash
-# Browse and add providers
-npx @lobu/cli@latest providers list
-npx @lobu/cli@latest providers add gemini          # prompts for API key, updates lobu.toml + .env
+# Select the target org and inspect remote agents
+npx @lobu/cli@latest org set my-org
+npx @lobu/cli@latest agent list
 
-# Install the Lobu starter skill into skills/lobu
-npx @lobu/cli@latest skills list
-npx @lobu/cli@latest skills add lobu
-
-# Install the bundled Lobu starter skill
-npx @lobu/cli@latest skills add lobu
-
-# Manage secrets
-npx @lobu/cli@latest secrets set GEMINI_API_KEY AIza...
-npx @lobu/cli@latest secrets list
-
-# Validate and run
+# Validate/apply local artifacts when you are using a checked-out project
 npx @lobu/cli@latest validate
+npx @lobu/cli@latest apply --org my-org
+
+# Run the embedded app/server locally
 npx @lobu/cli@latest run
 ```
 
 See the [CLI Reference](/reference/cli/) for all available commands.
 
-The CLI exposes an admin page at `/agents` and a REST API at `/api/docs` for runtime management — adding providers, connections, and viewing agent status.
+The web app and CLI use the same org-scoped REST API for runtime management — adding providers, connections, skills, and viewing agent status.

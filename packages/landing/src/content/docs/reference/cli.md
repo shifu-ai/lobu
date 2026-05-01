@@ -5,7 +5,7 @@ sidebar:
   order: 0
 ---
 
-The Lobu CLI (`@lobu/cli`) scaffolds projects, runs agents locally, and manages deployments.
+The Lobu CLI (`@lobu/cli`) scaffolds local project files, runs the embedded server, and manages org/agent configuration through the same REST API used by the web app.
 
 ## Install
 
@@ -22,7 +22,7 @@ lobu <command>
 
 ### `init [name]`
 
-Scaffold a new agent project with `lobu.toml`, `.env`, and an agent directory.
+Scaffold a local agent project with `lobu.toml`, `.env`, and an agent directory.
 
 ```bash
 npx @lobu/cli@latest init my-agent
@@ -30,13 +30,96 @@ npx @lobu/cli@latest init my-agent
 
 Generates:
 
-- `lobu.toml` — agent configuration (skills, providers, connections, network)
-- `.env` — credentials and environment variables (set `DATABASE_URL` after init)
-- `agents/{name}/` — agent directory with `IDENTITY.md`, `SOUL.md`, `USER.md`, and `skills/`
-- `skills/` — shared skills directory (available to all agents)
+- `lobu.toml` — local project/apply/validate configuration
+- `.env` — local environment variables (set `DATABASE_URL` after init)
+- `agents/{name}/` — `IDENTITY.md`, `SOUL.md`, `USER.md`, local skills, and evals
+- `skills/` — shared local skills directory
 - `AGENTS.md`, `TESTING.md`, `README.md`, `.gitignore`
 
-Interactive prompts guide you through provider, skills, platform, network access policy, gateway port, public URL, admin password, and memory configuration. Postgres (with pgvector) is the only user-provided external — Lobu does not bundle it.
+Interactive prompts guide you through provider, platform, network access policy, gateway port, public URL, and memory configuration. Postgres (with pgvector) is the only user-provided external — Lobu does not bundle it.
+
+---
+
+### `run`
+
+Run the embedded Lobu stack. `lobu.toml` is not required; set `DATABASE_URL` in the environment or `.env`, then run:
+
+```bash
+npx @lobu/cli@latest run
+```
+
+The command spawns the bundled Node server (`@lobu/owletto-backend/dist/server.bundle.mjs`) and forwards stdio. Ctrl+C cleanly stops the server and worker subprocesses. Extra arguments are forwarded to the Node entry point.
+
+---
+
+### `login`
+
+Authenticate with Lobu via the OAuth 2.0 device-code flow. Prints a verification URL and opens it in the browser; you approve there and the CLI receives the token.
+
+```bash
+npx @lobu/cli@latest login
+npx @lobu/cli@latest login --token <api-token>      # CI/CD
+npx @lobu/cli@latest login -c staging               # login to a named context
+npx @lobu/cli@latest login --force                  # re-authenticate
+```
+
+| Flag | Description |
+|------|-------------|
+| `--token <token>` | Use an API token directly |
+| `-c, --context <name>` | Authenticate against a named context |
+| `-f, --force` | Re-authenticate, revoking the existing OAuth session first |
+
+---
+
+### `context`
+
+Manage named API contexts.
+
+```bash
+npx @lobu/cli@latest context list
+npx @lobu/cli@latest context current
+npx @lobu/cli@latest context add staging --api-url https://staging.example.com/api/v1
+npx @lobu/cli@latest context use staging
+```
+
+Environment overrides: set `LOBU_CONTEXT` to select a context by name, or `LOBU_API_URL` to override the URL directly.
+
+---
+
+### `org`
+
+Manage the active organization for org-scoped API commands.
+
+```bash
+npx @lobu/cli@latest org list
+npx @lobu/cli@latest org current
+npx @lobu/cli@latest org set my-org
+```
+
+`LOBU_ORG` overrides the active org for one process.
+
+---
+
+### `agent`
+
+Manage agents via the same org-scoped REST endpoints as the web app.
+
+```bash
+npx @lobu/cli@latest agent list
+npx @lobu/cli@latest agent get my-agent
+npx @lobu/cli@latest agent create my-agent --name "My Agent"
+npx @lobu/cli@latest agent update my-agent --description "Handles support"
+npx @lobu/cli@latest agent delete my-agent --yes
+```
+
+Config helpers use the web app's `/config` API:
+
+```bash
+npx @lobu/cli@latest agent config get my-agent --output config.json
+npx @lobu/cli@latest agent config patch my-agent --file config.patch.json
+```
+
+Most agent commands accept `--org <slug>`, `-c/--context <name>`, and `--json` where useful.
 
 ---
 
@@ -51,38 +134,34 @@ npx @lobu/cli@latest chat "Check my PRs" --user telegram:12345
 npx @lobu/cli@latest chat "Status update" -c staging
 ```
 
-**API mode** (default): creates a session, sends the message, and streams the response to the terminal.
-
-**Platform mode** (with `--user`): routes the message through Telegram/Slack/Discord so the response appears on the platform. The terminal also streams the output.
-
 | Flag | Description |
 |------|-------------|
-| `-a, --agent <id>` | Agent ID (defaults to first agent in `lobu.toml`) |
+| `-a, --agent <id>` | Agent ID (defaults to first agent in local `lobu.toml` when present) |
 | `-u, --user <id>` | Route through a platform (e.g. `telegram:12345`, `slack:C0123`) |
 | `-t, --thread <id>` | Thread/conversation ID for multi-turn conversations |
-| `-g, --gateway <url>` | Gateway URL (default: `http://localhost:8080` or from `.env`) |
+| `-g, --gateway <url>` | Gateway URL (default: `http://localhost:8787` or from `.env`) |
 | `--dry-run` | Process without persisting history |
-| `--new` | Force a new session (ignore existing) |
+| `--new` | Force a new session |
 | `-c, --context <name>` | Use a named context for gateway URL and credentials |
 
 ---
 
 ### `eval [name]`
 
-Run agent evaluations. Eval files live in the agent directory and define test cases with expected outcomes.
+Run local agent evaluations. Eval files live in the agent directory and define test cases with expected outcomes.
 
 ```bash
-npx @lobu/cli@latest eval                           # run all evals
-npx @lobu/cli@latest eval basic-qa                  # run a specific eval
-npx @lobu/cli@latest eval --model claude/sonnet     # eval with a specific model
-npx @lobu/cli@latest eval --ci --output results.json  # CI mode with JSON output
+npx @lobu/cli@latest eval
+npx @lobu/cli@latest eval basic-qa
+npx @lobu/cli@latest eval --model claude/sonnet
+npx @lobu/cli@latest eval --ci --output results.json
 ```
 
 | Flag | Description |
 |------|-------------|
-| `-a, --agent <id>` | Agent ID (defaults to first in `lobu.toml`) |
-| `-g, --gateway <url>` | Gateway URL (default: `http://localhost:8080`) |
-| `-m, --model <model>` | Model to evaluate (e.g. `claude/sonnet`, `openai/gpt-4.1`) |
+| `-a, --agent <id>` | Agent ID (defaults to first in local `lobu.toml`) |
+| `-g, --gateway <url>` | Gateway URL (default: `http://localhost:8787`) |
+| `-m, --model <model>` | Model to evaluate |
 | `--trials <n>` | Override trial count |
 | `--ci` | CI mode: JSON output, non-zero exit on failure |
 | `--output <file>` | Write results to JSON file |
@@ -90,21 +169,9 @@ npx @lobu/cli@latest eval --ci --output results.json  # CI mode with JSON output
 
 ---
 
-### `run`
-
-Run the embedded Lobu stack. Validates `lobu.toml`, checks that `DATABASE_URL` is set in `.env`, then spawns the bundled Node server (`@lobu/owletto-backend/dist/server.bundle.mjs`) as a child process and forwards stdio. Ctrl+C cleanly stops the server and any worker subprocesses.
-
-```bash
-npx @lobu/cli@latest run              # boot the gateway + workers + memory backend
-```
-
-Extra arguments are forwarded to the Node entry point.
-
----
-
 ### `validate`
 
-Validate `lobu.toml` schema, skill IDs, and provider configuration.
+Validate local `lobu.toml` schema, skill IDs, and provider configuration.
 
 ```bash
 npx @lobu/cli@latest validate
@@ -114,165 +181,53 @@ Returns exit code `1` if validation fails.
 
 ---
 
-### `context`
+### `apply`
 
-Manage named API contexts for switching between local and remote gateways.
-
-```bash
-npx @lobu/cli@latest context list
-npx @lobu/cli@latest context current
-npx @lobu/cli@latest context add staging --api-url https://staging.example.com
-npx @lobu/cli@latest context use staging
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | List all configured contexts |
-| `current` | Show the active context |
-| `add <name> --api-url <url>` | Add a named context |
-| `use <name>` | Set the active context |
-
-Environment overrides: set `LOBU_CONTEXT` to select a context by name, or `LOBU_API_URL` to override the URL directly.
-
----
-
-### `login`
-
-Authenticate with Lobu Cloud via the OAuth 2.0 device-code flow. Prints a
-verification URL and opens it in the browser; you approve there and the CLI
-receives the token.
+Sync local `lobu.toml` and agent directories to a Lobu org.
 
 ```bash
-npx @lobu/cli@latest login
-npx @lobu/cli@latest login --token <api-token>      # CI/CD
-npx @lobu/cli@latest login -c staging               # login to a named context
-npx @lobu/cli@latest login --force                  # re-authenticate (revokes existing session)
+npx @lobu/cli@latest apply --org my-org
+npx @lobu/cli@latest apply --dry-run
 ```
-
-| Flag | Description |
-|------|-------------|
-| `--token <token>` | Use an API token directly (for CI/CD pipelines) |
-| `-c, --context <name>` | Authenticate against a named context |
-| `-f, --force` | Re-authenticate, revoking the existing session first |
-
----
-
-### `logout`
-
-Revoke the session server-side and clear stored credentials. If the gateway is unreachable, local credentials are still cleared.
-
-```bash
-npx @lobu/cli@latest logout
-npx @lobu/cli@latest logout -c staging
-```
-
-| Flag | Description |
-|------|-------------|
-| `-c, --context <name>` | Clear credentials for a named context |
-
----
-
-### `whoami`
-
-Show the current authenticated user, linked agent, and API URL.
-
-```bash
-npx @lobu/cli@latest whoami
-npx @lobu/cli@latest whoami -c staging
-```
-
-| Flag | Description |
-|------|-------------|
-| `-c, --context <name>` | Query a named context |
 
 ---
 
 ### `status`
 
-Show agent health: lists agents with their providers and models, platform connections with status, and active sandboxes. Requires the gateway to be running.
+Show a summary of agents in the active org.
 
 ```bash
 npx @lobu/cli@latest status
+npx @lobu/cli@latest status --org my-org
 ```
 
 ---
 
-### `secrets`
-
-Manage agent secrets (stored in `.env` for local dev).
+### `logout`, `whoami`, `token`
 
 ```bash
-npx @lobu/cli@latest secrets set OPENAI_API_KEY sk-...
-npx @lobu/cli@latest secrets list
-npx @lobu/cli@latest secrets delete OPENAI_API_KEY
+npx @lobu/cli@latest whoami
+npx @lobu/cli@latest token --raw
+npx @lobu/cli@latest logout
 ```
-
-| Subcommand | Description |
-|------------|-------------|
-| `set <key> <value>` | Set a secret |
-| `list` | List secrets (values redacted) |
-| `delete <key>` | Remove a secret |
-
----
-
-### `skills`
-
-Install bundled starter skills into a local `skills/` directory.
-
-```bash
-npx @lobu/cli@latest skills list
-npx @lobu/cli@latest skills add lobu
-npx @lobu/cli@latest skills add lobu --force
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | Show bundled Lobu starter skills |
-| `add <id>` | Copy a bundled starter skill into `skills/<id>` |
-
-The bundled Lobu starter skill includes memory guidance:
-
-```bash
-npx @lobu/cli@latest skills add lobu
-```
-
----
-
-### `providers`
-
-Browse and manage LLM providers.
-
-```bash
-npx @lobu/cli@latest providers list       # browse available providers
-npx @lobu/cli@latest providers add gemini  # add to lobu.toml
-```
-
-| Subcommand | Description |
-|------------|-------------|
-| `list` | Browse available LLM providers |
-| `add <id>` | Add a provider to `lobu.toml` |
 
 ## Typical workflow
 
 ```bash
-# 1. Scaffold
+# 1. Authenticate and select org
+npx @lobu/cli@latest login
+npx @lobu/cli@latest org set my-org
+
+# 2. Manage remote/UI-backed agents
+npx @lobu/cli@latest agent list
+npx @lobu/cli@latest agent create my-agent --name "My Agent"
+
+# 3. Optional local artifact workflow
 npx @lobu/cli@latest init my-agent
-
-# 2. Configure
 cd my-agent
-npx @lobu/cli@latest skills add lobu
-npx @lobu/cli@latest providers add gemini
-npx @lobu/cli@latest secrets set GEMINI_API_KEY ...
-
-# Optional: install the bundled Lobu starter skill
-npx @lobu/cli@latest skills add lobu
-
-# 3. Validate
 npx @lobu/cli@latest validate
+npx @lobu/cli@latest apply --org my-org
 
-# 4. Run locally
-npx @lobu/cli@latest run -d
-
-# 5. Chat with your agent
-npx @lobu/cli@latest chat "Hello, what can you do?"
+# 4. Run locally when DATABASE_URL is configured
+npx @lobu/cli@latest run
 ```

@@ -6,7 +6,7 @@ import { confirm, input, password, select } from "@inquirer/prompts";
 import chalk from "chalk";
 import ora from "ora";
 import { promptPlatformConfig } from "../commands/platforms/platform-prompts.js";
-import { secretsSetCommand } from "../commands/secrets.js";
+import { setLocalEnvValue } from "../internal/local-env.js";
 import {
   getProviderById,
   loadProviderRegistry,
@@ -68,7 +68,7 @@ export async function initCommand(
   // Gateway port selection
   const gatewayPort = await input({
     message: "Gateway port?",
-    default: "8080",
+    default: "8787",
     validate: (value: string) => {
       const port = Number(value);
       if (!Number.isInteger(port) || port < 1 || port > 65535) {
@@ -83,18 +83,6 @@ export async function initCommand(
     message:
       "Public gateway URL? (leave empty for local dev, set for OAuth/webhooks)",
     default: "",
-  });
-
-  // Admin password
-  const adminPassword = await password({
-    message: "Admin password?",
-    mask: true,
-    validate: (value: string) => {
-      if (!value || value.length < 4) {
-        return "Password must be at least 4 characters";
-      }
-      return true;
-    },
   });
 
   // Worker network access policy
@@ -297,7 +285,6 @@ export async function initCommand(
     const variables = {
       PROJECT_NAME: projectName,
       CLI_VERSION: cliVersion,
-      ADMIN_PASSWORD: adminPassword,
       ENCRYPTION_KEY: answers.encryptionKey,
       GATEWAY_PORT: gatewayPort,
       WORKER_ALLOWED_DOMAINS: answers.allowedDomains,
@@ -309,7 +296,7 @@ export async function initCommand(
 
     // Save public gateway URL if explicitly set
     if (publicGatewayUrl) {
-      await secretsSetCommand(
+      await setLocalEnvValue(
         projectDir,
         "PUBLIC_GATEWAY_URL",
         publicGatewayUrl
@@ -318,7 +305,7 @@ export async function initCommand(
 
     // Save provider API key to .env
     if (providerApiKey && selectedProvider?.providers?.[0]?.envVarName) {
-      await secretsSetCommand(
+      await setLocalEnvValue(
         projectDir,
         selectedProvider.providers[0].envVarName,
         providerApiKey
@@ -327,12 +314,12 @@ export async function initCommand(
 
     // Save platform secrets to .env
     for (const secret of platformSecrets) {
-      await secretsSetCommand(projectDir, secret.envVar, secret.value);
+      await setLocalEnvValue(projectDir, secret.envVar, secret.value);
     }
 
     // Save OAuth secrets to .env
     for (const secret of envSecrets) {
-      await secretsSetCommand(projectDir, secret.envVar, secret.value);
+      await setLocalEnvValue(projectDir, secret.envVar, secret.value);
     }
 
     // Create .gitignore

@@ -14,6 +14,7 @@ interface LobuContextEntry {
 
 interface LobuContextConfig {
   currentContext: string;
+  activeOrg?: string;
   contexts: Record<string, LobuContextEntry>;
 }
 
@@ -25,6 +26,7 @@ interface ResolvedContext {
 
 interface StoredContextConfig {
   currentContext?: string;
+  activeOrg?: string;
   contexts?: Record<string, LobuContextEntry>;
 }
 
@@ -53,6 +55,32 @@ export async function getCurrentContextName(): Promise<string> {
 
   const config = await loadContextConfig();
   return config.currentContext;
+}
+
+export async function getActiveOrg(): Promise<string | undefined> {
+  const envOrg = process.env.LOBU_ORG?.trim();
+  if (envOrg) return envOrg;
+  const config = await loadContextConfig();
+  return config.activeOrg;
+}
+
+export async function setActiveOrg(
+  orgSlug: string
+): Promise<LobuContextConfig> {
+  const trimmed = orgSlug.trim();
+  if (!trimmed) {
+    throw new Error("Organization slug cannot be empty.");
+  }
+  if (!/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/.test(trimmed)) {
+    throw new Error(
+      `Invalid organization slug "${orgSlug}". Slugs may only contain alphanumeric characters, hyphens, and underscores.`
+    );
+  }
+
+  const config = await loadContextConfig();
+  config.activeOrg = trimmed;
+  await saveContextConfig(config);
+  return config;
 }
 
 export async function resolveContext(
@@ -140,7 +168,14 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
       ? raw.currentContext
       : DEFAULT_CONTEXT_NAME;
 
-  return { currentContext, contexts };
+  return {
+    currentContext,
+    activeOrg:
+      typeof raw.activeOrg === "string" && raw.activeOrg.trim()
+        ? raw.activeOrg.trim()
+        : undefined,
+    contexts,
+  };
 }
 
 function normalizeAndValidateApiUrl(apiUrl: string): string {

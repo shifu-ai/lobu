@@ -189,7 +189,7 @@ When a rubric is present, its score is weighted 50% alongside assertion scores (
 | Flag | Description |
 |------|-------------|
 | `-a, --agent <id>` | Agent ID (defaults to first in `lobu.toml`) |
-| `-g, --gateway <url>` | Gateway URL (default: from `.env` or `http://localhost:8080`) |
+| `-g, --gateway <url>` | Gateway URL (default: from `.env` or `http://localhost:8787`) |
 | `-m, --model <model>` | Model to evaluate (e.g., `anthropic/claude-sonnet-4`) |
 | `--trials <n>` | Override trial count for all evals |
 | `--ci` | CI mode: JSON output, exit code 1 on any failure |

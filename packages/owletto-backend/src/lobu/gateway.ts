@@ -73,12 +73,6 @@ function ensureEmbeddedGatewaySecrets(): void {
       );
     }
   }
-
-  if (!process.env.ADMIN_PASSWORD && !process.env.LOBU_ADMIN_PASSWORD) {
-    process.env.ADMIN_PASSWORD = crypto.randomBytes(16).toString('base64url');
-  } else if (process.env.LOBU_ADMIN_PASSWORD) {
-    process.env.ADMIN_PASSWORD = process.env.LOBU_ADMIN_PASSWORD;
-  }
 }
 
 /**

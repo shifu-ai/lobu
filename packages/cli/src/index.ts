@@ -104,6 +104,7 @@ export async function runCli(
     .option("--list", "List available evals without running them")
     .option("--ci", "CI mode: JSON output, non-zero exit on failure")
     .option("--output <file>", "Write results to JSON file")
+    .option("-c, --context <name>", "Use a named context")
     .action(
       async (
         name: string | undefined,
@@ -115,6 +116,7 @@ export async function runCli(
           list?: boolean;
           ci?: boolean;
           output?: string;
+          context?: string;
         }
       ) => {
         const { evalCommand } = await import("./commands/eval.js");
@@ -284,120 +286,177 @@ export async function runCli(
   // ─── status ─────────────────────────────────────────────────────────
   program
     .command("status")
-    .description("Agent health and version info")
-    .action(async () => {
+    .description("Show agent status from the active org")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .action(async (options: { context?: string; org?: string }) => {
       const { statusCommand } = await import("./commands/status.js");
-      await statusCommand(process.cwd());
+      await statusCommand(options);
     });
 
-  // ─── secrets ────────────────────────────────────────────────────────
-  const secrets = program
-    .command("secrets")
-    .description("Manage agent secrets");
+  // ─── org ────────────────────────────────────────────────────────────
+  const org = program.command("org").description("Manage active Lobu org");
 
-  secrets
-    .command("set <key> <value>")
-    .description("Set a secret (stored in local .env for dev)")
-    .action(async (key: string, value: string) => {
-      const { secretsSetCommand } = await import("./commands/secrets.js");
-      await secretsSetCommand(process.cwd(), key, value);
-    });
-
-  secrets
+  org
     .command("list")
-    .description("List secrets (values redacted)")
+    .description("List organizations available to the current login")
+    .option("-c, --context <name>", "Use a named context")
+    .action(async (options: { context?: string }) => {
+      const { orgListCommand } = await import("./commands/org.js");
+      await orgListCommand(options);
+    });
+
+  org
+    .command("current")
+    .description("Show the active org")
     .action(async () => {
-      const { secretsListCommand } = await import("./commands/secrets.js");
-      await secretsListCommand(process.cwd());
+      const { orgCurrentCommand } = await import("./commands/org.js");
+      await orgCurrentCommand();
     });
 
-  secrets
-    .command("delete <key>")
-    .description("Remove a secret")
-    .action(async (key: string) => {
-      const { secretsDeleteCommand } = await import("./commands/secrets.js");
-      await secretsDeleteCommand(process.cwd(), key);
+  org
+    .command("set <slug>")
+    .description("Set the active org slug")
+    .action(async (slug: string) => {
+      const { orgSetCommand } = await import("./commands/org.js");
+      await orgSetCommand(slug);
     });
 
-  // ─── providers ──────────────────────────────────────────────────────
-  const providers = program
-    .command("providers")
-    .description("Browse and manage LLM providers");
+  // ─── agent ──────────────────────────────────────────────────────────
+  const agent = program
+    .command("agent")
+    .description("Manage agents via the same REST API as the web app");
 
-  providers
+  agent
     .command("list")
-    .description("Browse available LLM providers")
-    .action(async () => {
-      const { providersListCommand } = await import(
-        "./commands/providers/list.js"
-      );
-      await providersListCommand();
-    });
-
-  providers
-    .command("add <id>")
-    .description("Add a provider to lobu.toml")
-    .action(async (id: string) => {
-      const { providersAddCommand } = await import(
-        "./commands/providers/add.js"
-      );
-      await providersAddCommand(process.cwd(), id);
-    });
-
-  // ─── skills ─────────────────────────────────────────────────────────
-  const skills = program
-    .command("skills")
-    .description(
-      "Install bundled starter skills into the local skills/ directory"
+    .description("List agents")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .option("--json", "Print JSON")
+    .action(
+      async (options: { context?: string; org?: string; json?: boolean }) => {
+        const { agentListCommand } = await import("./commands/agent.js");
+        await agentListCommand(options);
+      }
     );
 
-  skills
-    .command("list")
-    .description("List bundled starter skills")
-    .action(async () => {
-      const { skillsListCommand } = await import("./commands/skills/list.js");
-      await skillsListCommand();
-    });
+  agent
+    .command("get <agentId>")
+    .description("Get an agent")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .action(
+      async (agentId: string, options: { context?: string; org?: string }) => {
+        const { agentGetCommand } = await import("./commands/agent.js");
+        await agentGetCommand(agentId, options);
+      }
+    );
 
-  skills
-    .command("add <id>")
-    .description("Install a bundled starter skill into skills/<id>")
-    .option(
-      "-d, --dir <path>",
-      "Target directory (defaults to current working directory)"
-    )
-    .option("-f, --force", "Overwrite an existing skills/<id> directory")
-    .action(async (id: string, options: { dir?: string; force?: boolean }) => {
-      const { skillsAddCommand } = await import("./commands/skills/add.js");
-      await skillsAddCommand(process.cwd(), id, options);
-    });
+  agent
+    .command("create <agentId>")
+    .description("Create an agent")
+    .option("--name <name>", "Display name")
+    .option("--description <text>", "Description")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .option("--json", "Print JSON")
+    .action(
+      async (
+        agentId: string,
+        options: {
+          name?: string;
+          description?: string;
+          context?: string;
+          org?: string;
+          json?: boolean;
+        }
+      ) => {
+        const { agentCreateCommand } = await import("./commands/agent.js");
+        await agentCreateCommand(agentId, options);
+      }
+    );
 
-  // ─── platforms ──────────────────────────────────────────────────────
-  const platforms = program
-    .command("platforms")
-    .description("Manage chat platforms");
+  agent
+    .command("update <agentId>")
+    .description("Update agent metadata")
+    .option("--name <name>", "Display name")
+    .option("--description <text>", "Description")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .option("--json", "Print JSON")
+    .action(
+      async (
+        agentId: string,
+        options: {
+          name?: string;
+          description?: string;
+          context?: string;
+          org?: string;
+          json?: boolean;
+        }
+      ) => {
+        const { agentUpdateCommand } = await import("./commands/agent.js");
+        await agentUpdateCommand(agentId, options);
+      }
+    );
 
-  platforms
-    .command("list")
-    .description("List configured platforms per agent")
-    .action(async () => {
-      const { platformsListCommand } = await import(
-        "./commands/platforms/list.js"
-      );
-      await platformsListCommand(process.cwd());
-    });
+  agent
+    .command("delete <agentId>")
+    .description("Delete an agent")
+    .option("--yes", "Confirm deletion")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .action(
+      async (
+        agentId: string,
+        options: { yes?: boolean; context?: string; org?: string }
+      ) => {
+        const { agentDeleteCommand } = await import("./commands/agent.js");
+        await agentDeleteCommand(agentId, options);
+      }
+    );
 
-  platforms
-    .command("add <platform>")
-    .description(
-      "Add a chat platform (telegram, slack, discord, whatsapp, teams, gchat)"
-    )
-    .action(async (platform: string) => {
-      const { platformsAddCommand } = await import(
-        "./commands/platforms/add.js"
-      );
-      await platformsAddCommand(process.cwd(), platform);
-    });
+  const agentConfig = agent
+    .command("config")
+    .description("Read or patch agent config");
+
+  agentConfig
+    .command("get <agentId>")
+    .description("Print agent config JSON")
+    .option("--output <file>", "Write JSON to a file")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .action(
+      async (
+        agentId: string,
+        options: { output?: string; context?: string; org?: string }
+      ) => {
+        const { agentConfigGetCommand } = await import("./commands/agent.js");
+        await agentConfigGetCommand(agentId, options);
+      }
+    );
+
+  agentConfig
+    .command("patch <agentId>")
+    .description("Patch agent config from a JSON file")
+    .requiredOption("--file <file>", "JSON file with config fields to update")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .option("--json", "Print JSON")
+    .action(
+      async (
+        agentId: string,
+        options: {
+          file: string;
+          context?: string;
+          org?: string;
+          json?: boolean;
+        }
+      ) => {
+        const { agentConfigPatchCommand } = await import("./commands/agent.js");
+        await agentConfigPatchCommand(agentId, options);
+      }
+    );
 
   // ─── doctor ─────────────────────────────────────────────────────────
   program

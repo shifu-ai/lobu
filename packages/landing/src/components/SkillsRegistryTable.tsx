@@ -15,7 +15,7 @@ const headerCellStyle = {
 const starterSkills = [
   {
     product: "Lobu",
-    install: "npx @lobu/cli@latest skills add lobu",
+    install: "Enable from the agent settings UI",
     adds: "The Lobu starter skill in skills/lobu/ (includes memory guidance)",
   },
 ];
@@ -25,8 +25,8 @@ export function SkillsRegistryTable() {
     <div>
       <h2>Starter Skills</h2>
       <p>
-        Lobu ships one starter-skill installer. After install, Lobu discovers
-        local skills from <code>skills/&lt;name&gt;/SKILL.md</code> or{" "}
+        Lobu ships one starter skill. Lobu also discovers local skills from{" "}
+        <code>skills/&lt;name&gt;/SKILL.md</code> or{" "}
         <code>agents/&lt;agent-id&gt;/skills/&lt;name&gt;/SKILL.md</code>.
       </p>
       <div style={{ overflowX: "auto" }}>
@@ -40,7 +40,7 @@ export function SkillsRegistryTable() {
           <thead>
             <tr>
               <th style={headerCellStyle}>Product</th>
-              <th style={headerCellStyle}>Install command</th>
+              <th style={headerCellStyle}>Install</th>
               <th style={headerCellStyle}>What it adds</th>
             </tr>
           </thead>

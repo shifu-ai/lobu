@@ -2825,7 +2825,7 @@ export function getSkillsPrompt(showcase: LandingUseCaseShowcase) {
 export function getMemoryPrompt(showcase: LandingUseCaseShowcase) {
   const memory = showcase.memory;
 
-  return `Run \`npx @lobu/cli@latest skills add lobu\` and then \`npx @lobu/cli@latest memory init\` to set up Lobu memory for ${showcase.label}. Model these entities: ${memory.entityTypes.join(", ")}. Keep the extracted memory durable, typed, and linked so the runtime can reuse it across future tasks.`;
+  return `Use the Agents UI to enable the Lobu skill and configure memory for ${showcase.label}. Model these entities: ${memory.entityTypes.join(", ")}. Keep the extracted memory durable, typed, and linked so the runtime can reuse it across future tasks.`;
 }
 
 const LOBU_ZONE =

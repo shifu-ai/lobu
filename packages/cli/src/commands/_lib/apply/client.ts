@@ -1,13 +1,6 @@
 import type { AgentSettings } from "@lobu/core";
-import { ApiError, ValidationError } from "../../memory/_lib/errors.js";
-import {
-  getSessionForOrg,
-  getUsableToken,
-  mcpUrlForOrg,
-  orgFromMcpUrl,
-  resolveOrg,
-  resolveServerUrl,
-} from "../../memory/_lib/openclaw-auth.js";
+import { resolveApiClient } from "../../../internal/index.js";
+import { ApiError } from "../../memory/_lib/errors.js";
 
 // ── Wire types ─────────────────────────────────────────────────────────────
 
@@ -98,61 +91,6 @@ async function parseResponseBody(
   } catch {
     throw new ApiError(`Invalid JSON from ${url}: ${raw.slice(0, 500)}`);
   }
-}
-
-// ── Auth resolver — same shape as seed-cmd.ts (PR #459) ────────────────────
-
-async function resolveAuth(
-  urlFlag?: string,
-  orgFlag?: string,
-  storePath?: string
-): Promise<{ token: string; mcpUrl: string; orgSlug: string }> {
-  const org = resolveOrg(orgFlag);
-  if (org) {
-    const orgSession = getSessionForOrg(org, storePath, urlFlag);
-    if (orgSession) {
-      const result = await getUsableToken(orgSession.key, storePath);
-      if (result) {
-        return { token: result.token, mcpUrl: orgSession.key, orgSlug: org };
-      }
-    }
-    const serverUrl = resolveServerUrl(urlFlag, storePath);
-    if (serverUrl) {
-      const orgUrl = mcpUrlForOrg(serverUrl, org);
-      const result = await getUsableToken(orgUrl, storePath);
-      if (result) {
-        return { token: result.token, mcpUrl: orgUrl, orgSlug: org };
-      }
-    }
-    throw new ValidationError("Not logged in. Run: lobu login");
-  }
-
-  const serverUrl = resolveServerUrl(urlFlag, storePath);
-  const result = await getUsableToken(serverUrl || undefined, storePath);
-  if (!result) {
-    throw new ValidationError("Not logged in. Run: lobu login");
-  }
-  const resolvedOrg =
-    orgFromMcpUrl(result.session.mcpUrl) || result.session.org;
-  if (!resolvedOrg) {
-    throw new ValidationError(
-      "Cannot determine org. Use --org or set LOBU_MEMORY_ORG."
-    );
-  }
-  return {
-    token: result.token,
-    mcpUrl: result.session.mcpUrl,
-    orgSlug: resolvedOrg,
-  };
-}
-
-/** Strip the path off an MCP URL to reach the API root. */
-export function deriveApiBaseUrl(mcpUrl: string): string {
-  const url = new URL(mcpUrl);
-  url.pathname = "";
-  url.search = "";
-  url.hash = "";
-  return url.toString().replace(/\/+$/, "");
 }
 
 // ── Client ─────────────────────────────────────────────────────────────────
@@ -264,7 +202,7 @@ export class ApplyClient {
   ): Promise<void> {
     await this.request(
       "PATCH",
-      `/api/${this.orgSlug}/agents/${agentId}`,
+      `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}`,
       agent
     );
   }
@@ -273,7 +211,7 @@ export class ApplyClient {
     try {
       const { body } = await this.request<AgentSettings>(
         "GET",
-        `/api/${this.orgSlug}/agents/${agentId}/config`
+        `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`
       );
       return body;
     } catch (err) {
@@ -288,7 +226,7 @@ export class ApplyClient {
   ): Promise<void> {
     await this.request(
       "PATCH",
-      `/api/${this.orgSlug}/agents/${agentId}/config`,
+      `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/config`,
       settings
     );
   }
@@ -298,7 +236,7 @@ export class ApplyClient {
   async listPlatforms(agentId: string): Promise<RemotePlatform[]> {
     const { body } = await this.request<{ platforms?: RemotePlatform[] }>(
       "GET",
-      `/api/${this.orgSlug}/agents/${agentId}/platforms`
+      `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/platforms`
     );
     return body.platforms ?? [];
   }
@@ -320,7 +258,7 @@ export class ApplyClient {
   ): Promise<UpsertPlatformResult> {
     const { body } = await this.request<UpsertPlatformResult>(
       "PUT",
-      `/api/${this.orgSlug}/agents/${agentId}/platforms/by-stable-id/${encodeURIComponent(stableId)}`,
+      `/api/${this.orgSlug}/agents/${encodeURIComponent(agentId)}/platforms/by-stable-id/${encodeURIComponent(stableId)}`,
       payload
     );
     return body;
@@ -471,24 +409,21 @@ export interface ResolvedClient {
   client: ApplyClient;
   apiBaseUrl: string;
   orgSlug: string;
-  mcpUrl: string;
 }
 
 export async function resolveApplyClient(opts: {
   url?: string;
   org?: string;
-  storePath?: string;
   fetchImpl?: typeof fetch;
 }): Promise<ResolvedClient> {
-  const { token, mcpUrl, orgSlug } = await resolveAuth(
-    opts.url,
-    opts.org,
-    opts.storePath
-  );
-  const apiBaseUrl = deriveApiBaseUrl(mcpUrl);
+  const { token, apiBaseUrl, orgSlug } = await resolveApiClient({
+    org: opts.org,
+    apiUrl: opts.url,
+    fetchImpl: opts.fetchImpl,
+  });
   const client = new ApplyClient(
     { apiBaseUrl, orgSlug, token },
     opts.fetchImpl
   );
-  return { client, apiBaseUrl, orgSlug, mcpUrl };
+  return { client, apiBaseUrl, orgSlug };
 }

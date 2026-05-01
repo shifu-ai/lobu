@@ -10,8 +10,6 @@ const logger = createLogger("provider-registry-service");
 
 const ENV_SUBSTITUTION_BLOCKLIST = new Set([
   "ENCRYPTION_KEY",
-  "ADMIN_PASSWORD",
-  "DATABASE_PASSWORD",
   "DATABASE_URL",
   // Kept defense-in-depth: even though the runtime no longer uses Redis, an
   // operator may still set REDIS_PASSWORD in their environment for unrelated
@@ -24,6 +22,10 @@ const ENV_SUBSTITUTION_BLOCKLIST = new Set([
   "AWS_SECRET_ACCESS_KEY",
   "SENTRY_DSN",
 ]);
+
+function isBlockedEnvSubstitution(varName: string): boolean {
+  return ENV_SUBSTITUTION_BLOCKLIST.has(varName) || /(^|_)PASSWORD$/i.test(varName);
+}
 
 export class ProviderRegistryService {
   private configUrl?: string;
@@ -117,7 +119,7 @@ export function resolveProviderRegistryFromRaw(raw: string): {
   }
 
   const substituted = raw.replace(/\$\{env:([^}]+)\}/g, (_match, varName) => {
-    if (ENV_SUBSTITUTION_BLOCKLIST.has(varName)) {
+    if (isBlockedEnvSubstitution(varName)) {
       logger.warn(`Blocked env substitution for sensitive var: ${varName}`);
       return "";
     }

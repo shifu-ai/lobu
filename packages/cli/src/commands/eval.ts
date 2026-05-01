@@ -2,7 +2,12 @@ import { readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import chalk from "chalk";
 import { parse as parseYaml } from "yaml";
-import { getToken, resolveGatewayUrl } from "../internal/index.js";
+import {
+  apiBaseFromContextUrl,
+  getToken,
+  resolveContext,
+  resolveGatewayUrl,
+} from "../internal/index.js";
 import { isLoadError, loadConfig } from "../config/loader.js";
 import { CURRENT_EVAL_VERSION, evalDefinitionSchema } from "../eval/types.js";
 import type { EvalDefinition, EvalReport, EvalResult } from "../eval/types.js";
@@ -25,6 +30,7 @@ export async function evalCommand(
     list?: boolean;
     ci?: boolean;
     output?: string;
+    context?: string;
   }
 ): Promise<void> {
   // Load config first (needed for --list and running)
@@ -108,15 +114,16 @@ export async function evalCommand(
 
   // Auth and gateway required from here (not needed for --list)
   const gatewayUrl = (
-    options.gateway ?? (await resolveGatewayUrl({ cwd }))
+    options.gateway ??
+    (options.context
+      ? apiBaseFromContextUrl((await resolveContext(options.context)).apiUrl)
+      : await resolveGatewayUrl({ cwd }))
   ).replace(/\/$/, "");
 
-  const authToken = (await getToken()) ?? process.env.ADMIN_PASSWORD;
+  const authToken = await getToken(options.context);
   if (!authToken) {
     console.error(
-      chalk.red(
-        "\n  Authentication required. Run `lobu login` or set ADMIN_PASSWORD.\n"
-      )
+      chalk.red("\n  Authentication required. Run `lobu login`.\n")
     );
     process.exit(1);
   }

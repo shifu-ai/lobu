@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { verifyWorkerToken } from "@lobu/core";
 import type { Context, Next } from "hono";
 import { verifySettingsSession } from "../routes/public/settings-auth.js";
@@ -8,10 +7,9 @@ export const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Creates a Hono middleware that enforces the standard auth check:
- *   1. Settings session cookie  2. External OAuth  3. Admin password  4. Worker token
+ *   1. Settings session cookie  2. External OAuth  3. Worker token
  */
 export function createApiAuthMiddleware(opts: {
-  adminPassword?: string;
   externalAuthClient?: ExternalAuthClient;
   allowWorkerToken?: boolean;
   allowSettingsSession?: boolean;
@@ -36,16 +34,7 @@ export function createApiAuthMiddleware(opts: {
       }
     }
 
-    // 3. Try admin password
-    if (opts.adminPassword) {
-      const a = Buffer.from(token);
-      const b = Buffer.from(opts.adminPassword);
-      if (a.length === b.length && timingSafeEqual(a, b)) {
-        return next();
-      }
-    }
-
-    // 4. Try worker token when explicitly allowed for the route
+    // 3. Try worker token when explicitly allowed for the route
     if (opts.allowWorkerToken !== false) {
       const workerData = verifyWorkerToken(token);
       if (workerData) {

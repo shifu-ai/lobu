@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { createRoute, OpenAPIHono } from "@hono/zod-openapi";
 import {
   type AgentConfigStore,
@@ -452,7 +452,6 @@ export interface AgentApiConfig {
   sessionManager: ISessionManager;
   sseManager: SseManager;
   publicGatewayUrl: string;
-  adminPassword?: string;
   externalAuthClient?: ExternalAuthClient;
   agentSettingsStore?: AgentSettingsStore;
   agentConfigStore?: Pick<
@@ -471,7 +470,6 @@ export interface AgentApiConfig {
 export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
   const {
     queueProducer,
-    adminPassword,
     externalAuthClient,
     agentSettingsStore,
     agentConfigStore,
@@ -488,7 +486,6 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
   app.use(
     "/api/v1/agents/*",
     createApiAuthMiddleware({
-      adminPassword,
       externalAuthClient,
       allowSettingsSession: true,
     })
@@ -528,22 +525,12 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     return token.length > 0 ? token : null;
   }
 
-  function matchesAdminPassword(token: string): boolean {
-    if (!adminPassword) return false;
-    const a = Buffer.from(token);
-    const b = Buffer.from(adminPassword);
-    if (a.length !== b.length) return false;
-    return timingSafeEqual(a, b);
-  }
-
   /**
    * Verify that the caller is authorized to act on `resolvedAgentId`.
    *
-   * The agent API middleware accepts four auth methods (admin password,
-   * worker token, external OAuth, settings session). Each needs its own
-   * ownership rule:
+   * The agent API middleware accepts three auth methods (worker token,
+   * external OAuth, settings session). Each needs its own ownership rule:
    *
-   *   - admin password       → full access
    *   - worker token         → scoped to its own agentId
    *   - settings session     → verifyOwnedAgentAccess (handles admin bypass,
    *                            agent-scoped sessions, and UserAgentsStore
@@ -563,10 +550,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     const bearer = tokenFromHeader(c);
 
-    // 1. Admin password bypasses ownership entirely, regardless of any cookie.
-    if (bearer && matchesAdminPassword(bearer)) return null;
-
-    // 2. Settings session cookie (or injected auth provider for embedded mode).
+    // 1. Settings session cookie (or injected auth provider for embedded mode).
     const settingsSession = verifySettingsSession(c);
     if (settingsSession) {
       const access = await verifyOwnedAgentAccess(
@@ -579,7 +563,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     if (!bearer) return deny();
 
-    // 3. Worker token — must target its own agent.
+    // 2. Worker token — must target its own agent.
     const workerData = verifyWorkerToken(bearer);
     if (workerData) {
       const tokenAge = Date.now() - workerData.timestamp;
@@ -588,7 +572,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       return workerAgentId && workerAgentId === resolvedAgentId ? null : deny();
     }
 
-    // 4. External OAuth (Owletto / memory-url userinfo).
+    // 3. External OAuth (Owletto / memory-url userinfo).
     if (externalAuthClient) {
       try {
         const userInfo = (await externalAuthClient.fetchUserInfo(bearer)) as {

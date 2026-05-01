@@ -13,8 +13,8 @@ Agents are created via `lobu.toml` (at startup) or the API (at runtime):
 
 ```bash
 # Via API
-curl -X POST http://localhost:8080/api/v1/agents \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/agents \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "agentId": "support", "name": "Support Agent" }'
 ```
@@ -24,8 +24,8 @@ Returns the agent ID and a settings URL for configuration.
 ### List agents
 
 ```bash
-curl http://localhost:8080/api/v1/agents \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 ```
 
 Returns all agents with their name, description, channel count, and last activity.
@@ -33,8 +33,8 @@ Returns all agents with their name, description, channel count, and last activit
 ### Update an agent
 
 ```bash
-curl -X PATCH http://localhost:8080/api/v1/agents/support \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X PATCH http://localhost:8787/api/v1/agents/support \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "name": "Customer Support", "description": "Handles billing and account questions" }'
 ```
@@ -42,8 +42,8 @@ curl -X PATCH http://localhost:8080/api/v1/agents/support \
 ### Delete an agent
 
 ```bash
-curl -X DELETE http://localhost:8080/api/v1/agents/support \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl -X DELETE http://localhost:8787/api/v1/agents/support \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 ```
 
 Unbinds all platform channels and removes the agent configuration.
@@ -53,8 +53,8 @@ Unbinds all platform channels and removes the agent configuration.
 Fetch the full configuration for an agent:
 
 ```bash
-curl http://localhost:8080/api/v1/agents/support/config \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents/support/config \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 ```
 
 This returns everything about the agent:
@@ -83,8 +83,8 @@ When a user creates a new agent through a platform connection (e.g., a new Slack
 ### Add a provider via API key
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/openai/save-key \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/auth/openai/save-key \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "agentId": "support", "apiKey": "sk-..." }'
 ```
@@ -95,14 +95,14 @@ Some providers use device-code auth:
 
 ```bash
 # Start the flow
-curl -X POST http://localhost:8080/api/v1/auth/github/start \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/auth/github/start \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "agentId": "support" }'
 
 # Poll for completion
-curl -X POST http://localhost:8080/api/v1/auth/github/poll \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/auth/github/poll \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "agentId": "support", "deviceAuthId": "..." }'
 ```
@@ -110,8 +110,8 @@ curl -X POST http://localhost:8080/api/v1/auth/github/poll \
 ### Remove a provider
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/auth/openai/logout \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/auth/openai/logout \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "agentId": "support" }'
 ```
@@ -119,8 +119,8 @@ curl -X POST http://localhost:8080/api/v1/auth/openai/logout \
 ### Browse available providers
 
 ```bash
-curl http://localhost:8080/api/v1/agents/support/config/providers/catalog \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents/support/config/providers/catalog \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 ```
 
 Returns providers that are not yet installed for this agent.
@@ -131,16 +131,16 @@ Check agent status, view messages, and get session stats:
 
 ```bash
 # Is the agent online?
-curl http://localhost:8080/api/v1/agents/support/history/status \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents/support/history/status \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 
 # Get recent messages (paginated)
-curl http://localhost:8080/api/v1/agents/support/history/session/messages \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents/support/history/session/messages \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 
 # Session statistics (message counts, token usage)
-curl http://localhost:8080/api/v1/agents/support/history/session/stats \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents/support/history/session/stats \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 ```
 
 ## Channel bindings
@@ -148,8 +148,8 @@ curl http://localhost:8080/api/v1/agents/support/history/session/stats \
 View which platform channels are bound to an agent:
 
 ```bash
-curl http://localhost:8080/api/v1/agents/support/channels \
-  -H "Authorization: Bearer $ADMIN_PASSWORD"
+curl http://localhost:8787/api/v1/agents/support/channels \
+  -H "Authorization: Bearer $LOBU_API_TOKEN"
 ```
 
 ## Interactive API reference

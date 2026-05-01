@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import chalk from "chalk";
 import {
+  apiBaseFromContextUrl,
   getToken,
   resolveContext,
   resolveGatewayUrl,
@@ -34,18 +35,17 @@ export async function chatCommand(
     gatewayUrl = options.gateway;
   } else if (options.context) {
     const ctx = await resolveContext(options.context);
-    gatewayUrl = ctx.apiUrl;
+    gatewayUrl = apiBaseFromContextUrl(ctx.apiUrl);
   } else {
     gatewayUrl = await resolveGatewayUrl({ cwd });
   }
   gatewayUrl = gatewayUrl.replace(/\/$/, "");
 
-  const authToken =
-    (await getToken(options.context)) ?? process.env.ADMIN_PASSWORD;
+  const authToken = await getToken(options.context);
   if (!authToken) {
     console.error(
       chalk.red(
-        "\n  Session expired or not logged in. Run `npx @lobu/cli@latest login` or set ADMIN_PASSWORD.\n"
+        "\n  Session expired or not logged in. Run `npx @lobu/cli@latest login`.\n"
       )
     );
     process.exit(1);
@@ -203,7 +203,7 @@ async function sendViaApi(
     if (createRes.status === 401) {
       console.error(
         chalk.red(
-          "\n  Authentication required. Run `npx @lobu/cli@latest login` or set ADMIN_PASSWORD.\n"
+          "\n  Authentication required. Run `npx @lobu/cli@latest login`.\n"
         )
       );
       process.exit(1);

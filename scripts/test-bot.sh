@@ -133,6 +133,20 @@ if [ -f .env ]; then
     done < .env
 fi
 
+resolve_auth_token() {
+    if [ -n "${TEST_AUTH_TOKEN:-}" ]; then
+        printf '%s\n' "$TEST_AUTH_TOKEN"
+        return
+    fi
+    if [ -n "${LOBU_API_TOKEN:-}" ]; then
+        printf '%s\n' "$LOBU_API_TOKEN"
+        return
+    fi
+    if command -v lobu > /dev/null 2>&1; then
+        lobu token --raw 2>/dev/null || true
+    fi
+}
+
 telegram_send_and_wait() {
     local peer="$1"
     local message="$2"
@@ -283,7 +297,7 @@ TIMEOUT="${TEST_TIMEOUT:-120}"
 # Platform-specific setup
 case "$TEST_PLATFORM" in
     slack)
-        AUTH_TOKEN="${TEST_AUTH_TOKEN:-${ADMIN_PASSWORD:-}}"
+        AUTH_TOKEN="$(resolve_auth_token)"
         CHANNEL="${TEST_CHANNEL:-${QA_SLACK_CHANNEL:-}}"
         if [ -z "$CHANNEL" ]; then
             echo "❌ QA_SLACK_CHANNEL or TEST_CHANNEL environment variable is required for Slack"
@@ -291,7 +305,7 @@ case "$TEST_PLATFORM" in
         fi
         ;;
     whatsapp)
-        AUTH_TOKEN="${TEST_AUTH_TOKEN:-${ADMIN_PASSWORD:-}}"
+        AUTH_TOKEN="$(resolve_auth_token)"
         CHANNEL="${TEST_CHANNEL:-${WHATSAPP_SELF_PHONE:-}}"
         if [ -z "$CHANNEL" ]; then
             # For self-chat mode, we can use "self" as a special channel
@@ -304,7 +318,7 @@ case "$TEST_PLATFORM" in
         fi
         ;;
     telegram)
-        AUTH_TOKEN="${TEST_AUTH_TOKEN:-${ADMIN_PASSWORD:-}}"
+        AUTH_TOKEN="$(resolve_auth_token)"
         CHANNEL="${TEST_CHANNEL:-${TELEGRAM_TEST_CHAT_ID:-}}"
         ACTIVE_TELEGRAM_BOT_PEER="$(fetch_telegram_bot_peer)"
         TELEGRAM_BOT_PEER="${TELEGRAM_TEST_BOT_USERNAME:-}"
@@ -334,6 +348,11 @@ case "$TEST_PLATFORM" in
         exit 1
         ;;
 esac
+
+if [ -z "$AUTH_TOKEN" ]; then
+    echo "❌ Authentication token required. Set TEST_AUTH_TOKEN/LOBU_API_TOKEN or run \`lobu login\`."
+    exit 1
+fi
 
 # Get messages from arguments or use default
 if [ $# -eq 0 ]; then

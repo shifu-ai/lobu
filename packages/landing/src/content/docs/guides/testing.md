@@ -102,15 +102,15 @@ TEST_PLATFORM=whatsapp TEST_CHANNEL=+1234567890 ./scripts/test-bot.sh "Hello"
 | `TEST_CHANNEL` | Channel/chat ID for the target platform |
 | `TEST_TIMEOUT` | Response timeout in seconds (default: 120) |
 | `TEST_AGENT_ID` | Agent ID to test (default: `test-{platform}`) |
-| `GATEWAY_URL` | Gateway URL (default: `http://localhost:8080`) |
+| `GATEWAY_URL` | Gateway URL (default: `http://localhost:8787`) |
 
 ## REST API
 
 Send messages directly to the gateway HTTP API:
 
 ```bash
-curl -X POST http://localhost:8080/api/v1/agents/{agentId}/messages \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "platform": "api",
@@ -122,8 +122,8 @@ Route through a platform by adding platform-specific fields:
 
 ```bash
 # Through Slack
-curl -X POST http://localhost:8080/api/v1/agents/{agentId}/messages \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "platform": "slack",
@@ -132,8 +132,8 @@ curl -X POST http://localhost:8080/api/v1/agents/{agentId}/messages \
   }'
 
 # Through Telegram
-curl -X POST http://localhost:8080/api/v1/agents/{agentId}/messages \
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \
+curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "platform": "telegram",

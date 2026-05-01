@@ -1,6 +1,6 @@
 # @lobu/cli
 
-CLI tool for initializing and managing Lobu projects.
+CLI tool for running Lobu locally and managing Lobu agents through the same REST API as the web app.
 
 ## Quick Start
 
@@ -13,21 +13,6 @@ npx @lobu/cli@latest run
 
 Lobu boots as a single Node process. Postgres is a user-provided external (managed instance or local — `brew services start postgresql`).
 
-## Starter Skills
-
-Install the Lobu starter skill into a local `skills/` directory:
-
-```bash
-npx @lobu/cli@latest skills list
-npx @lobu/cli@latest skills add lobu
-```
-
-The bundled Lobu starter skill includes memory guidance. Configure local MCP clients when needed:
-
-```bash
-npx @lobu/cli@latest memory init
-```
-
 ## Commands
 
 ### `lobu init [name]`
@@ -36,7 +21,6 @@ Scaffold a new Lobu project with interactive prompts:
 
 - **Project name**
 - **Gateway port** and optional **public URL** (for OAuth callbacks)
-- **Admin password**
 - **Worker network access** (isolated, allowlist, or unrestricted)
 - **AI provider** selection from the bundled provider registry + API key
 - **Messaging platform** (Telegram, Slack, Discord, WhatsApp, Teams, Google Chat, or none)
@@ -54,7 +38,7 @@ For a custom Owletto deployment, `.env` keeps `MEMORY_URL` as the optional base 
 
 ### `lobu run`
 
-Boot the embedded Lobu stack — gateway + workers + embeddings + Owletto memory backend in a single Node process. Validates `lobu.toml` and that `DATABASE_URL` is set in `.env`, then spawns the bundled `@lobu/owletto-backend/dist/server.bundle.mjs`. Ctrl+C stops the process and any spawned worker subprocesses cleanly.
+Boot the embedded Lobu stack — gateway + workers + embeddings + Owletto memory backend in a single Node process. `lobu.toml` is not required; set `DATABASE_URL` in the environment or `.env`, then the command spawns the bundled `@lobu/owletto-backend/dist/server.bundle.mjs`. Ctrl+C stops the process and any spawned worker subprocesses cleanly.
 
 ## License
 

@@ -24,7 +24,6 @@ export interface ApplyOptions {
   only?: "agents" | "memory";
   org?: string;
   url?: string;
-  storePath?: string;
   /** Test seam — inject a stubbed fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -202,7 +201,6 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   const { client, orgSlug } = await resolveApplyClient({
     url: opts.url,
     org: opts.org,
-    storePath: opts.storePath,
     fetchImpl: opts.fetchImpl,
   });
   printText(chalk.dim(`Org: ${orgSlug}`));

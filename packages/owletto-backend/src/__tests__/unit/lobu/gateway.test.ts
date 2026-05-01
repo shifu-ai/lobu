@@ -3,8 +3,6 @@ import { ensureEmbeddedGatewaySecrets } from '../../../lobu/gateway';
 
 const ORIGINAL_ENV = {
   ENCRYPTION_KEY: process.env.ENCRYPTION_KEY,
-  ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
-  LOBU_ADMIN_PASSWORD: process.env.LOBU_ADMIN_PASSWORD,
   OWLETTO_ALLOW_EPHEMERAL_ENCRYPTION_KEY: process.env.OWLETTO_ALLOW_EPHEMERAL_ENCRYPTION_KEY,
 };
 
@@ -28,13 +26,10 @@ describe('ensureEmbeddedGatewaySecrets', () => {
 
   it('allows explicitly ephemeral encryption keys', () => {
     delete process.env.ENCRYPTION_KEY;
-    delete process.env.ADMIN_PASSWORD;
-    delete process.env.LOBU_ADMIN_PASSWORD;
     process.env.OWLETTO_ALLOW_EPHEMERAL_ENCRYPTION_KEY = '1';
 
     ensureEmbeddedGatewaySecrets();
 
     expect(process.env.ENCRYPTION_KEY).toBeTruthy();
-    expect(process.env.ADMIN_PASSWORD).toBeTruthy();
   });
 });

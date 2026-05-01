@@ -9,7 +9,7 @@
  * can open threads and post messages without going through HTTP.
  *
  * The functions here intentionally do NOT perform any HTTP-shaped auth
- * (admin password, settings session, worker-token, OAuth, …). Callers are
+ * (settings session, worker-token, OAuth, …). Callers are
  * presumed to be inside the gateway's trust boundary; the public routes
  * remain the single auth-gated entry point for external clients.
  */

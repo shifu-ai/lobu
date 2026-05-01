@@ -1,6 +1,5 @@
 #!/usr/bin/env bun
 
-import { randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import { createServer } from "node:http";
 import { getRequestListener } from "@hono/node-server";
@@ -134,15 +133,12 @@ export function createGatewayApp(
         streaming: true,
         toolApproval: true,
       },
-      wsUrl: `ws://localhost:8080/ws`,
+      wsUrl: `ws://localhost:${process.env.PORT || process.env.GATEWAY_PORT || "8787"}/ws`,
       secretProxy: !!secretProxy,
     });
   });
 
   app.get("/ready", (c) => c.json({ ready: true }));
-
-  const adminPassword: string =
-    process.env.ADMIN_PASSWORD || randomBytes(16).toString("base64url");
 
   // Metrics auth is optional so existing ServiceMonitor configs continue to scrape.
   app.get("/metrics", async (c) => {
@@ -280,7 +276,6 @@ export function createGatewayApp(
         sessionManager: sessionMgr,
         sseManager: coreServices.getSseManager(),
         publicGatewayUrl: publicUrl,
-        adminPassword,
         externalAuthClient: coreServices.getExternalAuthClient(),
         agentSettingsStore: coreServices.getAgentSettingsStore(),
         agentConfigStore: coreServices.getConfigStore(),
@@ -588,12 +583,6 @@ export function createGatewayApp(
       setEnvResolver((key: string) => systemEnvStore.resolve(key));
     }
 
-    if (!process.env.ADMIN_PASSWORD) {
-      logger.info(
-        "An admin password has been auto-generated. For security reasons, it is not logged. Set the ADMIN_PASSWORD env var to use a fixed password."
-      );
-    }
-
     {
       const landingRouter = createLandingRoutes();
       app.route("", landingRouter);
@@ -703,12 +692,26 @@ export function createGatewayApp(
     );
   }
 
+  async function hasDevRouteAccess(c: any): Promise<boolean> {
+    if (verifySettingsSessionOrToken(c)) return true;
+    const authHeader = c.req.header("Authorization");
+    if (!authHeader?.startsWith("Bearer ")) return false;
+    const token = authHeader.slice(7);
+    const externalAuthClient = coreServices?.getExternalAuthClient?.();
+    if (!externalAuthClient) return false;
+    try {
+      const userInfo = await externalAuthClient.fetchUserInfo(token);
+      return Boolean(userInfo?.sub);
+    } catch {
+      return false;
+    }
+  }
+
   app.post("/api/v1/reload", async (c) => {
     if (process.env.NODE_ENV === "production") {
       return c.json({ error: "Not found" }, 404);
     }
-    const authHeader = c.req.header("Authorization");
-    if (authHeader !== `Bearer ${adminPassword}`) {
+    if (!(await hasDevRouteAccess(c))) {
       return c.json({ error: "Unauthorized" }, 401);
     }
 
@@ -734,8 +737,7 @@ export function createGatewayApp(
     if (process.env.NODE_ENV === "production") {
       return c.json({ error: "Not found" }, 404);
     }
-    const authHeader = c.req.header("Authorization");
-    if (authHeader !== `Bearer ${adminPassword}`) {
+    if (!(await hasDevRouteAccess(c))) {
       return c.json({ error: "Unauthorized" }, 401);
     }
 
@@ -816,21 +818,21 @@ The Lobu API allows you to create and interact with AI agents programmatically.
 
 ## Authentication
 
-1. Authenticate the agent-creation request with an admin password or CLI access token
+1. Authenticate the agent-creation request with a settings session or CLI access token
 2. Create an agent with \`POST /api/v1/agents\` to get a worker token
 3. Use the returned worker token as a Bearer token for subsequent agent requests
 
 ## Quick Start
 
 \`\`\`bash
-# 1. Create an agent (authenticate with admin password or CLI token)
-curl -X POST http://localhost:8080/api/v1/agents \\
-  -H "Authorization: Bearer $ADMIN_PASSWORD" \\
+# 1. Create an agent (authenticate with a CLI token)
+curl -X POST http://localhost:8787/api/v1/agents \\
+  -H "Authorization: Bearer $LOBU_API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{"provider": "claude"}'
 
 # 2. Send a message (use worker token from step 1)
-curl -X POST http://localhost:8080/api/v1/agents/{agentId}/messages \\
+curl -X POST http://localhost:8787/api/v1/agents/{agentId}/messages \\
   -H "Authorization: Bearer {token}" \\
   -H "Content-Type: application/json" \\
   -d '{"content": "Hello!"}'
@@ -894,7 +896,7 @@ Agents can be configured with custom MCP (Model Context Protocol) servers:
       },
     ],
     servers: [
-      { url: "http://localhost:8080", description: "Local development" },
+      { url: "http://localhost:8787", description: "Local development" },
     ],
   });
 
