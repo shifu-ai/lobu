@@ -168,6 +168,55 @@ lobu eval --list
 
 Local dev Telegram bot: `@clawdotfreebot`. Production: `@lobuaibot`.
 
+### Browser-driven verification (authenticated)
+
+For any UI verification that needs a signed-in session (anything past the auth wall), use the `agent-browser` CLI with a session cookie minted from the DB. The user's regular Chrome doesn't expose a remote-debug port, so `--auto-connect` will land on a wrong tab; mint a cookie instead.
+
+**Pick a target.** Local dev backend (with prod DB attached over Tailscale) is reachable at `https://buraks-macbook-pro-1.brill-kanyu.ts.net:8443` — use this when you only need to verify behavior end-to-end without a fresh prod deploy. For prod itself use `https://app.lobu.ai`.
+
+**Grab the secret + a session token.**
+
+```bash
+# Local dev backend uses .env's BETTER_AUTH_SECRET
+SECRET=$(grep '^BETTER_AUTH_SECRET=' .env | cut -d= -f2-)
+
+# Prod uses the secret on the K8s pod
+SECRET=$(kubectl exec -n summaries-prod \
+  $(kubectl get pod -n summaries-prod -l app.kubernetes.io/name=owletto-app -o name | head -1 | sed 's|pod/||') \
+  -- printenv BETTER_AUTH_SECRET)
+
+# Session token comes from the DB (prod DB serves both targets)
+DB="$(grep '^DATABASE_URL=' .env | cut -d= -f2-)"
+TOKEN=$(psql "$DB" -tAc "SELECT token FROM session WHERE \"userId\" = '<user_id>' AND \"expiresAt\" > NOW() ORDER BY \"updatedAt\" DESC LIMIT 1")
+```
+
+**Sign the cookie** (better-auth uses HMAC-SHA256, base64, then URL-encode — base64**url** does *not* validate):
+
+```bash
+SIGNED=$(SECRET="$SECRET" TOKEN="$TOKEN" node -e '
+  const {createHmac}=require("node:crypto");
+  const sig=createHmac("sha256",process.env.SECRET).update(process.env.TOKEN).digest("base64");
+  console.log(encodeURIComponent(`${process.env.TOKEN}.${sig}`));
+')
+```
+
+**Cookie name** is `__Secure-better-auth.session_token` whenever the baseURL is `https://` (both prod and the Tailscale dev URL qualify; only plain-http localhost uses the unprefixed `better-auth.session_token`).
+
+**Drive the browser:**
+
+```bash
+agent-browser --session lobu-verify open "https://app.lobu.ai/"
+agent-browser --session lobu-verify eval "document.cookie='__Secure-better-auth.session_token=$SIGNED; path=/; secure; samesite=lax'"
+agent-browser --session lobu-verify open "https://app.lobu.ai/<path>"
+agent-browser --session lobu-verify wait --text "<expected text>" --timeout 25000
+agent-browser --session lobu-verify snapshot -i      # find @refs
+agent-browser --session lobu-verify click @e13        # interact
+agent-browser --session lobu-verify screenshot --full /tmp/out.png   # capture
+agent-browser --session lobu-verify close
+```
+
+Don't `git stash`/`git switch` to a different branch while a dev server is running — sibling worktrees on neighbouring branches can hide files (e.g. `gateway/auth/cli/token-service.ts`) that your import graph still references, and the server will refuse to boot. Verify on a detached HEAD off `origin/main` if you need a clean slate.
+
 ## Environment & Runtime
 
 `.env` is the single source of truth for secrets. The gateway reads it on startup; restart `make dev` after changes.
