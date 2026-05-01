@@ -88,7 +88,9 @@ export async function tokenCreateCommand(
       `  Expires: ${response.token.expires_at ? new Date(response.token.expires_at).toISOString() : "never"}`
     )
   );
-  console.log(chalk.yellow("\n  Save this token now; it will not be shown again:"));
+  console.log(
+    chalk.yellow("\n  Save this token now; it will not be shown again:")
+  );
   console.log(`  ${response.token.token}\n`);
 }
 

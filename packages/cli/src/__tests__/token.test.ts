@@ -44,7 +44,9 @@ describe("token create", () => {
     });
     const originalFetch = globalThis.fetch;
     globalThis.fetch = fetchMock as unknown as typeof fetch;
-    const writeSpy = spyOn(process.stdout, "write").mockImplementation(() => true);
+    const writeSpy = spyOn(process.stdout, "write").mockImplementation(
+      () => true
+    );
 
     try {
       await tokenCreateCommand({ org: "acme", name: "prod-server", raw: true });

@@ -256,13 +256,17 @@ export async function runCli(
       "--scope <scope>",
       "Space-separated scopes (default: mcp:read mcp:write)"
     )
-    .option("--expires-in-days <days>", "Expire token after N days", (value) => {
-      const days = Number(value);
-      if (!Number.isInteger(days) || days < 1) {
-        throw new Error("--expires-in-days must be a positive integer");
+    .option(
+      "--expires-in-days <days>",
+      "Expire token after N days",
+      (value) => {
+        const days = Number(value);
+        if (!Number.isInteger(days) || days < 1) {
+          throw new Error("--expires-in-days must be a positive integer");
+        }
+        return days;
       }
-      return days;
-    })
+    )
     .option("--raw", "Print token only")
     .option("--json", "Print JSON response")
     .action(
