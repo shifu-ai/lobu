@@ -309,17 +309,19 @@ export async function runCli(
   org
     .command("current")
     .description("Show the active org")
-    .action(async () => {
+    .option("-c, --context <name>", "Use a named context")
+    .action(async (options: { context?: string }) => {
       const { orgCurrentCommand } = await import("./commands/org.js");
-      await orgCurrentCommand();
+      await orgCurrentCommand(options);
     });
 
   org
     .command("set <slug>")
     .description("Set the active org slug")
-    .action(async (slug: string) => {
+    .option("-c, --context <name>", "Use a named context")
+    .action(async (slug: string, options: { context?: string }) => {
       const { orgSetCommand } = await import("./commands/org.js");
-      await orgSetCommand(slug);
+      await orgSetCommand(slug, options);
     });
 
   // ─── agent ──────────────────────────────────────────────────────────
@@ -500,11 +502,12 @@ export async function runCli(
     .description("Invoke an MCP tool (or list tools when called bare)")
     .option("--url <url>", "Server URL override")
     .option("--org <slug>", "Org slug override")
+    .option("-c, --context <name>", "Use a named context")
     .action(
       async (
         tool: string | undefined,
         params: string | undefined,
-        options: { url?: string; org?: string }
+        options: { url?: string; org?: string; context?: string }
       ) => {
         const { memoryRunCommand } = await import("./commands/memory/run.js");
         await memoryRunCommand(tool, params, options);
@@ -516,7 +519,8 @@ export async function runCli(
     .description("Validate Lobu login + MCP connectivity")
     .option("--url <url>", "Server URL override")
     .option("--org <slug>", "Org slug override")
-    .action(async (options: { url?: string; org?: string }) => {
+    .option("-c, --context <name>", "Use a named context")
+    .action(async (options: { url?: string; org?: string; context?: string }) => {
       const { memoryHealthCommand } = await import(
         "./commands/memory/health.js"
       );
@@ -530,6 +534,7 @@ export async function runCli(
     )
     .option("--url <url>", "Server URL override")
     .option("--org <slug>", "Org slug override")
+    .option("-c, --context <name>", "Use a named context")
     .option(
       "--config-path <path>",
       "OpenClaw config path (defaults to ~/.openclaw/openclaw.json)"
@@ -542,6 +547,7 @@ export async function runCli(
       async (options: {
         url?: string;
         org?: string;
+        context?: string;
         configPath?: string;
         tokenCommand?: string;
       }) => {
@@ -563,6 +569,7 @@ export async function runCli(
       "Org slug override (defaults to [memory.owletto].org)"
     )
     .option("--url <url>", "Server URL override")
+    .option("-c, --context <name>", "Use a named context")
     .action(
       async (
         pathArg: string | undefined,
@@ -570,6 +577,7 @@ export async function runCli(
           dryRun?: boolean;
           org?: string;
           url?: string;
+          context?: string;
         }
       ) => {
         const { memorySeedCommand } = await import("./commands/memory/seed.js");

@@ -10,7 +10,7 @@ export async function orgListCommand(options?: {
   context?: string;
 }): Promise<void> {
   const target = await resolveContext(options?.context);
-  const active = await getActiveOrg();
+  const active = await getActiveOrg(target.name);
   const orgs = await listOrganizations({ context: target.name });
 
   if (orgs.length === 0) {
@@ -18,7 +18,7 @@ export async function orgListCommand(options?: {
     return;
   }
 
-  console.log(chalk.bold("\n  Organizations"));
+  console.log(chalk.bold(`\n  Organizations in ${target.name}`));
   for (const org of orgs) {
     const marker = org.slug === active ? chalk.green("*") : " ";
     const name = org.name ? chalk.dim(`  ${org.name}`) : "";
@@ -27,19 +27,32 @@ export async function orgListCommand(options?: {
   console.log();
 }
 
-export async function orgCurrentCommand(): Promise<void> {
-  const active = await getActiveOrg();
+export async function orgCurrentCommand(options?: {
+  context?: string;
+}): Promise<void> {
+  const target = await resolveContext(options?.context);
+  const active = await getActiveOrg(target.name);
   if (!active) {
     console.log(
-      chalk.dim("\n  No active org set. Run `lobu org set <slug>`.\n")
+      chalk.dim(
+        `\n  No active org set for context ${target.name}. Run \`lobu org set <slug>\`.\n`
+      )
     );
     return;
   }
-  console.log(chalk.bold("\n  Current org"));
+  console.log(chalk.bold(`\n  Current org for context ${target.name}`));
   console.log(chalk.dim(`  ${active}\n`));
 }
 
-export async function orgSetCommand(slug: string): Promise<void> {
-  await setActiveOrg(slug);
-  console.log(chalk.green(`\n  Active org set to ${slug}\n`));
+export async function orgSetCommand(
+  slug: string,
+  options?: { context?: string }
+): Promise<void> {
+  const target = await resolveContext(options?.context);
+  await setActiveOrg(slug, target.name);
+  console.log(
+    chalk.green(
+      `\n  Active org for context ${target.name} set to ${slug}\n`
+    )
+  );
 }
