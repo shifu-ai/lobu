@@ -136,16 +136,16 @@ async function initializeMcpSession(
 async function resolveSessionAndUrl(
   urlFlag?: string,
   orgFlag?: string,
-  storePath?: string
+  context?: string
 ): Promise<{ token: string; session: MemorySession; mcpUrl: string }> {
-  const org = await resolveOrg(orgFlag, undefined, storePath);
-  const serverUrl = await resolveServerUrl(urlFlag, storePath);
+  const org = await resolveOrg(orgFlag, undefined, context);
+  const serverUrl = await resolveServerUrl(urlFlag, context);
   if (!serverUrl) {
     throw new ValidationError("Memory MCP URL could not be resolved.");
   }
 
   const mcpUrl = org ? mcpUrlForOrg(serverUrl, org) : serverUrl;
-  const result = await getUsableToken(mcpUrl, storePath);
+  const result = await getUsableToken(mcpUrl, context);
   if (!result) {
     throw new ValidationError("Not logged in. Run: lobu login");
   }
@@ -169,10 +169,20 @@ function writeJsonObject(filePath: string, payload: Record<string, unknown>) {
   writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`);
 }
 
+function defaultTokenCommand(context?: string): string {
+  return context
+    ? `lobu token --raw --context ${shellQuote(context)}`
+    : "lobu token --raw";
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 export interface HealthOptions {
   url?: string;
   org?: string;
-  storePath?: string;
+  context?: string;
 }
 
 export async function checkMemoryHealth(
@@ -182,8 +192,8 @@ export async function checkMemoryHealth(
     token: accessToken,
     session,
     mcpUrl: targetMcpUrl,
-  } = await resolveSessionAndUrl(opts.url, opts.org, opts.storePath);
-  const org = await resolveOrg(opts.org, session, opts.storePath);
+  } = await resolveSessionAndUrl(opts.url, opts.org, opts.context);
+  const org = await resolveOrg(opts.org, session, opts.context);
   const sessionId = await initializeMcpSession(targetMcpUrl, accessToken);
 
   const result = await postJson<{ result?: { tools?: unknown[] } }>(
@@ -223,6 +233,7 @@ export async function checkMemoryHealth(
 export interface ConfigureOptions {
   url?: string;
   org?: string;
+  context?: string;
   configPath?: string;
   tokenCommand?: string;
 }
@@ -230,16 +241,16 @@ export interface ConfigureOptions {
 export async function configureMemoryPlugin(
   opts: ConfigureOptions = {}
 ): Promise<void> {
-  const org = await resolveOrg(opts.org);
-  const baseMcpUrl = await resolveServerUrl(opts.url);
+  const org = await resolveOrg(opts.org, undefined, opts.context);
+  const baseMcpUrl = await resolveServerUrl(opts.url, opts.context);
   if (!baseMcpUrl) {
     throw new ValidationError("Memory MCP URL could not be resolved.");
   }
   const resolvedMcpUrl = org
     ? mcpUrlForOrg(baseMcpUrl, org)
     : normalizeMcpUrl(baseMcpUrl);
-  await setActiveMcpUrl(resolvedMcpUrl);
-  if (org) await setActiveOrg(org);
+  await setActiveMcpUrl(resolvedMcpUrl, opts.context);
+  if (org) await setActiveOrg(org, opts.context);
 
   const configPath = resolve(
     opts.configPath || resolve(homedir(), ".openclaw", "openclaw.json")
@@ -262,7 +273,7 @@ export async function configureMemoryPlugin(
     ? (existingEntry.config as Record<string, unknown>)
     : {};
 
-  const tokenCommand = opts.tokenCommand || "lobu token --raw";
+  const tokenCommand = opts.tokenCommand || defaultTokenCommand(opts.context);
 
   entries[pluginId] = {
     ...existingEntry,

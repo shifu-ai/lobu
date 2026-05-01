@@ -11,6 +11,7 @@ import { isJson, printJson, printText } from "./_lib/output.js";
 interface RunOptions {
   url?: string;
   org?: string;
+  context?: string;
 }
 
 export async function memoryRunCommand(
@@ -18,16 +19,20 @@ export async function memoryRunCommand(
   params: string | undefined,
   options: RunOptions = {}
 ): Promise<void> {
-  const org = await resolveOrg(options.org);
+  const org = await resolveOrg(options.org, undefined, options.context);
   let mcpUrl: string;
 
   if (org) {
-    const orgSession = await getSessionForOrg(org, undefined, options.url);
+    const orgSession = await getSessionForOrg(
+      org,
+      options.context,
+      options.url
+    );
     if (orgSession) {
       mcpUrl = orgSession.key;
     } else {
-      const serverUrl = await resolveServerUrl(options.url);
-      const base = serverUrl || resolveMcpEndpoint();
+      const serverUrl = await resolveServerUrl(options.url, options.context);
+      const base = serverUrl || (await resolveMcpEndpoint());
       if (!base)
         throw new ValidationError(
           "Server URL required. Pass --url or set LOBU_MEMORY_URL."
@@ -35,8 +40,8 @@ export async function memoryRunCommand(
       mcpUrl = mcpUrlForOrg(base, org);
     }
   } else {
-    const serverUrl = await resolveServerUrl(options.url);
-    const resolved = serverUrl || resolveMcpEndpoint();
+    const serverUrl = await resolveServerUrl(options.url, options.context);
+    const resolved = serverUrl || (await resolveMcpEndpoint());
     if (!resolved)
       throw new ValidationError(
         "Server URL required. Pass --url or set LOBU_MEMORY_URL."

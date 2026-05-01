@@ -1,5 +1,7 @@
 export {
+  DEFAULT_MEMORY_URL,
   addContext,
+  findContextByMemoryUrl,
   findContextByUrl,
   getActiveOrg,
   getCurrentContextName,
@@ -10,6 +12,7 @@ export {
   setCurrentContext,
   setMemoryUrl,
 } from "./context.js";
+export type { ResolvedContext } from "./context.js";
 export {
   type Credentials,
   type OAuthClientInfo,

@@ -483,18 +483,20 @@ export async function runCli(
   memoryOrg
     .command("current")
     .description("Show the active org")
-    .action(async () => {
+    .option("-c, --context <name>", "Use a named context")
+    .action(async (options: { context?: string }) => {
       const { memoryOrgCurrentCommand } = await import(
         "./commands/memory/org.js"
       );
-      await memoryOrgCurrentCommand();
+      await memoryOrgCurrentCommand(options);
     });
   memoryOrg
     .command("set <slug>")
     .description("Set the active org slug")
-    .action(async (slug: string) => {
+    .option("-c, --context <name>", "Use a named context")
+    .action(async (slug: string, options: { context?: string }) => {
       const { memoryOrgSetCommand } = await import("./commands/memory/org.js");
-      await memoryOrgSetCommand(slug);
+      await memoryOrgSetCommand(slug, options);
     });
 
   memory

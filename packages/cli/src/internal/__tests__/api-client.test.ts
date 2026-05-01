@@ -1,38 +1,34 @@
-import { describe, expect, test, mock, beforeEach, afterEach } from "bun:test";
-import { ApiClient, resolveApiClient } from "../api-client";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  mock,
+  spyOn,
+  test,
+} from "bun:test";
+import { ApiClient, listOrganizations, resolveApiClient } from "../api-client";
 import * as context from "../context";
 import * as credentials from "../credentials";
 
-// Mocking filesystem and other dependencies to keep it clean and fast
-mock.module("../context", () => ({
-  ...context,
-  loadContextConfig: mock(),
-  resolveContext: mock(),
-  findContextByUrl: mock(),
-  getActiveOrg: mock(),
-}));
-
-mock.module("../credentials", () => ({
-  ...credentials,
-  getToken: mock(),
-  loadCredentials: mock(),
-}));
-
 describe("ApiClient", () => {
   test("request sends correct headers", async () => {
-    const fetchMock = mock(async (url: string, init: any) => {
+    const fetchMock = mock(async () => {
       return new Response(JSON.stringify({ ok: true }), { status: 200 });
     });
 
     const client = new ApiClient(
       "https://api.example.com",
       "my-token",
-      fetchMock as any
+      fetchMock as unknown as typeof fetch
     );
     const result = await client.get("/test");
 
     expect(result).toEqual({ ok: true });
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
     expect(url).toBe("https://api.example.com/test");
     expect(init.headers).toMatchObject({
       Authorization: "Bearer my-token",
@@ -51,7 +47,7 @@ describe("ApiClient", () => {
     const client = new ApiClient(
       "https://api.example.com",
       "my-token",
-      fetchMock as any
+      fetchMock as unknown as typeof fetch
     );
 
     expect(client.get("/fail")).rejects.toThrow(
@@ -62,23 +58,21 @@ describe("ApiClient", () => {
 
 describe("resolveApiClient", () => {
   beforeEach(() => {
-    process.env.LOBU_API_TOKEN = "";
-    process.env.LOBU_ORG = "";
+    delete process.env.LOBU_API_TOKEN;
+    delete process.env.LOBU_ORG;
   });
 
-  test("P1: resolves correct context and token when apiUrl is overridden", async () => {
-    const resolveContextMock = context.resolveContext as any;
-    const findContextByUrlMock = context.findContextByUrl as any;
-    const getTokenMock = credentials.getToken as any;
-    const getActiveOrgMock = context.getActiveOrg as any;
+  afterEach(() => {
+    mock.restore();
+  });
 
-    resolveContextMock.mockResolvedValue({
+  test("resolves the token from the context that owns an overridden API URL", async () => {
+    spyOn(context, "resolveContext").mockResolvedValue({
       name: "default",
       apiUrl: "https://app.lobu.ai/api/v1",
       source: "default",
     });
-
-    findContextByUrlMock.mockImplementation(async (url: string) => {
+    spyOn(context, "findContextByUrl").mockImplementation(async (url) => {
       if (url === "https://custom.lobu.ai/api/v1") {
         return {
           name: "custom",
@@ -88,16 +82,13 @@ describe("resolveApiClient", () => {
       }
       return undefined;
     });
-
-    getTokenMock.mockImplementation(async (name: string) => {
+    spyOn(credentials, "getToken").mockImplementation(async (name) => {
       if (name === "custom") return "custom-token";
       if (name === "default") return "default-token";
       return null;
     });
+    spyOn(context, "getActiveOrg").mockResolvedValue("my-org");
 
-    getActiveOrgMock.mockResolvedValue("my-org");
-
-    // Case 1: Use custom URL that matches a context
     const resolved = await resolveApiClient({
       apiUrl: "https://custom.lobu.ai/api/v1",
     });
@@ -105,33 +96,42 @@ describe("resolveApiClient", () => {
     expect(resolved.token).toBe("custom-token");
     expect(resolved.apiBaseUrl).toBe("https://custom.lobu.ai");
 
-    // Case 2: Use custom URL that DOES NOT match a context (should fail if not logged in to default or if URLs differ)
-    findContextByUrlMock.mockResolvedValue(undefined);
-    expect(
+    await expect(
       resolveApiClient({ apiUrl: "https://unknown.lobu.ai/api/v1" })
     ).rejects.toThrow("Refusing to send stored context credentials");
   });
 
-  test("P2: resolves correct org slug per context", async () => {
-    const resolveContextMock = context.resolveContext as any;
-    const getTokenMock = credentials.getToken as any;
-    const getActiveOrgMock = context.getActiveOrg as any;
-
-    resolveContextMock.mockResolvedValue({
+  test("reads the active org from the resolved context", async () => {
+    spyOn(context, "resolveContext").mockResolvedValue({
       name: "prod",
       apiUrl: "https://app.lobu.ai/api/v1",
       source: "config",
     });
-    getTokenMock.mockResolvedValue("prod-token");
-
-    // getActiveOrg should be called with the context name
-    getActiveOrgMock.mockImplementation(async (ctx?: string) => {
-      if (ctx === "prod") return "prod-org";
-      return "default-org";
-    });
+    spyOn(credentials, "getToken").mockResolvedValue("prod-token");
+    const getActiveOrgSpy = spyOn(context, "getActiveOrg").mockImplementation(
+      async (ctx) => {
+        if (ctx === "prod") return "prod-org";
+        return "default-org";
+      }
+    );
 
     const resolved = await resolveApiClient({ context: "prod" });
+
     expect(resolved.orgSlug).toBe("prod-org");
-    expect(getActiveOrgMock).toHaveBeenCalledWith("prod");
+    expect(getActiveOrgSpy).toHaveBeenCalledWith("prod");
+  });
+
+  test("listOrganizations refuses unmatched URL overrides with stored credentials", async () => {
+    spyOn(context, "resolveContext").mockResolvedValue({
+      name: "default",
+      apiUrl: "https://app.lobu.ai/api/v1",
+      source: "default",
+    });
+    spyOn(context, "findContextByUrl").mockResolvedValue(undefined);
+    spyOn(credentials, "getToken").mockResolvedValue("default-token");
+
+    await expect(
+      listOrganizations({ apiUrl: "https://unknown.lobu.ai/api/v1" })
+    ).rejects.toThrow("Refusing to send stored context credentials");
   });
 });

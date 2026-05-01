@@ -462,7 +462,7 @@ async function resolveConnectorDomains(
   }
 
   const { resolveMcpEndpoint, restToolCall } = await import("./mcp.js");
-  const mcpUrl = resolveMcpEndpoint(cliProfile.config);
+  const mcpUrl = await resolveMcpEndpoint(cliProfile.config);
   if (!mcpUrl) {
     printText(
       "No MCP URL configured. Use --domains to specify cookie domains manually."
@@ -521,7 +521,7 @@ export async function captureBrowserAuth(
       return;
     }
     const { resolveMcpEndpoint, restToolCall } = await import("./mcp.js");
-    const mcpUrl = resolveMcpEndpoint(cliProfile.config);
+    const mcpUrl = await resolveMcpEndpoint(cliProfile.config);
     if (!mcpUrl) {
       printText("No MCP URL configured.");
       process.exitCode = 1;
@@ -647,7 +647,7 @@ export async function captureBrowserAuth(
 
     if (args.authProfileSlug) {
       const { resolveMcpEndpoint, restToolCall } = await import("./mcp.js");
-      const mcpUrl = resolveMcpEndpoint(cliProfile.config);
+      const mcpUrl = await resolveMcpEndpoint(cliProfile.config);
 
       if (!mcpUrl) {
         printText(
@@ -797,7 +797,7 @@ export async function captureBrowserAuth(
     printText("Saving cookies to auth profile...");
 
     const { resolveMcpEndpoint, restToolCall } = await import("./mcp.js");
-    const mcpUrl = resolveMcpEndpoint(cliProfile.config);
+    const mcpUrl = await resolveMcpEndpoint(cliProfile.config);
 
     if (!mcpUrl) {
       printText("No MCP URL configured. Store cookies manually.");

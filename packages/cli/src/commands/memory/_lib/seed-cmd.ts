@@ -565,22 +565,22 @@ async function seedWatcher(
 async function resolveAuth(
   urlFlag?: string,
   orgFlag?: string,
-  storePath?: string
+  context?: string
 ): Promise<{ token: string; mcpUrl: string; orgSlug: string }> {
-  const org = await resolveOrg(orgFlag);
+  const org = await resolveOrg(orgFlag, undefined, context);
 
   if (org) {
-    const orgSession = await getSessionForOrg(org, storePath, urlFlag);
+    const orgSession = await getSessionForOrg(org, context, urlFlag);
     if (orgSession) {
-      const result = await getUsableToken(orgSession.key, storePath);
+      const result = await getUsableToken(orgSession.key, context);
       if (result) {
         return { token: result.token, mcpUrl: orgSession.key, orgSlug: org };
       }
     }
-    const serverUrl = await resolveServerUrl(urlFlag, storePath);
+    const serverUrl = await resolveServerUrl(urlFlag, context);
     if (serverUrl) {
       const orgUrl = mcpUrlForOrg(serverUrl, org);
-      const result = await getUsableToken(orgUrl, storePath);
+      const result = await getUsableToken(orgUrl, context);
       if (result) {
         return { token: result.token, mcpUrl: orgUrl, orgSlug: org };
       }
@@ -588,8 +588,8 @@ async function resolveAuth(
     throw new ValidationError("Not logged in. Run: lobu login");
   }
 
-  const serverUrl = await resolveServerUrl(urlFlag, storePath);
-  const result = await getUsableToken(serverUrl || undefined, storePath);
+  const serverUrl = await resolveServerUrl(urlFlag, context);
+  const result = await getUsableToken(serverUrl || undefined, context);
   if (!result) {
     throw new ValidationError("Not logged in. Run: lobu login");
   }
@@ -614,7 +614,7 @@ export interface SeedOptions {
   dryRun?: boolean;
   org?: string;
   url?: string;
-  storePath?: string;
+  context?: string;
 }
 
 export async function seedMemoryWorkspace(
@@ -626,7 +626,7 @@ export async function seedMemoryWorkspace(
   const { token, mcpUrl, orgSlug } = await resolveAuth(
     opts.url,
     orgOverride,
-    opts.storePath
+    opts.context
   );
   const apiBaseUrl = deriveApiBaseUrl(mcpUrl);
   const dryRun = opts.dryRun ?? false;

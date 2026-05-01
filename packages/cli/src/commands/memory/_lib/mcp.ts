@@ -78,11 +78,11 @@ type JsonRpcResponse<T = unknown> = {
  * Resolve the MCP endpoint URL.
  * Priority: explicit config > LOBU_MEMORY_URL env > saved memory server > default cloud server.
  */
-export function resolveMcpEndpoint(config?: {
+export async function resolveMcpEndpoint(config?: {
   mcpUrl?: unknown;
   url?: unknown;
   apiUrl?: unknown;
-}): string | null {
+}): Promise<string | null> {
   // Explicit config should win over ambient auth/session state so callers can
   // deterministically target a specific server.
   if (config) {

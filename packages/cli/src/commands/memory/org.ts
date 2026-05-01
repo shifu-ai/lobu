@@ -6,12 +6,14 @@ import {
 import { isJson, printJson, printText } from "./_lib/output.js";
 
 interface OrgOptions {
-  storePath?: string;
+  context?: string;
 }
 
-export async function memoryOrgCurrentCommand(options: OrgOptions = {}): Promise<void> {
-  const { session, key } = await getActiveSession(options.storePath);
-  const org = await resolveOrg(undefined, session, options.storePath);
+export async function memoryOrgCurrentCommand(
+  options: OrgOptions = {}
+): Promise<void> {
+  const { session, key } = await getActiveSession(options.context);
+  const org = await resolveOrg(undefined, session, options.context);
 
   if (isJson()) {
     printJson({ org: org || null, server: key });
@@ -26,7 +28,7 @@ export async function memoryOrgSetCommand(
   orgSlug: string,
   options: OrgOptions = {}
 ): Promise<void> {
-  await setActiveOrg(orgSlug, options.storePath);
+  await setActiveOrg(orgSlug, options.context);
 
   if (isJson()) {
     printJson({ org: orgSlug });

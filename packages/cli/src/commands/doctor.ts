@@ -68,7 +68,7 @@ export async function doctorCommand(
   checks.push(checkNodeVersion());
   checks.push(checkBinaryExists("git"));
 
-  const serverUrl = resolveServerUrl();
+  const serverUrl = await resolveServerUrl();
   if (serverUrl) checks.push(await checkServerReachable(serverUrl));
 
   const icons = {

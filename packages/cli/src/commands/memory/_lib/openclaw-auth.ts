@@ -1,4 +1,5 @@
 import {
+  findContextByMemoryUrl,
   getActiveOrg,
   getMemoryUrl,
   getToken,
@@ -106,7 +107,7 @@ export async function resolveServerUrl(
   context?: string
 ): Promise<string> {
   if (urlFlag) return normalizeMcpUrl(urlFlag);
-  return getMemoryUrl(context);
+  return normalizeMcpUrl(await getMemoryUrl(context));
 }
 
 /**
@@ -134,15 +135,33 @@ export async function getUsableToken(
   token: string;
   session: MemorySession;
 } | null> {
-  const target = await resolveContext(contextName);
-  const token = await getToken(target.name);
-  if (!token) return null;
-
+  let target = await resolveContext(contextName);
   const resolvedUrl = mcpUrl
     ? normalizeMcpUrl(mcpUrl)
     : await resolveServerUrl(undefined, target.name);
+
+  if (mcpUrl && !contextName) {
+    const matched = await findContextByMemoryUrl(resolvedUrl);
+    if (matched) target = matched;
+  }
+
+  if (mcpUrl && !process.env.LOBU_API_TOKEN) {
+    const contextUrl = await resolveServerUrl(undefined, target.name);
+    const requestedBase = baseMcpUrl(resolvedUrl);
+    const contextBase = baseMcpUrl(contextUrl);
+    if (requestedBase !== contextBase) {
+      throw new Error(
+        `Refusing to send stored context credentials for "${target.name}" to ${requestedBase}. Configure that context's memory URL or set LOBU_API_TOKEN explicitly.`
+      );
+    }
+  }
+
+  const token = await getToken(target.name);
+  if (!token) return null;
+
   const org =
-    orgFromMcpUrl(resolvedUrl) ?? (await resolveOrg(undefined, undefined, target.name));
+    orgFromMcpUrl(resolvedUrl) ??
+    (await resolveOrg(undefined, undefined, target.name));
   const sessionUrl =
     org && !orgFromMcpUrl(resolvedUrl)
       ? mcpUrlForOrg(resolvedUrl, org)

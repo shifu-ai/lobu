@@ -21,7 +21,7 @@ interface LobuContextConfig {
   contexts: Record<string, LobuContextEntry>;
 }
 
-interface ResolvedContext {
+export interface ResolvedContext {
   name: string;
   apiUrl: string;
   source: "default" | "config" | "env";
@@ -70,15 +70,15 @@ export async function getActiveOrg(
   return config.contexts[name]?.activeOrg;
 }
 
-export async function getMemoryUrl(
-  contextName?: string
-): Promise<string> {
+export async function getMemoryUrl(contextName?: string): Promise<string> {
   const envUrl = process.env.LOBU_MEMORY_URL?.trim();
   if (envUrl) return normalizeApiUrl(envUrl);
 
   const config = await loadContextConfig();
   const name = contextName || config.currentContext;
-  return normalizeApiUrl(config.contexts[name]?.memoryUrl || DEFAULT_MEMORY_URL);
+  return normalizeApiUrl(
+    config.contexts[name]?.memoryUrl || DEFAULT_MEMORY_URL
+  );
 }
 
 export async function setActiveOrg(
@@ -263,13 +263,55 @@ export async function findContextByUrl(
 
   for (const [name, context] of Object.entries(config.contexts)) {
     if (normalizeApiUrl(context.apiUrl) === normalizedSearch) {
-      return {
-        name,
-        apiUrl: normalizeApiUrl(context.apiUrl),
-        source: name === DEFAULT_CONTEXT_NAME ? "default" : "config",
-      };
+      return contextToResolvedContext(name, context);
     }
   }
 
   return undefined;
+}
+
+export async function findContextByMemoryUrl(
+  memoryUrl: string
+): Promise<ResolvedContext | undefined> {
+  const config = await loadContextConfig();
+  const normalizedSearch = normalizeMemoryBaseUrl(memoryUrl);
+
+  for (const [name, context] of Object.entries(config.contexts)) {
+    const candidate = normalizeMemoryBaseUrl(
+      context.memoryUrl || DEFAULT_MEMORY_URL
+    );
+    if (candidate === normalizedSearch) {
+      return contextToResolvedContext(name, context);
+    }
+  }
+
+  return undefined;
+}
+
+function contextToResolvedContext(
+  name: string,
+  context: LobuContextEntry
+): ResolvedContext {
+  return {
+    name,
+    apiUrl: normalizeApiUrl(context.apiUrl),
+    source: name === DEFAULT_CONTEXT_NAME ? "default" : "config",
+  };
+}
+
+function normalizeMemoryBaseUrl(input: string): string {
+  try {
+    const url = new URL(input);
+    url.hash = "";
+    url.search = "";
+    if (!url.pathname || url.pathname === "/") {
+      url.pathname = "/mcp";
+    } else if (!url.pathname.startsWith("/mcp")) {
+      url.pathname = `${url.pathname.replace(/\/+$/, "")}/mcp`;
+    }
+    url.pathname = "/mcp";
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return normalizeApiUrl(input);
+  }
 }

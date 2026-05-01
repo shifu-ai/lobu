@@ -1,4 +1,9 @@
-import { findContextByUrl, getActiveOrg, resolveContext } from "./context.js";
+import {
+  findContextByUrl,
+  getActiveOrg,
+  resolveContext,
+  type ResolvedContext,
+} from "./context.js";
 import { getToken, loadCredentials } from "./credentials.js";
 
 export interface ApiClientOptions {
@@ -92,24 +97,8 @@ export class ApiClient {
 export async function resolveApiClient(
   options: ApiClientOptions = {}
 ): Promise<ResolvedApiClient> {
-  let target = await resolveContext(options.context);
-
-  if (options.apiUrl) {
-    const matched = await findContextByUrl(options.apiUrl);
-    if (matched) {
-      target = matched;
-    } else if (!process.env.LOBU_API_TOKEN) {
-      const apiBaseUrl = apiBaseFromContextUrl(options.apiUrl);
-      const contextApiBaseUrl = apiBaseFromContextUrl(target.apiUrl);
-      if (apiBaseUrl !== contextApiBaseUrl) {
-        throw new ApiClientError(
-          `Refusing to send stored context credentials for "${target.name}" to ${apiBaseUrl}. Add a context for that URL or set LOBU_API_TOKEN explicitly.`
-        );
-      }
-    }
-  }
-
-  const apiBaseUrl = apiBaseFromContextUrl(options.apiUrl ?? target.apiUrl);
+  const target = await resolveApiTarget(options);
+  const apiBaseUrl = apiBaseFromContextUrl(target.apiUrl);
   const token = process.env.LOBU_API_TOKEN || (await getToken(target.name));
 
   if (!token) {
@@ -124,6 +113,7 @@ export async function resolveApiClient(
     contextName: target.name,
     token,
     apiBaseUrl,
+    useStoredUserInfoEndpoint: target.useStoredUserInfoEndpoint,
   });
 
   return {
@@ -138,15 +128,7 @@ export async function resolveApiClient(
 export async function listOrganizations(
   options: Pick<ApiClientOptions, "context" | "apiUrl" | "fetchImpl"> = {}
 ): Promise<OrganizationInfo[]> {
-  let target = await resolveContext(options.context);
-
-  if (options.apiUrl) {
-    const matched = await findContextByUrl(options.apiUrl);
-    if (matched) {
-      target = matched;
-    }
-  }
-
+  const target = await resolveApiTarget(options);
   const token = process.env.LOBU_API_TOKEN || (await getToken(target.name));
   if (!token) {
     throw new ApiClientError(
@@ -157,9 +139,42 @@ export async function listOrganizations(
   return getOrganizationsFromUserInfo(
     target.name,
     token,
-    apiBaseFromContextUrl(options.apiUrl ?? target.apiUrl),
-    options.fetchImpl
+    apiBaseFromContextUrl(target.apiUrl),
+    options.fetchImpl,
+    { useStoredUserInfoEndpoint: target.useStoredUserInfoEndpoint }
   );
+}
+
+interface ResolvedApiTarget extends ResolvedContext {
+  useStoredUserInfoEndpoint: boolean;
+}
+
+async function resolveApiTarget(
+  options: Pick<ApiClientOptions, "context" | "apiUrl">
+): Promise<ResolvedApiTarget> {
+  const requested = await resolveContext(options.context);
+  if (!options.apiUrl) {
+    return { ...requested, useStoredUserInfoEndpoint: true };
+  }
+
+  const matched = await findContextByUrl(options.apiUrl);
+  if (matched) {
+    return { ...matched, useStoredUserInfoEndpoint: true };
+  }
+
+  const apiBaseUrl = apiBaseFromContextUrl(options.apiUrl);
+  const contextApiBaseUrl = apiBaseFromContextUrl(requested.apiUrl);
+  if (!process.env.LOBU_API_TOKEN && apiBaseUrl !== contextApiBaseUrl) {
+    throw new ApiClientError(
+      `Refusing to send stored context credentials for "${requested.name}" to ${apiBaseUrl}. Add a context for that URL or set LOBU_API_TOKEN explicitly.`
+    );
+  }
+
+  return {
+    ...requested,
+    apiUrl: options.apiUrl,
+    useStoredUserInfoEndpoint: apiBaseUrl === contextApiBaseUrl,
+  };
 }
 
 export function apiBaseFromContextUrl(apiUrl: string): string {
@@ -175,6 +190,7 @@ async function resolveOrgSlug(
     contextName: string;
     token: string;
     apiBaseUrl: string;
+    useStoredUserInfoEndpoint: boolean;
   }
 ): Promise<string> {
   const explicit = options.org?.trim() || process.env.LOBU_ORG?.trim();
@@ -187,7 +203,8 @@ async function resolveOrgSlug(
     options.contextName,
     options.token,
     options.apiBaseUrl,
-    options.fetchImpl
+    options.fetchImpl,
+    { useStoredUserInfoEndpoint: options.useStoredUserInfoEndpoint }
   ).catch(() => []);
 
   if (organizations.length === 1) {
@@ -209,9 +226,13 @@ async function getOrganizationsFromUserInfo(
   contextName: string,
   token: string,
   apiBaseUrl: string,
-  fetchImpl: typeof fetch = fetch
+  fetchImpl: typeof fetch = fetch,
+  options: { useStoredUserInfoEndpoint?: boolean } = {}
 ): Promise<OrganizationInfo[]> {
-  const creds = await loadCredentials(contextName);
+  const creds =
+    options.useStoredUserInfoEndpoint === false
+      ? null
+      : await loadCredentials(contextName);
   const endpoint =
     creds?.oauth?.userinfoEndpoint ?? `${apiBaseUrl}/oauth/userinfo`;
   const response = await fetchImpl(endpoint, {
