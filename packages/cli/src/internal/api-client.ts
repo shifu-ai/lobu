@@ -1,4 +1,4 @@
-import { getActiveOrg, resolveContext } from "./context.js";
+import { findContextByUrl, getActiveOrg, resolveContext } from "./context.js";
 import { getToken, loadCredentials } from "./credentials.js";
 
 export interface ApiClientOptions {
@@ -92,20 +92,26 @@ export class ApiClient {
 export async function resolveApiClient(
   options: ApiClientOptions = {}
 ): Promise<ResolvedApiClient> {
-  const target = await resolveContext(options.context);
-  const contextApiBaseUrl = apiBaseFromContextUrl(target.apiUrl);
-  const apiBaseUrl = apiBaseFromContextUrl(options.apiUrl ?? target.apiUrl);
-  if (
-    options.apiUrl &&
-    apiBaseUrl !== contextApiBaseUrl &&
-    !process.env.LOBU_API_TOKEN
-  ) {
-    throw new ApiClientError(
-      `Refusing to send stored context credentials for "${target.name}" to ${apiBaseUrl}. Add a context for that URL or set LOBU_API_TOKEN explicitly.`
-    );
+  let target = await resolveContext(options.context);
+
+  if (options.apiUrl) {
+    const matched = await findContextByUrl(options.apiUrl);
+    if (matched) {
+      target = matched;
+    } else if (!process.env.LOBU_API_TOKEN) {
+      const apiBaseUrl = apiBaseFromContextUrl(options.apiUrl);
+      const contextApiBaseUrl = apiBaseFromContextUrl(target.apiUrl);
+      if (apiBaseUrl !== contextApiBaseUrl) {
+        throw new ApiClientError(
+          `Refusing to send stored context credentials for "${target.name}" to ${apiBaseUrl}. Add a context for that URL or set LOBU_API_TOKEN explicitly.`
+        );
+      }
+    }
   }
 
-  const token = await getToken(target.name);
+  const apiBaseUrl = apiBaseFromContextUrl(options.apiUrl ?? target.apiUrl);
+  const token = process.env.LOBU_API_TOKEN || (await getToken(target.name));
+
   if (!token) {
     throw new ApiClientError(
       `Not logged in to context "${target.name}". Run \`lobu login${options.context ? ` --context ${target.name}` : ""}\` first.`,
@@ -132,8 +138,16 @@ export async function resolveApiClient(
 export async function listOrganizations(
   options: Pick<ApiClientOptions, "context" | "apiUrl" | "fetchImpl"> = {}
 ): Promise<OrganizationInfo[]> {
-  const target = await resolveContext(options.context);
-  const token = await getToken(target.name);
+  let target = await resolveContext(options.context);
+
+  if (options.apiUrl) {
+    const matched = await findContextByUrl(options.apiUrl);
+    if (matched) {
+      target = matched;
+    }
+  }
+
+  const token = process.env.LOBU_API_TOKEN || (await getToken(target.name));
   if (!token) {
     throw new ApiClientError(
       `Not logged in to context "${target.name}". Run \`lobu login${options.context ? ` --context ${target.name}` : ""}\` first.`,
@@ -166,7 +180,7 @@ async function resolveOrgSlug(
   const explicit = options.org?.trim() || process.env.LOBU_ORG?.trim();
   if (explicit) return validateOrgSlug(explicit);
 
-  const active = await getActiveOrg();
+  const active = await getActiveOrg(options.contextName);
   if (active) return validateOrgSlug(active);
 
   const organizations = await getOrganizationsFromUserInfo(

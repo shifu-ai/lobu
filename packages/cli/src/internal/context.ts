@@ -10,11 +10,11 @@ const CONTEXTS_FILE = join(LOBU_CONFIG_DIR, "config.json");
 
 interface LobuContextEntry {
   apiUrl: string;
+  activeOrg?: string;
 }
 
 interface LobuContextConfig {
   currentContext: string;
-  activeOrg?: string;
   contexts: Record<string, LobuContextEntry>;
 }
 
@@ -26,7 +26,7 @@ interface ResolvedContext {
 
 interface StoredContextConfig {
   currentContext?: string;
-  activeOrg?: string;
+  activeOrg?: string; // Legacy top-level activeOrg
   contexts?: Record<string, LobuContextEntry>;
 }
 
@@ -57,15 +57,20 @@ export async function getCurrentContextName(): Promise<string> {
   return config.currentContext;
 }
 
-export async function getActiveOrg(): Promise<string | undefined> {
+export async function getActiveOrg(
+  contextName?: string
+): Promise<string | undefined> {
   const envOrg = process.env.LOBU_ORG?.trim();
   if (envOrg) return envOrg;
+
   const config = await loadContextConfig();
-  return config.activeOrg;
+  const name = contextName || config.currentContext;
+  return config.contexts[name]?.activeOrg;
 }
 
 export async function setActiveOrg(
-  orgSlug: string
+  orgSlug: string,
+  contextName?: string
 ): Promise<LobuContextConfig> {
   const trimmed = orgSlug.trim();
   if (!trimmed) {
@@ -78,7 +83,13 @@ export async function setActiveOrg(
   }
 
   const config = await loadContextConfig();
-  config.activeOrg = trimmed;
+  const name = contextName || config.currentContext;
+  const context = config.contexts[name];
+  if (!context) {
+    throw new Error(`Unknown context "${name}".`);
+  }
+
+  context.activeOrg = trimmed;
   await saveContextConfig(config);
   return config;
 }
@@ -160,7 +171,11 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
     if (!value || typeof value.apiUrl !== "string") {
       continue;
     }
-    contexts[name] = { apiUrl: normalizeApiUrl(value.apiUrl) };
+    contexts[name] = {
+      apiUrl: normalizeApiUrl(value.apiUrl),
+      activeOrg:
+        typeof value.activeOrg === "string" ? value.activeOrg.trim() : undefined,
+    };
   }
 
   const currentContext =
@@ -168,12 +183,14 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
       ? raw.currentContext
       : DEFAULT_CONTEXT_NAME;
 
+  // Migration: If we have a legacy top-level activeOrg and the current context doesn't have one,
+  // move it to the current context.
+  if (raw.activeOrg && !contexts[currentContext]!.activeOrg) {
+    contexts[currentContext]!.activeOrg = raw.activeOrg.trim();
+  }
+
   return {
     currentContext,
-    activeOrg:
-      typeof raw.activeOrg === "string" && raw.activeOrg.trim()
-        ? raw.activeOrg.trim()
-        : undefined,
     contexts,
   };
 }
@@ -202,4 +219,23 @@ function normalizeApiUrl(url: string): string {
     end--;
   }
   return end === url.length ? url : url.slice(0, end);
+}
+
+export async function findContextByUrl(
+  apiUrl: string
+): Promise<ResolvedContext | undefined> {
+  const config = await loadContextConfig();
+  const normalizedSearch = normalizeApiUrl(apiUrl);
+
+  for (const [name, context] of Object.entries(config.contexts)) {
+    if (normalizeApiUrl(context.apiUrl) === normalizedSearch) {
+      return {
+        name,
+        apiUrl: normalizeApiUrl(context.apiUrl),
+        source: name === DEFAULT_CONTEXT_NAME ? "default" : "config",
+      };
+    }
+  }
+
+  return undefined;
 }
