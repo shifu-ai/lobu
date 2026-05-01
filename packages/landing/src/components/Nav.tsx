@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { LandingUseCaseId } from "../use-case-definitions";
+import { dark as darkTokens, light as lightTokens } from "../styles/theme-tokens";
 import {
   getOwlettoBaseUrl,
   getOwlettoLoginUrl,
@@ -150,6 +151,16 @@ function ThemeToggle() {
     }
   }, []);
 
+  function applyVars(name: "light" | "dark") {
+    const s = document.documentElement.style;
+    // Import tokens dynamically — the bundler inlines them
+    if (name === "dark") {
+      for (const [k, v] of Object.entries(darkTokens)) s.setProperty(k, v);
+    } else {
+      for (const [k, v] of Object.entries(lightTokens)) s.setProperty(k, v);
+    }
+  }
+
   function cycle() {
     const current =
       theme ??
@@ -157,6 +168,7 @@ function ThemeToggle() {
         ? "dark"
         : "light");
     const next = current === "light" ? "dark" : "light";
+    applyVars(next);
     document.documentElement.setAttribute("data-theme", next);
     localStorage.setItem("theme", next);
     setTheme(next);

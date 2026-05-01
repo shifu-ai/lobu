@@ -523,7 +523,7 @@ export const ManageWatchersSchema = Type.Object({
 // Type Definitions
 // ============================================
 
-type ManageWatchersArgs = Static<typeof ManageWatchersSchema>;
+export type ManageWatchersArgs = Static<typeof ManageWatchersSchema>;
 
 interface WatcherOperationResult {
   watcher_id: string;

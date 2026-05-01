@@ -20,6 +20,7 @@ const {
 import { existsSync } from "node:fs";
 import PosthogAnalytics from "../components/PosthogAnalytics.astro";
 import WebMCP from "../components/WebMCP.astro";
+import { themeScript } from "../styles/theme-script";
 
 const canonicalURL = new URL(Astro.url.pathname, Astro.site);
 const ogImage = new URL("/lobster-icon.png", Astro.site);
@@ -44,15 +45,6 @@ const hasMarkdownTwin = existsSync(markdownFileURL);
     <link rel="icon" type="image/png" href="/lobster-icon.png" />
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0a0a0b" media="(prefers-color-scheme: dark)" />
-    <!-- Apply persisted theme before paint to prevent flash -->
-    <script is:inline>
-      (function() {
-        var t = localStorage.getItem('theme');
-        if (t === 'dark' || t === 'light') {
-          document.documentElement.setAttribute('data-theme', t);
-        }
-      })();
-    </script>
 
     <!-- Open Graph -->
     <meta property="og:type" content={ogType} />
@@ -110,6 +102,8 @@ const hasMarkdownTwin = existsSync(markdownFileURL);
     <link rel="api-catalog" href="/.well-known/api-catalog" />
   </head>
   <body>
+    <!-- Apply theme tokens via inline styles to defeat Tailwind v4 @layer cascade -->
+    <script is:inline set:html={themeScript(Astro)} />
     <slot />
   </body>
 </html>

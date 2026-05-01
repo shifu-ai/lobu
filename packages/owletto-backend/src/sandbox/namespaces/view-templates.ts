@@ -10,6 +10,7 @@
 import type { Env } from "../../index";
 import { manageViewTemplates } from "../../tools/admin/manage_view_templates";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 type ResourceType = "entity_type" | "entity";
 type ResourceId = string | number;
@@ -24,6 +25,7 @@ export interface ViewTemplateSetInput {
 }
 
 export interface ViewTemplatesNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   get(input: {
     resource_type: ResourceType;
     resource_id: ResourceId;
@@ -48,13 +50,13 @@ export function buildViewTemplatesNamespace(
   ctx: ToolContext,
   env: Env,
 ): ViewTemplatesNamespace {
-  const call = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageViewTemplates(payload as never, env, ctx) as Promise<T>;
+  const { manage, action } = createActionCaller(manageViewTemplates, env, ctx);
 
   return {
-    get: (input) => call({ action: "get", ...input }),
-    set: (input) => call({ action: "set", ...input }),
-    rollback: (input) => call({ action: "rollback", ...input }),
-    removeTab: (input) => call({ action: "remove_tab", ...input }),
+    manage,
+    get: (input) => action("get", input),
+    set: (input) => action("set", input),
+    rollback: (input) => action("rollback", input),
+    removeTab: (input) => action("remove_tab", input),
   };
 }

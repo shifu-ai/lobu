@@ -4,106 +4,50 @@ import {
   METHOD_METADATA,
   type MethodAccess,
 } from "../../../sandbox/method-metadata";
+import { buildClientSDK } from "../../../sandbox/client-sdk";
+import type { Env } from "../../../index";
+import type { ToolContext } from "../../../tools/registry";
 
-/**
- * Static surface description of every namespace method. Hand-maintained — when
- * a namespace adds a method, this list must add it too, and a metadata entry
- * must exist. The coverage test below enforces the latter.
- */
-const NAMESPACE_METHODS: Record<string, readonly string[]> = {
-  entities: [
-    "list",
-    "get",
-    "create",
-    "update",
-    "delete",
-    "link",
-    "unlink",
-    "updateLink",
-    "listLinks",
-    "search",
-  ],
-  entitySchema: [
-    "listTypes",
-    "getType",
-    "createType",
-    "updateType",
-    "deleteType",
-    "auditType",
-    "listRelTypes",
-    "getRelType",
-    "createRelType",
-    "updateRelType",
-    "deleteRelType",
-    "addRule",
-    "removeRule",
-    "listRules",
-  ],
-  connections: [
-    "list",
-    "listConnectorDefinitions",
-    "get",
-    "create",
-    "connect",
-    "update",
-    "delete",
-    "test",
-    "installConnector",
-    "uninstallConnector",
-    "toggleConnectorLogin",
-    "updateConnectorAuth",
-  ],
-  feeds: ["list", "get", "create", "update", "delete", "trigger"],
-  authProfiles: ["list", "get", "test", "create", "update", "delete"],
-  operations: [
-    "listAvailable",
-    "execute",
-    "listRuns",
-    "getRun",
-    "approve",
-    "reject",
-  ],
-  watchers: [
-    "list",
-    "get",
-    "create",
-    "update",
-    "delete",
-    "setReactionScript",
-    "completeWindow",
-  ],
-  classifiers: [
-    "list",
-    "create",
-    "createVersion",
-    "getVersions",
-    "setCurrentVersion",
-    "generateEmbeddings",
-    "delete",
-    "classify",
-  ],
-  viewTemplates: ["get", "set", "rollback", "removeTab"],
-  knowledge: ["search", "save", "read", "delete"],
-  organizations: ["list", "current"],
+const testEnv: Env = { ENVIRONMENT: "test" } as Env;
+const testCtx: ToolContext = {
+  organizationId: "test-org",
+  userId: "test-user",
+  memberRole: "owner",
+  isAuthenticated: true,
+  tokenType: "oauth",
+  scopedToOrg: false,
+  allowCrossOrg: true,
 };
 
-/** Top-level SDK methods that aren't inside a namespace. */
-const TOP_LEVEL_METHODS = ["query", "log", "org"] as const;
+function enumerateSdkMethods(): { namespaceMethods: string[]; topLevelMethods: string[] } {
+  const sdk = buildClientSDK(testCtx, testEnv);
+  const namespaceMethods: string[] = [];
+  const topLevelMethods: string[] = [];
+
+  for (const [name, value] of Object.entries(sdk)) {
+    if (typeof value === "function") {
+      topLevelMethods.push(name);
+      continue;
+    }
+    if (!value || typeof value !== "object") continue;
+    for (const method of Object.keys(value)) {
+      namespaceMethods.push(`${name}.${method}`);
+    }
+  }
+
+  return { namespaceMethods, topLevelMethods };
+}
 
 describe("method-metadata", () => {
-  it("has at least one entry per namespace method", () => {
-    const missing: string[] = [];
-    for (const [ns, methods] of Object.entries(NAMESPACE_METHODS)) {
-      for (const m of methods) {
-        const key = `${ns}.${m}`;
-        if (!(key in METHOD_METADATA)) missing.push(key);
-      }
-    }
+  it("has metadata for every namespace method", () => {
+    const { namespaceMethods } = enumerateSdkMethods();
+    const missing = namespaceMethods.filter((path) => !(path in METHOD_METADATA));
     expect(missing).toEqual([]);
   });
 
   it("has entries for top-level methods", () => {
-    for (const m of TOP_LEVEL_METHODS) {
+    const { topLevelMethods } = enumerateSdkMethods();
+    for (const m of topLevelMethods) {
       expect(METHOD_METADATA).toHaveProperty(m);
     }
   });
@@ -135,6 +79,7 @@ describe("method-metadata", () => {
   it("classifies external side-effects correctly for known methods", () => {
     expect(METHOD_METADATA["operations.execute"].access).toBe("external");
     expect(METHOD_METADATA["feeds.trigger"].access).toBe("external");
+    expect(METHOD_METADATA["watchers.trigger"].access).toBe("external");
     expect(METHOD_METADATA["connections.test"].access).toBe("external");
     expect(METHOD_METADATA["authProfiles.test"].access).toBe("external");
   });

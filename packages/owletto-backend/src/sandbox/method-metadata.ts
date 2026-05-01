@@ -32,6 +32,10 @@ export const METHOD_METADATA: Record<string, MethodMetadata> = {
   },
 
   // entities
+  "entities.manage": {
+    summary: "Raw manage_entity action wrapper. Prefer named methods.",
+    access: "write",
+  },
   "entities.list": {
     summary:
       "List entities in the current organization with optional filters. Returns `{ action, entities, metadata }` where `entities` is the page and `metadata` carries `total_count`, `has_more`, `limit`, `offset`.",
@@ -101,6 +105,10 @@ export default async (_ctx, client) => {
   },
 
   // entitySchema
+  "entitySchema.manage": {
+    summary: "Raw manage_entity_schema action wrapper. Prefer named methods.",
+    access: "write",
+  },
   "entitySchema.listTypes": {
     summary: "List entity types in the organization.",
     access: "read",
@@ -198,6 +206,12 @@ export default async (_ctx, client) => {
   },
 
   // watchers
+  "watchers.manage": {
+    summary:
+      "Raw manage_watchers action wrapper. Prefer named methods such as watchers.trigger or watchers.createVersion.",
+    access: "external",
+    example: "await client.watchers.manage({ action: 'trigger', watcher_id: '42' });",
+  },
   "watchers.list": {
     summary:
       "List watchers, optionally filtered by entity. Returns `{ watchers: [...] }`.",
@@ -230,8 +244,24 @@ export default async (_ctx, client) => {
 };`,
   },
   "watchers.update": {
-    summary: "Update watcher config (schedule, model, sources).",
+    summary: "Update watcher config (schedule, agent, model, sources).",
     access: "write",
+  },
+  "watchers.createVersion": {
+    summary: "Create a new watcher template version.",
+    access: "write",
+  },
+  "watchers.upgrade": {
+    summary: "Move a watcher to another template version.",
+    access: "write",
+  },
+  "watchers.trigger": {
+    summary: "Trigger an immediate watcher run and dispatch it to its assigned agent.",
+    access: "external",
+    example: "await client.watchers.trigger(42);",
+    usageExample: `export default async (_ctx, client) => {
+  return client.watchers.trigger(42);
+};`,
   },
   "watchers.delete": {
     summary: "Delete one or more watchers.",
@@ -248,8 +278,36 @@ export default async (_ctx, client) => {
       "Submit LLM-extracted data for a watcher window. Requires a signed window_token.",
     access: "write",
   },
+  "watchers.getVersions": {
+    summary: "List template versions for a watcher.",
+    access: "read",
+  },
+  "watchers.getVersionDetails": {
+    summary: "Fetch a specific watcher template version.",
+    access: "read",
+  },
+  "watchers.getComponentReference": {
+    summary: "Return watcher UI/component reference documentation.",
+    access: "read",
+  },
+  "watchers.submitFeedback": {
+    summary: "Submit field-level corrections for a watcher window.",
+    access: "write",
+  },
+  "watchers.getFeedback": {
+    summary: "Read field-level feedback for a watcher, optionally scoped to a window.",
+    access: "read",
+  },
+  "watchers.createFromVersion": {
+    summary: "Create watchers for multiple entities from an existing watcher version.",
+    access: "write",
+  },
 
   // connections
+  "connections.manage": {
+    summary: "Raw manage_connections action wrapper. Prefer named methods.",
+    access: "external",
+  },
   "connections.list": {
     summary: "List configured connections in the current organization.",
     access: "read",
@@ -274,6 +332,10 @@ export default async (_ctx, client) => {
     access: "write",
   },
   "connections.delete": { summary: "Delete a connection.", access: "write" },
+  "connections.reauthenticate": {
+    summary: "Start a fresh auth flow for an existing connection.",
+    access: "write",
+  },
   "connections.test": {
     summary: "Test connection credentials (sends an external probe).",
     access: "external",
@@ -294,8 +356,24 @@ export default async (_ctx, client) => {
     summary: "Update org-wide auth config for a connector.",
     access: "write",
   },
+  "connections.updateConnectorDefaultConfig": {
+    summary: "Update a connector definition's default connection config.",
+    access: "write",
+  },
+  "connections.setConnectorEntityLinkOverrides": {
+    summary: "Set connector-level entity-link overrides.",
+    access: "write",
+  },
+  "connections.updateConnectorDefaultRepairAgent": {
+    summary: "Set or clear the connector's default repair agent.",
+    access: "write",
+  },
 
   // operations
+  "operations.manage": {
+    summary: "Raw manage_operations action wrapper. Prefer named methods.",
+    access: "external",
+  },
   "operations.listAvailable": {
     summary: "List operations exposed by the active connections.",
     access: "read",
@@ -320,6 +398,10 @@ export default async (_ctx, client) => {
   },
 
   // feeds
+  "feeds.manage": {
+    summary: "Raw manage_feeds action wrapper. Prefer named methods.",
+    access: "external",
+  },
   "feeds.list": { summary: "List data-sync feeds.", access: "read" },
   "feeds.get": { summary: "Get a feed by id.", access: "read" },
   "feeds.create": {
@@ -334,6 +416,10 @@ export default async (_ctx, client) => {
   },
 
   // authProfiles
+  "authProfiles.manage": {
+    summary: "Raw manage_auth_profiles action wrapper. Prefer named methods.",
+    access: "external",
+  },
   "authProfiles.list": {
     summary: "List reusable auth profiles.",
     access: "read",
@@ -360,6 +446,10 @@ export default async (_ctx, client) => {
   },
 
   // classifiers
+  "classifiers.manage": {
+    summary: "Raw manage_classifiers action wrapper. Prefer named methods.",
+    access: "write",
+  },
   "classifiers.list": {
     summary: "List classifier templates.",
     access: "read",
@@ -396,6 +486,10 @@ export default async (_ctx, client) => {
   },
 
   // viewTemplates
+  "viewTemplates.manage": {
+    summary: "Raw manage_view_templates action wrapper. Prefer named methods.",
+    access: "write",
+  },
   "viewTemplates.get": {
     summary: "Get the active view template for a resource.",
     access: "read",

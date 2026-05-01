@@ -8,6 +8,7 @@
 import type { Env } from "../../index";
 import { manageClassifiers } from "../../tools/admin/manage_classifiers";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export interface ClassifierCreateInput {
   slug: string;
@@ -50,6 +51,7 @@ export interface ClassifierClassifyInput {
 }
 
 export interface ClassifiersNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   list(input?: { entity_id?: number; status?: string }): Promise<unknown>;
   create(input: ClassifierCreateInput): Promise<unknown>;
   createVersion(input: ClassifierCreateVersionInput): Promise<unknown>;
@@ -70,20 +72,18 @@ export function buildClassifiersNamespace(
   ctx: ToolContext,
   env: Env,
 ): ClassifiersNamespace {
-  const call = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageClassifiers(payload as never, env, ctx) as Promise<T>;
+  const { manage, action } = createActionCaller(manageClassifiers, env, ctx);
 
   return {
-    list: (input) => call({ action: "list", ...input }),
-    create: (input) => call({ action: "create", ...input }),
-    createVersion: (input) => call({ action: "create_version", ...input }),
+    manage,
+    list: (input) => action("list", input),
+    create: (input) => action("create", input),
+    createVersion: (input) => action("create_version", input),
     getVersions: (classifier_id) =>
-      call({ action: "get_versions", classifier_id }),
-    setCurrentVersion: (input) =>
-      call({ action: "set_current_version", ...input }),
-    generateEmbeddings: (input) =>
-      call({ action: "generate_embeddings", ...input }),
-    delete: (classifier_id) => call({ action: "delete", classifier_id }),
-    classify: (input) => call({ action: "classify", ...input }),
+      action("get_versions", { classifier_id }),
+    setCurrentVersion: (input) => action("set_current_version", input),
+    generateEmbeddings: (input) => action("generate_embeddings", input),
+    delete: (classifier_id) => action("delete", { classifier_id }),
+    classify: (input) => action("classify", input),
   };
 }

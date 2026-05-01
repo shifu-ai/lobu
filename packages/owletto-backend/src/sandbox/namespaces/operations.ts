@@ -8,6 +8,7 @@
 import type { Env } from "../../index";
 import { manageOperations } from "../../tools/admin/manage_operations";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export interface OperationsExecuteInput {
   connection_id: number;
@@ -21,6 +22,7 @@ export interface OperationsExecuteInput {
 }
 
 export interface OperationsNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   listAvailable(input?: { entity_id?: number }): Promise<unknown>;
   execute(input: OperationsExecuteInput): Promise<unknown>;
   listRuns(input?: {
@@ -43,15 +45,15 @@ export function buildOperationsNamespace(
   ctx: ToolContext,
   env: Env,
 ): OperationsNamespace {
-  const call = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageOperations(payload as never, env, ctx) as Promise<T>;
+  const { manage, action } = createActionCaller(manageOperations, env, ctx);
 
   return {
-    listAvailable: (input) => call({ action: "list_available", ...input }),
-    execute: (input) => call({ action: "execute", ...input }),
-    listRuns: (input) => call({ action: "list_runs", ...input }),
-    getRun: (run_id) => call({ action: "get_run", run_id }),
-    approve: (input) => call({ action: "approve", ...input }),
-    reject: (input) => call({ action: "reject", ...input }),
+    manage,
+    listAvailable: (input) => action("list_available", input),
+    execute: (input) => action("execute", input),
+    listRuns: (input) => action("list_runs", input),
+    getRun: (run_id) => action("get_run", { run_id }),
+    approve: (input) => action("approve", input),
+    reject: (input) => action("reject", input),
   };
 }

@@ -8,6 +8,7 @@
 import type { Env } from "../../index";
 import { manageEntity } from "../../tools/admin/manage_entity";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export interface EntityListFilter {
   entity_type?: string;
@@ -48,6 +49,7 @@ export interface EntityLinkInput {
 }
 
 export interface EntitiesNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   list(filter?: EntityListFilter): Promise<unknown>;
   get(entity_id: number): Promise<unknown>;
   create(input: EntityCreateInput): Promise<unknown>;
@@ -81,82 +83,47 @@ export function buildEntitiesNamespace(
   ctx: ToolContext,
   env: Env
 ): EntitiesNamespace {
+  const { manage, action } = createActionCaller(manageEntity, env, ctx);
+
   return {
+    manage,
     list(filter) {
-      return manageEntity(
-        { action: "list", ...filter } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("list", filter);
     },
     get(entity_id) {
-      return manageEntity(
-        { action: "get", entity_id } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("get", { entity_id });
     },
     create(input) {
-      return manageEntity(
-        {
-          action: "create",
-          entity_type: input.type,
-          name: input.name,
-          slug: input.slug,
-          content: input.content,
-          parent_id: input.parent_id,
-          metadata: input.metadata,
-          enabled_classifiers: input.enabled_classifiers,
-        } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("create", {
+        entity_type: input.type,
+        name: input.name,
+        slug: input.slug,
+        content: input.content,
+        parent_id: input.parent_id,
+        metadata: input.metadata,
+        enabled_classifiers: input.enabled_classifiers,
+      });
     },
     update(input) {
-      return manageEntity(
-        { action: "update", ...input } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("update", input);
     },
     delete(entity_id, options) {
-      return manageEntity(
-        {
-          action: "delete",
-          entity_id,
-          force_delete_tree: options?.force_delete_tree,
-        } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("delete", {
+        entity_id,
+        force_delete_tree: options?.force_delete_tree,
+      });
     },
     link(input) {
-      return manageEntity(
-        { action: "link", ...input } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("link", input);
     },
     unlink(input) {
-      return manageEntity(
-        { action: "unlink", ...input } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("unlink", input);
     },
     updateLink(input) {
-      return manageEntity(
-        { action: "update_link", ...input } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("update_link", input);
     },
     listLinks(input) {
-      return manageEntity(
-        { action: "list_links", ...input } as never,
-        env,
-        ctx
-      ) as Promise<unknown>;
+      return action("list_links", input);
     },
     async search(query, options) {
       const { search } = await import("../../tools/search");

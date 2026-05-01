@@ -8,6 +8,7 @@
 import type { Env } from "../../index";
 import { manageFeeds } from "../../tools/admin/manage_feeds";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export interface FeedsCreateInput {
   connection_id: number;
@@ -19,6 +20,7 @@ export interface FeedsCreateInput {
 }
 
 export interface FeedsNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   list(input?: { connection_id?: number }): Promise<unknown>;
   get(feed_id: number): Promise<unknown>;
   create(input: FeedsCreateInput): Promise<unknown>;
@@ -38,15 +40,15 @@ export function buildFeedsNamespace(
   ctx: ToolContext,
   env: Env,
 ): FeedsNamespace {
-  const call = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageFeeds(payload as never, env, ctx) as Promise<T>;
+  const { manage, action } = createActionCaller(manageFeeds, env, ctx);
 
   return {
-    list: (input) => call({ action: "list_feeds", ...input }),
-    get: (feed_id) => call({ action: "get_feed", feed_id }),
-    create: (input) => call({ action: "create_feed", ...input }),
-    update: (input) => call({ action: "update_feed", ...input }),
-    delete: (feed_id) => call({ action: "delete_feed", feed_id }),
-    trigger: (feed_id) => call({ action: "trigger_feed", feed_id }),
+    manage,
+    list: (input) => action("list_feeds", input),
+    get: (feed_id) => action("get_feed", { feed_id }),
+    create: (input) => action("create_feed", input),
+    update: (input) => action("update_feed", input),
+    delete: (feed_id) => action("delete_feed", { feed_id }),
+    trigger: (feed_id) => action("trigger_feed", { feed_id }),
   };
 }

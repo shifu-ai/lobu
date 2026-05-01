@@ -11,6 +11,7 @@
 import type { Env } from "../../index";
 import { manageEntitySchema } from "../../tools/admin/manage_entity_schema";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export interface EntitySchemaAddRuleInput {
   slug: string;
@@ -21,6 +22,7 @@ export interface EntitySchemaAddRuleInput {
 }
 
 export interface EntitySchemaNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   listTypes(): Promise<unknown>;
   getType(slug: string): Promise<unknown>;
   createType(input: {
@@ -69,20 +71,14 @@ export function buildEntitySchemaNamespace(
   ctx: ToolContext,
   env: Env,
 ): EntitySchemaNamespace {
+  const { manage, action } = createActionCaller(manageEntitySchema, env, ctx);
   const callEntity = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageEntitySchema(
-      { schema_type: "entity_type", ...payload } as never,
-      env,
-      ctx,
-    ) as Promise<T>;
+    action(payload.action as string, { schema_type: "entity_type", ...payload });
   const callRel = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageEntitySchema(
-      { schema_type: "relationship_type", ...payload } as never,
-      env,
-      ctx,
-    ) as Promise<T>;
+    action(payload.action as string, { schema_type: "relationship_type", ...payload });
 
   return {
+    manage,
     listTypes: () => callEntity({ action: "list" }),
     getType: (slug) => callEntity({ action: "get", slug }),
     createType: (input) => callEntity({ action: "create", ...input }),

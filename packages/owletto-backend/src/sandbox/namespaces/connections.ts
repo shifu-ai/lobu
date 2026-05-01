@@ -1,14 +1,15 @@
 /**
- * ClientSDK `connections` namespace. Thin wrapper over `manageConnections`.
+ * ClientSDK `connections` namespace. Thin, action-complete wrapper over
+ * `manageConnections`.
  *
- * `connect` is the entry point for setting up a new authenticated connection —
- * the handler returns a `connect_url` that the caller must surface to the
- * user's browser. Field names follow the handler schema.
+ * `connect` / `reauthenticate` return a `connect_url` the caller should show to
+ * the user. Field names follow the handler schema.
  */
 
 import type { Env } from "../../index";
 import { manageConnections } from "../../tools/admin/manage_connections";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export interface ConnectionsConnectInput {
   connector_key: string;
@@ -16,14 +17,10 @@ export interface ConnectionsConnectInput {
   auth_profile_slug?: string;
   app_auth_profile_slug?: string;
   config?: Record<string, unknown>;
+  entity_link_overrides?: Record<string, unknown> | null;
 }
 
-export interface ConnectionsCreateInput {
-  connector_key: string;
-  display_name?: string;
-  auth_profile_slug?: string;
-  app_auth_profile_slug?: string;
-  config?: Record<string, unknown>;
+export interface ConnectionsCreateInput extends ConnectionsConnectInput {
   created_by?: string;
 }
 
@@ -48,16 +45,27 @@ export interface ConnectionsInstallConnectorInput {
   compiled?: boolean;
   mcp_url?: string;
   auth_values?: Record<string, string>;
+  entity_link_overrides?: Record<string, unknown> | null;
 }
 
 export interface ConnectionsNamespace {
-  list(input?: { connector_key?: string }): Promise<unknown>;
-  listConnectorDefinitions(): Promise<unknown>;
+  /** Raw escape hatch for any manage_connections action. Prefer named methods. */
+  manage(input: Record<string, unknown>): Promise<unknown>;
+  list(input?: {
+    connector_key?: string;
+    status?: string;
+    entity_id?: number;
+    created_by?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<unknown>;
+  listConnectorDefinitions(input?: { include_installable?: boolean }): Promise<unknown>;
   get(connection_id: number): Promise<unknown>;
   create(input: ConnectionsCreateInput): Promise<unknown>;
   connect(input: ConnectionsConnectInput): Promise<unknown>;
   update(input: ConnectionsUpdateInput): Promise<unknown>;
   delete(connection_id: number): Promise<unknown>;
+  reauthenticate(connection_id: number): Promise<unknown>;
   test(connection_id: number): Promise<unknown>;
   installConnector(input: ConnectionsInstallConnectorInput): Promise<unknown>;
   uninstallConnector(connector_key: string): Promise<unknown>;
@@ -69,32 +77,49 @@ export interface ConnectionsNamespace {
     connector_key: string;
     auth_values: Record<string, string>;
   }): Promise<unknown>;
+  updateConnectorDefaultConfig(input: {
+    connector_key: string;
+    default_connection_config: Record<string, unknown>;
+  }): Promise<unknown>;
+  setConnectorEntityLinkOverrides(input: {
+    connector_key: string;
+    overrides: Record<string, unknown> | null;
+  }): Promise<unknown>;
+  updateConnectorDefaultRepairAgent(input: {
+    connector_key: string;
+    default_repair_agent_id: string | null;
+  }): Promise<unknown>;
 }
 
 export function buildConnectionsNamespace(
   ctx: ToolContext,
   env: Env,
 ): ConnectionsNamespace {
-  const call = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageConnections(payload as never, env, ctx) as Promise<T>;
+  const { manage, action } = createActionCaller(manageConnections, env, ctx);
 
   return {
-    list: (input) => call({ action: "list", ...input }),
-    listConnectorDefinitions: () =>
-      call({ action: "list_connector_definitions" }),
-    get: (connection_id) => call({ action: "get", connection_id }),
-    create: (input) => call({ action: "create", ...input }),
-    connect: (input) => call({ action: "connect", ...input }),
-    update: (input) => call({ action: "update", ...input }),
-    delete: (connection_id) => call({ action: "delete", connection_id }),
-    test: (connection_id) => call({ action: "test", connection_id }),
-    installConnector: (input) =>
-      call({ action: "install_connector", ...input }),
+    manage,
+    list: (input) => action("list", input),
+    listConnectorDefinitions: (input) =>
+      action("list_connector_definitions", input),
+    get: (connection_id) => action("get", { connection_id }),
+    create: (input) => action("create", input),
+    connect: (input) => action("connect", input),
+    update: (input) => action("update", input),
+    delete: (connection_id) => action("delete", { connection_id }),
+    reauthenticate: (connection_id) =>
+      action("reauthenticate", { connection_id }),
+    test: (connection_id) => action("test", { connection_id }),
+    installConnector: (input) => action("install_connector", input),
     uninstallConnector: (connector_key) =>
-      call({ action: "uninstall_connector", connector_key }),
-    toggleConnectorLogin: (input) =>
-      call({ action: "toggle_connector_login", ...input }),
-    updateConnectorAuth: (input) =>
-      call({ action: "update_connector_auth", ...input }),
+      action("uninstall_connector", { connector_key }),
+    toggleConnectorLogin: (input) => action("toggle_connector_login", input),
+    updateConnectorAuth: (input) => action("update_connector_auth", input),
+    updateConnectorDefaultConfig: (input) =>
+      action("update_connector_default_config", input),
+    setConnectorEntityLinkOverrides: (input) =>
+      action("set_connector_entity_link_overrides", input),
+    updateConnectorDefaultRepairAgent: (input) =>
+      action("update_connector_default_repair_agent", input),
   };
 }

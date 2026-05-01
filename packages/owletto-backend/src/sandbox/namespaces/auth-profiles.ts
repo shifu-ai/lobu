@@ -14,6 +14,7 @@
 import type { Env } from "../../index";
 import { manageAuthProfiles } from "../../tools/admin/manage_auth_profiles";
 import type { ToolContext } from "../../tools/registry";
+import { createActionCaller } from "./action-call";
 
 export type AuthProfileKind =
   | "env"
@@ -46,6 +47,7 @@ export interface AuthProfileUpdateInput {
 }
 
 export interface AuthProfilesNamespace {
+  manage(input: Record<string, unknown>): Promise<unknown>;
   list(input?: {
     connector_key?: string;
     provider?: string;
@@ -65,22 +67,18 @@ export function buildAuthProfilesNamespace(
   ctx: ToolContext,
   env: Env,
 ): AuthProfilesNamespace {
-  const call = <T>(payload: Record<string, unknown>): Promise<T> =>
-    manageAuthProfiles(payload as never, env, ctx) as Promise<T>;
+  const { manage, action } = createActionCaller(manageAuthProfiles, env, ctx);
 
   return {
-    list: (input) => call({ action: "list_auth_profiles", ...input }),
+    manage,
+    list: (input) => action("list_auth_profiles", input),
     get: (auth_profile_slug) =>
-      call({ action: "get_auth_profile", auth_profile_slug }),
+      action("get_auth_profile", { auth_profile_slug }),
     test: (auth_profile_slug) =>
-      call({ action: "test_auth_profile", auth_profile_slug }),
-    create: (input) => call({ action: "create_auth_profile", ...input }),
-    update: (input) => call({ action: "update_auth_profile", ...input }),
+      action("test_auth_profile", { auth_profile_slug }),
+    create: (input) => action("create_auth_profile", input),
+    update: (input) => action("update_auth_profile", input),
     delete: (auth_profile_slug, options) =>
-      call({
-        action: "delete_auth_profile",
-        auth_profile_slug,
-        ...options,
-      }),
+      action("delete_auth_profile", { auth_profile_slug, ...options }),
   };
 }

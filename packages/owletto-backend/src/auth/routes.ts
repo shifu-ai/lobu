@@ -1,18 +1,16 @@
 /**
- * Authentication & Credential Routes
+ * Authentication & Account Routes
  *
- * Provides REST endpoints for credential management:
- * - GET /api/credentials - List user's credentials
- * - POST /api/credentials - Create credential from OAuth account
- * - PATCH /api/credentials/:id - Update credential
- * - DELETE /api/credentials/:id - Delete credential
+ * REST endpoints for account and token management:
+ * - GET /api/accounts - List user's linked OAuth accounts
+ * - GET /api/agents - List OAuth agents (clients) for an organization
+ * - CRUD /api/tokens - Personal access token management
  */
 
 import { type Context, Hono } from 'hono';
 import { createDbClientFromEnv } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage } from '../utils/errors';
-import { CredentialService } from './credentials';
 import { requireAuth } from './middleware';
 import { OAuthClientsStore } from './oauth/clients';
 import { PersonalAccessTokenService } from './tokens';
@@ -28,116 +26,27 @@ function getAuthenticatedUser(c: Context<{ Bindings: Env }>) {
 }
 
 /**
- * List user's credentials
- */
-credentialRoutes.get('/credentials', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const sql = createDbClientFromEnv(c.env);
-  const credentialService = new CredentialService(sql);
-
-  const credentials = await credentialService.getUserCredentials(user.id);
-  return c.json({ credentials });
-});
-
-/**
  * List user's linked OAuth accounts
  */
 credentialRoutes.get('/accounts', requireAuth, async (c) => {
   const user = getAuthenticatedUser(c);
   const sql = createDbClientFromEnv(c.env);
-  const credentialService = new CredentialService(sql);
 
-  const accounts = await credentialService.getUserAccounts(user.id);
-  return c.json({ accounts });
-});
-
-/**
- * Create credential from OAuth account
- */
-credentialRoutes.post('/credentials', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const body = await c.req.json<{
-    accountId: string;
-    connectorKeys: string[];
-    displayName: string;
-  }>();
-
-  if (!body.accountId || !body.displayName) {
-    return c.json({ error: 'accountId and displayName are required' }, 400);
-  }
-
-  const sql = createDbClientFromEnv(c.env);
-  const credentialService = new CredentialService(sql);
-
-  try {
-    const credential = await credentialService.createCredentialFromAccount(
-      user.id,
-      body.accountId,
-      body.connectorKeys || [],
-      body.displayName
-    );
-    return c.json({ credential });
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
-});
-
-/**
- * Update credential
- */
-credentialRoutes.patch('/credentials/:id', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const credentialId = parseInt(c.req.param('id') ?? '', 10);
-  if (Number.isNaN(credentialId)) {
-    return c.json({ error: 'Invalid credential ID' }, 400);
-  }
-  const body = await c.req.json<{
-    connectorKeys?: string[];
-    isActive?: boolean;
-  }>();
-
-  const sql = createDbClientFromEnv(c.env);
-  const credentialService = new CredentialService(sql);
-
-  try {
-    if (body.connectorKeys) {
-      await credentialService.updateCredentialConnectorKeys(
-        credentialId,
-        user.id,
-        body.connectorKeys
-      );
-    }
-    if (body.isActive === false) {
-      await credentialService.deactivateCredential(credentialId, user.id);
-    }
-
-    const credentials = await credentialService.getUserCredentials(user.id);
-    const credential = credentials.find((c) => c.id === credentialId);
-    return c.json({ credential });
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
-});
-
-/**
- * Delete credential
- */
-credentialRoutes.delete('/credentials/:id', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const credentialId = parseInt(c.req.param('id') ?? '', 10);
-  if (Number.isNaN(credentialId)) {
-    return c.json({ error: 'Invalid credential ID' }, 400);
-  }
-
-  const sql = createDbClientFromEnv(c.env);
-  const credentialService = new CredentialService(sql);
-
-  try {
-    await credentialService.deleteCredential(credentialId, user.id);
-    return c.json({ success: true });
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
+  const result = await sql`
+    SELECT
+      id,
+      "accountId",
+      "providerId",
+      "accessToken" IS NOT NULL as "hasAccessToken",
+      "refreshToken" IS NOT NULL as "hasRefreshToken",
+      "accessTokenExpiresAt",
+      scope,
+      "createdAt"
+    FROM "account"
+    WHERE "userId" = ${user.id}
+    ORDER BY "createdAt" DESC
+  `;
+  return c.json({ accounts: result });
 });
 
 // ============================================

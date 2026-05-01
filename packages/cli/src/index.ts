@@ -517,6 +517,22 @@ export async function runCli(
     );
 
   memory
+    .command("exec <script>")
+    .description("Run a TypeScript ClientSDK script via the memory MCP")
+    .option("--url <url>", "Server URL override")
+    .option("--org <slug>", "Org slug override")
+    .option("-c, --context <name>", "Use a named context")
+    .action(
+      async (
+        script: string,
+        options: { url?: string; org?: string; context?: string }
+      ) => {
+        const { memoryRunCommand } = await import("./commands/memory/run.js");
+        await memoryRunCommand("run", JSON.stringify({ script }), options);
+      }
+    );
+
+  memory
     .command("health")
     .description("Validate Lobu login + MCP connectivity")
     .option("--url <url>", "Server URL override")
