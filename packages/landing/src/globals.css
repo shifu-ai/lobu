@@ -6,12 +6,19 @@
 /*
  * Theme tokens
  *
- * Tailwind's @theme block requires static values, so we define the light
- * palette here. Dark mode overrides live in the :root[data-theme="dark"]
- * and @media (prefers-color-scheme: dark) blocks below — they simply
- * reassign the same custom properties.
+ * Only structural/design tokens go in @theme (fonts, spacing, radii).
+ * Color tokens are defined as plain :root custom properties so our dark-mode
+ * overrides (below) can win over the cascade without fighting @layer theme.
  */
 @theme {
+  --font-sans: "Inter", "Inter Fallback", system-ui, -apple-system, sans-serif;
+  --font-display:
+    "Inter Tight", "Inter", "Inter Fallback", system-ui, -apple-system,
+    sans-serif;
+}
+
+/* ─── Light (default) tokens ─── */
+:root {
   --color-page-bg: #ffffff;
   --color-page-bg-elevated: #fafafa;
   --color-page-bg-overlay: rgba(255, 255, 255, 0.85);
@@ -32,17 +39,6 @@
   --color-tg-text: white;
   --color-tg-meta: rgba(255, 255, 255, 0.533);
 
-  --font-sans: "Inter", "Inter Fallback", system-ui, -apple-system, sans-serif;
-  --font-display:
-    "Inter Tight", "Inter", "Inter Fallback", system-ui, -apple-system,
-    sans-serif;
-}
-
-/*
- * Additional semantic tokens not in @theme (used as raw CSS vars in
- * inline styles). These are overridden by dark-mode rules below.
- */
-:root {
   --color-page-bg-inverted: #0b0b0d;
   --color-page-text-inverted: #ffffff;
   --color-page-dotted: rgba(0, 0, 0, 0.08);
@@ -64,7 +60,6 @@
   --color-page-dialog-close-hover: rgba(0, 0, 0, 0.7);
   --color-page-meta-theme: #ffffff;
 
-  /* Persisted theme preference ("light" | "dark" | null = auto) */
   color-scheme: light;
 }
 

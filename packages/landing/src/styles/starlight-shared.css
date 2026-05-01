@@ -7,6 +7,14 @@
 
 /* Import the same theme tokens as globals.css */
 @theme {
+  --font-sans: "Inter", "Inter Fallback", system-ui, -apple-system, sans-serif;
+  --font-display:
+    "Inter Tight", "Inter", "Inter Fallback", system-ui, -apple-system,
+    sans-serif;
+}
+
+/* Color tokens defined as plain :root custom properties */
+:root {
   --color-page-bg: #ffffff;
   --color-page-bg-elevated: #fafafa;
   --color-page-bg-overlay: rgba(255, 255, 255, 0.85);
