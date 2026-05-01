@@ -18,15 +18,15 @@ export async function memoryRunCommand(
   params: string | undefined,
   options: RunOptions = {}
 ): Promise<void> {
-  const org = resolveOrg(options.org);
+  const org = await resolveOrg(options.org);
   let mcpUrl: string;
 
   if (org) {
-    const orgSession = getSessionForOrg(org, undefined, options.url);
+    const orgSession = await getSessionForOrg(org, undefined, options.url);
     if (orgSession) {
       mcpUrl = orgSession.key;
     } else {
-      const serverUrl = resolveServerUrl(options.url);
+      const serverUrl = await resolveServerUrl(options.url);
       const base = serverUrl || resolveMcpEndpoint();
       if (!base)
         throw new ValidationError(
@@ -35,7 +35,7 @@ export async function memoryRunCommand(
       mcpUrl = mcpUrlForOrg(base, org);
     }
   } else {
-    const serverUrl = resolveServerUrl(options.url);
+    const serverUrl = await resolveServerUrl(options.url);
     const resolved = serverUrl || resolveMcpEndpoint();
     if (!resolved)
       throw new ValidationError(

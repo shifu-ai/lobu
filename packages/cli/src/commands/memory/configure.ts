@@ -3,6 +3,8 @@ import {
   configureMemoryPlugin,
 } from "./_lib/openclaw-cmd.js";
 
-export function memoryConfigureCommand(options: ConfigureOptions): void {
-  configureMemoryPlugin(options);
+export async function memoryConfigureCommand(
+  options: ConfigureOptions
+): Promise<void> {
+  await configureMemoryPlugin(options);
 }

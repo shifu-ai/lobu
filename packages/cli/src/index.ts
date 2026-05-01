@@ -487,14 +487,14 @@ export async function runCli(
       const { memoryOrgCurrentCommand } = await import(
         "./commands/memory/org.js"
       );
-      memoryOrgCurrentCommand();
+      await memoryOrgCurrentCommand();
     });
   memoryOrg
     .command("set <slug>")
     .description("Set the active org slug")
     .action(async (slug: string) => {
       const { memoryOrgSetCommand } = await import("./commands/memory/org.js");
-      memoryOrgSetCommand(slug);
+      await memoryOrgSetCommand(slug);
     });
 
   memory
@@ -520,12 +520,14 @@ export async function runCli(
     .option("--url <url>", "Server URL override")
     .option("--org <slug>", "Org slug override")
     .option("-c, --context <name>", "Use a named context")
-    .action(async (options: { url?: string; org?: string; context?: string }) => {
-      const { memoryHealthCommand } = await import(
-        "./commands/memory/health.js"
-      );
-      await memoryHealthCommand(options);
-    });
+    .action(
+      async (options: { url?: string; org?: string; context?: string }) => {
+        const { memoryHealthCommand } = await import(
+          "./commands/memory/health.js"
+        );
+        await memoryHealthCommand(options);
+      }
+    );
 
   memory
     .command("configure")
@@ -554,7 +556,7 @@ export async function runCli(
         const { memoryConfigureCommand } = await import(
           "./commands/memory/configure.js"
         );
-        memoryConfigureCommand(options);
+        await memoryConfigureCommand(options);
       }
     );
 

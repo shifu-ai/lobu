@@ -51,8 +51,6 @@ export async function orgSetCommand(
   const target = await resolveContext(options?.context);
   await setActiveOrg(slug, target.name);
   console.log(
-    chalk.green(
-      `\n  Active org for context ${target.name} set to ${slug}\n`
-    )
+    chalk.green(`\n  Active org for context ${target.name} set to ${slug}\n`)
   );
 }

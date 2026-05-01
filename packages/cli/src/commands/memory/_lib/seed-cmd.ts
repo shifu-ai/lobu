@@ -567,17 +567,17 @@ async function resolveAuth(
   orgFlag?: string,
   storePath?: string
 ): Promise<{ token: string; mcpUrl: string; orgSlug: string }> {
-  const org = resolveOrg(orgFlag);
+  const org = await resolveOrg(orgFlag);
 
   if (org) {
-    const orgSession = getSessionForOrg(org, storePath, urlFlag);
+    const orgSession = await getSessionForOrg(org, storePath, urlFlag);
     if (orgSession) {
       const result = await getUsableToken(orgSession.key, storePath);
       if (result) {
         return { token: result.token, mcpUrl: orgSession.key, orgSlug: org };
       }
     }
-    const serverUrl = resolveServerUrl(urlFlag, storePath);
+    const serverUrl = await resolveServerUrl(urlFlag, storePath);
     if (serverUrl) {
       const orgUrl = mcpUrlForOrg(serverUrl, org);
       const result = await getUsableToken(orgUrl, storePath);
@@ -588,7 +588,7 @@ async function resolveAuth(
     throw new ValidationError("Not logged in. Run: lobu login");
   }
 
-  const serverUrl = resolveServerUrl(urlFlag, storePath);
+  const serverUrl = await resolveServerUrl(urlFlag, storePath);
   const result = await getUsableToken(serverUrl || undefined, storePath);
   if (!result) {
     throw new ValidationError("Not logged in. Run: lobu login");

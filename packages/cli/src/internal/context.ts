@@ -8,9 +8,12 @@ const DEFAULT_API_URL = "https://app.lobu.ai/api/v1";
 
 const CONTEXTS_FILE = join(LOBU_CONFIG_DIR, "config.json");
 
+export const DEFAULT_MEMORY_URL = "https://lobu.ai/mcp";
+
 interface LobuContextEntry {
   apiUrl: string;
   activeOrg?: string;
+  memoryUrl?: string;
 }
 
 interface LobuContextConfig {
@@ -67,6 +70,17 @@ export async function getActiveOrg(
   return config.contexts[name]?.activeOrg;
 }
 
+export async function getMemoryUrl(
+  contextName?: string
+): Promise<string> {
+  const envUrl = process.env.LOBU_MEMORY_URL?.trim();
+  if (envUrl) return normalizeApiUrl(envUrl);
+
+  const config = await loadContextConfig();
+  const name = contextName || config.currentContext;
+  return normalizeApiUrl(config.contexts[name]?.memoryUrl || DEFAULT_MEMORY_URL);
+}
+
 export async function setActiveOrg(
   orgSlug: string,
   contextName?: string
@@ -89,6 +103,27 @@ export async function setActiveOrg(
   }
 
   context.activeOrg = trimmed;
+  await saveContextConfig(config);
+  return config;
+}
+
+export async function setMemoryUrl(
+  memoryUrl: string,
+  contextName?: string
+): Promise<LobuContextConfig> {
+  const trimmed = memoryUrl.trim();
+  if (!trimmed) {
+    throw new Error("Memory URL cannot be empty.");
+  }
+
+  const config = await loadContextConfig();
+  const name = contextName || config.currentContext;
+  const context = config.contexts[name];
+  if (!context) {
+    throw new Error(`Unknown context "${name}".`);
+  }
+
+  context.memoryUrl = normalizeAndValidateApiUrl(trimmed);
   await saveContextConfig(config);
   return config;
 }
@@ -175,6 +210,10 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
       activeOrg:
         typeof value.activeOrg === "string"
           ? value.activeOrg.trim()
+          : undefined,
+      memoryUrl:
+        typeof value.memoryUrl === "string"
+          ? value.memoryUrl.trim()
           : undefined,
     };
   }

@@ -138,8 +138,8 @@ async function resolveSessionAndUrl(
   orgFlag?: string,
   storePath?: string
 ): Promise<{ token: string; session: MemorySession; mcpUrl: string }> {
-  const org = resolveOrg(orgFlag, undefined, storePath);
-  const serverUrl = resolveServerUrl(urlFlag, storePath);
+  const org = await resolveOrg(orgFlag, undefined, storePath);
+  const serverUrl = await resolveServerUrl(urlFlag, storePath);
   if (!serverUrl) {
     throw new ValidationError("Memory MCP URL could not be resolved.");
   }
@@ -183,7 +183,7 @@ export async function checkMemoryHealth(
     session,
     mcpUrl: targetMcpUrl,
   } = await resolveSessionAndUrl(opts.url, opts.org, opts.storePath);
-  const org = resolveOrg(opts.org, session, opts.storePath);
+  const org = await resolveOrg(opts.org, session, opts.storePath);
   const sessionId = await initializeMcpSession(targetMcpUrl, accessToken);
 
   const result = await postJson<{ result?: { tools?: unknown[] } }>(
@@ -227,17 +227,19 @@ export interface ConfigureOptions {
   tokenCommand?: string;
 }
 
-export function configureMemoryPlugin(opts: ConfigureOptions = {}): void {
-  const org = resolveOrg(opts.org);
-  const baseMcpUrl = resolveServerUrl(opts.url);
+export async function configureMemoryPlugin(
+  opts: ConfigureOptions = {}
+): Promise<void> {
+  const org = await resolveOrg(opts.org);
+  const baseMcpUrl = await resolveServerUrl(opts.url);
   if (!baseMcpUrl) {
     throw new ValidationError("Memory MCP URL could not be resolved.");
   }
   const resolvedMcpUrl = org
     ? mcpUrlForOrg(baseMcpUrl, org)
     : normalizeMcpUrl(baseMcpUrl);
-  setActiveMcpUrl(resolvedMcpUrl);
-  if (org) setActiveOrg(org);
+  await setActiveMcpUrl(resolvedMcpUrl);
+  if (org) await setActiveOrg(org);
 
   const configPath = resolve(
     opts.configPath || resolve(homedir(), ".openclaw", "openclaw.json")

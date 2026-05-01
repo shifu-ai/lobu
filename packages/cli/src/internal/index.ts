@@ -1,11 +1,14 @@
 export {
   addContext,
+  findContextByUrl,
   getActiveOrg,
   getCurrentContextName,
+  getMemoryUrl,
   loadContextConfig,
   resolveContext,
   setActiveOrg,
   setCurrentContext,
+  setMemoryUrl,
 } from "./context.js";
 export {
   type Credentials,

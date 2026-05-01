@@ -9,9 +9,9 @@ interface OrgOptions {
   storePath?: string;
 }
 
-export function memoryOrgCurrentCommand(options: OrgOptions = {}): void {
-  const { session, key } = getActiveSession(options.storePath);
-  const org = resolveOrg(undefined, session, options.storePath);
+export async function memoryOrgCurrentCommand(options: OrgOptions = {}): Promise<void> {
+  const { session, key } = await getActiveSession(options.storePath);
+  const org = await resolveOrg(undefined, session, options.storePath);
 
   if (isJson()) {
     printJson({ org: org || null, server: key });
@@ -22,11 +22,11 @@ export function memoryOrgCurrentCommand(options: OrgOptions = {}): void {
   printText(`server: ${key || "(none)"}`);
 }
 
-export function memoryOrgSetCommand(
+export async function memoryOrgSetCommand(
   orgSlug: string,
   options: OrgOptions = {}
-): void {
-  setActiveOrg(orgSlug, options.storePath);
+): Promise<void> {
+  await setActiveOrg(orgSlug, options.storePath);
 
   if (isJson()) {
     printJson({ org: orgSlug });
