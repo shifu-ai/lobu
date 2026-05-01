@@ -99,7 +99,7 @@ export class CredentialService {
     return result;
   }
 
-  private async persistAccountTokens
+  private async persistAccountTokens(
     accountId: string,
     tokens: { accessToken: string; expiresAt: Date; refreshToken?: string }
   ): Promise<void> {

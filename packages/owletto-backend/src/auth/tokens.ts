@@ -2,7 +2,8 @@
  * Personal Access Token (PAT) Service
  *
  * Manages PATs for workers, CLI tools, and MCP clients.
- * Users generate tokens from the web UI and use them for programmatic access.
+ * Users generate tokens from the CLI or an authenticated control-plane session
+ * and use them for programmatic access.
  */
 
 import type { DbClient } from '../db/client';

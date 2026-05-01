@@ -800,7 +800,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       const reauthOrigin = getConfiguredPublicOrigin() ?? new URL(req.url).origin;
       const remediation =
         authCtx.tokenType === 'pat'
-          ? `Reissue this PAT bound to a workspace (settings → personal access tokens) at ${reauthOrigin}.`
+          ? `Reissue this PAT bound to a workspace with \`lobu token create --org <workspace>\` against ${reauthOrigin}.`
           : `Re-authorize the OAuth client and pick a workspace at ${reauthOrigin}/oauth/authorize.`;
       return buildJsonRpcErrorResponse(
         `This token has no organization binding and cannot connect to /mcp. ${remediation}`,

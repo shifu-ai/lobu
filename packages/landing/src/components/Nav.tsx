@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import type { LandingUseCaseId } from "../use-case-definitions";
-import { dark as darkTokens, light as lightTokens } from "../styles/theme-tokens";
+import {
+  dark as darkTokens,
+  light as lightTokens,
+} from "../styles/theme-tokens";
 import {
   getOwlettoBaseUrl,
   getOwlettoLoginUrl,

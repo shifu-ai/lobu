@@ -4,14 +4,14 @@
  * REST endpoints for account and token management:
  * - GET /api/accounts - List user's linked OAuth accounts
  * - GET /api/agents - List OAuth agents (clients) for an organization
- * - CRUD /api/tokens - Personal access token management
+ * - POST /api/:orgSlug/tokens - Create org-scoped personal access tokens
  */
 
 import { type Context, Hono } from 'hono';
 import { createDbClientFromEnv } from '../db/client';
 import type { Env } from '../index';
 import { errorMessage } from '../utils/errors';
-import { requireAuth } from './middleware';
+import { mcpAuth, requireAuth } from './middleware';
 import { OAuthClientsStore } from './oauth/clients';
 import { PersonalAccessTokenService } from './tokens';
 
@@ -98,154 +98,104 @@ credentialRoutes.get('/agents', requireAuth, async (c) => {
 });
 
 // ============================================
-// Personal Access Token Routes
+// Org-scoped Personal Access Token Routes
 // ============================================
 
-/**
- * List user's tokens
- */
-credentialRoutes.get('/tokens', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const sql = createDbClientFromEnv(c.env);
-  const patService = new PersonalAccessTokenService(sql);
+const AVAILABLE_PAT_SCOPES = new Set(['mcp:read', 'mcp:write', 'mcp:admin', 'profile:read']);
+const DEFAULT_PAT_SCOPE = 'mcp:read mcp:write';
+const MAX_PAT_EXPIRY_DAYS = 3650;
 
-  const tokens = await patService.list(user.id);
-  return c.json({ tokens });
-});
+function authorizeTokenCreation(c: Context<{ Bindings: Env }>) {
+  const user = c.get('user');
+  if (!user?.id) {
+    return { error: c.json({ error: 'Unauthorized', message: 'Authentication required' }, 401) };
+  }
+
+  const organizationId = c.get('organizationId');
+  if (!organizationId) {
+    return { error: c.json({ error: 'Organization slug is required in URL' }, 400) };
+  }
+
+  const role = c.get('memberRole');
+  if (role !== 'owner' && role !== 'admin') {
+    return { error: c.json({ error: 'Token creation requires org owner or admin access' }, 403) };
+  }
+
+  const authSource = c.get('authSource');
+  if (authSource === 'pat') {
+    return {
+      error: c.json(
+        { error: 'Use `lobu login` with OAuth or a web session to create server tokens' },
+        403
+      ),
+    };
+  }
+
+  const scopes = c.get('mcpAuthInfo')?.scopes ?? [];
+  if (authSource === 'oauth' && !scopes.includes('mcp:admin')) {
+    return { error: c.json({ error: 'Token creation requires mcp:admin scope' }, 403) };
+  }
+
+  return { user, organizationId };
+}
+
+function normalizePatScope(scope: unknown): string | undefined {
+  if (scope === undefined || scope === null || scope === '') return DEFAULT_PAT_SCOPE;
+  if (typeof scope !== 'string') {
+    throw new Error('scope must be a space-separated string');
+  }
+  const scopes = Array.from(new Set(scope.split(/\s+/).map((value) => value.trim()).filter(Boolean)));
+  if (scopes.length === 0) return DEFAULT_PAT_SCOPE;
+  const invalid = scopes.filter((value) => !AVAILABLE_PAT_SCOPES.has(value));
+  if (invalid.length > 0) {
+    throw new Error(`Invalid scope(s): ${invalid.join(', ')}`);
+  }
+  return scopes.join(' ');
+}
+
+function normalizeExpiryDays(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  const days = Number(value);
+  if (!Number.isInteger(days) || days < 1 || days > MAX_PAT_EXPIRY_DAYS) {
+    throw new Error(`expiresInDays must be an integer between 1 and ${MAX_PAT_EXPIRY_DAYS}`);
+  }
+  return days;
+}
 
 /**
- * Create new token
+ * Create an org-scoped Personal Access Token for servers/CI.
+ * Requires an owner/admin web session or OAuth bearer with mcp:admin scope.
  */
-credentialRoutes.post('/tokens', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
+credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
+  const authorized = authorizeTokenCreation(c);
+  if ('error' in authorized) return authorized.error;
+
   const body = await c.req.json<{
-    name: string;
-    org_slug: string;
+    name?: string;
     description?: string;
     scope?: string;
     expiresInDays?: number;
   }>();
 
-  if (!body.name) {
+  const name = body.name?.trim();
+  if (!name) {
     return c.json({ error: 'name is required' }, 400);
   }
-  if (!body.org_slug) {
-    return c.json({ error: 'org_slug is required' }, 400);
-  }
 
+  const description = typeof body.description === 'string' ? body.description.trim() : undefined;
   const sql = createDbClientFromEnv(c.env);
   const patService = new PersonalAccessTokenService(sql);
 
   try {
-    const membership = await sql`
-      SELECT m."organizationId" as organization_id
-      FROM "member" m
-      JOIN "organization" o ON o.id = m."organizationId"
-      WHERE m."userId" = ${user.id}
-        AND o.slug = ${body.org_slug}
-      LIMIT 1
-    `;
-
-    if (membership.length === 0) {
-      return c.json({ error: `Not a member of organization '${body.org_slug}'` }, 403);
-    }
-
-    const organizationId = membership[0].organization_id as string;
-
-    const token = await patService.create(user.id, organizationId, body.name, {
-      description: body.description,
-      scope: body.scope,
-      expiresInDays: body.expiresInDays,
+    const token = await patService.create(authorized.user.id, authorized.organizationId, name, {
+      ...(description ? { description } : {}),
+      scope: normalizePatScope(body.scope),
+      expiresInDays: normalizeExpiryDays(body.expiresInDays),
     });
     return c.json({ token }, 201);
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 400);
   }
-});
-
-/**
- * Get a specific token
- */
-credentialRoutes.get('/tokens/:id', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const tokenId = parseInt(c.req.param('id') ?? '', 10);
-  if (Number.isNaN(tokenId)) {
-    return c.json({ error: 'Invalid token ID' }, 400);
-  }
-
-  const sql = createDbClientFromEnv(c.env);
-  const patService = new PersonalAccessTokenService(sql);
-
-  const token = await patService.get(tokenId, user.id);
-  if (!token) {
-    return c.json({ error: 'Token not found' }, 404);
-  }
-
-  return c.json({ token });
-});
-
-/**
- * Update token metadata
- */
-credentialRoutes.patch('/tokens/:id', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const tokenId = parseInt(c.req.param('id') ?? '', 10);
-  if (Number.isNaN(tokenId)) {
-    return c.json({ error: 'Invalid token ID' }, 400);
-  }
-  const body = await c.req.json<{
-    name?: string;
-    description?: string;
-  }>();
-
-  const sql = createDbClientFromEnv(c.env);
-  const patService = new PersonalAccessTokenService(sql);
-
-  try {
-    const success = await patService.update(tokenId, user.id, body);
-    if (!success) {
-      return c.json({ error: 'Token not found or no changes made' }, 404);
-    }
-
-    const token = await patService.get(tokenId, user.id);
-    return c.json({ token });
-  } catch (error) {
-    return c.json({ error: errorMessage(error) }, 400);
-  }
-});
-
-/**
- * Revoke token
- */
-credentialRoutes.delete('/tokens/:id', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-  const tokenId = parseInt(c.req.param('id') ?? '', 10);
-  if (Number.isNaN(tokenId)) {
-    return c.json({ error: 'Invalid token ID' }, 400);
-  }
-
-  const sql = createDbClientFromEnv(c.env);
-  const patService = new PersonalAccessTokenService(sql);
-
-  const success = await patService.revoke(tokenId, user.id);
-  if (!success) {
-    return c.json({ error: 'Token not found' }, 404);
-  }
-
-  return c.json({ success: true });
-});
-
-/**
- * Revoke all tokens
- */
-credentialRoutes.delete('/tokens', requireAuth, async (c) => {
-  const user = getAuthenticatedUser(c);
-
-  const sql = createDbClientFromEnv(c.env);
-  const patService = new PersonalAccessTokenService(sql);
-
-  const count = await patService.revokeAll(user.id);
-  return c.json({ success: true, revoked_count: count });
 });
 
 export { credentialRoutes };

@@ -131,7 +131,7 @@ export function MemoryGraphic() {
             <div
               class="w-10 h-10 rounded-lg flex items-center justify-center font-mono text-[12px] font-semibold"
               style={{
-                background: "white",
+                background: "var(--color-page-surface)",
                 border: "1px solid var(--color-page-border)",
                 color: "var(--color-page-text)",
               }}
@@ -318,7 +318,7 @@ export function SkillsGraphic() {
         <span
           class="px-2 py-0.5 rounded"
           style={{
-            background: "white",
+            background: "var(--color-page-surface)",
             border: "1px solid var(--color-page-border)",
             color: "var(--color-page-text)",
           }}

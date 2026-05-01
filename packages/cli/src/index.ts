@@ -235,15 +235,51 @@ export async function runCli(
     });
 
   // ─── token ──────────────────────────────────────────────────────────
-  program
+  const token = program
     .command("token")
-    .description("Print the current Lobu access token")
+    .description("Print or create Lobu access tokens")
     .option("-c, --context <name>", "Use a named context")
     .option("--raw", "Print token only (no labels)")
     .action(async (options: { context?: string; raw?: boolean }) => {
       const { tokenCommand } = await import("./commands/token.js");
       await tokenCommand(options);
     });
+
+  token
+    .command("create")
+    .description("Create an org-scoped personal access token for servers/CI")
+    .option("-c, --context <name>", "Use a named context")
+    .option("--org <slug>", "Org slug override")
+    .option("--name <name>", "Token name (default: lobu-cli-YYYY-MM-DD)")
+    .option("--description <text>", "Token description")
+    .option(
+      "--scope <scope>",
+      "Space-separated scopes (default: mcp:read mcp:write)"
+    )
+    .option("--expires-in-days <days>", "Expire token after N days", (value) => {
+      const days = Number(value);
+      if (!Number.isInteger(days) || days < 1) {
+        throw new Error("--expires-in-days must be a positive integer");
+      }
+      return days;
+    })
+    .option("--raw", "Print token only")
+    .option("--json", "Print JSON response")
+    .action(
+      async (options: {
+        context?: string;
+        org?: string;
+        name?: string;
+        description?: string;
+        scope?: string;
+        expiresInDays?: number;
+        raw?: boolean;
+        json?: boolean;
+      }) => {
+        const { tokenCreateCommand } = await import("./commands/token.js");
+        await tokenCreateCommand(options);
+      }
+    );
 
   // ─── context ────────────────────────────────────────────────────────
   const context = program
