@@ -131,8 +131,8 @@ export function HeroSection(props: {
             href={props.startUrl}
             class="inline-flex items-center text-[14px] font-medium px-5 h-10 rounded-lg transition-opacity hover:opacity-90"
             style={{
-              background: "#0b0b0d",
-              color: "#ffffff",
+              background: "var(--color-page-bg-inverted)",
+              color: "var(--color-page-text-inverted)",
             }}
           >
             Start for free
@@ -144,7 +144,7 @@ export function HeroSection(props: {
             class="inline-flex items-center gap-2 text-[14px] font-medium px-5 h-10 rounded-lg transition-colors hover:bg-[color:var(--color-page-surface-dim)]"
             style={{
               color: "var(--color-page-text)",
-              background: "#ffffff",
+              background: "var(--color-page-surface)",
               border: "1px solid var(--color-page-border)",
             }}
           >

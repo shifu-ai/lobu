@@ -56,7 +56,7 @@ const RELATIONSHIPS: { afterIndex: number; label: string }[] = [
 function EntityCardView({ entity }: { entity: EntityCard }) {
   return (
     <div
-      class="rounded-xl bg-white shadow-sm w-full"
+      class="rounded-xl bg-[var(--color-page-surface)] shadow-sm w-full"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div

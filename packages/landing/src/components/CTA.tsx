@@ -16,8 +16,8 @@ function HexCluster() {
           <g key={i} transform={`translate(${x},90)`}>
             <polygon
               points="-30,0 -15,-26 15,-26 30,0 15,26 -15,26"
-              fill="#ffffff"
-              stroke="rgba(0,0,0,0.18)"
+              fill="var(--color-page-text-inverted)"
+              stroke="var(--color-page-hex-stroke)"
               stroke-width="1.2"
             />
             <line
@@ -25,7 +25,7 @@ function HexCluster() {
               y1="-26"
               x2="15"
               y2="26"
-              stroke="rgba(0,0,0,0.08)"
+              stroke="var(--color-page-hex-line)"
               stroke-width="1"
               stroke-dasharray="2 3"
             />
@@ -59,7 +59,10 @@ export function CTA({ startUrl = getOwlettoBaseUrl() }: { startUrl?: string }) {
             <a
               href={startUrl}
               class="inline-flex items-center text-[14px] font-medium px-5 h-10 rounded-lg transition-opacity hover:opacity-90"
-              style={{ background: "#0b0b0d", color: "#ffffff" }}
+              style={{
+                background: "var(--color-page-bg-inverted)",
+                color: "var(--color-page-text-inverted)",
+              }}
             >
               Start for free
             </a>

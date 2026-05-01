@@ -3,6 +3,14 @@
 /* Scan gateway settings components so their Tailwind classes are generated */
 @source "../../gateway/src/routes/public/settings-page/**/*.tsx";
 
+/*
+ * Theme tokens
+ *
+ * Tailwind's @theme block requires static values, so we define the light
+ * palette here. Dark mode overrides live in the :root[data-theme="dark"]
+ * and @media (prefers-color-scheme: dark) blocks below — they simply
+ * reassign the same custom properties.
+ */
 @theme {
   --color-page-bg: #ffffff;
   --color-page-bg-elevated: #fafafa;
@@ -28,6 +36,118 @@
   --font-display:
     "Inter Tight", "Inter", "Inter Fallback", system-ui, -apple-system,
     sans-serif;
+}
+
+/*
+ * Additional semantic tokens not in @theme (used as raw CSS vars in
+ * inline styles). These are overridden by dark-mode rules below.
+ */
+:root {
+  --color-page-bg-inverted: #0b0b0d;
+  --color-page-text-inverted: #ffffff;
+  --color-page-dotted: rgba(0, 0, 0, 0.08);
+  --color-page-grid: rgba(0, 0, 0, 0.06);
+  --color-page-divider-mark: rgba(0, 0, 0, 0.18);
+  --color-page-overlay-backdrop: rgba(0, 0, 0, 0.7);
+  --color-page-code-bg: rgba(0, 0, 0, 0.04);
+  --color-page-code-border: rgba(0, 0, 0, 0.08);
+  --color-page-pre-bg-from: rgba(20, 20, 24, 0.98);
+  --color-page-pre-bg-to: rgba(12, 12, 16, 0.98);
+  --color-page-pre-border: rgba(255, 255, 255, 0.09);
+  --color-page-prose-text: rgba(11, 11, 13, 0.82);
+  --color-page-prose-blockquote: rgba(11, 11, 13, 0.7);
+  --color-page-hex-stroke: rgba(0, 0, 0, 0.18);
+  --color-page-hex-line: rgba(0, 0, 0, 0.08);
+  --color-page-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --color-page-shadow-md: 0 12px 32px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04);
+  --color-page-dialog-close-bg: rgba(0, 0, 0, 0.5);
+  --color-page-dialog-close-hover: rgba(0, 0, 0, 0.7);
+  --color-page-meta-theme: #ffffff;
+
+  /* Persisted theme preference ("light" | "dark" | null = auto) */
+  color-scheme: light;
+}
+
+/* ─── Dark mode overrides ─── */
+/* Applied when: user explicitly toggled dark, or OS prefers dark (and no explicit choice). */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-page-bg: #0a0a0b;
+  --color-page-bg-elevated: #111113;
+  --color-page-bg-overlay: rgba(10, 10, 11, 0.85);
+  --color-page-surface: #161618;
+  --color-page-surface-dim: #1c1c1f;
+  --color-page-border: rgba(255, 255, 255, 0.08);
+  --color-page-border-active: rgba(255, 255, 255, 0.16);
+  --color-page-text: #f0f0f2;
+  --color-page-text-muted: #9ca3af;
+
+  --color-tg-bg: rgb(22, 22, 24);
+  --color-tg-bg-secondary: rgb(10, 10, 11);
+  --color-tg-bubble-in: rgb(22, 22, 24);
+  --color-tg-border: rgb(48, 48, 48);
+
+  --color-page-bg-inverted: #f0f0f2;
+  --color-page-text-inverted: #0a0a0b;
+  --color-page-dotted: rgba(255, 255, 255, 0.06);
+  --color-page-grid: rgba(255, 255, 255, 0.04);
+  --color-page-divider-mark: rgba(255, 255, 255, 0.14);
+  --color-page-overlay-backdrop: rgba(0, 0, 0, 0.8);
+  --color-page-code-bg: rgba(255, 255, 255, 0.06);
+  --color-page-code-border: rgba(255, 255, 255, 0.08);
+  --color-page-pre-bg-from: rgba(20, 20, 24, 0.98);
+  --color-page-pre-bg-to: rgba(12, 12, 16, 0.98);
+  --color-page-pre-border: rgba(255, 255, 255, 0.09);
+  --color-page-prose-text: rgba(240, 240, 242, 0.82);
+  --color-page-prose-blockquote: rgba(240, 240, 242, 0.7);
+  --color-page-hex-stroke: rgba(255, 255, 255, 0.14);
+  --color-page-hex-line: rgba(255, 255, 255, 0.06);
+  --color-page-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --color-page-shadow-md: 0 12px 32px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.2);
+  --color-page-dialog-close-bg: rgba(255, 255, 255, 0.15);
+  --color-page-dialog-close-hover: rgba(255, 255, 255, 0.25);
+  --color-page-meta-theme: #0a0a0b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --color-page-bg: #0a0a0b;
+    --color-page-bg-elevated: #111113;
+    --color-page-bg-overlay: rgba(10, 10, 11, 0.85);
+    --color-page-surface: #161618;
+    --color-page-surface-dim: #1c1c1f;
+    --color-page-border: rgba(255, 255, 255, 0.08);
+    --color-page-border-active: rgba(255, 255, 255, 0.16);
+    --color-page-text: #f0f0f2;
+    --color-page-text-muted: #9ca3af;
+
+    --color-tg-bg: rgb(22, 22, 24);
+    --color-tg-bg-secondary: rgb(10, 10, 11);
+    --color-tg-bubble-in: rgb(22, 22, 24);
+    --color-tg-border: rgb(48, 48, 48);
+
+    --color-page-bg-inverted: #f0f0f2;
+    --color-page-text-inverted: #0a0a0b;
+    --color-page-dotted: rgba(255, 255, 255, 0.06);
+    --color-page-grid: rgba(255, 255, 255, 0.04);
+    --color-page-divider-mark: rgba(255, 255, 255, 0.14);
+    --color-page-overlay-backdrop: rgba(0, 0, 0, 0.8);
+    --color-page-code-bg: rgba(255, 255, 255, 0.06);
+    --color-page-code-border: rgba(255, 255, 255, 0.08);
+    --color-page-pre-bg-from: rgba(20, 20, 24, 0.98);
+    --color-page-pre-bg-to: rgba(12, 12, 16, 0.98);
+    --color-page-pre-border: rgba(255, 255, 255, 0.09);
+    --color-page-prose-text: rgba(240, 240, 242, 0.82);
+    --color-page-prose-blockquote: rgba(240, 240, 242, 0.7);
+    --color-page-hex-stroke: rgba(255, 255, 255, 0.14);
+    --color-page-hex-line: rgba(255, 255, 255, 0.06);
+    --color-page-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --color-page-shadow-md: 0 12px 32px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.2);
+    --color-page-dialog-close-bg: rgba(255, 255, 255, 0.15);
+    --color-page-dialog-close-hover: rgba(255, 255, 255, 0.25);
+    --color-page-meta-theme: #0a0a0b;
+  }
 }
 
 button {
@@ -58,7 +178,7 @@ h3,
 
 /* Vercel-style edge lines */
 .grid-lines {
-  --grid-color: rgba(0, 0, 0, 0.06);
+  --grid-color: var(--color-page-grid);
   --grid-max-w: 64rem;
   position: relative;
 }
@@ -95,7 +215,7 @@ h3,
   font-size: 13px;
   font-weight: 300;
   line-height: 1;
-  color: rgba(0, 0, 0, 0.18);
+  color: var(--color-page-divider-mark);
 }
 
 .section-divider::before {
@@ -137,7 +257,7 @@ h3,
 /* Dotted background used in attio's feature panels */
 .dotted-bg {
   background-image: radial-gradient(
-    rgba(0, 0, 0, 0.08) 1px,
+    var(--color-page-dotted) 1px,
     transparent 1px
   );
   background-size: 14px 14px;
@@ -174,7 +294,7 @@ button.chat-action-btn:hover {
 }
 
 .schedule-dialog::backdrop {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--color-page-overlay-backdrop);
   backdrop-filter: blur(4px);
 }
 
@@ -182,7 +302,7 @@ button.chat-action-btn:hover {
   position: relative;
   border-radius: 16px;
   overflow: hidden;
-  background: #fff;
+  background: var(--color-page-surface);
 }
 
 .schedule-dialog-close {
@@ -193,8 +313,8 @@ button.chat-action-btn:hover {
   width: 32px;
   height: 32px;
   border: none;
-  background: rgba(0, 0, 0, 0.5);
-  color: #fff;
+  background: var(--color-page-dialog-close-bg);
+  color: var(--color-page-text-inverted);
   font-size: 20px;
   line-height: 1;
   border-radius: 50%;
@@ -205,7 +325,7 @@ button.chat-action-btn:hover {
 }
 
 .schedule-dialog-close:hover {
-  background: rgba(0, 0, 0, 0.7);
+  background: var(--color-page-dialog-close-hover);
 }
 
 .schedule-dialog-iframe {
@@ -239,7 +359,7 @@ button.chat-action-btn:hover {
 .blog-prose li,
 .blog-prose td,
 .blog-prose blockquote {
-  color: rgba(11, 11, 13, 0.82);
+  color: var(--color-page-prose-text);
 }
 
 .blog-prose h2,
@@ -298,7 +418,7 @@ button.chat-action-btn:hover {
 .blog-prose blockquote {
   border-left: 3px solid rgba(194, 65, 12, 0.45);
   padding: 0.125rem 0 0.125rem 1rem;
-  color: rgba(11, 11, 13, 0.7);
+  color: var(--color-page-prose-blockquote);
 }
 
 .blog-prose code {
@@ -306,8 +426,8 @@ button.chat-action-btn:hover {
     "SFMono-Regular", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
     "Liberation Mono", "Courier New", monospace;
   font-size: 0.92em;
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  background: var(--color-page-code-bg);
+  border: 1px solid var(--color-page-code-border);
   border-radius: 0.4rem;
   padding: 0.15rem 0.35rem;
 }
@@ -316,8 +436,8 @@ button.chat-action-btn:hover {
   position: relative;
   overflow-x: auto;
   border-radius: 0.9rem;
-  border: 1px solid rgba(255, 255, 255, 0.09);
-  background: linear-gradient(180deg, rgba(20, 20, 24, 0.98), rgba(12, 12, 16, 0.98));
+  border: 1px solid var(--color-page-pre-border);
+  background: linear-gradient(180deg, var(--color-page-pre-bg-from), var(--color-page-pre-bg-to));
   padding: 1rem 1.1rem;
 }
 
@@ -340,7 +460,7 @@ button.chat-action-btn:hover {
 .blog-prose td {
   text-align: left;
   padding: 0.85rem 1rem;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  border-bottom: 1px solid var(--color-page-border);
   vertical-align: top;
 }
 
@@ -355,7 +475,7 @@ button.chat-action-btn:hover {
 
 .blog-prose hr {
   border: 0;
-  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  border-top: 1px solid var(--color-page-border);
   margin: 2.5rem 0;
 }
 

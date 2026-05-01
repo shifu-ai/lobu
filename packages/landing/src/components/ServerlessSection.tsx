@@ -75,7 +75,7 @@ export function ServerlessSection() {
           <div
             class="inline-flex p-1 rounded-xl border"
             style={{
-              backgroundColor: "rgba(255, 255, 255, 0.03)",
+              backgroundColor: "var(--color-page-surface-dim)",
               borderColor: "var(--color-page-border)",
             }}
           >

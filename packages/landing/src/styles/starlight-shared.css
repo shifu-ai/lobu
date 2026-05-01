@@ -28,6 +28,43 @@
   --color-tg-meta: rgba(255, 255, 255, 0.533);
 }
 
+/* Dark mode tokens for Starlight pages */
+:root[data-theme="dark"] {
+  --color-page-bg: #0a0a0b;
+  --color-page-bg-elevated: #111113;
+  --color-page-bg-overlay: rgba(10, 10, 11, 0.85);
+  --color-page-surface: #161618;
+  --color-page-surface-dim: #1c1c1f;
+  --color-page-border: rgba(255, 255, 255, 0.08);
+  --color-page-border-active: rgba(255, 255, 255, 0.16);
+  --color-page-text: #f0f0f2;
+  --color-page-text-muted: #9ca3af;
+
+  --color-tg-bg: rgb(22, 22, 24);
+  --color-tg-bg-secondary: rgb(10, 10, 11);
+  --color-tg-bubble-in: rgb(22, 22, 24);
+  --color-tg-border: rgb(48, 48, 48);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --color-page-bg: #0a0a0b;
+    --color-page-bg-elevated: #111113;
+    --color-page-bg-overlay: rgba(10, 10, 11, 0.85);
+    --color-page-surface: #161618;
+    --color-page-surface-dim: #1c1c1f;
+    --color-page-border: rgba(255, 255, 255, 0.08);
+    --color-page-border-active: rgba(255, 255, 255, 0.16);
+    --color-page-text: #f0f0f2;
+    --color-page-text-muted: #9ca3af;
+
+    --color-tg-bg: rgb(22, 22, 24);
+    --color-tg-bg-secondary: rgb(10, 10, 11);
+    --color-tg-bubble-in: rgb(22, 22, 24);
+    --color-tg-border: rgb(48, 48, 48);
+  }
+}
+
 /* Prevent Tailwind's preflight from resetting Starlight's list styles */
 @layer base {
   .sl-markdown-content ul {

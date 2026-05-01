@@ -25,30 +25,53 @@
     ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", Menlo, monospace;
 }
 
-/* Force-light: Starlight ships a `[data-theme=dark]` block that overrides the
-   :root tokens above. Mirror our light values onto it so the docs always
-   render light regardless of the user's OS preference. */
+/* Dark mode overrides for Starlight docs */
 :root[data-theme="dark"] {
-  --sl-color-bg: #ffffff;
-  --sl-color-bg-nav: #ffffff;
-  --sl-color-bg-sidebar: #fafafa;
-  --sl-color-hairline: rgba(0, 0, 0, 0.08);
-  --sl-color-hairline-light: rgba(0, 0, 0, 0.05);
-  --sl-color-text: #0b0b0d;
-  --sl-color-text-accent: #b45309;
-  --sl-color-text-invert: #ffffff;
-  --sl-color-white: #0b0b0d;
-  --sl-color-gray-1: #1f2937;
-  --sl-color-gray-2: #374151;
+  --sl-color-bg: #0a0a0b;
+  --sl-color-bg-nav: #0a0a0b;
+  --sl-color-bg-sidebar: #111113;
+  --sl-color-hairline: rgba(255, 255, 255, 0.08);
+  --sl-color-hairline-light: rgba(255, 255, 255, 0.05);
+  --sl-color-text: #f0f0f2;
+  --sl-color-text-accent: #f59e0b;
+  --sl-color-text-invert: #0a0a0b;
+  --sl-color-white: #f0f0f2;
+  --sl-color-gray-1: #d1d5db;
+  --sl-color-gray-2: #9ca3af;
   --sl-color-gray-3: #6b7280;
-  --sl-color-gray-4: rgba(0, 0, 0, 0.08);
-  --sl-color-gray-5: #f5f5f7;
-  --sl-color-gray-6: #fafafa;
-  --sl-color-gray-7: #f5f5f7;
-  --sl-color-black: #ffffff;
-  --sl-color-accent-low: rgba(194, 65, 12, 0.12);
-  --sl-color-accent: #c2410c;
-  --sl-color-accent-high: #9a3412;
+  --sl-color-gray-4: rgba(255, 255, 255, 0.08);
+  --sl-color-gray-5: #1c1c1f;
+  --sl-color-gray-6: #111113;
+  --sl-color-gray-7: #1c1c1f;
+  --sl-color-black: #0a0a0b;
+  --sl-color-accent-low: rgba(194, 65, 12, 0.18);
+  --sl-color-accent: #ea580c;
+  --sl-color-accent-high: #fb923c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sl-color-bg: #0a0a0b;
+    --sl-color-bg-nav: #0a0a0b;
+    --sl-color-bg-sidebar: #111113;
+    --sl-color-hairline: rgba(255, 255, 255, 0.08);
+    --sl-color-hairline-light: rgba(255, 255, 255, 0.05);
+    --sl-color-text: #f0f0f2;
+    --sl-color-text-accent: #f59e0b;
+    --sl-color-text-invert: #0a0a0b;
+    --sl-color-white: #f0f0f2;
+    --sl-color-gray-1: #d1d5db;
+    --sl-color-gray-2: #9ca3af;
+    --sl-color-gray-3: #6b7280;
+    --sl-color-gray-4: rgba(255, 255, 255, 0.08);
+    --sl-color-gray-5: #1c1c1f;
+    --sl-color-gray-6: #111113;
+    --sl-color-gray-7: #1c1c1f;
+    --sl-color-black: #0a0a0b;
+    --sl-color-accent-low: rgba(194, 65, 12, 0.18);
+    --sl-color-accent: #ea580c;
+    --sl-color-accent-high: #fb923c;
+  }
 }
 
 /* Hide right TOC panel; keep Starlight header/sidebar */

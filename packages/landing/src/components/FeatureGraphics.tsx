@@ -86,7 +86,7 @@ export function MemoryGraphic() {
   return (
     <div class="w-full max-w-md flex flex-col gap-4">
       <div
-        class="rounded-xl p-4 bg-white"
+        class="rounded-xl p-4 bg-[var(--color-page-surface)]"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div
@@ -190,7 +190,7 @@ export function SharedMemoryGraphic() {
       </div>
 
       <div
-        class="rounded-xl bg-white shadow-sm"
+        class="rounded-xl bg-[var(--color-page-surface)] shadow-sm"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div
@@ -269,7 +269,7 @@ function MemoryAgentCard({
 }) {
   return (
     <div
-      class="rounded-xl bg-white shadow-sm"
+      class="rounded-xl bg-[var(--color-page-surface)] shadow-sm"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div class="flex flex-col items-center px-2 py-3 text-center">
@@ -304,7 +304,7 @@ function MemoryAgentCard({
 export function SkillsGraphic() {
   return (
     <div
-      class="w-full max-w-md rounded-xl overflow-hidden bg-white"
+      class="w-full max-w-md rounded-xl overflow-hidden bg-[var(--color-page-surface)]"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div
@@ -389,7 +389,7 @@ export function HostingGraphic() {
           ) : null}
           <div
             key={card.label}
-            class="rounded-xl p-4 bg-white"
+            class="rounded-xl p-4 bg-[var(--color-page-surface)]"
             style={{ border: "1px solid var(--color-page-border)" }}
           >
             <div class="flex items-center justify-between mb-3">
@@ -443,7 +443,7 @@ export function BenchmarkGraphic() {
 
   return (
     <div
-      class="w-full max-w-md rounded-xl p-5 bg-white"
+      class="w-full max-w-md rounded-xl p-5 bg-[var(--color-page-surface)]"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div class="flex items-center justify-between mb-4">
@@ -509,7 +509,7 @@ export function WatcherGraphic() {
   return (
     <div class="w-full max-w-md flex flex-col gap-3">
       <div
-        class="rounded-xl p-4 bg-white"
+        class="rounded-xl p-4 bg-[var(--color-page-surface)]"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div class="flex items-center justify-between mb-3">
@@ -571,7 +571,7 @@ export function WatcherGraphic() {
         ↓
       </div>
       <div
-        class="rounded-xl p-3.5 bg-white flex items-center gap-2.5 text-[13px]"
+        class="rounded-xl p-3.5 bg-[var(--color-page-surface)] flex items-center gap-2.5 text-[13px]"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <span aria-hidden="true">🏢</span>
@@ -617,7 +617,7 @@ export function PlatformsGraphic() {
   return (
     <div class="w-full max-w-md flex flex-col gap-3">
       <div
-        class="rounded-xl p-4 bg-white"
+        class="rounded-xl p-4 bg-[var(--color-page-surface)]"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div
@@ -641,7 +641,7 @@ export function PlatformsGraphic() {
         </div>
       </div>
       <div
-        class="rounded-xl p-4 bg-white"
+        class="rounded-xl p-4 bg-[var(--color-page-surface)]"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div class="flex items-center justify-between mb-3">

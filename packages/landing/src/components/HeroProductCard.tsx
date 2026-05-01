@@ -636,11 +636,11 @@ function Sidebar({
   onStageChange?: (stage: HeroStageId) => void;
   entities: EntityNavItem[];
 }) {
-  const sidebarBg = "#fafafa";
-  const fg = "#0b0b0d";
-  const fgMuted = "rgba(11,11,13,0.55)";
-  const fgFaint = "rgba(11,11,13,0.4)";
-  const accentBg = "rgba(0,0,0,0.05)";
+  const sidebarBg = "var(--color-page-surface-dim)";
+  const fg = "var(--color-page-text)";
+  const fgMuted = "var(--color-page-text-muted)";
+  const fgFaint = "var(--color-page-text-muted)";
+  const accentBg = "var(--color-page-surface-dim)";
 
   function NavRow({
     icon,
@@ -898,7 +898,7 @@ function AppShell({
 }) {
   return (
     <div
-      class="max-w-[72rem] mx-auto rounded-2xl overflow-hidden grid grid-cols-1 md:grid-cols-[232px_1fr] relative bg-white"
+      class="max-w-[72rem] mx-auto rounded-2xl overflow-hidden grid grid-cols-1 md:grid-cols-[232px_1fr] relative bg-[var(--color-page-surface)]"
       style={{
         border: "1px solid var(--color-page-border)",
         boxShadow: "0 8px 28px rgba(0,0,0,0.06)",
@@ -976,10 +976,14 @@ function PrimaryButton({
     <span
       class="inline-flex items-center gap-1.5 h-8 px-3 rounded-md text-[13px] font-medium"
       style={{
-        background: active ? "#0b0b0d" : "white",
-        color: active ? "white" : "var(--color-page-text)",
+        background: active
+          ? "var(--color-page-bg-inverted)"
+          : "var(--color-page-surface)",
+        color: active
+          ? "var(--color-page-text-inverted)"
+          : "var(--color-page-text)",
         border: active
-          ? "1px solid #0b0b0d"
+          ? "1px solid var(--color-page-bg-inverted)"
           : "1px solid var(--color-page-border)",
       }}
     >
@@ -1002,7 +1006,7 @@ function GhostButton({
       style={{
         color: "var(--color-page-text)",
         border: "1px solid var(--color-page-border)",
-        background: "white",
+        background: "var(--color-page-surface)",
       }}
     >
       {icon}
@@ -1016,7 +1020,7 @@ function SearchInput() {
     <span
       class="hidden sm:inline-flex items-center gap-2 h-8 px-3 rounded-md text-[13px]"
       style={{
-        background: "white",
+        background: "var(--color-page-surface)",
         color: "var(--color-page-text-muted)",
         border: "1px solid var(--color-page-border)",
         minWidth: "0",
@@ -1133,7 +1137,7 @@ const DEFAULT_RECORD_ROWS: RecordRow[] = [
 function MembersTable({ rows }: { rows: RecordRow[] }) {
   return (
     <div
-      class="rounded-lg overflow-hidden bg-white"
+      class="rounded-lg overflow-hidden bg-[var(--color-page-surface)]"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div
@@ -1224,7 +1228,7 @@ function EntitySchemaSummary({
 }) {
   return (
     <div
-      class="rounded-lg bg-white p-3"
+      class="rounded-lg bg-[var(--color-page-surface)] p-3"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div class="flex flex-wrap items-start gap-3">
@@ -1337,7 +1341,7 @@ function SummaryChip({ children }: { children: ComponentChildren }) {
     <span
       class="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 text-[11px]"
       style={{
-        background: "white",
+        background: "var(--color-page-surface)",
         border: "1px solid var(--color-page-border)",
         color: "var(--color-page-text)",
       }}
@@ -1617,7 +1621,7 @@ function ConnectorsTable({ connectors }: { connectors: ConnectorRow[] }) {
 
   return (
     <div
-      class="rounded-lg overflow-hidden bg-white"
+      class="rounded-lg overflow-hidden bg-[var(--color-page-surface)]"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div
@@ -1734,7 +1738,7 @@ function WatchersTable({ rows }: { rows: WatcherRow[] }) {
   const cols = "1.6fr 0.7fr 1.1fr 0.7fr 1fr 0.7fr";
   return (
     <div
-      class="rounded-lg overflow-hidden bg-white"
+      class="rounded-lg overflow-hidden bg-[var(--color-page-surface)]"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div
@@ -2041,7 +2045,7 @@ function KnowledgeFeed({ rows }: { rows?: KnowledgeRow[] }) {
 function UseCaseKnowledgeCard({ row }: { row: KnowledgeRow }) {
   return (
     <article
-      class="rounded-lg bg-white p-4 flex flex-col gap-3"
+      class="rounded-lg bg-[var(--color-page-surface)] p-4 flex flex-col gap-3"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <header class="flex items-start gap-3">
@@ -2134,7 +2138,7 @@ function UseCaseKnowledgeCard({ row }: { row: KnowledgeRow }) {
 function KnowledgeFilterBar() {
   return (
     <div
-      class="rounded-lg bg-white px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1.5"
+      class="rounded-lg bg-[var(--color-page-surface)] px-3 py-2 flex flex-wrap items-center gap-x-3 gap-y-1.5"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       {KNOWLEDGE_CHIPS.map((group, gi) => (
@@ -2160,8 +2164,12 @@ function KnowledgeFilterBar() {
                 key={v}
                 class="inline-flex items-center px-2 py-0.5 rounded text-[11px]"
                 style={{
-                  background: isActive ? "var(--color-page-text)" : "white",
-                  color: isActive ? "white" : "var(--color-page-text)",
+                  background: isActive
+                    ? "var(--color-page-bg-inverted)"
+                    : "var(--color-page-surface)",
+                  color: isActive
+                    ? "var(--color-page-text-inverted)"
+                    : "var(--color-page-text)",
                   border: isActive
                     ? "1px solid var(--color-page-text)"
                     : "1px solid var(--color-page-border)",
@@ -2181,7 +2189,7 @@ function KnowledgeFilterBar() {
 function KnowledgeCard({ item }: { item: KnowledgeMemoryItem }) {
   return (
     <article
-      class="rounded-lg bg-white p-4 flex flex-col gap-2"
+      class="rounded-lg bg-[var(--color-page-surface)] p-4 flex flex-col gap-2"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <header class="flex items-start gap-3">
@@ -2243,7 +2251,7 @@ function KnowledgeCard({ item }: { item: KnowledgeMemoryItem }) {
             style={{
               color: "var(--color-page-text-muted)",
               border: "1px solid var(--color-page-border)",
-              background: "white",
+              background: "var(--color-page-surface)",
             }}
             aria-hidden="true"
           >
@@ -2254,7 +2262,7 @@ function KnowledgeCard({ item }: { item: KnowledgeMemoryItem }) {
             style={{
               color: "var(--color-page-text-muted)",
               border: "1px solid var(--color-page-border)",
-              background: "white",
+              background: "var(--color-page-surface)",
             }}
             aria-hidden="true"
           >
@@ -2336,7 +2344,7 @@ function KnowledgeActionCard({ item }: { item: KnowledgeActionItem }) {
         <span
           class="inline-flex items-center justify-center w-7 h-7 rounded-md mt-0.5"
           style={{
-            background: "white",
+            background: "var(--color-page-surface)",
             border: "1px solid var(--color-page-border)",
             color: "var(--color-page-text)",
           }}
@@ -2362,7 +2370,7 @@ function KnowledgeActionCard({ item }: { item: KnowledgeActionItem }) {
             <span
               class="font-mono text-[11px] px-1.5 py-0.5 rounded"
               style={{
-                background: "white",
+                background: "var(--color-page-surface)",
                 color: "var(--color-page-text-muted)",
                 border: "1px solid var(--color-page-border)",
               }}
@@ -2387,7 +2395,7 @@ function KnowledgeActionCard({ item }: { item: KnowledgeActionItem }) {
             <span
               class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px]"
               style={{
-                background: "white",
+                background: "var(--color-page-surface)",
                 border: "1px solid var(--color-page-border)",
               }}
             >
@@ -2399,7 +2407,7 @@ function KnowledgeActionCard({ item }: { item: KnowledgeActionItem }) {
       </header>
 
       <div
-        class="rounded-md bg-white p-3 flex flex-col gap-2"
+        class="rounded-md bg-[var(--color-page-surface)] p-3 flex flex-col gap-2"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div
@@ -2480,7 +2488,9 @@ function ActionField({
           .filter(Boolean)
           .join(" ")}
         style={{
-          background: editable ? "white" : "var(--color-page-surface-dim)",
+          background: editable
+            ? "var(--color-page-surface)"
+            : "var(--color-page-surface-dim)",
           color: "var(--color-page-text)",
           border: "1px solid var(--color-page-border)",
         }}
@@ -2503,7 +2513,7 @@ function AgentsConnect({
   return (
     <div class="flex flex-col gap-4">
       <div
-        class="rounded-2xl bg-white p-4 flex items-center gap-4"
+        class="rounded-2xl bg-[var(--color-page-surface)] p-4 flex items-center gap-4"
         style={{ border: "1px solid var(--color-page-border)" }}
       >
         <div class="flex items-center gap-2 shrink-0">
@@ -2529,7 +2539,7 @@ function AgentsConnect({
           <span
             class="inline-flex items-center h-6 px-2 rounded text-[11px] font-medium"
             style={{
-              background: "white",
+              background: "var(--color-page-surface)",
               color: "var(--color-page-text)",
               border: "1px solid var(--color-page-border)",
             }}
@@ -2583,7 +2593,7 @@ const DEFAULT_AGENT_ROWS: AgentRow[] = [
 function AlwaysOnAgentsTable({ rows }: { rows: AgentRow[] }) {
   return (
     <div
-      class="rounded-2xl bg-white overflow-hidden"
+      class="rounded-2xl bg-[var(--color-page-surface)] overflow-hidden"
       style={{ border: "1px solid var(--color-page-border)" }}
     >
       <div
