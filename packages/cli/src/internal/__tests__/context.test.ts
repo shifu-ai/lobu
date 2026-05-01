@@ -51,20 +51,6 @@ describe("context management", () => {
     expect(await getActiveOrg()).toBe("prod-org");
   });
 
-  test("P2: Migration from legacy top-level activeOrg", async () => {
-    const legacyData = {
-      currentContext: "lobu",
-      activeOrg: "legacy-org",
-      contexts: {
-        lobu: { apiUrl: "https://app.lobu.ai/api/v1" },
-      },
-    };
-    readFileMock.mockResolvedValue(JSON.stringify(legacyData));
-
-    const config = await loadContextConfig();
-    expect(config.contexts["lobu"]?.activeOrg).toBe("legacy-org");
-  });
-
   test("P1: findContextByUrl finds matching context", async () => {
     const configData = {
       currentContext: "lobu",

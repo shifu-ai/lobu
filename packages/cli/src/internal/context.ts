@@ -26,7 +26,6 @@ interface ResolvedContext {
 
 interface StoredContextConfig {
   currentContext?: string;
-  activeOrg?: string; // Legacy top-level activeOrg
   contexts?: Record<string, LobuContextEntry>;
 }
 
@@ -184,12 +183,6 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
     raw.currentContext && contexts[raw.currentContext]
       ? raw.currentContext
       : DEFAULT_CONTEXT_NAME;
-
-  // Migration: If we have a legacy top-level activeOrg and the current context doesn't have one,
-  // move it to the current context.
-  if (raw.activeOrg && !contexts[currentContext]!.activeOrg) {
-    contexts[currentContext]!.activeOrg = raw.activeOrg.trim();
-  }
 
   return {
     currentContext,
