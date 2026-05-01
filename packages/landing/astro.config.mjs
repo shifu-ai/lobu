@@ -54,7 +54,7 @@ export default defineConfig({
         "./src/styles/starlight-theme.css",
       ],
       expressiveCode: {
-        themes: ["github-light"],
+        themes: ["github-light", "github-dark"],
       },
       components: {
         Head: "./src/components/starlight/Head.astro",

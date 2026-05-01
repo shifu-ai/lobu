@@ -2,6 +2,7 @@
 import DefaultHead from "@astrojs/starlight/components/Head.astro";
 import PosthogAnalytics from "../PosthogAnalytics.astro";
 import WebMCP from "../WebMCP.astro";
+import { themeScript } from "../../styles/theme-script";
 
 const markdownPath =
   Astro.url.pathname === "/"
@@ -11,6 +12,7 @@ const markdownURL = new URL(markdownPath, Astro.site);
 ---
 
 <DefaultHead />
+<script is:inline set:html={themeScript(Astro)} />
 <PosthogAnalytics />
 <WebMCP />
 
