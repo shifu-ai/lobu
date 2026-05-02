@@ -497,7 +497,17 @@ export class ChatInstanceManager {
       if (useWebhook && this.publicGatewayUrl) {
         const webhookUrl = `${this.publicGatewayUrl}/api/v1/webhooks/${connection.id}`;
         logger.info({ id: connection.id, webhookUrl }, "Setting webhook");
-        await this.configurePlatformWebhook(connection, webhookUrl);
+        try {
+          await this.configurePlatformWebhook(connection, webhookUrl);
+        } catch (error) {
+          // Webhook registration failure is non-fatal — the adapter can still
+          // receive messages if the webhook URL was set externally (e.g. from
+          // a previous deploy or manual configuration).
+          logger.warn(
+            { id: connection.id, error: String(error) },
+            "Webhook registration failed, continuing without it"
+          );
+        }
       }
 
       const cleanup = async () => {
