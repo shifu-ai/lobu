@@ -872,7 +872,7 @@ describe('residual-race fixes (PR-466 follow-up)', () => {
           calls.updateConnection++;
           // Read the existing row through the connection store so the test
           // mirrors the production manager behavior closely enough that the
-          // route's persistConnectionSnapshot call sees a sane shape.
+          // route's response sees a sane shape.
           const { getDb } = await import('../../db/client.js');
           const sql = getDb();
           const rows = await sql`
