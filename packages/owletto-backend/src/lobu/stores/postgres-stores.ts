@@ -501,44 +501,69 @@ export function createPostgresAgentConnectionStore(): AgentConnectionStore {
     },
     async listConnections(filter) {
       const sql = getDb();
-      const orgId = getOrgId();
+      // Worker gateway / ChatInstanceManager calls this without orgContext.
+      const orgId = tryGetOrgId();
 
       if (filter?.templateAgentId && filter?.platform) {
-        const rows = await sql`
-          SELECT c.* FROM agent_connections c
-          JOIN agents a ON a.id = c.agent_id
-          WHERE a.organization_id = ${orgId}
-            AND c.agent_id = ${filter.templateAgentId}
-            AND c.platform = ${filter.platform}
-          ORDER BY c.created_at DESC
-        `;
+        const rows = orgId
+          ? await sql`
+              SELECT c.* FROM agent_connections c
+              JOIN agents a ON a.id = c.agent_id
+              WHERE a.organization_id = ${orgId}
+                AND c.agent_id = ${filter.templateAgentId}
+                AND c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `
+          : await sql`
+              SELECT c.* FROM agent_connections c
+              WHERE c.agent_id = ${filter.templateAgentId}
+                AND c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `;
         return rows.map(rowToConnection);
       }
       if (filter?.templateAgentId) {
-        const rows = await sql`
-          SELECT c.* FROM agent_connections c
-          JOIN agents a ON a.id = c.agent_id
-          WHERE a.organization_id = ${orgId} AND c.agent_id = ${filter.templateAgentId}
-          ORDER BY c.created_at DESC
-        `;
+        const rows = orgId
+          ? await sql`
+              SELECT c.* FROM agent_connections c
+              JOIN agents a ON a.id = c.agent_id
+              WHERE a.organization_id = ${orgId} AND c.agent_id = ${filter.templateAgentId}
+              ORDER BY c.created_at DESC
+            `
+          : await sql`
+              SELECT c.* FROM agent_connections c
+              WHERE c.agent_id = ${filter.templateAgentId}
+              ORDER BY c.created_at DESC
+            `;
         return rows.map(rowToConnection);
       }
       if (filter?.platform) {
-        const rows = await sql`
-          SELECT c.* FROM agent_connections c
-          JOIN agents a ON a.id = c.agent_id
-          WHERE a.organization_id = ${orgId} AND c.platform = ${filter.platform}
-          ORDER BY c.created_at DESC
-        `;
+        const rows = orgId
+          ? await sql`
+              SELECT c.* FROM agent_connections c
+              JOIN agents a ON a.id = c.agent_id
+              WHERE a.organization_id = ${orgId} AND c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `
+          : await sql`
+              SELECT c.* FROM agent_connections c
+              WHERE c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `;
         return rows.map(rowToConnection);
       }
 
-      const rows = await sql`
-        SELECT c.* FROM agent_connections c
-        JOIN agents a ON a.id = c.agent_id
-        WHERE a.organization_id = ${orgId}
-        ORDER BY c.created_at DESC
-      `;
+      const rows = orgId
+        ? await sql`
+            SELECT c.* FROM agent_connections c
+            JOIN agents a ON a.id = c.agent_id
+            WHERE a.organization_id = ${orgId}
+            ORDER BY c.created_at DESC
+          `
+        : await sql`
+            SELECT c.* FROM agent_connections c
+            ORDER BY c.created_at DESC
+          `;
       return rows.map(rowToConnection);
     },
     async saveConnection(connection) {

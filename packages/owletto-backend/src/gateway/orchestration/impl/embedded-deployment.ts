@@ -320,7 +320,11 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     }
 
     const child = spawn(command, spawnArgs, {
-      env: { ...process.env, ...commonEnvVars },
+      // Workers must not inherit gateway-only secrets or telemetry settings
+      // (DATABASE_URL, SENTRY_DSN, OAuth secrets, etc.). Everything a worker
+      // needs is assembled explicitly above, with optional operator-provided
+      // values forwarded only via WORKER_ENV_*.
+      env: commonEnvVars,
       cwd: workspaceDir,
       stdio: ["ignore", "pipe", "pipe"],
     });

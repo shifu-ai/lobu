@@ -1,21 +1,22 @@
 /**
  * ChatInstanceManager — manages Chat SDK instances for API-driven platform
- * connections. Owns persistence (chat_connections), Chat lifecycle, and
- * webhook dispatch.
+ * connections. Owns Chat lifecycle and webhook dispatch.
+ *
+ * Persistence uses `agent_connections` (via AgentConnectionStore) as the
+ * single source of truth. Secrets are encrypted inline as `enc:v1:` blobs
+ * using the shared ENCRYPTION_KEY — no separate secret-store indirection.
  */
 
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
-import { createLogger, isSecretRef } from "@lobu/core";
+import type {
+  AgentConnectionStore,
+  StoredConnection,
+} from "@lobu/core";
+import { createLogger } from "@lobu/core";
 import type { CoreServices, PlatformAdapter } from "../platform.js";
 import type { IFileHandler } from "../platform/file-handler.js";
-import {
-  deleteSecretsByPrefix,
-  persistSecretValue,
-  resolveSecretValue,
-} from "../secrets/index.js";
 import { resolveAgentOptions } from "../services/platform-helpers.js";
-import { ChatConnectionStore } from "./chat-connection-store.js";
 import {
   ConversationStateStore,
   type HistoryEntry,
@@ -82,33 +83,29 @@ export class ChatInstanceManager {
   private services!: CoreServices;
   private publicGatewayUrl = "";
   private slackCoordinator!: SlackConnectionCoordinator;
-  private connectionStore: ChatConnectionStore = new ChatConnectionStore();
+  private connectionStore!: AgentConnectionStore;
 
   async initialize(services: CoreServices): Promise<void> {
     this.services = services;
     this.publicGatewayUrl = services.getPublicGatewayUrl();
     this.slackCoordinator = this.buildSlackCoordinator();
 
-    const connections = await this.connectionStore.listAll();
+    const store = services.getConnectionStore();
+    if (!store) {
+      logger.warn("No AgentConnectionStore — chat connections disabled");
+      return;
+    }
+    this.connectionStore = store;
+
+    const connections = await this.connectionStore.listConnections();
     logger.debug(
       { count: connections.length },
-      "Loading chat connections from Postgres"
+      "Loading chat connections from agent_connections"
     );
 
-    for (const connection of connections) {
-      try {
-        connection.config = await this.resolveConfigForRuntime(
-          connection.id,
-          connection.config
-        );
-      } catch (error) {
-        logger.warn(
-          { id: connection.id, platform: connection.platform, error: String(error) },
-          "Removing connection with unresolved secret refs — reseed from lobu.toml"
-        );
-        await this.deleteConnectionRecord(connection.id, connection);
-        continue;
-      }
+    for (const stored of connections) {
+      // StoredConnection.config is already decrypted by AgentConnectionStore.
+      const connection = storedToPlatform(stored);
 
       try {
         if (connection.status === "active") {
@@ -116,27 +113,11 @@ export class ChatInstanceManager {
         }
       } catch (error) {
         logger.error({ id: connection.id, error: String(error) }, "Failed to load connection");
+        await this.connectionStore.updateConnection(connection.id, {
+          status: "error",
+          errorMessage: `Startup failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
       }
-    }
-  }
-
-  private async deleteConnectionRecord(
-    id: string,
-    _connection?: PlatformConnection
-  ): Promise<void> {
-    await this.connectionStore.delete(id);
-    // Also clear any secrets owned by the torn-down record so a replay
-    // of `initialize()` does not inherit stale credential material.
-    try {
-      await deleteSecretsByPrefix(
-        this.services.getSecretStore(),
-        `connections/${id}/`
-      );
-    } catch (error) {
-      logger.warn(
-        { id, error: String(error) },
-        "Failed to purge connection secrets during record cleanup"
-      );
     }
   }
 
@@ -179,9 +160,6 @@ export class ChatInstanceManager {
       );
     }
 
-    // Use the caller-supplied stable ID when provided (file-loader path, so
-    // webhook URLs survive fresh-clone setups). Fall back to a random ID
-    // for API-created connections.
     const id = stableId ?? randomUUID().replace(/-/g, "").slice(0, 16);
     const now = Date.now();
 
@@ -197,17 +175,15 @@ export class ChatInstanceManager {
       updatedAt: now,
     };
 
-    // Persist first (sensitive fields are moved into the secret store as
-    // refs) so a startInstance failure can't leave a running instance with
-    // no row, and a persist failure can't leave an unbroadcast row.
+    // Persist first so a startInstance failure can't leave a running
+    // instance with no row.
     await this.persistConnection(connection);
 
     try {
       await this.startInstance(connection);
     } catch (error) {
-      // Roll back the row so a retry doesn't see a half-baked entry.
       try {
-        await this.connectionStore.delete(connection.id);
+        await this.connectionStore.deleteConnection(connection.id);
       } catch {
         // best-effort
       }
@@ -230,17 +206,11 @@ export class ChatInstanceManager {
       instance?.conversationState ??
       new ConversationStateStore(await this.createStateAdapter());
 
-    // Cascade cleanups first, then drop the row last so a cleanup failure
-    // leaves the row in place for an operator-driven retry rather than
-    // orphaning history/secrets with no anchoring chat_connection record.
+    // Cascade history cleanup, then drop the row.
     const historyDeleted = await conversationState.clearAllHistory(id);
-    const secretsDeleted = await deleteSecretsByPrefix(
-      this.services.getSecretStore(),
-      `connections/${id}/`
-    );
-    await this.connectionStore.delete(id);
+    await this.connectionStore.deleteConnection(id);
 
-    logger.info({ id, secretsDeleted, historyDeleted }, "Connection removed");
+    logger.info({ id, historyDeleted }, "Connection removed");
   }
 
   async restartConnection(id: string): Promise<void> {
@@ -251,32 +221,9 @@ export class ChatInstanceManager {
       this.instances.delete(id);
     }
 
-    const connection = await this.connectionStore.get(id);
-    if (!connection) throw new Error(`Connection ${id} not found`);
-
-    // Resolve the (possibly-ref'd) config before we attempt to boot. If
-    // this fails — e.g. a secret ref was wiped between restarts — we
-    // can't auto-delete the record (that's initialize()'s startup job,
-    // not a user-initiated restart), so stamp the row with the error
-    // and re-throw so the caller (and UI) can surface it.
-    try {
-      connection.config = await this.resolveConfigForRuntime(
-        connection.id,
-        connection.config
-      );
-    } catch (error) {
-      connection.status = "error";
-      connection.errorMessage = `Failed to resolve connection secrets: ${
-        error instanceof Error ? error.message : String(error)
-      }`;
-      connection.updatedAt = Date.now();
-      await this.persistConnection(connection);
-      logger.error(
-        { id, error: String(error) },
-        "restartConnection: failed to resolve secrets"
-      );
-      throw error;
-    }
+    const stored = await this.connectionStore.getConnection(id);
+    if (!stored) throw new Error(`Connection ${id} not found`);
+    const connection = storedToPlatform(stored);
 
     connection.status = "active";
     connection.errorMessage = undefined;
@@ -302,15 +249,9 @@ export class ChatInstanceManager {
       this.instances.delete(id);
     }
 
-    const connection = await this.connectionStore.get(id);
-    if (!connection) throw new Error(`Connection ${id} not found`);
-    connection.config = await this.resolveConfigForRuntime(
-      connection.id,
-      connection.config
-    );
-    connection.status = "stopped";
-    connection.updatedAt = Date.now();
-    await this.persistConnection(connection);
+    await this.connectionStore.updateConnection(id, {
+      status: "stopped",
+    });
 
     logger.info({ id }, "Connection stopped");
   }
@@ -324,18 +265,12 @@ export class ChatInstanceManager {
       metadata?: Record<string, any>;
     }
   ): Promise<PlatformConnection> {
-    const connection = await this.connectionStore.get(id);
-    if (!connection) throw new Error(`Connection ${id} not found`);
-    connection.config = await this.resolveConfigForRuntime(
-      connection.id,
-      connection.config
-    );
+    const stored = await this.connectionStore.getConnection(id);
+    if (!stored) throw new Error(`Connection ${id} not found`);
+    const connection = storedToPlatform(stored);
 
-    // Compute the merged config first (skipping sanitized `***...`
-    // placeholder values), then decide whether a restart is needed by
-    // comparing merged-vs-current. A previous version compared the raw
-    // `updates.config` to `connection.config`, which would trigger a
-    // spurious restart every time the UI posted back a sanitized form.
+    // Compute the merged config (skipping sanitized `***...` placeholders),
+    // then decide whether a restart is needed.
     const previousConfig = connection.config as Record<string, unknown>;
     let nextConfig: Record<string, unknown> | undefined;
     if (updates.config !== undefined) {
@@ -352,8 +287,6 @@ export class ChatInstanceManager {
       nextConfig !== undefined && !configsEqual(nextConfig, previousConfig);
 
     if (updates.templateAgentId !== undefined) {
-      // template_agent_id is a column on chat_connections; the persistConnection
-      // call below rewrites the row, so just update the in-memory field here.
       if (updates.templateAgentId) {
         connection.templateAgentId = updates.templateAgentId;
       } else {
@@ -397,20 +330,13 @@ export class ChatInstanceManager {
     platform?: string;
     templateAgentId?: string;
   }): Promise<PlatformConnection[]> {
-    const all = filter?.templateAgentId
-      ? await this.connectionStore.listByAgent(filter.templateAgentId)
-      : await this.connectionStore.listAll();
-    const out: PlatformConnection[] = [];
-    for (const conn of all) {
-      if (filter?.platform && conn.platform !== filter.platform) continue;
-      out.push(this.sanitizeConnection(conn));
-    }
-    return out;
+    const all = await this.connectionStore.listConnections(filter);
+    return all.map((c) => this.sanitizeConnection(storedToPlatform(c)));
   }
 
   async getConnection(id: string): Promise<PlatformConnection | null> {
-    const conn = await this.connectionStore.get(id);
-    return conn ? this.sanitizeConnection(conn) : null;
+    const conn = await this.connectionStore.getConnection(id);
+    return conn ? this.sanitizeConnection(storedToPlatform(conn)) : null;
   }
 
   has(id: string): boolean {
@@ -784,8 +710,8 @@ export class ChatInstanceManager {
     }
 
     // Don't auto-restart intentionally stopped connections
-    const connection = await this.connectionStore.get(id);
-    if (connection?.status === "stopped") {
+    const stored = await this.connectionStore.getConnection(id);
+    if (stored?.status === "stopped") {
       logger.info({ id }, "Connection is stopped, not auto-restarting");
       return false;
     }
@@ -805,56 +731,10 @@ export class ChatInstanceManager {
   private async persistConnection(
     connection: PlatformConnection
   ): Promise<void> {
-    const persistedConfig = await this.normalizeConfigForStorage(
-      connection.id,
-      connection.config
-    );
-    await this.connectionStore.upsert({ ...connection, config: persistedConfig });
-  }
-
-  private async normalizeConfigForStorage(
-    connectionId: string,
-    config: PlatformAdapterConfig
-  ): Promise<PlatformAdapterConfig> {
-    const normalized = { ...config } as Record<string, unknown>;
-    const secretStore = this.services.getSecretStore();
-
-    for (const field of Object.keys(normalized)) {
-      const value = normalized[field];
-      if (!isSecretField(field) || typeof value !== "string") continue;
-      normalized[field] = await persistSecretValue(
-        secretStore,
-        `connections/${connectionId}/${field}`,
-        value
-      );
-    }
-
-    return normalized as PlatformAdapterConfig;
-  }
-
-  private async resolveConfigForRuntime(
-    connectionId: string,
-    config: PlatformAdapterConfig
-  ): Promise<PlatformAdapterConfig> {
-    const resolved = { ...config } as Record<string, unknown>;
-    const secretStore = this.services.getSecretStore();
-
-    for (const field of Object.keys(resolved)) {
-      const value = resolved[field];
-      if (!isSecretField(field) || typeof value !== "string") continue;
-
-      if (isSecretRef(value)) {
-        const secretValue = await resolveSecretValue(secretStore, value);
-        if (secretValue === undefined) {
-          throw new Error(
-            `Failed to resolve secret ref for connection ${connectionId} field "${field}"`
-          );
-        }
-        resolved[field] = secretValue;
-      }
-    }
-
-    return resolved as PlatformAdapterConfig;
+    // AgentConnectionStore.saveConnection encrypts secret fields inline.
+    await this.connectionStore.saveConnection({
+      ...connection,
+    });
   }
 
   /** Return connection with secrets redacted for API responses. */
@@ -1588,4 +1468,21 @@ export class ChatInstanceManager {
 
     return activeConnections[0] || null;
   }
+}
+
+/** Convert a StoredConnection (decrypted config) to a PlatformConnection. */
+function storedToPlatform(stored: StoredConnection): PlatformConnection {
+  const out: PlatformConnection = {
+    id: stored.id,
+    platform: stored.platform,
+    config: stored.config as PlatformAdapterConfig,
+    settings: stored.settings,
+    metadata: stored.metadata,
+    status: stored.status,
+    createdAt: stored.createdAt,
+    updatedAt: stored.updatedAt,
+  };
+  if (stored.templateAgentId) out.templateAgentId = stored.templateAgentId;
+  if (stored.errorMessage) out.errorMessage = stored.errorMessage;
+  return out;
 }
