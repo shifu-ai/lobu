@@ -46,10 +46,6 @@ let lobuApp: any = null;
 let chatInstanceManager: any = null;
 let coreServices: any = null;
 let orchestrator: any = null;
-// Map<connectionId, SocketModeClient> — one Slack Socket Mode WebSocket
-// per agent_connections row. Keyed by connection id so per-org workspaces
-// each get their own bridge into ChatInstanceManager.handleSlackAppWebhook.
-const socketModeClients = new Map<string, any>();
 let filteringProxyStarted = false;
 
 function ensureEmbeddedWorkerLauncher(): void {
@@ -75,76 +71,6 @@ function ensureEmbeddedGatewaySecrets(): void {
     } else {
       throw new Error(
         'ENCRYPTION_KEY is required for the embedded Lobu gateway. Set ENCRYPTION_KEY explicitly or opt into ephemeral local keys with OWLETTO_ALLOW_EPHEMERAL_ENCRYPTION_KEY=1.'
-      );
-    }
-  }
-}
-
-/**
- * Start a Slack Socket Mode client per agent_connections row that has an
- * appToken. This lets the bot receive events without a publicly reachable
- * URL, and supports multiple Slack workspaces (across orgs) on a single
- * gateway. New connections added after gateway boot are not picked up
- * until the next restart — an in-process lifecycle hook off
- * ChatInstanceManager is a future refactor.
- */
-async function startSlackSocketMode(manager: any): Promise<void> {
-  if (!manager) return;
-
-  const sql = getDb();
-  const rows = await sql`
-    SELECT id, config FROM agent_connections
-    WHERE platform = 'slack'
-    ORDER BY id
-  `;
-
-  const { SocketModeClient } = await import('@slack/socket-mode');
-
-  for (const row of rows as Array<{ id: string; config: any }>) {
-    if (socketModeClients.has(row.id)) continue;
-
-    const cfg = typeof row.config === 'string' ? JSON.parse(row.config) : row.config;
-    if (!cfg?.appToken) continue;
-
-    const signingSecret = cfg.signingSecret || process.env.SLACK_SIGNING_SECRET || '';
-    const client = new SocketModeClient({ appToken: cfg.appToken });
-
-    client.on('slack_event', async ({ ack, body }: any) => {
-      if (ack) await ack();
-
-      const payload = JSON.stringify(body);
-      const timestamp = Math.floor(Date.now() / 1000).toString();
-      const sigBase = `v0:${timestamp}:${payload}`;
-      const signature = `v0=${crypto.createHmac('sha256', signingSecret).update(sigBase).digest('hex')}`;
-
-      const request = new Request('http://localhost/slack/events', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-slack-request-timestamp': timestamp,
-          'x-slack-signature': signature,
-        },
-        body: payload,
-      });
-
-      try {
-        await manager.handleSlackAppWebhook(request);
-      } catch (err) {
-        logger.error(
-          { connectionId: row.id, error: String(err) },
-          '[Lobu] Socket Mode event handler error'
-        );
-      }
-    });
-
-    try {
-      await client.start();
-      socketModeClients.set(row.id, client);
-      logger.info({ connectionId: row.id }, '[Lobu] Slack Socket Mode client started');
-    } catch (err) {
-      logger.error(
-        { connectionId: row.id, error: String(err) },
-        '[Lobu] Failed to start Slack Socket Mode client'
       );
     }
   }
@@ -238,9 +164,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
         '[Lobu] ChatInstanceManager init failed — connections disabled'
       );
     }
-
-    // Start Slack Socket Mode bridge if any connection has an appToken
-    await startSlackSocketMode(chatInstanceManager);
 
     // Auth bridge: translate Owletto's Better Auth session → Lobu's SettingsTokenPayload
     const authProvider = (c: any): EmbeddedSettingsSession | null => {
@@ -340,17 +263,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
  */
 export async function stopLobuGateway(): Promise<void> {
   try {
-    for (const [connectionId, client] of socketModeClients) {
-      try {
-        await client.disconnect();
-      } catch (err) {
-        logger.warn(
-          { connectionId, error: String(err) },
-          '[Lobu] Error disconnecting Slack Socket Mode client'
-        );
-      }
-    }
-    socketModeClients.clear();
     if (chatInstanceManager) {
       await chatInstanceManager.shutdown();
     }
