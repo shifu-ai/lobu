@@ -81,13 +81,21 @@ function ensureEmbeddedGatewaySecrets(): void {
  * Start a Slack Socket Mode client that bridges WebSocket events into the
  * ChatInstanceManager's webhook handler. This lets the bot receive events
  * without a publicly reachable URL.
+ *
+ * NOTE: The gateway maintains a single `socketModeClient` module-level
+ * singleton (see `break` below) — only the first Slack connection with an
+ * `appToken` gets a WebSocket. Multi-tenant Socket Mode (one client per
+ * connection) is a future refactor; production multi-org deployments should
+ * use the Events API webhook transport instead.
  */
 async function startSlackSocketMode(manager: any): Promise<void> {
   if (!manager) return;
 
   const sql = getDb();
   const rows = await sql`
-    SELECT id, config FROM agent_connections WHERE platform = 'slack' LIMIT 10
+    SELECT id, config FROM agent_connections
+    WHERE platform = 'slack'
+    ORDER BY id
   `;
 
   for (const row of rows as Array<{ id: string; config: any }>) {
