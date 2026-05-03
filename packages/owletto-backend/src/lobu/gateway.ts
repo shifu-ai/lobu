@@ -46,7 +46,10 @@ let lobuApp: any = null;
 let chatInstanceManager: any = null;
 let coreServices: any = null;
 let orchestrator: any = null;
-let socketModeClient: any = null;
+// Map<connectionId, SocketModeClient> — one Slack Socket Mode WebSocket
+// per agent_connections row. Keyed by connection id so per-org workspaces
+// each get their own bridge into ChatInstanceManager.handleSlackAppWebhook.
+const socketModeClients = new Map<string, any>();
 let filteringProxyStarted = false;
 
 function ensureEmbeddedWorkerLauncher(): void {
@@ -78,15 +81,12 @@ function ensureEmbeddedGatewaySecrets(): void {
 }
 
 /**
- * Start a Slack Socket Mode client that bridges WebSocket events into the
- * ChatInstanceManager's webhook handler. This lets the bot receive events
- * without a publicly reachable URL.
- *
- * NOTE: The gateway maintains a single `socketModeClient` module-level
- * singleton (see `break` below) — only the first Slack connection with an
- * `appToken` gets a WebSocket. Multi-tenant Socket Mode (one client per
- * connection) is a future refactor; production multi-org deployments should
- * use the Events API webhook transport instead.
+ * Start a Slack Socket Mode client per agent_connections row that has an
+ * appToken. This lets the bot receive events without a publicly reachable
+ * URL, and supports multiple Slack workspaces (across orgs) on a single
+ * gateway. New connections added after gateway boot are not picked up
+ * until the next restart — an in-process lifecycle hook off
+ * ChatInstanceManager is a future refactor.
  */
 async function startSlackSocketMode(manager: any): Promise<void> {
   if (!manager) return;
@@ -98,16 +98,18 @@ async function startSlackSocketMode(manager: any): Promise<void> {
     ORDER BY id
   `;
 
+  const { SocketModeClient } = await import('@slack/socket-mode');
+
   for (const row of rows as Array<{ id: string; config: any }>) {
+    if (socketModeClients.has(row.id)) continue;
+
     const cfg = typeof row.config === 'string' ? JSON.parse(row.config) : row.config;
     if (!cfg?.appToken) continue;
 
-    const { SocketModeClient } = await import('@slack/socket-mode');
     const signingSecret = cfg.signingSecret || process.env.SLACK_SIGNING_SECRET || '';
+    const client = new SocketModeClient({ appToken: cfg.appToken });
 
-    socketModeClient = new SocketModeClient({ appToken: cfg.appToken });
-
-    socketModeClient.on('slack_event', async ({ ack, body }: any) => {
+    client.on('slack_event', async ({ ack, body }: any) => {
       if (ack) await ack();
 
       const payload = JSON.stringify(body);
@@ -128,13 +130,23 @@ async function startSlackSocketMode(manager: any): Promise<void> {
       try {
         await manager.handleSlackAppWebhook(request);
       } catch (err) {
-        logger.error({ error: String(err) }, '[Lobu] Socket Mode event handler error');
+        logger.error(
+          { connectionId: row.id, error: String(err) },
+          '[Lobu] Socket Mode event handler error'
+        );
       }
     });
 
-    await socketModeClient.start();
-    logger.info({ connectionId: row.id }, '[Lobu] Slack Socket Mode client started');
-    break; // one socket mode client is enough
+    try {
+      await client.start();
+      socketModeClients.set(row.id, client);
+      logger.info({ connectionId: row.id }, '[Lobu] Slack Socket Mode client started');
+    } catch (err) {
+      logger.error(
+        { connectionId: row.id, error: String(err) },
+        '[Lobu] Failed to start Slack Socket Mode client'
+      );
+    }
   }
 }
 
@@ -328,10 +340,17 @@ export async function initLobuGateway(): Promise<Hono | null> {
  */
 export async function stopLobuGateway(): Promise<void> {
   try {
-    if (socketModeClient) {
-      await socketModeClient.disconnect();
-      socketModeClient = null;
+    for (const [connectionId, client] of socketModeClients) {
+      try {
+        await client.disconnect();
+      } catch (err) {
+        logger.warn(
+          { connectionId, error: String(err) },
+          '[Lobu] Error disconnecting Slack Socket Mode client'
+        );
+      }
     }
+    socketModeClients.clear();
     if (chatInstanceManager) {
       await chatInstanceManager.shutdown();
     }
