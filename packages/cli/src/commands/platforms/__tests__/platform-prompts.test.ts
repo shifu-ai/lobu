@@ -35,7 +35,6 @@ let promptPlatformConfig: typeof import("../platform-prompts").promptPlatformCon
 let PLATFORM_LABELS: typeof import("../platform-prompts").PLATFORM_LABELS;
 
 beforeAll(async () => {
-  // Silence console.log noise from the Slack onboarding instructions.
   console.log = () => undefined;
   ({ promptPlatformConfig, PLATFORM_LABELS } = await import(
     "../platform-prompts"
@@ -53,154 +52,180 @@ beforeEach(() => {
   inputMock.mockClear();
 });
 
-describe("PLATFORM_LABELS", () => {
-  test("includes all built-in platforms", () => {
-    expect(PLATFORM_LABELS.telegram).toBe("Telegram");
-    expect(PLATFORM_LABELS.slack).toBe("Slack");
-    expect(PLATFORM_LABELS.discord).toBe("Discord");
-    expect(PLATFORM_LABELS.whatsapp).toBe("WhatsApp");
-    expect(PLATFORM_LABELS.teams).toBe("Microsoft Teams");
-    expect(PLATFORM_LABELS.gchat).toBe("Google Chat");
-  });
+/**
+ * Each row defines a platform's full prompt contract. Tests then verify three
+ * properties from a single source of truth:
+ *   1. Filled inputs produce the expected env-var refs in `platformConfig`.
+ *   2. The matching `platformSecrets` entries are emitted with verbatim values.
+ *   3. Empty inputs produce empty config and empty secrets (skip-on-blank).
+ *
+ * `passwords` and `inputs` are queued in the order the source code prompts.
+ * `expectedConfig` keys mirror the source's `platformConfig.<key> = "$ENV"`
+ * lines, so changing a key/env-var in the source forces a deliberate edit
+ * here.
+ */
+type PromptKind = "password" | "input";
+interface FieldSpec {
+  kind: PromptKind;
+  /** Test value to feed when the prompt is called. */
+  value: string;
+  /** Expected key in `platformConfig`. */
+  configKey: string;
+  /** Expected env-var name in `platformSecrets`. */
+  envVar: string;
+}
+interface PlatformCase {
+  platform: string;
+  fields: FieldSpec[];
+}
+
+const PLATFORM_CASES: PlatformCase[] = [
+  {
+    platform: "telegram",
+    fields: [
+      {
+        kind: "password",
+        value: "tg-secret",
+        configKey: "botToken",
+        envVar: "TELEGRAM_BOT_TOKEN",
+      },
+    ],
+  },
+  {
+    platform: "slack",
+    fields: [
+      {
+        kind: "password",
+        value: "xoxb-abc",
+        configKey: "botToken",
+        envVar: "SLACK_BOT_TOKEN",
+      },
+      {
+        kind: "password",
+        value: "signing-xyz",
+        configKey: "signingSecret",
+        envVar: "SLACK_SIGNING_SECRET",
+      },
+    ],
+  },
+  {
+    platform: "discord",
+    fields: [
+      {
+        kind: "password",
+        value: "disc-token",
+        configKey: "botToken",
+        envVar: "DISCORD_BOT_TOKEN",
+      },
+    ],
+  },
+  {
+    platform: "whatsapp",
+    fields: [
+      {
+        kind: "password",
+        value: "wa-access",
+        configKey: "accessToken",
+        envVar: "WHATSAPP_ACCESS_TOKEN",
+      },
+      {
+        kind: "input",
+        value: "12345",
+        configKey: "phoneNumberId",
+        envVar: "WHATSAPP_PHONE_NUMBER_ID",
+      },
+    ],
+  },
+  {
+    platform: "teams",
+    fields: [
+      {
+        kind: "input",
+        value: "app-id-1",
+        configKey: "appId",
+        envVar: "TEAMS_APP_ID",
+      },
+      {
+        kind: "password",
+        value: "app-pwd-1",
+        configKey: "appPassword",
+        envVar: "TEAMS_APP_PASSWORD",
+      },
+    ],
+  },
+  {
+    platform: "gchat",
+    fields: [
+      {
+        kind: "password",
+        value: '{"type":"service_account"}',
+        configKey: "credentials",
+        envVar: "GOOGLE_CHAT_CREDENTIALS",
+      },
+    ],
+  },
+];
+
+function queue(field: FieldSpec) {
+  if (field.kind === "password") passwordResponses.push(field.value);
+  else inputResponses.push(field.value);
+}
+
+function expectedFromFields(fields: FieldSpec[]) {
+  const platformConfig: Record<string, string> = {};
+  const platformSecrets: Array<{ envVar: string; value: string }> = [];
+  for (const f of fields) {
+    if (!f.value) continue;
+    platformConfig[f.configKey] = `$${f.envVar}`;
+    platformSecrets.push({ envVar: f.envVar, value: f.value });
+  }
+  return { platformConfig, platformSecrets };
+}
+
+test("PLATFORM_LABELS lists every platform with a prompt branch", () => {
+  for (const { platform } of PLATFORM_CASES) {
+    expect(PLATFORM_LABELS[platform]).toBeTruthy();
+  }
 });
 
-describe("promptPlatformConfig", () => {
-  test("returns empty config for unknown platforms without prompting", async () => {
-    const result = await promptPlatformConfig("unknown");
+test("returns empty config for unknown platforms without prompting", async () => {
+  const result = await promptPlatformConfig("unknown");
+  expect(result.platformConfig).toEqual({});
+  expect(result.platformSecrets).toEqual([]);
+  expect(passwordMock).not.toHaveBeenCalled();
+  expect(inputMock).not.toHaveBeenCalled();
+});
 
-    expect(result.platformConfig).toEqual({});
-    expect(result.platformSecrets).toEqual([]);
-    expect(passwordMock).not.toHaveBeenCalled();
-    expect(inputMock).not.toHaveBeenCalled();
-  });
-
-  test("telegram captures bot token into a $TELEGRAM_BOT_TOKEN env reference", async () => {
-    passwordResponses.push("tg-secret");
-
-    const { platformConfig, platformSecrets } =
-      await promptPlatformConfig("telegram");
-
-    expect(platformConfig).toEqual({ botToken: "$TELEGRAM_BOT_TOKEN" });
-    expect(platformSecrets).toEqual([
-      { envVar: "TELEGRAM_BOT_TOKEN", value: "tg-secret" },
-    ]);
-  });
-
-  test("telegram skips config when token is empty", async () => {
-    passwordResponses.push("");
-
-    const { platformConfig, platformSecrets } =
-      await promptPlatformConfig("telegram");
-
-    expect(platformConfig).toEqual({});
-    expect(platformSecrets).toEqual([]);
-  });
-
-  test("slack captures bot token + signing secret", async () => {
-    passwordResponses.push("xoxb-abc", "signing-xyz");
-
-    const { platformConfig, platformSecrets } =
-      await promptPlatformConfig("slack");
-
-    expect(platformConfig).toEqual({
-      botToken: "$SLACK_BOT_TOKEN",
-      signingSecret: "$SLACK_SIGNING_SECRET",
+describe("promptPlatformConfig — happy path (all fields filled)", () => {
+  for (const c of PLATFORM_CASES) {
+    test(c.platform, async () => {
+      for (const f of c.fields) queue(f);
+      const result = await promptPlatformConfig(c.platform);
+      expect(result).toEqual(expectedFromFields(c.fields));
     });
-    expect(platformSecrets).toEqual([
-      { envVar: "SLACK_BOT_TOKEN", value: "xoxb-abc" },
-      { envVar: "SLACK_SIGNING_SECRET", value: "signing-xyz" },
-    ]);
-  });
+  }
+});
 
-  test("slack omits each value independently when blank", async () => {
-    passwordResponses.push("", "signing-only");
-
-    const { platformConfig, platformSecrets } =
-      await promptPlatformConfig("slack");
-
-    expect(platformConfig).toEqual({
-      signingSecret: "$SLACK_SIGNING_SECRET",
+describe("promptPlatformConfig — every field blank produces empty result", () => {
+  for (const c of PLATFORM_CASES) {
+    test(c.platform, async () => {
+      for (const f of c.fields) queue({ ...f, value: "" });
+      const result = await promptPlatformConfig(c.platform);
+      expect(result.platformConfig).toEqual({});
+      expect(result.platformSecrets).toEqual([]);
     });
-    expect(platformSecrets).toEqual([
-      { envVar: "SLACK_SIGNING_SECRET", value: "signing-only" },
-    ]);
-  });
+  }
+});
 
-  test("discord captures bot token", async () => {
-    passwordResponses.push("disc-token");
-
-    const result = await promptPlatformConfig("discord");
-
-    expect(result.platformConfig).toEqual({ botToken: "$DISCORD_BOT_TOKEN" });
-    expect(result.platformSecrets).toEqual([
-      { envVar: "DISCORD_BOT_TOKEN", value: "disc-token" },
-    ]);
-  });
-
-  test("whatsapp captures access token + phone number id", async () => {
-    passwordResponses.push("wa-access");
-    inputResponses.push("12345");
-
-    const result = await promptPlatformConfig("whatsapp");
-
-    expect(result.platformConfig).toEqual({
-      accessToken: "$WHATSAPP_ACCESS_TOKEN",
-      phoneNumberId: "$WHATSAPP_PHONE_NUMBER_ID",
+describe("promptPlatformConfig — partial blanks omit only the empty fields", () => {
+  // Only run for multi-field platforms; single-field platforms are covered
+  // by the all-blank case above.
+  for (const c of PLATFORM_CASES.filter((c) => c.fields.length > 1)) {
+    test(`${c.platform} — first field blank, rest filled`, async () => {
+      const blanked = c.fields.map((f, i) => (i === 0 ? { ...f, value: "" } : f));
+      for (const f of blanked) queue(f);
+      const result = await promptPlatformConfig(c.platform);
+      expect(result).toEqual(expectedFromFields(blanked));
     });
-    expect(result.platformSecrets).toEqual([
-      { envVar: "WHATSAPP_ACCESS_TOKEN", value: "wa-access" },
-      { envVar: "WHATSAPP_PHONE_NUMBER_ID", value: "12345" },
-    ]);
-  });
-
-  test("whatsapp omits empty fields", async () => {
-    passwordResponses.push("");
-    inputResponses.push("");
-
-    const result = await promptPlatformConfig("whatsapp");
-
-    expect(result.platformConfig).toEqual({});
-    expect(result.platformSecrets).toEqual([]);
-  });
-
-  test("teams captures app id + app password", async () => {
-    inputResponses.push("app-id-1");
-    passwordResponses.push("app-pwd-1");
-
-    const result = await promptPlatformConfig("teams");
-
-    expect(result.platformConfig).toEqual({
-      appId: "$TEAMS_APP_ID",
-      appPassword: "$TEAMS_APP_PASSWORD",
-    });
-    expect(result.platformSecrets).toEqual([
-      { envVar: "TEAMS_APP_ID", value: "app-id-1" },
-      { envVar: "TEAMS_APP_PASSWORD", value: "app-pwd-1" },
-    ]);
-  });
-
-  test("gchat captures service-account credentials", async () => {
-    passwordResponses.push('{"type":"service_account"}');
-
-    const result = await promptPlatformConfig("gchat");
-
-    expect(result.platformConfig).toEqual({
-      credentials: "$GOOGLE_CHAT_CREDENTIALS",
-    });
-    expect(result.platformSecrets).toEqual([
-      {
-        envVar: "GOOGLE_CHAT_CREDENTIALS",
-        value: '{"type":"service_account"}',
-      },
-    ]);
-  });
-
-  test("gchat skips when credentials are empty", async () => {
-    passwordResponses.push("");
-
-    const result = await promptPlatformConfig("gchat");
-
-    expect(result.platformConfig).toEqual({});
-    expect(result.platformSecrets).toEqual([]);
-  });
+  }
 });

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { createLogger, logger as defaultLogger } from "../logger";
+import { createLogger } from "../logger";
 
 const ENV_KEYS = [
   "USE_WINSTON_LOGGER",
@@ -53,21 +53,6 @@ describe("createLogger (console-based default)", () => {
     }
   });
 
-  test("returns a logger object with all four log methods", () => {
-    const log = createLogger("test-service");
-    expect(typeof log.error).toBe("function");
-    expect(typeof log.warn).toBe("function");
-    expect(typeof log.info).toBe("function");
-    expect(typeof log.debug).toBe("function");
-  });
-
-  test("default logger export is also a Logger", () => {
-    expect(typeof defaultLogger.error).toBe("function");
-    expect(typeof defaultLogger.warn).toBe("function");
-    expect(typeof defaultLogger.info).toBe("function");
-    expect(typeof defaultLogger.debug).toBe("function");
-  });
-
   test("info() writes via console.log when level is info (default)", () => {
     const log = createLogger("svc");
     log.info("hello world");
@@ -96,56 +81,40 @@ describe("createLogger (console-based default)", () => {
     expect(call).toContain("boom");
   });
 
-  test("debug() is suppressed at default (info) level", () => {
-    const log = createLogger("svc");
-    log.debug("noisy");
-    expect(consoleLogSpy).not.toHaveBeenCalled();
-  });
+  // Threshold matrix: each row = (LOG_LEVEL value, expected per-channel hits
+  // when we call error/warn/info/debug exactly once each). info+debug both
+  // route to console.log so the third entry counts both.
+  const LEVEL_CASES: Array<{
+    level: string | undefined;
+    error: number;
+    warn: number;
+    log: number;
+  }> = [
+    { level: undefined, error: 1, warn: 1, log: 1 }, // default = info
+    { level: "error", error: 1, warn: 0, log: 0 },
+    { level: "warn", error: 1, warn: 1, log: 0 },
+    { level: "info", error: 1, warn: 1, log: 1 },
+    { level: "debug", error: 1, warn: 1, log: 2 },
+    { level: "totally-bogus", error: 1, warn: 1, log: 1 }, // unknown → info
+  ];
 
-  test("LOG_LEVEL=error suppresses warn/info/debug", () => {
-    process.env.LOG_LEVEL = "error";
-    const log = createLogger("svc");
-    log.error("e");
-    log.warn("w");
-    log.info("i");
-    log.debug("d");
-    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
-    expect(consoleWarnSpy).not.toHaveBeenCalled();
-    expect(consoleLogSpy).not.toHaveBeenCalled();
-  });
-
-  test("LOG_LEVEL=debug enables every level", () => {
-    process.env.LOG_LEVEL = "debug";
-    const log = createLogger("svc");
-    log.error("e");
-    log.warn("w");
-    log.info("i");
-    log.debug("d");
-    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
-    expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-    // info + debug both go to console.log
-    expect(consoleLogSpy).toHaveBeenCalledTimes(2);
-  });
-
-  test("LOG_LEVEL=warn allows error+warn but blocks info/debug", () => {
-    process.env.LOG_LEVEL = "warn";
-    const log = createLogger("svc");
-    log.error("e");
-    log.warn("w");
-    log.info("i");
-    log.debug("d");
-    expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
-    expect(consoleWarnSpy).toHaveBeenCalledTimes(1);
-    expect(consoleLogSpy).not.toHaveBeenCalled();
-  });
-
-  test("unknown LOG_LEVEL falls back to info threshold", () => {
-    process.env.LOG_LEVEL = "totally-bogus";
-    const log = createLogger("svc");
-    log.info("i");
-    log.debug("d");
-    expect(consoleLogSpy).toHaveBeenCalledTimes(1); // only info
-  });
+  for (const c of LEVEL_CASES) {
+    test(`LOG_LEVEL=${c.level ?? "(unset)"} routes channels: error=${c.error}, warn=${c.warn}, console.log=${c.log}`, () => {
+      if (c.level === undefined) {
+        delete process.env.LOG_LEVEL;
+      } else {
+        process.env.LOG_LEVEL = c.level;
+      }
+      const log = createLogger("svc");
+      log.error("e");
+      log.warn("w");
+      log.info("i");
+      log.debug("d");
+      expect(consoleErrorSpy).toHaveBeenCalledTimes(c.error);
+      expect(consoleWarnSpy).toHaveBeenCalledTimes(c.warn);
+      expect(consoleLogSpy).toHaveBeenCalledTimes(c.log);
+    });
+  }
 
   test("formatted line includes ISO-ish timestamp prefix", () => {
     const log = createLogger("svc");

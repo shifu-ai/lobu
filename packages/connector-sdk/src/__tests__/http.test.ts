@@ -33,25 +33,6 @@ describe('http clients', () => {
     globalThis.fetch = originalFetch;
   });
 
-  test('exports a default httpClient', () => {
-    expect(httpClient).toBeDefined();
-    expect(typeof httpClient.get).toBe('function');
-    expect(typeof httpClient.post).toBe('function');
-  });
-
-  test('exports a jsonHttpClient', () => {
-    expect(jsonHttpClient).toBeDefined();
-    expect(typeof jsonHttpClient.get).toBe('function');
-  });
-
-  test('createHttpClient returns an instance with HTTP verb methods', () => {
-    const client = createHttpClient();
-    expect(typeof client.get).toBe('function');
-    expect(typeof client.post).toBe('function');
-    expect(typeof client.put).toBe('function');
-    expect(typeof client.delete).toBe('function');
-  });
-
   test('createHttpClient sends configured User-Agent via fetch', async () => {
     let capturedHeaders: Headers | null = null;
     const fetchMock = mock(async (input: any, init?: RequestInit) => {
@@ -114,19 +95,6 @@ describe('http clients', () => {
 
     expect(capturedHeaders!.get('x-trace-id')).toBe('abc');
     expect(capturedHeaders!.get('authorization')).toBe('Bearer t');
-  });
-
-  test('createHttpClient accepts a numeric retry override (limit only)', () => {
-    const client = createHttpClient({ retry: 0 });
-    // The instance construction must not throw and must still expose verbs.
-    expect(typeof client.get).toBe('function');
-  });
-
-  test('createHttpClient accepts a retry config object override', () => {
-    const client = createHttpClient({
-      retry: { limit: 1, methods: ['get'], statusCodes: [503] },
-    });
-    expect(typeof client.get).toBe('function');
   });
 
   test('createHttpClient passes through caller options (prefixUrl)', async () => {

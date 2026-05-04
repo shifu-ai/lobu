@@ -48,11 +48,17 @@ describe('validateUrlDomain', () => {
     );
   });
 
-  test('matches by hostname.endsWith — does NOT guard against substring hostnames', () => {
-    // Documented current behaviour: `endsWith('example.com')` is true for
-    // `notexample.com`. Pin this so any future tightening (e.g. dot-prefix
-    // check) is an intentional, test-driven change rather than a silent shift.
-    expect(() => validateUrlDomain('https://notexample.com/x', 'example.com')).not.toThrow();
+  test('rejects a substring-match hostname (security: notexample.com is NOT example.com)', () => {
+    expect(() => validateUrlDomain('https://notexample.com/x', 'example.com')).toThrow(
+      /must be on example.com/
+    );
+    expect(() => validateUrlDomain('https://eviltrustpilot.com/x', 'trustpilot.com')).toThrow(
+      /must be on trustpilot.com/
+    );
+  });
+
+  test('accepts the apex domain itself (no subdomain)', () => {
+    expect(() => validateUrlDomain('https://example.com/x', 'example.com')).not.toThrow();
   });
 });
 

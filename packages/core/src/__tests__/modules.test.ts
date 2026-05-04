@@ -3,7 +3,6 @@ import {
   type ModuleInterface,
   ModuleRegistry,
   moduleRegistry,
-  type WorkerContext,
   type WorkerModule,
 } from "../modules";
 
@@ -176,14 +175,3 @@ describe("global moduleRegistry", () => {
   });
 });
 
-// Type-level smoke check that WorkerContext is usable as a value-shaped object.
-describe("WorkerContext shape", () => {
-  test("accepts the documented fields", () => {
-    const ctx: WorkerContext = {
-      workspaceDir: "/tmp/x",
-      userId: "u",
-      conversationId: "c",
-    };
-    expect(ctx.workspaceDir).toBe("/tmp/x");
-  });
-});

@@ -119,12 +119,7 @@ describe('plugin metadata', () => {
     expect(plugin.id).toBe('openclaw-owletto');
     expect(plugin.kind).toBe('memory');
     expect(plugin.name).toBe('Lobu Memory');
-    expect(typeof plugin.description).toBe('string');
     expect(plugin.description.length).toBeGreaterThan(0);
-  });
-
-  it('exposes a register function', () => {
-    expect(typeof plugin.register).toBe('function');
   });
 });
 

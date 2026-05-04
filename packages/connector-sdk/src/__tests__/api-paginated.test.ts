@@ -167,65 +167,134 @@ describe('ApiPaginatedFeed.setSessionState / getSessionState', () => {
   });
 });
 
-describe('ApiPaginatedFeed HTTP client builders', () => {
-  test('createBearerClient builds a ky instance', () => {
+/**
+ * Captures every header that hits the wire for a given client build. Returns
+ * the request `Headers` object so the caller can inspect Authorization, custom
+ * keys, etc. Restores `globalThis.fetch` automatically via the outer afterEach.
+ */
+async function captureHeaders(
+  build: () => KyInstance
+): Promise<Record<string, string>> {
+  let captured: Record<string, string> = {};
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const headers =
+      input instanceof Request
+        ? new Headers(input.headers)
+        : new Headers();
+    captured = Object.fromEntries(headers.entries());
+    return new Response('{}', {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof globalThis.fetch;
+  await build().get('https://api.example.test/probe').json();
+  return captured;
+}
+
+describe('ApiPaginatedFeed HTTP client builders — request header contract', () => {
+  test('createBearerClient sets Authorization: Bearer <token> and merges custom headers', async () => {
     const feed = new TestApiFeed();
-    const client = feed.exposeCreateBearerClient('token123', { 'X-Trace': 'a' });
-    expect(typeof client.get).toBe('function');
-    expect(typeof client.extend).toBe('function');
+    const headers = await captureHeaders(() =>
+      feed.exposeCreateBearerClient('token123', { 'x-trace': 'abc' })
+    );
+    expect(headers.authorization).toBe('Bearer token123');
+    expect(headers['x-trace']).toBe('abc');
   });
 
-  test('createClientWithHeaders builds a ky instance', () => {
+  test('createClientWithHeaders sets the supplied custom headers and emits no Authorization', async () => {
     const feed = new TestApiFeed();
-    const client = feed.exposeCreateClientWithHeaders({ 'X-Custom': '1' });
-    expect(typeof client.get).toBe('function');
+    const headers = await captureHeaders(() =>
+      feed.exposeCreateClientWithHeaders({ 'x-custom': '1' })
+    );
+    expect(headers['x-custom']).toBe('1');
+    expect(headers.authorization).toBeUndefined();
   });
 
-  test('createClientFromSessionState returns default httpClient when no session set', () => {
+  test('createClientFromSessionState with no session emits no auth and merges only the additional headers', async () => {
     const feed = new TestApiFeed();
-    const client = feed.exposeCreateClientFromSessionState();
-    expect(typeof client.get).toBe('function');
+    const withHeaders = await captureHeaders(() =>
+      feed.exposeCreateClientFromSessionState({ 'x-foo': 'bar' })
+    );
+    expect(withHeaders['x-foo']).toBe('bar');
+    expect(withHeaders.authorization).toBeUndefined();
+
+    const withoutHeaders = await captureHeaders(() =>
+      feed.exposeCreateClientFromSessionState()
+    );
+    expect(withoutHeaders.authorization).toBeUndefined();
   });
 
-  test('createClientFromSessionState merges only-additional headers when no session', () => {
-    const feed = new TestApiFeed();
-    const client = feed.exposeCreateClientFromSessionState({ 'X-Foo': 'bar' });
-    expect(typeof client.get).toBe('function');
-  });
+  // Source-of-truth table: each row describes a session shape and the auth
+  // header it must produce. Documents the precedence rules in the source
+  // (`access_token` wins over `api_key`, `token_type` defaults to `Bearer`).
+  const sessionAuthCases: Array<{
+    name: string;
+    session: ApiSessionState;
+    extra?: Record<string, string>;
+    expectedAuthorization?: string;
+    expectedExtra?: Record<string, string>;
+  }> = [
+    {
+      name: 'access_token + default token_type → "Bearer <token>"',
+      session: { access_token: 'tok' },
+      expectedAuthorization: 'Bearer tok',
+    },
+    {
+      name: 'access_token + token_type=Bearer (explicit) → "Bearer <token>"',
+      session: { access_token: 'tok', token_type: 'Bearer' },
+      expectedAuthorization: 'Bearer tok',
+    },
+    {
+      name: 'access_token + custom token_type → "<type> <token>"',
+      session: { access_token: 'tok', token_type: 'Token' },
+      expectedAuthorization: 'Token tok',
+    },
+    {
+      name: 'access_token wins over api_key',
+      session: { access_token: 'tok', api_key: 'apikey' },
+      expectedAuthorization: 'Bearer tok',
+    },
+    {
+      name: 'api_key alone → Authorization: <api_key> (no scheme prefix)',
+      session: { api_key: 'apikey' },
+      expectedAuthorization: 'apikey',
+    },
+    {
+      name: 'stored headers without token/key → headers passthrough, no Authorization',
+      session: { headers: { 'x-stored': 'v' } },
+      expectedExtra: { 'x-stored': 'v' },
+    },
+    {
+      name: 'empty session → no auth, no custom headers',
+      session: {},
+    },
+  ];
 
-  test('createClientFromSessionState builds Bearer auth from access_token', () => {
-    const feed = new TestApiFeed();
-    feed.exposeSetSessionState({ access_token: 'tok', token_type: 'Bearer' });
-    const client = feed.exposeCreateClientFromSessionState({ 'X-Custom': '1' });
-    expect(typeof client.get).toBe('function');
-  });
+  for (const c of sessionAuthCases) {
+    test(`createClientFromSessionState — ${c.name}`, async () => {
+      const feed = new TestApiFeed();
+      feed.exposeSetSessionState(c.session);
+      const headers = await captureHeaders(() =>
+        feed.exposeCreateClientFromSessionState(c.extra)
+      );
+      if (c.expectedAuthorization === undefined) {
+        expect(headers.authorization).toBeUndefined();
+      } else {
+        expect(headers.authorization).toBe(c.expectedAuthorization);
+      }
+      for (const [k, v] of Object.entries(c.expectedExtra ?? {})) {
+        expect(headers[k]).toBe(v);
+      }
+    });
+  }
 
-  test('createClientFromSessionState builds custom token_type', () => {
+  test('additionalHeaders override stored session headers (later spread wins)', async () => {
     const feed = new TestApiFeed();
-    feed.exposeSetSessionState({ access_token: 'tok', token_type: 'Token' });
-    const client = feed.exposeCreateClientFromSessionState();
-    expect(typeof client.get).toBe('function');
-  });
-
-  test('createClientFromSessionState falls back to api_key when no access_token', () => {
-    const feed = new TestApiFeed();
-    feed.exposeSetSessionState({ api_key: 'apikey' });
-    const client = feed.exposeCreateClientFromSessionState();
-    expect(typeof client.get).toBe('function');
-  });
-
-  test('createClientFromSessionState with only stored headers (no token/key)', () => {
-    const feed = new TestApiFeed();
-    feed.exposeSetSessionState({ headers: { 'X-Stored': 'v' } });
-    const client = feed.exposeCreateClientFromSessionState();
-    expect(typeof client.get).toBe('function');
-  });
-
-  test('createClientFromSessionState with empty session and no extra headers returns default', () => {
-    const feed = new TestApiFeed();
-    feed.exposeSetSessionState({});
-    const client = feed.exposeCreateClientFromSessionState();
-    expect(typeof client.get).toBe('function');
+    feed.exposeSetSessionState({ headers: { 'x-shared': 'from-session' } });
+    const headers = await captureHeaders(() =>
+      feed.exposeCreateClientFromSessionState({ 'x-shared': 'from-extra' })
+    );
+    expect(headers['x-shared']).toBe('from-extra');
   });
 });
 
