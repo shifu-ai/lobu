@@ -222,7 +222,9 @@ describe("promptPlatformConfig — partial blanks omit only the empty fields", (
   // by the all-blank case above.
   for (const c of PLATFORM_CASES.filter((c) => c.fields.length > 1)) {
     test(`${c.platform} — first field blank, rest filled`, async () => {
-      const blanked = c.fields.map((f, i) => (i === 0 ? { ...f, value: "" } : f));
+      const blanked = c.fields.map((f, i) =>
+        i === 0 ? { ...f, value: "" } : f
+      );
       for (const f of blanked) queue(f);
       const result = await promptPlatformConfig(c.platform);
       expect(result).toEqual(expectedFromFields(blanked));

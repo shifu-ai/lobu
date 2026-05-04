@@ -174,4 +174,3 @@ describe("global moduleRegistry", () => {
     expect(moduleRegistry).toBeInstanceOf(ModuleRegistry);
   });
 });
-
