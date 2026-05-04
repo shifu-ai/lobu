@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import type {
+  AgentConnectionStore,
   CommandRegistry,
   InstructionProvider,
   UserSuggestion,
@@ -63,6 +64,7 @@ export interface CoreServices {
   getCommandRegistry(): CommandRegistry;
   getGrantStore(): GrantStore | undefined;
   getDeclaredAgentRegistry(): DeclaredAgentRegistry | undefined;
+  getConnectionStore(): AgentConnectionStore | undefined;
 }
 
 // ============================================================================

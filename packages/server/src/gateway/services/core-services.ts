@@ -588,7 +588,7 @@ export class CoreServices {
       );
     } else {
       this.providerRegistryService = new ProviderRegistryService(
-        "config/providers.json"
+        process.env.LOBU_PROVIDER_REGISTRY_PATH || "config/providers.json"
       );
     }
     this.providerConfigResolver = new ProviderConfigResolver(

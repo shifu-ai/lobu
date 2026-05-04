@@ -573,6 +573,31 @@ async function handleConnect(
     return;
   }
 
+  let targetSocket: net.Socket | null = null;
+  clientSocket.on("error", (err) => {
+    // Clients commonly reset denied CONNECT tunnels after reading the 4xx
+    // response. A Duplex socket with no error listener treats ECONNRESET as
+    // process-fatal, so attach this handler before any early-return path can
+    // write and close the socket.
+    if ((err as NodeJS.ErrnoException).code === "ECONNRESET") {
+      logger.debug(`Client disconnected for ${hostname} (ECONNRESET)`);
+    } else {
+      logger.debug(`Client connection error for ${hostname}: ${err.message}`);
+    }
+    try {
+      targetSocket?.end();
+    } catch {
+      // Ignore errors while cleaning up an already-closed target socket.
+    }
+  });
+  clientSocket.on("close", () => {
+    try {
+      targetSocket?.end();
+    } catch {
+      // Ignore errors while cleaning up an already-closed target socket.
+    }
+  });
+
   // Validate worker token
   const auth = validateProxyAuth(req);
   if (!auth) {
@@ -656,17 +681,18 @@ async function handleConnect(
   }
 
   // Establish connection to target
-  const targetSocket = net.connect(port, resolvedIp, () => {
+  const tunnelSocket = net.connect(port, resolvedIp, () => {
     // Send success response to client
     clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
 
     // Pipe the connection bidirectionally
-    targetSocket.write(head);
-    targetSocket.pipe(clientSocket);
-    clientSocket.pipe(targetSocket);
+    tunnelSocket.write(head);
+    tunnelSocket.pipe(clientSocket);
+    clientSocket.pipe(tunnelSocket);
   });
+  targetSocket = tunnelSocket;
 
-  targetSocket.on("error", (err) => {
+  tunnelSocket.on("error", (err) => {
     logger.debug(`Target connection error for ${hostname}: ${err.message}`);
     try {
       clientSocket.end();
@@ -675,32 +701,10 @@ async function handleConnect(
     }
   });
 
-  clientSocket.on("error", (err) => {
-    // ECONNRESET is common when clients drop connections - don't log as error
-    if ((err as NodeJS.ErrnoException).code === "ECONNRESET") {
-      logger.debug(`Client disconnected for ${hostname} (ECONNRESET)`);
-    } else {
-      logger.debug(`Client connection error for ${hostname}: ${err.message}`);
-    }
-    try {
-      targetSocket.end();
-    } catch {
-      // Ignore errors when closing already-closed socket
-    }
-  });
-
   // Handle close events to clean up
-  targetSocket.on("close", () => {
+  tunnelSocket.on("close", () => {
     try {
       clientSocket.end();
-    } catch {
-      // Ignore
-    }
-  });
-
-  clientSocket.on("close", () => {
-    try {
-      targetSocket.end();
     } catch {
       // Ignore
     }

@@ -312,7 +312,7 @@ async function buildCustomCommands(
             invocation.args,
             {
               cwd: hostCwd,
-              env: envRecord,
+              env: envRecord as NodeJS.ProcessEnv,
               maxBuffer: 10 * 1024 * 1024,
             },
             (error, stdout, stderr) => {

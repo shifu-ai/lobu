@@ -370,6 +370,40 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
       `);
     },
   },
+  {
+    id: 'drop-chat-connections',
+    apply: async (sql) => {
+      // Mirror of db/migrations/20260502000000_drop_chat_connections.sql
+      // for already-initialized PGlite installs that skip the migrations
+      // dir runner. ChatInstanceManager now reads/writes agent_connections
+      // directly. Copy any rows from chat_connections (if it exists) into
+      // agent_connections, then drop the legacy table. INSERT runs only
+      // when chat_connections is present so fresh PGlite installs (which
+      // never had the table) skip cleanly.
+      await sql.unsafe(`
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM pg_tables
+            WHERE schemaname = 'public' AND tablename = 'chat_connections'
+          ) THEN
+            INSERT INTO public.agent_connections (
+              id, agent_id, platform, config, settings, metadata,
+              status, error_message, created_at, updated_at
+            )
+            SELECT
+              id, template_agent_id, platform, config, settings, metadata,
+              status, error_message, created_at, updated_at
+            FROM public.chat_connections
+            WHERE template_agent_id IS NOT NULL
+            ON CONFLICT (id) DO NOTHING;
+
+            DROP TABLE public.chat_connections;
+          END IF;
+        END $$;
+      `);
+    },
+  },
 ];
 
 async function applyEmbeddedSchemaPatches(sql: MigrationSqlClient) {

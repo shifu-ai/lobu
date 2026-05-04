@@ -50,10 +50,12 @@ mock.module('../../auth/middleware', () => ({
 }));
 
 // `getChatInstanceManager` returns whatever the active test installs into
-// `chatManagerStash.manager` — null by default. The fallback (no-manager) path
-// covers most of the route's correctness contract; tests that exercise the
-// manager-side serialization (e.g. addConnection-call-count) install a stub
-// here.
+// `chatManagerStash.manager`. The route refuses platform writes when the
+// manager is null (would otherwise persist plaintext secrets bypassing
+// secret-ref normalization), so `beforeEach` installs a thin stub that
+// just delegates persistence to the real connectionStore — enough for
+// route-level idempotency / ownership / racing tests that don't care
+// about secret-store roundtrip.
 const chatManagerStash: { manager: unknown } = { manager: null };
 
 mock.module('../gateway', () => ({
@@ -64,6 +66,78 @@ mock.module('../gateway', () => ({
   isLobuGatewayRunning: () => false,
   ensureEmbeddedGatewaySecrets: () => {},
 }));
+
+/**
+ * Minimal manager stub for route tests. addConnection / updateConnection
+ * persist directly through the route's `connectionStore` (no secret-ref
+ * normalization — tests use non-secret config or simple bot tokens that
+ * are checked for routing/idempotency, not secret-store roundtrip).
+ * removeConnection delegates to the same store. Real ChatInstanceManager
+ * behaviour is exercised by the gateway-side tests.
+ */
+function installDelegatingManagerStub(): void {
+  chatManagerStash.manager = {
+    async addConnection(
+      platform: string,
+      templateAgentId: string,
+      config: Record<string, unknown>,
+      settings: Record<string, unknown>,
+      _metadata: Record<string, unknown> | undefined,
+      stableId: string | undefined
+    ) {
+      const { createPostgresAgentConnectionStore } = await import(
+        '../stores/postgres-stores.js'
+      );
+      const store = createPostgresAgentConnectionStore();
+      const id =
+        stableId ?? `${platform}-${templateAgentId}-${Date.now()}`;
+      const now = Date.now();
+      const row = {
+        id,
+        platform,
+        templateAgentId,
+        config: config as Record<string, any>,
+        settings: settings as any,
+        metadata: {},
+        status: 'active' as const,
+        createdAt: now,
+        updatedAt: now,
+      };
+      await store.saveConnection(row);
+      return row;
+    },
+    async updateConnection(
+      id: string,
+      updates: { config?: Record<string, unknown>; settings?: Record<string, unknown> }
+    ) {
+      const { createPostgresAgentConnectionStore } = await import(
+        '../stores/postgres-stores.js'
+      );
+      const store = createPostgresAgentConnectionStore();
+      const current = await store.getConnection(id);
+      if (!current) throw new Error(`Connection ${id} not found`);
+      const merged = {
+        ...current,
+        config: updates.config
+          ? ({ ...current.config, ...updates.config } as Record<string, any>)
+          : current.config,
+        settings: updates.settings
+          ? ({ ...current.settings, ...updates.settings } as any)
+          : current.settings,
+        updatedAt: Date.now(),
+      };
+      await store.saveConnection(merged);
+      return merged;
+    },
+    async removeConnection(id: string) {
+      const { createPostgresAgentConnectionStore } = await import(
+        '../stores/postgres-stores.js'
+      );
+      const store = createPostgresAgentConnectionStore();
+      await store.deleteConnection(id);
+    },
+  };
+}
 
 const ORG_A = 'org-a';
 const ORG_B = 'org-b';
@@ -217,6 +291,7 @@ describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
     authStash.organizationId = ORG_A;
     authStash.authSource = 'session';
     authStash.mcpAuthInfo = null;
+    installDelegatingManagerStub();
   });
 
   test('new stable ID creates a platform with that exact ID', async () => {
@@ -402,7 +477,7 @@ describe('platform ownership checks', () => {
     authStash.organizationId = ORG_A;
     authStash.authSource = 'session';
     authStash.mcpAuthInfo = null;
-    chatManagerStash.manager = null;
+    installDelegatingManagerStub();
   });
 
   test('GET /:agentId/platforms/:platformId rejects platforms bound to another agent', async () => {
@@ -450,6 +525,7 @@ describe('concurrent-apply race fixes', () => {
     authStash.organizationId = ORG_A;
     authStash.authSource = 'session';
     authStash.mcpAuthInfo = null;
+    installDelegatingManagerStub();
   });
 
   test('POST /agents — two concurrent creates resolve to one 201 + one 200, single row', async () => {
@@ -872,7 +948,7 @@ describe('residual-race fixes (PR-466 follow-up)', () => {
           calls.updateConnection++;
           // Read the existing row through the connection store so the test
           // mirrors the production manager behavior closely enough that the
-          // route's persistConnectionSnapshot call sees a sane shape.
+          // route's response sees a sane shape.
           const { getDb } = await import('../../db/client.js');
           const sql = getDb();
           const rows = await sql`

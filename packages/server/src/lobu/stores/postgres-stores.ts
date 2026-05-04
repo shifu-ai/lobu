@@ -160,26 +160,21 @@ function isSecretField(key: string): boolean {
 
 const ENC_PREFIX = 'enc:v1:';
 
-export function encryptConfig(config: Record<string, any>): Record<string, any> {
-  try {
-    const { encrypt } = require('@lobu/core');
-    const result = { ...config };
-    for (const [key, value] of Object.entries(result)) {
-      if (isSecretField(key) && typeof value === 'string' && !value.startsWith(ENC_PREFIX)) {
-        result[key] = `${ENC_PREFIX}${encrypt(value)}`;
-      }
-    }
-    return result;
-  } catch {
-    return config;
-  }
-}
-
 function isRedactedSecretValue(value: unknown): value is string {
   return typeof value === 'string' && value.startsWith('***');
 }
 
-export function decryptConfig(config: Record<string, any>): Record<string, any> {
+/**
+ * Read-side legacy fallback: any `enc:v1:`-prefixed value is decrypted
+ * back to plaintext so connections persisted before the move to
+ * `secret://` ref indirection still load. New writes never produce
+ * these — ChatInstanceManager normalizes secret fields into refs via
+ * SecretStoreRegistry before saveConnection runs. Non-prefixed strings
+ * (including `secret://` refs) pass through untouched.
+ */
+function decryptLegacyEncryptedConfig(
+  config: Record<string, any>
+): Record<string, any> {
   try {
     const { decrypt } = require('@lobu/core');
     const result = { ...config };
@@ -188,7 +183,8 @@ export function decryptConfig(config: Record<string, any>): Record<string, any> 
         try {
           result[key] = decrypt(value.slice(ENC_PREFIX.length));
         } catch {
-          // Leave encrypted if decryption fails.
+          // Leave encrypted if decryption fails — surfaces as a
+          // resolveConfigForRuntime error at boot time.
         }
       }
     }
@@ -203,7 +199,7 @@ function rowToConnection(row: Record<string, any>): StoredConnection {
     id: row.id,
     platform: row.platform,
     templateAgentId: row.agent_id ?? undefined,
-    config: decryptConfig(row.config ?? {}),
+    config: decryptLegacyEncryptedConfig(row.config ?? {}),
     settings: row.settings ?? {},
     metadata: row.metadata ?? {},
     status: row.status,
@@ -501,44 +497,69 @@ export function createPostgresAgentConnectionStore(): AgentConnectionStore {
     },
     async listConnections(filter) {
       const sql = getDb();
-      const orgId = getOrgId();
+      // Worker gateway / ChatInstanceManager calls this without orgContext.
+      const orgId = tryGetOrgId();
 
       if (filter?.templateAgentId && filter?.platform) {
-        const rows = await sql`
-          SELECT c.* FROM agent_connections c
-          JOIN agents a ON a.id = c.agent_id
-          WHERE a.organization_id = ${orgId}
-            AND c.agent_id = ${filter.templateAgentId}
-            AND c.platform = ${filter.platform}
-          ORDER BY c.created_at DESC
-        `;
+        const rows = orgId
+          ? await sql`
+              SELECT c.* FROM agent_connections c
+              JOIN agents a ON a.id = c.agent_id
+              WHERE a.organization_id = ${orgId}
+                AND c.agent_id = ${filter.templateAgentId}
+                AND c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `
+          : await sql`
+              SELECT c.* FROM agent_connections c
+              WHERE c.agent_id = ${filter.templateAgentId}
+                AND c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `;
         return rows.map(rowToConnection);
       }
       if (filter?.templateAgentId) {
-        const rows = await sql`
-          SELECT c.* FROM agent_connections c
-          JOIN agents a ON a.id = c.agent_id
-          WHERE a.organization_id = ${orgId} AND c.agent_id = ${filter.templateAgentId}
-          ORDER BY c.created_at DESC
-        `;
+        const rows = orgId
+          ? await sql`
+              SELECT c.* FROM agent_connections c
+              JOIN agents a ON a.id = c.agent_id
+              WHERE a.organization_id = ${orgId} AND c.agent_id = ${filter.templateAgentId}
+              ORDER BY c.created_at DESC
+            `
+          : await sql`
+              SELECT c.* FROM agent_connections c
+              WHERE c.agent_id = ${filter.templateAgentId}
+              ORDER BY c.created_at DESC
+            `;
         return rows.map(rowToConnection);
       }
       if (filter?.platform) {
-        const rows = await sql`
-          SELECT c.* FROM agent_connections c
-          JOIN agents a ON a.id = c.agent_id
-          WHERE a.organization_id = ${orgId} AND c.platform = ${filter.platform}
-          ORDER BY c.created_at DESC
-        `;
+        const rows = orgId
+          ? await sql`
+              SELECT c.* FROM agent_connections c
+              JOIN agents a ON a.id = c.agent_id
+              WHERE a.organization_id = ${orgId} AND c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `
+          : await sql`
+              SELECT c.* FROM agent_connections c
+              WHERE c.platform = ${filter.platform}
+              ORDER BY c.created_at DESC
+            `;
         return rows.map(rowToConnection);
       }
 
-      const rows = await sql`
-        SELECT c.* FROM agent_connections c
-        JOIN agents a ON a.id = c.agent_id
-        WHERE a.organization_id = ${orgId}
-        ORDER BY c.created_at DESC
-      `;
+      const rows = orgId
+        ? await sql`
+            SELECT c.* FROM agent_connections c
+            JOIN agents a ON a.id = c.agent_id
+            WHERE a.organization_id = ${orgId}
+            ORDER BY c.created_at DESC
+          `
+        : await sql`
+            SELECT c.* FROM agent_connections c
+            ORDER BY c.created_at DESC
+          `;
       return rows.map(rowToConnection);
     },
     async saveConnection(connection) {
@@ -555,6 +576,11 @@ export function createPostgresAgentConnectionStore(): AgentConnectionStore {
           ? (existingRows[0].config as Record<string, any>)
           : null;
 
+      // ChatInstanceManager normalizes secret fields into `secret://` refs
+      // before reaching here. The remaining special case is the API surface
+      // that hands back `***last4`-redacted values when a sanitized
+      // connection is round-tripped to an UPDATE — preserve the existing
+      // ref/value so a non-edited secret doesn't overwrite the real one.
       if (existingConfig) {
         for (const [key, value] of Object.entries(configToPersist)) {
           if (!isSecretField(key) || !isRedactedSecretValue(value)) continue;
@@ -566,13 +592,12 @@ export function createPostgresAgentConnectionStore(): AgentConnectionStore {
         }
       }
 
-      const encrypted = encryptConfig(configToPersist);
       const now = new Date();
       await sql`
         INSERT INTO agent_connections (id, agent_id, platform, config, settings, metadata, status, error_message, created_at, updated_at)
         VALUES (
           ${connection.id}, ${connection.templateAgentId ?? null}, ${connection.platform},
-          ${sql.json(encrypted)}, ${sql.json(connection.settings)}, ${sql.json(connection.metadata)},
+          ${sql.json(configToPersist)}, ${sql.json(connection.settings)}, ${sql.json(connection.metadata)},
           ${connection.status}, ${connection.errorMessage ?? null}, ${now}, ${now}
         )
         ON CONFLICT (id) DO UPDATE SET
