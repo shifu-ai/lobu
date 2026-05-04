@@ -1,0 +1,236 @@
+import { describe, expect, test } from "bun:test";
+import {
+  BaseError,
+  ConfigError,
+  ErrorCode,
+  OrchestratorError,
+  PlatformError,
+  SessionError,
+  WorkerError,
+  WorkspaceError,
+} from "../errors";
+
+describe("BaseError (via WorkerError)", () => {
+  test("sets name, message, and prototype chain", () => {
+    const err = new WorkerError("spawn", "boom");
+    expect(err).toBeInstanceOf(WorkerError);
+    expect(err).toBeInstanceOf(BaseError);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("WorkerError");
+    expect(err.message).toBe("boom");
+    expect(err.operation).toBe("spawn");
+    expect(err.cause).toBeUndefined();
+  });
+
+  test("getFullMessage without cause", () => {
+    const err = new WorkerError("spawn", "boom");
+    expect(err.getFullMessage()).toBe("WorkerError: boom");
+  });
+
+  test("getFullMessage with plain Error cause", () => {
+    const cause = new Error("underlying");
+    const err = new WorkerError("spawn", "boom", cause);
+    expect(err.getFullMessage()).toBe(
+      "WorkerError: boom\nCaused by: underlying"
+    );
+    expect(err.cause).toBe(cause);
+  });
+
+  test("getFullMessage with nested BaseError cause recurses", () => {
+    const inner = new WorkspaceError("init", "no perms");
+    const outer = new WorkerError("spawn", "boom", inner);
+    expect(outer.getFullMessage()).toBe(
+      "WorkerError: boom\nCaused by: WorkspaceError: no perms"
+    );
+  });
+
+  test("getFullMessage with deeply nested BaseError cause", () => {
+    const innermost = new ConfigError("bad config");
+    const middle = new WorkspaceError("init", "no perms", innermost);
+    const outer = new WorkerError("spawn", "boom", middle);
+    expect(outer.getFullMessage()).toBe(
+      "WorkerError: boom\nCaused by: WorkspaceError: no perms\nCaused by: ConfigError: bad config"
+    );
+  });
+
+  test("toJSON includes name, message, operation, stack", () => {
+    const err = new WorkerError("spawn", "boom");
+    const json = err.toJSON();
+    expect(json.name).toBe("WorkerError");
+    expect(json.message).toBe("boom");
+    expect(json.operation).toBe("spawn");
+    expect(typeof json.stack).toBe("string");
+    expect(json.cause).toBeUndefined();
+  });
+
+  test("toJSON omits operation if not set", () => {
+    const err = new ConfigError("bad");
+    const json = err.toJSON();
+    expect(json.name).toBe("ConfigError");
+    expect(json).not.toHaveProperty("operation");
+  });
+
+  test("toJSON serialises a plain Error cause as its message", () => {
+    const cause = new Error("underlying");
+    const err = new WorkerError("spawn", "boom", cause);
+    const json = err.toJSON();
+    expect(json.cause).toBe("underlying");
+  });
+
+  test("toJSON serialises a nested BaseError cause via toJSON()", () => {
+    const inner = new WorkspaceError("init", "no perms");
+    const outer = new WorkerError("spawn", "boom", inner);
+    const json = outer.toJSON();
+    expect(json.cause).toMatchObject({
+      name: "WorkspaceError",
+      message: "no perms",
+      operation: "init",
+    });
+  });
+});
+
+describe("WorkerError", () => {
+  test("name is WorkerError", () => {
+    const err = new WorkerError("op", "msg");
+    expect(err.name).toBe("WorkerError");
+    expect(err.operation).toBe("op");
+  });
+});
+
+describe("WorkspaceError", () => {
+  test("name is WorkspaceError and operation is set", () => {
+    const err = new WorkspaceError("write", "denied");
+    expect(err.name).toBe("WorkspaceError");
+    expect(err.operation).toBe("write");
+    expect(err).toBeInstanceOf(BaseError);
+  });
+});
+
+describe("PlatformError", () => {
+  test("stores platform and operation", () => {
+    const err = new PlatformError("slack", "send", "rate limited");
+    expect(err.name).toBe("PlatformError");
+    expect(err.platform).toBe("slack");
+    expect(err.operation).toBe("send");
+    expect(err.message).toBe("rate limited");
+  });
+
+  test("toJSON includes platform alongside base fields", () => {
+    const cause = new Error("429");
+    const err = new PlatformError("slack", "send", "rate limited", cause);
+    const json = err.toJSON();
+    expect(json.platform).toBe("slack");
+    expect(json.name).toBe("PlatformError");
+    expect(json.message).toBe("rate limited");
+    expect(json.operation).toBe("send");
+    expect(json.cause).toBe("429");
+  });
+});
+
+describe("SessionError", () => {
+  test("stores sessionKey and code", () => {
+    const err = new SessionError("sess-1", "EXPIRED", "session expired");
+    expect(err.name).toBe("SessionError");
+    expect(err.sessionKey).toBe("sess-1");
+    expect(err.code).toBe("EXPIRED");
+    expect(err.message).toBe("session expired");
+  });
+
+  test("toJSON includes sessionKey and code", () => {
+    const err = new SessionError("sess-1", "EXPIRED", "session expired");
+    const json = err.toJSON();
+    expect(json.sessionKey).toBe("sess-1");
+    expect(json.code).toBe("EXPIRED");
+    expect(json.name).toBe("SessionError");
+    expect(json.message).toBe("session expired");
+  });
+});
+
+describe("OrchestratorError", () => {
+  test("stores code, details, shouldRetry default false", () => {
+    const err = new OrchestratorError(
+      ErrorCode.DEPLOYMENT_CREATE_FAILED,
+      "create failed"
+    );
+    expect(err.name).toBe("OrchestratorError");
+    expect(err.code).toBe(ErrorCode.DEPLOYMENT_CREATE_FAILED);
+    expect(err.details).toBeUndefined();
+    expect(err.shouldRetry).toBe(false);
+  });
+
+  test("stores explicit details and shouldRetry", () => {
+    const details = { foo: "bar" };
+    const err = new OrchestratorError(
+      ErrorCode.QUEUE_JOB_PROCESSING_FAILED,
+      "queue failed",
+      details,
+      true
+    );
+    expect(err.details).toBe(details);
+    expect(err.shouldRetry).toBe(true);
+  });
+
+  test("toJSON includes code, details, shouldRetry", () => {
+    const err = new OrchestratorError(
+      ErrorCode.DEPLOYMENT_DELETE_FAILED,
+      "delete failed",
+      { id: "abc" },
+      true
+    );
+    const json = err.toJSON();
+    expect(json.code).toBe(ErrorCode.DEPLOYMENT_DELETE_FAILED);
+    expect(json.details).toEqual({ id: "abc" });
+    expect(json.shouldRetry).toBe(true);
+    expect(json.name).toBe("OrchestratorError");
+  });
+
+  test("fromDatabaseError builds from Error", () => {
+    const dbErr = Object.assign(new Error("connection refused"), {
+      code: "ECONNREFUSED",
+      detail: "no socket",
+    });
+    const err = OrchestratorError.fromDatabaseError(dbErr);
+    expect(err).toBeInstanceOf(OrchestratorError);
+    expect(err.code).toBe(ErrorCode.DATABASE_CONNECTION_FAILED);
+    expect(err.message).toBe("Database error: connection refused");
+    expect(err.details).toEqual({ code: "ECONNREFUSED", detail: "no socket" });
+    expect(err.shouldRetry).toBe(true);
+    expect(err.cause).toBe(dbErr);
+  });
+
+  test("fromDatabaseError handles non-Error inputs", () => {
+    const err = OrchestratorError.fromDatabaseError("plain string failure");
+    expect(err.message).toBe("Database error: plain string failure");
+    expect(err.code).toBe(ErrorCode.DATABASE_CONNECTION_FAILED);
+    expect(err.shouldRetry).toBe(true);
+  });
+});
+
+describe("ConfigError", () => {
+  test("has correct name and prototype", () => {
+    const err = new ConfigError("bad config");
+    expect(err.name).toBe("ConfigError");
+    expect(err).toBeInstanceOf(ConfigError);
+    expect(err).toBeInstanceOf(BaseError);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toBe("bad config");
+  });
+
+  test("getFullMessage works without cause", () => {
+    const err = new ConfigError("bad config");
+    expect(err.getFullMessage()).toBe("ConfigError: bad config");
+  });
+});
+
+describe("ErrorCode enum", () => {
+  test("values are stable strings", () => {
+    expect(ErrorCode.DATABASE_CONNECTION_FAILED).toBe(
+      "DATABASE_CONNECTION_FAILED"
+    );
+    expect(ErrorCode.DEPLOYMENT_CREATE_FAILED).toBe("DEPLOYMENT_CREATE_FAILED");
+    expect(ErrorCode.DEPLOYMENT_DELETE_FAILED).toBe("DEPLOYMENT_DELETE_FAILED");
+    expect(ErrorCode.QUEUE_JOB_PROCESSING_FAILED).toBe(
+      "QUEUE_JOB_PROCESSING_FAILED"
+    );
+  });
+});
