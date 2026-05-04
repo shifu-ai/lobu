@@ -14,11 +14,11 @@ import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
 import type {
   AgentSettings,
   AgentSettingsStore,
-} from "../../auth/settings/index.js";
+} from "../../auth/settings/agent-settings-store.js";
 import { buildDefaultSettingsFromSource } from "../../auth/settings/template-utils.js";
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
-import type { ChannelBindingService } from "../../channels/index.js";
+import type { ChannelBindingService } from "../../channels/binding-service.js";
 import {
   resolveSettingsLookupUserId,
   verifyOwnedAgentAccess,

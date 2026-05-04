@@ -59,7 +59,7 @@ interface CreateGatewayAppOptions {
   platformRegistry?: any;
   coreServices?: any;
   chatInstanceManager?:
-    | import("../connections/index.js").ChatInstanceManager
+    | import("../connections/chat-instance-manager.js").ChatInstanceManager
     | null;
   /** Custom auth provider for embedded mode. When set, gateway delegates auth to this function instead of using cookie-based sessions. */
   authProvider?: import("../routes/public/settings-auth.js").AuthProvider;
@@ -892,7 +892,7 @@ Agents can be configured with custom MCP (Model Context Protocol) servers:
  * Start an HTTP server for the gateway Hono app.
  * Used in standalone mode. In embedded mode, the host creates its own server.
  */
-export function startGatewayServer(app: OpenAPIHono, port = 8080): Server {
+function startGatewayServer(app: OpenAPIHono, port = 8080): Server {
   const honoListener = getRequestListener(app.fetch);
   const server = createServer(honoListener);
   server.listen(port);
@@ -1115,7 +1115,7 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
 
   const gateway = new Gateway(config);
 
-  const { ApiPlatform } = await import("../api/index.js");
+  const { ApiPlatform } = await import("../api/platform.js");
   const apiPlatform = new ApiPlatform();
   gateway.registerPlatform(apiPlatform);
   logger.debug("API platform registered");
@@ -1155,8 +1155,11 @@ export async function startGateway(config: GatewayConfig): Promise<void> {
   // lobu.toml is no longer read at gateway boot. Agents and connections
   // enter Postgres via `lobu apply` (CLI) or the web UI.
 
-  const { ChatInstanceManager, ChatResponseBridge } = await import(
-    "../connections/index.js"
+  const { ChatInstanceManager } = await import(
+    "../connections/chat-instance-manager.js"
+  );
+  const { ChatResponseBridge } = await import(
+    "../connections/chat-response-bridge.js"
   );
   const chatInstanceManager = new ChatInstanceManager();
   try {

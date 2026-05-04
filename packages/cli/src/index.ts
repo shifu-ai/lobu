@@ -300,8 +300,10 @@ Memory:
           );
           process.exit(2);
         }
-        const { lobuApplyCommand } = await import("./commands/apply.js");
-        await lobuApplyCommand({
+        const { applyCommand } = await import(
+          "./commands/_lib/apply/apply-cmd.js"
+        );
+        await applyCommand({
           dryRun: options.dryRun,
           yes: options.yes,
           only: options.only as "agents" | "memory" | undefined,
