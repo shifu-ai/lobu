@@ -1,6 +1,6 @@
 # Development Makefile for Lobu
 
-.PHONY: help setup build test eval clean dev build-packages ensure-submodule clean-workers
+.PHONY: help setup build test eval clean dev build-packages ensure-submodule clean-workers test-unit test-integration test-e2e
 
 # Default target
 help:
@@ -9,6 +9,9 @@ help:
 	@echo "  make dev                                   - Start the embedded Lobu stack (Postgres via DATABASE_URL, Vite HMR)"
 	@echo "  make build-packages                        - Build all TypeScript packages"
 	@echo "  make test                                  - Run test bot"
+	@echo "  make test-unit                             - Run the CI unit suite (no Postgres needed)"
+	@echo "  make test-integration                      - Run the CI integration suite (needs DATABASE_URL with pgvector)"
+	@echo "  make test-e2e                              - Boot the dev server + run openclaw-plugin e2e against it"
 	@echo "  make eval                                  - Run agent evals"
 	@echo "  make clean-workers                         - Stop any running embedded worker subprocesses"
 
@@ -58,6 +61,44 @@ test:
 # Run agent evals
 eval:
 	@npx @lobu/cli@latest eval
+
+# --- Test pipelines ---------------------------------------------------------
+# These mirror what CI runs (.github/workflows/ci.yml) so a passing local run
+# is a strong signal CI will pass.
+
+# Unit suite — bun:test on the per-package units that don't need Postgres.
+test-unit:
+	@echo "🧪 Unit suite (no Postgres)…"
+	@bun test packages/core packages/cli
+	@bun test packages/agent-worker
+	@bun test packages/server/src/__tests__/unit
+	@bun test packages/server/src/auth/__tests__/tool-access.test.ts
+	@bun test packages/server/src/gateway/infrastructure/queue
+	@bun test packages/connector-worker
+
+# Integration suite — vitest under Node + bun:test packages that need Postgres.
+# Requires DATABASE_URL pointing at a Postgres with pgvector installed.
+# Tip for a clean local DB:
+#   sudo apt-get install -y postgresql-16-pgvector
+#   sudo -u postgres createdb owletto_test
+#   sudo -u postgres psql -d owletto_test -c "CREATE EXTENSION vector"
+#   export DATABASE_URL=postgres://postgres@127.0.0.1:5432/owletto_test PGSSLMODE=disable
+test-integration:
+	@: $${DATABASE_URL?Set DATABASE_URL=postgres://… (with pgvector) before running}
+	@echo "🧪 Integration suite (Postgres at $${DATABASE_URL%%@*}@…)…"
+	@cd packages/server && node ../../node_modules/.bin/vitest run --reporter=default
+	@bun test packages/server/src/gateway/__tests__
+	@bun test packages/server/src/lobu/__tests__ packages/server/src/workspace/__tests__
+	@bun test packages/server/src/scheduled/__tests__
+	@bun test packages/connector-worker/integration-tests
+
+# End-to-end — openclaw-plugin tests against a real running dev server.
+# Starts the server, waits for /health, runs vitest, kills the server.
+# Pass ZAI_API_KEY in env to also run the memory-loop tests; without it
+# they cleanly skip (12 of 14 will run).
+test-e2e:
+	@: $${DATABASE_URL?Set DATABASE_URL=postgres://… (with pgvector) before running}
+	@./scripts/run-e2e.sh
 
 # Stop any embedded worker subprocesses left over from a crashed gateway.
 # Workers are normally cleaned up when the gateway exits; this target is a
