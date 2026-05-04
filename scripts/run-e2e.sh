@@ -4,13 +4,20 @@
 # What this does:
 #   1. Sanity-check Postgres (DATABASE_URL must point at a DB with pgvector)
 #   2. Build workspace packages if needed
-#   3. Boot scripts/dev-native.sh in the background
-#   4. Wait until /health responds
-#   5. Run vitest (test/e2e/) inside packages/openclaw-plugin
-#   6. Tear the server down on any exit path
+#   3. (Optional) Boot the fake OpenAI-compatible LLM server, configure the
+#      dev server to use it via FAKE_LLM_BASE_URL + a fixture provider registry
+#   4. Boot scripts/dev-native.sh in the background
+#   5. Wait until /health responds
+#   6. Run vitest (test/e2e/) inside packages/openclaw-plugin
+#   7. Tear the fake + server down on any exit path
 #
-# Pass ZAI_API_KEY in env to also run the LLM-driven memory-loop tests.
-# Without it, those tests skip cleanly (12 of 14 still execute).
+# Env knobs:
+#   ZAI_API_KEY=...                 → run the live memory-loop tests too;
+#                                     without it those skip cleanly.
+#   LOBU_E2E_FAKE_LLM=0             → disable the fake-LLM harness (for
+#                                     debugging real-provider e2e setups).
+#   LOBU_E2E_FAKE_LLM_PORT=9876     → fixed port for the fake; default is
+#                                     the same so tests have a stable URL.
 
 set -euo pipefail
 
@@ -23,23 +30,43 @@ PORT="${PORT:-8787}"
 APP_URL="${APP_URL:-http://127.0.0.1:${PORT}}"
 LOG="$(mktemp -t lobu-e2e-server.XXXXXX.log)"
 PIDFILE="$(mktemp -t lobu-e2e-server.XXXXXX.pid)"
+FAKE_LLM_PIDFILE="$(mktemp -t lobu-e2e-fake-llm.XXXXXX.pid)"
+FAKE_LLM_LOG="$(mktemp -t lobu-e2e-fake-llm.XXXXXX.log)"
+
+USE_FAKE_LLM="${LOBU_E2E_FAKE_LLM:-1}"
+FAKE_LLM_PORT="${LOBU_E2E_FAKE_LLM_PORT:-9876}"
+FAKE_LLM_BASE_URL="http://127.0.0.1:${FAKE_LLM_PORT}"
 
 cleanup() {
-  if [[ -s "$PIDFILE" ]]; then
-    pid=$(cat "$PIDFILE")
-    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-      kill "$pid" 2>/dev/null || true
-      # give it a couple seconds to drain, then force
-      for _ in 1 2 3 4 5; do
-        kill -0 "$pid" 2>/dev/null || break
-        sleep 1
-      done
-      kill -9 "$pid" 2>/dev/null || true
+  for pidfile in "$PIDFILE" "$FAKE_LLM_PIDFILE"; do
+    if [[ -s "$pidfile" ]]; then
+      pid=$(cat "$pidfile")
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        kill "$pid" 2>/dev/null || true
+        for _ in 1 2 3 4 5; do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 1
+        done
+        kill -9 "$pid" 2>/dev/null || true
+      fi
     fi
-  fi
+  done
+  # tsx watch fork-spawns a child node that holds :8118 / :8787 — pkill the
+  # whole tree, then double-check via port owner so a stale orphan from a
+  # crashed prior run can't keep the next run from booting.
   pkill -f 'tsx watch.*src/server.ts' 2>/dev/null || true
-  rm -f "$PIDFILE"
+  pkill -f 'node.*src/server.ts' 2>/dev/null || true
+  for port in 8118 8787 "$FAKE_LLM_PORT"; do
+    holder=$(lsof -ti :"$port" 2>/dev/null || true)
+    if [[ -n "$holder" ]]; then
+      kill -9 $holder 2>/dev/null || true
+    fi
+  done
+  rm -f "$PIDFILE" "$FAKE_LLM_PIDFILE"
   echo "  server log retained at: $LOG"
+  if [[ "$USE_FAKE_LLM" != "0" ]]; then
+    echo "  fake-llm log retained at: $FAKE_LLM_LOG"
+  fi
 }
 trap cleanup EXIT INT TERM
 
@@ -61,11 +88,48 @@ if [[ ! -d packages/core/dist || ! -d packages/connector-sdk/dist || ! -d packag
   make build-packages >/dev/null
 fi
 
-# 3. Boot the dev server (DATABASE_URL etc. are inherited)
+# 3. Optionally start the fake LLM server.
+#    The dev server will be configured to discover it via:
+#      LOBU_PROVIDER_REGISTRY_PATH → fixture pointing at FAKE_LLM_BASE_URL
+#      FAKE_LLM_API_KEY            → stub key, marks the provider "system-keyed"
+#      FAKE_LLM_BASE_URL           → upstream URL the secret-proxy forwards to
+if [[ "$USE_FAKE_LLM" != "0" ]]; then
+  echo "🤖 Starting fake LLM server on $FAKE_LLM_BASE_URL…"
+  (
+    bun -e "
+      import('${REPO_ROOT}/packages/server/src/__tests__/fixtures/fake-llm-server.ts').then(async ({ startFakeLlmServer }) => {
+        const handle = await startFakeLlmServer({ port: ${FAKE_LLM_PORT} });
+        process.stdout.write('fake-llm listening at ' + handle.url + '\\n');
+        // Keep the process alive
+        setInterval(() => {}, 1 << 30);
+      }).catch((err) => { console.error(err); process.exit(1); });
+    " >"$FAKE_LLM_LOG" 2>&1 &
+    echo $! > "$FAKE_LLM_PIDFILE"
+  ) || true
+  # Wait for the fake to bind
+  for i in $(seq 1 30); do
+    if curl -sf -m 1 "${FAKE_LLM_BASE_URL}/v1/models" >/dev/null 2>&1; then
+      break
+    fi
+    if [[ $i -eq 30 ]]; then
+      echo "❌ fake-llm did not start within 15s. Last 20 log lines:" >&2
+      tail -n 20 "$FAKE_LLM_LOG" >&2 || true
+      exit 1
+    fi
+    sleep 0.5
+  done
+  echo "✅ fake-llm healthy"
+
+  export LOBU_PROVIDER_REGISTRY_PATH="${REPO_ROOT}/packages/server/src/__tests__/fixtures/fake-providers.json"
+  export FAKE_LLM_API_KEY="${FAKE_LLM_API_KEY:-fake-test-key}"
+  export FAKE_LLM_BASE_URL
+fi
+
+# 4. Boot the dev server (DATABASE_URL etc. are inherited)
 echo "🚀 Booting dev server on $APP_URL (logs: $LOG)…"
 ( ./scripts/dev-native.sh >"$LOG" 2>&1 & echo $! > "$PIDFILE" ) || true
 
-# 4. Wait for /health
+# 5. Wait for /health
 deadline=$(( $(date +%s) + 60 ))
 until curl -sf -m 2 "$APP_URL/health" >/dev/null 2>&1; do
   if [[ $(date +%s) -gt $deadline ]]; then
@@ -77,7 +141,8 @@ until curl -sf -m 2 "$APP_URL/health" >/dev/null 2>&1; do
 done
 echo "✅ Server healthy"
 
-# 5. Run the e2e suite
+# 6. Run the e2e suite
 echo "🧪 Running openclaw-plugin e2e…"
 APP_URL="$APP_URL" \
+LOBU_E2E_FAKE_LLM_URL="${FAKE_LLM_BASE_URL}" \
   bun run --cwd packages/openclaw-plugin test:e2e
