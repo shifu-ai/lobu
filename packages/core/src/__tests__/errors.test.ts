@@ -224,13 +224,10 @@ describe("ConfigError", () => {
 
 describe("ErrorCode enum", () => {
   test("values are stable strings", () => {
-    expect(ErrorCode.DATABASE_CONNECTION_FAILED).toBe(
-      "DATABASE_CONNECTION_FAILED"
-    );
-    expect(ErrorCode.DEPLOYMENT_CREATE_FAILED).toBe("DEPLOYMENT_CREATE_FAILED");
-    expect(ErrorCode.DEPLOYMENT_DELETE_FAILED).toBe("DEPLOYMENT_DELETE_FAILED");
-    expect(ErrorCode.QUEUE_JOB_PROCESSING_FAILED).toBe(
-      "QUEUE_JOB_PROCESSING_FAILED"
-    );
+    // The enum's runtime values must equal their key names — log/Sentry
+    // metadata depends on these being self-describing strings.
+    for (const key of Object.keys(ErrorCode) as Array<keyof typeof ErrorCode>) {
+      expect(ErrorCode[key]).toBe(key as unknown as ErrorCode);
+    }
   });
 });

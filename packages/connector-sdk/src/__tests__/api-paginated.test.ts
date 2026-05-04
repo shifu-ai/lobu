@@ -186,7 +186,7 @@ async function captureHeaders(
       status: 200,
       headers: { 'content-type': 'application/json' },
     });
-  }) as typeof globalThis.fetch;
+  }) as unknown as typeof globalThis.fetch;
   await build().get('https://api.example.test/probe').json();
   return captured;
 }
@@ -311,7 +311,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
         ],
         next: 'cursor-2',
       });
-    }) as typeof globalThis.fetch;
+    }) as unknown as typeof globalThis.fetch;
 
     const result = await feed.exposeFetchPage(null, {}, env);
 
@@ -326,7 +326,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       calledUrl = urlOf(input);
       return jsonResponse({ items: [], next: null });
-    }) as typeof globalThis.fetch;
+    }) as unknown as typeof globalThis.fetch;
 
     await feed.exposeFetchPage('abc def', {}, env);
     expect(calledUrl).toContain('cursor=abc%20def');
@@ -335,7 +335,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
   test('200 empty response → empty items, null nextToken', async () => {
     const feed = new TestApiFeed();
     globalThis.fetch = (async () =>
-      jsonResponse({ items: [] })) as typeof globalThis.fetch;
+      jsonResponse({ items: [] })) as unknown as typeof globalThis.fetch;
 
     const result = await feed.exposeFetchPage(null, {}, env);
     expect(result.items).toEqual([]);
@@ -347,7 +347,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
   test('404 → "not found" error surfaces via handleHttpError', async () => {
     const feed = new TestApiFeed();
     globalThis.fetch = (async () =>
-      new Response('missing', { status: 404 })) as typeof globalThis.fetch;
+      new Response('missing', { status: 404 })) as unknown as typeof globalThis.fetch;
 
     await expect(feed.exposeFetchPage(null, {}, env)).rejects.toThrow(/not found/i);
   });
@@ -355,7 +355,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
   test('401 → "Authentication failed"', async () => {
     const feed = new TestApiFeed();
     globalThis.fetch = (async () =>
-      new Response('unauth', { status: 401 })) as typeof globalThis.fetch;
+      new Response('unauth', { status: 401 })) as unknown as typeof globalThis.fetch;
 
     await expect(feed.exposeFetchPage(null, {}, env)).rejects.toThrow(/Authentication failed/);
   });
@@ -363,7 +363,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
   test('403 → "forbidden"', async () => {
     const feed = new TestApiFeed();
     globalThis.fetch = (async () =>
-      new Response('nope', { status: 403 })) as typeof globalThis.fetch;
+      new Response('nope', { status: 403 })) as unknown as typeof globalThis.fetch;
 
     await expect(feed.exposeFetchPage(null, {}, env)).rejects.toThrow(/forbidden/i);
   });
@@ -371,7 +371,7 @@ describe('ApiPaginatedFeed.fetchPage with mocked fetch', () => {
   test('400 → "Bad request"', async () => {
     const feed = new TestApiFeed();
     globalThis.fetch = (async () =>
-      new Response('bad', { status: 400 })) as typeof globalThis.fetch;
+      new Response('bad', { status: 400 })) as unknown as typeof globalThis.fetch;
 
     await expect(feed.exposeFetchPage(null, {}, env)).rejects.toThrow(/Bad request/);
   });
