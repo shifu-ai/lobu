@@ -123,7 +123,7 @@ async function loadRecentRuns(
   limit = 10
 ): Promise<DiagnosticRunRow[]> {
   const rows = (await sql`
-    SELECT id, status, started_at, completed_at, error_message,
+    SELECT id, status, claimed_at, completed_at, error_message,
            exit_reason, exit_code, exit_signal, output_tail
     FROM runs
     WHERE feed_id = ${feedId}
@@ -132,7 +132,7 @@ async function loadRecentRuns(
   `) as unknown as Array<{
     id: number;
     status: string;
-    started_at: Date | null;
+    claimed_at: Date | null;
     completed_at: Date | null;
     error_message: string | null;
     exit_reason: string | null;
@@ -143,11 +143,11 @@ async function loadRecentRuns(
   return rows.map((r) => ({
     id: Number(r.id),
     status: r.status,
-    startedAt: r.started_at ? new Date(r.started_at).toISOString() : null,
+    claimedAt: r.claimed_at ? new Date(r.claimed_at).toISOString() : null,
     completedAt: r.completed_at ? new Date(r.completed_at).toISOString() : null,
     durationMs:
-      r.started_at && r.completed_at
-        ? new Date(r.completed_at).getTime() - new Date(r.started_at).getTime()
+      r.claimed_at && r.completed_at
+        ? new Date(r.completed_at).getTime() - new Date(r.claimed_at).getTime()
         : null,
     errorMessage: r.error_message,
     exitReason: r.exit_reason,

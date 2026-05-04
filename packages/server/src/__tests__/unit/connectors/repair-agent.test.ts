@@ -89,7 +89,7 @@ function feedRow(overrides: Partial<Record<string, any>> = {}): any {
 const RUN_ROW = {
   id: 99,
   status: 'failed',
-  started_at: new Date(NOW - 5 * 60 * 1000),
+  claimed_at: new Date(NOW - 5 * 60 * 1000),
   completed_at: new Date(NOW),
   error_message: 'token expired',
   exit_reason: 'error_message',
@@ -265,7 +265,7 @@ describe('hashFailureSignature', () => {
     const a: DiagnosticRunRow = {
       id: 1,
       status: 'failed',
-      startedAt: null,
+      claimedAt: null,
       completedAt: null,
       durationMs: null,
       errorMessage: 'boom',
@@ -282,7 +282,7 @@ describe('hashFailureSignature', () => {
     const a: DiagnosticRunRow = {
       id: 1,
       status: 'failed',
-      startedAt: null,
+      claimedAt: null,
       completedAt: null,
       durationMs: null,
       errorMessage: 'boom',
@@ -325,7 +325,7 @@ describe('buildOpenPacket', () => {
         {
           id: 99,
           status: 'failed',
-          startedAt: '2026-04-25T11:55:00.000Z',
+          claimedAt: '2026-04-25T11:55:00.000Z',
           completedAt: '2026-04-25T12:00:00.000Z',
           durationMs: 300000,
           errorMessage: 'token expired',

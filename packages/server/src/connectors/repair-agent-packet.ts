@@ -11,7 +11,7 @@
 export interface DiagnosticRunRow {
   id: number;
   status: string;
-  startedAt: string | null;
+  claimedAt: string | null;
   completedAt: string | null;
   durationMs: number | null;
   errorMessage: string | null;
@@ -41,7 +41,7 @@ function fmtRun(run: DiagnosticRunRow): string {
   const lines: string[] = [];
   lines.push(`- id: ${run.id}`);
   lines.push(`  status: ${run.status}`);
-  if (run.startedAt) lines.push(`  started_at: ${run.startedAt}`);
+  if (run.claimedAt) lines.push(`  claimed_at: ${run.claimedAt}`);
   if (run.completedAt) lines.push(`  completed_at: ${run.completedAt}`);
   if (run.durationMs != null) lines.push(`  duration_ms: ${run.durationMs}`);
   if (run.errorMessage) lines.push(`  error_message: ${run.errorMessage}`);
