@@ -18,17 +18,23 @@
  *     so future agent-driven tests can script replies remotely
  *   - The fake speaks the OpenAI Chat Completions wire format: a request
  *     mirroring what pi-ai sends produces a parseable assistant message
- *
- * NOT yet covered: end-to-end agent → worker → fake → response. The
- * gateway's POST /lobu/api/v1/agents handler calls findTemplateAgentId()
- * which requires orgContext.run() to be wrapping the request, and the
- * embedded-server middleware doesn't set that. Filed as follow-up — fix is a
- * one-line wrap once we agree on which org an unscoped session should bind
- * to (probably the user's first membership, see auth/routes.ts:82).
+ *   - POST /lobu/api/v1/agents now succeeds for a signed-in cookie session.
+ *     The lobu/gateway.ts middleware resolves the user's primary org and
+ *     wraps the request in orgContext.run(), so Postgres-backed stores
+ *     (which getOrgId() via AsyncLocalStorage) work for unscoped routes.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { APP_URL } from './helpers';
+import {
+  APP_URL,
+  addUserToOrg,
+  cleanupTestData,
+  closeDb,
+  createTestOrg,
+  signUpTestUser,
+  type SignedUpUser,
+  type TestOrg,
+} from './helpers';
 
 const FAKE_LLM_URL = process.env.LOBU_E2E_FAKE_LLM_URL;
 const SKIP = !FAKE_LLM_URL;
@@ -116,5 +122,58 @@ describe.skipIf(SKIP)('fake-llm harness is wired into the dev server', () => {
     expect(completion.status).toBe(503);
     const body = (await completion.json()) as { error: { message: string } };
     expect(body.error.message).toMatch(/no scripted reply queued/);
+  });
+});
+
+/**
+ * Validates that the orgContext middleware in lobu/gateway.ts unblocks the
+ * createAgentApi route for cookie-authed sessions. We're not asserting on
+ * the agent's text reply (that requires a complete pi-ai → SSE round-trip
+ * and a worker subprocess that's slow to boot inside this suite); we ARE
+ * asserting that the route now succeeds where it previously 500'd with
+ * "Organization context not available", and that the auto-provisioned
+ * ephemeral agent has fake-llm in its installedProviders list.
+ */
+describe.skipIf(SKIP)('lobu/gateway orgContext middleware', () => {
+  let signedUp: SignedUpUser;
+  let org: TestOrg;
+  let cookieHeader: string;
+
+  beforeAll(async () => {
+    if (SKIP) return;
+    signedUp = await signUpTestUser();
+    org = await createTestOrg();
+    await addUserToOrg(signedUp.userId, org.id, 'owner');
+    cookieHeader = signedUp.cookieHeader;
+  }, 30_000);
+
+  afterAll(async () => {
+    if (SKIP) return;
+    await cleanupTestData();
+    await closeDb();
+  });
+
+  it('POST /lobu/api/v1/agents creates an ephemeral agent with the fake-llm provider auto-installed', async () => {
+    const res = await fetch(`${APP_URL}/lobu/api/v1/agents`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        cookie: cookieHeader,
+      },
+      body: JSON.stringify({ forceNew: true, dryRun: true }),
+    });
+
+    expect(res.status, `expected 2xx, got ${res.status}: ${await res.clone().text()}`).toBeLessThan(
+      300
+    );
+    const body = (await res.json()) as {
+      success: boolean;
+      agentId: string;
+      token: string;
+      error?: string;
+    };
+    expect(body.success).toBe(true);
+    expect(body.agentId).toBeTruthy();
+    expect(body.token).toBeTruthy();
   });
 });

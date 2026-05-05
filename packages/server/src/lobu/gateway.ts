@@ -23,12 +23,47 @@ import { SecretStoreRegistry } from '../gateway/secrets/index';
 import type { Env } from '../index';
 import logger from '../utils/logger';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
+import { getDb } from '../db/client';
+import { orgContext } from './stores/org-context';
 import {
   createPostgresAgentAccessStore,
   createPostgresAgentConfigStore,
   createPostgresAgentConnectionStore,
   PostgresSecretStore,
 } from './stores';
+
+// Cache of (userId → orgId) lookups. Keyed by userId; users only see their
+// own row swap when they leave/join orgs, which doesn't happen often. The
+// 60s TTL is deliberately short — first-load cost is one indexed query.
+const DEFAULT_ORG_TTL_MS = 60_000;
+const defaultOrgCache = new Map<string, { orgId: string | null; expiresAt: number }>();
+
+async function resolveDefaultOrgId(userId: string): Promise<string | null> {
+  const cached = defaultOrgCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) return cached.orgId;
+  let orgId: string | null = null;
+  try {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT m."organizationId" AS organization_id
+      FROM "member" m
+      WHERE m."userId" = ${userId}
+      ORDER BY m."createdAt" ASC
+      LIMIT 1
+    `;
+    orgId = (rows[0]?.organization_id as string | undefined) ?? null;
+  } catch (err) {
+    // The DB may not be reachable yet at request time (e.g. boot races) —
+    // fail open so the rest of the request can still proceed; the route
+    // handler will surface its own error if it actually needs the org.
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      '[Lobu] resolveDefaultOrgId: lookup failed, returning null'
+    );
+  }
+  defaultOrgCache.set(userId, { orgId, expiresAt: Date.now() + DEFAULT_ORG_TTL_MS });
+  return orgId;
+}
 
 type EmbeddedSettingsSession = {
   userId: string;
@@ -226,6 +261,37 @@ export async function initLobuGateway(): Promise<Hono | null> {
 
       await next();
     });
+
+    // Resolve the signed-in user's primary org and wrap the rest of the
+    // request in orgContext.run() so Postgres-backed stores (which read the
+    // org id from AsyncLocalStorage via getOrgId()) work for routes that
+    // don't carry an explicit org slug — POST /api/v1/agents in particular,
+    // which auto-provisions ephemeral agents and needs to look up the
+    // user's existing agents to inherit pluginsConfig.
+    //
+    // The mainApp's multi-tenant middleware (workspace/multi-tenant.ts)
+    // already handles /api/:orgSlug/* — that's a separate path. This
+    // middleware is the equivalent for the lobu-app's unscoped routes.
+    lobuApp.use('*', async (c: any, next: any) => {
+      const user = c.get('user') as { id?: string } | null;
+      if (!user?.id) {
+        await next();
+        return;
+      }
+      // Skip if a higher-priority middleware already set the org id.
+      if (c.get('organizationId')) {
+        await next();
+        return;
+      }
+      const orgId = await resolveDefaultOrgId(user.id);
+      if (!orgId) {
+        await next();
+        return;
+      }
+      c.set('organizationId', orgId);
+      await orgContext.run({ organizationId: orgId }, () => next());
+    });
+
     // Worker gateway routes must be mounted first (before rawLobuApp's catch-all)
     if (workerGateway?.getApp) {
       lobuApp.route('/worker', workerGateway.getApp());
