@@ -183,9 +183,10 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
   const store: AgentConfigStore = {
     async getSettings(agentId) {
       const sql = getDb();
-      // Worker gateway calls this without orgContext — agent IDs are globally
-      // unique (primary key on id alone), and the worker token already proves
-      // authenticity, so falling back to id-only lookup is safe.
+      // Workers/gateway-internal callers run without org context — agent IDs
+      // are globally unique and the worker token already proves authenticity,
+      // so falling back to id-only lookup is safe. HTTP request paths always
+      // have an org context (set by middleware) and get the row scoped to it.
       const orgId = tryGetOrgId();
       const rows = orgId
         ? await sql`
@@ -264,7 +265,6 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
     },
     async getMetadata(agentId) {
       const sql = getDb();
-      // See getSettings note — worker gateway calls this without orgContext.
       const orgId = tryGetOrgId();
       const rows = orgId
         ? await sql`
@@ -295,7 +295,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           ${agentId}, ${orgId}, ${metadata.name}, ${metadata.description ?? null},
           ${metadata.owner.platform}, ${metadata.owner.userId},
           ${metadata.isWorkspaceAgent ?? false}, ${metadata.workspaceId ?? null},
-          ${now}
+          ${metadata.createdAt ? new Date(metadata.createdAt) : now}
         )
         ON CONFLICT (id) DO UPDATE SET
           name = EXCLUDED.name,
@@ -304,6 +304,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           owner_user_id = EXCLUDED.owner_user_id,
           is_workspace_agent = EXCLUDED.is_workspace_agent,
           workspace_id = EXCLUDED.workspace_id,
+          last_used_at = ${metadata.lastUsedAt ? new Date(metadata.lastUsedAt) : null},
           updated_at = ${now}
         WHERE agents.organization_id = EXCLUDED.organization_id
         RETURNING organization_id
@@ -351,7 +352,6 @@ export function createPostgresAgentConnectionStore(): AgentConnectionStore {
   return {
     async getConnection(connectionId) {
       const sql = getDb();
-      // See getSettings note — worker gateway calls this without orgContext.
       const orgId = tryGetOrgId();
       const rows = orgId
         ? await sql`
@@ -368,7 +368,6 @@ export function createPostgresAgentConnectionStore(): AgentConnectionStore {
     },
     async listConnections(filter) {
       const sql = getDb();
-      // Worker gateway / ChatInstanceManager calls this without orgContext.
       const orgId = tryGetOrgId();
 
       if (filter?.agentId && filter?.platform) {
