@@ -31,11 +31,6 @@ COPY packages/openclaw-plugin/package.json packages/openclaw-plugin/
 COPY packages/connectors/package.json packages/connectors/
 COPY packages/embeddings/package.json packages/embeddings/
 COPY packages/connector-worker/package.json packages/connector-worker/
-COPY packages/owletto-sdk/package.json packages/owletto-sdk/
-COPY packages/owletto-connectors/package.json packages/owletto-connectors/
-COPY packages/owletto-embeddings/package.json packages/owletto-embeddings/
-COPY packages/owletto-worker/package.json packages/owletto-worker/
-COPY packages/owletto-openclaw/package.json packages/owletto-openclaw/
 # packages/web is a private git submodule. The glob lets the copy succeed
 # when the submodule is not initialized (external contributors / backend-only builds).
 COPY packages/web/package.jso[n] packages/web/
@@ -69,11 +64,6 @@ COPY packages/openclaw-plugin/ packages/openclaw-plugin/
 COPY packages/connectors/ packages/connectors/
 COPY packages/embeddings/ packages/embeddings/
 COPY packages/connector-worker/ packages/connector-worker/
-COPY packages/owletto-sdk/ packages/owletto-sdk/
-COPY packages/owletto-connectors/ packages/owletto-connectors/
-COPY packages/owletto-embeddings/ packages/owletto-embeddings/
-COPY packages/owletto-worker/ packages/owletto-worker/
-COPY packages/owletto-openclaw/ packages/owletto-openclaw/
 COPY packages/server/ packages/server/
 # Copy the private frontend submodule when present.
 COPY packages/web packages/web
@@ -138,11 +128,6 @@ COPY --from=builder /app/packages/openclaw-plugin ./packages/openclaw-plugin
 COPY --from=builder /app/packages/connectors ./packages/connectors
 COPY --from=builder /app/packages/embeddings ./packages/embeddings
 COPY --from=builder /app/packages/connector-worker ./packages/connector-worker
-COPY --from=builder /app/packages/owletto-sdk ./packages/owletto-sdk
-COPY --from=builder /app/packages/owletto-connectors ./packages/owletto-connectors
-COPY --from=builder /app/packages/owletto-embeddings ./packages/owletto-embeddings
-COPY --from=builder /app/packages/owletto-worker ./packages/owletto-worker
-COPY --from=builder /app/packages/owletto-openclaw ./packages/owletto-openclaw
 COPY --from=builder /app/packages/server ./packages/server
 COPY --from=builder /app/packages/web ./packages/web
 
