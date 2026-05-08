@@ -72,7 +72,9 @@ describeIfSubmodule('getMcpInstallTargets', () => {
   it('encodes the runtime mcpUrl into the Cursor install link', () => {
     const targets = getMcpInstallTargets(mcpUrl);
     const cursor = targets.find((target) => target.id === 'cursor');
-    const link = cursor?.actions.find((action) => action.type === 'link');
+    const link = cursor?.actions.find(
+      (action: { type: string }) => action.type === 'link'
+    );
 
     expect(link?.type).toBe('link');
 

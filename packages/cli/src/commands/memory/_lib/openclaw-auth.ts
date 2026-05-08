@@ -134,6 +134,7 @@ export async function getUsableToken(
 ): Promise<{
   token: string;
   session: MemorySession;
+  contextName: string;
 } | null> {
   let target = await resolveContext(contextName);
   const resolvedUrl = mcpUrl
@@ -141,8 +142,19 @@ export async function getUsableToken(
     : await resolveServerUrl(undefined, target.name);
 
   if (mcpUrl && !contextName) {
-    const matched = await findContextByMemoryUrl(resolvedUrl);
-    if (matched) target = matched;
+    const requestedBase = baseMcpUrl(resolvedUrl);
+    const currentContextUrl = await resolveServerUrl(undefined, target.name);
+    const currentContextBase = baseMcpUrl(currentContextUrl);
+
+    // Keep the active context when it already targets the requested memory
+    // server. Multiple contexts can legitimately share the default memory URL,
+    // and blindly picking the first matching context can select credentials for
+    // an unrelated context (or one with no login), causing unauthenticated MCP
+    // requests.
+    if (currentContextBase !== requestedBase) {
+      const matched = await findContextByMemoryUrl(resolvedUrl);
+      if (matched) target = matched;
+    }
   }
 
   if (mcpUrl && !process.env.LOBU_API_TOKEN) {
@@ -169,6 +181,7 @@ export async function getUsableToken(
 
   return {
     token,
+    contextName: target.name,
     session: {
       mcpUrl: sessionUrl,
       org,

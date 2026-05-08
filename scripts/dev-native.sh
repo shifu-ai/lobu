@@ -34,10 +34,40 @@ fi
 
 # --- Env -------------------------------------------------------------------
 
+# Preserve explicit environment overrides from the caller while still loading
+# local defaults/secrets from .env. This matters for scripts/run-e2e.sh, which
+# points DATABASE_URL at an isolated test database; sourcing .env must not send
+# the app server to a different DB than the test helpers use.
+_PRESET_DATABASE_URL_SET="${DATABASE_URL+x}"
+_PRESET_DATABASE_URL="${DATABASE_URL-}"
+_PRESET_PGSSLMODE_SET="${PGSSLMODE+x}"
+_PRESET_PGSSLMODE="${PGSSLMODE-}"
+_PRESET_HOST_SET="${HOST+x}"
+_PRESET_HOST="${HOST-}"
+_PRESET_PORT_SET="${PORT+x}"
+_PRESET_PORT="${PORT-}"
+_PRESET_PUBLIC_WEB_URL_SET="${PUBLIC_WEB_URL+x}"
+_PRESET_PUBLIC_WEB_URL="${PUBLIC_WEB_URL-}"
+_PRESET_LOBU_PROVIDER_REGISTRY_PATH_SET="${LOBU_PROVIDER_REGISTRY_PATH+x}"
+_PRESET_LOBU_PROVIDER_REGISTRY_PATH="${LOBU_PROVIDER_REGISTRY_PATH-}"
+_PRESET_FAKE_LLM_API_KEY_SET="${FAKE_LLM_API_KEY+x}"
+_PRESET_FAKE_LLM_API_KEY="${FAKE_LLM_API_KEY-}"
+_PRESET_FAKE_LLM_BASE_URL_SET="${FAKE_LLM_BASE_URL+x}"
+_PRESET_FAKE_LLM_BASE_URL="${FAKE_LLM_BASE_URL-}"
+
 set -a
 # shellcheck disable=SC1091
 source .env
 set +a
+
+if [[ -n "$_PRESET_DATABASE_URL_SET" ]]; then export DATABASE_URL="$_PRESET_DATABASE_URL"; fi
+if [[ -n "$_PRESET_PGSSLMODE_SET" ]]; then export PGSSLMODE="$_PRESET_PGSSLMODE"; fi
+if [[ -n "$_PRESET_HOST_SET" ]]; then export HOST="$_PRESET_HOST"; fi
+if [[ -n "$_PRESET_PORT_SET" ]]; then export PORT="$_PRESET_PORT"; fi
+if [[ -n "$_PRESET_PUBLIC_WEB_URL_SET" ]]; then export PUBLIC_WEB_URL="$_PRESET_PUBLIC_WEB_URL"; fi
+if [[ -n "$_PRESET_LOBU_PROVIDER_REGISTRY_PATH_SET" ]]; then export LOBU_PROVIDER_REGISTRY_PATH="$_PRESET_LOBU_PROVIDER_REGISTRY_PATH"; fi
+if [[ -n "$_PRESET_FAKE_LLM_API_KEY_SET" ]]; then export FAKE_LLM_API_KEY="$_PRESET_FAKE_LLM_API_KEY"; fi
+if [[ -n "$_PRESET_FAKE_LLM_BASE_URL_SET" ]]; then export FAKE_LLM_BASE_URL="$_PRESET_FAKE_LLM_BASE_URL"; fi
 
 export NODE_ENV="${NODE_ENV:-development}"
 export ENVIRONMENT="${ENVIRONMENT:-development}"

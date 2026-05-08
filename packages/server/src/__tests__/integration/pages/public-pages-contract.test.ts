@@ -3,8 +3,16 @@
  *
  * Focuses on the public/private boundary and crawlable HTML payloads without
  * restoring the old large page suite verbatim.
+ *
+ * Skipped automatically when packages/web is not initialized — these tests
+ * render HTML produced by the web submodule. CI checks it out via
+ * OWLETTO_WEB_DEPLOY_KEY; local clones without that key cannot, so we skip
+ * rather than fail on missing assets.
  */
 
+import { existsSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
@@ -16,9 +24,14 @@ import {
 } from '../../setup/test-fixtures';
 import { get } from '../../setup/test-helpers';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WEB_AVAILABLE = existsSync(
+  resolve(__dirname, '../../../../../web/src')
+);
+
 const publicWebUrl = 'https://www.owletto.test';
 
-describe('public page contract', () => {
+describe.skipIf(!WEB_AVAILABLE)('public page contract', () => {
   beforeAll(async () => {
     await cleanupTestDatabase();
     const sql = getTestDb();

@@ -50,7 +50,12 @@ export async function memoryRunCommand(
   }
 
   if (!tool) {
-    const result = await mcpRpc(mcpUrl, "tools/list");
+    const result = await mcpRpc(
+      mcpUrl,
+      "tools/list",
+      undefined,
+      options.context
+    );
     const resultObj = result as {
       tools?: Array<{ name: string; description?: string }>;
     };
@@ -72,10 +77,15 @@ export async function memoryRunCommand(
   }
 
   const parsedParams = params ? JSON.parse(params) : {};
-  const result = await mcpRpc(mcpUrl, "tools/call", {
-    name: tool,
-    arguments: parsedParams,
-  });
+  const result = await mcpRpc(
+    mcpUrl,
+    "tools/call",
+    {
+      name: tool,
+      arguments: parsedParams,
+    },
+    options.context
+  );
 
   if (isJson()) {
     printJson({ result });

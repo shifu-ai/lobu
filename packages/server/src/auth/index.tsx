@@ -172,7 +172,7 @@ export async function createAuth(env: Env, request?: Request) {
 
 	const auth = betterAuth({
 		...(env.BETTER_AUTH_SECRET ? { secret: env.BETTER_AUTH_SECRET } : {}),
-		database: { dialect: getAuthDialect(), type: "postgres" },
+		database: { dialect: getAuthDialect(), type: "postgres", transaction: true },
 		baseURL: resolveBaseUrl({ request }),
 		basePath: "/api/auth",
 

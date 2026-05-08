@@ -68,7 +68,10 @@ export function validateUrlDomain(url: string, expectedDomain: string): void {
   if (parsed.protocol !== 'https:') {
     throw new Error(`${expectedDomain} URL must use https: protocol, got ${parsed.protocol}`);
   }
-  if (!parsed.hostname.endsWith(expectedDomain)) {
+  if (
+    parsed.hostname !== expectedDomain &&
+    !parsed.hostname.endsWith(`.${expectedDomain}`)
+  ) {
     throw new Error(`URL must be on ${expectedDomain}, got ${parsed.hostname}`);
   }
 }
