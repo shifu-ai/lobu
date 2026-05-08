@@ -96,7 +96,7 @@ const connectFromClientConfigs: Record<
       "Enable the connector and choose the workspace Claude should use.",
     ],
     docsSetupNote:
-      "For Claude Code, run `claude mcp add --transport http owletto https://lobu.ai/mcp` instead and complete the OAuth flow when prompted.",
+      "For Claude Code, run `claude mcp add --transport http lobu https://lobu.ai/mcp` instead and complete the OAuth flow when prompted.",
     docsExtraSection: {
       title: "Claude Code and Claude Desktop",
       paragraphs: [
