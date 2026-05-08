@@ -557,12 +557,6 @@ export class McpProxy {
     if (!httpServer) {
       return c.json({ error: `MCP server '${mcpId}' not found` }, 404);
     }
-    const scopeKey = this.computeScopeKey(
-      httpServer,
-      requesterUserId,
-      auth.tokenData.channelId || ""
-    );
-
     // Check cache
     if (this.toolCache) {
       const cached = await this.toolCache.get(mcpId, agentId);
@@ -570,39 +564,7 @@ export class McpProxy {
     }
 
     try {
-      const jsonRpcBody = JSON.stringify({
-        jsonrpc: "2.0",
-        method: "tools/list",
-        params: {},
-        id: 1,
-      });
-
-      const response = await this.sendUpstreamRequest(
-        httpServer,
-        agentId,
-        mcpId,
-        "POST",
-        jsonRpcBody,
-        scopeKey,
-        httpServer.internal === true ? auth.token : undefined
-      );
-
-      const data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
-      if (data?.error) {
-        logger.error("Upstream returned JSON-RPC error", {
-          mcpId,
-          error: data.error,
-        });
-        return c.json({ error: data.error.message || "Upstream error" }, 502);
-      }
-
-      const tools: McpTool[] = data?.result?.tools || [];
-
-      // Cache result
-      if (this.toolCache && tools.length > 0) {
-        await this.toolCache.set(mcpId, tools, agentId);
-      }
-
+      const { tools } = await this.fetchToolsForMcp(mcpId, agentId, auth.tokenData, auth.token);
       return c.json({ tools });
     } catch (error) {
       logger.error("Failed to list tools", { mcpId, error });
