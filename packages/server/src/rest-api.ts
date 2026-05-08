@@ -25,8 +25,8 @@ import { executeTool, extractAuthContext, toToolContext } from './tools/execute'
 import { getContent } from './tools/get_content';
 import { getWatcher } from './tools/get_watchers';
 import { getTool, type ToolContext } from './tools/registry';
+import { toJsonSafe } from '@lobu/core';
 import { ToolNotRegisteredError, ToolUserError, errorMessage } from './utils/errors';
-import { toJsonSafe } from './utils/json';
 import logger from './utils/logger';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from './utils/run-statuses';
 import { getRuntimeInfo } from './utils/runtime-info';
@@ -532,7 +532,6 @@ export async function publicRestGetOrganization(c: Context<{ Bindings: Env }>) {
     const [{ count: agent_count }] = await sql<{ count: number }>`
       SELECT COUNT(*)::int AS count FROM agents
       WHERE organization_id = ${organizationId}
-        AND parent_connection_id IS NULL
     `;
     const [{ count: entity_type_count }] = await sql<{ count: number }>`
       SELECT COUNT(*)::int AS count FROM entity_types
@@ -567,7 +566,6 @@ export async function publicRestListAgents(c: Context<{ Bindings: Env }>) {
       SELECT id, name, description, created_at
       FROM agents
       WHERE organization_id = ${organizationId}
-        AND parent_connection_id IS NULL
       ORDER BY created_at ASC
     `;
     return { agents: rows };

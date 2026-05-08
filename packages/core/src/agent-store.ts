@@ -26,8 +26,7 @@ import type {
  * Agent settings — configurable per agentId.
  *
  * Canonical shape. Every agent store implementation conforms to this
- * interface; the gateway re-exports it from `auth/settings/index.ts` for
- * legacy import paths.
+ * interface.
  */
 export interface AgentSettings {
   /** Display-only model reference (legacy; prefer modelSelection). */
@@ -72,8 +71,6 @@ export interface AgentSettings {
   installedProviders?: InstalledProvider[];
   /** Enable verbose logging (show tool calls, reasoning, etc.) */
   verboseLogging?: boolean;
-  /** Template agent this sandbox was cloned from (for credential fallback) */
-  templateAgentId?: string;
   /**
    * MCP tool patterns the operator has pre-approved. Each entry is a grant
    * pattern (e.g. "/mcp/gmail/tools/send_email" or "/mcp/linear/tools/*").
@@ -94,7 +91,6 @@ export interface AgentMetadata {
   owner: { platform: string; userId: string };
   isWorkspaceAgent?: boolean;
   workspaceId?: string;
-  parentConnectionId?: string;
   createdAt: number;
   lastUsedAt?: number;
 }
@@ -110,7 +106,7 @@ export interface ConnectionSettings {
 export interface StoredConnection {
   id: string;
   platform: string;
-  templateAgentId?: string;
+  agentId?: string;
   config: Record<string, any>;
   settings: ConnectionSettings;
   metadata: Record<string, any>;
@@ -174,27 +170,6 @@ export interface AgentConfigStore {
   deleteMetadata(agentId: string): Promise<void>;
   hasAgent(agentId: string): Promise<boolean>;
   listAgents(): Promise<AgentMetadata[]>;
-  listSandboxes(connectionId: string): Promise<AgentMetadata[]>;
-}
-
-/**
- * Find the first non-sandbox agent with installed providers configured.
- * Used to pick a default template agent when creating ephemeral/API agents.
- */
-export async function findTemplateAgentId(
-  store: Pick<AgentConfigStore, "listAgents" | "getSettings">
-): Promise<string | null> {
-  const agents = await store.listAgents();
-
-  for (const agent of agents) {
-    if (agent.parentConnectionId) continue;
-    const settings = await store.getSettings(agent.agentId);
-    if (settings?.installedProviders?.length) {
-      return agent.agentId;
-    }
-  }
-
-  return null;
 }
 
 /**
@@ -204,7 +179,7 @@ export async function findTemplateAgentId(
 export interface AgentConnectionStore {
   getConnection(connectionId: string): Promise<StoredConnection | null>;
   listConnections(filter?: {
-    templateAgentId?: string;
+    agentId?: string;
     platform?: string;
   }): Promise<StoredConnection[]>;
   saveConnection(connection: StoredConnection): Promise<void>;

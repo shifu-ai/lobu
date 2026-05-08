@@ -27,6 +27,8 @@ import {
   resolveSecretValue,
 } from "../secrets/index.js";
 import { resolveAgentOptions } from "../services/platform-helpers.js";
+import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
+import { getAgentOrganizationId } from "../../lobu/stores/postgres-stores.js";
 import {
   ConversationStateStore,
   type HistoryEntry,
@@ -123,6 +125,10 @@ export class ChatInstanceManager {
 
       try {
         if (connection.status === "active") {
+          // Boot runs without an HTTP request, so AsyncLocalStorage has
+          // no orgId. startInstance() now self-binds the connection's
+          // agent org so PostgresSecretStore.get() resolves per-org
+          // refs correctly; see comment on startInstance().
           await this.startInstance(connection);
         }
       } catch (error) {
@@ -159,7 +165,7 @@ export class ChatInstanceManager {
 
   async addConnection(
     platform: string,
-    templateAgentId: string | undefined,
+    agentId: string | undefined,
     config: PlatformAdapterConfig,
     settings?: ConnectionSettings,
     metadata: Record<string, any> = {},
@@ -180,7 +186,7 @@ export class ChatInstanceManager {
     const connection: PlatformConnection = {
       id,
       platform,
-      ...(templateAgentId ? { templateAgentId } : {}),
+      ...(agentId ? { agentId } : {}),
       config,
       settings: settings ?? { allowGroups: true },
       metadata,
@@ -218,7 +224,7 @@ export class ChatInstanceManager {
       throw error;
     }
 
-    logger.info({ id, platform, templateAgentId }, "Connection added");
+    logger.info({ id, platform, agentId }, "Connection added");
     return connection;
   }
 
@@ -296,7 +302,7 @@ export class ChatInstanceManager {
   async updateConnection(
     id: string,
     updates: {
-      templateAgentId?: string | null;
+      agentId?: string | null;
       config?: PlatformAdapterConfig;
       settings?: ConnectionSettings;
       metadata?: Record<string, any>;
@@ -335,11 +341,11 @@ export class ChatInstanceManager {
     const needsRestart =
       nextConfig !== undefined && !configsEqual(nextConfig, previousResolved);
 
-    if (updates.templateAgentId !== undefined) {
-      if (updates.templateAgentId) {
-        connection.templateAgentId = updates.templateAgentId;
+    if (updates.agentId !== undefined) {
+      if (updates.agentId) {
+        connection.agentId = updates.agentId;
       } else {
-        delete connection.templateAgentId;
+        delete connection.agentId;
       }
     }
     if (nextConfig !== undefined) {
@@ -377,7 +383,7 @@ export class ChatInstanceManager {
 
   async listConnections(filter?: {
     platform?: string;
-    templateAgentId?: string;
+    agentId?: string;
   }): Promise<PlatformConnection[]> {
     const all = await this.connectionStore.listConnections(filter);
     return all.map((c) => this.sanitizeConnection(storedToPlatform(c)));
@@ -500,6 +506,31 @@ export class ChatInstanceManager {
   // --- Private ---
 
   private async startInstance(connection: PlatformConnection): Promise<void> {
+    // Multi-tenant secret resolution: PostgresSecretStore.get/put route
+    // by AsyncLocalStorage org context (see #516). Some callers reach
+    // here with org context already bound (HTTP routes via agent-routes
+    // middleware); others don't (boot-time initialize(), the public
+    // /slack/events webhook, anywhere ensureConnectionRunning() is
+    // triggered without an HTTP request). Self-binding the connection's
+    // owning org keeps per-org secret refs resolvable from every entry
+    // point — no caller has to remember.
+    const callerOrgId = tryGetOrgId();
+    if (!callerOrgId && connection.agentId) {
+      const organizationId = await getAgentOrganizationId(
+        connection.agentId
+      );
+      if (organizationId) {
+        return orgContext.run({ organizationId }, () =>
+          this.startInstanceUnscoped(connection)
+        );
+      }
+    }
+    return this.startInstanceUnscoped(connection);
+  }
+
+  private async startInstanceUnscoped(
+    connection: PlatformConnection
+  ): Promise<void> {
     try {
       // Resolve any `secret://` refs in the connection config to plaintext
       // values for the Chat SDK adapter. This is idempotent — addConnection
@@ -1617,7 +1648,7 @@ function storedToPlatform(stored: StoredConnection): PlatformConnection {
     createdAt: stored.createdAt,
     updatedAt: stored.updatedAt,
   };
-  if (stored.templateAgentId) out.templateAgentId = stored.templateAgentId;
+  if (stored.agentId) out.agentId = stored.agentId;
   if (stored.errorMessage) out.errorMessage = stored.errorMessage;
   return out;
 }

@@ -32,9 +32,9 @@ describe('deleteContent auth gate', () => {
   });
 
   it('accepts a member with mcp:write and gets past the gate', async () => {
-    // No DB available in unit context — success here is "we got past the gate
-    // and died deeper", not "the delete succeeded".
-    let bypassedGate = false;
+    // Depending on local env, DATABASE_URL may point at a reachable DB. Success
+    // and deeper non-auth failures both mean the auth gate was bypassed.
+    let bypassedGate = true;
     try {
       await deleteContent(args, {} as never, ctx({ memberRole: 'member' }));
     } catch (err) {
@@ -44,7 +44,7 @@ describe('deleteContent auth gate', () => {
   });
 
   it('mcp:admin scope satisfies the write requirement', async () => {
-    let bypassedGate = false;
+    let bypassedGate = true;
     try {
       await deleteContent(args, {} as never, ctx({ memberRole: 'admin', scopes: ['mcp:admin'] }));
     } catch (err) {
@@ -54,7 +54,7 @@ describe('deleteContent auth gate', () => {
   });
 
   it('system contexts (userId=null + auth=true) bypass the gate', async () => {
-    let bypassedGate = false;
+    let bypassedGate = true;
     try {
       await deleteContent(args, {} as never, ctx({ userId: null }));
     } catch (err) {

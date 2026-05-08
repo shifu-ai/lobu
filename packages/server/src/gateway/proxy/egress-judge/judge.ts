@@ -12,7 +12,7 @@ const logger = createLogger("egress-judge");
  * Default Haiku model for the judge. Fast + cheap; invoked only when a
  * rule with `action: "judge"` matches, so most traffic never touches it.
  */
-export const DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001";
+const DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001";
 
 export interface EgressJudgeOptions {
   client?: JudgeClient;
@@ -149,7 +149,7 @@ export class EgressJudge {
       return {
         verdict: "deny",
         reason: "Judge call failed; request denied",
-        source: "circuit-open",
+        source: "judge-error",
         latencyMs: Date.now() - started,
         policyHash: rule.policyHash,
         judgeName: rule.judgeName,

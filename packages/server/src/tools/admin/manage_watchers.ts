@@ -2383,7 +2383,7 @@ async function handleCreateVersion(
   }
 
   const createdBy = ctx.userId ?? 'system';
-  const versionId = await getNextWatcherVersionId(sql);
+  let versionId = 0;
   let lockedNextVersion = nextVersion;
   await sql.begin(async (tx) => {
     // Serialize concurrent create_version calls on the same group. The
@@ -2393,8 +2393,9 @@ async function handleCreateVersion(
     // so unrelated groups are unaffected.
     await tx`SELECT pg_advisory_xact_lock(hashtext('watcher_create_version'), ${groupId})`;
 
-    // Re-resolve the latest version under the lock so we don't race with a
-    // call that already committed N+1 while we were computing nextVersion.
+    // Re-resolve the latest id and version under the lock so we don't race
+    // with a call that already committed while we were computing nextVersion.
+    versionId = await getNextWatcherVersionId(tx);
     const latestRows = await tx`
       SELECT MAX(version) AS v FROM watcher_versions WHERE watcher_id = ${groupId}
     `;

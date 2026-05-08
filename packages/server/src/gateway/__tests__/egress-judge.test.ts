@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ResolvedJudgeRule } from "../permissions/policy-store.js";
-import { EgressJudge } from "../proxy/egress-judge/index.js";
-import type { JudgeClient, JudgeVerdict } from "../proxy/egress-judge/index.js";
+import { EgressJudge } from "../proxy/egress-judge/judge.js";
+import type { JudgeClient, JudgeVerdict } from "../proxy/egress-judge/types.js";
 
 class StubClient implements JudgeClient {
   calls = 0;
@@ -116,7 +116,9 @@ describe("EgressJudge.decide", () => {
       rule()
     );
     expect(decision.verdict).toBe("deny");
-    expect(decision.source).toBe("circuit-open");
+    // A single judge-call failure is not the same as the breaker being
+    // open; audit logs need to distinguish them.
+    expect(decision.source).toBe("judge-error");
   });
 
   test("trips the circuit after consecutive failures and stops calling the client", async () => {

@@ -73,18 +73,18 @@ trap cleanup EXIT INT TERM
 # 1. Postgres sanity
 psql_args=(-d "$DATABASE_URL" -t -A -c "SELECT 1")
 if ! psql "${psql_args[@]}" >/dev/null 2>&1; then
-  echo "❌ Cannot reach Postgres via DATABASE_URL" >&2
+  echo "Cannot reach Postgres via DATABASE_URL" >&2
   exit 1
 fi
 if ! psql -d "$DATABASE_URL" -t -A -c "SELECT 1 FROM pg_extension WHERE extname='vector'" | grep -q 1; then
-  echo "❌ pgvector extension not installed in DATABASE_URL target" >&2
+  echo "pgvector extension not installed in DATABASE_URL target" >&2
   echo "   Run: psql -d \"\$DATABASE_URL\" -c 'CREATE EXTENSION IF NOT EXISTS vector'" >&2
   exit 1
 fi
 
 # 2. Build packages if dist trees aren't there yet
 if [[ ! -d packages/core/dist || ! -d packages/connector-sdk/dist || ! -d packages/agent-worker/dist ]]; then
-  echo "📦 Building workspace packages…"
+  echo "Building workspace packages..."
   make build-packages >/dev/null
 fi
 
@@ -94,7 +94,7 @@ fi
 #      FAKE_LLM_API_KEY            → stub key, marks the provider "system-keyed"
 #      FAKE_LLM_BASE_URL           → upstream URL the secret-proxy forwards to
 if [[ "$USE_FAKE_LLM" != "0" ]]; then
-  echo "🤖 Starting fake LLM server on $FAKE_LLM_BASE_URL…"
+  echo "Starting fake LLM server on ${FAKE_LLM_BASE_URL}..."
   (
     bun -e "
       import('${REPO_ROOT}/packages/server/src/__tests__/fixtures/fake-llm-server.ts').then(async ({ startFakeLlmServer }) => {
@@ -112,13 +112,13 @@ if [[ "$USE_FAKE_LLM" != "0" ]]; then
       break
     fi
     if [[ $i -eq 30 ]]; then
-      echo "❌ fake-llm did not start within 15s. Last 20 log lines:" >&2
+      echo "fake-llm did not start within 15s. Last 20 log lines:" >&2
       tail -n 20 "$FAKE_LLM_LOG" >&2 || true
       exit 1
     fi
     sleep 0.5
   done
-  echo "✅ fake-llm healthy"
+  echo "fake-llm healthy"
 
   export LOBU_PROVIDER_REGISTRY_PATH="${REPO_ROOT}/packages/server/src/__tests__/fixtures/fake-providers.json"
   export FAKE_LLM_API_KEY="${FAKE_LLM_API_KEY:-fake-test-key}"
@@ -126,23 +126,23 @@ if [[ "$USE_FAKE_LLM" != "0" ]]; then
 fi
 
 # 4. Boot the dev server (DATABASE_URL etc. are inherited)
-echo "🚀 Booting dev server on $APP_URL (logs: $LOG)…"
+echo "Booting dev server on ${APP_URL} (logs: ${LOG})..."
 ( ./scripts/dev-native.sh >"$LOG" 2>&1 & echo $! > "$PIDFILE" ) || true
 
 # 5. Wait for /health
 deadline=$(( $(date +%s) + 60 ))
 until curl -sf -m 2 "$APP_URL/health" >/dev/null 2>&1; do
   if [[ $(date +%s) -gt $deadline ]]; then
-    echo "❌ Server did not become healthy within 60s. Last 30 log lines:" >&2
+    echo "Server did not become healthy within 60s. Last 30 log lines:" >&2
     tail -n 30 "$LOG" >&2 || true
     exit 1
   fi
   sleep 1
 done
-echo "✅ Server healthy"
+echo "Server healthy"
 
 # 6. Run the e2e suite
-echo "🧪 Running openclaw-plugin e2e…"
+echo "Running openclaw-plugin e2e..."
 APP_URL="$APP_URL" \
 LOBU_E2E_FAKE_LLM_URL="${FAKE_LLM_BASE_URL}" \
   bun run --cwd packages/openclaw-plugin test:e2e

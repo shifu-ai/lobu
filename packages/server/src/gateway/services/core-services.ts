@@ -12,10 +12,10 @@ import {
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { BedrockProviderModule } from "../auth/bedrock/provider-module.js";
-import { ChatGPTOAuthModule } from "../auth/chatgpt/index.js";
+import { ChatGPTOAuthModule } from "../auth/chatgpt/chatgpt-oauth-module.js";
 import { ClaudeOAuthModule } from "../auth/claude/oauth-module.js";
 import { ExternalAuthClient } from "../auth/external/client.js";
-import { GeminiCliModule } from "../auth/gemini/index.js";
+import { GeminiCliModule } from "../auth/gemini/cli-module.js";
 import { McpConfigService } from "../auth/mcp/config-service.js";
 import { McpProxy } from "../auth/mcp/proxy.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
@@ -30,14 +30,12 @@ import { sweepExpiredRateLimits } from "../utils/rate-limiter.js";
 import { sweepExpiredGrants } from "../permissions/grant-store.js";
 import { sweepCompletedRuns } from "../infrastructure/queue/runs-queue.js";
 import { ProviderCatalogService } from "../auth/provider-catalog.js";
-import {
-  AgentSettingsStore,
-  AuthProfilesManager,
-} from "../auth/settings/index.js";
+import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import { ModelPreferenceStore } from "../auth/settings/model-preference-store.js";
 import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
 import { UserAgentsStore } from "../auth/user-agents-store.js";
-import { ChannelBindingService } from "../channels/index.js";
+import { ChannelBindingService } from "../channels/binding-service.js";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
 import { createGatewayStateAdapter } from "../connections/state-adapter.js";
 import { registerBuiltInCommands } from "../commands/built-in-commands.js";
@@ -73,7 +71,6 @@ import {
 import { ImageGenerationService } from "./image-generation-service.js";
 import { InstructionService } from "./instruction-service.js";
 import { SessionManager, StateAdapterSessionStore } from "./session-manager.js";
-import { SettingsResolver } from "./settings-resolver.js";
 import { SseManager } from "./sse-manager.js";
 import { WatcherRunTracker } from "../watchers/run-tracker.js";
 import { ProviderConfigResolver } from "./provider-config-resolver.js";
@@ -174,7 +171,6 @@ export class CoreServices {
   private configStore?: AgentConfigStore;
   private connectionStore?: AgentConnectionStore;
   private accessStore?: AgentAccessStore;
-  private settingsResolver?: SettingsResolver;
 
   // SDK-embedded agents (passed via `GatewayConfig.agents`). lobu.toml
   // file-declared agents have been moved out of the gateway boot path —
@@ -221,10 +217,6 @@ export class CoreServices {
 
   getAccessStore(): AgentAccessStore | undefined {
     return this.accessStore;
-  }
-
-  getSettingsResolver(): SettingsResolver | undefined {
-    return this.settingsResolver;
   }
 
   /**
@@ -365,19 +357,13 @@ export class CoreServices {
       );
     logger.debug("Secret store initialized");
 
-    // Agent configuration stores read directly from Postgres (`getDb()`).
-    // No process-local cache — at current scale (~7 SELECTs per chat
-    // dispatch) PG handles the load comfortably and we get strong
-    // read-after-write across pods for free.
-    this.agentSettingsStore = new AgentSettingsStore();
     this.channelBindingService = new ChannelBindingService();
     this.userAgentsStore = new UserAgentsStore();
-    this.agentMetadataStore = new AgentMetadataStore();
-    logger.debug(
-      "Agent settings, channel binding, user agents & metadata stores initialized"
-    );
 
-    // Initialize agent sub-stores
+    // Initialize agent sub-stores. The configStore here owns all Postgres I/O
+    // for agent settings + metadata; the AgentSettingsStore / AgentMetadataStore
+    // wrappers below add the declared-agent overlay and convenience helpers
+    // without duplicating the storage layer.
     if (!this.configStore || !this.connectionStore || !this.accessStore) {
       if (this.config.agents?.length) {
         const inMemoryStore = new InMemoryAgentStore();
@@ -401,10 +387,10 @@ export class CoreServices {
       logger.debug("Using host-provided agent sub-stores (embedded mode)");
     }
 
-    // Create settings resolver (template fallback logic)
-    this.settingsResolver = new SettingsResolver(
-      this.configStore,
-      this.connectionStore
+    this.agentSettingsStore = new AgentSettingsStore(this.configStore);
+    this.agentMetadataStore = new AgentMetadataStore(this.configStore);
+    logger.debug(
+      "Agent settings, channel binding, user agents & metadata stores initialized"
     );
 
     // Initialize external OAuth client if configured. The KV here is a tiny
@@ -467,7 +453,7 @@ export class CoreServices {
     this.declaredAgentRegistry.replaceAll(
       buildRegistryMap(this.configAgents)
     );
-    // Plumb registry into the settings store so getEffectiveSettings
+    // Plumb registry into the settings store so getSettings
     // returns declared settings for declared agents (no second copy exists
     // by design — see one-shot cleanup below).
     this.agentSettingsStore.setDeclaredAgents(this.declaredAgentRegistry);
@@ -795,7 +781,7 @@ export class CoreServices {
       this.instructionService,
       this.mcpProxy,
       this.providerCatalogService,
-      this.settingsResolver,
+      this.agentSettingsStore,
       this.secretStore
     );
     logger.debug("Worker gateway initialized");

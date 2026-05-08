@@ -18,39 +18,32 @@
     "test": "bun test packages/core/src packages/agent-worker/src packages/landing/src",
     "test:coverage": "bun test packages/core/src packages/agent-worker/src packages/landing/src --coverage",
     "typecheck": "tsc --noEmit",
-    "jscpd": "bunx jscpd --pattern \"packages/**/*.ts\" --reporters \"console\" --ignore \"**/node_modules/**,**/dist/**,**/coverage/**,**/.bun/**,**/.turbo/**,workspaces/**,charts/**,integration-tests/**,bin/**,**/__tests__/**,**/__mocks__/**,**/*.d.ts\"",
-    "depcruise": "bunx --bun depcruise --config config/dependency-cruiser.config.cjs packages",
     "dev": "./scripts/dev-native.sh",
-    "build:packages": "cd packages/core && bun run build && cd ../connector-sdk && bun run build && cd ../agent-worker && bun run build && cd ../openclaw-plugin && bun run build && cd ../connector-worker && bun run build && cd ../embeddings && bun run build && cd ../server && bun run build:server && cd ../cli && bun run build",
+    "build:packages": "cd packages/core && bun run build && cd ../connector-sdk && bun run build && cd ../agent-worker && bun run build && cd ../openclaw-plugin && bun run build && cd ../embeddings && bun run build && cd ../connector-worker && bun run build && cd ../server && bun run build:server && cd ../cli && bun run build",
     "build:owletto": "cd packages/embeddings && bun run build && cd ../..",
     "watch:packages": "tsc -b --watch packages/core packages/agent-worker",
     "test:packages": "cd packages/core && bun run test && cd ../agent-worker && bun run test",
     "typecheck:packages": "cd packages/core && bun run typecheck && cd ../agent-worker && bun run typecheck",
-    "typecheck:owletto": "cd packages/server && bun run typecheck && cd ../embeddings && bun run typecheck && cd ../connector-sdk && bun run typecheck && cd ../..",
     "knip": "bunx knip --config config/knip.ts",
-    "gitleaks": "docker run --rm -v $(pwd):/repo -w /repo zricethezav/gitleaks:latest detect --source=/repo --no-git --redact --config=/repo/config/gitleaks.toml",
-    "dev:gateway": "bun run packages/server/src/gateway/cli/index.ts",
-    "dev:worker": "bun run packages/agent-worker/src/index.ts",
-    "version:bump": "node scripts/bump-version.mjs",
-    "publish:packages": "node scripts/publish-packages.mjs",
     "slack:manifest:print": "bun run scripts/slack-manifest.ts print",
     "slack:manifest:validate": "bun run scripts/slack-manifest.ts validate",
     "slack:manifest:update": "bun run scripts/slack-manifest.ts update",
-    "owletto:bench": "bun run scripts/owletto/run-memory-benchmark.ts",
-    "owletto:bench:prepare:locomo": "bun run scripts/owletto/prepare-locomo-suite.ts",
-    "owletto:bench:prepare:longmemeval": "bun run scripts/owletto/prepare-longmemeval-suite.ts",
+    "owletto:feeds:sync": "bun run scripts/owletto/sync-local.ts",
     "owletto:guidance:sync": "bun run scripts/owletto/sync-owletto-guidance.ts",
+    "owletto:bench:memory": "bun run scripts/owletto/run-memory-benchmark.ts",
+    "owletto:bench:locomo:prepare": "bun run scripts/owletto/prepare-locomo-suite.ts",
+    "owletto:bench:longmemeval:prepare": "bun run scripts/owletto/prepare-longmemeval-suite.ts",
     "owletto:connectors:install": "bun run scripts/owletto/install-connectors.ts",
-    "owletto:connectors:dry-run": "bun run scripts/owletto/dry-run-connector.ts",
-    "owletto:feeds:sync": "bun run scripts/owletto/sync-local.ts"
+    "owletto:connectors:dry-run": "bun run scripts/owletto/dry-run-connector.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.2.2",
     "@types/bun": "1.2.11",
-    "@types/node": "^20.0.0",
+    "@types/node": "20.19.9",
     "husky": "^9.1.7",
     "jscpd": "^4.0.5",
     "knip": "^5.66.3",
+    "smol-toml": "^1.3.1",
     "typescript": "^5.8.3"
   },
   "engines": {
@@ -58,8 +51,5 @@
   },
   "patchedDependencies": {
     "@chat-adapter/telegram@4.20.0": "patches/@chat-adapter%2Ftelegram@4.20.0.patch"
-  },
-  "overrides": {
-    "@types/node": "20.19.9"
   }
 }

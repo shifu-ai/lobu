@@ -339,21 +339,33 @@ export class MultiTenantProvider implements WorkspaceProvider {
 
       let effectiveOrgId = requestedOrgId;
 
-      // Token's bound org is the default. On scoped routes the URL slug must
-      // match the token's binding (already enforced); on unscoped /mcp we now
-      // resolve the default to the bound org instead of leaving it null. This
-      // matches the contract documented in `mcp-query-run-split.md`.
+      // Token's bound org is the default. PATs are intentionally org-scoped:
+      // a PAT minted for org A must never be usable against org B even if the
+      // owner has membership in both, so the URL slug must match the bound
+      // org strictly. OAuth tokens bind to whichever org the user picked at
+      // consent time but the user often has memberships in many orgs; the
+      // membership check below is the real authorization gate, so for OAuth
+      // we trust the URL slug and let membership decide. Without this, a
+      // user logged in via `lobu login` (which OAuths into one org) cannot
+      // hit cross-org admin routes like POST /api/:slug/tokens — the very
+      // call needed to bootstrap a PAT for the second org. On unscoped /mcp
+      // we still resolve the default to the bound org instead of leaving it
+      // null, matching the contract in `mcp-query-run-split.md`.
       if (authInfo.organizationId) {
         if (requestedOrgId && requestedOrgId !== authInfo.organizationId) {
-          return c.json(
-            {
-              error: 'forbidden',
-              error_description: 'Token organization does not match URL organization',
-            },
-            403
-          );
+          if (isPat) {
+            return c.json(
+              {
+                error: 'forbidden',
+                error_description: 'Token organization does not match URL organization',
+              },
+              403
+            );
+          }
+          effectiveOrgId = requestedOrgId;
+        } else {
+          effectiveOrgId = authInfo.organizationId;
         }
-        effectiveOrgId = authInfo.organizationId;
       }
 
       if (!effectiveOrgId) {
@@ -459,8 +471,14 @@ export class MultiTenantProvider implements WorkspaceProvider {
       if (!cacheHit) {
         const auth = await createAuth(c.env);
         session = await auth.api.getSession({ headers: c.req.raw.headers });
-        if (sessionCacheKey) {
-          sessionCache.set(sessionCacheKey, session ?? null);
+        // Only cache valid sessions. Caching `null` would let an explicitly
+        // revoked or expired session continue to resolve to "no auth" for
+        // the cache TTL (30s) instead of returning the upstream's fresh
+        // verdict — fine on its own, but it also masks the inverse case
+        // where the user just logged in: the prior `null` answer keeps
+        // them logged out until the entry expires.
+        if (sessionCacheKey && session?.user && session.session) {
+          sessionCache.set(sessionCacheKey, session);
         }
       }
 

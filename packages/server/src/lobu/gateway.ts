@@ -12,9 +12,10 @@ import path from 'node:path';
 import type { Hono } from 'hono';
 import { Hono as HonoApp } from 'hono';
 import { createAuth } from '../auth';
-import { ApiPlatform } from '../gateway/api';
+import { ApiPlatform } from '../gateway/api/platform';
 import { createGatewayApp } from '../gateway/cli/gateway';
-import { ChatInstanceManager, ChatResponseBridge } from '../gateway/connections';
+import { ChatInstanceManager } from '../gateway/connections/chat-instance-manager';
+import { ChatResponseBridge } from '../gateway/connections/chat-response-bridge';
 import { buildGatewayConfig } from '../gateway/config/index';
 import { Gateway } from '../gateway/gateway-main';
 import { Orchestrator } from '../gateway/orchestration/index';
@@ -25,12 +26,12 @@ import logger from '../utils/logger';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { getDb } from '../db/client';
 import { orgContext } from './stores/org-context';
+import { PostgresSecretStore } from './stores/postgres-secret-store';
 import {
   createPostgresAgentAccessStore,
   createPostgresAgentConfigStore,
   createPostgresAgentConnectionStore,
-  PostgresSecretStore,
-} from './stores';
+} from './stores/postgres-stores';
 
 // Cache of (userId → orgId) lookups. Keyed by userId; users only see their
 // own row swap when they leave/join orgs, which doesn't happen often. The
