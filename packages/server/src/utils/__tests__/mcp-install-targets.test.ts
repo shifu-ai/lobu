@@ -44,7 +44,7 @@ describeIfSubmodule('getMcpInstallTargets', () => {
     expect(codex?.actions).toContainEqual({
       type: 'command',
       label: 'Add MCP server',
-      value: `codex mcp add owletto --url ${mcpUrl}`,
+      value: `codex mcp add lobu --url ${mcpUrl}`,
     });
 
     expect(openclaw?.actions).toContainEqual({
@@ -79,7 +79,7 @@ describeIfSubmodule('getMcpInstallTargets', () => {
     expect(link?.type).toBe('link');
 
     const href = new URL((link as { href: string }).href);
-    expect(href.searchParams.get('name')).toBe('owletto');
+    expect(href.searchParams.get('name')).toBe('lobu');
 
     const encodedConfig = href.searchParams.get('config');
     expect(encodedConfig).toBeTruthy();
