@@ -10,6 +10,7 @@
 import type { DbClient } from '../db/client';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
+import { findBundledConnectorFile } from './connector-catalog';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from './run-statuses';
@@ -109,13 +110,13 @@ async function createSyncRunWithClient(sql: DbClient, feedId: number): Promise<n
     );
   }
 
-  const { compiled_code, source_path } = versionRows[0] as {
+  const { compiled_code } = versionRows[0] as {
     compiled_code: string | null;
     source_path: string | null;
   };
-  if (!compiled_code && !source_path) {
+  if (!compiled_code && !findBundledConnectorFile(feed.connector_key)) {
     throw new Error(
-      `Connector '${feed.connector_key}' has no compiled code or source_path for version '${connectorVersion}'.`
+      `Connector '${feed.connector_key}' has no compiled code and no bundled source file for version '${connectorVersion}'.`
     );
   }
 

@@ -118,8 +118,12 @@ function getDefaultConnectorCatalogUri(): string {
 }
 
 export function findBundledConnectorFile(key: string): string | null {
-  const filePath = resolve(getDefaultConnectorCatalogDir(), `${key.replace(/\./g, '_')}.ts`);
-  return existsSync(filePath) ? filePath : null;
+  const fileName = `${key.replace(/\./g, '_')}.ts`;
+  for (const candidate of DEFAULT_CONNECTOR_DIR_CANDIDATES) {
+    const filePath = resolve(candidate, fileName);
+    if (existsSync(filePath)) return filePath;
+  }
+  return null;
 }
 
 export function normalizeFileSourceUri(value: string): string | null {

@@ -48,9 +48,12 @@ COPY packages/connectors/ packages/connectors/
 COPY packages/embeddings/ packages/embeddings/
 COPY packages/connector-worker/ packages/connector-worker/
 
-# Build core dist before connector-sdk (connector-sdk imports @lobu/core)
+# Build workspace dists required by runtime source imports.
+# connector-sdk imports @lobu/core; connector-worker/src/embeddings.ts imports
+# @lobu/embeddings, whose package exports point at dist/.
 RUN cd packages/core && bunx tsc \
-    && cd ../connector-sdk && bunx tsc
+    && cd ../connector-sdk && bunx tsc \
+    && cd ../embeddings && bunx tsc
 
 # ===========================================
 # Runtime

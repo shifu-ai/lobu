@@ -583,7 +583,8 @@ export class McpProxy {
         mcpId,
         "POST",
         jsonRpcBody,
-        scopeKey
+        scopeKey,
+        httpServer.internal === true ? auth.token : undefined
       );
 
       const data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;

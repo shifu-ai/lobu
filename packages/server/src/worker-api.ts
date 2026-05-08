@@ -183,6 +183,27 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     auth_profile_auth_data: Record<string, unknown> | null;
   };
 
+  let compiledCode: string | undefined;
+  if (row.connector_key) {
+    try {
+      compiledCode = await resolveConnectorCode(row.connector_key, row.compiled_code);
+    } catch (err) {
+      const message = errorMessage(err);
+      await sql`
+        UPDATE runs
+        SET status = 'failed',
+            completed_at = current_timestamp,
+            error_message = ${message}
+        WHERE id = ${row.run_id}
+      `;
+      logger.error(
+        { run_id: row.run_id, connector_key: row.connector_key, err },
+        'Failed to resolve connector code for claimed worker run'
+      );
+      return c.json({ next_poll_seconds: 1, skipped_run_id: row.run_id, error: message });
+    }
+  }
+
   const { credentials, connectionCredentials, sessionState } = row.connection_id
     ? await resolveExecutionAuth({
         organizationId: row.organization_id,
@@ -213,9 +234,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     credentials,
     connection_credentials:
       Object.keys(connectionCredentials).length > 0 ? connectionCredentials : undefined,
-    compiled_code: row.connector_key
-      ? await resolveConnectorCode(row.connector_key, row.compiled_code)
-      : undefined,
+    compiled_code: compiledCode,
     session_state: sessionState ?? undefined,
     action_key: row.action_key ?? undefined,
     action_input: (row as any).approved_input ?? row.action_input ?? undefined,
