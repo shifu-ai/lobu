@@ -105,12 +105,13 @@ export async function resolveMcpEndpoint(config?: {
 async function mcpFetch(
   mcpUrl: string,
   body: Record<string, unknown>,
-  sessionId?: string
+  sessionId?: string,
+  contextName?: string
 ): Promise<{ data: JsonRpcResponse; usedUrl: string; response: Response }> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  const tokenResult = await getUsableToken(mcpUrl);
+  const tokenResult = await getUsableToken(mcpUrl, contextName);
   if (tokenResult) {
     headers.Authorization = `Bearer ${tokenResult.token}`;
   }
@@ -126,8 +127,15 @@ async function mcpFetch(
   });
 
   if (!res.ok) {
+    const authContext = tokenResult
+      ? ` using context "${tokenResult.contextName}"`
+      : " without an access token";
+    const hint =
+      res.status === 401
+        ? `${authContext}. Try --context <name> or run \`lobu context use <name>\`.`
+        : authContext;
     throw new ApiError(
-      `MCP request failed via ${usedUrl}: ${res.status} ${res.statusText}`,
+      `MCP request failed via ${usedUrl}: ${res.status} ${res.statusText}${hint}`,
       res.status
     );
   }
@@ -138,18 +146,24 @@ async function mcpFetch(
 }
 
 async function initializeMcpSession(
-  mcpUrl: string
+  mcpUrl: string,
+  contextName?: string
 ): Promise<{ sessionId: string; usedUrl: string }> {
-  const { data, usedUrl, response } = await mcpFetch(mcpUrl, {
-    jsonrpc: "2.0",
-    id: "__init__",
-    method: "initialize",
-    params: {
-      protocolVersion: "2025-03-26",
-      capabilities: {},
-      clientInfo: { name: "lobu-memory", version: "1.0.0" },
+  const { data, usedUrl, response } = await mcpFetch(
+    mcpUrl,
+    {
+      jsonrpc: "2.0",
+      id: "__init__",
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "lobu-memory", version: "1.0.0" },
+      },
     },
-  });
+    undefined,
+    contextName
+  );
 
   if (data.error) {
     throw new ApiError(
@@ -170,7 +184,8 @@ async function initializeMcpSession(
       jsonrpc: "2.0",
       method: "notifications/initialized",
     },
-    sessionId
+    sessionId,
+    contextName
   );
 
   return { sessionId, usedUrl };
@@ -179,9 +194,10 @@ async function initializeMcpSession(
 export async function mcpRpc(
   mcpUrl: string,
   method: string,
-  params?: Record<string, unknown>
+  params?: Record<string, unknown>,
+  contextName?: string
 ) {
-  const { sessionId } = await initializeMcpSession(mcpUrl);
+  const { sessionId } = await initializeMcpSession(mcpUrl, contextName);
   const { data } = await mcpFetch(
     mcpUrl,
     {
@@ -190,7 +206,8 @@ export async function mcpRpc(
       method,
       params: params || {},
     },
-    sessionId
+    sessionId,
+    contextName
   );
 
   if (data.error) {
@@ -213,12 +230,13 @@ export async function mcpRpc(
 export async function restToolCall<T = unknown>(
   mcpUrl: string,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  contextName?: string
 ): Promise<T> {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
-  const tokenResult = await getUsableToken(mcpUrl);
+  const tokenResult = await getUsableToken(mcpUrl, contextName);
   if (tokenResult) {
     headers.Authorization = `Bearer ${tokenResult.token}`;
   }
@@ -252,8 +270,15 @@ export async function restToolCall<T = unknown>(
         message = raw;
       }
     }
+    const authContext = tokenResult
+      ? ` using context "${tokenResult.contextName}"`
+      : " without an access token";
+    const hint =
+      res.status === 401
+        ? `${authContext}. Try --context <name> or run \`lobu context use <name>\`.`
+        : authContext;
     throw new ApiError(
-      `${toolName} failed via ${usedUrl}: ${message}`,
+      `${toolName} failed via ${usedUrl}: ${message}${hint}`,
       res.status
     );
   }
