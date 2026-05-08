@@ -57,8 +57,26 @@ const FINAL_JOINS_WITH_CLASSIFICATIONS_SQL = `${FINAL_JOINS_SQL}
       LEFT JOIN event_classifiers fcl_all ON lc_all.classifier_id = fcl_all.id`;
 
 const PARENT_ROOT_JOINS_SQL = `
-      LEFT JOIN current_event_records p ON f.origin_parent_id = p.origin_id AND p.entity_ids && f.entity_ids
-      LEFT JOIN current_event_records root ON tm.root_origin_id = root.origin_id AND root.entity_ids && f.entity_ids`;
+      LEFT JOIN LATERAL (
+        SELECT p.author_name, p.title, p.payload_text, p.occurred_at, p.source_url, p.score
+        FROM current_event_records p
+        WHERE f.connection_id IS NOT NULL
+          AND f.origin_parent_id IS NOT NULL
+          AND p.connection_id = f.connection_id
+          AND p.origin_id = f.origin_parent_id
+        ORDER BY p.occurred_at DESC NULLS LAST, p.id DESC
+        LIMIT 1
+      ) p ON true
+      LEFT JOIN LATERAL (
+        SELECT root.author_name, root.title, root.occurred_at, root.source_url, root.score
+        FROM current_event_records root
+        WHERE f.connection_id IS NOT NULL
+          AND tm.depth > 0
+          AND root.connection_id = f.connection_id
+          AND root.origin_id = tm.root_origin_id
+        ORDER BY root.occurred_at DESC NULLS LAST, root.id DESC
+        LIMIT 1
+      ) root ON true`;
 
 const BASE_COLUMNS_SQL = `f.id, f.entity_ids, f.connection_id, f.payload_text, f.title, f.author_name, f.source_url, f.occurred_at, f.semantic_type,
           f.connector_key as platform, f.origin_id, f.origin_parent_id, f.score, f.metadata, f.payload_type, f.payload_data, f.payload_template, f.attachments, f.origin_type,
@@ -674,6 +692,7 @@ function buildThreadMetaCteSql(
     thread_chain AS (
       SELECT
         rs.id as content_id,
+        f.connection_id,
         f.origin_id,
         f.origin_parent_id,
         f.origin_id as root_origin_id,
@@ -686,14 +705,18 @@ function buildThreadMetaCteSql(
 
       SELECT
         tc.content_id,
+        p.connection_id,
         p.origin_id,
         p.origin_parent_id,
         p.origin_id as root_origin_id,
         tc.depth + 1,
         array_append(tc.path, COALESCE(p.origin_id, CAST(p.id AS VARCHAR)))
       FROM thread_chain tc
-      JOIN current_event_records p ON tc.origin_parent_id = p.origin_id
-      WHERE tc.origin_parent_id IS NOT NULL
+      JOIN current_event_records p
+        ON p.connection_id = tc.connection_id
+       AND p.origin_id = tc.origin_parent_id
+      WHERE tc.connection_id IS NOT NULL
+        AND tc.origin_parent_id IS NOT NULL
         AND tc.depth < 25
         AND ${entityFilter}
         AND NOT (COALESCE(p.origin_id, CAST(p.id AS VARCHAR)) = ANY(tc.path))
