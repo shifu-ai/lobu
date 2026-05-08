@@ -7,7 +7,7 @@ import type { ToolContext } from "./registry";
 const SCRIPT_FIELDS = {
   script: Type.String({
     description:
-      "TypeScript source. Must `export default async (ctx, client) => { ... }`. Use `search` to discover SDK methods.",
+      "TypeScript source. Must `export default async (ctx, client) => { ... }`. Use `search_sdk` to discover SDK methods.",
     minLength: 1,
     maxLength: 100_000,
   }),
@@ -49,7 +49,7 @@ async function runSandbox(
     context: {
       organization_id: ctx.organizationId,
       user_id: ctx.userId,
-      mode: mode === "read" ? "query" : "run",
+      mode: mode === "read" ? "query_sdk" : "run_sdk",
     },
     limits: args.timeout_ms ? { timeoutMs: args.timeout_ms } : undefined,
   });

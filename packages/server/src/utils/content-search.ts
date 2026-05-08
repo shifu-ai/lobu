@@ -487,7 +487,7 @@ interface ContentSearchOptions {
 
   // Pre-computed embedding for the query. When provided, skips the text→embedding
   // regeneration step inside searchContentBySingleQuery — useful when the caller
-  // already computed an embedding (e.g. search_knowledge receiving query_embedding).
+  // already computed an embedding (e.g. search_memory receiving query_embedding).
   query_embedding?: number[];
 }
 

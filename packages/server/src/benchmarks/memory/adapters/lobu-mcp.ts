@@ -99,7 +99,7 @@ export class LobuMcpBenchmarkAdapter implements BenchmarkAdapter {
         const entityIds = step.entityRefs.map((ref) =>
           this.requireEntityId(ctx.runId, ctx.scenario.id, ref)
         );
-        const saveResult = await this.client.callTool<SaveKnowledgeResult>('save_knowledge', {
+        const saveResult = await this.client.callTool<SaveKnowledgeResult>('save_memory', {
           entity_ids: entityIds,
           title: step.title,
           content: step.content,
@@ -147,7 +147,7 @@ export class LobuMcpBenchmarkAdapter implements BenchmarkAdapter {
     const chronologicalSortOrder = isHistoricalLookup(ctx.prompt) ? 'asc' : 'desc';
     const includeSuperseded = isHistoricalLookup(ctx.prompt);
 
-    const search = await this.client.callTool<SearchKnowledgeResult>('search_knowledge', {
+    const search = await this.client.callTool<SearchKnowledgeResult>('search_memory', {
       query: ctx.prompt,
       include_content: false,
       fuzzy: true,

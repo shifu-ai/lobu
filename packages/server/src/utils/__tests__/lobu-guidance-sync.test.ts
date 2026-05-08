@@ -17,8 +17,8 @@ describe('lobu guidance sync', () => {
   it('renders plugin fallback context with namespaced tool names', () => {
     const text = renderFallbackSystemContext();
 
-    expect(text).toContain('lobu_save_knowledge');
-    expect(text).toContain('lobu_search_knowledge');
+    expect(text).toContain('lobu_save_memory');
+    expect(text).toContain('lobu_search_memory');
     expect(text).toContain('<lobu-system>');
   });
 

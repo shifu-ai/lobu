@@ -96,20 +96,20 @@ Lists tools when called without arguments, or executes a tool when given a tool 
 # List available tools
 lobu memory run --org my-org
 
-# Search memory (legacy alias: search_knowledge)
+# Search memory
 lobu memory run search_memory '{"query":"Acme"}' --org my-org
 
-# Save new memory (legacy alias: save_knowledge)
+# Save new memory
 lobu memory run save_memory '{"content":"Prefers weekly summaries","semantic_type":"preference","metadata":{}}' --org my-org
 
 # Discover SDK methods
-lobu memory run search '{"query":"watchers.create"}' --org my-org
+lobu memory run search_sdk '{"query":"watchers.create"}' --org my-org
 
 # Query with a read-only TypeScript script over the typed client SDK
-lobu memory run query '{"script":"export default async (ctx, client) => client.entities.list({ entity_type: \"company\", limit: 5 })"}' --org my-org
+lobu memory run query_sdk '{"script":"export default async (ctx, client) => client.entities.list({ entity_type: \"company\", limit: 5 })"}' --org my-org
 
 # Preview a mutating script without applying write/external SDK calls
-lobu memory run run '{"dry_run":true,"script":"export default async (ctx, client) => client.entities.create({ type: \"company\", name: \"Acme\" })"}' --org my-org
+lobu memory run run_sdk '{"dry_run":true,"script":"export default async (ctx, client) => client.entities.create({ type: \"company\", name: \"Acme\" })"}' --org my-org
 ```
 
 ## Seed Project Memory

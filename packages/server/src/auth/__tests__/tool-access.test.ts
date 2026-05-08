@@ -114,8 +114,8 @@ describe('member write access', () => {
   it('should allow members to save memory', () => {
     expect(requiresMemberWrite('save_memory', {}, false)).toBe(true);
     expect(getRequiredAccessLevel('save_memory', {}, false)).toBe('write');
-    expect(requiresMemberWrite('save_knowledge', {}, false)).toBe(true);
-    expect(getRequiredAccessLevel('save_knowledge', {}, false)).toBe('write');
+    expect(requiresMemberWrite('run_sdk', {}, false)).toBe(true);
+    expect(getRequiredAccessLevel('run_sdk', {}, false)).toBe('write');
   });
 
   it('should allow members to create and update entities without admin role', () => {
@@ -138,7 +138,7 @@ describe('isPublicReadable', () => {
 
   it('should allow public read for search memory tools', () => {
     expect(isPublicReadable('search_memory', {})).toBe(true);
-    expect(isPublicReadable('search_knowledge', {})).toBe(true);
+    expect(isPublicReadable('search_sdk', {})).toBe(true);
   });
 
   it('should allow public read for read_knowledge', () => {
@@ -271,21 +271,21 @@ describe('checkToolAccess', () => {
   };
 
   it('explains the public read-only situation on write attempts', () => {
-    expect(() => checkToolAccess('save_knowledge', {}, baseAuth)).toThrow(
+    expect(() => checkToolAccess('save_memory', {}, baseAuth)).toThrow(
       /public workspace is read-only/i
     );
   });
 
   it('requires write scope for member writes', () => {
     expect(() =>
-      checkToolAccess('save_knowledge', {}, { ...baseAuth, memberRole: 'member' })
+      checkToolAccess('save_memory', {}, { ...baseAuth, memberRole: 'member' })
     ).toThrow(/MCP session is read-only/i);
   });
 
-  it('allows members with write scope to save knowledge', () => {
+  it('allows members with write scope to save memory', () => {
     expect(() =>
       checkToolAccess(
-        'save_knowledge',
+        'save_memory',
         {},
         {
           ...baseAuth,

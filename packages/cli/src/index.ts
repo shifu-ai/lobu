@@ -774,7 +774,7 @@ Memory:
         options: { url?: string; org?: string; context?: string }
       ) => {
         const { memoryRunCommand } = await import("./commands/memory/run.js");
-        await memoryRunCommand("run", JSON.stringify({ script }), options);
+        await memoryRunCommand("run_sdk", JSON.stringify({ script }), options);
       }
     );
 

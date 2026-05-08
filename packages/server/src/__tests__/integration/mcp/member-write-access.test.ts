@@ -78,7 +78,7 @@ describe('MCP member write access', () => {
         id: 1,
         method: 'tools/call',
         params: {
-          name: 'save_knowledge',
+          name: 'save_memory',
           arguments: {
             content: 'member write access test',
             semantic_type: 'content',
@@ -95,7 +95,7 @@ describe('MCP member write access', () => {
     expect(body.result?.isError).not.toBe(true);
   });
 
-  it('hides save_knowledge for a member token that only has read scope', async () => {
+  it('hides save_memory for a member token that only has read scope', async () => {
     const { token } = await createTestAccessToken(user.id, org.id, client.client_id, {
       scope: 'mcp:read profile:read',
     });
@@ -116,12 +116,12 @@ describe('MCP member write access', () => {
     const body = await response.json();
     const toolNames = body.result.tools.map((tool: any) => tool.name);
 
-    expect(toolNames).not.toContain('save_knowledge');
+    expect(toolNames).not.toContain('save_memory');
     // manage_entity moved to the internal REST/CLI surface in #432; it's no
     // longer registered as an external MCP tool. Verify that read-only
-    // discovery surfaces (search_knowledge / search) are still visible.
-    expect(toolNames).toContain('search_knowledge');
-    expect(toolNames).toContain('search');
+    // discovery surfaces (search_memory / search) are still visible.
+    expect(toolNames).toContain('search_memory');
+    expect(toolNames).toContain('search_sdk');
   });
 
   it('returns an upgrade-path message for public-org non-member write attempts', async () => {
@@ -136,7 +136,7 @@ describe('MCP member write access', () => {
         id: 1,
         method: 'tools/call',
         params: {
-          name: 'save_knowledge',
+          name: 'save_memory',
           arguments: {
             content: 'public org should reject write',
             semantic_type: 'content',
@@ -173,7 +173,7 @@ describe('MCP member write access', () => {
     const beforeNames = beforeBody.result.tools.map((tool: any) => tool.name);
     // Admin/owner sessions see `query_sql` (admin-tier read).
     expect(beforeNames).toContain('query_sql');
-    expect(beforeNames).toContain('run');
+    expect(beforeNames).toContain('run_sdk');
 
     const downgradeResponse = await post('/api/auth/organization/update-member-role', {
       body: {
@@ -192,7 +192,7 @@ describe('MCP member write access', () => {
     });
     const afterBody = await afterResponse.json();
     const afterTools = afterBody.result.tools.map((tool: any) => tool.name);
-    expect(afterTools).toContain('save_knowledge');
+    expect(afterTools).toContain('save_memory');
     // Member tier loses admin-only `query_sql`.
     expect(afterTools).not.toContain('query_sql');
   });
@@ -211,7 +211,7 @@ describe('MCP member write access', () => {
         id: 1,
         method: 'tools/call',
         params: {
-          name: 'save_knowledge',
+          name: 'save_memory',
           arguments: {
             content: 'before removal still works',
             semantic_type: 'content',
@@ -241,7 +241,7 @@ describe('MCP member write access', () => {
         id: 2,
         method: 'tools/call',
         params: {
-          name: 'save_knowledge',
+          name: 'save_memory',
           arguments: {
             content: 'after removal should fail',
             semantic_type: 'content',
@@ -281,7 +281,7 @@ describe('MCP member write access', () => {
         id: 3,
         method: 'tools/call',
         params: {
-          name: 'save_knowledge',
+          name: 'save_memory',
           arguments: {
             content: 'after leave should fail',
             semantic_type: 'content',

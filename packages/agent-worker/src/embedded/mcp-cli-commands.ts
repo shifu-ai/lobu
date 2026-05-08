@@ -4,9 +4,9 @@
  * Registers one `just-bash` custom command per MCP server (e.g. `lobu`,
  * `gmail`). The agent invokes MCP tools via the sandboxed bash:
  *
- *   lobu search_knowledge <<<'{"query":"foo"}'
+ *   lobu search_memory <<<'{"query":"foo"}'
  *   lobu --help
- *   lobu save_knowledge --schema
+ *   lobu save_memory --schema
  *   lobu auth login
  *
  * Payload is read from `ctx.stdin` as JSON. If stdin is empty, falls back to

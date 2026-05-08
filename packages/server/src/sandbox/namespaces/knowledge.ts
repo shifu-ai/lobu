@@ -1,7 +1,7 @@
 /**
  * ClientSDK `knowledge` namespace.
  *
- * Wraps `search` (aka search_knowledge), `saveContent` (save_knowledge),
+ * Wraps `search_memory`, `saveContent` (save_memory),
  * `getContent` (read_knowledge), and `deleteContent` (delete_knowledge).
  * The SDK surface mirrors the MCP tool surface for consistency.
  */

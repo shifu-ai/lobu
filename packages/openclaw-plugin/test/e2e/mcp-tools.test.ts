@@ -76,7 +76,7 @@ describe('MCP session + tool discovery', () => {
     expect(sessionId).toBeTruthy();
   });
 
-  it('lists save_knowledge and search_knowledge tools', async () => {
+  it('lists save_memory and search_memory tools', async () => {
     const res = await mcpRpc(
       'tools/list',
       {},
@@ -86,8 +86,8 @@ describe('MCP session + tool discovery', () => {
     const toolNames = rpc.result!.tools.map((t) => t.name);
 
     expect(toolNames.length).toBeGreaterThan(0);
-    expect(toolNames).toContain('save_knowledge');
-    expect(toolNames).toContain('search_knowledge');
+    expect(toolNames).toContain('save_memory');
+    expect(toolNames).toContain('search_memory');
   });
 });
 
@@ -99,9 +99,9 @@ describe('MCP save + recall knowledge', () => {
     sessionId = await mcpInitSession(accessToken, org.slug);
   });
 
-  it('saves knowledge via save_knowledge tool', async () => {
+  it('saves knowledge via save_memory tool', async () => {
     const result = await mcpCallTool(
-      'save_knowledge',
+      'save_memory',
       {
         content: `The secret passphrase is ${uniqueMarker}. This is an e2e test fact.`,
         semantic_type: 'fact',
@@ -114,12 +114,12 @@ describe('MCP save + recall knowledge', () => {
     expect(result.content.length).toBeGreaterThan(0);
   });
 
-  it('recalls the saved knowledge via search_knowledge', async () => {
+  it('recalls the saved knowledge via search_memory', async () => {
     // Brief delay for embedding indexing
     await new Promise((r) => setTimeout(r, 3000));
 
     const result = await mcpCallTool(
-      'search_knowledge',
+      'search_memory',
       { query: `secret passphrase ${uniqueMarker}` },
       { token: accessToken, sessionId, orgSlug: org.slug }
     );
@@ -136,7 +136,7 @@ describe('unauthenticated MCP tool calls', () => {
     // Try calling a tool on the org-scoped endpoint without auth
     const toolRes = await mcpRpc(
       'tools/call',
-      { name: 'save_knowledge', arguments: { content: 'should fail', metadata: {} } },
+      { name: 'save_memory', arguments: { content: 'should fail', metadata: {} } },
       { orgSlug: org.slug }
     );
 

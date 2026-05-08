@@ -155,7 +155,7 @@ inventing new permission machinery.
 ## Outstanding work
 
 The agent path is complete: tenant agents discover canonical entities via
-`search_knowledge`, create entities with public-catalog vocabulary, and link
+`search_memory`, create entities with public-catalog vocabulary, and link
 cross-org. The frontend has org-awareness primitives (`useCurrentOrg`,
 `PublicOrgJoinBar`, public orgs in the org dropdown) but doesn't yet exercise
 the cross-org features. The work below closes that gap with as little new UX
@@ -210,7 +210,7 @@ already exists in
 `is_member` / `visibility`). No further work.
 
 For users who want to *find* a canonical entity by name without knowing the
-catalog: that's an agent task (`search_knowledge`), not a frontend search.
+catalog: that's an agent task (`search_memory`), not a frontend search.
 **Don't add a global search bar** — keeps the UI simple, pushes the
 discovery work into the AI tool where it's already strong.
 

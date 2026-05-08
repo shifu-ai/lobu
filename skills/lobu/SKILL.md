@@ -39,9 +39,9 @@ npx @lobu/cli@latest login
 
 Your long-term memory is powered by Lobu. Do NOT use local files (memory/, MEMORY.md) for memory.
 - Lobu automatically recalls relevant memories when you receive a message.
-- To save something, call save_knowledge with the content and an appropriate semantic_type.
-- To search, call search_knowledge. Results include view_url links to the web interface.
-- NEVER construct Lobu URLs yourself. When the user asks for a link, call search_knowledge to get the correct view_url.
+- To save something, call save_memory with the content and an appropriate semantic_type.
+- To search, call search_memory. Results include view_url links to the web interface.
+- NEVER construct Lobu URLs yourself. When the user asks for a link, call search_memory to get the correct view_url.
 - When the user says "remember this", save it to Lobu immediately.
 <!-- lobu-memory-guidance:end -->
 
@@ -65,10 +65,10 @@ lobu login
 lobu memory org set <org-slug>
 lobu memory health --org <org-slug>
 lobu memory seed --org <org-slug>
-lobu memory run search_knowledge '{"query":"Acme"}' --org <org-slug>
+lobu memory run search_memory '{"query":"Acme"}' --org <org-slug>
 ```
 
-Use `search_knowledge` first when the user asks about a specific entity or workspace memory. Use `save_knowledge` to persist durable memory. To update existing knowledge, search first, then save with `supersedes_event_id` so the old row is tombstoned rather than deleted.
+Use `search_memory` first when the user asks about a specific entity or workspace memory. Use `save_memory` to persist durable memory. To update existing knowledge, search first, then save with `supersedes_event_id` so the old row is tombstoned rather than deleted.
 
 ## MCP Client Setup
 

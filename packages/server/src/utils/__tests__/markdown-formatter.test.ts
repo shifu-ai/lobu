@@ -40,14 +40,14 @@ describe('formatToolResult', () => {
           },
         ],
       };
-      const md = formatToolResult('search_knowledge', result);
+      const md = formatToolResult('search_memory', result);
       expect(md).toContain('Search Results');
       expect(md).toContain('Entity ID');
     });
 
     it('should format empty search result', () => {
       const result = { entity: null, matches: [] };
-      const md = formatToolResult('search_knowledge', result);
+      const md = formatToolResult('search_memory', result);
       expect(md).toContain('No Results Found');
     });
   });

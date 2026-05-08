@@ -1,5 +1,5 @@
 /**
- * `run` MCP tool round-trip through the sandbox.
+ * `run_sdk` MCP tool round-trip through the sandbox.
  *
  * Complementary to sandbox/client-sdk-org and namespace-dispatch (which test
  * the SDK directly): this exercises the wire path — JSON-RPC → tool dispatch
@@ -58,7 +58,7 @@ describe('sandbox run (wire)', () => {
   it('runs a trivial script and returns its result', async (testCtx) => {
     if (!isolatedAvailable) return testCtx.skip();
     const client = new TestMcpClient({ token, orgSlug });
-    const result = await client.run<unknown>(
+    const result = await client.runSdk<unknown>(
       `export default async (_ctx, _client) => ({ ok: true, n: 42 });`
     );
     const json = JSON.stringify(result);
@@ -69,7 +69,7 @@ describe('sandbox run (wire)', () => {
   it('runs a script that calls into client.entities.list (real SDK round-trip)', async (testCtx) => {
     if (!isolatedAvailable) return testCtx.skip();
     const client = new TestMcpClient({ token, orgSlug });
-    const result = await client.run<unknown>(
+    const result = await client.runSdk<unknown>(
       `export default async (_ctx, client) => {
          const list = await client.entities.list({ entity_type: 'company' });
          return { count: list.entities?.length ?? 0 };

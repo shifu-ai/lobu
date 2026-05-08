@@ -67,7 +67,7 @@ describe("memory auth URL resolution", () => {
       if (body.method === "tools/list") {
         return new Response(
           JSON.stringify({
-            result: { tools: [{ name: "search_knowledge" }] },
+            result: { tools: [{ name: "search_memory" }] },
           }),
           { status: 200 }
         );
@@ -87,7 +87,7 @@ describe("memory auth URL resolution", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(writeSpy).toHaveBeenCalledWith(
-      expect.stringContaining("search_knowledge")
+      expect.stringContaining("search_memory")
     );
   });
 

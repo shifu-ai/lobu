@@ -1,5 +1,5 @@
 /**
- * Tool: save_knowledge
+ * Tool: save_memory
  *
  * Save content to the workspace, optionally associated with entities.
  * semantic_type is required and validated against $member.event_kinds for the org.
@@ -137,10 +137,10 @@ export async function saveContent(
   const isSystem = ctx.userId === null && ctx.isAuthenticated;
   if (!isSystem) {
     if (!ctx.memberRole) {
-      throw new Error('save_knowledge requires workspace membership with write access.');
+      throw new Error('save_memory requires workspace membership with write access.');
     }
     if (!hasRequiredMcpScope('write', ctx.scopes)) {
-      throw new Error('save_knowledge requires an MCP session with write access.');
+      throw new Error('save_memory requires an MCP session with write access.');
     }
   }
 
@@ -322,7 +322,7 @@ export async function saveContent(
       semantic_type: semanticType,
       supersedes: args.supersedes_event_id,
     },
-    'Content saved via save_knowledge'
+    'Content saved via save_memory'
   );
 
   // Track watcher reaction if attribution source is provided
@@ -332,7 +332,7 @@ export async function saveContent(
       watcherId: args.watcher_source.watcher_id,
       windowId: args.watcher_source.window_id,
       reactionType: 'content_saved',
-      toolName: 'save_knowledge',
+      toolName: 'save_memory',
       toolArgs: { entity_ids: finalEntityIds, semantic_type: semanticType, title: args.title },
       entityId: finalEntityIds[0],
     }).catch((err) => {

@@ -4,7 +4,7 @@
  * Before the fix, searchContentByText bailed to listContentInternal (which
  * ignores ranking) whenever queryText was missing or too short. That meant
  * callers that had a pre-computed embedding but no text query — notably
- * search_knowledge forwarding args.query_embedding — got unranked recent
+ * search_memory forwarding args.query_embedding — got unranked recent
  * content instead of cosine-distance semantic matches.
  *
  * Two guarantees under test:

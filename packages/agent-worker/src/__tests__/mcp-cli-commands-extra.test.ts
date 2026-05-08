@@ -31,7 +31,7 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
 }
 
 const lobuTool: McpToolDef = {
-  name: "search_knowledge",
+  name: "search_memory",
   description: "Search the memory store",
   inputSchema: {
     type: "object",

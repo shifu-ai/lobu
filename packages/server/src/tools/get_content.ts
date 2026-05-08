@@ -293,7 +293,7 @@ export const GetContentSchema = Type.Object({
   semantic_type: Type.Optional(
     Type.String({
       description:
-        'Filter by semantic type (e.g. note, summary, decision, observation). Matches the semantic_type set via save_knowledge.',
+        'Filter by semantic type (e.g. note, summary, decision, observation). Matches the semantic_type set via save_memory.',
     })
   ),
   interaction_status: Type.Optional(

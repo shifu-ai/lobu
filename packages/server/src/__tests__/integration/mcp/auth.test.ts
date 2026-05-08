@@ -142,7 +142,7 @@ describe('MCP Authentication', () => {
           id: 1,
           method: 'tools/call',
           params: {
-            name: 'search_knowledge',
+            name: 'search_memory',
             arguments: { query: 'upgrade-test-probe' },
           },
         },
@@ -174,7 +174,7 @@ describe('MCP Authentication', () => {
           id: 2,
           method: 'tools/call',
           params: {
-            name: 'search_knowledge',
+            name: 'search_memory',
             arguments: { query: 'upgrade-test-probe-after-auth' },
           },
         },
@@ -259,13 +259,13 @@ describe('MCP Authentication', () => {
       const result = await mcpListTools({ orgSlug: publicOrg.slug });
       const toolNames = result.tools.map((t) => t.name);
 
-      // Public reads survive: search_knowledge, search (SDK discovery).
-      expect(toolNames).toContain('search_knowledge');
-      expect(toolNames).toContain('search');
+      // Public reads survive: search_memory, search_sdk (SDK discovery).
+      expect(toolNames).toContain('search_memory');
+      expect(toolNames).toContain('search_sdk');
       // Writes and admin reads must not be visible to anonymous public callers.
-      expect(toolNames).not.toContain('save_knowledge');
+      expect(toolNames).not.toContain('save_memory');
       expect(toolNames).not.toContain('query_sql');
-      expect(toolNames).not.toContain('run');
+      expect(toolNames).not.toContain('run_sdk');
       // Legacy `manage_*` tools are no longer registered as external MCP tools.
       expect(toolNames).not.toContain('manage_entity');
     });
@@ -279,7 +279,7 @@ describe('MCP Authentication', () => {
           id: 1,
           method: 'tools/call',
           params: {
-            name: 'search_knowledge',
+            name: 'search_memory',
             arguments: { query: 'public-mcp-probe-nonexistent-12345' },
           },
         },
@@ -301,7 +301,7 @@ describe('MCP Authentication', () => {
           id: 1,
           method: 'tools/call',
           params: {
-            name: 'save_knowledge',
+            name: 'save_memory',
             arguments: {
               content: 'public org write probe',
               kind: 'note',
@@ -362,11 +362,11 @@ describe('MCP Authentication', () => {
       const result = await mcpListTools({ token, orgSlug: publicOrg.slug });
       const toolNames = result.tools.map((t) => t.name);
 
-      expect(toolNames).toContain('search_knowledge');
-      expect(toolNames).toContain('search');
-      expect(toolNames).not.toContain('save_knowledge');
+      expect(toolNames).toContain('search_memory');
+      expect(toolNames).toContain('search_sdk');
+      expect(toolNames).not.toContain('save_memory');
       expect(toolNames).not.toContain('query_sql');
-      expect(toolNames).not.toContain('run');
+      expect(toolNames).not.toContain('run_sdk');
       expect(toolNames).not.toContain('manage_entity');
     });
 
@@ -413,7 +413,7 @@ describe('MCP Authentication', () => {
       const response = await mcpRequest(
         'tools/call',
         {
-          name: 'search_knowledge',
+          name: 'search_memory',
           arguments: { query: 'nonexistent-brand-12345' },
         },
         { token }
@@ -478,7 +478,7 @@ describe('MCP Authentication', () => {
           id: 2,
           method: 'tools/call',
           params: {
-            name: 'search_knowledge',
+            name: 'search_memory',
             arguments: { query: 'recovery-probe-nonexistent-12345' },
           },
         },
@@ -496,7 +496,7 @@ describe('MCP Authentication', () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
       await mcpToolsCall(
-        'search_knowledge',
+        'search_memory',
         { query: 'nonexistent-brand-12345' },
         { token, agentId: agent.agentId }
       );
@@ -552,7 +552,7 @@ describe('MCP Authentication', () => {
           id: 1,
           method: 'tools/call',
           params: {
-            name: 'search_knowledge',
+            name: 'search_memory',
             arguments: { query: 'revocation-check-before' },
           },
         },
@@ -632,7 +632,7 @@ describe('MCP Authentication', () => {
           id: 2,
           method: 'tools/call',
           params: {
-            name: 'search_knowledge',
+            name: 'search_memory',
             arguments: { query: 'revocation-check-after' },
           },
         },
@@ -887,15 +887,15 @@ describe('MCP Authentication', () => {
 
       // Verify expected tools are present. The legacy `manage_*`,
       // `read_knowledge`, `get_watcher`, `list_watchers` MCP tools are now
-      // internal-only and reachable via the SDK from `run` / `query` scripts.
+      // internal-only and reachable via the SDK from `run_sdk` / `query_sdk` scripts.
       // lobu-cli's browser-auth flow now hits the REST proxy, so
       // `manage_connections` / `manage_auth_profiles` are no longer public-MCP.
       const toolNames = result.tools.map((t: any) => t.name);
-      expect(toolNames).toContain('search_knowledge');
-      expect(toolNames).toContain('save_knowledge');
-      expect(toolNames).toContain('search');
-      expect(toolNames).toContain('query');
-      expect(toolNames).toContain('run');
+      expect(toolNames).toContain('search_memory');
+      expect(toolNames).toContain('save_memory');
+      expect(toolNames).toContain('search_sdk');
+      expect(toolNames).toContain('query_sdk');
+      expect(toolNames).toContain('run_sdk');
       expect(toolNames).not.toContain('execute');
       expect(toolNames).not.toContain('read_knowledge');
       expect(toolNames).not.toContain('get_watcher');

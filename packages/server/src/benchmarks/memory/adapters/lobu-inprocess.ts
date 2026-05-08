@@ -273,7 +273,7 @@ export class LobuInprocessBenchmarkAdapter implements BenchmarkAdapter {
             ]
               .filter(Boolean)
               .join('\n');
-            const saveResult = await this.callTool<SaveKnowledgeResult>('save_knowledge', {
+            const saveResult = await this.callTool<SaveKnowledgeResult>('save_memory', {
               entity_ids: entityIds,
               title: turnTitle,
               content: turnContent,
@@ -297,7 +297,7 @@ export class LobuInprocessBenchmarkAdapter implements BenchmarkAdapter {
           continue;
         }
 
-        const saveResult = await this.callTool<SaveKnowledgeResult>('save_knowledge', {
+        const saveResult = await this.callTool<SaveKnowledgeResult>('save_memory', {
           entity_ids: entityIds,
           title: step.title,
           content: step.content,
@@ -362,7 +362,7 @@ export class LobuInprocessBenchmarkAdapter implements BenchmarkAdapter {
     const baseReadLimit = this.config.readLimit ?? this.config.topK ?? 8;
     const overFetchedLimit = Math.max(baseReadLimit, baseReadLimit * readOverfetch);
 
-    const search = await this.callTool<SearchKnowledgeResult>('search_knowledge', {
+    const search = await this.callTool<SearchKnowledgeResult>('search_memory', {
       query: ctx.prompt,
       include_content: false,
       fuzzy: true,

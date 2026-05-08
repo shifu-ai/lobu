@@ -288,7 +288,7 @@ export function formatToolResult(
   options: FormatterOptions = {}
 ): string {
   const formatters: Record<string, (result: any, options: FormatterOptions) => string> = {
-    search_knowledge: formatSearchResult,
+    search_memory: formatSearchResult,
     get_watcher: formatGetWatcherResult,
     read_knowledge: formatGetContentResult,
     manage_watchers: formatManageWatchersResult,
