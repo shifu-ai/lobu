@@ -191,6 +191,7 @@ const LOOKBACK_PROP = {
 } as const;
 
 const STARGAZER_PROFILE_REFRESH_MS = 30 * 24 * 60 * 60 * 1000;
+const STARGAZER_PROFILE_FETCH_LIMIT = 25;
 
 const LABELS_PROP = {
   labels_filter: {
@@ -1011,6 +1012,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     const now = new Date();
     const repoInfo = await this.fetchRepository(repo, token);
     const target = this.buildRepoTarget(repo, repoInfo);
+    let remainingProfileFetches = STARGAZER_PROFILE_FETCH_LIMIT;
 
     for (let page = 1; ; page += 1) {
       const query = new URLSearchParams({
@@ -1037,7 +1039,8 @@ export default class GitHubConnector extends ConnectorRuntime {
         if (Number.isNaN(starredAt.getTime())) continue;
 
         const previousStargazer = previousByKey.get(key);
-        const profileFetchedAt = this.shouldRefreshStargazerProfile(previousStargazer, now)
+        const shouldRefreshProfile = this.shouldRefreshStargazerProfile(previousStargazer, now);
+        const profileFetchedAt = shouldRefreshProfile && remainingProfileFetches > 0
           ? await this.enqueueStargazerProfileEvent({
               events,
               login,
@@ -1046,6 +1049,7 @@ export default class GitHubConnector extends ConnectorRuntime {
               fetchedAt: now,
             })
           : (previousStargazer?.profile_fetched_at ?? null);
+        if (shouldRefreshProfile && remainingProfileFetches > 0) remainingProfileFetches -= 1;
 
         currentStargazers.push({
           key,
