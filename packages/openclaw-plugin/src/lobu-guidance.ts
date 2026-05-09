@@ -27,13 +27,13 @@ function renderLobuMemoryGuidance(tools: MemoryGuidanceTools): string[] {
 export function renderFallbackSystemContext(options?: { gatewayMode?: boolean }): string {
   const isGateway = options?.gatewayMode === true;
   const tools: MemoryGuidanceTools = isGateway
-    ? { saveTool: 'save_knowledge', searchTool: 'search_knowledge' }
-    : { saveTool: 'lobu_save_knowledge', searchTool: 'lobu_search_knowledge' };
+    ? { saveTool: 'save_memory', searchTool: 'search_memory' }
+    : { saveTool: 'lobu_save_memory', searchTool: 'lobu_search_memory' };
 
   const lines = renderLobuMemoryGuidance(tools);
 
   const authGuidance = isGateway
-    ? '\n- If save_knowledge or search_knowledge returns an authentication error, call lobu_login to start authentication. After the user completes login, call lobu_login_check to finish.'
+    ? '\n- If save_memory or search_memory returns an authentication error, call lobu_login to start authentication. After the user completes login, call lobu_login_check to finish.'
     : '';
 
   return `<lobu-system>
@@ -46,8 +46,8 @@ ${lines.map((line) => `- ${line}`).join('\n')}${authGuidance}
 
 export function renderSkillMemorySection(): string {
   const lines = renderLobuMemoryGuidance({
-    saveTool: 'save_knowledge',
-    searchTool: 'search_knowledge',
+    saveTool: 'save_memory',
+    searchTool: 'search_memory',
   });
 
   return ['## Memory Defaults', '', MEMORY_INTRO, ...lines.map((line) => `- ${line}`)].join('\n');

@@ -27,7 +27,7 @@ const gw: GatewayParams = {
 };
 
 const searchKnowledge: McpToolDef = {
-  name: "search_knowledge",
+  name: "search_memory",
   description: "Search memory",
   inputSchema: {
     type: "object",
@@ -94,7 +94,7 @@ describe("embedded MCP CLI through real just-bash", () => {
     });
 
     const result = await bash.exec(
-      `lobu search_knowledge <<'EOF'
+      `lobu search_memory <<'EOF'
 {"query":"architecture"}
 EOF`,
       { cwd: "/" }
@@ -123,7 +123,7 @@ EOF`,
     });
 
     const result = await bash.exec(
-      `echo '{"query":"piped"}' | lobu search_knowledge`,
+      `echo '{"query":"piped"}' | lobu search_memory`,
       { cwd: "/" }
     );
 
@@ -155,7 +155,7 @@ EOF`,
 
     const result = await bash.exec("lobu --help", { cwd: "/" });
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("search_knowledge");
+    expect(result.stdout).toContain("search_memory");
     expect(result.stdout).toContain("auth login|check|logout");
   });
 

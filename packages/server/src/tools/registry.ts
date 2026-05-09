@@ -95,7 +95,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'search_memory',
     description:
-      'First step when answering anything about the user. Searches the workspace memory graph for entities, saved facts, decisions, preferences, and notes. Supports fuzzy matching and entity_type filtering. Pair writes with `save_memory`; reach for `query` only when a TS script is needed.',
+      'Search saved workspace memory: entities, facts, decisions, preferences, observations, and notes. Use this to answer “what do we know?” Pair writes with `save_memory`; use `search_sdk` / `query_sdk` only when you need SDK capabilities or programmable reads.',
     inputSchema: SearchSchema,
     annotations: READ_ONLY,
     handler: search,
@@ -103,23 +103,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'save_memory',
     description:
-      "Save user-shared facts, preferences, decisions, observations, and notes the moment they surface. Storage is append-only — pass `supersedes_event_id` to replace an existing fact (the old event is hidden from future searches without losing history). Optionally attach to entities via `entity_ids`. Always search first to avoid duplicates.",
-    inputSchema: SaveContentSchema,
-    annotations: { destructiveHint: false },
-    handler: saveContent,
-  },
-  {
-    name: 'search_knowledge',
-    description:
-      'Legacy alias for `search_memory`. Searches the workspace memory graph for entities, saved facts, decisions, preferences, and notes.',
-    inputSchema: SearchSchema,
-    annotations: READ_ONLY,
-    handler: search,
-  },
-  {
-    name: 'save_knowledge',
-    description:
-      'Legacy alias for `save_memory`. Saves user-shared facts, preferences, decisions, observations, and notes using append-only storage.',
+      "Save user-shared facts, preferences, decisions, observations, and notes to workspace memory. Storage is append-only — pass `supersedes_event_id` to replace an existing fact (the old event is hidden from future searches without losing history). Optionally attach to entities via `entity_ids`. Always search first to avoid duplicates.",
     inputSchema: SaveContentSchema,
     annotations: { destructiveHint: false },
     handler: saveContent,
@@ -128,7 +112,7 @@ const TOOLS: ToolDefinition[] = [
   {
     name: 'list_organizations',
     description:
-      'List organizations the authenticated user belongs to, plus any public workspaces the session can read. The response marks the bound org with `is_current: true` — that is the default target for memory and SDK calls. Use the slug with `client.org(slug)` from `query` / `run` for cross-org reads on /mcp + OAuth, or reconnect to /mcp/{slug} to pin a different default.',
+      'List organizations the authenticated user belongs to, plus any public workspaces the session can read. The response marks the bound org with `is_current: true` — that is the default target for memory and SDK calls. Use the slug with `client.org(slug)` from `query_sdk` / `run_sdk` for cross-org reads on /mcp + OAuth, or reconnect to /mcp/{slug} to pin a different default.',
     inputSchema: ListOrganizationsSchema,
     annotations: READ_ONLY,
     handler: async () => {
@@ -136,18 +120,18 @@ const TOOLS: ToolDefinition[] = [
     },
   },
   {
-    name: 'search',
+    name: 'search_sdk',
     description:
-      "Discover ClientSDK methods. Pass a namespace ('watchers', 'entities', etc.) for a listing, a dotted path ('watchers.create') for a drill-down with signature/throws/example, or a free-text query for fuzzy matches. Hot-path methods include a usage_example. Pair with `query` (read-only) or `run` (full SDK) to actually call methods.",
+      "Search ClientSDK documentation and method metadata. Use this to discover which SDK method exists and how to call it; it does not query workspace data. Pass a namespace ('watchers', 'entities', etc.), a dotted path ('watchers.create'), or a free-text query. Pair with `query_sdk` (read-only) or `run_sdk` (full SDK) to actually call methods.",
     inputSchema: SdkSearchSchema,
     annotations: READ_ONLY,
     handler: sdkSearch,
   },
   // ─── Power tools — TS scripting + raw SQL ─────────────────────────────────
   {
-    name: 'query',
+    name: 'query_sdk',
     description:
-      'Run a TypeScript script in a sandboxed isolate over a READ-ONLY `ClientSDK`. The script signature is `export default async (ctx, client) => ...`. Mutating methods are absent from `client` — attempts surface as undefined methods, retry with `run`. Output capped at 1 MB. Use `search` to find method names. Example: `export default async (_ctx, client) => client.entities.list({ entity_type: "company" });`',
+      'Run read-only TypeScript in a sandboxed isolate over the ClientSDK. Use this to fetch workspace data through typed SDK methods. The script signature is `export default async (ctx, client) => ...`. Mutating methods are absent from `client` — attempts surface as undefined methods; use `run_sdk` for writes. Output capped at 1 MB. Use `search_sdk` to find method names. Example: `export default async (_ctx, client) => client.entities.list({ entity_type: "company" });`',
     inputSchema: QuerySchema,
     annotations: READ_ONLY,
     handler: querySdkScript,
@@ -161,9 +145,9 @@ const TOOLS: ToolDefinition[] = [
     handler: querySql,
   },
   {
-    name: 'run',
+    name: 'run_sdk',
     description:
-      'Destructive — confirm before running. Runs a TypeScript script in a sandboxed isolate over the FULL `ClientSDK`. Signature: `export default async (ctx, client) => ...`. Can mutate entities, watchers, knowledge, classifiers, connections, etc. Use `query` for reads. Pass `dry_run: true` to execute reads while skipping write/external SDK calls and returning `side_effect_preview`. Output capped at 1 MB. Example: `export default async (_ctx, client) => client.entities.create({ type: "company", name: "Acme" });`',
+      'Destructive — confirm before running. Runs TypeScript in a sandboxed isolate over the FULL ClientSDK. Use this for SDK writes or multi-step workflows. Signature: `export default async (ctx, client) => ...`. Can mutate entities, watchers, memory, classifiers, connections, etc. Use `query_sdk` for reads. Pass `dry_run: true` to execute reads while skipping write/external SDK calls and returning `side_effect_preview`. Output capped at 1 MB. Example: `export default async (_ctx, client) => client.entities.create({ type: "company", name: "Acme" });`',
     inputSchema: RunSchema,
     annotations: { destructiveHint: true },
     handler: runSdkScript,

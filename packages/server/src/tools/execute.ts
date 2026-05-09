@@ -10,6 +10,7 @@ import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { ToolNotRegisteredError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
+import { recordToolInvocationAudit } from './audit';
 import { listOrganizations } from './organizations';
 import { getTool, type TokenType, type ToolContext } from './registry';
 
@@ -173,8 +174,28 @@ export async function executeTool(
 
   const tool = getTool(toolName)!;
   const toolContext = toToolContext(authCtx);
+  const startTime = Date.now();
 
-  return trackMCPToolCall(toolName, args, () => tool.handler(args, env, toolContext));
+  try {
+    const result = await trackMCPToolCall(toolName, args, () => tool.handler(args, env, toolContext));
+    await recordToolInvocationAudit({
+      toolName,
+      args,
+      result,
+      durationMs: Date.now() - startTime,
+      ctx: toolContext,
+    });
+    return result;
+  } catch (error) {
+    await recordToolInvocationAudit({
+      toolName,
+      args,
+      error,
+      durationMs: Date.now() - startTime,
+      ctx: toolContext,
+    });
+    throw error;
+  }
 }
 
 /**

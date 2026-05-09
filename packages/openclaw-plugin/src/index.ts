@@ -1120,7 +1120,7 @@ const plugin = {
                     text: JSON.stringify({
                       status: 'already_authenticated',
                       message:
-                        "You are already authenticated with Lobu. Do NOT call lobu_login again. Proceed directly with the user's request using the available lobu tools (lobu_search to discover SDK methods, lobu_execute to run TypeScript over the typed client SDK, lobu_search_knowledge for entity/knowledge search, lobu_save_knowledge to persist).",
+                        "You are already authenticated with Lobu. Do NOT call lobu_login again. Proceed directly with the user's request using the available lobu tools (lobu_search_sdk to discover SDK methods, lobu_query_sdk for read-only TypeScript over the typed client SDK, lobu_run_sdk for full SDK execution, lobu_search_memory for memory search, lobu_save_memory to persist).",
                     }),
                   },
                 ],
@@ -1368,7 +1368,7 @@ const plugin = {
         }
 
         try {
-          const result = await callMcpTool(config, 'search_knowledge', {
+          const result = await callMcpTool(config, 'search_memory', {
             query,
             include_content: true,
             content_limit: config.recallLimit,
@@ -1489,7 +1489,7 @@ const plugin = {
         const content = combined.length > 2000 ? combined.slice(0, 2000) : combined;
 
         // Fire-and-forget — don't block prompt build
-        callMcpTool(config, 'save_knowledge', {
+        callMcpTool(config, 'save_memory', {
           content,
           semantic_type: 'observation',
           metadata: {},

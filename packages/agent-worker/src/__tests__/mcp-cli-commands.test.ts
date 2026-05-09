@@ -31,7 +31,7 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
 }
 
 const lobuTool: McpToolDef = {
-  name: "search_knowledge",
+  name: "search_memory",
   description: "Search the memory store",
   inputSchema: {
     type: "object",
@@ -122,7 +122,7 @@ describe("buildMcpServerHandler", () => {
     const result = await handler(["--help"], {});
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("lobu — MCP server CLI");
-    expect(result.stdout).toContain("search_knowledge");
+    expect(result.stdout).toContain("search_memory");
     expect(result.stdout).toContain("auth login|check|logout");
   });
 
@@ -132,7 +132,7 @@ describe("buildMcpServerHandler", () => {
       callTool: async () => ({ content: [] }),
     });
 
-    const result = await handler(["search_knowledge", "--schema"], {});
+    const result = await handler(["search_memory", "--schema"], {});
     expect(result.exitCode).toBe(0);
     const parsed = JSON.parse(result.stdout);
     expect(parsed).toEqual(lobuTool.inputSchema);
@@ -163,7 +163,7 @@ describe("buildMcpServerHandler", () => {
       },
     });
 
-    const result = await handler(["search_knowledge"], {
+    const result = await handler(["search_memory"], {
       stdin: '{"query":"architecture"}',
     });
     expect(result.exitCode).toBe(0);
@@ -171,7 +171,7 @@ describe("buildMcpServerHandler", () => {
     expect(calls).toEqual([
       {
         mcpId: "lobu",
-        toolName: "search_knowledge",
+        toolName: "search_memory",
         payload: { query: "architecture" },
       },
     ]);
@@ -187,10 +187,7 @@ describe("buildMcpServerHandler", () => {
       },
     });
 
-    const result = await handler(
-      ["search_knowledge", '{"query":"inline"}'],
-      {}
-    );
+    const result = await handler(["search_memory", '{"query":"inline"}'], {});
     expect(result.exitCode).toBe(0);
     expect(captured).toEqual([{ query: "inline" }]);
   });
@@ -205,7 +202,7 @@ describe("buildMcpServerHandler", () => {
       },
     });
 
-    const result = await handler(["search_knowledge"], {});
+    const result = await handler(["search_memory"], {});
     expect(result.exitCode).toBe(0);
     expect(captured).toEqual([{}]);
   });
@@ -218,7 +215,7 @@ describe("buildMcpServerHandler", () => {
       },
     });
 
-    const result = await handler(["search_knowledge"], { stdin: "{not json" });
+    const result = await handler(["search_memory"], { stdin: "{not json" });
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("invalid JSON");
   });
@@ -242,7 +239,7 @@ describe("buildMcpServerHandler", () => {
       },
     });
 
-    const result = await handler(["search_knowledge"], { stdin: "{}" });
+    const result = await handler(["search_memory"], { stdin: "{}" });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("network down");
   });
@@ -254,7 +251,7 @@ describe("buildMcpServerHandler", () => {
       callTool: async () => ({ content: [{ type: "text", text: "ok" }] }),
     });
 
-    const r1 = await handler(["search_knowledge"], {});
+    const r1 = await handler(["search_memory"], {});
     expect(r1.exitCode).toBe(2);
 
     ref.current = {
@@ -262,7 +259,7 @@ describe("buildMcpServerHandler", () => {
       mcpTools: { lobu: [lobuTool] },
     };
 
-    const r2 = await handler(["search_knowledge"], { stdin: "{}" });
+    const r2 = await handler(["search_memory"], { stdin: "{}" });
     expect(r2.exitCode).toBe(0);
   });
 });

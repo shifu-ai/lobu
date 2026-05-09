@@ -1,5 +1,5 @@
 /**
- * ClientSDK method metadata, keyed by dotted path. Drives the `search` MCP
+ * ClientSDK method metadata, keyed by dotted path. Drives the `search_sdk` MCP
  * tool, the read-only SDK filter (`access`), and the BANNED_PATHS guard.
  */
 
@@ -11,7 +11,7 @@ export interface MethodMetadata {
   throws?: readonly string[];
   /** Single-line copy-pasteable snippet. */
   example?: string;
-  /** Multi-line example surfaced by `search` for hot-path methods. */
+  /** Multi-line example surfaced by `search_sdk` for hot-path methods. */
   usageExample?: string;
   /** Cost hint: 'cheap' | 'normal' | 'expensive'. Normal if omitted. */
   cost?: "cheap" | "normal" | "expensive";

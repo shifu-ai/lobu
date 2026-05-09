@@ -157,9 +157,9 @@ describe.skipIf(SKIP)('memory save + recall via agent', () => {
   const recallSessionId = `e2e-recall-${Date.now()}`;
 
   it('saves a memory via agent tool call', async () => {
-    // The agent should call lobu_save_knowledge when told to remember.
+    // The agent should call lobu_save_memory when told to remember.
     // Timeout is generous because the agent may make multiple tool calls
-    // (search → list entities → list schemas → save_knowledge).
+    // (search → list entities → list schemas → save_memory).
     const result = runOpenclawAgent(
       'Please remember this important fact: My favorite programming language is Rust and I use it for all my systems work.',
       { sessionId: saveSessionId, timeoutMs: 120_000 }

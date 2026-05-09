@@ -134,7 +134,7 @@ export async function buildWorkspaceInstructions(organizationId: string): Promis
     if (operationConnections.length > 0) {
       sections.push(
         '',
-        '### Connector Operations (call via `run` → `client.operations.execute(...)`)'
+        '### Connector Operations (call via `run_sdk` → `client.operations.execute(...)`)'
       );
       for (const conn of operationConnections) {
         const actionCount =
@@ -154,29 +154,29 @@ export async function buildWorkspaceInstructions(organizationId: string): Promis
     sections.push(
       '',
       '### Tool surface',
-      'External MCP tools: `search_memory`, `save_memory`, legacy aliases `search_knowledge`/`save_knowledge`, `list_organizations`, `search` (SDK method discovery), `query` (read-only TS over the typed client SDK), `query_sql` (read-only SQL), `run` (full TS — destructive; supports `dry_run: true`).',
-      'For reads beyond search_memory, prefer `query` with a TS script. For writes (entity CRUD, watchers, classifiers, connections, feeds, view templates, operations), use `run`. Use `search` to discover method names.',
+      'External MCP tools: `search_memory`, `save_memory`, `list_organizations`, `search_sdk` (SDK method discovery), `query_sdk` (read-only TS over the typed client SDK), `query_sql` (admin/debug read-only SQL), `run_sdk` (full TS — destructive; supports `dry_run: true`).',
+      'For reads beyond search_memory, prefer `query_sdk` with a TS script. For writes (entity CRUD, watchers, classifiers, connections, feeds, view templates, operations), use `run_sdk`. Use `search_sdk` to discover method names.',
       '',
       '### Saving (do this automatically)',
       'When the user shares any of these, save immediately:',
-      '- Preferences, opinions, or personal details → `save_memory` to matching entity (create the entity first via `run({script: "client.entities.create(...)"})` if needed)',
+      '- Preferences, opinions, or personal details → `save_memory` to matching entity (create the entity first via `run_sdk({script: "client.entities.create(...)"})` if needed)',
       '- Facts about people, projects, or topics → `save_memory` to the relevant entity',
-      '- Relationships between things → `run` calling `client.entities.link({...})`',
+      '- Relationships between things → `run_sdk` calling `client.entities.link({...})`',
       '',
       "### Updating Facts (supersede, don't duplicate)",
       'When a fact changes (e.g. updated preference, corrected info):',
-      '1. Search for the existing fact via `search_memory` or `query({script: "client.knowledge.read({...})"})`',
+      '1. Search for the existing fact via `search_memory` or `query_sdk({script: "client.knowledge.read({...})"})`',
       '2. Save the updated fact with `supersedes_event_id` pointing to the old one in `save_memory`',
       'The old fact is automatically hidden from future searches. Never save a duplicate — always search first.',
       '',
       '### Recalling',
       '- Always search before creating to avoid duplicates',
       '- `search_memory(query=…, entity_type=…)` to find entities + semantic content matches',
-      '- `query({script: "client.entities.listLinks({entity_id: ...})"})` to explore relationships',
+      '- `query_sdk({script: "client.entities.listLinks({entity_id: ...})"})` to explore relationships',
       '',
       '### Full schema details',
-      '- `query({script: "client.entitySchema.listTypes()"})` for entity types',
-      '- `query({script: "client.entitySchema.listRelTypes()"})` for relationship types and rules'
+      '- `query_sdk({script: "client.entitySchema.listTypes()"})` for entity types',
+      '- `query_sdk({script: "client.entitySchema.listRelTypes()"})` for relationship types and rules'
     );
 
     return sections.join('\n');

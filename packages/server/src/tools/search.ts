@@ -1,9 +1,9 @@
 /**
- * Tool: search_knowledge
+ * Tool: search_memory
  *
- * Search existing entities in the database.
+ * Search existing entities and saved memory in the database.
  * Searches all entity types when entity_type not specified.
- * For new entities, write a TS script for `run` that calls
+ * For new entities, write a TS script for `run_sdk` that calls
  * `client.entities.create(...)` then `client.connections.create(...)`.
  */
 
@@ -385,7 +385,7 @@ export async function search(
 
   const suggestionText =
     `No matches found for "${query}" in existing database.\n\n` +
-    '**Next steps:** call `run` with a TS script over `client`:\n' +
+    '**Next steps:** call `run_sdk` with a TS script over `client`:\n' +
     `1. Create the entity: \`await client.entities.create({ type: '<entity_type>', name: '${query}' })\` (optionally pass parent_id for hierarchy)\n` +
     "2. Create a connection: `await client.connections.create({ connector_key: '<connector>', ... })`, then scope it with `await client.feeds.create({ ... })`\n" +
     '3. Wait for ingestion to start automatically, then discover watchers with `client.watchers.list(...)` and inspect results with `client.knowledge.read(...)` / `client.watchers.get(...)`.\n\n' +

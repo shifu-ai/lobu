@@ -2,7 +2,7 @@
  * Integration test: org-scoping in `searchContentByText`.
  *
  * The original bug: an event saved with `f.organization_id = caller` but
- * empty `entity_ids` and no connection was invisible to `search_knowledge`,
+ * empty `entity_ids` and no connection was invisible to `search_memory`,
  * because the org-scope clause required either an entity bridge or
  * (only when entity_ids was empty) a connection bridge. The fix turns the
  * clause into a triple-OR: direct org match OR entity bridge OR connection
@@ -73,7 +73,7 @@ describe('searchContentByText > org-scope visibility', () => {
 
     // 1. Direct org match: f.organization_id = callerOrg, no entity_ids,
     //    no connection. This is the row that triggered the original bug —
-    //    save_knowledge with no entity_ids landed but search couldn't find
+    //    save_memory with no entity_ids landed but search couldn't find
     //    it.
     directOrgEventId = (
       await createTestEvent({

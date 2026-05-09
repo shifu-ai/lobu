@@ -7,7 +7,7 @@
  * with `is_current: true` — agents use that field to know which workspace
  * memory tools target by default.
  *
- * Cross-org reads from inside `query` / `run` go through `client.org(slug)`;
+ * Cross-org reads from inside `query_sdk` / `run_sdk` go through `client.org(slug)`;
  * scripts that need a different default org should reconnect via /mcp/{slug}
  * or a different OAuth token.
  */

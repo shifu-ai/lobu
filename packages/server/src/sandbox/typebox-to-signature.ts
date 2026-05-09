@@ -1,7 +1,7 @@
 /**
  * TypeBox schema → inline TypeScript signature formatter.
  *
- * Used by the `search` MCP tool (PR-2) to render method signatures as
+ * Used by the `search_sdk` MCP tool to render method signatures as
  * copy-pasteable TS for LLMs. Walks a TypeBox schema and emits the
  * inline-expanded type with JSDoc comments derived from `description`.
  *

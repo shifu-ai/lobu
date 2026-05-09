@@ -1,7 +1,7 @@
 /**
  * Internal REST/CLI tool surface.
  *
- * External MCP clients see the small `search`/`query`/`run`/`save_knowledge`/...
+ * External MCP clients see the small `search_sdk`/`query_sdk`/`run_sdk`/`save_memory`/...
  * surface from `registry.ts`. The frontend, lobu-cli, and other REST/session
  * callers reach the named handlers below by `name` via `POST /api/:orgSlug/:toolName`.
  *
@@ -108,7 +108,7 @@ const ENTRIES: InternalToolEntry[] = [
   {
     name: 'read_knowledge',
     description:
-      'Read content/knowledge. SDK alternatives: search_knowledge, client.knowledge.search.',
+      'Read content/memory. SDK alternatives: search_memory, client.knowledge.search.',
     schema: GetContentSchema,
     handler: getContent,
     annotations: READ_ONLY,

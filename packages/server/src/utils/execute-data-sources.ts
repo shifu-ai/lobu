@@ -248,7 +248,7 @@ function buildScopedQuery(
       // it was stamped to the caller's org directly, OR any of its entity_ids
       // belong to the caller's org, OR it came in through a connection in the
       // caller's org. Mirroring that here keeps query_sql consistent with
-      // what search_knowledge/get_content surface.
+      // what search_memory/get_content surface.
       let eventsCte =
         `"${safeName}" AS (SELECT ${sel(table, 'ev')} FROM public.current_event_records ev ` +
         `WHERE (ev.organization_id = ${orgP} ` +

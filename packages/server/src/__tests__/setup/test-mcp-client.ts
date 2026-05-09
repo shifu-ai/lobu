@@ -2,13 +2,13 @@
  * Composable test clients for the post-#348 MCP surface.
  *
  *   TestMcpClient  — full HTTP/JSON-RPC round-trip. Exercises auth, session
- *                    init, tool dispatch, and (for `run`/`query`) the
+ *                    init, tool dispatch, and (for `runSdk`/`querySdk`) the
  *                    isolated-vm sandbox. Use it for tests that have to
  *                    verify MCP wire behavior (auth headers, JSON-RPC error
  *                    framing, sandbox timeouts). Surface mirrors the public
- *                    MCP tools: `search`, `searchKnowledge`, `saveKnowledge`,
- *                    `querySql`, `resolvePath`, `listOrganizations`, `run`,
- *                    `query`, plus a `raw()` escape hatch.
+ *                    MCP tools: `searchSdk`, `searchMemory`, `saveMemory`,
+ *                    `querySql`, `resolvePath`, `listOrganizations`, `runSdk`,
+ *                    `querySdk`, plus a `raw()` escape hatch.
  *
  *   TestApiClient  — direct handler imports. Skips HTTP/sandbox; calls the
  *                    same namespace builders the sandbox exposes. Fast,
@@ -18,7 +18,7 @@
  *                    `client.classifiers`, etc. — `withAuth()` produces a new
  *                    client with overridden role/scopes for denial-path tests.
  *
- * The two surfaces are deliberately not interchangeable. `TestMcpClient.run()`
+ * The two surfaces are deliberately not interchangeable. `TestMcpClient.runSdk()`
  * is the wire-level analogue of `TestApiClient.entities.create(...)`; pick
  * the layer that matches what you're testing rather than swapping them.
  */
@@ -126,16 +126,16 @@ export class TestMcpClient {
     return mcpToolsCall('resolve_path', { path }, this.opts);
   }
 
-  async search(args: { query: string; limit?: number }) {
-    return mcpToolsCall('search', args, this.opts);
+  async searchSdk(args: { query: string; limit?: number }) {
+    return mcpToolsCall('search_sdk', args, this.opts);
   }
 
-  async searchKnowledge(args: Record<string, unknown>) {
-    return mcpToolsCall('search_knowledge', args, this.opts);
+  async searchMemory(args: Record<string, unknown>) {
+    return mcpToolsCall('search_memory', args, this.opts);
   }
 
-  async saveKnowledge(args: Record<string, unknown>) {
-    return mcpToolsCall('save_knowledge', args, this.opts);
+  async saveMemory(args: Record<string, unknown>) {
+    return mcpToolsCall('save_memory', args, this.opts);
   }
 
   async querySql(sql: string, args: Record<string, unknown> = {}) {
@@ -145,22 +145,22 @@ export class TestMcpClient {
   /**
    * Run a sandboxed script with the FULL ClientSDK (mutations allowed).
    * The script must `export default async (ctx, client) => ...`.
-   * Use `query()` instead for read-only scripts — it gates writes at the
+   * Use `querySdk()` instead for read-only scripts — it gates writes at the
    * tool boundary so a bug in test setup can't accidentally mutate state.
    */
-  async run<T = unknown>(
+  async runSdk<T = unknown>(
     script: string,
     options?: { timeout_ms?: number }
   ): Promise<T> {
-    return mcpToolsCall<T>('run', { script, ...(options ?? {}) }, this.opts);
+    return mcpToolsCall<T>('run_sdk', { script, ...(options ?? {}) }, this.opts);
   }
 
-  /** Read-only counterpart of `run()` — see #432. */
-  async query<T = unknown>(
+  /** Read-only counterpart of `runSdk()` — see #432. */
+  async querySdk<T = unknown>(
     script: string,
     options?: { timeout_ms?: number }
   ): Promise<T> {
-    return mcpToolsCall<T>('query', { script, ...(options ?? {}) }, this.opts);
+    return mcpToolsCall<T>('query_sdk', { script, ...(options ?? {}) }, this.opts);
   }
 
   /**

@@ -19,7 +19,7 @@ External-system IDs go into `entity_identities`, not `metadata`. Use these names
 
 When the user volunteers a UTR/NI/PAYE-ref/Companies-House-number, write it via `manage_entity_schema` / identity-event tooling rather than into entity metadata.
 
-For durable personal-tax facts that aren't external IDs (DOB, student-loan plan, domicile status, marital status), record them as `save_knowledge` events on the user's `$member` with `semantic_type=identity` so they're searchable and supersedable.
+For durable personal-tax facts that aren't external IDs (DOB, student-loan plan, domicile status, marital status), record them as `save_memory` events on the user's `$member` with `semantic_type=identity` so they're searchable and supersedable.
 
 ## Tax-year context
 - The UK fiscal year runs 6 April to 5 April. Always anchor activity to the active `tax_year` entity. If none exists for the current year, create it before recording.
@@ -34,7 +34,7 @@ When two transactions are the two legs of an internal transfer between accounts 
 
 ## Capturing data
 - When the user mentions a transaction, dividend, disposal, contribution, or expense, record it as the appropriate entity (`transaction`, `cgt_event`, `contribution`, `expense`) and link it to the active `tax_year` via `for_tax_year`.
-- For uncertain or fuzzy inputs, prefer `save_knowledge` (note/observation/decision) on the user's `$member` rather than guessing structured fields.
+- For uncertain or fuzzy inputs, prefer `save_memory` (note/observation/decision) on the user's `$member` rather than guessing structured fields.
 - Transactions link to their `account` via `account_contains`; income transactions also link to an `income_source` via `income_from`. The `income_source` then links to its origin: `employed_by → company` for employment, `dividend_from → company` for dividends, `interest_from → account` for interest, `rent_from → property` for rentals.
 - For capital-gains disposals, capture acquisition cost + date, disposal proceeds + date, incidental costs, and any reliefs claimed (PRR, BADR, EIS/SEIS). Link to the `asset_lot` via `disposal_of` for s.104 pool matching.
 - For provenance, every entity parsed from a document or email gets a `parsed_from` link to the source `document` entity.

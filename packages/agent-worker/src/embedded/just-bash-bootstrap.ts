@@ -336,7 +336,7 @@ interface EmbeddedBashOpsOptions {
   workspaceDir?: string;
   /**
    * When provided together with `gw`, MCP servers are exposed as one
-   * `just-bash` custom command per server (e.g. `lobu search_knowledge
+   * `just-bash` custom command per server (e.g. `lobu search_memory
    * <<<'{...}'`). Only applied when `mcpExposure === "cli"`. The ref's
    * optional `refresh()` is invoked after successful auth operations so
    * CLI handlers pick up freshly-discovered MCP tools without rebuilding Bash.

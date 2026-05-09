@@ -8,12 +8,12 @@
  * disappears from default search/query/read paths. The full history stays
  * recoverable via `include_superseded` and direct `events`-table reads.
  *
- * This matches the contract advertised by `save_knowledge`:
+ * This matches the contract advertised by `save_memory`:
  *   "Storage is append-only — pass `supersedes_event_id` to replace an
  *    existing fact (the old event is hidden from future searches without
  *    losing history)."
  *
- * Authorization mirrors `save_knowledge` since the underlying primitive is
+ * Authorization mirrors `save_memory` since the underlying primitive is
  * the same (insert an event with `supersedes_event_id`).
  */
 
