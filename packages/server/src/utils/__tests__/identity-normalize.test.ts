@@ -2,7 +2,9 @@ import {
   normalizeAuthUserId,
   normalizeEmail,
   normalizeGithubLogin,
+  normalizeGithubRepoFullName,
   normalizeIdentifier,
+  normalizeNumericId,
   normalizePhone,
   normalizeSlackUserId,
   normalizeWaJid,
@@ -101,6 +103,31 @@ describe('normalizeGithubLogin', () => {
   });
 });
 
+describe('normalizeNumericId', () => {
+  it('normalizes positive numeric ids', () => {
+    expect(normalizeNumericId('82745')).toBe('82745');
+    expect(normalizeNumericId('  00123  ')).toBe('123');
+  });
+
+  it('rejects non-numeric ids', () => {
+    expect(normalizeNumericId('abc')).toBeNull();
+    expect(normalizeNumericId('12.3')).toBeNull();
+    expect(normalizeNumericId('')).toBeNull();
+  });
+});
+
+describe('normalizeGithubRepoFullName', () => {
+  it('lowercases owner/repo full names', () => {
+    expect(normalizeGithubRepoFullName('Lobu-AI/Lobu')).toBe('lobu-ai/lobu');
+  });
+
+  it('rejects invalid full names', () => {
+    expect(normalizeGithubRepoFullName('missing-repo')).toBeNull();
+    expect(normalizeGithubRepoFullName('/repo')).toBeNull();
+    expect(normalizeGithubRepoFullName('owner/')).toBeNull();
+  });
+});
+
 describe('normalizeAuthUserId', () => {
   it('trims but preserves case to match Better Auth ids', () => {
     expect(normalizeAuthUserId('  abc123 ')).toBe('abc123');
@@ -121,6 +148,8 @@ describe('normalizeIdentifier dispatcher', () => {
       '14155551234@s.whatsapp.net'
     );
     expect(normalizeIdentifier('github_login', 'Octocat')).toBe('octocat');
+    expect(normalizeIdentifier('github_user_id', '  82745 ')).toBe('82745');
+    expect(normalizeIdentifier('github_repo_full_name', 'Lobu-AI/Lobu')).toBe('lobu-ai/lobu');
   });
 
   it('falls back to trim-only for unknown namespaces so custom identities still get hygiene', () => {

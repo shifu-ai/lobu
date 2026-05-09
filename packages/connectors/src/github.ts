@@ -10,6 +10,7 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  IDENTITY,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -20,7 +21,8 @@ type GitHubContentType =
   | 'issue_comments'
   | 'pr_comments'
   | 'discussions'
-  | 'discussion_comments';
+  | 'discussion_comments'
+  | 'stargazers';
 
 interface GitHubConfig {
   repo_owner?: string;
@@ -33,11 +35,28 @@ interface GitHubConfig {
 
 interface GitHubCheckpoint {
   last_sync_at?: string;
+  stargazers?: GitHubStargazerCheckpoint[];
+}
+
+interface GitHubStargazerCheckpoint {
+  key: string;
+  login: string;
+  starred_at?: string;
+  user_id?: number | null;
+  user_type?: string | null;
+  html_url?: string | null;
+  profile_fetched_at?: string | null;
 }
 
 interface RepoRef {
   owner: string;
   repo: string;
+}
+
+interface GitHubRepositoryLike {
+  id?: number;
+  full_name?: string;
+  html_url?: string;
 }
 
 interface GitHubIssueLike {
@@ -93,6 +112,46 @@ interface GraphQLDiscussionCommentNode {
   discussion?: { number?: number };
 }
 
+interface GitHubStargazerLike {
+  starred_at?: string;
+  user?: {
+    id?: number;
+    login?: string;
+    html_url?: string;
+    type?: string;
+    site_admin?: boolean;
+    avatar_url?: string;
+  };
+  login?: string;
+  html_url?: string;
+  id?: number;
+  type?: string;
+  site_admin?: boolean;
+  avatar_url?: string;
+}
+
+interface GitHubUserProfile {
+  id?: number;
+  login?: string;
+  name?: string | null;
+  company?: string | null;
+  blog?: string | null;
+  location?: string | null;
+  email?: string | null;
+  bio?: string | null;
+  twitter_username?: string | null;
+  public_repos?: number;
+  public_gists?: number;
+  followers?: number;
+  following?: number;
+  html_url?: string;
+  avatar_url?: string;
+  type?: string;
+  site_admin?: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
 function toInt(value: unknown, fallback: number): number {
   const n = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(n) ? n : fallback;
@@ -131,6 +190,9 @@ const LOOKBACK_PROP = {
   },
 } as const;
 
+const STARGAZER_PROFILE_REFRESH_MS = 30 * 24 * 60 * 60 * 1000;
+const STARGAZER_PROFILE_FETCH_LIMIT = 25;
+
 const LABELS_PROP = {
   labels_filter: {
     type: 'array',
@@ -144,7 +206,7 @@ export default class GitHubConnector extends ConnectorRuntime {
     key: 'github',
     name: 'GitHub',
     description: 'Collects GitHub issues/discussions and executes repo actions.',
-    version: '1.1.0',
+    version: '1.2.0',
     authSchema: {
       methods: [
         {
@@ -338,6 +400,60 @@ export default class GitHubConnector extends ConnectorRuntime {
           },
         },
       },
+      stargazers: {
+        key: 'stargazers',
+        name: 'Stargazers',
+        requiredScopes: [],
+        description: 'Sync GitHub users who starred a repository.',
+        displayNameTemplate: '{repo_owner}/{repo_name} stargazers',
+        configSchema: {
+          type: 'object',
+          required: ['repo_owner', 'repo_name'],
+          properties: { ...REPO_PROPS, ...LOOKBACK_PROP },
+        },
+        eventKinds: {
+          stargazer: {
+            description: 'A GitHub user starred the repository',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                actor: { type: 'object' },
+                target: { type: 'object' },
+                action: { type: 'string' },
+                starred_at: { type: 'string' },
+                source: { type: 'string' },
+              },
+            },
+          },
+          stargazer_unstarred: {
+            description: 'A GitHub user unstarred the repository',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                actor: { type: 'object' },
+                target: { type: 'object' },
+                action: { type: 'string' },
+                starred_at: { type: 'string' },
+                unstarred_at: { type: 'string' },
+                unstarred_at_is_inferred: { type: 'boolean' },
+                source: { type: 'string' },
+              },
+            },
+          },
+          stargazer_profile: {
+            description: 'A public GitHub profile observation for a stargazer',
+            metadataSchema: {
+              type: 'object',
+              properties: {
+                public_identity_profile: { type: 'boolean' },
+                provider: { type: 'string' },
+                identities: { type: 'array' },
+                account: { type: 'object' },
+              },
+            },
+          },
+        },
+      },
     },
     actions: {
       create_issue: {
@@ -459,6 +575,21 @@ export default class GitHubConnector extends ConnectorRuntime {
     const contentType = (ctx.feedKey ?? 'issues') as GitHubContentType;
     const sinceIso = this.resolveSince(ctx.checkpoint, config.lookback_days ?? 365);
 
+    if (contentType === 'stargazers') {
+      const result = await this.syncStargazers(repo, ctx.checkpoint, token);
+      return {
+        events: result.events,
+        checkpoint: {
+          last_sync_at: new Date().toISOString(),
+          stargazers: result.currentStargazers,
+        } as Record<string, unknown>,
+        metadata: {
+          items_found: result.events.length,
+          current_stargazers: result.currentStargazers.length,
+        },
+      };
+    }
+
     const events = await this.syncContent({
       repo,
       contentType,
@@ -574,6 +705,8 @@ export default class GitHubConnector extends ConnectorRuntime {
         return await this.syncDiscussions(repo, sinceIso, token);
       case 'discussion_comments':
         return await this.syncDiscussionComments(repo, sinceIso, token);
+      case 'stargazers':
+        return [];
       default:
         return [];
     }
@@ -867,6 +1000,317 @@ export default class GitHubConnector extends ConnectorRuntime {
     return result;
   }
 
+  private async syncStargazers(
+    repo: RepoRef,
+    checkpoint: Record<string, unknown> | null,
+    token: string | null
+  ): Promise<{ events: EventEnvelope[]; currentStargazers: GitHubStargazerCheckpoint[] }> {
+    const previous = this.parseStargazerCheckpoint(checkpoint);
+    const previousByKey = new Map(previous.map((stargazer) => [stargazer.key, stargazer]));
+    const currentStargazers: GitHubStargazerCheckpoint[] = [];
+    const events: EventEnvelope[] = [];
+    const now = new Date();
+    const repoInfo = await this.fetchRepository(repo, token);
+    const target = this.buildRepoTarget(repo, repoInfo);
+    let remainingProfileFetches = STARGAZER_PROFILE_FETCH_LIMIT;
+
+    for (let page = 1; ; page += 1) {
+      const query = new URLSearchParams({
+        per_page: '100',
+        page: String(page),
+      });
+      const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/stargazers?${query.toString()}`;
+      const stargazers = await this.requestJson<GitHubStargazerLike[]>({
+        url,
+        token,
+        accept: 'application/vnd.github.star+json',
+      });
+
+      if (stargazers.length === 0) break;
+
+      for (const stargazer of stargazers) {
+        const user = stargazer.user ?? stargazer;
+        const login = user.login;
+        if (!login) continue;
+
+        const key = this.githubUserKey(user, login);
+        const starredAtIso = toIsoOrUndefined(stargazer.starred_at) ?? now.toISOString();
+        const starredAt = new Date(starredAtIso);
+        if (Number.isNaN(starredAt.getTime())) continue;
+
+        const previousStargazer = previousByKey.get(key);
+        const shouldRefreshProfile = this.shouldRefreshStargazerProfile(previousStargazer, now);
+        const profileFetchedAt = shouldRefreshProfile && remainingProfileFetches > 0
+          ? await this.enqueueStargazerProfileEvent({
+              events,
+              login,
+              token,
+              fallback: user,
+              fetchedAt: now,
+            })
+          : (previousStargazer?.profile_fetched_at ?? null);
+        if (shouldRefreshProfile && remainingProfileFetches > 0) remainingProfileFetches -= 1;
+
+        currentStargazers.push({
+          key,
+          login,
+          starred_at: starredAt.toISOString(),
+          user_id: user.id ?? previousStargazer?.user_id ?? null,
+          user_type: user.type ?? previousStargazer?.user_type ?? null,
+          html_url: user.html_url ?? previousStargazer?.html_url ?? `https://github.com/${login}`,
+          profile_fetched_at: profileFetchedAt,
+        });
+
+        if (!previousStargazer) {
+          events.push({
+            origin_id: `stargazer_${repo.owner}_${repo.repo}_${this.keyForOriginId(key)}`,
+            title: `${login} starred ${repo.owner}/${repo.repo}`,
+            payload_text: `${login} starred ${repo.owner}/${repo.repo}.`,
+            author_name: login,
+            source_url: user.html_url ?? `https://github.com/${login}`,
+            occurred_at: starredAt,
+            origin_type: 'stargazer',
+            score: 1,
+            metadata: {
+              actor: this.buildActor(user, login),
+              target,
+              action: 'starred',
+              starred_at: starredAt.toISOString(),
+              source: 'github_stargazers_snapshot',
+            },
+          });
+        }
+      }
+
+      if (stargazers.length < 100) break;
+    }
+
+    const currentKeys = new Set(currentStargazers.map((stargazer) => stargazer.key));
+    for (const previousStargazer of previous) {
+      if (currentKeys.has(previousStargazer.key)) continue;
+
+      events.push({
+        origin_id: `stargazer_unstarred_${repo.owner}_${repo.repo}_${this.keyForOriginId(previousStargazer.key)}_${now.getTime()}`,
+        title: `${previousStargazer.login} unstarred ${repo.owner}/${repo.repo}`,
+        payload_text: `${previousStargazer.login} unstarred ${repo.owner}/${repo.repo}.`,
+        author_name: previousStargazer.login,
+        source_url: previousStargazer.html_url ?? `https://github.com/${previousStargazer.login}`,
+        occurred_at: now,
+        origin_type: 'stargazer_unstarred',
+        score: 1,
+        metadata: {
+          actor: this.buildActorFromCheckpoint(previousStargazer),
+          target,
+          action: 'unstarred',
+          starred_at: previousStargazer.starred_at ?? null,
+          unstarred_at: now.toISOString(),
+          unstarred_at_is_inferred: true,
+          source: 'github_stargazers_snapshot_diff',
+        },
+      });
+    }
+
+    return { events, currentStargazers };
+  }
+
+  private shouldRefreshStargazerProfile(
+    previous: GitHubStargazerCheckpoint | undefined,
+    now: Date
+  ): boolean {
+    const fetchedAt = toIsoOrUndefined(previous?.profile_fetched_at);
+    if (!fetchedAt) return true;
+    return now.getTime() - new Date(fetchedAt).getTime() >= STARGAZER_PROFILE_REFRESH_MS;
+  }
+
+  private async enqueueStargazerProfileEvent(params: {
+    events: EventEnvelope[];
+    login: string;
+    token: string | null;
+    fallback: GitHubStargazerLike['user'] | GitHubStargazerLike;
+    fetchedAt: Date;
+  }): Promise<string> {
+    const profile = await this.fetchUserProfile(params.login, params.token, params.fallback);
+    const profileUrl = profile.html_url ?? `https://github.com/${params.login}`;
+    const occurredAt = new Date(
+      toIsoOrUndefined(profile.updated_at) ?? params.fetchedAt.toISOString()
+    );
+    const identities = this.githubUserIdentities(profile, params.login);
+
+    params.events.push({
+      origin_id: `stargazer_profile_${this.keyForOriginId(this.githubUserKey(profile, params.login))}`,
+      title: profile.name || params.login,
+      payload_text: profile.bio || `GitHub profile for ${params.login}.`,
+      author_name: params.login,
+      source_url: profileUrl,
+      occurred_at: Number.isNaN(occurredAt.getTime()) ? params.fetchedAt : occurredAt,
+      origin_type: 'stargazer_profile',
+      score: toInt(profile.followers, 0),
+      metadata: {
+        public_identity_profile: true,
+        provider: 'github',
+        identities,
+        account: {
+          provider: 'github',
+          provider_user_id: profile.id ? String(profile.id) : null,
+          handle: params.login,
+          url: profileUrl,
+          avatar_url: profile.avatar_url ?? null,
+          user_type: profile.type ?? null,
+          site_admin: profile.site_admin ?? false,
+          profile: {
+            name: profile.name ?? null,
+            company: profile.company ?? null,
+            blog: profile.blog ?? null,
+            location: profile.location ?? null,
+            email: profile.email ?? null,
+            bio: profile.bio ?? null,
+            twitter_username: profile.twitter_username ?? null,
+            public_repos: profile.public_repos ?? null,
+            public_gists: profile.public_gists ?? null,
+            followers: profile.followers ?? null,
+            following: profile.following ?? null,
+            github_created_at: profile.created_at ?? null,
+            github_updated_at: profile.updated_at ?? null,
+          },
+          fetched_at: params.fetchedAt.toISOString(),
+        },
+      },
+    });
+
+    return params.fetchedAt.toISOString();
+  }
+
+  private async fetchUserProfile(
+    login: string,
+    token: string | null,
+    fallback: GitHubStargazerLike['user'] | GitHubStargazerLike
+  ): Promise<GitHubUserProfile> {
+    try {
+      return await this.requestJson<GitHubUserProfile>({
+        url: `https://api.github.com/users/${encodeURIComponent(login)}`,
+        token,
+      });
+    } catch {
+      return {
+        id: fallback?.id,
+        login,
+        html_url: fallback?.html_url ?? `https://github.com/${login}`,
+        avatar_url: fallback?.avatar_url,
+        type: fallback?.type,
+        site_admin: fallback?.site_admin,
+      };
+    }
+  }
+
+  private async fetchRepository(
+    repo: RepoRef,
+    token: string | null
+  ): Promise<GitHubRepositoryLike> {
+    try {
+      return await this.requestJson<GitHubRepositoryLike>({
+        url: `https://api.github.com/repos/${repo.owner}/${repo.repo}`,
+        token,
+      });
+    } catch {
+      return {
+        full_name: `${repo.owner}/${repo.repo}`,
+        html_url: `https://github.com/${repo.owner}/${repo.repo}`,
+      };
+    }
+  }
+
+  private githubUserKey(user: Pick<GitHubUserProfile, 'id'>, login: string): string {
+    return user.id ? `${IDENTITY.GITHUB_USER_ID}:${user.id}` : `${IDENTITY.GITHUB_LOGIN}:${login.toLowerCase()}`;
+  }
+
+  private keyForOriginId(key: string): string {
+    return key.replace(/[^a-z0-9]+/gi, '_');
+  }
+
+  private githubUserIdentities(
+    user: Pick<GitHubUserProfile, 'id'>,
+    login: string
+  ): Array<{ namespace: string; identifier: string; verification_status: string }> {
+    const identities: Array<{ namespace: string; identifier: string; verification_status: string }> = [];
+    if (user.id) {
+      identities.push({
+        namespace: IDENTITY.GITHUB_USER_ID,
+        identifier: String(user.id),
+        verification_status: 'observed',
+      });
+    }
+    identities.push({
+      namespace: IDENTITY.GITHUB_LOGIN,
+      identifier: login.toLowerCase(),
+      verification_status: 'observed',
+    });
+    return identities;
+  }
+
+  private buildActor(user: GitHubStargazerLike['user'] | GitHubStargazerLike, login: string) {
+    return {
+      provider: 'github',
+      identity: user?.id
+        ? { namespace: IDENTITY.GITHUB_USER_ID, identifier: String(user.id) }
+        : { namespace: IDENTITY.GITHUB_LOGIN, identifier: login.toLowerCase() },
+      handle: { namespace: IDENTITY.GITHUB_LOGIN, identifier: login.toLowerCase() },
+      profile_url: user?.html_url ?? `https://github.com/${login}`,
+      user_type: user?.type ?? null,
+    };
+  }
+
+  private buildActorFromCheckpoint(stargazer: GitHubStargazerCheckpoint) {
+    const [namespace, ...identifierParts] = stargazer.key.split(':');
+    const identifier = identifierParts.join(':');
+    return {
+      provider: 'github',
+      identity: { namespace, identifier },
+      handle: { namespace: IDENTITY.GITHUB_LOGIN, identifier: stargazer.login.toLowerCase() },
+      profile_url: stargazer.html_url ?? `https://github.com/${stargazer.login}`,
+      user_type: stargazer.user_type ?? null,
+    };
+  }
+
+  private buildRepoTarget(repo: RepoRef, repoInfo: GitHubRepositoryLike) {
+    const fullName = (repoInfo.full_name ?? `${repo.owner}/${repo.repo}`).toLowerCase();
+    return {
+      provider: 'github',
+      identity: repoInfo.id
+        ? { namespace: IDENTITY.GITHUB_REPO_ID, identifier: String(repoInfo.id) }
+        : { namespace: IDENTITY.GITHUB_REPO_FULL_NAME, identifier: fullName },
+      handle: { namespace: IDENTITY.GITHUB_REPO_FULL_NAME, identifier: fullName },
+      url: repoInfo.html_url ?? `https://github.com/${repo.owner}/${repo.repo}`,
+    };
+  }
+
+  private parseStargazerCheckpoint(
+    checkpoint: Record<string, unknown> | null
+  ): GitHubStargazerCheckpoint[] {
+    const raw = (checkpoint as GitHubCheckpoint | null)?.stargazers;
+    if (!Array.isArray(raw)) return [];
+
+    return raw
+      .map((item): GitHubStargazerCheckpoint | null => {
+        if (!item || typeof item !== 'object') return null;
+        const value = item as Record<string, unknown>;
+        const login = asString(value.login);
+        if (!login) return null;
+        const userId = typeof value.user_id === 'number' ? value.user_id : null;
+        const key = asString(value.key) ?? (userId ? `${IDENTITY.GITHUB_USER_ID}:${userId}` : `${IDENTITY.GITHUB_LOGIN}:${login.toLowerCase()}`);
+
+        return {
+          key,
+          login,
+          starred_at: asString(value.starred_at),
+          user_id: userId,
+          user_type: asString(value.user_type) ?? null,
+          html_url: asString(value.html_url) ?? null,
+          profile_fetched_at: asString(value.profile_fetched_at) ?? null,
+        };
+      })
+      .filter((value): value is GitHubStargazerCheckpoint => value !== null);
+  }
+
   private async createIssue(
     repo: RepoRef,
     token: string,
@@ -1081,10 +1525,11 @@ export default class GitHubConnector extends ConnectorRuntime {
     method?: string;
     token: string | null;
     body?: Record<string, unknown>;
+    accept?: string;
   }): Promise<T> {
     const method = params.method ?? 'GET';
     const headers: Record<string, string> = {
-      Accept: 'application/vnd.github+json',
+      Accept: params.accept ?? 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
       'Content-Type': 'application/json',
     };

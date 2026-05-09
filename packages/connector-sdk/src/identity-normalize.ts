@@ -90,6 +90,25 @@ export function normalizeGithubLogin(raw: string | null | undefined): string | n
   return trimmed;
 }
 
+export function normalizeNumericId(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  return trimmed.replace(/^0+(?=\d)/, '');
+}
+
+export function normalizeGithubRepoFullName(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (!trimmed) return null;
+  const parts = trimmed.split('/');
+  if (parts.length !== 2) return null;
+  const [owner, repo] = parts;
+  const githubName = /^[a-z0-9](?:[a-z0-9._-]{0,98}[a-z0-9])?$/;
+  if (!githubName.test(owner) || !githubName.test(repo)) return null;
+  return `${owner}/${repo}`;
+}
+
 export function normalizeGoogleContactId(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string') return null;
   const trimmed = raw.trim();
@@ -126,6 +145,11 @@ export function normalizeIdentifier(
       return normalizeWaJid(raw);
     case 'github_login':
       return normalizeGithubLogin(raw);
+    case 'github_user_id':
+    case 'github_repo_id':
+      return normalizeNumericId(raw);
+    case 'github_repo_full_name':
+      return normalizeGithubRepoFullName(raw);
     case 'google_contact_id':
       return normalizeGoogleContactId(raw);
     case 'auth_user_id':
