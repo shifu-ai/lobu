@@ -11,10 +11,48 @@ echo "  DATABASE_URL: ${DATABASE_URL:+***set***}"
 echo "  GITHUB_TOKEN: ${GITHUB_TOKEN:+***set***}"
 echo "  JWT_SECRET: ${JWT_SECRET:+***set***}"
 
+preflight_database() {
+  echo "Checking database connectivity..."
+  node --input-type=module <<'NODE'
+import postgres from "postgres";
+
+const databaseUrl = process.env.DATABASE_URL;
+const timeoutSeconds = Number(process.env.DB_PREFLIGHT_TIMEOUT_SECONDS || 10);
+
+if (!databaseUrl) {
+  console.error("ERROR: DATABASE_URL not set");
+  process.exit(1);
+}
+
+const sql = postgres(databaseUrl, {
+  max: 1,
+  connect_timeout: timeoutSeconds,
+  idle_timeout: 1,
+  onnotice: () => {},
+});
+
+try {
+  const rows = await sql`select current_database() as database`;
+  console.log(`Database preflight passed (${rows[0]?.database ?? "unknown"})`);
+} catch (error) {
+  console.error("ERROR: database preflight failed");
+  console.error(error instanceof Error ? error.message : String(error));
+  console.error("Refusing to run migrations against an unreachable or missing production database.");
+  process.exit(1);
+} finally {
+  await sql.end({ timeout: 1 }).catch(() => {});
+}
+NODE
+}
+
 run_migrations() {
   if [ -z "$DATABASE_URL" ]; then
     echo "ERROR: DATABASE_URL not set"
     exit 1
+  fi
+
+  if [ "${NODE_ENV:-}" = "production" ] && [ "${ALLOW_DB_CREATE:-0}" != "1" ]; then
+    preflight_database
   fi
 
   echo ""
