@@ -442,6 +442,18 @@ export async function initCommand(
 
     await renderTemplate(".env.tmpl", variables, join(projectDir, ".env"));
 
+    const envVarsToFill = new Set<string>();
+    if (selectedProvider?.providers?.[0]?.envVarName) {
+      envVarsToFill.add(selectedProvider.providers[0].envVarName);
+    }
+    for (const value of Object.values(platformConfig)) {
+      const envVar = extractEnvVarRef(value);
+      if (envVar) envVarsToFill.add(envVar);
+    }
+    for (const envVar of envVarsToFill) {
+      await setLocalEnvValue(projectDir, envVar, "");
+    }
+
     if (publicGatewayUrl) {
       await setLocalEnvValue(
         projectDir,
@@ -613,14 +625,29 @@ const PLATFORM_PLACEHOLDERS: Record<PlatformChoice, Record<string, string>> = {
     botToken: "$SLACK_BOT_TOKEN",
     signingSecret: "$SLACK_SIGNING_SECRET",
   },
-  discord: { botToken: "$DISCORD_BOT_TOKEN" },
+  discord: {
+    botToken: "$DISCORD_BOT_TOKEN",
+    applicationId: "$DISCORD_APPLICATION_ID",
+    publicKey: "$DISCORD_PUBLIC_KEY",
+  },
   whatsapp: {
     accessToken: "$WHATSAPP_ACCESS_TOKEN",
     phoneNumberId: "$WHATSAPP_PHONE_NUMBER_ID",
+    verifyToken: "$WHATSAPP_WEBHOOK_VERIFY_TOKEN",
+    appSecret: "$WHATSAPP_APP_SECRET",
   },
-  teams: { appId: "$TEAMS_APP_ID", appPassword: "$TEAMS_APP_PASSWORD" },
+  teams: {
+    appId: "$TEAMS_APP_ID",
+    appPassword: "$TEAMS_APP_PASSWORD",
+    appType: "MultiTenant",
+  },
   gchat: { credentials: "$GOOGLE_CHAT_CREDENTIALS" },
 };
+
+function extractEnvVarRef(value: string): string | null {
+  const match = value.match(/^\$([A-Z_][A-Z0-9_]*)$/);
+  return match?.[1] ?? null;
+}
 
 function humanizeSlug(slug: string): string {
   return slug
@@ -674,8 +701,8 @@ export async function generateLobuToml(
     lines.push(
       "# Add providers via the gateway configuration APIs or uncomment below:",
       `# [[agents.${id}.providers]]`,
-      '# id = "anthropic"',
-      '# key = "$ANTHROPIC_API_KEY"'
+      '# id = "openrouter"',
+      '# key = "$OPENROUTER_API_KEY"'
     );
   }
 

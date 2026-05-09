@@ -153,7 +153,7 @@ Each entry configures an LLM provider. The first available provider is used at r
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `id` | string | yes | Provider identifier (e.g. `openrouter`, `anthropic`, `gemini`, `openai`) |
+| `id` | string | yes | Provider identifier from `config/providers.json` (e.g. `openrouter`, `gemini`, `openai`) |
 | `model` | string | no | Model override (e.g. `anthropic/claude-sonnet-4`) |
 | `key` | string | no | API key — literal value or `$ENV_VAR` reference |
 | `secret_ref` | string | no | Durable secret reference (for example `secret://...`) |
@@ -206,8 +206,10 @@ appSecret = "$WHATSAPP_APP_SECRET"
 [agents.x.platforms.config]
 appId = "$TEAMS_APP_ID"
 appPassword = "$TEAMS_APP_PASSWORD"
-appTenantId = "$TEAMS_APP_TENANT_ID"
 appType = "MultiTenant"
+# For single-tenant Azure apps, use:
+# appTenantId = "$TEAMS_APP_TENANT_ID"
+# appType = "SingleTenant"
 ```
 
 **Google Chat**

@@ -77,9 +77,27 @@ export async function promptPlatformConfig(
       message: "Discord bot token:",
       mask: true,
     });
+    const applicationId = await input({
+      message: "Discord application ID:",
+    });
+    const publicKey = await password({
+      message: "Discord application public key:",
+      mask: true,
+    });
     if (botToken) {
       platformConfig.botToken = "$DISCORD_BOT_TOKEN";
       platformSecrets.push({ envVar: "DISCORD_BOT_TOKEN", value: botToken });
+    }
+    if (applicationId) {
+      platformConfig.applicationId = "$DISCORD_APPLICATION_ID";
+      platformSecrets.push({
+        envVar: "DISCORD_APPLICATION_ID",
+        value: applicationId,
+      });
+    }
+    if (publicKey) {
+      platformConfig.publicKey = "$DISCORD_PUBLIC_KEY";
+      platformSecrets.push({ envVar: "DISCORD_PUBLIC_KEY", value: publicKey });
     }
   } else if (platform === "whatsapp") {
     const accessToken = await password({
@@ -88,6 +106,14 @@ export async function promptPlatformConfig(
     });
     const phoneNumberId = await input({
       message: "WhatsApp phone number ID:",
+    });
+    const verifyToken = await password({
+      message: "WhatsApp webhook verify token:",
+      mask: true,
+    });
+    const appSecret = await password({
+      message: "WhatsApp app secret:",
+      mask: true,
     });
     if (accessToken) {
       platformConfig.accessToken = "$WHATSAPP_ACCESS_TOKEN";
@@ -103,6 +129,20 @@ export async function promptPlatformConfig(
         value: phoneNumberId,
       });
     }
+    if (verifyToken) {
+      platformConfig.verifyToken = "$WHATSAPP_WEBHOOK_VERIFY_TOKEN";
+      platformSecrets.push({
+        envVar: "WHATSAPP_WEBHOOK_VERIFY_TOKEN",
+        value: verifyToken,
+      });
+    }
+    if (appSecret) {
+      platformConfig.appSecret = "$WHATSAPP_APP_SECRET";
+      platformSecrets.push({
+        envVar: "WHATSAPP_APP_SECRET",
+        value: appSecret,
+      });
+    }
   } else if (platform === "teams") {
     const appId = await input({
       message: "Teams App ID (from Azure Bot):",
@@ -110,6 +150,9 @@ export async function promptPlatformConfig(
     const appPassword = await password({
       message: "Teams App Password (client secret):",
       mask: true,
+    });
+    const appTenantId = await input({
+      message: "Teams App Tenant ID (leave empty for multi-tenant apps):",
     });
     if (appId) {
       platformConfig.appId = "$TEAMS_APP_ID";
@@ -124,6 +167,16 @@ export async function promptPlatformConfig(
         envVar: "TEAMS_APP_PASSWORD",
         value: appPassword,
       });
+    }
+    if (appTenantId) {
+      platformConfig.appTenantId = "$TEAMS_APP_TENANT_ID";
+      platformSecrets.push({
+        envVar: "TEAMS_APP_TENANT_ID",
+        value: appTenantId,
+      });
+      platformConfig.appType = "SingleTenant";
+    } else if (appId || appPassword) {
+      platformConfig.appType = "MultiTenant";
     }
   } else if (platform === "gchat") {
     const credentials = await password({

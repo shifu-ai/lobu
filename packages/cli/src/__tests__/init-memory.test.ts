@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { generateLobuToml } from "../commands/init";
+import { generateLobuToml, initCommand } from "../commands/init";
 
 describe("init memory scaffolding", () => {
   let projectDir: string;
@@ -55,5 +55,28 @@ describe("init memory scaffolding", () => {
 
     expect(content).toContain('org = "support"');
     expect(content).toContain('name = "Support"');
+  });
+
+  test("init --yes writes empty env entries for generated provider and platform refs", async () => {
+    await initCommand(projectDir, "my-agent", {
+      yes: true,
+      provider: "openrouter",
+      platform: "slack",
+      memory: "lobu-cloud",
+      noSentry: true,
+    });
+
+    const env = readFileSync(join(projectDir, "my-agent", ".env"), "utf-8");
+    const toml = readFileSync(
+      join(projectDir, "my-agent", "lobu.toml"),
+      "utf-8"
+    );
+
+    expect(toml).toContain('key = "$OPENROUTER_API_KEY"');
+    expect(toml).toContain('botToken = "$SLACK_BOT_TOKEN"');
+    expect(toml).toContain('signingSecret = "$SLACK_SIGNING_SECRET"');
+    expect(env).toContain("OPENROUTER_API_KEY=");
+    expect(env).toContain("SLACK_BOT_TOKEN=");
+    expect(env).toContain("SLACK_SIGNING_SECRET=");
   });
 });
