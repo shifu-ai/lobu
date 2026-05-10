@@ -3,7 +3,7 @@ title: Security
 description: Isolation, network policy, credentials, and MCP proxy behavior.
 ---
 
-Lobu is built so a compromised worker session cannot leak secrets or reach arbitrary networks. Secrets and outbound policy live on the gateway; workers run sandboxed with no ambient trust.
+Lobu is built for multi-user agents: each user or channel gets an isolated worker, while secrets and outbound policy stay on the gateway. A compromised worker should not see raw credentials or reach arbitrary networks.
 
 ## Core Model
 

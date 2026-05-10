@@ -77,8 +77,8 @@ export function Footer() {
               class="mt-4 text-[13px] leading-relaxed max-w-xs"
               style={{ color: "var(--color-page-text-muted)" }}
             >
-              Open-source platform for autonomous, persistent agents.
-              Self-hostable, sandboxed, and proactive.
+              Open-source backend for multi-user AI agents. Self-hostable,
+              isolated, and source-backed.
             </p>
           </div>
           {COLUMNS.map((col) => (

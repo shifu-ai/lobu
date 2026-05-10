@@ -48,7 +48,7 @@ type ConnectFromClientConfig = {
 
 const mcpClientDescribe =
   (label: string) => (showcase: LandingUseCaseShowcase) =>
-    `Use ${label} on top of the ${showcase.label.toLowerCase()} workspace so it can read and write the same shared memory shown in this example.`;
+    `Use ${label} with the ${showcase.label.toLowerCase()} workspace so it can use the same org-scoped memory, sources, and tools shown here.`;
 
 const connectFromClientConfigs: Record<
   ConnectFromClientId,
@@ -118,7 +118,7 @@ const connectFromClientConfigs: Record<
     valueProp:
       "Layer structured, shareable Lobu memory on top of OpenClaw's built-in filesystem memory — the plugin extends OpenClaw's filesystem plugin and can optionally take over its memory slot, so different OpenClaw agents can talk to each other through the same Lobu graph.",
     installPrompt:
-      "Install Lobu memory in OpenClaw. Run:\n\n  openclaw plugins install @lobu/openclaw-plugin\n  lobu login\n  lobu memory configure --url https://lobu.ai/mcp --org <org-slug>\n  lobu memory health --url https://lobu.ai/mcp --org <org-slug>\n\nThe plugin extends OpenClaw's filesystem plugin and can replace its memory slot. After install, point me at the Lobu memory workspace I should use as shared memory across my OpenClaw agents.",
+      "Connect OpenClaw to Lobu. Run:\n\n  openclaw plugins install @lobu/openclaw-plugin\n  lobu login\n  lobu memory configure --url https://lobu.ai/mcp --org <org-slug>\n  lobu memory health --url https://lobu.ai/mcp --org <org-slug>\n\nUse Lobu as the multi-user backend for OpenClaw: org-scoped memory, connected sources, watchers, and credentials that stay behind the gateway.",
     npmPackage: {
       name: "@lobu/openclaw-plugin",
       registryUrl: "https://www.npmjs.com/package/@lobu/openclaw-plugin",

@@ -35,8 +35,8 @@ const clients = [
 ---
 
 <BaseLayout
-  title="Lobu MCP - Connect any agent to your shared memory"
-  description="https://lobu.ai/mcp is the canonical MCP endpoint. Sign in once, then list and switch between organizations from any MCP-capable agent."
+  title="Lobu MCP - Connect agents to your multi-user backend"
+  description="https://lobu.ai/mcp is the canonical MCP endpoint. Sign in once, then use org-scoped memory, connectors, watchers, and tools from any MCP-capable agent."
 >
   <div
     class="min-h-screen grid-lines"
@@ -58,18 +58,15 @@ const clients = [
           class="text-4xl sm:text-5xl font-bold tracking-tight mb-6"
           style={{ color: "var(--color-page-text)" }}
         >
-          Connect any agent to Lobu
+          Connect agents to your Lobu backend
         </h1>
         <p
           class="text-lg leading-relaxed mb-8"
           style={{ color: "var(--color-page-text-muted)" }}
         >
-          The URL below is a Streamable HTTP MCP server. Paste it into any
-          MCP-capable client. After OAuth, the server exposes
-          <code class="font-mono text-sm">list_organizations</code> and
-          <code class="font-mono text-sm">switch_organization</code> so the
-          agent can see every workspace you belong to and pick one per
-          conversation.
+          Paste this Streamable HTTP MCP URL into any compatible client. After
+          OAuth, agents can use org-scoped memory, connectors, watchers, and
+          tools without seeing raw credentials.
         </p>
 
         <div
