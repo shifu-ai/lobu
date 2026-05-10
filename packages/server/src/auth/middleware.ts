@@ -45,6 +45,20 @@ declare module 'hono' {
      * - `null`        — anonymous / unauthenticated request
      */
     authSource: 'session' | 'pat' | 'oauth' | null;
+    /**
+     * Set by the /api/workers/* middleware. Tells worker handlers what trust
+     * model this request operates under.
+     *
+     * - `trusted`     — request matched WORKER_API_TOKEN (server-side fleet)
+     * - `user`        — authenticated as a Lobu user (e.g. iOS Bridge); poll
+     *                   and stream MUST filter on `workerOrgIds`
+     * - `anonymous`   — local dev only (no WORKER_API_TOKEN, no user auth)
+     */
+    workerAuthMode: 'trusted' | 'user' | 'anonymous' | null;
+    /** The user.id when workerAuthMode === 'user', else null. */
+    workerUserId: string | null;
+    /** The user's org memberships when workerAuthMode === 'user', else null. */
+    workerOrgIds: string[] | null;
   }
 }
 

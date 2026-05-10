@@ -1,3 +1,4 @@
+export * from './apple_health.ts';
 export * from './browser-scraper-utils.ts';
 export * from './capterra.ts';
 export * from './g2.ts';

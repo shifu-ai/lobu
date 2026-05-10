@@ -7,7 +7,7 @@
 
 import type { Context } from 'hono';
 import { createAuth } from './auth';
-import { getDb } from './db/client';
+import { getDb, pgTextArray } from './db/client';
 import { emit } from './events/emitter';
 import type { Env } from './index';
 import { notifyBrowserAuthExpired } from './notifications/triggers';
@@ -40,6 +40,37 @@ const DUE_FEED_MATERIALIZE_COOLDOWN_MS = 5000;
 let lastDueFeedMaterializeAttemptAt = 0;
 
 /**
+ * Verify that the request's worker auth scope is allowed to touch this run.
+ * Trusted/anonymous workers see everything; user-scoped workers can only
+ * touch runs in orgs the user belongs to.
+ *
+ * Returns a Hono response on rejection, or null on pass.
+ */
+async function authorizeRunForWorker(
+  c: Context<{ Bindings: Env }>,
+  runId: number
+): Promise<Response | null> {
+  if (c.var.workerAuthMode !== 'user') {
+    return null;
+  }
+  const orgIds = c.var.workerOrgIds ?? [];
+  if (orgIds.length === 0) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  const sql = getDb();
+  const rows = (await sql`
+    SELECT organization_id FROM runs WHERE id = ${runId} LIMIT 1
+  `) as unknown as Array<{ organization_id: string }>;
+  if (rows.length === 0) {
+    return c.json({ error: 'Run not found' }, 404);
+  }
+  if (!orgIds.includes(rows[0].organization_id)) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  return null;
+}
+
+/**
  * POST /api/workers/poll
  *
  * Worker polls for next available sync run.
@@ -47,9 +78,12 @@ let lastDueFeedMaterializeAttemptAt = 0;
  */
 export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let worker_id: string;
-  let capabilities: { browser?: boolean } = {};
+  let capabilities: Record<string, boolean> = {};
   try {
-    const body = await c.req.json<{ worker_id: string; capabilities?: { browser?: boolean } }>();
+    const body = await c.req.json<{
+      worker_id: string;
+      capabilities?: Record<string, boolean>;
+    }>();
     worker_id = body.worker_id;
     capabilities = body.capabilities ?? {};
   } catch {
@@ -57,6 +91,30 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   }
   const sql = getDb();
   const hasBrowser = capabilities.browser ?? false;
+  // Capability set the worker advertised (excluding browser, which has its
+  // own legacy gate via connector_definitions.api_type). Used to filter on
+  // connector_definitions.required_capability.
+  const advertisedCapabilities = Object.entries(capabilities)
+    .filter(([key, value]) => value === true && key !== 'browser')
+    .map(([key]) => key);
+  // SQL ANY needs a non-empty array. Prepend '' so that connectors without
+  // a required_capability (NULL → '' via COALESCE) always match.
+  const capabilityMatchSet = [''].concat(advertisedCapabilities);
+
+  // User-scoped workers (e.g. iOS Bridge) can only claim runs for orgs the
+  // authenticated user is a member of. Trusted workers (matched WORKER_API_TOKEN)
+  // and anonymous local-dev requests see all pending runs — preserving the
+  // existing server-side worker fleet behavior.
+  const workerAuthMode = c.var.workerAuthMode;
+  const workerOrgIds = c.var.workerOrgIds;
+  if (workerAuthMode === 'user' && (!workerOrgIds || workerOrgIds.length === 0)) {
+    // User has no org memberships — nothing they can ever claim.
+    return c.json({ next_poll_seconds: 30 });
+  }
+  const orgScopeActive = workerAuthMode === 'user';
+  // Always pass a non-empty array to ANY() to keep the SQL valid; the gate
+  // below only activates when orgScopeActive is true.
+  const orgScopeIds = orgScopeActive && workerOrgIds ? workerOrgIds : [''];
 
   const claimNextPendingRun = async () =>
     sql.begin(async (tx) => {
@@ -72,6 +130,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           AND r.run_type IN ('sync', 'action', 'embed_backfill', 'auth')
           AND (r.approval_status = 'auto' OR r.approval_status = 'approved')
           AND (${hasBrowser} OR COALESCE((SELECT cd.api_type FROM connector_definitions cd WHERE cd.key = r.connector_key LIMIT 1), 'api') = 'api')
+          AND COALESCE(
+            (SELECT cd.required_capability FROM connector_definitions cd WHERE cd.key = r.connector_key LIMIT 1),
+            ''
+          ) = ANY(${pgTextArray(capabilityMatchSet)}::text[])
+          AND (${!orgScopeActive} OR r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[]))
         ORDER BY
           CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END,
           r.created_at ASC
@@ -256,6 +319,9 @@ export async function heartbeat(c: Context<{ Bindings: Env }>) {
       progress?: { items_collected_so_far?: number };
     }>();
 
+    const denied = await authorizeRunForWorker(c, run_id);
+    if (denied) return denied;
+
     const sql = getDb();
 
     await sql`
@@ -301,6 +367,9 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
       }>;
       checkpoint?: Record<string, unknown>;
     }>();
+
+    const denied = await authorizeRunForWorker(c, batch.run_id);
+    if (denied) return denied;
 
     const sql = getDb();
 
@@ -481,6 +550,9 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
       exit_signal?: string | null;
       exit_reason?: 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
     }>();
+
+    const denied = await authorizeRunForWorker(c, req.run_id);
+    if (denied) return denied;
 
     const sql = getDb();
 

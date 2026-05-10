@@ -40,6 +40,14 @@ export interface ConnectorDefinition {
     includeTags?: string[];
     serverUrl?: string;
   };
+  /**
+   * Optional worker capability required to run this connector. Workers advertise
+   * capabilities on poll; the runs scheduler only hands a connector run to a
+   * worker whose capabilities array includes this value. Unset = any worker
+   * (default API/browser fleet). Example: `'healthkit'` for apple.health (only
+   * the iOS Bridge can read HealthKit).
+   */
+  requiredCapability?: string;
 }
 
 // =============================================================================

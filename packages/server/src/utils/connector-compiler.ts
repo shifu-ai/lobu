@@ -20,6 +20,7 @@ export interface ConnectorMetadata {
   faviconDomain?: string | null;
   mcpConfig?: Record<string, unknown> | null;
   openapiConfig?: Record<string, unknown> | null;
+  requiredCapability?: string | null;
 }
 
 const CONNECTOR_RUNNER_CODE = `
@@ -80,6 +81,7 @@ async function main() {
       faviconDomain: def.faviconDomain || null,
       mcpConfig: def.mcpConfig || null,
       openapiConfig: def.openapiConfig || null,
+      requiredCapability: def.requiredCapability || null,
     };
 
     process.send({ success: true, metadata });

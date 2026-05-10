@@ -538,15 +538,65 @@ import {
   streamContent,
 } from './worker-api';
 
-// Worker API authentication middleware — validates WORKER_API_TOKEN when configured
-app.use('/api/workers/*', async (c, next) => {
+// Worker API authentication.
+//
+// Two ways to authenticate a request to /api/workers/*:
+//
+//   1. **Trusted worker** — `Authorization: Bearer ${WORKER_API_TOKEN}`. Shared
+//      secret in the server env; used by server-side connector-worker fleets.
+//      Full access to all orgs (existing model).
+//
+//   2. **User-scoped worker** — user OAuth bearer (or PAT, or session). The
+//      worker is bound to the authenticated user; poll/stream/complete must
+//      filter on the user's org memberships. Used by phone-bridge workers
+//      (e.g. the iOS Bridge for apple.health) that can't ship a shared secret.
+//
+// In dev (no WORKER_API_TOKEN configured) and with no user auth, requests pass
+// through unauthenticated — the existing local-dev behavior.
+app.use('/api/workers/*', mcpAuth, async (c, next) => {
   const expected = c.env.WORKER_API_TOKEN;
-  if (expected) {
-    const provided = c.req.header('Authorization')?.replace('Bearer ', '');
-    if (provided !== expected) {
-      return c.json({ error: 'Unauthorized' }, 401);
-    }
+  const provided = c.req.header('Authorization')?.replace('Bearer ', '');
+
+  if (expected && provided === expected) {
+    c.set('workerAuthMode', 'trusted');
+    c.set('workerUserId', null);
+    c.set('workerOrgIds', null);
+    return next();
   }
+
+  if (c.var.mcpIsAuthenticated && c.var.user?.id) {
+    // User-scoped workers can only hit the endpoints needed to run a job
+    // end-to-end. Auth-artifact / embeddings / repair-thread endpoints are
+    // for server-side fleets and would leak across orgs without per-handler
+    // scoping (which we haven't added). Block them at the door.
+    const allowedPathsForUserWorker = new Set([
+      '/api/workers/poll',
+      '/api/workers/heartbeat',
+      '/api/workers/stream',
+      '/api/workers/complete',
+    ]);
+    const requestPath = new URL(c.req.url).pathname;
+    if (!allowedPathsForUserWorker.has(requestPath)) {
+      return c.json({ error: 'Endpoint not available to user-scoped workers' }, 403);
+    }
+    const userId = c.var.user.id;
+    const rows = (await getDb()`
+      SELECT "organizationId" FROM member WHERE "userId" = ${userId}
+    `) as unknown as Array<{ organizationId: string }>;
+    const orgIds = rows.map((r) => r.organizationId);
+    c.set('workerAuthMode', 'user');
+    c.set('workerUserId', userId);
+    c.set('workerOrgIds', orgIds);
+    return next();
+  }
+
+  if (expected) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+
+  c.set('workerAuthMode', 'anonymous');
+  c.set('workerUserId', null);
+  c.set('workerOrgIds', null);
   return next();
 });
 

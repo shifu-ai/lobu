@@ -407,6 +407,20 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
       `);
     },
   },
+  {
+    id: 'connector-required-capability',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        ALTER TABLE public.connector_definitions
+        ADD COLUMN IF NOT EXISTS required_capability text
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS connector_definitions_required_capability_idx
+        ON public.connector_definitions (required_capability)
+        WHERE required_capability IS NOT NULL
+      `);
+    },
+  },
 ];
 
 async function applyEmbeddedSchemaPatches(sql: MigrationSqlClient) {
