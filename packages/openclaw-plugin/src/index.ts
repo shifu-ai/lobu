@@ -11,6 +11,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { renderFallbackSystemContext } from './lobu-guidance.js';
+import { registerMemoryWikiCompatTools } from './memory-wiki-compat.js';
 import type {
   McpToolDefinition,
   McpToolResponse,
@@ -216,6 +217,16 @@ function asPositiveInt(value: unknown, fallback: number): number {
   return n > 0 ? n : fallback;
 }
 
+function resolveMemoryWikiCompatConfig(value: unknown): { enabled: boolean } {
+  if (typeof value === 'boolean') {
+    return { enabled: value };
+  }
+  if (isRecord(value)) {
+    return { enabled: asBoolean(value.enabled, false) };
+  }
+  return { enabled: false };
+}
+
 function getLogger(api: Record<string, unknown>): PluginLogger {
   const logger = api.logger;
   if (
@@ -297,6 +308,7 @@ function resolvePluginConfig(api: Record<string, unknown>, pluginId: string): Re
     autoRecall: asBoolean(cfg.autoRecall, true),
     autoCapture: asBoolean(cfg.autoCapture, true),
     recallLimit: asPositiveInt(cfg.recallLimit, DEFAULT_RECALL_LIMIT),
+    memoryWikiCompat: resolveMemoryWikiCompatConfig(cfg.memoryWikiCompat),
   };
 }
 
@@ -697,13 +709,17 @@ async function reinitializeMcpSession(config: ResolvedPluginConfig): Promise<boo
 async function callMcpTool(
   config: ResolvedPluginConfig,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  options?: { rawJson?: boolean }
 ): Promise<McpToolResponse | null> {
   if (!config.mcpUrl) return null;
   const token = await resolveAuthToken(config);
 
   const rpcId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const authHeaders: Record<string, string> = { ...config.headers };
+  if (options?.rawJson) {
+    authHeaders['X-MCP-Format'] = 'json';
+  }
   if (token) {
     authHeaders.Authorization = `Bearer ${token}`;
   }
@@ -1353,6 +1369,10 @@ const plugin = {
     // In gateway mode, tools are already registered above.
     if (registerTool && config.mcpUrl && !config.gatewayAuthUrl && hasAuthConfigured(config)) {
       registerMcpTools(config, registerTool, log);
+    }
+
+    if (registerTool && config.memoryWikiCompat.enabled) {
+      registerMemoryWikiCompatTools(config, registerTool, log, callMcpTool);
     }
 
     // Inject workspace instructions (dynamic from server) or fallback (static).
