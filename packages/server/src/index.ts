@@ -72,6 +72,7 @@ import { getClientIP, getRateLimiter, RateLimitPresets } from './utils/rate-limi
 import { getRuntimeInfo } from './utils/runtime-info';
 import { getWorkspaceProvider } from './workspace';
 import { joinPublicOrganization } from './workspace/join-public';
+import { invalidateOrgSlugCache } from './workspace/multi-tenant';
 
 export type { Env };
 
@@ -812,6 +813,86 @@ app.get('/api/:orgSlug/actions/available', mcpAuth, async (c) => {
 app.post('/api/:orgSlug/actions/execute', mcpAuth, async (c) => {
   const body = await c.req.json();
   return restToolProxy(c, 'manage_operations', { action: 'execute', ...body });
+});
+
+app.patch('/api/:orgSlug/organization/visibility', mcpAuth, async (c) => {
+  const organizationId = c.get('organizationId');
+  const memberRole = c.get('memberRole');
+
+  if (!organizationId) {
+    return c.json({ error: 'Organization context required' }, 401);
+  }
+
+  if (memberRole !== 'owner' && memberRole !== 'admin') {
+    return c.json(
+      {
+        error: 'forbidden',
+        message: 'Workspace visibility requires owner or admin access.',
+      },
+      403
+    );
+  }
+
+  const authSource = c.get('authSource');
+  if (authSource === 'pat') {
+    return c.json(
+      { error: 'forbidden', message: 'Use OAuth or a web session to change workspace visibility.' },
+      403
+    );
+  }
+
+  const scopes = c.get('mcpAuthInfo')?.scopes ?? [];
+  if (authSource === 'oauth' && !scopes.includes('mcp:admin')) {
+    return c.json(
+      { error: 'forbidden', message: 'Workspace visibility changes require mcp:admin scope.' },
+      403
+    );
+  }
+
+  let body: { visibility?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'invalid_request', message: 'Request body must be JSON.' }, 400);
+  }
+
+  const visibility = body.visibility;
+  if (visibility !== 'public' && visibility !== 'private') {
+    return c.json(
+      { error: 'invalid_request', message: 'Visibility must be "public" or "private".' },
+      400
+    );
+  }
+
+  const sql = getDb();
+  const rows = await sql<{
+    id: string;
+    name: string;
+    slug: string;
+    logo: string | null;
+    description: string | null;
+    created_at: string;
+    visibility: 'public' | 'private';
+  }>`
+    UPDATE "organization"
+    SET visibility = ${visibility}
+    WHERE id = ${organizationId}
+    RETURNING id, name, slug, logo, description, "createdAt" AS created_at, visibility
+  `;
+
+  const org = rows[0];
+  if (!org) {
+    return c.json({ error: 'not_found', message: 'Workspace not found.' }, 404);
+  }
+
+  invalidateOrgSlugCache(c.req.param('orgSlug'));
+  invalidateOrgSlugCache(org.slug);
+  invalidationEmitter.emit(org.id, {
+    keys: ['organizations', 'resolve-path'],
+    resource: { type: 'organization', id: org.id },
+  });
+
+  return c.json({ organization: { ...org, is_member: true } });
 });
 
 app.route('/api/:orgSlug/agents', agentRoutes);

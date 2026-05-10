@@ -33,6 +33,11 @@ export function invalidateMembershipRoleCache(
   memberRoleCache.delete(`${organizationId}:${userId}`);
 }
 
+export function invalidateOrgSlugCache(slug: string | null | undefined): void {
+  if (!slug) return;
+  orgSlugCache.delete(slug);
+}
+
 /**
  * Cache-backed membership-role lookup. Reuses the same 60s cache the auth
  * middleware populates so writes on the `member` table that call
