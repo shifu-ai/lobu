@@ -1,0 +1,181 @@
+# Default values for the public Lobu chart.
+# See values.example.yaml for a minimal copy/paste install template.
+
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  registry: ghcr.io
+  # The chart appends -app, -worker, and -embeddings for the three images.
+  repository: lobu-ai/lobu
+  pullPolicy: IfNotPresent
+  # The image pipeline publishes timestamp tags plus latest. Pin a timestamp
+  # tag for production upgrades; latest keeps first-time installs simple.
+  tag: "latest"
+
+# Public images do not require pull secrets. Set this if your cluster must
+# authenticate to GHCR or you mirror images into a private registry.
+imagePullSecrets: []
+
+# Existing Kubernetes Secret loaded into app, worker, embeddings, and migration
+# pods via envFrom. It commonly contains DATABASE_URL, JWT_SECRET,
+# BETTER_AUTH_SECRET, provider API keys, and integration OAuth credentials.
+secretName: ""
+
+# Optional chart-managed Secret. Prefer an external secret manager for
+# production; this is here for small test clusters and quick demos.
+secrets:
+  create: false
+  name: ""
+  stringData: {}
+
+app:
+  replicaCount: 1
+  strategy: {}
+  podAnnotations: {}
+  podSecurityContext: {}
+  securityContext: {}
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+
+  env:
+    NODE_ENV: production
+
+  # Persistent workspaces volume. Embedded agent workers store session and
+  # workspace state below /app/workspaces.
+  workspaces:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+
+worker:
+  # Connector ingestion worker. Disable if you only need the API/chat gateway.
+  enabled: true
+  replicaCount: 1
+  strategy: {}
+  podAnnotations: {}
+  podSecurityContext:
+    fsGroup: 1001
+    fsGroupChangePolicy: OnRootMismatch
+  securityContext: {}
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+
+  env:
+    POLL_INTERVAL_MS: "10000"
+
+  cache:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+
+embeddings:
+  enabled: true
+  replicaCount: 1
+  strategy: {}
+  podAnnotations: {}
+  podSecurityContext:
+    fsGroup: 1001
+    fsGroupChangePolicy: OnRootMismatch
+  securityContext: {}
+
+  # If set, app and worker use this URL instead of the in-chart service.
+  serviceUrl: ""
+
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      memory: 3Gi
+
+  env: {}
+
+  service:
+    port: 8790
+
+  cache:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+
+service:
+  type: ClusterIP
+  port: 8787
+
+# Optional Ingress for public webhooks and the admin UI. When hosts are set,
+# the app Deployment derives PUBLIC_WEB_URL from the first host unless you set
+# app.env.PUBLIC_WEB_URL explicitly.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []
+  tls: []
+
+# Database configuration. For most installs, create a Secret with DATABASE_URL
+# and set database.existingSecret below. Alternatively, keep database empty and
+# provide DATABASE_URL through secretName/secrets. When migrations.enabled and
+# secrets.create are both true, put DATABASE_URL in secrets.stringData or set
+# migrations.database.existingSecret so the hook does not depend on a Secret
+# that Helm has not created yet.
+database:
+  existingSecret: ""
+  existingSecretKey: uri
+  name: app
+  usePooler: false
+  poolerService: ""
+
+healthCheck:
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 6
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 20
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+migrations:
+  # When enabled, Helm runs migrations as a pre-install/pre-upgrade Job and you
+  # should set app.env.SKIP_MIGRATIONS: "1" so app pods do not repeat them. If
+  # secrets.create is true and DATABASE_URL lives in that chart-managed Secret,
+  # the Job reads secrets.stringData.DATABASE_URL directly because normal chart
+  # resources are not created before pre-install hooks run.
+  enabled: false
+  database:
+    existingSecret: ""
+    existingSecretKey: uri
+    name: app
+    usePooler: false
+    poolerService: ""
+
+releaseGates:
+  databasePreflight:
+    enabled: true
+    timeoutSeconds: 10
+  smokeTest:
+    enabled: true
+    path: /api/health
+    timeoutSeconds: 300
+    intervalSeconds: 2

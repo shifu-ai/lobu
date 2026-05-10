@@ -1,0 +1,96 @@
+{{- if .Values.embeddings.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lobu.fullname" . }}-embeddings
+  labels:
+    {{- include "lobu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: embeddings
+spec:
+  replicas: {{ .Values.embeddings.replicaCount }}
+  {{- with .Values.embeddings.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- else }}
+  {{- if .Values.embeddings.cache.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lobu.embeddingsSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lobu.embeddingsSelectorLabels" . | nindent 8 }}
+      {{- with .Values.embeddings.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.embeddings.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: embeddings
+          image: {{ include "lobu.embeddingsImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.embeddings.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.embeddings.service.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.embeddings.service.port | quote }}
+            - name: TRANSFORMERS_CACHE
+              value: /app/.cache/transformers
+            {{- range $key, $value := .Values.embeddings.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+          {{- $secretName := include "lobu.secretName" . }}
+          {{- if $secretName }}
+          envFrom:
+            - secretRef:
+                name: {{ $secretName }}
+          {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.healthCheck.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthCheck.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.healthCheck.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.healthCheck.readinessProbe.failureThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.healthCheck.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.healthCheck.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.healthCheck.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.healthCheck.livenessProbe.failureThreshold }}
+          {{- if .Values.embeddings.cache.enabled }}
+          volumeMounts:
+            - name: embeddings-cache
+              mountPath: /app/.cache
+          {{- end }}
+          resources:
+            {{- toYaml .Values.embeddings.resources | nindent 12 }}
+      {{- if .Values.embeddings.cache.enabled }}
+      volumes:
+        - name: embeddings-cache
+          persistentVolumeClaim:
+            claimName: {{ include "lobu.fullname" . }}-embeddings-cache
+      {{- end }}
+{{- end }}

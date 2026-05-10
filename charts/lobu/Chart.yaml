@@ -1,0 +1,17 @@
+apiVersion: v2
+name: lobu
+description: Lobu self-hosted AI agent platform
+type: application
+version: 6.1.1
+appVersion: "6.1.1"
+keywords:
+  - lobu
+  - agents
+  - ai
+  - memory
+home: https://github.com/lobu-ai/lobu
+sources:
+  - https://github.com/lobu-ai/lobu
+maintainers:
+  - name: lobu-ai
+    email: emre@lobu.ai

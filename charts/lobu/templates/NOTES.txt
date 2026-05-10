@@ -1,0 +1,32 @@
+Lobu has been installed.
+
+{{- if .Values.ingress.enabled }}
+Application URL:
+{{- range .Values.ingress.hosts }}
+  https://{{ . }}
+{{- end }}
+{{- else }}
+Port-forward the app service:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "lobu.fullname" . }}-app {{ .Values.service.port }}:{{ .Values.service.port }}
+  open http://localhost:{{ .Values.service.port }}
+{{- end }}
+
+Secrets:
+{{- $secretName := include "lobu.secretName" . }}
+{{- if $secretName }}
+  Using runtime secret: {{ $secretName }}
+{{- else }}
+  No runtime secret configured. Create a Secret with JWT_SECRET, BETTER_AUTH_SECRET,
+  provider API keys, and other Lobu settings, then set secretName.
+{{- end }}
+
+Database:
+{{- if .Values.database.existingSecret }}
+  DATABASE_URL comes from Secret {{ .Values.database.existingSecret }} key {{ .Values.database.existingSecretKey }}.
+{{- else }}
+  Ensure DATABASE_URL is present in the runtime secret.
+{{- end }}
+
+Useful checks:
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "lobu.fullname" . }}-app

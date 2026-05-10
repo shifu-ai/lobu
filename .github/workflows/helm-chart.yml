@@ -1,0 +1,77 @@
+name: Helm Chart
+
+on:
+  pull_request:
+    paths:
+      - "charts/lobu/**"
+      - ".github/workflows/helm-chart.yml"
+      - "release-please-config.json"
+  push:
+    branches:
+      - main
+    paths:
+      - "charts/lobu/**"
+      - ".github/workflows/helm-chart.yml"
+      - "release-please-config.json"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the chart to GHCR"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/setup-helm@v4
+
+      - name: Lint chart
+        run: helm lint charts/lobu
+
+      - name: Render default values
+        run: helm template lobu charts/lobu --namespace lobu >/tmp/lobu-default.yaml
+
+      - name: Render install example
+        run: helm template lobu charts/lobu --namespace lobu -f charts/lobu/values.example.yaml >/tmp/lobu-example.yaml
+
+  publish:
+    needs: lint
+    if: ${{ github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || github.ref }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Package chart
+        run: helm package charts/lobu --destination /tmp
+
+      - name: Push chart
+        run: |
+          chart_package="$(ls /tmp/lobu-*.tgz | head -1)"
+          helm push "$chart_package" oci://ghcr.io/${{ github.repository_owner }}/charts
+
+      - name: Make chart package public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          gh api -X PATCH "/orgs/${OWNER}/packages/container/charts%2Flobu/visibility" \
+            -f visibility=public || true

@@ -1,0 +1,137 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lobu.fullname" . }}-worker
+  labels:
+    {{- include "lobu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  replicas: {{ .Values.worker.replicaCount }}
+  {{- with .Values.worker.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- else }}
+  {{- if .Values.worker.cache.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "lobu.workerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lobu.workerSelectorLabels" . | nindent 8 }}
+      {{- with .Values.worker.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: wait-for-app
+          image: {{ include "lobu.workerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              url="http://{{ include "lobu.fullname" . }}-app:{{ .Values.service.port }}/health"
+              echo "waiting for $url"
+              for i in $(seq 1 120); do
+                if curl -sf --max-time 2 "$url" >/dev/null 2>&1; then
+                  echo "app ready after $i attempts"
+                  exit 0
+                fi
+                sleep 2
+              done
+              echo "timed out after 4 minutes" >&2
+              exit 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+      containers:
+        - name: worker
+          image: {{ include "lobu.workerImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.worker.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          env:
+            - name: API_URL
+              value: http://{{ include "lobu.fullname" . }}-app:{{ .Values.service.port }}
+            - name: WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: TRANSFORMERS_CACHE
+              value: /app/.cache/transformers
+            {{- if .Values.embeddings.service.port }}
+            {{- if .Values.embeddings.serviceUrl }}
+            - name: EMBEDDINGS_SERVICE_URL
+              value: {{ .Values.embeddings.serviceUrl | quote }}
+            {{- else if .Values.embeddings.enabled }}
+            - name: EMBEDDINGS_SERVICE_URL
+              value: {{ printf "http://%s-embeddings:%d" (include "lobu.fullname" .) (.Values.embeddings.service.port | int) | quote }}
+            {{- end }}
+            {{- end }}
+            {{- range $key, $value := .Values.worker.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.database.existingSecret }}
+            {{- if .Values.database.usePooler }}
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: username
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: password
+            - name: DATABASE_URL
+              value: "postgresql://$(DB_USER):$(DB_PASS)@{{ .Values.database.poolerService }}:5432/{{ .Values.database.name }}?sslmode=disable"
+            {{- else }}
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.database.existingSecret }}
+                  key: {{ .Values.database.existingSecretKey }}
+            {{- end }}
+            {{- end }}
+          {{- $secretName := include "lobu.secretName" . }}
+          {{- if $secretName }}
+          envFrom:
+            - secretRef:
+                name: {{ $secretName }}
+          {{- end }}
+          {{- if .Values.worker.cache.enabled }}
+          volumeMounts:
+            - name: worker-cache
+              mountPath: /app/.cache
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.resources | nindent 12 }}
+      {{- if .Values.worker.cache.enabled }}
+      volumes:
+        - name: worker-cache
+          persistentVolumeClaim:
+            claimName: {{ include "lobu.fullname" . }}-worker-cache
+      {{- end }}
+{{- end }}
