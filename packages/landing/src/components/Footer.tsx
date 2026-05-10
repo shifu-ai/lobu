@@ -20,8 +20,6 @@ const COLUMNS: FooterColumn[] = [
   {
     heading: "Solutions",
     links: [
-      { label: "Engineering", href: "/for/engineering" },
-      { label: "Support", href: "/for/support" },
       { label: "Legal", href: "/for/legal" },
       { label: "Sales", href: "/for/sales" },
       { label: "Finance", href: "/for/finance" },
