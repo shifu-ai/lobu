@@ -2,7 +2,7 @@ import Foundation
 import Security
 
 struct KeychainTokenStore {
-    private let service = "ai.lobu.HealthBridge"
+    private let service = "ai.lobu.IOSBridge"
     private let account = "lobu-api-token"
 
     func load() -> String {

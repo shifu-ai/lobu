@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct LobuHealthBridgeApp: App {
+struct LobuIOSBridgeApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()

@@ -7,7 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000000000000000000001 /* LobuHealthBridgeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* LobuHealthBridgeApp.swift */; };
+		A10000000000000000000001 /* LobuIOSBridgeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* LobuIOSBridgeApp.swift */; };
 		A10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* ContentView.swift */; };
 		A10000000000000000000003 /* HealthModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* HealthModels.swift */; };
 		A10000000000000000000004 /* HealthKitManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* HealthKitManager.swift */; };
@@ -16,13 +16,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A20000000000000000000001 /* LobuHealthBridgeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LobuHealthBridgeApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000001 /* LobuIOSBridgeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LobuIOSBridgeApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* HealthModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthModels.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* HealthKitManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthKitManager.swift; sourceTree = "<group>"; };
 		A20000000000000000000005 /* LobuClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LobuClient.swift; sourceTree = "<group>"; };
-		A20000000000000000000006 /* LobuHealthBridge.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LobuHealthBridge.entitlements; sourceTree = "<group>"; };
-		A20000000000000000000007 /* LobuHealthBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LobuHealthBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000006 /* LobuIOSBridge.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LobuIOSBridge.entitlements; sourceTree = "<group>"; };
+		A20000000000000000000007 /* LobuIOSBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LobuIOSBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000008 /* KeychainTokenStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainTokenStore.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -40,29 +40,29 @@
 		A40000000000000000000001 = {
 			isa = PBXGroup;
 			children = (
-				A40000000000000000000002 /* LobuHealthBridge */,
+				A40000000000000000000002 /* LobuIOSBridge */,
 				A40000000000000000000003 /* Products */,
 			);
 			sourceTree = "<group>";
 		};
-		A40000000000000000000002 /* LobuHealthBridge */ = {
+		A40000000000000000000002 /* LobuIOSBridge */ = {
 			isa = PBXGroup;
 			children = (
-				A20000000000000000000001 /* LobuHealthBridgeApp.swift */,
+				A20000000000000000000001 /* LobuIOSBridgeApp.swift */,
 				A20000000000000000000002 /* ContentView.swift */,
 				A20000000000000000000003 /* HealthModels.swift */,
 				A20000000000000000000004 /* HealthKitManager.swift */,
 				A20000000000000000000005 /* LobuClient.swift */,
 				A20000000000000000000008 /* KeychainTokenStore.swift */,
-				A20000000000000000000006 /* LobuHealthBridge.entitlements */,
+				A20000000000000000000006 /* LobuIOSBridge.entitlements */,
 			);
-			path = LobuHealthBridge;
+			path = LobuIOSBridge;
 			sourceTree = "<group>";
 		};
 		A40000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A20000000000000000000007 /* LobuHealthBridge.app */,
+				A20000000000000000000007 /* LobuIOSBridge.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -70,9 +70,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A50000000000000000000001 /* LobuHealthBridge */ = {
+		A50000000000000000000001 /* LobuIOSBridge */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget \"LobuHealthBridge\" */;
+			buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget \"LobuIOSBridge\" */;
 			buildPhases = (
 				A70000000000000000000001 /* Sources */,
 				A30000000000000000000001 /* Frameworks */,
@@ -82,9 +82,9 @@
 			);
 			dependencies = (
 			);
-			name = LobuHealthBridge;
-			productName = LobuHealthBridge;
-			productReference = A20000000000000000000007 /* LobuHealthBridge.app */;
+			name = LobuIOSBridge;
+			productName = LobuIOSBridge;
+			productReference = A20000000000000000000007 /* LobuIOSBridge.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -107,7 +107,7 @@
 					};
 				};
 			};
-			buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXProject \"LobuHealthBridge\" */;
+			buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXProject \"LobuIOSBridge\" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -121,7 +121,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A50000000000000000000001 /* LobuHealthBridge */,
+				A50000000000000000000001 /* LobuIOSBridge */,
 			);
 		};
 /* End PBXProject section */
@@ -141,7 +141,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000001 /* LobuHealthBridgeApp.swift in Sources */,
+				A10000000000000000000001 /* LobuIOSBridgeApp.swift in Sources */,
 				A10000000000000000000002 /* ContentView.swift in Sources */,
 				A10000000000000000000003 /* HealthModels.swift in Sources */,
 				A10000000000000000000004 /* HealthKitManager.swift in Sources */,
@@ -276,20 +276,20 @@
 		AA0000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = LobuHealthBridge/LobuHealthBridge.entitlements;
+				CODE_SIGN_ENTITLEMENTS = LobuIOSBridge/LobuIOSBridge.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "Lobu Health Bridge reads selected Apple Health summaries and workouts so it can save them to your personal Lobu organization.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Lobu iOS Bridge reads selected Apple Health summaries and workouts so it can save them to your personal Lobu organization.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = ai.lobu.HealthBridge;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.lobu.IOSBridge;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -301,20 +301,20 @@
 		AA0000000000000000000004 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = LobuHealthBridge/LobuHealthBridge.entitlements;
+				CODE_SIGN_ENTITLEMENTS = LobuIOSBridge/LobuIOSBridge.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSHealthShareUsageDescription = "Lobu Health Bridge reads selected Apple Health summaries and workouts so it can save them to your personal Lobu organization.";
+				INFOPLIST_KEY_NSHealthShareUsageDescription = "Lobu iOS Bridge reads selected Apple Health summaries and workouts so it can save them to your personal Lobu organization.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				MARKETING_VERSION = 0.1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = ai.lobu.HealthBridge;
+				PRODUCT_BUNDLE_IDENTIFIER = ai.lobu.IOSBridge;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -326,7 +326,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		A90000000000000000000001 /* Build configuration list for PBXProject \"LobuHealthBridge\" */ = {
+		A90000000000000000000001 /* Build configuration list for PBXProject \"LobuIOSBridge\" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AA0000000000000000000001 /* Debug */,
@@ -335,7 +335,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		A90000000000000000000002 /* Build configuration list for PBXNativeTarget \"LobuHealthBridge\" */ = {
+		A90000000000000000000002 /* Build configuration list for PBXNativeTarget \"LobuIOSBridge\" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				AA0000000000000000000003 /* Debug */,

@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "A50000000000000000000001"
-               BuildableName = "LobuHealthBridge.app"
-               BlueprintName = "LobuHealthBridge"
-               ReferencedContainer = "container:LobuHealthBridge.xcodeproj">
+               BuildableName = "LobuIOSBridge.app"
+               BlueprintName = "LobuIOSBridge"
+               ReferencedContainer = "container:LobuIOSBridge.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -46,9 +46,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A50000000000000000000001"
-            BuildableName = "LobuHealthBridge.app"
-            BlueprintName = "LobuHealthBridge"
-            ReferencedContainer = "container:LobuHealthBridge.xcodeproj">
+            BuildableName = "LobuIOSBridge.app"
+            BlueprintName = "LobuIOSBridge"
+            ReferencedContainer = "container:LobuIOSBridge.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -63,9 +63,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "A50000000000000000000001"
-            BuildableName = "LobuHealthBridge.app"
-            BlueprintName = "LobuHealthBridge"
-            ReferencedContainer = "container:LobuHealthBridge.xcodeproj">
+            BuildableName = "LobuIOSBridge.app"
+            BlueprintName = "LobuIOSBridge"
+            ReferencedContainer = "container:LobuIOSBridge.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

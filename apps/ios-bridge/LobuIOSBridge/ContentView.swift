@@ -48,7 +48,7 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .navigationTitle("Lobu Health Bridge")
+            .navigationTitle("Lobu iOS Bridge")
             .onAppear {
                 lobuToken = KeychainTokenStore().load()
             }
