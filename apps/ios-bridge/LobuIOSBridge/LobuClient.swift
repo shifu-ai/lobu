@@ -1,17 +1,5 @@
 import Foundation
 
-struct LobuConfig: Equatable {
-    var baseURL: String
-    var orgSlug: String
-    var token: String
-
-    var isComplete: Bool {
-        !baseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !orgSlug.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-}
-
 struct SaveMemoryPayload<Metadata: Encodable>: Encodable {
     let content: String
     let title: String
@@ -47,12 +35,16 @@ struct WorkoutMetadata: Encodable {
 }
 
 final class LobuClient {
-    private let config: LobuConfig
+    private let baseURL: String
+    private let orgSlug: String
+    private let accessToken: String
     private let session: URLSession
     private let encoder: JSONEncoder
 
-    init(config: LobuConfig, session: URLSession = .shared) {
-        self.config = config
+    init(baseURL: String, orgSlug: String, accessToken: String, session: URLSession = .shared) {
+        self.baseURL = baseURL
+        self.orgSlug = orgSlug
+        self.accessToken = accessToken
         self.session = session
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
@@ -104,13 +96,12 @@ final class LobuClient {
     }
 
     private func postSaveMemory<Metadata: Encodable>(_ payload: SaveMemoryPayload<Metadata>) async throws {
-        guard config.isComplete else { throw HealthBridgeError.missingConfiguration }
-        guard let url = URL(string: "\(config.baseURL.trimmedTrailingSlash())/api/\(config.orgSlug)/save_memory") else {
+        guard let url = URL(string: "\(baseURL.trimmedTrailingSlash())/api/\(orgSlug)/save_memory") else {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(payload)
 
@@ -138,7 +129,7 @@ func isoString(_ date: Date) -> String {
     ISO8601DateFormatter().string(from: date)
 }
 
-private extension String {
+extension String {
     func trimmedTrailingSlash() -> String {
         var value = self
         while value.hasSuffix("/") { value.removeLast() }
