@@ -18,6 +18,7 @@
 		A10000000000000000000009 /* HealthSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* HealthSyncService.swift */; };
 		A10000000000000000000010 /* HealthBackgroundSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* HealthBackgroundSync.swift */; };
 		A10000000000000000000011 /* DataSourceManagers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* DataSourceManagers.swift */; };
+		A10000000000000000000012 /* LobuWebView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* LobuWebView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -35,6 +36,7 @@
 		A20000000000000000000012 /* HealthSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSyncService.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* HealthBackgroundSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthBackgroundSync.swift; sourceTree = "<group>"; };
 		A20000000000000000000014 /* DataSourceManagers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSourceManagers.swift; sourceTree = "<group>"; };
+		A20000000000000000000015 /* LobuWebView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LobuWebView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -67,6 +69,7 @@
 				A20000000000000000000013 /* HealthBackgroundSync.swift */,
 				A20000000000000000000005 /* LobuClient.swift */,
 				A20000000000000000000014 /* DataSourceManagers.swift */,
+				A20000000000000000000015 /* LobuWebView.swift */,
 				A20000000000000000000008 /* KeychainTokenStore.swift */,
 				A20000000000000000000009 /* OAuthClient.swift */,
 				A20000000000000000000010 /* Assets.xcassets */,
@@ -169,6 +172,7 @@
 				A10000000000000000000009 /* HealthSyncService.swift in Sources */,
 				A10000000000000000000010 /* HealthBackgroundSync.swift in Sources */,
 				A10000000000000000000011 /* DataSourceManagers.swift in Sources */,
+				A10000000000000000000012 /* LobuWebView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -301,7 +305,7 @@
 				CODE_SIGN_ENTITLEMENTS = LobuIOSBridge/LobuIOSBridge.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 3G4Z35PA84;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LobuIOSBridge/Info.plist;
@@ -321,7 +325,7 @@
 				CODE_SIGN_ENTITLEMENTS = LobuIOSBridge/LobuIOSBridge.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 3G4Z35PA84;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = LobuIOSBridge/Info.plist;

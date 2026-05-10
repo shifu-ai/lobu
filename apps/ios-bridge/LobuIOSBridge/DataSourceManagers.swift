@@ -38,10 +38,19 @@ struct DataSourceDescriptor: Identifiable, Hashable {
     let id: String
     /// User-facing name shown in the iOS UI.
     let label: String
+    /// SF Symbol shown next to the label.
+    let systemImage: String
+    /// SwiftUI Color for the system image tint (kept here so the row UI stays trivial).
+    /// Renders as a string to avoid pulling SwiftUI types into this file's surface.
+    let iconTint: IconTint
     /// Capability advertised to the server on poll (matches connector_definitions.required_capability).
     let capability: String
     /// Connector key the server expects in poll responses.
     let connectorKey: String
+
+    enum IconTint: String {
+        case red, blue, orange, purple
+    }
 }
 
 /// Catalog of data sources the bridge knows how to run. To add a new source:
@@ -51,18 +60,22 @@ struct DataSourceDescriptor: Identifiable, Hashable {
 enum DataSourceCatalog {
     static let health = DataSourceDescriptor(
         id: "health", label: "Apple Health",
+        systemImage: "heart.fill", iconTint: .red,
         capability: "healthkit", connectorKey: "apple.health"
     )
     static let calendar = DataSourceDescriptor(
         id: "calendar", label: "Calendar",
+        systemImage: "calendar", iconTint: .red,
         capability: "calendar", connectorKey: "apple.calendar"
     )
     static let reminders = DataSourceDescriptor(
         id: "reminders", label: "Reminders",
+        systemImage: "checklist", iconTint: .orange,
         capability: "reminders", connectorKey: "apple.reminders"
     )
     static let contacts = DataSourceDescriptor(
         id: "contacts", label: "Contacts",
+        systemImage: "person.crop.circle.fill", iconTint: .blue,
         capability: "contacts", connectorKey: "apple.contacts"
     )
 

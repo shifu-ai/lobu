@@ -103,7 +103,9 @@ enum HealthSyncService {
 
     static func clampedBackfillDays(_ requestedBackfillDays: Int? = nil) -> Int {
         let value = requestedBackfillDays ?? UserDefaults.standard.integer(forKey: "backfillDays")
-        return min(max(value == 0 ? 7 : value, 1), 30)
+        // Upper bound matches the apple_*.ts connector schemas (3650 = 10y).
+        // Lower bound at 1; fall back to "Last year" when unset.
+        return min(max(value == 0 ? 365 : value, 1), 3650)
     }
 
     // -------------------------------------------------------------------------

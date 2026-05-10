@@ -9,9 +9,9 @@ struct ContentView: View {
     @StateObject private var reminders = RemindersManager()
     @StateObject private var contacts = ContactsManager()
 
-    @AppStorage("lobuBaseURL") private var lobuBaseURL = "https://app.lobu.ai"
+    @AppStorage("lobuBaseURL") private var lobuBaseURL = "https://buraks-macbook-pro-1.brill-kanyu.ts.net:8443"
     @AppStorage("selectedOrgSlug") private var selectedOrgSlug = ""
-    @AppStorage("backfillDays") private var backfillDays = 7
+    @AppStorage("backfillDays") private var backfillDays = 365
     @AppStorage("pendingOAuthLogin") private var pendingOAuthLoginData = Data()
     @AppStorage("healthAuthorizationRequested") private var healthAuthorizationRequested = false
 
@@ -21,13 +21,39 @@ struct ContentView: View {
     @State private var loginCode: String?
     @State private var status = ""
     @State private var showSettings = false
+    /// Set non-nil to present the embedded Lobu web view at that path. nil = sheet closed.
+    @State private var embeddedLobuPath: LobuPath?
+
+    /// Identifiable wrapper so SwiftUI's `sheet(item:)` can drive presentation.
+    struct LobuPath: Identifiable {
+        let value: String
+        var id: String { value }
+    }
 
     private let credentialStore = KeychainCredentialStore()
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
     private var clampedBackfillDays: Int {
-        min(max(backfillDays, 1), 30)
+        min(max(backfillDays, 1), 3650)
+    }
+
+    /// Preset time horizons the user picks from. Each maps to a day count
+    /// the server uses as feed.config.backfill_days. Matches the upper
+    /// bound declared in the apple_*.ts connector schemas (3650 days = 10y).
+    private static let backfillPresets: [(label: String, days: Int)] = [
+        ("Last week", 7),
+        ("Last month", 30),
+        ("Last 3 months", 90),
+        ("Last year", 365),
+        ("Last 5 years", 1825),
+        ("Everything", 3650),
+    ]
+
+    private var backfillPresetSelection: Int {
+        // Snap the stored day count to the nearest preset upward so the picker
+        // always shows a stable label. "Everything" wins anything > 1825.
+        Self.backfillPresets.first(where: { $0.days >= clampedBackfillDays })?.days ?? 3650
     }
 
     init() {
@@ -38,18 +64,42 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Form {
-                heroSection
                 accountSection
                 if credentials != nil {
                     dataSourcesSection
                     syncSection
+                    Section {
+                        Button {
+                            embeddedLobuPath = LobuPath(value: "/")
+                        } label: {
+                            HStack {
+                                Image(systemName: "safari")
+                                Text("Open Lobu")
+                            }
+                        }
+                    }
                 }
                 settingsDisclosure
                 if !status.isEmpty {
                     Section { Text(status).font(.footnote).foregroundStyle(.secondary) }
                 }
             }
-            .navigationTitle("Lobu iOS Bridge")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    HStack(spacing: 8) {
+                        Image("LobuLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(height: 32)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        Text("Lobu")
+                            .font(.headline)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Lobu")
+                }
+            }
             .onAppear(perform: handleAppear)
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
@@ -60,29 +110,15 @@ struct ContentView: View {
                 }
             }
             .onOpenURL(perform: handleDeepLink)
+            .sheet(item: $embeddedLobuPath) { wrapped in
+                LobuWebView(path: wrapped.value)
+            }
         }
     }
 
     // -------------------------------------------------------------------------
     // Sections
     // -------------------------------------------------------------------------
-
-    @ViewBuilder
-    private var heroSection: some View {
-        Section {
-            VStack(spacing: 8) {
-                Image("LobuLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 72, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                Text("Lobu iOS Bridge")
-                    .font(.title3.bold())
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 8)
-        }
-    }
 
     @ViewBuilder
     private var accountSection: some View {
@@ -124,23 +160,40 @@ struct ContentView: View {
     private var dataSourcesSection: some View {
         Section("Data sources") {
             ForEach(DataSourceCatalog.all) { descriptor in
+                let perm = permission(for: descriptor)
                 Button {
                     Task { await authorize(descriptor) }
                 } label: {
-                    HStack {
+                    HStack(spacing: 12) {
+                        Image(systemName: descriptor.systemImage)
+                            .foregroundStyle(iconColor(descriptor.iconTint))
+                            .frame(width: 24)
                         Text(descriptor.label)
                             .foregroundStyle(.primary)
                         Spacer()
-                        Text(permissionLabel(for: descriptor))
-                            .foregroundStyle(permissionLabelColor(for: descriptor))
-                            .font(.footnote)
-                        Image(systemName: "chevron.right")
-                            .font(.footnote)
-                            .foregroundStyle(.tertiary)
+                        if perm == .authorized {
+                            Image(systemName: "checkmark")
+                                .font(.footnote.bold())
+                                .foregroundStyle(.green)
+                        } else {
+                            Text(perm.label)
+                                .foregroundStyle(perm == .denied ? .orange : .secondary)
+                                .font(.footnote)
+                        }
                     }
                 }
                 .buttonStyle(.plain)
+                .disabled(perm == .unsupported)
             }
+        }
+    }
+
+    private func iconColor(_ tint: DataSourceDescriptor.IconTint) -> Color {
+        switch tint {
+        case .red: return .red
+        case .blue: return .blue
+        case .orange: return .orange
+        case .purple: return .purple
         }
     }
 
@@ -162,11 +215,14 @@ struct ContentView: View {
                     .textInputAutocapitalization(.never)
                     .keyboardType(.URL)
                     .disabled(credentials != nil)
-                Stepper(
-                    "Backfill \(clampedBackfillDays) days",
-                    value: Binding(get: { clampedBackfillDays }, set: { backfillDays = min(max($0, 1), 30) }),
-                    in: 1...30
-                )
+                Picker("How far back to sync", selection: Binding(
+                    get: { backfillPresetSelection },
+                    set: { backfillDays = $0 }
+                )) {
+                    ForEach(Self.backfillPresets, id: \.days) { preset in
+                        Text(preset.label).tag(preset.days)
+                    }
+                }
             }
         }
     }
@@ -188,18 +244,6 @@ struct ContentView: View {
         case "reminders": return reminders.permission
         case "contacts": return contacts.permission
         default: return .unsupported
-        }
-    }
-
-    private func permissionLabel(for descriptor: DataSourceDescriptor) -> String {
-        permission(for: descriptor).label
-    }
-
-    private func permissionLabelColor(for descriptor: DataSourceDescriptor) -> Color {
-        switch permission(for: descriptor) {
-        case .authorized: return .green
-        case .denied: return .orange
-        case .notDetermined, .unsupported: return .secondary
         }
     }
 
@@ -243,7 +287,7 @@ struct ContentView: View {
     // -------------------------------------------------------------------------
 
     private func handleAppear() {
-        if backfillDays < 1 || backfillDays > 30 {
+        if backfillDays < 1 || backfillDays > 3650 {
             backfillDays = clampedBackfillDays
         }
         if healthAuthorizationRequested {
