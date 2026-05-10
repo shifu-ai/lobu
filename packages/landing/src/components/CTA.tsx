@@ -51,9 +51,9 @@ export function CTA({ startUrl = getLobuBaseUrl() }: { startUrl?: string }) {
               letterSpacing: "-0.025em",
             }}
           >
-            Start with the
+            Build your first
             <br />
-            free open-source build.
+            multi-user agent.
           </h2>
           <div class="flex flex-wrap gap-3">
             <a
@@ -64,7 +64,7 @@ export function CTA({ startUrl = getLobuBaseUrl() }: { startUrl?: string }) {
                 color: "var(--color-page-text-inverted)",
               }}
             >
-              Start for free
+              Start building
             </a>
             <a
               href="/getting-started"

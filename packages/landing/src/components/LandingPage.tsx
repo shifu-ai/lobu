@@ -72,9 +72,9 @@ export function LandingPage(props: {
         id="memory"
       >
         <FeatureBlock
-          eyebrow="Shared memory for every agent"
-          title="Turn data into shared, structured memory."
-          description="Tell one agent something and the rest already know. Lobu Memory gives every agent the same typed entities and event history, recalled through MCP when it matters."
+          eyebrow="Shared org memory"
+          title="Give agents the same source-backed context."
+          description="Connect sources once. Lobu turns them into typed memory that agents can search, cite, and reuse across users."
           ctaLabel="Read the memory guide"
           ctaHref="/getting-started/memory/"
           graphic={<SharedMemoryGraphic />}
@@ -88,9 +88,9 @@ export function LandingPage(props: {
         id="skills"
       >
         <FeatureBlock
-          eyebrow="Drop in, ready to work"
-          title="Give your agent new capabilities."
-          description="A skill bundles everything an agent needs to do something: instructions, tools, and access, all in one folder. No glue code, no IT ticket. Drop it in and the agent picks it up."
+          eyebrow="Capabilities"
+          title="Add tools without glue code."
+          description="Skills bundle instructions, tools, packages, and network access so agents can pick up new workflows safely."
           ctaLabel="Explore skills"
           ctaHref="/getting-started/skills/"
           graphic={<SkillsGraphic />}
@@ -105,9 +105,9 @@ export function LandingPage(props: {
         id="autonomous"
       >
         <FeatureBlock
-          eyebrow="Working while you're away"
-          title="Turn schedules into agents that act on their own."
-          description="A watcher wakes on a schedule, reads recent activity, filters with a prompt you wrote, and writes the signal (not the noise) into entity memory. The agent isn't online, but the memory is moving."
+          eyebrow="Watchers"
+          title="Turn recurring work into reports and memory."
+          description="Watchers read new activity on a schedule, extract the signal, and write source-backed updates your agents can use."
           ctaLabel="How watchers work"
           ctaHref="/getting-started/memory/#watchers"
           graphic={<WatcherGraphic />}
@@ -121,9 +121,9 @@ export function LandingPage(props: {
         id="platforms"
       >
         <FeatureBlock
-          eyebrow="Built into your tools"
-          title="Talk to your agents from any chat or AI client."
-          description="Lobu agents live where your team already works: Slack, Telegram, Discord, Teams, WhatsApp, Google Chat. Or pull them into ChatGPT, Claude, Cursor, and any MCP-capable client over the same protocol."
+          eyebrow="Multi-user delivery"
+          title="Reach agents from chat, apps, and MCP clients."
+          description="Route Slack, Telegram, REST, OpenClaw, ChatGPT, Claude, and other MCP clients through the same org-scoped backend."
           ctaLabel="Connect via MCP"
           ctaHref="/mcp/"
           graphic={<PlatformsGraphic />}
@@ -139,8 +139,8 @@ export function LandingPage(props: {
       >
         <FeatureBlock
           eyebrow="Self-host or managed"
-          title="You own your data."
-          description="Run open-source Lobu on your own servers for full control over your data and credentials, or use our managed runtime. With per-second billing you only pay for the time your agents are awake."
+          title="Keep data and credentials under control."
+          description="Run the open-source engine on your infrastructure or use Lobu Cloud. Workers stay isolated and never receive raw secrets."
           ctaLabel="Self-host guide"
           ctaHref="/getting-started/"
           graphic={<HostingGraphic />}
@@ -150,7 +150,7 @@ export function LandingPage(props: {
       <ArchitectureSection activeUseCaseId={activeUseCaseId} />
 
       <div class="py-20" id="data-model">
-        <DataModelSection />
+        <DataModelSection useCaseId={activeUseCaseId} />
       </div>
 
       <CTA startUrl={startUrl} />

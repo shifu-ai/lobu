@@ -394,7 +394,7 @@ export function Nav({
                 color: "var(--color-page-text-inverted)",
               }}
             >
-              Start for free
+              Start building
             </a>
           </div>
         </div>

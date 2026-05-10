@@ -87,11 +87,11 @@ export function HeroSection(props: {
     setCycleSeed((s) => s + 1);
   };
 
-  const headlineText = "Proactive agents that never forget.";
-  const headlineHighlight = "never forget";
+  const headlineText = "The open-source backend for multi-user AI agents.";
+  const headlineHighlight = "multi-user AI agents";
   const subhead =
     props.heroCopy?.description ??
-    "Build autonomous agents that take action and stay reachable from any chat or AI client.";
+    "Give every user an isolated agent workspace with OAuth, connected sources, shared memory, watchers, and secrets agents never see.";
 
   return (
     <section class="pt-16 pb-8 px-6 relative">
@@ -104,7 +104,7 @@ export function HeroSection(props: {
             border: "1px solid var(--color-page-border)",
           }}
         >
-          Lobu Memory scores 87.1% on LongMemEval, highest of any system
+          Multi-tenant agents with per-user OAuth isolation
           <ArrowRightIcon />
         </a>
 
@@ -135,7 +135,7 @@ export function HeroSection(props: {
               color: "var(--color-page-text-inverted)",
             }}
           >
-            Start for free
+            Start building
           </a>
           <a
             href={GITHUB_URL}
