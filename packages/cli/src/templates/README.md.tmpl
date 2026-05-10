@@ -41,14 +41,15 @@ Edit `.env` to configure:
 
 ### Platform Connections
 
-Platforms (Slack, Telegram, Discord, WhatsApp, Teams) are configured through the gateway APIs — no per-platform env vars are required in `.env`. Manage connections against `{PUBLIC_GATEWAY_URL}/api/v1/connections` and related auth/config endpoints.
+If you selected a platform during `lobu init`, fill the generated platform variables in `.env` (for example `TELEGRAM_BOT_TOKEN` or `SLACK_BOT_TOKEN`) before starting Lobu. Otherwise, manage platform connections through the gateway APIs at `{PUBLIC_GATEWAY_URL}/api/v1/connections` and related auth/config endpoints.
 
 ### Worker Customization
 
 Worker behavior is controlled by:
 
-- `[agents.<id>.skills]` blocks in `lobu.toml` — declare MCP servers, OAuth, and tool policy.
-- `nixPackages` per agent — pulls binaries onto the worker's `PATH` via `nix-shell`. The worker uses [just-bash](https://github.com/nicholasgasior/just-bash) to wrap shell commands; interpreters and package managers are excluded from the allowlist by default. Set `LOBU_ALLOW_UNSANDBOXED_EXEC=1` per-agent to opt back in if you genuinely need them.
+- `[agents.<id>.skills]` blocks in `lobu.toml` — declare custom MCP servers and OAuth.
+- `[agents.<id>.tools]` blocks — configure tool visibility and MCP approval bypasses.
+- `[agents.<id>.worker].nix_packages` — pulls binaries onto the worker's `PATH` via `nix-shell`. The worker uses [just-bash](https://github.com/nicholasgasior/just-bash) to wrap shell commands; interpreters and package managers are excluded from the allowlist by default. Set `LOBU_ALLOW_UNSANDBOXED_EXEC=1` per-agent to opt back in if you genuinely need them.
 
 ## Learn More
 

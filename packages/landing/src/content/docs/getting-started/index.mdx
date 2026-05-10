@@ -40,10 +40,11 @@ my-agent/
 │   ├── skills/                # skills scoped to this agent only
 │   └── evals/
 │       └── ping.yaml          # test cases for agent quality
-├── skills/                    # skills shared across all agents
-├── models/                    # Lobu entity schemas (if memory enabled)
-└── data/                      # Lobu seed entities and relationships
+├── data/                      # local runtime data; memory seeds when enabled
+└── skills/                    # skills shared across all agents
 ```
+
+If you enable Lobu memory during `init`, the scaffold also creates `models/` plus `data/entities/` and `data/relationships/`.
 
 | Path | Docs |
 |------|------|
@@ -51,7 +52,7 @@ my-agent/
 | `agents/*/IDENTITY.md`, `SOUL.md`, `USER.md` | [Agent Workspace](/guides/agent-prompts/) |
 | `agents/*/skills/`, `skills/` | [SKILL.md reference](/reference/skill-md/), [Skills](/getting-started/skills/) |
 | `agents/*/evals/` | [Evaluations](/guides/evals/) |
-| `models/`, `data/` | [Memory](/getting-started/memory/) |
+| `models/`, `data/entities/`, `data/relationships/` | [Memory](/getting-started/memory/) |
 | `.env` | [CLI reference](/reference/cli/) |
 
 ## Develop your agent
