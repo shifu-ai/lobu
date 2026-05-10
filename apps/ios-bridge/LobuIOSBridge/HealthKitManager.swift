@@ -18,7 +18,17 @@ final class HealthKitManager: ObservableObject {
         }
 
         try await store.requestAuthorization(toShare: [], read: readTypes())
-        authorizationStatus = "Authorized"
+        authorizationStatus = "Connected"
+    }
+
+    func restorePreviouslyRequestedAuthorizationState() {
+        authorizationStatus = "Connected"
+    }
+
+    func enableBackgroundDelivery() async throws {
+        for type in readTypes() {
+            try await enableBackgroundDelivery(for: type)
+        }
     }
 
     func summariesForLastDays(_ days: Int) async throws -> ([DailyHealthSummary], [WorkoutSummary]) {
@@ -121,6 +131,22 @@ final class HealthKitManager: ObservableObject {
         }
     }
 
+    private func enableBackgroundDelivery(for type: HKObjectType) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            store.enableBackgroundDelivery(for: type, frequency: .hourly) { success, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                    return
+                }
+                if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: HealthBridgeError.backgroundDeliveryUnavailable)
+                }
+            }
+        }
+    }
+
     private func readTypes() -> Set<HKObjectType> {
         var types: Set<HKObjectType> = [HKWorkoutType.workoutType()]
         [
@@ -143,12 +169,14 @@ enum HealthBridgeError: LocalizedError {
     case healthDataUnavailable
     case invalidDateRange
     case missingConfiguration
+    case backgroundDeliveryUnavailable
 
     var errorDescription: String? {
         switch self {
         case .healthDataUnavailable: return "Health data is not available on this device."
         case .invalidDateRange: return "Could not build the HealthKit date range."
-        case .missingConfiguration: return "Set Lobu base URL, org slug, and token before syncing."
+        case .missingConfiguration: return "Sign in to Lobu before syncing."
+        case .backgroundDeliveryUnavailable: return "Health background delivery is not available."
         }
     }
 }

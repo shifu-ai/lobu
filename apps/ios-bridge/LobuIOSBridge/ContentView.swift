@@ -8,6 +8,7 @@ struct ContentView: View {
     @AppStorage("selectedOrgSlug") private var selectedOrgSlug = ""
     @AppStorage("backfillDays") private var backfillDays = 7
     @AppStorage("pendingOAuthLogin") private var pendingOAuthLoginData = Data()
+    @AppStorage("healthAuthorizationRequested") private var healthAuthorizationRequested = false
 
     @State private var credentials: OAuthCredentials?
     @State private var isLoggingIn = false
@@ -88,10 +89,13 @@ struct ContentView: View {
                     }
                 }
 
-                Section("Health permissions") {
+                Section("Apple Health") {
                     LabeledContent("HealthKit", value: health.isHealthDataAvailable ? "Available" : "Unavailable")
-                    LabeledContent("Status", value: health.authorizationStatus)
-                    Button("Authorize Apple Health") {
+                    LabeledContent("Status", value: healthAuthorizationRequested ? "Connected" : health.authorizationStatus)
+                    Text("Connect once. After that, Sync now and background refresh reuse the existing Health permission.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Button(healthAuthorizationRequested ? "Review Apple Health permissions" : "Connect Apple Health") {
                         Task { await authorizeHealth() }
                     }
                 }
@@ -110,6 +114,7 @@ struct ContentView: View {
                     }
                     .disabled(isSyncing || credentials == nil || selectedOrgSlug.isEmpty)
                     LabeledContent("Last upload", value: "\(lastUploadCount) events")
+                    LabeledContent("Background", value: healthAuthorizationRequested ? "Enabled by iOS" : "Connect Health first")
                 }
 
                 Section("Status") {
@@ -122,6 +127,10 @@ struct ContentView: View {
             .onAppear {
                 if backfillDays < 1 || backfillDays > 30 {
                     backfillDays = clampedBackfillDays
+                }
+                if healthAuthorizationRequested {
+                    health.restorePreviouslyRequestedAuthorizationState()
+                    HealthBackgroundSync.schedule()
                 }
                 credentials = credentialStore.load()
                 if selectedOrgSlug.isEmpty {
@@ -277,43 +286,30 @@ struct ContentView: View {
     private func authorizeHealth() async {
         do {
             try await health.requestAuthorization()
-            setStatus("Apple Health authorized.")
+            try? await health.enableBackgroundDelivery()
+            healthAuthorizationRequested = true
+            HealthBackgroundSync.schedule()
+            setStatus("Apple Health connected. Background refresh is scheduled by iOS.")
         } catch {
             setStatus(error.localizedDescription)
         }
     }
 
     private func sync() async {
+        guard !isSyncing else { return }
         isSyncing = true
         defer { isSyncing = false }
         do {
             setStatus("Starting Apple Health sync for \(clampedBackfillDays) day(s)...")
-            guard var currentCredentials = credentials else { throw HealthBridgeError.missingConfiguration }
-            let oauth = try OAuthClient(baseURL: currentCredentials.baseURL)
-            if let expiresAt = currentCredentials.expiresAt, expiresAt < Date().addingTimeInterval(60) {
-                currentCredentials = try await oauth.refresh(currentCredentials, discovery: try await oauth.discover())
-                try credentialStore.save(currentCredentials)
-                credentials = currentCredentials
-            }
-
-            let client = LobuClient(
-                baseURL: currentCredentials.baseURL,
-                orgSlug: selectedOrgSlug,
-                accessToken: currentCredentials.accessToken
+            let result = try await HealthSyncService.sync(
+                health: health,
+                requestHealthAuthorization: !healthAuthorizationRequested,
+                backfillDays: clampedBackfillDays
             )
-            let (summaries, workouts) = try await health.summariesForLastDays(clampedBackfillDays)
-            setStatus("Fetched \(summaries.count) daily summaries and \(workouts.count) workouts from Apple Health. Uploading...")
-            var uploaded = 0
-            for summary in summaries {
-                try await client.saveDailySummary(summary)
-                uploaded += 1
-            }
-            for workout in workouts {
-                try await client.saveWorkout(workout)
-                uploaded += 1
-            }
-            lastUploadCount = uploaded
-            setStatus("Uploaded \(uploaded) Apple Health events to Lobu.")
+            healthAuthorizationRequested = true
+            HealthBackgroundSync.schedule()
+            lastUploadCount = result.uploadedCount
+            setStatus("Uploaded \(result.uploadedCount) Apple Health events to Lobu (\(result.dailySummaryCount) daily summaries, \(result.workoutCount) workouts).")
         } catch {
             setStatus(error.localizedDescription)
         }
