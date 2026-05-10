@@ -20,6 +20,10 @@ struct ContentView: View {
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
 
+    private var clampedBackfillDays: Int {
+        min(max(backfillDays, 1), 30)
+    }
+
     init() {
         decoder.dateDecodingStrategy = .iso8601
         encoder.dateEncodingStrategy = .iso8601
@@ -93,7 +97,14 @@ struct ContentView: View {
                 }
 
                 Section("Apple Health sync") {
-                    Stepper("Backfill \(backfillDays) days", value: $backfillDays, in: 1...30)
+                    Stepper(
+                        "Backfill \(clampedBackfillDays) days",
+                        value: Binding(
+                            get: { clampedBackfillDays },
+                            set: { backfillDays = min(max($0, 1), 30) }
+                        ),
+                        in: 1...30
+                    )
                     Button(isSyncing ? "Syncing…" : "Sync now") {
                         Task { await sync() }
                     }
@@ -109,6 +120,9 @@ struct ContentView: View {
             }
             .navigationTitle("Lobu iOS Bridge")
             .onAppear {
+                if backfillDays < 1 || backfillDays > 30 {
+                    backfillDays = clampedBackfillDays
+                }
                 credentials = credentialStore.load()
                 if selectedOrgSlug.isEmpty {
                     selectedOrgSlug = credentials?.userInfo?.organization_slug ?? credentials?.userInfo?.organizations.first?.slug ?? ""
@@ -267,7 +281,8 @@ struct ContentView: View {
                 orgSlug: selectedOrgSlug,
                 accessToken: currentCredentials.accessToken
             )
-            let (summaries, workouts) = try await health.summariesForLastDays(backfillDays)
+            let (summaries, workouts) = try await health.summariesForLastDays(clampedBackfillDays)
+            status = "Fetched \(summaries.count) daily summaries and \(workouts.count) workouts from Apple Health. Uploading..."
             var uploaded = 0
             for summary in summaries {
                 try await client.saveDailySummary(summary)
