@@ -14,6 +14,7 @@ import { Hono } from 'hono';
 import { compress } from 'hono/compress';
 import { cors } from 'hono/cors';
 import { pinoLogger } from 'hono-pino';
+import { appleHealthIngest } from './apple-health-ingest';
 import { createAuth } from './auth';
 import { getAuthConfig as getAuthConfigFromEnv } from './auth/config';
 import { mcpAuth } from './auth/middleware';
@@ -787,6 +788,7 @@ app.get('/api/:orgSlug/connections/:id', mcpAuth, async (c) => {
     connection_id: Number(c.req.param('id')),
   });
 });
+app.post('/api/:orgSlug/apple-health/ingest', mcpAuth, appleHealthIngest);
 app.delete('/api/:orgSlug/connections/:id', mcpAuth, async (c) => {
   return restToolProxy(c, 'manage_connections', {
     action: 'delete',

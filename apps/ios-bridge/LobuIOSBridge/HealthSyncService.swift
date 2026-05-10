@@ -38,19 +38,11 @@ enum HealthSyncService {
         )
         let backfillDays = clampedBackfillDays(requestedBackfillDays)
         let (summaries, workouts) = try await healthManager.summariesForLastDays(backfillDays)
-        var uploaded = 0
-        for summary in summaries {
-            try await client.saveDailySummary(summary)
-            uploaded += 1
-        }
-        for workout in workouts {
-            try await client.saveWorkout(workout)
-            uploaded += 1
-        }
+        try await client.uploadAppleHealth(dailySummaries: summaries, workouts: workouts)
         return HealthSyncResult(
             dailySummaryCount: summaries.count,
             workoutCount: workouts.count,
-            uploadedCount: uploaded
+            uploadedCount: summaries.count + workouts.count
         )
     }
 

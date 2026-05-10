@@ -1,37 +1,32 @@
 import Foundation
 
-struct SaveMemoryPayload<Metadata: Encodable>: Encodable {
-    let content: String
+struct AppleHealthIngestPayload: Encodable {
+    let daily_summaries: [AppleHealthIngestItem]
+    let workouts: [AppleHealthIngestItem]
+}
+
+struct AppleHealthIngestItem: Encodable {
+    let origin_id: String
     let title: String
-    let semantic_type: String
+    let content: String
     let occurred_at: String
-    let metadata: Metadata
+    let metadata: AppleHealthMetadata
 }
 
-struct DailyHealthMetadata: Encodable {
+struct AppleHealthMetadata: Encodable {
     let origin_id: String
     let source: String
     let sensitivity: String
-    let date: String
+    let date: String?
     let start_at: String
     let end_at: String
-    let steps: Double
-    let distance_m: Double
-    let active_energy_kcal: Double
-    let exercise_minutes: Double
-    let resting_heart_rate_bpm: Double?
-}
-
-struct WorkoutMetadata: Encodable {
-    let origin_id: String
-    let source: String
-    let sensitivity: String
-    let workout_type: String
-    let start_at: String
-    let end_at: String
-    let duration_s: Double
-    let active_energy_kcal: Double?
+    let steps: Double?
     let distance_m: Double?
+    let active_energy_kcal: Double?
+    let exercise_minutes: Double?
+    let resting_heart_rate_bpm: Double?
+    let workout_type: String?
+    let duration_s: Double?
 }
 
 final class LobuClient {
@@ -51,52 +46,60 @@ final class LobuClient {
         self.encoder = encoder
     }
 
-    func saveDailySummary(_ summary: DailyHealthSummary) async throws {
-        let payload = SaveMemoryPayload(
-            content: summary.summaryText,
-            title: summary.title,
-            semantic_type: "summary",
-            occurred_at: isoString(summary.startAt),
-            metadata: DailyHealthMetadata(
-                origin_id: summary.originID,
-                source: "apple_health",
-                sensitivity: "health",
-                date: summary.date,
-                start_at: isoString(summary.startAt),
-                end_at: isoString(summary.endAt),
-                steps: summary.steps,
-                distance_m: summary.distanceMeters,
-                active_energy_kcal: summary.activeEnergyKilocalories,
-                exercise_minutes: summary.exerciseMinutes,
-                resting_heart_rate_bpm: summary.restingHeartRateBpm
-            )
+    func uploadAppleHealth(dailySummaries: [DailyHealthSummary], workouts: [WorkoutSummary]) async throws {
+        let payload = AppleHealthIngestPayload(
+            daily_summaries: dailySummaries.map { summary in
+                AppleHealthIngestItem(
+                    origin_id: summary.originID,
+                    title: summary.title,
+                    content: summary.summaryText,
+                    occurred_at: isoString(summary.startAt),
+                    metadata: AppleHealthMetadata(
+                        origin_id: summary.originID,
+                        source: "apple_health",
+                        sensitivity: "health",
+                        date: summary.date,
+                        start_at: isoString(summary.startAt),
+                        end_at: isoString(summary.endAt),
+                        steps: summary.steps,
+                        distance_m: summary.distanceMeters,
+                        active_energy_kcal: summary.activeEnergyKilocalories,
+                        exercise_minutes: summary.exerciseMinutes,
+                        resting_heart_rate_bpm: summary.restingHeartRateBpm,
+                        workout_type: nil,
+                        duration_s: nil
+                    )
+                )
+            },
+            workouts: workouts.map { workout in
+                AppleHealthIngestItem(
+                    origin_id: workout.originID,
+                    title: workout.title,
+                    content: workout.summaryText,
+                    occurred_at: isoString(workout.startAt),
+                    metadata: AppleHealthMetadata(
+                        origin_id: workout.originID,
+                        source: "apple_health",
+                        sensitivity: "health",
+                        date: nil,
+                        start_at: isoString(workout.startAt),
+                        end_at: isoString(workout.endAt),
+                        steps: nil,
+                        distance_m: workout.distanceMeters,
+                        active_energy_kcal: workout.activeEnergyKilocalories,
+                        exercise_minutes: nil,
+                        resting_heart_rate_bpm: nil,
+                        workout_type: workout.workoutType,
+                        duration_s: workout.durationSeconds
+                    )
+                )
+            }
         )
-        try await postSaveMemory(payload)
+        try await postAppleHealthIngest(payload)
     }
 
-    func saveWorkout(_ workout: WorkoutSummary) async throws {
-        let payload = SaveMemoryPayload(
-            content: workout.summaryText,
-            title: workout.title,
-            semantic_type: "event",
-            occurred_at: isoString(workout.startAt),
-            metadata: WorkoutMetadata(
-                origin_id: workout.originID,
-                source: "apple_health",
-                sensitivity: "health",
-                workout_type: workout.workoutType,
-                start_at: isoString(workout.startAt),
-                end_at: isoString(workout.endAt),
-                duration_s: workout.durationSeconds,
-                active_energy_kcal: workout.activeEnergyKilocalories,
-                distance_m: workout.distanceMeters
-            )
-        )
-        try await postSaveMemory(payload)
-    }
-
-    private func postSaveMemory<Metadata: Encodable>(_ payload: SaveMemoryPayload<Metadata>) async throws {
-        guard let url = URL(string: "\(baseURL.trimmedTrailingSlash())/api/\(orgSlug)/save_memory") else {
+    private func postAppleHealthIngest(_ payload: AppleHealthIngestPayload) async throws {
+        guard let url = URL(string: "\(baseURL.trimmedTrailingSlash())/api/\(orgSlug)/apple-health/ingest") else {
             throw URLError(.badURL)
         }
         var request = URLRequest(url: url)
