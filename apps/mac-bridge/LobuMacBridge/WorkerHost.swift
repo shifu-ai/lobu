@@ -1,17 +1,20 @@
 import Foundation
 
 /// Optional: hosts Lobu's connector-worker daemon (the Node-based worker that
-/// runs server-side connectors like Gmail, Calendar, GitHub, RSS, etc.) as a
-/// child process on the user's Mac. The daemon polls /api/workers/* itself,
-/// using the user's OAuth bearer for auth — same protocol the Mac bridge's
-/// Screen Time reader uses, just running standard connectors instead of
-/// phone-bridged ones.
+/// runs server-side connectors like Gmail, GitHub, RSS, etc.) as a child
+/// process on the user's Mac. The daemon polls /api/workers/* itself, using
+/// the user's OAuth bearer for auth — same protocol the Mac bridge's Screen
+/// Time reader uses, just running standard connectors instead of phone-
+/// bridged ones.
 ///
-/// Spawning strategy: prefer a bundled `bun` binary at
-/// `Bundle.main.resourceURL/bun` (ships ~80MB inside the .app), fall back to
-/// whatever `bun` is on the user's PATH if they have it installed already.
-/// The daemon process itself comes from the published @lobu/connector-worker
-/// npm package which `bunx` will pull on first run.
+/// The daemon ships from this monorepo's @lobu/connector-worker package, NOT
+/// from npm (the package is intentionally private). Two locations to find it:
+///   1. Bundled at Bundle.main.resourceURL/connector-worker/dist/bin.js
+///      (production distribution — copied in by the release pipeline)
+///   2. Dev fallback: env LOBU_REPO_ROOT/packages/connector-worker/dist/bin.js
+///      (set the env var when launching from Xcode for local iteration)
+///
+/// bun is found in this order: bundled binary → ~/.bun/bin/bun → Homebrew.
 final class WorkerHost {
     private(set) var pid: Int32?
     private var process: Process?
@@ -26,13 +29,19 @@ final class WorkerHost {
 
     enum HostError: LocalizedError {
         case bunNotFound
+        case daemonNotFound(String)
         case alreadyRunning
         case spawn(Error)
         var errorDescription: String? {
             switch self {
-            case .bunNotFound: return "bun runtime not found (expected bundled at .app/Contents/Resources/bun or on $PATH)."
-            case .alreadyRunning: return "Connector worker is already running."
-            case let .spawn(err): return "Failed to spawn worker: \(err.localizedDescription)"
+            case .bunNotFound:
+                return "bun runtime not found. Install via `curl -fsSL https://bun.sh/install | bash` or bundle it in the .app."
+            case let .daemonNotFound(path):
+                return "Connector-worker daemon not found at \(path). For dev, set LOBU_REPO_ROOT to the repo root before launching."
+            case .alreadyRunning:
+                return "Connector worker is already running."
+            case let .spawn(err):
+                return "Failed to spawn worker: \(err.localizedDescription)"
             }
         }
     }
@@ -44,10 +53,11 @@ final class WorkerHost {
         guard FileManager.default.isExecutableFile(atPath: bunPath) else {
             throw HostError.bunNotFound
         }
+        let daemonPath = try locateDaemon()
 
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: bunPath)
-        proc.arguments = ["x", "@lobu/connector-worker", "daemon"]
+        proc.arguments = ["run", daemonPath, "daemon"]
         var env = ProcessInfo.processInfo.environment
         env["API_URL"] = apiURL
         env["WORKER_API_TOKEN"] = accessToken
@@ -65,7 +75,7 @@ final class WorkerHost {
             try proc.run()
             process = proc
             pid = proc.processIdentifier
-            NSLog("[WorkerHost] started bun connector-worker (pid=\(pid ?? -1)) log=\(logFile.path)")
+            NSLog("[WorkerHost] started \(bunPath) run \(daemonPath) (pid=\(pid ?? -1)) log=\(logFile.path)")
         } catch {
             throw HostError.spawn(error)
         }
@@ -76,14 +86,9 @@ final class WorkerHost {
         proc.terminate()
         process = nil
         pid = nil
-        NSLog("[WorkerHost] stopped bun connector-worker")
+        NSLog("[WorkerHost] stopped connector-worker")
     }
 
-    /// Look for bun in three places, in order of preference:
-    ///   1. Bundled binary inside the .app (production distribution)
-    ///   2. ~/.bun/bin/bun (the official bun installer's default location)
-    ///   3. /opt/homebrew/bin/bun (Homebrew install)
-    /// Returns the first path that exists. Caller still checks executability.
     private func locateBun() -> String {
         if let resourceURL = Bundle.main.resourceURL {
             let bundled = resourceURL.appendingPathComponent("bun").path
@@ -92,5 +97,18 @@ final class WorkerHost {
         let userBun = "\(NSHomeDirectory())/.bun/bin/bun"
         if FileManager.default.isExecutableFile(atPath: userBun) { return userBun }
         return "/opt/homebrew/bin/bun"
+    }
+
+    private func locateDaemon() throws -> String {
+        if let resourceURL = Bundle.main.resourceURL {
+            let bundled = resourceURL.appendingPathComponent("connector-worker/dist/bin.js").path
+            if FileManager.default.fileExists(atPath: bundled) { return bundled }
+        }
+        if let repoRoot = ProcessInfo.processInfo.environment["LOBU_REPO_ROOT"] {
+            let devPath = "\(repoRoot)/packages/connector-worker/dist/bin.js"
+            if FileManager.default.fileExists(atPath: devPath) { return devPath }
+            throw HostError.daemonNotFound(devPath)
+        }
+        throw HostError.daemonNotFound("(bundled or $LOBU_REPO_ROOT)")
     }
 }

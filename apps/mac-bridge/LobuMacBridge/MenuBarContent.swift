@@ -91,13 +91,18 @@ struct MenuBarContent: View {
     }
 
     private var dataSourceRow: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "clock.fill")
-                .foregroundStyle(.purple)
-                .frame(width: 22)
-            Text("Screen Time").font(.body)
-            Spacer()
-            Text("Connected").font(.caption).foregroundStyle(.green)
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 10) {
+                Image(systemName: "clock.fill")
+                    .foregroundStyle(.purple)
+                    .frame(width: 22)
+                Text("Screen Time").font(.body)
+                Spacer()
+            }
+            Text("Needs Full Disk Access — grant in System Settings if Sync fails.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 32)
         }
     }
 
