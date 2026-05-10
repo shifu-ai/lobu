@@ -16,14 +16,15 @@ export interface DevOptions {
   logLevel?: string;
 }
 
+type BackendBundleKind = "postgres" | "pglite";
+
 /**
  * `lobu run` — start the embedded Lobu stack.
  *
- * Spawns the bundled @lobu/server Node server, which hosts the
- * gateway, embedded workers, embeddings, and the Lobu memory backend
- * in-process. Workers are spawned as child subprocesses by the gateway's
- * EmbeddedDeploymentManager. Postgres must be reachable via DATABASE_URL
- * in .env.
+ * By default this uses the bundled local PGlite runtime, so a freshly
+ * scaffolded project can boot without Docker or a separate Postgres. When
+ * DATABASE_URL is set in .env or the shell, it instead starts the external
+ * Postgres runtime against that database.
  */
 export async function devCommand(
   cwd: string,
@@ -40,35 +41,16 @@ export async function devCommand(
   }
 
   const mergedEnv = { ...envVars, ...(process.env as Record<string, string>) };
-  if (!mergedEnv.DATABASE_URL) {
-    spinner.fail("DATABASE_URL is missing");
-    console.error(
-      chalk.red(`\n  Set the following in your environment or .env:\n`)
-    );
-    console.error(chalk.dim(`    DATABASE_URL=`));
-    console.error(
-      chalk.dim(
-        "\n  Lobu connects to a user-provided Postgres with pgvector. Pick one:"
-      )
-    );
-    console.error(
-      chalk.dim("    Docker: docker run -d --name lobu-pg -p 5432:5432 \\")
-    );
-    console.error(
-      chalk.dim(
-        "              -e POSTGRES_PASSWORD=lobu pgvector/pgvector:pg16"
-      )
-    );
-    console.error(chalk.dim("    macOS:  brew services start postgresql\n"));
-    process.exit(1);
-  }
-
-  const bundlePath = resolveBackendBundle();
+  const hasDatabaseUrl = Boolean(mergedEnv.DATABASE_URL?.trim());
+  const bundleKind: BackendBundleKind = hasDatabaseUrl ? "postgres" : "pglite";
+  const bundlePath = resolveBackendBundle(undefined, bundleKind);
   if (!bundlePath) {
     spinner.fail("server bundle not found");
+    const bundleName =
+      bundleKind === "pglite" ? "start-local.bundle.mjs" : "server.bundle.mjs";
     console.error(
       chalk.red(
-        "\n  Could not locate the embedded server bundle (server.bundle.mjs).\n"
+        `\n  Could not locate the embedded server bundle (${bundleName}).\n`
       )
     );
     console.error(
@@ -86,7 +68,11 @@ export async function devCommand(
     process.exit(1);
   }
 
-  spinner.succeed("Environment ready");
+  spinner.succeed(
+    hasDatabaseUrl
+      ? "Environment ready"
+      : "Environment ready (using local PGlite)"
+  );
 
   const portRaw =
     options.port ?? mergedEnv.GATEWAY_PORT ?? mergedEnv.PORT ?? "8787";
@@ -120,9 +106,18 @@ export async function devCommand(
   if (!options.quiet) {
     console.log(chalk.cyan(`\n  Starting Lobu...\n`));
     console.log(chalk.dim(`  bundle:        ${bundlePath}`));
-    console.log(
-      chalk.dim(`  database:      ${redactUrl(mergedEnv.DATABASE_URL!)}`)
-    );
+    if (hasDatabaseUrl) {
+      console.log(
+        chalk.dim(`  database:      ${redactUrl(mergedEnv.DATABASE_URL!)}`)
+      );
+    } else {
+      console.log(chalk.dim("  database:      local PGlite"));
+      console.log(
+        chalk.dim(
+          `  data:          ${mergedEnv.LOBU_DATA_DIR || "~/.lobu/data"}`
+        )
+      );
+    }
     console.log(chalk.dim(`  api docs:      ${gatewayUrl}/api/docs`));
     console.log();
   }
@@ -179,27 +174,32 @@ export async function devCommand(
 }
 
 export function resolveBackendBundle(
-  startDir = dirname(fileURLToPath(import.meta.url))
+  startDir = dirname(fileURLToPath(import.meta.url)),
+  kind: BackendBundleKind = "postgres"
 ): string | null {
   const here = startDir;
   const require_ = createRequire(import.meta.url);
+  const bundleName =
+    kind === "pglite" ? "start-local.bundle.mjs" : "server.bundle.mjs";
 
   for (const bundled of [
-    join(here, "server.bundle.mjs"),
-    join(here, "..", "server.bundle.mjs"),
+    join(here, bundleName),
+    join(here, "..", bundleName),
   ]) {
     if (existsSync(bundled)) return bundled;
   }
 
-  try {
-    return require_.resolve("@lobu/server/dist/server.bundle.mjs");
-  } catch {
-    // not installed as a dep
+  if (kind === "postgres") {
+    try {
+      return require_.resolve("@lobu/server/dist/server.bundle.mjs");
+    } catch {
+      // not installed as a dep
+    }
   }
 
   let cur = here;
   for (let i = 0; i < 6; i++) {
-    const candidate = join(cur, "packages/server/dist/server.bundle.mjs");
+    const candidate = join(cur, "packages/server/dist", bundleName);
     if (existsSync(candidate)) return candidate;
     const parent = dirname(cur);
     if (parent === cur) break;

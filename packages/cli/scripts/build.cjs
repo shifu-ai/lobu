@@ -35,20 +35,25 @@ if (fs.existsSync(providersSrc)) {
 // compiles them on demand when a workspace installs or runs one.
 copyDirIfExists("../connectors/src", "dist/connectors");
 
-// Copy the server server bundle so `lobu run` is self-contained.
+// Copy database migrations for the bundled PGlite local server.
+copyDirIfExists("../../db/migrations", "dist/db/migrations");
+
+// Copy server bundles so `lobu run` is self-contained.
 // @lobu/server is private (`private: true` in its package.json),
 // so `npx @lobu/cli` users can never resolve it via npm — they only get
-// what ships inside the CLI tarball. CI's publish flow builds the bundle
-// (`build:server`) before this script runs; if it's missing locally, run
+// what ships inside the CLI tarball. CI's publish flow builds the bundles
+// (`build:server`) before this script runs; if they're missing locally, run
 // `bun run --filter '@lobu/server' build:server` first.
-const bundleSrc = "../server/dist/server.bundle.mjs";
-const bundleDest = "dist/server.bundle.mjs";
-if (fs.existsSync(bundleSrc)) {
-  fs.cpSync(bundleSrc, bundleDest);
-} else {
-  console.warn(
-    `[cli build] server bundle missing at ${bundleSrc}; ` +
-      "`lobu run` will fall back to monorepo-relative lookup. Run " +
-      "`bun run --filter '@lobu/server' build:server` to bundle it."
-  );
+for (const bundleName of ["server.bundle.mjs", "start-local.bundle.mjs"]) {
+  const bundleSrc = `../server/dist/${bundleName}`;
+  const bundleDest = `dist/${bundleName}`;
+  if (fs.existsSync(bundleSrc)) {
+    fs.cpSync(bundleSrc, bundleDest);
+  } else {
+    console.warn(
+      `[cli build] server bundle missing at ${bundleSrc}; ` +
+        "`lobu run` may fall back to monorepo-relative lookup. Run " +
+        "`bun run --filter '@lobu/server' build:server` to bundle it."
+    );
+  }
 }

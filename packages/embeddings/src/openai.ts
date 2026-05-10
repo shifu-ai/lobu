@@ -1,4 +1,4 @@
-import { normalizeEmbeddings, validateEmbeddingDimensions } from './embedding-utils';
+import { normalizeEmbeddings, validateEmbeddingDimensions } from './embedding-utils.js';
 
 interface OpenAIEmbeddingResponse {
   data: Array<{ embedding: number[]; index: number }>;

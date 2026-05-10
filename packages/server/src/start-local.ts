@@ -202,6 +202,9 @@ async function runMigrations(dbUrl: string) {
     }
 
     const migrationsDir = resolveExistingPath(
+      // Published @lobu/cli copies migrations next to start-local.bundle.mjs
+      // under dist/db/migrations.
+      join(fileURLToPath(new URL('.', import.meta.url)), 'db', 'migrations'),
       join(APP_ROOT, 'db', 'migrations'),
       join(process.cwd(), 'db', 'migrations')
     );
@@ -588,9 +591,17 @@ function findFreePort(): Promise<number> {
 }
 
 async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
+  const publishedServerPath = (() => {
+    try {
+      return fileURLToPath(import.meta.resolve('@lobu/embeddings/server'));
+    } catch {
+      return null;
+    }
+  })();
   const serverPath = resolveExistingPath(
     join(APP_ROOT, 'packages', 'embeddings', 'src', 'server.ts'),
-    join(process.cwd(), 'packages', 'embeddings', 'src', 'server.ts')
+    join(process.cwd(), 'packages', 'embeddings', 'src', 'server.ts'),
+    ...(publishedServerPath ? [publishedServerPath] : [])
   );
   if (!serverPath) {
     logger.warn('Embeddings service not found — embedding generation will not be available');
@@ -598,11 +609,16 @@ async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
   }
 
   const port = EMBEDDINGS_PORT || (await findFreePort());
-  const tsxPackageJson = require.resolve('tsx/package.json');
-  const tsxLoaderPath = join(dirname(tsxPackageJson), 'dist', 'loader.mjs');
+  const isTypescriptServer = serverPath.endsWith('.ts');
+  let execArgv: string[] = [];
+  if (isTypescriptServer) {
+    const tsxPackageJson = require.resolve('tsx/package.json');
+    const tsxLoaderPath = join(dirname(tsxPackageJson), 'dist', 'loader.mjs');
+    execArgv = ['--import', tsxLoaderPath];
+  }
 
   const child = fork(serverPath, [], {
-    execArgv: ['--import', tsxLoaderPath],
+    execArgv,
     env: { ...process.env, PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });

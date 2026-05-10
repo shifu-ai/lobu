@@ -7,14 +7,14 @@ Deploy sandboxed, persistent AI agents to your infrastructure — one isolated a
 
 ## Quick start
 
-Lobu boots as a single Node process. Bring your own Postgres with pgvector (managed instance or local — `brew services start postgresql` works for dev).
+Lobu boots as a single Node process. By default it uses local PGlite with pgvector enabled, so you can start without Docker or a separate Postgres. Set `DATABASE_URL` only when you want to use an external Postgres.
 
 ```bash
 # 1. Scaffold
 npx @lobu/cli@latest init my-agent
 cd my-agent
 
-# 2. Set DATABASE_URL in .env, then boot
+# 2. Boot locally (uses PGlite by default)
 npx @lobu/cli@latest run
 
 # 3. Chat with your agent (in another terminal)
@@ -29,7 +29,7 @@ npx @lobu/cli@latest eval
 ```
 my-agent/
 ├── lobu.toml                  # agents, providers, skills, network
-├── .env                       # secrets (API keys, DATABASE_URL)
+├── .env                       # secrets (API keys, optional DATABASE_URL)
 ├── AGENTS.md                  # briefing for coding agents
 ├── README.md
 ├── TESTING.md

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * Bundle src/server.ts into a single ESM file for production runtime.
+ * Bundle production and local PGlite server entrypoints into standalone ESM
+ * files consumed by the published @lobu/cli package.
  *
  * Why: prod runs under Node so isolated-vm (V8 native addon) loads. Running
  * the TS source through tsx exposes Node's CJS↔ESM lexer interop with
@@ -15,8 +16,9 @@
  * External: bare specifiers stay external (loaded from node_modules at
  * runtime). Published `@lobu/cli` declares those runtime dependencies
  * directly so Node's resolver finds them from the CLI install. Native addons
- * (isolated-vm) and packages with require-in-the-middle hooks (Sentry,
- * OpenTelemetry, pino) MUST stay external to keep their runtime hooks working.
+ * (isolated-vm), PGlite native/WASM assets, and packages with
+ * require-in-the-middle hooks (Sentry, OpenTelemetry, pino) MUST stay external
+ * to keep their runtime hooks working.
  */
 
 import esbuild from 'esbuild';
@@ -26,11 +28,9 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const pkgDir = join(here, '..');
 
-const result = await esbuild.build({
+const commonOptions = {
   absWorkingDir: pkgDir,
-  entryPoints: ['src/server.ts'],
   bundle: true,
-  outfile: 'dist/server.bundle.mjs',
   platform: 'node',
   target: 'node22',
   format: 'esm',
@@ -61,13 +61,24 @@ const result = await esbuild.build({
   sourcemap: true,
   metafile: true,
   logLevel: 'info',
-});
+};
 
-const output = Object.entries(result.metafile.outputs).find(([file]) =>
-  file.endsWith('dist/server.bundle.mjs'),
-)?.[1];
-const bytes = output?.bytes ?? 0;
-console.log(
-  `\n=== bundle ready: dist/server.bundle.mjs (${(bytes / 1024 / 1024).toFixed(2)} MB)`,
-);
-console.log(`    warnings: ${result.warnings.length}, errors: ${result.errors.length}`);
+async function buildBundle(entryPoint, outfile) {
+  const result = await esbuild.build({
+    ...commonOptions,
+    entryPoints: [entryPoint],
+    outfile,
+  });
+
+  const output = Object.entries(result.metafile.outputs).find(([file]) =>
+    file.endsWith(outfile),
+  )?.[1];
+  const bytes = output?.bytes ?? 0;
+  console.log(
+    `\n=== bundle ready: ${outfile} (${(bytes / 1024 / 1024).toFixed(2)} MB)`,
+  );
+  console.log(`    warnings: ${result.warnings.length}, errors: ${result.errors.length}`);
+}
+
+await buildBundle('src/server.ts', 'dist/server.bundle.mjs');
+await buildBundle('src/start-local.ts', 'dist/start-local.bundle.mjs');
