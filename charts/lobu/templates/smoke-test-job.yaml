@@ -1,0 +1,54 @@
+{{- if .Values.releaseGates.smokeTest.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "lobu.fullname" . }}-smoke-test
+  labels:
+    {{- include "lobu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: smoke-test
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (.Values.releaseGates.smokeTest.timeoutSeconds | int) 30 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lobu.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: smoke-test
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: smoke-test
+          image: {{ include "lobu.appImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              url="http://{{ include "lobu.fullname" . }}-app:{{ .Values.service.port }}{{ .Values.releaseGates.smokeTest.path }}"
+              deadline=$((SECONDS + {{ .Values.releaseGates.smokeTest.timeoutSeconds | int }}))
+              echo "waiting for $url"
+
+              while true; do
+                if curl -fsS --max-time 5 "$url" >/tmp/lobu-smoke-response 2>/tmp/lobu-smoke-error; then
+                  echo "smoke test passed"
+                  cat /tmp/lobu-smoke-response
+                  exit 0
+                fi
+
+                if [ "$SECONDS" -ge "$deadline" ]; then
+                  echo "smoke test timed out" >&2
+                  echo "last curl error:" >&2
+                  cat /tmp/lobu-smoke-error >&2 || true
+                  exit 1
+                fi
+
+                sleep {{ .Values.releaseGates.smokeTest.intervalSeconds | int }}
+              done
+{{- end }}
