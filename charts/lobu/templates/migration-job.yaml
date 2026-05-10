@@ -72,6 +72,10 @@ spec:
             - name: DB_PREFLIGHT_TIMEOUT_SECONDS
               value: {{ .Values.releaseGates.databasePreflight.timeoutSeconds | quote }}
             {{- end }}
+            {{- if and .Values.secrets.create (hasKey .Values.secrets.stringData "DATABASE_URL") (not .Values.migrations.database.existingSecret) (not (hasKey .Values.app.env "DATABASE_URL")) }}
+            - name: DATABASE_URL
+              value: {{ index .Values.secrets.stringData "DATABASE_URL" | quote }}
+            {{- end }}
             {{- if .Values.migrations.database.existingSecret }}
             {{- if .Values.migrations.database.usePooler }}
             - name: DB_USER
@@ -95,7 +99,7 @@ spec:
             {{- end }}
             {{- end }}
           {{- $secretName := include "lobu.secretName" . }}
-          {{- if $secretName }}
+          {{- if and $secretName (not .Values.secrets.create) }}
           envFrom:
             - secretRef:
                 name: {{ $secretName }}

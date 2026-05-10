@@ -36,6 +36,8 @@ app:
   replicaCount: 1
   env:
     NODE_ENV: production
+    # PUBLIC_WEB_URL is derived from ingress.hosts[0] below. Set it here only
+    # when your public URL differs from that host.
     # Migrations are handled by the Helm pre-install/pre-upgrade Job below.
     SKIP_MIGRATIONS: "1"
     # Optional but recommended: start restrictive and add domains needed by
@@ -63,6 +65,9 @@ embeddings:
 
 migrations:
   enabled: true
+  # If you use secrets.create and place DATABASE_URL in secrets.stringData
+  # instead of the external lobu-db Secret above, leave this database block empty;
+  # the migration hook reads secrets.stringData.DATABASE_URL directly.
   database:
     existingSecret: lobu-db
     existingSecretKey: uri

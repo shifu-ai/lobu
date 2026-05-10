@@ -121,7 +121,9 @@ service:
   type: ClusterIP
   port: 8787
 
-# Optional Ingress for public webhooks and the admin UI.
+# Optional Ingress for public webhooks and the admin UI. When hosts are set,
+# the app Deployment derives PUBLIC_WEB_URL from the first host unless you set
+# app.env.PUBLIC_WEB_URL explicitly.
 ingress:
   enabled: false
   className: ""
@@ -131,7 +133,10 @@ ingress:
 
 # Database configuration. For most installs, create a Secret with DATABASE_URL
 # and set database.existingSecret below. Alternatively, keep database empty and
-# provide DATABASE_URL through secretName/secrets.
+# provide DATABASE_URL through secretName/secrets. When migrations.enabled and
+# secrets.create are both true, put DATABASE_URL in secrets.stringData or set
+# migrations.database.existingSecret so the hook does not depend on a Secret
+# that Helm has not created yet.
 database:
   existingSecret: ""
   existingSecretKey: uri
@@ -153,7 +158,10 @@ healthCheck:
 
 migrations:
   # When enabled, Helm runs migrations as a pre-install/pre-upgrade Job and you
-  # should set app.env.SKIP_MIGRATIONS: "1" so app pods do not repeat them.
+  # should set app.env.SKIP_MIGRATIONS: "1" so app pods do not repeat them. If
+  # secrets.create is true and DATABASE_URL lives in that chart-managed Secret,
+  # the Job reads secrets.stringData.DATABASE_URL directly because normal chart
+  # resources are not created before pre-install hooks run.
   enabled: false
   database:
     existingSecret: ""

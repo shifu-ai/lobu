@@ -53,8 +53,8 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            {{- if .Values.ingress.hosts }}
-            - name: BASE_URL
+            {{- if and .Values.ingress.hosts (not (hasKey .Values.app.env "PUBLIC_WEB_URL")) }}
+            - name: PUBLIC_WEB_URL
               value: {{ printf "https://%s" (first .Values.ingress.hosts) | quote }}
             {{- end }}
             {{- if .Values.embeddings.service.port }}
