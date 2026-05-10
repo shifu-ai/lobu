@@ -14,8 +14,8 @@ interface JoinPublicParams {
 }
 
 /**
- * Self-serve join for a public organization. Used by the REST /join endpoint
- * and the join_organization MCP tool. Idempotent.
+ * Self-serve join for a public organization. Used by the REST /join endpoint.
+ * Idempotent.
  *
  * Replicates the side effects of Better Auth's afterAddMember hook
  * (ensureMemberEntity + invalidateMembershipRoleCache) since Better Auth's
