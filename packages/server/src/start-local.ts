@@ -601,7 +601,7 @@ async function startEmbeddings(): Promise<ReturnType<typeof fork> | null> {
   const serverPath = resolveExistingPath(
     join(APP_ROOT, 'packages', 'embeddings', 'src', 'server.ts'),
     join(process.cwd(), 'packages', 'embeddings', 'src', 'server.ts'),
-    publishedServerPath
+    ...(publishedServerPath ? [publishedServerPath] : [])
   );
   if (!serverPath) {
     logger.warn('Embeddings service not found — embedding generation will not be available');
