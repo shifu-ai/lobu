@@ -170,6 +170,7 @@ enum HealthBridgeError: LocalizedError {
     case invalidDateRange
     case missingConfiguration
     case backgroundDeliveryUnavailable
+    case unsupportedConnector(String)
 
     var errorDescription: String? {
         switch self {
@@ -177,6 +178,8 @@ enum HealthBridgeError: LocalizedError {
         case .invalidDateRange: return "Could not build the HealthKit date range."
         case .missingConfiguration: return "Sign in to Lobu before syncing."
         case .backgroundDeliveryUnavailable: return "Health background delivery is not available."
+        case let .unsupportedConnector(key):
+            return "The iOS bridge does not know how to run connector \(key)."
         }
     }
 }

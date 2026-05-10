@@ -309,7 +309,11 @@ struct ContentView: View {
             healthAuthorizationRequested = true
             HealthBackgroundSync.schedule()
             lastUploadCount = result.uploadedCount
-            setStatus("Uploaded \(result.uploadedCount) Apple Health events to Lobu (\(result.dailySummaryCount) daily summaries, \(result.workoutCount) workouts).")
+            if result.claimedJob {
+                setStatus("Streamed \(result.uploadedCount) Apple Health events to Lobu (\(result.dailySummaryCount) daily summaries, \(result.workoutCount) workouts).")
+            } else {
+                setStatus("No pending Apple Health sync work — Lobu's scheduler will trigger the next run when due.")
+            }
         } catch {
             setStatus(error.localizedDescription)
         }
