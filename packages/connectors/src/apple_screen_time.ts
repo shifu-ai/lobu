@@ -1,37 +1,15 @@
 /**
- * Apple Screen Time Connector (V1 runtime) — gated by entitlement.
+ * Apple Screen Time Connector (V1 runtime) — Mac-bridge only.
  *
- * IMPORTANT: this is a scaffold. Apple's Screen Time API (FamilyControls +
- * DeviceActivity + ManagedSettings) is intentionally designed so per-app
- * usage data CANNOT be exfiltrated from the device by a third-party app:
+ * Runs on the Lobu Mac Bridge, which reads `~/Library/Application Support/
+ * Knowledge/knowledgeC.db` (the on-device Knowledge store backing Apple's
+ * Settings → Screen Time UI). With Full Disk Access granted, the Mac can
+ * pull per-app foreground time by day for both Mac usage and (if the user
+ * enables Screen Time iCloud sync) iOS usage.
  *
- *   1. The `com.apple.developer.family-controls` entitlement requires
- *      explicit approval from Apple — it is not a self-service toggle.
- *   2. Even with the entitlement, raw app-usage data is only readable inside
- *      a `DeviceActivityReport` SwiftUI extension that renders charts on
- *      device. The extension cannot perform network I/O.
- *   3. The aggregate signals that ARE readable from the host app
- *      (`DeviceActivityCenter` schedules + opaque event thresholds) are
- *      thresholds, not totals — they fire when a budget is crossed, no
- *      per-app totals are exposed.
- *
- * What this connector definition does today:
- *   - Reserves the connector key + UI slot in the catalog.
- *   - Declares `requiredCapability='screentime'` so when (and only when) an
- *     iOS Bridge build with the Family Controls entitlement advertises it,
- *     the scheduler will route runs to that device.
- *
- * What it would take to make this real:
- *   - Request and obtain the Family Controls entitlement from Apple.
- *   - Add a DeviceActivityReport SwiftUI extension target to the iOS app.
- *   - Constrain this connector's eventKinds to the aggregate-only signals
- *     the extension can derive (e.g. daily total screen time per category,
- *     never per-app totals). The user grants `FamilyControls.AuthorizationCenter`
- *     before any of that runs.
- *
- * Until those land, the connector definition exists but no iOS Bridge advertises
- * the `screentime` capability, so runs queued for it will sit pending forever
- * (which is the right behavior — visibly stalled is better than silently lost).
+ * iOS does NOT advertise the `screentime` capability — Apple's
+ * FamilyControls + DeviceActivityReport design prevents per-app data from
+ * leaving the device on iOS. The Mac path is the workable one.
  */
 
 import {
@@ -44,24 +22,24 @@ import {
 } from '@lobu/connector-sdk';
 
 const BRIDGE_ONLY =
-  'Apple Screen Time requires the Family Controls entitlement on the iOS Bridge build.';
+  'Apple Screen Time runs only on a worker advertising capability "screentime" (the Lobu Mac Bridge with Full Disk Access).';
 
 export default class AppleScreenTimeConnector extends ConnectorRuntime {
   readonly definition: ConnectorDefinition = {
     key: 'apple.screen_time',
     name: 'Apple Screen Time',
     description:
-      'Daily Screen Time category totals from the Lobu iOS Bridge. Requires the Family Controls entitlement; until that ships, runs for this connector stay pending. Per-app totals are not exposed by iOS to third-party apps.',
+      'Daily per-app usage totals from the Lobu Mac Bridge, sourced from the Apple Knowledge store. Captures both Mac usage and (if Screen Time iCloud sync is on) the user\'s iOS device usage.',
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'screentime',
     authSchema: { methods: [{ type: 'none' }] },
     feeds: {
-      daily_category_totals: {
-        key: 'daily_category_totals',
-        name: 'Daily category totals',
+      daily_app_usage: {
+        key: 'daily_app_usage',
+        name: 'Daily app usage',
         description:
-          'Per-day total Screen Time by category (e.g. Social, Productivity). Aggregate-only — no per-app data is available to third-party apps.',
+          'Per-day total foreground time for each application (identified by bundle id).',
         configSchema: {
           type: 'object',
           properties: {
@@ -70,21 +48,21 @@ export default class AppleScreenTimeConnector extends ConnectorRuntime {
               minimum: 1,
               maximum: 90,
               default: 14,
-              description: 'How many days the bridge should backfill.',
+              description: 'How many days the bridge should backfill on each sync.',
             },
           },
         },
         eventKinds: {
-          screen_time_daily_category: {
-            description: 'Total Screen Time spent in a category on a given day.',
+          screen_time_daily_app: {
+            description: 'Total time the user spent in one application on a given day.',
             metadataSchema: {
               type: 'object',
-              required: ['source', 'origin_id', 'date', 'category', 'seconds'],
+              required: ['source', 'origin_id', 'date', 'bundle_id', 'seconds'],
               properties: {
                 source: { type: 'string', const: 'apple_screen_time' },
                 origin_id: { type: 'string' },
                 date: { type: 'string', format: 'date' },
-                category: { type: 'string' },
+                bundle_id: { type: 'string' },
                 seconds: { type: 'number', minimum: 0 },
               },
             },
