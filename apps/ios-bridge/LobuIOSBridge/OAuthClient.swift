@@ -59,6 +59,17 @@ struct OAuthCredentials: Codable, Equatable {
     }
 }
 
+struct PendingOAuthLogin: Codable, Equatable {
+    let discovery: OAuthDiscovery
+    let client: RegisteredOAuthClient
+    let authorization: DeviceAuthorizationResponse
+    let createdAt: Date
+
+    var expiresAt: Date {
+        createdAt.addingTimeInterval(TimeInterval(authorization.expires_in))
+    }
+}
+
 final class OAuthClient {
     static let scope = "mcp:read mcp:write profile:read"
 

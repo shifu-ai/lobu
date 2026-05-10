@@ -1,11 +1,13 @@
 import SwiftUI
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var health = HealthKitManager()
 
     @AppStorage("lobuBaseURL") private var lobuBaseURL = "https://app.lobu.ai"
     @AppStorage("selectedOrgSlug") private var selectedOrgSlug = ""
     @AppStorage("backfillDays") private var backfillDays = 7
+    @AppStorage("pendingOAuthLogin") private var pendingOAuthLoginData = Data()
 
     @State private var credentials: OAuthCredentials?
     @State private var isLoggingIn = false
@@ -15,6 +17,13 @@ struct ContentView: View {
     @State private var lastUploadCount = 0
 
     private let credentialStore = KeychainCredentialStore()
+    private let decoder = JSONDecoder()
+    private let encoder = JSONEncoder()
+
+    init() {
+        decoder.dateDecodingStrategy = .iso8601
+        encoder.dateEncodingStrategy = .iso8601
+    }
 
     var body: some View {
         NavigationStack {
@@ -68,6 +77,10 @@ struct ContentView: View {
 
                     if let loginCode {
                         LabeledContent("Login code", value: loginCode)
+                        Button("I've approved — check now") {
+                            Task { await resumePendingLogin() }
+                        }
+                        .disabled(isLoggingIn)
                     }
                 }
 
@@ -100,6 +113,16 @@ struct ContentView: View {
                 if selectedOrgSlug.isEmpty {
                     selectedOrgSlug = credentials?.userInfo?.organization_slug ?? credentials?.userInfo?.organizations.first?.slug ?? ""
                 }
+                if credentials == nil, let pendingLogin = pendingLogin(), pendingLogin.expiresAt > Date() {
+                    loginCode = pendingLogin.authorization.user_code
+                    status = "Return here after approving code \(pendingLogin.authorization.user_code)."
+                    Task { await resumePendingLogin() }
+                }
+            }
+            .onChange(of: scenePhase) { _, phase in
+                if phase == .active, credentials == nil, loginCode != nil {
+                    Task { await resumePendingLogin() }
+                }
             }
         }
     }
@@ -118,23 +141,60 @@ struct ContentView: View {
             let discovery = try await oauth.discover()
             let client = try await oauth.registerClient(discovery)
             let authorization = try await oauth.startDeviceAuthorization(discovery, client: client)
+            let pending = PendingOAuthLogin(
+                discovery: discovery,
+                client: client,
+                authorization: authorization,
+                createdAt: Date()
+            )
+            savePendingLogin(pending)
             loginCode = authorization.user_code
             status = "Approve the login in your browser. Code: \(authorization.user_code)"
             oauth.openVerificationURL(authorization)
+            await completeLogin(pending)
+        } catch is CancellationError {
+            // The app may be suspended while Safari is in front. Keep the saved device code
+            // so the user can return and tap "I've approved — check now".
+        } catch {
+            status = error.localizedDescription
+        }
+    }
 
-            let deadline = Date().addingTimeInterval(TimeInterval(authorization.expires_in))
-            var interval = max(authorization.interval ?? 5, 1)
-            while Date() < deadline {
-                try await Task.sleep(for: .seconds(interval))
-                switch try await oauth.pollDeviceToken(discovery, client: client, deviceCode: authorization.device_code) {
+    private func resumePendingLogin() async {
+        guard !isLoggingIn, let pending = pendingLogin() else { return }
+        guard pending.expiresAt > Date() else {
+            clearPendingLogin()
+            loginCode = nil
+            status = "Login request expired. Try signing in again."
+            return
+        }
+        isLoggingIn = true
+        defer { isLoggingIn = false }
+        await completeLogin(pending)
+    }
+
+    private func completeLogin(_ pending: PendingOAuthLogin) async {
+        do {
+            let oauth = try OAuthClient(baseURL: lobuBaseURL)
+            var interval = max(pending.authorization.interval ?? 5, 1)
+            while Date() < pending.expiresAt {
+                switch try await oauth.pollDeviceToken(
+                    pending.discovery,
+                    client: pending.client,
+                    deviceCode: pending.authorization.device_code
+                ) {
                 case let .pending(slowDown):
                     if slowDown { interval += 5 }
+                    try await Task.sleep(for: .seconds(interval))
                 case let .complete(tokens):
-                    let userInfo = try await oauth.fetchUserInfo(discovery.userinfo_endpoint, accessToken: tokens.access_token)
+                    let userInfo = try await oauth.fetchUserInfo(
+                        pending.discovery.userinfo_endpoint,
+                        accessToken: tokens.access_token
+                    )
                     let saved = OAuthCredentials(
                         baseURL: lobuBaseURL.trimmedTrailingSlash(),
-                        clientID: client.client_id,
-                        clientSecret: client.client_secret,
+                        clientID: pending.client.client_id,
+                        clientSecret: pending.client.client_secret,
                         accessToken: tokens.access_token,
                         refreshToken: tokens.refresh_token,
                         expiresAt: tokens.expires_in.map { Date().addingTimeInterval(TimeInterval($0)) },
@@ -144,19 +204,39 @@ struct ContentView: View {
                     credentials = saved
                     selectedOrgSlug = userInfo?.organization_slug ?? userInfo?.organizations.first?.slug ?? selectedOrgSlug
                     loginCode = nil
+                    clearPendingLogin()
                     status = "Signed in to Lobu."
                     return
                 }
             }
+            clearPendingLogin()
+            loginCode = nil
             status = "Login request expired. Try signing in again."
+        } catch is CancellationError {
+            // Keep pending login around for when the app returns to foreground.
         } catch {
             status = error.localizedDescription
         }
     }
 
+    private func pendingLogin() -> PendingOAuthLogin? {
+        guard !pendingOAuthLoginData.isEmpty else { return nil }
+        return try? decoder.decode(PendingOAuthLogin.self, from: pendingOAuthLoginData)
+    }
+
+    private func savePendingLogin(_ pending: PendingOAuthLogin) {
+        pendingOAuthLoginData = (try? encoder.encode(pending)) ?? Data()
+    }
+
+    private func clearPendingLogin() {
+        pendingOAuthLoginData = Data()
+    }
+
     private func signOut() {
         credentialStore.clear()
+        clearPendingLogin()
         credentials = nil
+        loginCode = nil
         selectedOrgSlug = ""
         status = "Signed out."
     }
