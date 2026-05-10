@@ -176,7 +176,11 @@ final class OAuthClient {
     }
 
     func openVerificationURL(_ authorization: DeviceAuthorizationResponse) {
-        guard let url = URL(string: authorization.verification_uri_complete ?? authorization.verification_uri) else { return }
+        guard var components = URLComponents(string: authorization.verification_uri_complete ?? authorization.verification_uri) else { return }
+        var queryItems = components.queryItems ?? []
+        queryItems.append(URLQueryItem(name: "return_to", value: "lobu-ios-bridge://oauth/device-approved"))
+        components.queryItems = queryItems
+        guard let url = components.url else { return }
         UIApplication.shared.open(url)
     }
 
