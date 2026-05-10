@@ -29,8 +29,18 @@ enum HealthBackgroundSync {
         schedule()
         let syncTask = Task { @MainActor in
             do {
-                let result = try await HealthSyncService.sync(requestHealthAuthorization: false)
-                print("[LobuIOSBridge] Background sync uploaded \(result.uploadedCount) Apple Health events.")
+                // Background workers can't prompt for permissions, so we only
+                // advertise capabilities the user has already authorized in
+                // the foreground. The dispatcher routes whichever connector
+                // run the server hands back.
+                let managers = DataSourceManagers(
+                    health: HealthKitManager(),
+                    calendar: CalendarManager(),
+                    reminders: RemindersManager(),
+                    contacts: ContactsManager()
+                )
+                let result = try await HealthSyncService.sync(managers: managers)
+                print("[LobuIOSBridge] Background sync streamed \(result.uploadedCount) events from \(result.claimedConnectorKey ?? "<none>").")
                 task.setTaskCompleted(success: true)
             } catch {
                 print("[LobuIOSBridge] Background sync failed: \(error.localizedDescription)")

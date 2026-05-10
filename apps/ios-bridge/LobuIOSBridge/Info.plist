@@ -37,6 +37,16 @@
 	<true/>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Lobu iOS Bridge reads selected Apple Health summaries and workouts so it can save them to your personal Lobu organization.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Lobu iOS Bridge reads Calendar events so it can save them to your personal Lobu organization.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Lobu iOS Bridge reads Calendar events so it can save them to your personal Lobu organization.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Lobu iOS Bridge reads Reminders so it can save them to your personal Lobu organization.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Lobu iOS Bridge reads Reminders so it can save them to your personal Lobu organization.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Lobu iOS Bridge reads Contacts so it can save them to your personal Lobu organization.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

@@ -1,38 +1,52 @@
+import Contacts
+import EventKit
 import Foundation
 
-/// Result of running one worker-loop iteration. Surfaced to the UI so the user
-/// sees whether a job was claimed and how many events were streamed.
+/// Result of running one worker-loop iteration. Surfaced to the UI.
 struct HealthSyncResult: Equatable {
     let dailySummaryCount: Int
     let workoutCount: Int
     let uploadedCount: Int
     /// True when the poll claimed a job. False means the server had no
-    /// pending apple.health runs for this user.
+    /// pending runs for any connector this device can run.
     let claimedJob: Bool
+    /// The connector key of the claimed job, e.g. "apple.health". nil when
+    /// no job was claimed.
+    let claimedConnectorKey: String?
+}
+
+/// Bag of data-source managers the dispatcher can reach. Keeps the function
+/// signature stable as we add connectors.
+@MainActor
+struct DataSourceManagers {
+    let health: HealthKitManager
+    let calendar: CalendarManager
+    let reminders: RemindersManager
+    let contacts: ContactsManager
+
+    /// Capabilities to advertise on poll. Only authorized sources are listed
+    /// — if the user revokes a permission, the server stops handing this
+    /// device runs for that connector on the next poll.
+    var advertisedCapabilities: [String: Bool] {
+        var caps: [String: Bool] = [:]
+        if health.authorizationStatus == "Connected" || UserDefaults.standard.bool(forKey: "healthAuthorizationRequested") {
+            caps["healthkit"] = true
+        }
+        if calendar.permission == .authorized { caps["calendar"] = true }
+        if reminders.permission == .authorized { caps["reminders"] = true }
+        if contacts.permission == .authorized { caps["contacts"] = true }
+        return caps
+    }
 }
 
 @MainActor
 enum HealthSyncService {
-    /// Run one cycle of the worker protocol: poll → if claimed, execute the
-    /// claimed apple.health job against HealthKit → stream events → complete.
-    ///
-    /// `requestHealthAuthorization` requests HealthKit permissions on first
-    /// run (no-op afterwards). `backfillDays` is a UI-visible default the user
-    /// can override; the actual backfill window per run comes from the feed's
-    /// merged config the server sends in the poll response, falling back to
-    /// this value when the connector definition's config isn't set on the feed.
+    /// Run one cycle of the worker protocol: poll → if claimed, dispatch
+    /// based on connector_key → stream events → complete.
     static func sync(
-        health: HealthKitManager? = nil,
-        requestHealthAuthorization: Bool,
+        managers: DataSourceManagers,
         backfillDays requestedBackfillDays: Int? = nil
     ) async throws -> HealthSyncResult {
-        let healthManager = health ?? HealthKitManager()
-        if requestHealthAuthorization {
-            try await healthManager.requestAuthorization()
-            try? await healthManager.enableBackgroundDelivery()
-            UserDefaults.standard.set(true, forKey: "healthAuthorizationRequested")
-        }
-
         let credentialStore = KeychainCredentialStore()
         guard var credentials = credentialStore.load() else {
             throw HealthBridgeError.missingConfiguration
@@ -49,78 +63,34 @@ enum HealthSyncService {
 
         let (job, _) = try await worker.poll(
             workerId: workerId,
-            capabilities: ["healthkit": true]
+            capabilities: managers.advertisedCapabilities
         )
         guard let job else {
             return HealthSyncResult(
-                dailySummaryCount: 0,
-                workoutCount: 0,
-                uploadedCount: 0,
-                claimedJob: false
+                dailySummaryCount: 0, workoutCount: 0, uploadedCount: 0,
+                claimedJob: false, claimedConnectorKey: nil
             )
         }
-
-        // Currently the iOS bridge only knows how to run apple.health. If the
-        // server somehow handed us a different connector we fail the run and
-        // surface that clearly — better than silently producing no events.
-        guard job.connector_key == "apple.health" else {
-            try await worker.complete(
-                workerId: workerId,
-                runId: job.run_id,
-                itemsCollected: 0,
-                error: "iOS Bridge cannot execute connector '\(job.connector_key)'"
-            )
-            throw HealthBridgeError.unsupportedConnector(job.connector_key)
-        }
-
-        let userDefaultBackfill = clampedBackfillDays(requestedBackfillDays)
-        let backfillDays = job.config?["backfill_days"]?.intValue ?? userDefaultBackfill
 
         do {
-            let (summaries, workouts) = try await healthManager.summariesForLastDays(backfillDays)
-            let items: [WorkerStreamItem]
-            let dailyCount: Int
-            let workoutCount: Int
-
-            switch job.feed_key {
-            case "daily_summaries":
-                items = summaries.map(makeDailySummaryItem(from:))
-                dailyCount = summaries.count
-                workoutCount = 0
-            case "workouts":
-                items = workouts.map(makeWorkoutItem(from:))
-                dailyCount = 0
-                workoutCount = workouts.count
-            default:
-                // No feed_key set: behave conservatively and stream both — the
-                // server validates per-event semantic_type against the feed's
-                // declared eventKinds so unsupported feed_keys still error
-                // cleanly server-side.
-                items = summaries.map(makeDailySummaryItem(from:)) + workouts.map(makeWorkoutItem(from:))
-                dailyCount = summaries.count
-                workoutCount = workouts.count
+            let outcome = try await runJob(job: job, managers: managers, defaultBackfillDays: clampedBackfillDays(requestedBackfillDays))
+            if !outcome.items.isEmpty {
+                try await worker.stream(runId: job.run_id, items: outcome.items)
             }
-
-            if !items.isEmpty {
-                try await worker.stream(runId: job.run_id, items: items)
-            }
-
             try await worker.complete(
                 workerId: workerId,
                 runId: job.run_id,
-                itemsCollected: items.count,
+                itemsCollected: outcome.items.count,
                 error: nil
             )
-
             return HealthSyncResult(
-                dailySummaryCount: dailyCount,
-                workoutCount: workoutCount,
-                uploadedCount: items.count,
-                claimedJob: true
+                dailySummaryCount: outcome.dailyCount,
+                workoutCount: outcome.workoutCount,
+                uploadedCount: outcome.items.count,
+                claimedJob: true,
+                claimedConnectorKey: job.connector_key
             )
         } catch {
-            // Best-effort: tell the server the run failed so it doesn't sit
-            // forever as 'running' and block subsequent runs.
             try? await worker.complete(
                 workerId: workerId,
                 runId: job.run_id,
@@ -135,14 +105,99 @@ enum HealthSyncService {
         let value = requestedBackfillDays ?? UserDefaults.standard.integer(forKey: "backfillDays")
         return min(max(value == 0 ? 7 : value, 1), 30)
     }
+
+    // -------------------------------------------------------------------------
+    // Dispatch
+    // -------------------------------------------------------------------------
+
+    private struct JobOutcome {
+        let items: [WorkerStreamItem]
+        let dailyCount: Int
+        let workoutCount: Int
+    }
+
+    private static func runJob(
+        job: WorkerJob,
+        managers: DataSourceManagers,
+        defaultBackfillDays: Int
+    ) async throws -> JobOutcome {
+        switch job.connector_key {
+        case "apple.health":
+            return try await runHealth(job: job, manager: managers.health, defaultBackfillDays: defaultBackfillDays)
+        case "apple.calendar":
+            return try await runCalendar(job: job, manager: managers.calendar, defaultBackfillDays: defaultBackfillDays)
+        case "apple.reminders":
+            return try await runReminders(job: job, manager: managers.reminders)
+        case "apple.contacts":
+            return try runContacts(job: job, manager: managers.contacts)
+        default:
+            throw HealthBridgeError.unsupportedConnector(job.connector_key)
+        }
+    }
+
+    private static func runHealth(
+        job: WorkerJob,
+        manager: HealthKitManager,
+        defaultBackfillDays: Int
+    ) async throws -> JobOutcome {
+        let backfillDays = job.config?["backfill_days"]?.intValue ?? defaultBackfillDays
+        let (summaries, workouts) = try await manager.summariesForLastDays(backfillDays)
+        switch job.feed_key {
+        case "daily_summaries":
+            let items = summaries.map(dailySummaryItem(from:))
+            return JobOutcome(items: items, dailyCount: summaries.count, workoutCount: 0)
+        case "workouts":
+            let items = workouts.map(workoutItem(from:))
+            return JobOutcome(items: items, dailyCount: 0, workoutCount: workouts.count)
+        default:
+            let items = summaries.map(dailySummaryItem(from:)) + workouts.map(workoutItem(from:))
+            return JobOutcome(items: items, dailyCount: summaries.count, workoutCount: workouts.count)
+        }
+    }
+
+    private static func runCalendar(
+        job: WorkerJob,
+        manager: CalendarManager,
+        defaultBackfillDays: Int
+    ) async throws -> JobOutcome {
+        let backfillDays = job.config?["backfill_days"]?.intValue ?? defaultBackfillDays
+        let lookaheadDays = job.config?["lookahead_days"]?.intValue ?? 30
+        let now = Date()
+        let start = Calendar.current.date(byAdding: .day, value: -backfillDays, to: now) ?? now
+        let end = Calendar.current.date(byAdding: .day, value: lookaheadDays, to: now) ?? now
+        let events = manager.eventsBetween(start: start, end: end)
+        let items = events.map(calendarEventItem(from:))
+        return JobOutcome(items: items, dailyCount: 0, workoutCount: 0)
+    }
+
+    private static func runReminders(
+        job: WorkerJob,
+        manager: RemindersManager
+    ) async throws -> JobOutcome {
+        let includeCompleted = (job.config?["include_completed"]?.intValue ?? 1) != 0
+        let reminders = try await manager.fetchAllReminders(includeCompleted: includeCompleted)
+        let items = reminders.map(reminderItem(from:))
+        return JobOutcome(items: items, dailyCount: 0, workoutCount: 0)
+    }
+
+    private static func runContacts(
+        job: WorkerJob,
+        manager: ContactsManager
+    ) throws -> JobOutcome {
+        let includeNoName = (job.config?["include_no_name"]?.intValue ?? 0) != 0
+        let contacts = try manager.fetchAllContacts(includeNoName: includeNoName)
+        let items = contacts.map(contactItem(from:))
+        return JobOutcome(items: items, dailyCount: 0, workoutCount: 0)
+    }
 }
 
 // =============================================================================
-// HealthKit → WorkerStreamItem mapping. Field names + semantic_type must match
-// the connector definition at packages/connectors/src/apple_health.ts.
+// Per-connector → WorkerStreamItem mapping.
+// Field names + semantic_type must match the connector definitions in
+// packages/connectors/src/apple_*.ts.
 // =============================================================================
 
-private func makeDailySummaryItem(from summary: DailyHealthSummary) -> WorkerStreamItem {
+private func dailySummaryItem(from summary: DailyHealthSummary) -> WorkerStreamItem {
     WorkerStreamItem(
         id: summary.originID,
         title: summary.title,
@@ -162,7 +217,7 @@ private func makeDailySummaryItem(from summary: DailyHealthSummary) -> WorkerStr
     )
 }
 
-private func makeWorkoutItem(from workout: WorkoutSummary) -> WorkerStreamItem {
+private func workoutItem(from workout: WorkoutSummary) -> WorkerStreamItem {
     WorkerStreamItem(
         id: workout.originID,
         title: workout.title,
@@ -176,6 +231,88 @@ private func makeWorkoutItem(from workout: WorkoutSummary) -> WorkerStreamItem {
             "duration_s": AnyEncodable(workout.durationSeconds),
             "active_energy_kcal": AnyEncodable(workout.activeEnergyKilocalories as Any?),
             "distance_m": AnyEncodable(workout.distanceMeters as Any?),
+        ]
+    )
+}
+
+private func calendarEventItem(from event: EKEvent) -> WorkerStreamItem {
+    let originId = "apple-calendar:\(event.eventIdentifier ?? UUID().uuidString)"
+    let calendarName = event.calendar?.title
+    let participants = (event.attendees ?? []).compactMap { $0.name }
+    let summary = [
+        event.title ?? "Untitled event",
+        event.location.flatMap { $0.isEmpty ? nil : "at \($0)" } ?? "",
+    ].filter { !$0.isEmpty }.joined(separator: " ")
+    return WorkerStreamItem(
+        id: originId,
+        title: event.title,
+        payload_text: summary,
+        occurred_at: isoString(event.startDate),
+        semantic_type: "calendar_event",
+        metadata: [
+            "source": AnyEncodable("apple_calendar"),
+            "origin_id": AnyEncodable(originId),
+            "calendar_name": AnyEncodable(calendarName as Any?),
+            "start_at": AnyEncodable(isoString(event.startDate)),
+            "end_at": AnyEncodable(event.endDate.map(isoString) as Any?),
+            "location": AnyEncodable(event.location as Any?),
+            "all_day": AnyEncodable(event.isAllDay),
+            "participants": AnyEncodable(participants),
+        ]
+    )
+}
+
+private func reminderItem(from reminder: EKReminder) -> WorkerStreamItem {
+    let originId = "apple-reminders:\(reminder.calendarItemIdentifier)"
+    let dueComponents = reminder.dueDateComponents
+    let dueDate = dueComponents?.date
+    let listName = reminder.calendar?.title
+    let title = reminder.title ?? "Untitled reminder"
+    let summary = [
+        title,
+        dueDate.map { "due \(isoString($0))" } ?? "",
+        reminder.isCompleted ? "completed" : "open",
+    ].filter { !$0.isEmpty }.joined(separator: " · ")
+    return WorkerStreamItem(
+        id: originId,
+        title: title,
+        payload_text: summary,
+        occurred_at: isoString(reminder.completionDate ?? dueDate ?? Date()),
+        semantic_type: "reminder",
+        metadata: [
+            "source": AnyEncodable("apple_reminders"),
+            "origin_id": AnyEncodable(originId),
+            "list_name": AnyEncodable(listName as Any?),
+            "due_date": AnyEncodable(dueDate.map(isoString) as Any?),
+            "completed": AnyEncodable(reminder.isCompleted),
+            "completed_at": AnyEncodable(reminder.completionDate.map(isoString) as Any?),
+            "priority": AnyEncodable(reminder.priority),
+            "notes": AnyEncodable(reminder.notes as Any?),
+        ]
+    )
+}
+
+private func contactItem(from contact: CNContact) -> WorkerStreamItem {
+    let originId = "apple-contacts:\(contact.identifier)"
+    let fullName = CNContactFormatter.string(from: contact, style: .fullName) ?? ""
+    let primaryEmail = (contact.emailAddresses.first?.value as String?) ?? nil
+    let primaryPhone = contact.phoneNumbers.first?.value.stringValue
+    let organization = contact.organizationName.isEmpty ? nil : contact.organizationName
+    return WorkerStreamItem(
+        id: originId,
+        title: fullName.isEmpty ? "Contact" : fullName,
+        payload_text: [fullName, organization ?? "", primaryEmail ?? "", primaryPhone ?? ""].filter { !$0.isEmpty }.joined(separator: " · "),
+        occurred_at: isoString(Date()),
+        semantic_type: "contact",
+        metadata: [
+            "source": AnyEncodable("apple_contacts"),
+            "origin_id": AnyEncodable(originId),
+            "full_name": AnyEncodable(fullName.isEmpty ? nil as Any? : fullName),
+            "given_name": AnyEncodable(contact.givenName.isEmpty ? nil as Any? : contact.givenName),
+            "family_name": AnyEncodable(contact.familyName.isEmpty ? nil as Any? : contact.familyName),
+            "organization": AnyEncodable(organization as Any?),
+            "primary_email": AnyEncodable(primaryEmail as Any?),
+            "primary_phone": AnyEncodable(primaryPhone as Any?),
         ]
     )
 }

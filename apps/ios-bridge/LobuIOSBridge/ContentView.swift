@@ -2,7 +2,12 @@ import SwiftUI
 
 struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
+
+    // Data source managers — one per supported connector.
     @StateObject private var health = HealthKitManager()
+    @StateObject private var calendar = CalendarManager()
+    @StateObject private var reminders = RemindersManager()
+    @StateObject private var contacts = ContactsManager()
 
     @AppStorage("lobuBaseURL") private var lobuBaseURL = "https://app.lobu.ai"
     @AppStorage("selectedOrgSlug") private var selectedOrgSlug = ""
@@ -14,8 +19,8 @@ struct ContentView: View {
     @State private var isLoggingIn = false
     @State private var isSyncing = false
     @State private var loginCode: String?
-    @State private var status = "Sign in to Lobu, authorize Health, then sync."
-    @State private var lastUploadCount = 0
+    @State private var status = ""
+    @State private var showSettings = false
 
     private let credentialStore = KeychainCredentialStore()
     private let decoder = JSONDecoder()
@@ -33,128 +38,230 @@ struct ContentView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    VStack(spacing: 12) {
-                        Image("LobuLogo")
-                            .resizable()
-                            .scaledToFit()
-                            .frame(width: 96, height: 96)
-                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                        Text("Lobu iOS Bridge")
-                            .font(.title2.bold())
-                        Text("Connect iOS data sources to your personal Lobu organization. Apple Health is the first collector.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 12)
+                heroSection
+                accountSection
+                if credentials != nil {
+                    dataSourcesSection
+                    syncSection
                 }
-
-                Section("Lobu account") {
-                    TextField("Base URL", text: $lobuBaseURL)
-                        .textInputAutocapitalization(.never)
-                        .keyboardType(.URL)
-
-                    if let credentials {
-                        LabeledContent("Signed in", value: credentials.displayName)
-                        if let boundOrgSlug = credentials.userInfo?.organization_slug {
-                            LabeledContent("Organization", value: orgName(for: boundOrgSlug, in: credentials.userInfo))
-                        } else if credentials.userInfo?.organizations.isEmpty == false {
-                            Picker("Organization", selection: $selectedOrgSlug) {
-                                ForEach(credentials.userInfo?.organizations ?? []) { org in
-                                    Text(org.name).tag(org.slug)
-                                }
-                            }
-                        } else {
-                            TextField("Org slug", text: $selectedOrgSlug)
-                                .textInputAutocapitalization(.never)
-                        }
-                        Button("Sign out", role: .destructive) {
-                            signOut()
-                        }
-                    } else {
-                        Button(isLoggingIn ? "Waiting for approval…" : "Sign in with Lobu") {
-                            Task { await signIn() }
-                        }
-                        .disabled(isLoggingIn)
-                    }
-
-                    if let loginCode {
-                        LabeledContent("Login code", value: loginCode)
-                        Button("I've approved — check now") {
-                            Task { await resumePendingLogin() }
-                        }
-                        .disabled(isLoggingIn)
-                    }
-                }
-
-                Section("Apple Health") {
-                    LabeledContent("HealthKit", value: health.isHealthDataAvailable ? "Available" : "Unavailable")
-                    LabeledContent("Status", value: healthAuthorizationRequested ? "Connected" : health.authorizationStatus)
-                    Text("Connect once. After that, Sync now and background refresh reuse the existing Health permission.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                    Button(healthAuthorizationRequested ? "Review Apple Health permissions" : "Connect Apple Health") {
-                        Task { await authorizeHealth() }
-                    }
-                }
-
-                Section("Apple Health sync") {
-                    Stepper(
-                        "Backfill \(clampedBackfillDays) days",
-                        value: Binding(
-                            get: { clampedBackfillDays },
-                            set: { backfillDays = min(max($0, 1), 30) }
-                        ),
-                        in: 1...30
-                    )
-                    Button(isSyncing ? "Syncing…" : "Sync now") {
-                        Task { await sync() }
-                    }
-                    .disabled(isSyncing || credentials == nil || selectedOrgSlug.isEmpty)
-                    LabeledContent("Last upload", value: "\(lastUploadCount) events")
-                    LabeledContent("Background", value: healthAuthorizationRequested ? "Enabled by iOS" : "Connect Health first")
-                }
-
-                Section("Status") {
-                    Text(status)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                settingsDisclosure
+                if !status.isEmpty {
+                    Section { Text(status).font(.footnote).foregroundStyle(.secondary) }
                 }
             }
             .navigationTitle("Lobu iOS Bridge")
-            .onAppear {
-                if backfillDays < 1 || backfillDays > 30 {
-                    backfillDays = clampedBackfillDays
-                }
-                if healthAuthorizationRequested {
-                    health.restorePreviouslyRequestedAuthorizationState()
-                    HealthBackgroundSync.schedule()
-                }
-                credentials = credentialStore.load()
-                if selectedOrgSlug.isEmpty {
-                    selectedOrgSlug = credentials?.userInfo?.organization_slug ?? credentials?.userInfo?.organizations.first?.slug ?? ""
-                }
-                if credentials == nil, let pendingLogin = pendingLogin(), pendingLogin.expiresAt > Date() {
-                    loginCode = pendingLogin.authorization.user_code
-                    setStatus("Return here after approving code \(pendingLogin.authorization.user_code).")
-                    Task { await resumePendingLogin() }
-                }
-            }
+            .onAppear(perform: handleAppear)
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active, credentials == nil, loginCode != nil {
-                    Task { await resumePendingLogin() }
+                if phase == .active {
+                    refreshAllPermissions()
+                    if credentials == nil, loginCode != nil {
+                        Task { await resumePendingLogin() }
+                    }
                 }
             }
-            .onOpenURL { url in
-                handleDeepLink(url)
+            .onOpenURL(perform: handleDeepLink)
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Sections
+    // -------------------------------------------------------------------------
+
+    @ViewBuilder
+    private var heroSection: some View {
+        Section {
+            VStack(spacing: 8) {
+                Image("LobuLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 72, height: 72)
+                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                Text("Lobu iOS Bridge")
+                    .font(.title3.bold())
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+    }
+
+    @ViewBuilder
+    private var accountSection: some View {
+        Section {
+            if let credentials {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(credentials.displayName).font(.body)
+                        if let orgName = currentOrgName(in: credentials.userInfo) {
+                            Text(orgName).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Button("Sign out", role: .destructive, action: signOut)
+                        .buttonStyle(.borderless)
+                        .font(.footnote)
+                }
+            } else {
+                Button(isLoggingIn ? "Waiting for approval…" : "Sign in with Lobu") {
+                    Task { await signIn() }
+                }
+                .disabled(isLoggingIn)
+                if let loginCode {
+                    HStack {
+                        Text("Code").foregroundStyle(.secondary)
+                        Spacer()
+                        Text(loginCode).monospaced()
+                    }
+                    Button("I've approved — check now") {
+                        Task { await resumePendingLogin() }
+                    }
+                    .disabled(isLoggingIn)
+                }
             }
         }
     }
 
-    private func orgName(for slug: String, in userInfo: OAuthUserInfo?) -> String {
-        userInfo?.organizations.first(where: { $0.slug == slug })?.name ?? slug
+    @ViewBuilder
+    private var dataSourcesSection: some View {
+        Section("Data sources") {
+            ForEach(DataSourceCatalog.all) { descriptor in
+                Button {
+                    Task { await authorize(descriptor) }
+                } label: {
+                    HStack {
+                        Text(descriptor.label)
+                            .foregroundStyle(.primary)
+                        Spacer()
+                        Text(permissionLabel(for: descriptor))
+                            .foregroundStyle(permissionLabelColor(for: descriptor))
+                            .font(.footnote)
+                        Image(systemName: "chevron.right")
+                            .font(.footnote)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var syncSection: some View {
+        Section {
+            Button(isSyncing ? "Syncing…" : "Sync now") {
+                Task { await sync() }
+            }
+            .disabled(isSyncing || credentials == nil || managersBag.advertisedCapabilities.isEmpty)
+        }
+    }
+
+    @ViewBuilder
+    private var settingsDisclosure: some View {
+        Section {
+            DisclosureGroup("Settings", isExpanded: $showSettings) {
+                TextField("Base URL", text: $lobuBaseURL)
+                    .textInputAutocapitalization(.never)
+                    .keyboardType(.URL)
+                    .disabled(credentials != nil)
+                Stepper(
+                    "Backfill \(clampedBackfillDays) days",
+                    value: Binding(get: { clampedBackfillDays }, set: { backfillDays = min(max($0, 1), 30) }),
+                    in: 1...30
+                )
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Permission helpers
+    // -------------------------------------------------------------------------
+
+    private var managersBag: DataSourceManagers {
+        DataSourceManagers(health: health, calendar: calendar, reminders: reminders, contacts: contacts)
+    }
+
+    private func permission(for descriptor: DataSourceDescriptor) -> DataSourcePermission {
+        switch descriptor.capability {
+        case "healthkit":
+            if healthAuthorizationRequested { return .authorized }
+            return health.isHealthDataAvailable ? .notDetermined : .unsupported
+        case "calendar": return calendar.permission
+        case "reminders": return reminders.permission
+        case "contacts": return contacts.permission
+        default: return .unsupported
+        }
+    }
+
+    private func permissionLabel(for descriptor: DataSourceDescriptor) -> String {
+        permission(for: descriptor).label
+    }
+
+    private func permissionLabelColor(for descriptor: DataSourceDescriptor) -> Color {
+        switch permission(for: descriptor) {
+        case .authorized: return .green
+        case .denied: return .orange
+        case .notDetermined, .unsupported: return .secondary
+        }
+    }
+
+    private func authorize(_ descriptor: DataSourceDescriptor) async {
+        do {
+            switch descriptor.capability {
+            case "healthkit":
+                try await health.requestAuthorization()
+                try? await health.enableBackgroundDelivery()
+                healthAuthorizationRequested = true
+                HealthBackgroundSync.schedule()
+            case "calendar":
+                try await calendar.requestAuthorization()
+            case "reminders":
+                try await reminders.requestAuthorization()
+            case "contacts":
+                try await contacts.requestAuthorization()
+            default:
+                break
+            }
+            setStatus("\(descriptor.label) is ready.")
+        } catch {
+            setStatus(error.localizedDescription)
+        }
+    }
+
+    private func refreshAllPermissions() {
+        calendar.refreshPermission()
+        reminders.refreshPermission()
+        contacts.refreshPermission()
+    }
+
+    private func currentOrgName(in userInfo: OAuthUserInfo?) -> String? {
+        let slug = userInfo?.organization_slug ?? selectedOrgSlug
+        guard !slug.isEmpty else { return nil }
+        return userInfo?.organizations.first(where: { $0.slug == slug })?.name ?? slug
+    }
+
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
+
+    private func handleAppear() {
+        if backfillDays < 1 || backfillDays > 30 {
+            backfillDays = clampedBackfillDays
+        }
+        if healthAuthorizationRequested {
+            health.restorePreviouslyRequestedAuthorizationState()
+            HealthBackgroundSync.schedule()
+        }
+        refreshAllPermissions()
+        credentials = credentialStore.load()
+        if selectedOrgSlug.isEmpty {
+            selectedOrgSlug = credentials?.userInfo?.organization_slug
+                ?? credentials?.userInfo?.organizations.first?.slug
+                ?? ""
+        }
+        if credentials == nil, let pending = pendingLogin(), pending.expiresAt > Date() {
+            loginCode = pending.authorization.user_code
+            setStatus("Return here after approving code \(pending.authorization.user_code).")
+            Task { await resumePendingLogin() }
+        }
     }
 
     private func setStatus(_ message: String) {
@@ -163,7 +270,6 @@ struct ContentView: View {
     }
 
     private func handleDeepLink(_ url: URL) {
-        setStatus("Received deep link: \(url.absoluteString)")
         if url.host == "sync" {
             Task { await sync() }
             return
@@ -172,6 +278,10 @@ struct ContentView: View {
             Task { await resumePendingLogin() }
         }
     }
+
+    // -------------------------------------------------------------------------
+    // OAuth — unchanged from prior implementation
+    // -------------------------------------------------------------------------
 
     private func signIn() async {
         isLoggingIn = true
@@ -195,8 +305,6 @@ struct ContentView: View {
             oauth.openVerificationURL(authorization)
             await completeLogin(pending)
         } catch is CancellationError {
-            // The app may be suspended while Safari is in front. Keep the saved device code
-            // so the user can return and tap "I've approved — check now".
         } catch {
             setStatus(error.localizedDescription)
         }
@@ -247,15 +355,12 @@ struct ContentView: View {
                     selectedOrgSlug = userInfo?.organization_slug ?? userInfo?.organizations.first?.slug ?? selectedOrgSlug
                     loginCode = nil
                     clearPendingLogin()
-                    setStatus("Signed in to Lobu.")
+                    setStatus("Signed in.")
                     return
                 }
             }
+            setStatus("Login request expired before approval.")
             clearPendingLogin()
-            loginCode = nil
-            setStatus("Login request expired. Try signing in again.")
-        } catch is CancellationError {
-            // Keep pending login around for when the app returns to foreground.
         } catch {
             setStatus(error.localizedDescription)
         }
@@ -283,40 +388,34 @@ struct ContentView: View {
         setStatus("Signed out.")
     }
 
-    private func authorizeHealth() async {
-        do {
-            try await health.requestAuthorization()
-            try? await health.enableBackgroundDelivery()
-            healthAuthorizationRequested = true
-            HealthBackgroundSync.schedule()
-            setStatus("Apple Health connected. Background refresh is scheduled by iOS.")
-        } catch {
-            setStatus(error.localizedDescription)
-        }
-    }
+    // -------------------------------------------------------------------------
+    // Sync
+    // -------------------------------------------------------------------------
 
     private func sync() async {
         guard !isSyncing else { return }
         isSyncing = true
         defer { isSyncing = false }
         do {
-            setStatus("Starting Apple Health sync for \(clampedBackfillDays) day(s)...")
             let result = try await HealthSyncService.sync(
-                health: health,
-                requestHealthAuthorization: !healthAuthorizationRequested,
+                managers: managersBag,
                 backfillDays: clampedBackfillDays
             )
-            healthAuthorizationRequested = true
             HealthBackgroundSync.schedule()
-            lastUploadCount = result.uploadedCount
             if result.claimedJob {
-                setStatus("Streamed \(result.uploadedCount) Apple Health events to Lobu (\(result.dailySummaryCount) daily summaries, \(result.workoutCount) workouts).")
+                let label = connectorLabel(result.claimedConnectorKey)
+                setStatus("Streamed \(result.uploadedCount) \(label) event\(result.uploadedCount == 1 ? "" : "s").")
             } else {
-                setStatus("No pending Apple Health sync work — Lobu's scheduler will trigger the next run when due.")
+                setStatus("No pending sync work — scheduler will queue the next run when due.")
             }
         } catch {
             setStatus(error.localizedDescription)
         }
+    }
+
+    private func connectorLabel(_ key: String?) -> String {
+        guard let key else { return "" }
+        return DataSourceCatalog.all.first(where: { $0.connectorKey == key })?.label ?? key
     }
 }
 

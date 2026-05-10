@@ -17,6 +17,7 @@
 		A10000000000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000010 /* Assets.xcassets */; };
 		A10000000000000000000009 /* HealthSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* HealthSyncService.swift */; };
 		A10000000000000000000010 /* HealthBackgroundSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* HealthBackgroundSync.swift */; };
+		A10000000000000000000011 /* DataSourceManagers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* DataSourceManagers.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,6 +34,7 @@
 		A20000000000000000000011 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A20000000000000000000012 /* HealthSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthSyncService.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* HealthBackgroundSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HealthBackgroundSync.swift; sourceTree = "<group>"; };
+		A20000000000000000000014 /* DataSourceManagers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSourceManagers.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -64,6 +66,7 @@
 				A20000000000000000000012 /* HealthSyncService.swift */,
 				A20000000000000000000013 /* HealthBackgroundSync.swift */,
 				A20000000000000000000005 /* LobuClient.swift */,
+				A20000000000000000000014 /* DataSourceManagers.swift */,
 				A20000000000000000000008 /* KeychainTokenStore.swift */,
 				A20000000000000000000009 /* OAuthClient.swift */,
 				A20000000000000000000010 /* Assets.xcassets */,
@@ -165,6 +168,7 @@
 				A10000000000000000000007 /* OAuthClient.swift in Sources */,
 				A10000000000000000000009 /* HealthSyncService.swift in Sources */,
 				A10000000000000000000010 /* HealthBackgroundSync.swift in Sources */,
+				A10000000000000000000011 /* DataSourceManagers.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
