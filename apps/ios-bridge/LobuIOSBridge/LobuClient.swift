@@ -55,7 +55,7 @@ final class LobuClient {
         let payload = SaveMemoryPayload(
             content: summary.summaryText,
             title: summary.title,
-            semantic_type: "health_daily_summary",
+            semantic_type: "summary",
             occurred_at: isoString(summary.startAt),
             metadata: DailyHealthMetadata(
                 origin_id: summary.originID,
@@ -78,7 +78,7 @@ final class LobuClient {
         let payload = SaveMemoryPayload(
             content: workout.summaryText,
             title: workout.title,
-            semantic_type: "health_workout",
+            semantic_type: "event",
             occurred_at: isoString(workout.startAt),
             metadata: WorkoutMetadata(
                 origin_id: workout.originID,

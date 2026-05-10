@@ -129,7 +129,7 @@ struct ContentView: View {
                 }
                 if credentials == nil, let pendingLogin = pendingLogin(), pendingLogin.expiresAt > Date() {
                     loginCode = pendingLogin.authorization.user_code
-                    status = "Return here after approving code \(pendingLogin.authorization.user_code)."
+                    setStatus("Return here after approving code \(pendingLogin.authorization.user_code).")
                     Task { await resumePendingLogin() }
                 }
             }
@@ -138,11 +138,30 @@ struct ContentView: View {
                     Task { await resumePendingLogin() }
                 }
             }
+            .onOpenURL { url in
+                handleDeepLink(url)
+            }
         }
     }
 
     private func orgName(for slug: String, in userInfo: OAuthUserInfo?) -> String {
         userInfo?.organizations.first(where: { $0.slug == slug })?.name ?? slug
+    }
+
+    private func setStatus(_ message: String) {
+        status = message
+        print("[LobuIOSBridge] \(message)")
+    }
+
+    private func handleDeepLink(_ url: URL) {
+        setStatus("Received deep link: \(url.absoluteString)")
+        if url.host == "sync" {
+            Task { await sync() }
+            return
+        }
+        if url.host == "oauth", url.path == "/device-approved" {
+            Task { await resumePendingLogin() }
+        }
     }
 
     private func signIn() async {
@@ -151,7 +170,7 @@ struct ContentView: View {
         defer { isLoggingIn = false }
         do {
             let oauth = try OAuthClient(baseURL: lobuBaseURL)
-            status = "Discovering Lobu OAuth…"
+            setStatus("Discovering Lobu OAuth…")
             let discovery = try await oauth.discover()
             let client = try await oauth.registerClient(discovery)
             let authorization = try await oauth.startDeviceAuthorization(discovery, client: client)
@@ -163,14 +182,14 @@ struct ContentView: View {
             )
             savePendingLogin(pending)
             loginCode = authorization.user_code
-            status = "Approve the login in your browser. Code: \(authorization.user_code)"
+            setStatus("Approve the login in your browser. Code: \(authorization.user_code)")
             oauth.openVerificationURL(authorization)
             await completeLogin(pending)
         } catch is CancellationError {
             // The app may be suspended while Safari is in front. Keep the saved device code
             // so the user can return and tap "I've approved — check now".
         } catch {
-            status = error.localizedDescription
+            setStatus(error.localizedDescription)
         }
     }
 
@@ -179,7 +198,7 @@ struct ContentView: View {
         guard pending.expiresAt > Date() else {
             clearPendingLogin()
             loginCode = nil
-            status = "Login request expired. Try signing in again."
+            setStatus("Login request expired. Try signing in again.")
             return
         }
         isLoggingIn = true
@@ -219,17 +238,17 @@ struct ContentView: View {
                     selectedOrgSlug = userInfo?.organization_slug ?? userInfo?.organizations.first?.slug ?? selectedOrgSlug
                     loginCode = nil
                     clearPendingLogin()
-                    status = "Signed in to Lobu."
+                    setStatus("Signed in to Lobu.")
                     return
                 }
             }
             clearPendingLogin()
             loginCode = nil
-            status = "Login request expired. Try signing in again."
+            setStatus("Login request expired. Try signing in again.")
         } catch is CancellationError {
             // Keep pending login around for when the app returns to foreground.
         } catch {
-            status = error.localizedDescription
+            setStatus(error.localizedDescription)
         }
     }
 
@@ -252,15 +271,15 @@ struct ContentView: View {
         credentials = nil
         loginCode = nil
         selectedOrgSlug = ""
-        status = "Signed out."
+        setStatus("Signed out.")
     }
 
     private func authorizeHealth() async {
         do {
             try await health.requestAuthorization()
-            status = "Apple Health authorized."
+            setStatus("Apple Health authorized.")
         } catch {
-            status = error.localizedDescription
+            setStatus(error.localizedDescription)
         }
     }
 
@@ -268,6 +287,7 @@ struct ContentView: View {
         isSyncing = true
         defer { isSyncing = false }
         do {
+            setStatus("Starting Apple Health sync for \(clampedBackfillDays) day(s)...")
             guard var currentCredentials = credentials else { throw HealthBridgeError.missingConfiguration }
             let oauth = try OAuthClient(baseURL: currentCredentials.baseURL)
             if let expiresAt = currentCredentials.expiresAt, expiresAt < Date().addingTimeInterval(60) {
@@ -282,7 +302,7 @@ struct ContentView: View {
                 accessToken: currentCredentials.accessToken
             )
             let (summaries, workouts) = try await health.summariesForLastDays(clampedBackfillDays)
-            status = "Fetched \(summaries.count) daily summaries and \(workouts.count) workouts from Apple Health. Uploading..."
+            setStatus("Fetched \(summaries.count) daily summaries and \(workouts.count) workouts from Apple Health. Uploading...")
             var uploaded = 0
             for summary in summaries {
                 try await client.saveDailySummary(summary)
@@ -293,9 +313,9 @@ struct ContentView: View {
                 uploaded += 1
             }
             lastUploadCount = uploaded
-            status = "Uploaded \(uploaded) Apple Health events to Lobu."
+            setStatus("Uploaded \(uploaded) Apple Health events to Lobu.")
         } catch {
-            status = error.localizedDescription
+            setStatus(error.localizedDescription)
         }
     }
 }

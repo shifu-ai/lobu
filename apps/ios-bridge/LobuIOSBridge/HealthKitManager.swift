@@ -68,7 +68,11 @@ final class HealthKitManager: ObservableObject {
         return try await withCheckedThrowingContinuation { continuation in
             let query = HKSampleQuery(sampleType: HKWorkoutType.workoutType(), predicate: predicate, limit: HKObjectQueryNoLimit, sortDescriptors: [sort]) { _, samples, error in
                 if let error {
-                    continuation.resume(throwing: error)
+                    if isNoDataError(error) {
+                        continuation.resume(returning: [])
+                    } else {
+                        continuation.resume(throwing: error)
+                    }
                     return
                 }
                 let workouts = (samples as? [HKWorkout] ?? []).map { workout in
@@ -103,7 +107,11 @@ final class HealthKitManager: ObservableObject {
         return try await withCheckedThrowingContinuation { continuation in
             let query = HKStatisticsQuery(quantityType: type, quantitySamplePredicate: predicate, options: option) { _, result, error in
                 if let error {
-                    continuation.resume(throwing: error)
+                    if isNoDataError(error) {
+                        continuation.resume(returning: nil)
+                    } else {
+                        continuation.resume(throwing: error)
+                    }
                     return
                 }
                 let quantity = option == .discreteAverage ? result?.averageQuantity() : result?.sumQuantity()
@@ -124,6 +132,11 @@ final class HealthKitManager: ObservableObject {
         ].compactMap { HKQuantityType.quantityType(forIdentifier: $0) }.forEach { types.insert($0) }
         return types
     }
+}
+
+private func isNoDataError(_ error: Error) -> Bool {
+    let nsError = error as NSError
+    return nsError.domain == HKError.errorDomain && nsError.code == HKError.Code.errorNoData.rawValue
 }
 
 enum HealthBridgeError: LocalizedError {
