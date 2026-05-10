@@ -32,40 +32,40 @@ data = "./data"
 ## Full example
 
 ```toml
-[agents.support]
-name = "support"
-description = "Customer support agent"
-dir = "./agents/support"
+[agents.assistant]
+name = "assistant"
+description = "Team assistant"
+dir = "./agents/assistant"
 
 # Providers (order = priority, first available is used)
-[[agents.support.providers]]
+[[agents.assistant.providers]]
 id = "openrouter"
 model = "anthropic/claude-sonnet-4"
 key = "$OPENROUTER_API_KEY"
 
-[[agents.support.providers]]
+[[agents.assistant.providers]]
 id = "gemini"
 key = "$GEMINI_API_KEY"
 
 # Chat platforms
-[[agents.support.platforms]]
+[[agents.assistant.platforms]]
 type = "telegram"
-[agents.support.platforms.config]
+[agents.assistant.platforms.config]
 botToken = "$TELEGRAM_BOT_TOKEN"
 
-[[agents.support.platforms]]
+[[agents.assistant.platforms]]
 type = "slack"
-[agents.support.platforms.config]
+[agents.assistant.platforms.config]
 botToken = "$SLACK_BOT_TOKEN"
 signingSecret = "$SLACK_SIGNING_SECRET"
 
 # Local skills live in skills/<name>/SKILL.md or agents/<id>/skills/<name>/SKILL.md
 # MCP servers can still be configured inline here.
-[agents.support.skills.mcp.custom-tools]
+[agents.assistant.skills.mcp.custom-tools]
 url = "https://my-mcp.example.com"
 headers = { Authorization = "Bearer $MCP_TOKEN" }
 
-[agents.support.skills.mcp.custom-tools.oauth]
+[agents.assistant.skills.mcp.custom-tools.oauth]
 auth_url = "https://auth.example.com/authorize"
 token_url = "https://auth.example.com/token"
 client_id = "$OAUTH_CLIENT_ID"
@@ -73,12 +73,12 @@ client_secret = "$OAUTH_CLIENT_SECRET"
 scopes = ["read", "write"]
 
 # Network access policy
-[agents.support.network]
+[agents.assistant.network]
 allowed = ["github.com", "api.linear.app"]
 denied = []
 
 # Tool policy (worker-side visibility + MCP approval override)
-[agents.support.tools]
+[agents.assistant.tools]
 # Bypass the in-thread approval card for these destructive MCP tools.
 pre_approved = [
   "/mcp/gmail/tools/list_messages",
@@ -90,15 +90,15 @@ denied = ["Bash(rm:*)"]
 strict = false
 
 # Worker customization
-[agents.support.worker]
+[agents.assistant.worker]
 nix_packages = ["imagemagick", "ffmpeg"]
 
 # File-first Lobu memory
 [memory]
 enabled = true
-org = "support"
-name = "Support"
-description = "Customer support agent"
+org = "team-assistant"
+name = "Team Assistant"
+description = "Team assistant"
 models = "./models"
 data = "./data"
 ```
