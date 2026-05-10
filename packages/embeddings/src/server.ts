@@ -1,12 +1,12 @@
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
-import { validateEmbeddingDimensions } from './embedding-utils';
+import { validateEmbeddingDimensions } from './embedding-utils.js';
 import {
   batchGenerateLocalEmbeddings,
   generateLocalEmbedding,
   getLocalModelInfo,
-} from './embeddings';
-import { generateOpenAIEmbeddings } from './openai';
+} from './embeddings.js';
+import { generateOpenAIEmbeddings } from './openai.js';
 
 interface EmbeddingRequest {
   texts?: unknown;

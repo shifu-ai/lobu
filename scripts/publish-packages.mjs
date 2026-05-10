@@ -22,11 +22,11 @@ const PACKAGES = [
   { dir: "packages/core", transform: transformCorePublish },
   { dir: "packages/connector-sdk", transform: rewriteWorkspaceRefs },
   { dir: "packages/agent-worker", transform: rewriteWorkspaceRefs },
+  { dir: "packages/embeddings", transform: rewriteWorkspaceRefs },
   { dir: "packages/cli", transform: rewriteWorkspaceRefs },
   { dir: "packages/openclaw-plugin", transform: rewriteWorkspaceRefs },
   { dir: "packages/connectors", transform: rewriteWorkspaceRefs },
   { dir: "packages/connector-worker", transform: rewriteWorkspaceRefs },
-  { dir: "packages/embeddings", transform: rewriteWorkspaceRefs },
 ];
 
 // Published package names that don't use the @lobu/ scope. The unscoped

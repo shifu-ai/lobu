@@ -530,16 +530,13 @@ export async function initCommand(
       console.log(chalk.cyan(`  ${n++}. cd ${projectName}`));
     }
     console.log(
-      chalk.cyan(`  ${n++}. Set DATABASE_URL in .env (Postgres + pgvector):`)
-    );
-    console.log(
-      chalk.dim(
-        "       docker run -d --name lobu-pg -p 5432:5432 -e POSTGRES_PASSWORD=lobu pgvector/pgvector:pg16"
+      chalk.cyan(
+        `  ${n++}. Start the local stack: lobu run (uses PGlite by default)`
       )
     );
     console.log(
       chalk.dim(
-        "       DATABASE_URL=postgresql://postgres:lobu@localhost:5432/postgres"
+        "       Optional: set DATABASE_URL in .env to use external Postgres instead."
       )
     );
     if (lobuUrl) {
@@ -547,7 +544,6 @@ export async function initCommand(
         chalk.cyan(`  ${n++}. Wire memory clients: lobu memory init`)
       );
     }
-    console.log(chalk.cyan(`  ${n++}. Start the stack: lobu run`));
     console.log(chalk.cyan(`  ${n++}. API docs: ${gatewayUrl}/api/docs`));
     console.log(
       chalk.dim(

@@ -31,24 +31,24 @@ npx @lobu/cli@latest init my-agent
 Generates:
 
 - `lobu.toml` — local project/apply/validate configuration
-- `.env` — local environment variables (set `DATABASE_URL` after init)
+- `.env` — local environment variables (API keys, optional external `DATABASE_URL`)
 - `agents/{name}/` — `IDENTITY.md`, `SOUL.md`, `USER.md`, local skills, and evals
 - `skills/` — shared local skills directory
 - `AGENTS.md`, `TESTING.md`, `README.md`, `.gitignore`
 
-Interactive prompts guide you through provider, platform, network access policy, gateway port, public URL, and memory configuration. Postgres (with pgvector) is the only user-provided external — Lobu does not bundle it.
+Interactive prompts guide you through provider, platform, network access policy, gateway port, public URL, and memory configuration. Local runs use bundled PGlite by default; set `DATABASE_URL` when you want to use external Postgres with pgvector.
 
 ---
 
 ### `run`
 
-Run the embedded Lobu stack. `lobu.toml` is not required; set `DATABASE_URL` in the environment or `.env`, then run:
+Run the embedded Lobu stack. `lobu.toml` is not required. With no `DATABASE_URL`, the command starts bundled local PGlite and stores data under `~/.lobu/data` (override with `LOBU_DATA_DIR`). If `DATABASE_URL` is set in the environment or `.env`, Lobu uses that external Postgres instead.
 
 ```bash
 npx @lobu/cli@latest run
 ```
 
-The command spawns the bundled Node server (`@lobu/server/dist/server.bundle.mjs`) and forwards stdio. Ctrl+C cleanly stops the server and worker subprocesses. Extra arguments are forwarded to the Node entry point.
+The command spawns the bundled Node server and forwards stdio. Ctrl+C cleanly stops the server and worker subprocesses.
 
 ---
 
@@ -228,6 +228,6 @@ cd my-agent
 npx @lobu/cli@latest validate
 npx @lobu/cli@latest apply --org my-org
 
-# 4. Run locally when DATABASE_URL is configured
+# 4. Run locally (PGlite by default; external Postgres if DATABASE_URL is set)
 npx @lobu/cli@latest run
 ```
