@@ -133,6 +133,21 @@ make dev                  # boots embedded gateway + workers + Vite HMR on :8787
 make clean-workers        # kill orphaned worker subprocesses if a crash leaves any
 ```
 
+To run multiple worktrees in parallel, drop a gitignored `.env.local` in each
+worktree's repo root with non-default ports — it's sourced after `.env` so it
+overrides:
+
+```bash
+# packages/lobu-other-worktree/.env.local
+PORT=8788
+WORKER_PROXY_PORT=8119
+```
+
+The Tailscale tunnel only forwards to one local port at a time, so whichever
+worktree owns `:8787` is what `https://...ts.net:8443` serves. Other worktrees
+are reachable on `http://localhost:8788` etc. — fine for UI work; only
+webhook/OAuth-callback testing actually needs the public URL.
+
 ### Validation after code changes
 
 Run the validation that matches what you touched:
