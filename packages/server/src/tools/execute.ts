@@ -112,7 +112,7 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {
       throw new Error(
-        'This public workspace is read-only for your account. Ask an organization owner for an invite to unlock write access.'
+        'This public workspace is read-only for your account. Join the workspace to unlock write access.'
       );
     }
     throw new Error(
