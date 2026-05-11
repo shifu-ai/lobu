@@ -44,14 +44,17 @@ export default class LocalDirectoryConnector extends ConnectorRuntime {
         },
         eventKinds: {
           file_document: {
-            description: 'A text file from the local folder.',
+            description: 'A text file from a configured local folder.',
             metadataSchema: {
               type: 'object',
-              required: ['source', 'path', 'name'],
+              // No absolute filesystem path — the bridge sends the folder's
+              // display name and the file name, which is enough context
+              // without leaking the user's home directory / disk layout.
+              required: ['source', 'folder', 'name'],
               properties: {
                 source: { type: 'string', const: 'local_directory' },
-                path: { type: 'string' },
-                name: { type: 'string' },
+                folder: { type: 'string', description: 'Display name of the local folder.' },
+                name: { type: 'string', description: 'File name.' },
                 ext: { type: 'string' },
                 size_bytes: { type: 'number' },
                 modified_at: { type: 'string' },

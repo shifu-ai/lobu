@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Handles `local.directory` jobs: enumerates persisted security-scoped folder
@@ -8,10 +9,21 @@ import Foundation
 /// - Extensions: txt, md, json, csv, html.
 /// - Max file size: 1 MB per file.
 /// - Max total files: 500 across all bookmarks.
+///
+/// Events carry the folder's *display name* and the file name only — never the
+/// absolute path (which would leak the user's home directory / disk layout into
+/// Lobu). The stable origin id derives the folder part from a hash of the
+/// security-scoped bookmark, so it's stable across syncs without exposing it.
 enum LocalDirectorySyncService {
     private static let allowedExtensions: Set<String> = ["txt", "md", "json", "csv", "html"]
     private static let maxFileSize: Int = 1_048_576   // 1 MB
     private static let maxTotalFiles: Int = 500
+
+    /// Opaque, stable 12-hex-char id for a folder bookmark — used in origin ids
+    /// so they don't carry the path. Stable as long as the bookmark is.
+    private static func folderKey(for bookmark: Data) -> String {
+        SHA256.hash(data: bookmark).prefix(6).map { String(format: "%02x", $0) }.joined()
+    }
 
     static func runLocalDirectory(job: WorkerJob) throws -> [WorkerStreamItem] {
         let bookmarks = (UserDefaults.standard.array(forKey: "lobu.localFolderBookmarks") as? [Data]) ?? []
@@ -34,6 +46,9 @@ enum LocalDirectorySyncService {
 
             guard folderURL.startAccessingSecurityScopedResource() else { continue }
             defer { folderURL.stopAccessingSecurityScopedResource() }
+
+            let folderName = folderURL.lastPathComponent
+            let folderId = folderKey(for: bookmark)
 
             guard let entries = try? fm.contentsOfDirectory(
                 at: folderURL,
@@ -58,17 +73,16 @@ enum LocalDirectorySyncService {
 
                 guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
 
-                let absPath = fileURL.path
                 let filename = fileURL.lastPathComponent
                 let item = WorkerStreamItem(
-                    id: "local-dir:\(absPath)",
+                    id: "local-dir:\(folderId):\(filename)",
                     title: filename,
                     payload_text: text,
                     occurred_at: iso.string(from: modifiedAt),
                     semantic_type: "file_document",
                     metadata: [
                         "source": AnyEncodable("local_directory"),
-                        "path": AnyEncodable(absPath),
+                        "folder": AnyEncodable(folderName),
                         "name": AnyEncodable(filename),
                         "ext": AnyEncodable(ext),
                         "size_bytes": AnyEncodable(fileSize),
