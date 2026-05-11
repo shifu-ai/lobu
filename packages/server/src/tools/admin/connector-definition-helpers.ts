@@ -40,7 +40,12 @@ export type ScopedConnectorDefinitionRow = {
   status: string;
   login_enabled?: boolean | null;
   required_capability?: string | null;
-  runtime?: ConnectorRuntimeInfo | null;
+  /**
+   * `runtime` is stored as raw jsonb (the catalog extractor doesn't narrow it),
+   * so the row type stays untyped here. Consumers that want the structured
+   * shape — `ConnectorRuntimeInfo` — narrow at the use site.
+   */
+  runtime?: Record<string, unknown> | null;
   created_at?: string;
   updated_at?: string;
 };

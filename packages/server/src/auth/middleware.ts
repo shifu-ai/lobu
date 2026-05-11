@@ -84,7 +84,16 @@ export async function requireAuth(c: Context<{ Bindings: Env }>, next: Next) {
 /**
  * Middleware: MCP authentication (optional auth for MCP endpoints)
  * Delegates entirely to WorkspaceProvider.resolveAuth.
+ *
+ * `next` is widened past Hono's `Next` so callers that use `mcpAuth(c, cb)`
+ * with an `async` callback that may short-circuit by returning a `Response`
+ * (e.g. the /api/workers/* gating middleware) still typecheck — Hono's own
+ * `Next` (`() => Promise<void>`) is a subtype of this, so the normal
+ * `app.use(..., mcpAuth)` usage is unchanged.
  */
-export async function mcpAuth(c: Context<{ Bindings: Env }>, next: Next) {
-  return getWorkspaceProvider().resolveAuth(c, next);
+export async function mcpAuth(
+  c: Context<{ Bindings: Env }>,
+  next: () => Promise<unknown>
+) {
+  return getWorkspaceProvider().resolveAuth(c, next as Next);
 }
