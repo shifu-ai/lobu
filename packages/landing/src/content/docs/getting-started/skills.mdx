@@ -14,11 +14,23 @@ A **skill** is a reusable capability bundle for an agent. In Lobu, skills can ad
 
 Lobu still discovers local `SKILL.md` files at runtime. Bundled skills are enabled from the agent settings UI; local skills live in your project so you can commit and customize them.
 
-## Bundled Starter Skill
+## Lobu Starter Skill
 
-The bundled Lobu starter skill includes project, runtime, and memory guidance. Enable it from the agent settings UI.
+The bundled Lobu skill teaches an agent the project layout, `lobu.toml`, prompt files, evals, memory tools, watchers, and client setup. Two places to install it:
 
-Use the **Lobu** skill when the agent should understand Lobu projects, `lobu.toml`, prompt files, evals, project structure, memory tools, watchers, and client setup.
+### In your coding agent
+
+Drop `SKILL.md` into Claude Code, Cursor, Codex, OpenCode, or OpenClaw with one command:
+
+```bash
+npx skills add lobu-ai/lobu --skill lobu
+```
+
+The [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI auto-detects your editor and writes to the right directory. Pin one host with `-a <agent>` (e.g. `-a claude-code`, `-a cursor`).
+
+### In a Lobu agent
+
+Enable the bundled skill from the agent settings UI in [app.lobu.ai](https://app.lobu.ai). Local `SKILL.md` files under `skills/` and `agents/<id>/skills/` are also loaded at runtime — see [Local Skill Locations](#local-skill-locations) below.
 
 <SkillsRegistryTable client:load />
 
