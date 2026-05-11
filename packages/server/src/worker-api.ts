@@ -213,9 +213,18 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   const advertisedCapabilities = Object.entries(capabilities)
     .filter(([key, value]) => value === true && key !== 'browser')
     .map(([key]) => key);
-  // SQL ANY needs a non-empty array. Prepend '' so that connectors without
-  // a required_capability (NULL → '' via COALESCE) always match.
-  const capabilityMatchSet = [''].concat(advertisedCapabilities);
+  // Trusted fleet workers (WORKER_API_TOKEN) run the no-capability cloud
+  // connectors too, so '' (a NULL required_capability becomes '' via COALESCE
+  // below) belongs in their match set. User-scoped workers — the Mac / iOS
+  // bridge, anything in `workerAuthMode === 'user'` — are *device* workers:
+  // they may ONLY claim runs whose connector declares a `required_capability`
+  // they advertise, never the cloud connectors. So '' is excluded for them,
+  // which means a bridge with no granted capabilities claims *nothing* instead
+  // of hijacking-and-failing arbitrary cloud-connector runs (e.g. hackernews).
+  const isUserScopedWorker = c.var.workerAuthMode === 'user';
+  const capabilityMatchSet = isUserScopedWorker
+    ? advertisedCapabilities
+    : [''].concat(advertisedCapabilities);
 
   // Device-worker registry: upsert device_workers row for user-scoped workers
   // so /api/devices can enumerate them. Also auto-wire connectors for any
