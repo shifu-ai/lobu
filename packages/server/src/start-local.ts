@@ -430,7 +430,7 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
     apply: async (sql) => {
       // `runtime` carries platform metadata for device-bound connectors
       // (e.g. apple.screen_time / local.directory, which run inside the Lobu
-      // Mac Bridge). NULL = cloud connector.
+      // Lobu for Mac). NULL = cloud connector.
       await sql.unsafe(`
         ALTER TABLE public.connector_definitions
         ADD COLUMN IF NOT EXISTS runtime jsonb

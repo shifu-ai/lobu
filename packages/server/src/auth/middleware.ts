@@ -50,7 +50,7 @@ declare module 'hono' {
      * model this request operates under.
      *
      * - `trusted`     — request matched WORKER_API_TOKEN (server-side fleet)
-     * - `user`        — authenticated as a Lobu user (e.g. the Mac Bridge); poll
+     * - `user`        — authenticated as a Lobu user (e.g. Lobu for Mac); poll
      *                   and stream MUST filter on `workerOrgIds`
      * - `anonymous`   — local dev only (no WORKER_API_TOKEN, no user auth)
      */

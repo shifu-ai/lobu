@@ -1,11 +1,11 @@
 import Foundation
 import Security
 
-/// Mac variant of the iOS bridge's KeychainCredentialStore. Same Security
-/// framework, distinct service identifier ("ai.lobu.MacBridge") so the two
-/// surfaces never collide on a Mac that has iCloud-synced Keychain enabled.
+/// Mac variant of the iOS app's KeychainCredentialStore. Same Security
+/// framework, distinct service identifier ("ai.lobu.mac") so the two surfaces
+/// never collide on a Mac that has iCloud-synced Keychain enabled.
 struct KeychainCredentialStore {
-    private let service = "ai.lobu.MacBridge"
+    private let service = "ai.lobu.mac"
     private let account = "oauth-credentials"
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()

@@ -16,8 +16,8 @@
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "B50000000000000000000001"
                BuildableName = "Lobu.app"
-               BlueprintName = "LobuMacBridge"
-               ReferencedContainer = "container:LobuMacBridge.xcodeproj">
+               BlueprintName = "Lobu"
+               ReferencedContainer = "container:Lobu.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -37,8 +37,8 @@
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "B50000000000000000000001"
             BuildableName = "Lobu.app"
-            BlueprintName = "LobuMacBridge"
-            ReferencedContainer = "container:LobuMacBridge.xcodeproj">
+            BlueprintName = "Lobu"
+            ReferencedContainer = "container:Lobu.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>

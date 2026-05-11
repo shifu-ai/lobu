@@ -457,7 +457,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // User-scoped workers (e.g. the Lobu Mac Bridge) can only claim runs in the
+  // User-scoped workers (e.g. Lobu for Mac) can only claim runs in the
   // org their token is bound to, plus the user's personal org (where device
   // connectors auto-wire) — the set is computed in the /api/workers/* auth
   // middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
@@ -632,7 +632,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // User-scoped device workers (Mac Bridge etc.) only ever run no-auth bundled
+  // User-scoped device workers (Lobu for Mac etc.) only ever run no-auth bundled
   // connectors gated by `required_capability`. Never hand a user OAuth/PAT
   // client real connection credentials or auth-profile state — strip them
   // unconditionally, so a connector that's misconfigured with both a

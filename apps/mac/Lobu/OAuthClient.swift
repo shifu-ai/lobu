@@ -1,13 +1,13 @@
 import AppKit
 import Foundation
 
-// Direct port of the iOS Bridge's OAuthClient. Differences:
+// Direct port of the iOS app's OAuthClient. Differences:
 //   - imports AppKit (not UIKit) and uses NSWorkspace.shared.open for the
 //     device-approve link instead of UIApplication.shared.open.
-//   - software_id = "lobu-mac-bridge" so server-side telemetry can tell the
-//     two surfaces apart.
-//   - openVerificationURL appends `return_to=lobu-mac-bridge://oauth/...`
-//     using the Mac app's URL scheme.
+//   - software_id = "lobu-mac" so server-side telemetry can tell the two
+//     surfaces apart.
+//   - openVerificationURL appends `return_to=lobu-mac://oauth/...` using the
+//     Mac app's URL scheme.
 
 struct OAuthDiscovery: Codable, Equatable {
     let issuer: String?
@@ -117,7 +117,7 @@ final class OAuthClient {
             URL(string: discovery.registration_endpoint)!,
             body: [
                 "client_name": "Lobu for Mac",
-                "software_id": "lobu-mac-bridge",
+                "software_id": "lobu-mac",
                 "software_version": "0.1.0",
                 "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],
                 "token_endpoint_auth_method": "none",
@@ -191,7 +191,7 @@ final class OAuthClient {
     func openVerificationURL(_ authorization: DeviceAuthorizationResponse) {
         guard var components = URLComponents(string: authorization.verification_uri_complete ?? authorization.verification_uri) else { return }
         var queryItems = components.queryItems ?? []
-        queryItems.append(URLQueryItem(name: "return_to", value: "lobu-mac-bridge://oauth/device-approved"))
+        queryItems.append(URLQueryItem(name: "return_to", value: "lobu-mac://oauth/device-approved"))
         components.queryItems = queryItems
         guard let url = components.url else { return }
         NSWorkspace.shared.open(url)

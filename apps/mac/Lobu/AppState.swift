@@ -500,7 +500,7 @@ final class AppState: ObservableObject {
 
     private func setStatus(_ message: String) {
         status = message
-        NSLog("[LobuMacBridge] \(message)")
+        NSLog("[Lobu] \(message)")
     }
 }
 
@@ -520,7 +520,7 @@ enum SyncDispatcher {
     static func runOneCycle(baseURL: String, capabilities: [String: Bool]) async throws -> CycleResult {
         let credentialStore = KeychainCredentialStore()
         guard var credentials = credentialStore.load() else {
-            throw NSError(domain: "LobuMacBridge", code: 1,
+            throw NSError(domain: "Lobu", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "Sign in to Lobu first."])
         }
         let oauth = try OAuthClient(baseURL: credentials.baseURL)

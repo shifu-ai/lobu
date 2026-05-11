@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct LobuMacBridgeApp: App {
+struct LobuApp: App {
     @StateObject private var state = AppState()
 
     var body: some Scene {

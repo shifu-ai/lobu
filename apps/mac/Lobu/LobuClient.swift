@@ -1,6 +1,6 @@
 import Foundation
 
-// Worker-protocol HTTP client. Same wire shapes as the iOS Bridge's
+// Worker-protocol HTTP client. Same wire shapes as the iOS app's
 // LobuClient.swift — kept as a verbatim port so server-side changes only
 // have to happen in one place. Auth is the user's OAuth access token.
 
@@ -10,7 +10,7 @@ enum LobuWorkerIdentity {
         if let existing = UserDefaults.standard.string(forKey: key), !existing.isEmpty {
             return existing
         }
-        let generated = "mac-bridge-\(UUID().uuidString.lowercased())"
+        let generated = "mac-\(UUID().uuidString.lowercased())"
         UserDefaults.standard.set(generated, forKey: key)
         return generated
     }

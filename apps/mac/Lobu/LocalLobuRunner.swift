@@ -1,7 +1,7 @@
 import Foundation
 
-/// Spawns and supervises a local `lobu run` so the Mac Bridge can sync into a
-/// Lobu on this machine without Lobu Cloud or a separate server.
+/// Spawns and supervises a local `lobu run` so Lobu can sync into a workspace
+/// on this machine without Lobu Cloud or a separate server.
 ///
 /// The project lives at `~/lobu` (created if absent — `lobu run` boots with the
 /// bundled PGlite store, no Docker/Postgres, no scaffolding needed; the user can
@@ -10,8 +10,8 @@ import Foundation
 /// `/usr/local/bin`, and a bundled-in-.app slot for later); if it isn't, surfaces
 /// `.cliNotFound` so the UI can tell the user how to install it.
 ///
-/// The Mac Bridge is not sandboxed, so spawning a subprocess is allowed. A clean
-/// quit SIGTERMs the child; if the app dies uncleanly the leftover process is
+/// The app is not sandboxed, so spawning a subprocess is allowed. A clean quit
+/// SIGTERMs the child; if the app dies uncleanly the leftover process is
 /// harmless — `start()` reconnects to it instead of spawning a second one.
 final class LocalLobuRunner {
     enum RunnerError: LocalizedError {
@@ -47,7 +47,7 @@ final class LocalLobuRunner {
     init() {
         self.projectDir = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("lobu", isDirectory: true)
         let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Logs/LobuMacBridge", isDirectory: true)
+            .appendingPathComponent("Logs/Lobu", isDirectory: true)
         try? FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         self.logFile = logs.appendingPathComponent("lobu-run.log")
     }

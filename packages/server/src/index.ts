@@ -600,7 +600,7 @@ import {
 //      secret in the server env; used by server-side connector-worker fleets.
 //      Full access to all orgs (existing model).
 //
-//   2. **User-scoped worker** — user OAuth bearer or PAT (the Lobu Mac Bridge
+//   2. **User-scoped worker** — user OAuth bearer or PAT (Lobu for Mac
 //      uses an OAuth bearer from the device-code flow). `/api/workers/*` carries
 //      no org slug, so the token must resolve to an org on its own (PAT/OAuth
 //      carry a bound org — a bare session cookie won't work here). The worker is

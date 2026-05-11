@@ -8,11 +8,11 @@
 --
 -- `runtime` carries platform metadata for device-bound connectors (e.g.
 -- `{"platforms": ["macos"]}` for apple.screen_time / local.directory, which
--- only run inside the Lobu Mac Bridge — that data is unreachable from a
--- server-side worker). NULL = cloud connector.
+-- only run inside Lobu for Mac — that data is unreachable from a server-side
+-- worker). NULL = cloud connector.
 --
--- Initial use case: apple.screen_time and local.directory, served by the Lobu
--- Mac Bridge polling /api/workers/* as a user-scoped device worker.
+-- Initial use case: apple.screen_time and local.directory, served by Lobu for
+-- Mac polling /api/workers/* as a user-scoped device worker.
 
 ALTER TABLE public.connector_definitions
     ADD COLUMN IF NOT EXISTS required_capability text,

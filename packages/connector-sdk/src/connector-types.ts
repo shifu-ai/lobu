@@ -45,14 +45,14 @@ export interface ConnectorDefinition {
    * capabilities on poll; the runs scheduler only hands a connector run to a
    * worker whose capabilities array includes this value. Unset = any worker
    * (default API/browser fleet). Example: `'screentime'` for apple.screen_time
-   * (only the Lobu Mac Bridge, with Full Disk Access, can read the Knowledge store).
+   * (only Lobu for Mac, with Full Disk Access, can read the Knowledge store).
    */
   requiredCapability?: string;
   /**
    * Present only for device-bound connectors. Omitting this field means the
    * connector runs on the server-side worker fleet (cloud). `platforms` lists
-   * the host platforms a device worker (e.g. the Lobu Mac Bridge) must be
-   * running on to serve this connector's runs.
+   * the host platforms a device worker (e.g. Lobu for Mac) must be running on
+   * to serve this connector's runs.
    */
   runtime?: ConnectorRuntimeInfo;
 }
