@@ -71,6 +71,38 @@ describe('watcher CRUD', () => {
     expect(list.watchers?.some((w) => w.watcher_id === watcherId)).toBe(false);
   });
 
+  it('creates an org-scoped watcher with no entity_id', async () => {
+    const created = (await owner.watchers.create({
+      slug: 'org-scoped-watcher',
+      name: 'Org Scoped',
+      prompt: 'Track org-wide signals.',
+      extraction_schema: {
+        type: 'object',
+        properties: { signals: { type: 'array', items: { type: 'string' } } },
+      },
+    })) as { watcher_id: string };
+    expect(created.watcher_id).toBeDefined();
+
+    const got = (await owner.watchers.get(created.watcher_id)) as {
+      watcher?: { entity_ids?: number[] };
+    };
+    expect(got.watcher?.entity_ids ?? []).toEqual([]);
+
+    await owner.watchers.delete([created.watcher_id]);
+  });
+
+  it('rejects an org-scoped watcher when there is no organization context', async () => {
+    const noOrg = owner.withAuth({ organizationId: null });
+    await expect(
+      noOrg.watchers.create({
+        slug: 'no-org-watcher',
+        name: 'No Org',
+        prompt: 'should fail',
+        extraction_schema: { type: 'object', properties: {} },
+      })
+    ).rejects.toThrow(/organization|entity_id/i);
+  });
+
   it('blocks a member from deleting watchers (admin-only)', async () => {
     const created = (await owner.watchers.create({
       entity_id: entityId,
