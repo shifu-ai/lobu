@@ -265,7 +265,17 @@ final class AppState: ObservableObject {
 
     func refreshFDAStatus() {
         let path = "\(NSHomeDirectory())/Library/Application Support/Knowledge/knowledgeC.db"
-        hasFDA = FileManager.default.isReadableFile(atPath: path)
+        // Actually *open* the file rather than stat it. A real open() is what
+        // makes macOS register this app in System Settings → Privacy & Security
+        // → Full Disk Access (so the user just flips a toggle, no "+" digging).
+        // `fileExists` / `isReadableFile` don't count as "access" and never
+        // surface the app in that list.
+        if let handle = FileHandle(forReadingAtPath: path) {
+            try? handle.close()
+            hasFDA = true
+        } else {
+            hasFDA = false
+        }
     }
 
     // MARK: - Persistence helpers ----------------------------------------------
