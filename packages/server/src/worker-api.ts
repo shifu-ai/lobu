@@ -51,6 +51,21 @@ let lastDueFeedMaterializeAttemptAt = 0;
 
 /** A device worker counts toward "serves capability X" only if seen this recently. */
 const DEVICE_WORKER_FRESH_INTERVAL = '7 days';
+const WORKER_CAPABILITY_NAME_RE = /^[a-z][a-z0-9_.:-]{0,63}$/;
+
+function normalizeAdvertisedCapabilities(capabilities: Record<string, boolean>): string[] {
+  return Array.from(
+    new Set(
+      Object.entries(capabilities)
+        .map(([key, value]) => [key.trim(), value] as const)
+        .filter(
+          ([key, value]) =>
+            value === true && key !== 'browser' && WORKER_CAPABILITY_NAME_RE.test(key)
+        )
+        .map(([key]) => key)
+    )
+  );
+}
 
 /**
  * Install + wire a bundled device connector into the user's personal org:
@@ -67,15 +82,23 @@ const DEVICE_WORKER_FRESH_INTERVAL = '7 days';
 async function ensureDeviceConnectorWired(
   userId: string,
   organizationId: string,
-  connectorKey: string
+  connectorKey: string,
+  declaredFeedKeys: string[]
 ): Promise<void> {
   const sql = getDb();
   try {
-    // Fast path: definition + version + connection + an ACTIVE feed all present
-    // → nothing to repair or re-activate. Keeps the per-poll ensure cheap while
-    // still healing partially-wired or paused device connectors.
+    // Fast path: definition + version + connection + EVERY declared feed active
+    // → nothing to repair or re-activate. The feed list comes from the bundled
+    // catalog source, not the installed DB row, so adding a new bundled feed
+    // still heals existing installs after deploy.
     const existingReady = (await sql`
-      SELECT c.id AS connection_id, f.id AS feed_id, cv.connector_key AS version_key
+      SELECT
+        c.id AS connection_id,
+        cv.connector_key AS version_key,
+        COALESCE(
+          array_agg(f.feed_key) FILTER (WHERE f.id IS NOT NULL),
+          ARRAY[]::text[]
+        ) AS active_feed_keys
       FROM connector_definitions cd
       LEFT JOIN connector_versions cv
         ON cv.connector_key = cd.key AND cv.version = cd.version
@@ -91,16 +114,19 @@ async function ensureDeviceConnectorWired(
       WHERE cd.organization_id = ${organizationId}
         AND cd.key = ${connectorKey}
         AND cd.status = 'active'
+      GROUP BY c.id, cv.connector_key
       LIMIT 1
     `) as unknown as Array<{
       connection_id: number | null;
-      feed_id: number | null;
       version_key: string | null;
+      active_feed_keys: string[] | null;
     }>;
+    const activeFeedKeys = new Set(existingReady[0]?.active_feed_keys ?? []);
     if (
       existingReady[0]?.connection_id &&
-      existingReady[0]?.feed_id &&
-      existingReady[0]?.version_key
+      existingReady[0]?.version_key &&
+      declaredFeedKeys.length > 0 &&
+      declaredFeedKeys.every((feedKey) => activeFeedKeys.has(feedKey))
     ) {
       return;
     }
@@ -297,7 +323,7 @@ async function reconcileDeviceCapabilities(userId: string): Promise<void> {
   await Promise.allSettled(
     deviceConnectors.map((dc) =>
       liveCaps.has(dc.requiredCapability)
-        ? ensureDeviceConnectorWired(userId, personalOrg.id, dc.key)
+        ? ensureDeviceConnectorWired(userId, personalOrg.id, dc.key, dc.feedKeys)
         : pauseStaleDeviceFeeds(userId, personalOrg.id, dc.key)
     )
   );
@@ -339,7 +365,10 @@ async function authorizeRunForWorker(
   if (run.status !== 'running') {
     return c.json({ error: 'Run is not in progress' }, 409);
   }
-  if (expectedWorkerId && run.claimed_by !== expectedWorkerId) {
+  if (!expectedWorkerId?.trim()) {
+    return c.json({ error: 'worker_id is required' }, 400);
+  }
+  if (run.claimed_by !== expectedWorkerId) {
     return c.json({ error: 'Forbidden' }, 403);
   }
   return null;
@@ -378,9 +407,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // Capability set the worker advertised (excluding browser, which has its
   // own legacy gate via connector_definitions.api_type). Used to filter on
   // connector_definitions.required_capability.
-  const advertisedCapabilities = Object.entries(capabilities)
-    .filter(([key, value]) => value === true && key !== 'browser')
-    .map(([key]) => key);
+  const advertisedCapabilities = normalizeAdvertisedCapabilities(capabilities);
   // Trusted fleet workers (WORKER_API_TOKEN) run the no-capability cloud
   // connectors too, so '' (a NULL required_capability becomes '' via COALESCE
   // below) belongs in their match set. User-scoped workers — the Lobu Mac
@@ -471,6 +498,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           AND (r.approval_status = 'auto' OR r.approval_status = 'approved')
           AND (${hasBrowser} OR COALESCE(cd.api_type, 'api') = 'api')
           AND COALESCE(cd.required_capability, '') = ANY(${pgTextArray(capabilityMatchSet)}::text[])
+          AND (${!isUserScopedWorker} OR cd.required_capability IS NOT NULL)
           AND (${!orgScopeActive} OR r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[]))
         ORDER BY
           CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END,
@@ -691,6 +719,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
     const batch = await c.req.json<{
       type: 'batch';
       run_id: number;
+      worker_id?: string;
       items: Array<{
         id: string;
         title?: string;
@@ -712,7 +741,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
       checkpoint?: Record<string, unknown>;
     }>();
 
-    const denied = await authorizeRunForWorker(c, batch.run_id);
+    const denied = await authorizeRunForWorker(c, batch.run_id, batch.worker_id);
     if (denied) return denied;
 
     const sql = getDb();

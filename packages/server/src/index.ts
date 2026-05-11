@@ -639,6 +639,14 @@ app.use('/api/workers/*', async (c, next) => {
       if (!allowedPathsForUserWorker.has(requestPath)) {
         return c.json({ error: 'Endpoint not available to user-scoped workers' }, 403);
       }
+      const scopes = c.var.mcpAuthInfo?.scopes ?? [];
+      if (
+        !scopes.includes('device_worker:run') &&
+        !scopes.includes('mcp:write') &&
+        !scopes.includes('mcp:admin')
+      ) {
+        return c.json({ error: 'Worker token missing device_worker:run scope' }, 403);
+      }
       const userId = c.var.user.id;
       // mcpAuth already verified the token resolves to (and the user is a
       // member of) `c.var.organizationId`. A device worker is scoped to that

@@ -1,10 +1,11 @@
 /**
  * Apple Health Connector (V1 runtime) — Mac Bridge.
  *
- * Phone-bridged via iCloud: HealthKit on macOS 13+ exposes the same per-user
- * Health store that's synced (via iCloud Health) from the user's iPhone and
- * Apple Watch. The Lobu Mac Bridge holds the HealthKit entitlement, requests
- * read permission once via a system sheet, and queries:
+ * Runs on a device bridge with HealthKit access. On iOS this reads the phone's
+ * Health store directly; on supported macOS installs HealthKit exposes the
+ * per-user store synced from iPhone and Apple Watch via iCloud Health. The
+ * Lobu device bridge holds the HealthKit entitlement, requests read permission
+ * once via a system sheet, and queries:
  *
  * - `daily_summaries`: daily totals for steps, distance, active energy,
  *   exercise minutes, and resting heart rate.
@@ -44,7 +45,7 @@ export default class AppleHealthConnector extends ConnectorRuntime {
     faviconDomain: 'apple.com',
     requiredCapability: 'healthkit',
     runtime: {
-      platforms: ['macos'],
+      platforms: ['ios', 'macos'],
       scopes: ['steps', 'distance', 'active-calories', 'exercise-minutes', 'workouts', 'resting-heart-rate'],
     },
     authSchema: {

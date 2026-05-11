@@ -423,7 +423,10 @@ struct MenuBarContent: View {
 
     private var footerRow: some View {
         HStack {
-            Button("Quit Lobu Bridge") { NSApplication.shared.terminate(nil) }
+            Button("Quit Lobu Bridge") {
+                state.stopLocalLobu()
+                NSApplication.shared.terminate(nil)
+            }
                 .buttonStyle(.plain)
                 .font(.caption)
             Spacer()

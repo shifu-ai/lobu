@@ -537,6 +537,18 @@ enum SyncDispatcher {
             return CycleResult(claimedJob: false, itemsStreamed: 0, connectorKey: nil, runId: nil)
         }
 
+        let heartbeatBaseURL = credentials.baseURL
+        let heartbeatAccessToken = credentials.accessToken
+        let heartbeatTask = Task.detached {
+            let heartbeatClient = WorkerClient(baseURL: heartbeatBaseURL, accessToken: heartbeatAccessToken)
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(60))
+                if Task.isCancelled { break }
+                try? await heartbeatClient.heartbeat(workerId: workerId, runId: job.run_id)
+            }
+        }
+        defer { heartbeatTask.cancel() }
+
         do {
             let items: [WorkerStreamItem]
             var checkpoint: [String: AnyEncodable]?
@@ -558,7 +570,7 @@ enum SyncDispatcher {
             }
 
             if !items.isEmpty {
-                try await worker.stream(runId: job.run_id, items: items)
+                try await worker.stream(workerId: workerId, runId: job.run_id, items: items)
             }
             try await worker.complete(workerId: workerId, runId: job.run_id,
                                       itemsCollected: items.count, checkpoint: checkpoint, error: nil)

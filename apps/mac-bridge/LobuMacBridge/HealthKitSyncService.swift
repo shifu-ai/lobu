@@ -1,5 +1,6 @@
 import Foundation
 import HealthKit
+import Security
 
 /// Result of an `apple.health` sync pass — events to stream plus the new
 /// per-feed checkpoint (`last_sync_at` Unix seconds) to persist.
@@ -45,7 +46,21 @@ enum HealthKitSyncService {
 
     static var hasBeenRequested: Bool { UserDefaults.standard.bool(forKey: userDefaultsKey) }
 
-    static func isAvailable() -> Bool { HKHealthStore.isHealthDataAvailable() }
+    static func isAvailable() -> Bool {
+        HKHealthStore.isHealthDataAvailable() && hasHealthKitEntitlement()
+    }
+
+    private static func hasHealthKitEntitlement() -> Bool {
+        guard
+            let task = SecTaskCreateFromSelf(nil),
+            let value = SecTaskCopyValueForEntitlement(
+                task,
+                "com.apple.developer.healthkit" as CFString,
+                nil
+            )
+        else { return false }
+        return (value as? Bool) == true
+    }
 
     /// The READ types the bridge asks for. Apple shows ONE sheet listing all of
     /// these and lets the user grant/deny each individually.
@@ -96,9 +111,16 @@ enum HealthKitSyncService {
             throw HealthKitError.unsupportedFeed(other ?? "<nil>")
         }
 
+        // If this is the first run and HealthKit returns nothing, do not burn
+        // the historical backfill window. This covers both denied read access
+        // (HealthKit does not expose read-grant status) and iCloud Health data
+        // that has not populated on this Mac yet.
+        let hadExistingCheckpoint = job.checkpoint?["last_sync_at"]?.intValue != nil
         return HealthKitOutput(
             items: items,
-            checkpoint: ["last_sync_at": AnyEncodable(passStartedAt)]
+            checkpoint: items.isEmpty && !hadExistingCheckpoint
+                ? [:]
+                : ["last_sync_at": AnyEncodable(passStartedAt)]
         )
     }
 

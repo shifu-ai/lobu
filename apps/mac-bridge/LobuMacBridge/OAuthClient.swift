@@ -85,7 +85,7 @@ enum OAuthClientError: LocalizedError {
 }
 
 final class OAuthClient {
-    static let scope = "mcp:read mcp:write profile:read"
+    static let scope = "device_worker:run profile:read"
 
     private let baseURL: URL
     private let session: URLSession

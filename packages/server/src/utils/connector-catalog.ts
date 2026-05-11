@@ -338,6 +338,8 @@ export interface BundledDeviceConnector {
   key: string;
   /** Worker capability the device must advertise to run it, e.g. `screentime`. */
   requiredCapability: string;
+  /** Feed keys declared by the bundled source. Used to heal partially-wired installs. */
+  feedKeys: string[];
 }
 
 /**
@@ -352,5 +354,12 @@ export async function getBundledDeviceConnectors(): Promise<BundledDeviceConnect
   const defs = await listCatalogConnectorDefinitions();
   return defs
     .filter((d) => d.runtime != null && typeof d.required_capability === 'string')
-    .map((d) => ({ key: d.key, requiredCapability: d.required_capability as string }));
+    .map((d) => ({
+      key: d.key,
+      requiredCapability: d.required_capability as string,
+      feedKeys:
+        d.feeds_schema && typeof d.feeds_schema === 'object' && !Array.isArray(d.feeds_schema)
+          ? Object.keys(d.feeds_schema)
+          : [],
+    }));
 }

@@ -60,6 +60,16 @@ enum AnyJSONValue: Decodable {
         default: return nil
         }
     }
+
+    var stringValue: String? {
+        switch self {
+        case let .string(s): return s
+        case let .integer(v): return String(v)
+        case let .double(v): return String(v)
+        case let .bool(v): return String(v)
+        case .null, .other: return nil
+        }
+    }
 }
 
 struct WorkerStreamItem: Encodable {
@@ -145,9 +155,14 @@ final class WorkerClient {
         throw WorkerClientError.decode("/poll body=\(String(data: data, encoding: .utf8) ?? "<binary>")")
     }
 
-    func stream(runId: Int, items: [WorkerStreamItem]) async throws {
-        struct Body: Encodable { let type: String; let run_id: Int; let items: [WorkerStreamItem] }
-        _ = try await post("/api/workers/stream", body: Body(type: "batch", run_id: runId, items: items))
+    func heartbeat(workerId: String, runId: Int) async throws {
+        struct Body: Encodable { let run_id: Int; let worker_id: String }
+        _ = try await post("/api/workers/heartbeat", body: Body(run_id: runId, worker_id: workerId))
+    }
+
+    func stream(workerId: String, runId: Int, items: [WorkerStreamItem]) async throws {
+        struct Body: Encodable { let type: String; let run_id: Int; let worker_id: String; let items: [WorkerStreamItem] }
+        _ = try await post("/api/workers/stream", body: Body(type: "batch", run_id: runId, worker_id: workerId, items: items))
     }
 
     func complete(

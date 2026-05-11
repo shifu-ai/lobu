@@ -57,7 +57,6 @@ enum LocalDirectorySyncService {
         let fm = FileManager.default
 
         for bookmark in bookmarks {
-            guard items.count < maxTotalFiles else { break }
             var isStale = false
             guard let folderURL = try? URL(
                 resolvingBookmarkData: bookmark,
@@ -72,17 +71,31 @@ enum LocalDirectorySyncService {
             let folderName = folderURL.lastPathComponent
             let folderId = folderKey(for: bookmark)
             let checkpointKey = "folder:\(folderId)"
+            let cursorKey = "\(checkpointKey):cursor"
             // nil ⇒ folder never synced (or first run) ⇒ full scan.
-            let syncedSince: Double? = (job.checkpoint?[checkpointKey]?.intValue).map(Double.init)
+            let syncedSinceInt = job.checkpoint?[checkpointKey]?.intValue
+            let cursor = job.checkpoint?[cursorKey]?.stringValue
 
-            guard let entries = try? fm.contentsOfDirectory(
+            guard let rawEntries = try? fm.contentsOfDirectory(
                 at: folderURL,
                 includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles]
             ) else { continue }
+            let entries = rawEntries.sorted { lhs, rhs in
+                let lhsModified = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
+                let rhsModified = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)?.timeIntervalSince1970 ?? 0
+                if lhsModified == rhsModified { return lhs.lastPathComponent < rhs.lastPathComponent }
+                return lhsModified < rhsModified
+            }
+
+            var folderCompleted = true
+            var lastProcessed: (seconds: Int, filename: String)?
 
             for fileURL in entries {
-                guard items.count < maxTotalFiles else { break }
+                guard items.count < maxTotalFiles else {
+                    folderCompleted = false
+                    break
+                }
 
                 // Regular files only
                 guard (try? fileURL.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true else { continue }
@@ -95,15 +108,26 @@ enum LocalDirectorySyncService {
                 guard fileSize <= maxFileSize else { continue }
 
                 let modifiedAt = resources?.contentModificationDate ?? Date()
+                let modifiedSeconds = Int(modifiedAt.timeIntervalSince1970)
+                let filename = fileURL.lastPathComponent
 
-                // Skip files unchanged since this folder's last sync — stat only,
-                // no read. Strict `<` so a same-second edit is re-synced (cheap
-                // no-op upsert) rather than missed.
-                if let syncedSince, modifiedAt.timeIntervalSince1970 < syncedSince { continue }
+                // Skip files unchanged since this folder's last sync. A cursor is
+                // stored only when a previous pass hit maxTotalFiles; it lets the
+                // next pass continue through many same-second mtimes instead of
+                // permanently skipping or repeatedly re-reading the same prefix.
+                if let syncedSinceInt {
+                    if let cursor {
+                        if modifiedSeconds < syncedSinceInt { continue }
+                        if modifiedSeconds == syncedSinceInt && filename <= cursor { continue }
+                    } else if modifiedAt.timeIntervalSince1970 < Double(syncedSinceInt) {
+                        // Strict `<` so a same-second edit is re-synced (cheap
+                        // no-op upsert) rather than missed.
+                        continue
+                    }
+                }
 
                 guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
 
-                let filename = fileURL.lastPathComponent
                 let item = WorkerStreamItem(
                     id: "local-dir:\(folderId):\(filename)",
                     title: filename,
@@ -120,9 +144,18 @@ enum LocalDirectorySyncService {
                     ]
                 )
                 items.append(item)
+                lastProcessed = (modifiedSeconds, filename)
             }
 
-            checkpoint[checkpointKey] = AnyEncodable(passStartedAt)
+            if folderCompleted {
+                checkpoint[checkpointKey] = AnyEncodable(passStartedAt)
+            } else if let lastProcessed {
+                checkpoint[checkpointKey] = AnyEncodable(lastProcessed.seconds)
+                checkpoint[cursorKey] = AnyEncodable(lastProcessed.filename)
+            } else if let syncedSinceInt {
+                checkpoint[checkpointKey] = AnyEncodable(syncedSinceInt)
+                if let cursor { checkpoint[cursorKey] = AnyEncodable(cursor) }
+            }
         }
 
         return LocalDirectoryOutput(items: items, checkpoint: checkpoint)
