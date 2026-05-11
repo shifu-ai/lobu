@@ -27,12 +27,10 @@ struct DeviceAuthorizationResponse: Codable, Equatable {
     let user_code: String
     let verification_uri: String
     let verification_uri_complete: String?
+    /// Seconds the device code stays valid, relative to this response. Callers
+    /// must turn it into an absolute deadline once, not re-derive it per poll.
     let expires_in: Int
     let interval: Int?
-
-    /// Wall-clock expiry derived from expires_in. AppState's polling loop uses
-    /// this so it doesn't have to track createdAt separately.
-    var expiresAt: Date { Date().addingTimeInterval(TimeInterval(expires_in)) }
 }
 
 struct OAuthTokenResponse: Codable, Equatable {

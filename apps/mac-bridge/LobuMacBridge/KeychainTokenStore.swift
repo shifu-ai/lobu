@@ -41,7 +41,10 @@ struct KeychainCredentialStore {
         if status == errSecItemNotFound {
             var item = query
             item[kSecValueData as String] = data
-            SecItemAdd(item as CFDictionary, nil)
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            if addStatus != errSecSuccess {
+                throw KeychainError.saveFailed(addStatus)
+            }
         } else if status != errSecSuccess {
             throw KeychainError.saveFailed(status)
         }

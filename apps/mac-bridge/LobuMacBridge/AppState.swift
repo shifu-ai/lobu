@@ -157,8 +157,12 @@ final class AppState: ObservableObject {
             setStatus("Approve the login in your browser. Code: \(authorization.user_code)")
             oauth.openVerificationURL(authorization)
 
+            // Absolute deadline captured once — `expires_in` is relative to the
+            // device-auth response, so re-deriving it each loop iteration would
+            // never expire.
+            let deadline = Date().addingTimeInterval(TimeInterval(authorization.expires_in))
             var interval = max(authorization.interval ?? 5, 1)
-            while Date() < authorization.expiresAt {
+            while Date() < deadline {
                 switch try await oauth.pollDeviceToken(discovery, client: client, deviceCode: authorization.device_code) {
                 case let .pending(slowDown):
                     if slowDown { interval += 5 }

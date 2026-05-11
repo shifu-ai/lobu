@@ -599,10 +599,12 @@ import {
 //      secret in the server env; used by server-side connector-worker fleets.
 //      Full access to all orgs (existing model).
 //
-//   2. **User-scoped worker** — user OAuth bearer (or PAT, or session). The
-//      worker is bound to the authenticated user; poll/stream/complete must
-//      filter on the user's org memberships. Used by device-bridge workers
-//      (e.g. the Lobu Mac Bridge) that can't ship a shared secret.
+//   2. **User-scoped worker** — user OAuth bearer or PAT (the Lobu Mac Bridge
+//      uses an OAuth bearer from the device-code flow). The worker is bound to
+//      the authenticated user; poll filters on the user's org memberships and
+//      heartbeat/stream/complete re-check the run is theirs. `/api/workers/*`
+//      carries no org slug, so the token must resolve to an org on its own
+//      (PAT/OAuth carry a bound org) — a bare session cookie won't work here.
 //
 // In dev (no WORKER_API_TOKEN configured) and with no user auth, requests pass
 // through unauthenticated — the existing local-dev behavior.

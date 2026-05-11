@@ -201,14 +201,18 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
 
 /**
  * Verify that the request's worker auth scope is allowed to touch this run.
- * Trusted/anonymous workers see everything; user-scoped workers can only
- * touch runs in orgs the user belongs to.
+ * Trusted/anonymous workers see everything; user-scoped device workers can only
+ * touch a run that (a) belongs to one of the user's orgs, (b) is currently
+ * `running`, and (c) — when the caller passes its worker id — was claimed by
+ * that same worker. That last check stops one device from streaming/completing
+ * another worker's run; (b) stops it from re-touching a pending/finished run.
  *
  * Returns a Hono response on rejection, or null on pass.
  */
 async function authorizeRunForWorker(
   c: Context<{ Bindings: Env }>,
-  runId: number
+  runId: number,
+  expectedWorkerId?: string
 ): Promise<Response | null> {
   if (c.var.workerAuthMode !== 'user') {
     return null;
@@ -219,12 +223,19 @@ async function authorizeRunForWorker(
   }
   const sql = getDb();
   const rows = (await sql`
-    SELECT organization_id FROM runs WHERE id = ${runId} LIMIT 1
-  `) as unknown as Array<{ organization_id: string }>;
+    SELECT organization_id, status, claimed_by FROM runs WHERE id = ${runId} LIMIT 1
+  `) as unknown as Array<{ organization_id: string; status: string; claimed_by: string | null }>;
   if (rows.length === 0) {
     return c.json({ error: 'Run not found' }, 404);
   }
-  if (!orgIds.includes(rows[0].organization_id)) {
+  const run = rows[0];
+  if (!orgIds.includes(run.organization_id)) {
+    return c.json({ error: 'Forbidden' }, 403);
+  }
+  if (run.status !== 'running') {
+    return c.json({ error: 'Run is not in progress' }, 409);
+  }
+  if (expectedWorkerId && run.claimed_by !== expectedWorkerId) {
     return c.json({ error: 'Forbidden' }, 403);
   }
   return null;
@@ -487,21 +498,28 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  const { credentials, connectionCredentials, sessionState } = row.connection_id
-    ? await resolveExecutionAuth({
-        organizationId: row.organization_id,
-        connectionId: row.connection_id,
-        authProfileId: row.auth_profile_id,
-        appAuthProfileId: row.app_auth_profile_id,
-        credentialDb: sql,
-        logContext: { run_id: row.run_id },
-        logMessage: 'Failed to resolve connection credentials for worker poll',
-      })
-    : {
-        credentials: null,
-        connectionCredentials: {},
-        sessionState: null,
-      };
+  // User-scoped device workers (Mac Bridge etc.) only ever run no-auth bundled
+  // connectors gated by `required_capability`. Never hand a user OAuth/PAT
+  // client real connection credentials or auth-profile state — strip them
+  // unconditionally, so a connector that's misconfigured with both a
+  // `required_capability` and an auth profile can't leak secrets to a device.
+  // (`isUserScopedWorker` is computed above for the capability-match set.)
+  const { credentials, connectionCredentials, sessionState } =
+    !isUserScopedWorker && row.connection_id
+      ? await resolveExecutionAuth({
+          organizationId: row.organization_id,
+          connectionId: row.connection_id,
+          authProfileId: row.auth_profile_id,
+          appAuthProfileId: row.app_auth_profile_id,
+          credentialDb: sql,
+          logContext: { run_id: row.run_id },
+          logMessage: 'Failed to resolve connection credentials for worker poll',
+        })
+      : {
+          credentials: null,
+          connectionCredentials: {},
+          sessionState: null,
+        };
 
   return c.json({
     run_id: row.run_id,
@@ -521,8 +539,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     session_state: sessionState ?? undefined,
     action_key: row.action_key ?? undefined,
     action_input: (row as any).approved_input ?? row.action_input ?? undefined,
-    auth_profile_id: row.run_auth_profile_id ?? undefined,
-    previous_credentials: row.auth_profile_auth_data ?? undefined,
+    auth_profile_id: isUserScopedWorker ? undefined : (row.run_auth_profile_id ?? undefined),
+    previous_credentials: isUserScopedWorker ? undefined : (row.auth_profile_auth_data ?? undefined),
   });
 }
 
@@ -533,13 +551,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
  */
 export async function heartbeat(c: Context<{ Bindings: Env }>) {
   try {
-    const { run_id, progress } = await c.req.json<{
+    const { run_id, worker_id, progress } = await c.req.json<{
       run_id: number;
       worker_id: string;
       progress?: { items_collected_so_far?: number };
     }>();
 
-    const denied = await authorizeRunForWorker(c, run_id);
+    const denied = await authorizeRunForWorker(c, run_id, worker_id);
     if (denied) return denied;
 
     const sql = getDb();
@@ -771,7 +789,7 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
       exit_reason?: 'ok' | 'error_message' | 'timeout' | 'oom' | 'crash';
     }>();
 
-    const denied = await authorizeRunForWorker(c, req.run_id);
+    const denied = await authorizeRunForWorker(c, req.run_id, req.worker_id);
     if (denied) return denied;
 
     const sql = getDb();
