@@ -663,8 +663,10 @@ app.post('/api/workers/fetch-events', fetchEventsForEmbedding);
 app.post('/api/workers/emit-auth-artifact', emitAuthArtifact);
 app.post('/api/workers/poll-auth-signal', pollAuthSignal);
 app.post('/api/workers/complete-auth', completeAuthRun);
-// Device worker registry. Authenticated (mcpAuth); returns calling user's devices.
-app.get('/api/devices', mcpAuth, listDeviceWorkers);
+// Device worker registry. Authenticated (mcpAuth); returns the calling user's
+// devices. Lives under /api/me/ so the workspace resolver treats it as
+// user-scoped (no org slug in the URL).
+app.get('/api/me/devices', mcpAuth, listDeviceWorkers);
 // UI → worker signal channel. Separate path prefix so the worker API auth
 // middleware above doesn't cover it (this one is hit from the web session).
 app.get('/api/auth-runs/active', getActiveAuthRun);
