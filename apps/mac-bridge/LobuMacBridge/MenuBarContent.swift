@@ -50,8 +50,12 @@ struct MenuBarContent: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "rectangle.on.rectangle")
-                .font(.title3)
+            Image("MenuBarIcon")
+                .resizable()
+                .renderingMode(.template)
+                .scaledToFit()
+                .frame(width: 18, height: 18)
+                .foregroundStyle(.orange)
             Text("Lobu")
                 .font(.headline)
             Spacer()

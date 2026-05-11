@@ -8,9 +8,9 @@ struct LobuMacBridgeApp: App {
         MenuBarExtra {
             MenuBarContent(state: state)
         } label: {
-            // Use the system "rectangle.on.rectangle" as a placeholder until we
-            // ship a proper template image. Renders monochrome in the menu bar.
-            Label("Lobu", systemImage: "rectangle.on.rectangle")
+            // Lobu lobster mark — vector SVG, rendered as a template so it
+            // tints to the menu bar's light/dark appearance.
+            Label("Lobu", image: "MenuBarIcon")
         }
         .menuBarExtraStyle(.window)
     }
