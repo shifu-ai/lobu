@@ -245,7 +245,39 @@ struct MenuBarContent: View {
             sectionLabel("Integrations")
             screenTimeRow
             localFolderRows
+            healthKitRow
         }
+    }
+
+    private var healthKitRow: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "heart.fill")
+                .foregroundStyle(.pink)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Apple Health").font(.caption)
+                if !state.healthKitAvailable {
+                    Text("Not available on this Mac.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                } else if !state.hasHealthKit {
+                    Text("Daily activity + workouts, synced from iPhone via iCloud Health.")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            if !state.healthKitAvailable {
+                EmptyView()
+            } else if state.hasHealthKit {
+                Label("Requested", systemImage: "checkmark.circle.fill")
+                    .labelStyle(.iconOnly)
+                    .foregroundStyle(.green)
+                    .font(.caption)
+            } else {
+                Button("Grant access") { Task { await state.requestHealthKitAccess() } }
+                    .buttonStyle(.plain).font(.caption).foregroundStyle(.orange)
+            }
+        }
+        .menuRow()
     }
 
     private var screenTimeRow: some View {

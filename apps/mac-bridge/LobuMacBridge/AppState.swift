@@ -12,6 +12,7 @@ struct RecentJob: Codable {
         switch connectorKey {
         case "apple.screen_time": return "Screen Time"
         case "local.directory":   return "Local folder"
+        case "apple.health":      return "Apple Health"
         default:                  return connectorKey
         }
     }
@@ -81,6 +82,9 @@ final class AppState: ObservableObject {
     // Integrations state
     @Published var hasFDA: Bool = false
     @Published var localFolderBookmarks: [Data] = []
+    /// True once the user has been through the Apple Health permission sheet
+    /// (mirrored from UserDefaults — HealthKit hides actual READ-grant status).
+    @Published var hasHealthKit: Bool = HealthKitSyncService.hasBeenRequested
 
     @Published var baseURL: String = {
         UserDefaults.standard.string(forKey: "lobuBaseURL")
@@ -178,10 +182,14 @@ final class AppState: ObservableObject {
     // MARK: - Capabilities -------------------------------------------------------
 
     /// Capabilities advertised on the next poll.
+    /// Whether Apple Health querying is even possible on this Mac.
+    var healthKitAvailable: Bool { HealthKitSyncService.isAvailable() }
+
     var currentCapabilities: [String: Bool] {
         var caps: [String: Bool] = [:]
         if hasFDA { caps["screentime"] = true }
         if !localFolderBookmarks.isEmpty { caps["local_directory"] = true }
+        if hasHealthKit && healthKitAvailable { caps["healthkit"] = true }
         return caps
     }
 
@@ -438,6 +446,23 @@ final class AppState: ObservableObject {
                         bookmarkDataIsStale: &isStale)
     }
 
+    // MARK: - Apple Health ------------------------------------------------------
+
+    /// Open the system permission sheet for Apple Health. After it closes (we
+    /// can't tell whether the user actually granted anything — Apple hides
+    /// READ-grant status), we treat the app as "requested" and start
+    /// advertising the `healthkit` capability; a deny just means the next sync
+    /// gets empty results.
+    func requestHealthKitAccess() async {
+        do {
+            try await HealthKitSyncService.requestAuthorization()
+            hasHealthKit = true
+            setStatus("Apple Health access requested.")
+        } catch {
+            setStatus("Apple Health: \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Full Disk Access -------------------------------------------------
 
     func refreshFDAStatus() {
@@ -520,6 +545,10 @@ enum SyncDispatcher {
                 items = try await ScreenTimeSyncService.runScreenTime(job: job)
             case "local.directory":
                 let out = try LocalDirectorySyncService.runLocalDirectory(job: job)
+                items = out.items
+                checkpoint = out.checkpoint
+            case "apple.health":
+                let out = try await HealthKitSyncService.runHealth(job: job)
                 items = out.items
                 checkpoint = out.checkpoint
             default:
