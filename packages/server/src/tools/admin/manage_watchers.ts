@@ -27,7 +27,11 @@ import { nextRunAt, validateSchedule } from '../../utils/cron';
 import { recordChangeEvent } from '../../utils/insert-event';
 import { verifyWindowToken } from '../../utils/jwt';
 import logger from '../../utils/logger';
-import { requireReadAccess, requireWriteAccess } from '../../utils/organization-access';
+import {
+  requireOrgWriteAccess,
+  requireReadAccess,
+  requireWriteAccess,
+} from '../../utils/organization-access';
 import { resolveUsernames } from '../../utils/resolve-usernames';
 import { computeStableKeys } from '../../utils/stable-keys';
 import {
@@ -265,7 +269,8 @@ export const ManageWatchersSchema = Type.Object({
   ),
   entity_id: Type.Optional(
     Type.Number({
-      description: 'Entity ID. Required for create. Optional for list.',
+      description:
+        'Entity ID. Optional for create — provide it to attach the watcher to an entity; omit it for an org-scoped/global watcher. Optional for list.',
     })
   ),
   entity_ids: Type.Optional(
@@ -602,8 +607,12 @@ export async function manageWatchers(
   const pgSql = createDbClientFromEnv(env);
 
   // Validate organization access based on action type
-  if (args.action === 'create' && args.entity_id) {
-    await requireWriteAccess(pgSql, args.entity_id, ctx);
+  if (args.action === 'create') {
+    if (args.entity_id) {
+      await requireWriteAccess(pgSql, args.entity_id, ctx);
+    } else {
+      await requireOrgWriteAccess(pgSql, ctx);
+    }
   } else if (args.action === 'update' && args.watcher_id) {
     const entityId = await getWatcherEntityId(args.watcher_id);
     if (entityId) await requireWriteAccess(pgSql, entityId, ctx);
@@ -821,11 +830,7 @@ async function handleCreate(
     throw new Error('extraction_schema is required for create action');
   }
 
-  // Require entity_id
-  if (!args.entity_id) {
-    throw new Error('entity_id is required');
-  }
-
+  // entity_id is optional: omit it for an org-scoped/global watcher.
   const entityId = args.entity_id;
 
   // Parse JSON inputs
@@ -883,22 +888,31 @@ async function handleCreate(
   let organizationId: string | null = ctx.organizationId ?? null;
   let organizationSlug: string | null = null;
 
-  const entityResult = await sql`
-    SELECT
-      e.id, et.slug AS entity_type, e.parent_id, e.slug, e.organization_id,
-      parent.slug as parent_slug, pet.slug as parent_entity_type
-    FROM entities e
-    JOIN entity_types et ON et.id = e.entity_type_id
-    LEFT JOIN entities parent ON e.parent_id = parent.id
-    LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
-    WHERE e.id = ${entityId}
-  `;
-  if (entityResult.length === 0) {
-    throw new Error(`Entity with ID ${entityId} not found`);
+  if (entityId) {
+    const entityResult = await sql`
+      SELECT
+        e.id, et.slug AS entity_type, e.parent_id, e.slug, e.organization_id,
+        parent.slug as parent_slug, pet.slug as parent_entity_type
+      FROM entities e
+      JOIN entity_types et ON et.id = e.entity_type_id
+      LEFT JOIN entities parent ON e.parent_id = parent.id
+      LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
+      WHERE e.id = ${entityId}
+    `;
+    if (entityResult.length === 0) {
+      throw new Error(`Entity with ID ${entityId} not found`);
+    }
+    entityRow = entityResult[0] as EntityRow;
+    organizationId = entityRow.organization_id;
+    organizationSlug = await getOrganizationSlug(organizationId);
+  } else {
+    if (!organizationId) {
+      throw new Error(
+        'entity_id or an organization context is required to create a watcher'
+      );
+    }
+    organizationSlug = await getOrganizationSlug(organizationId);
   }
-  entityRow = entityResult[0] as EntityRow;
-  organizationId = entityRow.organization_id;
-  organizationSlug = await getOrganizationSlug(organizationId);
 
   // Check slug uniqueness within org
   const existingSlug = await sql`
