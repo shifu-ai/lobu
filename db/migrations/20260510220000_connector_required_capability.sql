@@ -22,16 +22,6 @@ CREATE INDEX IF NOT EXISTS connector_definitions_required_capability_idx
     ON public.connector_definitions (required_capability)
     WHERE required_capability IS NOT NULL;
 
--- Backfill the gate for the bundled device connectors in case an earlier build
--- installed them before this column existed (otherwise a server-side worker
--- could claim them and hit their bridge-only throwing stubs). Reinstalls via
--- upsertConnectorDefinitionRecords set this from the connector's
--- `requiredCapability`; this just covers rows that predate that.
-UPDATE public.connector_definitions SET required_capability = 'screentime'
-    WHERE key = 'apple.screen_time' AND required_capability IS NULL;
-UPDATE public.connector_definitions SET required_capability = 'local_directory'
-    WHERE key = 'local.directory' AND required_capability IS NULL;
-
 CREATE TABLE IF NOT EXISTS public.device_workers (
     user_id text NOT NULL,
     worker_id text NOT NULL,

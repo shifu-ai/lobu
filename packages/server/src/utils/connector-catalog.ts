@@ -331,3 +331,26 @@ export async function listCatalogConnectorDefinitions(
 
   return definitions.sort((a, b) => a.name.localeCompare(b.name));
 }
+
+/** A bundled connector that runs on a device worker rather than the cloud fleet. */
+export interface BundledDeviceConnector {
+  /** Connector key, e.g. `apple.screen_time`. */
+  key: string;
+  /** Worker capability the device must advertise to run it, e.g. `screentime`. */
+  requiredCapability: string;
+}
+
+/**
+ * Bundled connectors that are device-bound: they declare both a `runtime` block
+ * and a `requiredCapability` gate, which together mean "only a device worker
+ * advertising that capability can run me" (e.g. apple.screen_time on the Lobu
+ * Mac Bridge). The gateway auto-wires these into a user's personal org when a
+ * device advertises the capability — nothing about which connectors those are
+ * is hardcoded; it's derived from the connector definitions in the catalog.
+ */
+export async function getBundledDeviceConnectors(): Promise<BundledDeviceConnector[]> {
+  const defs = await listCatalogConnectorDefinitions();
+  return defs
+    .filter((d) => d.runtime != null && typeof d.required_capability === 'string')
+    .map((d) => ({ key: d.key, requiredCapability: d.required_capability as string }));
+}

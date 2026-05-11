@@ -22,7 +22,12 @@ import {
 } from './connectors/repair-agent';
 import { autoLinkEvent } from './utils/auto-linker';
 import { nextRunAt as nextRunAtFromCron } from './utils/cron';
-import { compileConnectorFromFile, findBundledConnectorFile } from './utils/connector-catalog';
+import {
+  type BundledDeviceConnector,
+  compileConnectorFromFile,
+  findBundledConnectorFile,
+  getBundledDeviceConnectors,
+} from './utils/connector-catalog';
 import { extractConnectorMetadata } from './utils/connector-compiler';
 import { upsertConnectorDefinitionRecords } from './utils/connector-definition-install';
 import { resolveConnectorCode } from './utils/ensure-connector-installed';
@@ -44,49 +49,28 @@ const DUE_FEEDS_LOCK_KEY = 71001;
 const DUE_FEED_MATERIALIZE_COOLDOWN_MS = 5000;
 let lastDueFeedMaterializeAttemptAt = 0;
 
-/**
- * Worker capability → bundled connector key, for the device connectors that
- * have a working runtime (the Lobu Mac Bridge). When a device worker advertises
- * one of these we auto-wire the connector into the user's personal org; when no
- * recently-seen device of the user advertises it any more, we pause the
- * auto-wired feed so it stops materializing runs no worker can claim. Adding an
- * entry here is only meaningful once a bridge advertises that capability and a
- * connector definition declares it as `requiredCapability`.
- */
-const CAPABILITY_TO_CONNECTOR: Record<string, string> = {
-  screentime: 'apple.screen_time',
-  local_directory: 'local.directory',
-};
-
 /** A device worker counts toward "serves capability X" only if seen this recently. */
 const DEVICE_WORKER_FRESH_INTERVAL = '7 days';
 
 /**
- * Auto-wire a bundled device connector into the user's personal org when a
- * capability appears on their device worker. Installs the connector definition
- * (idempotent), creates a no-auth connection for the user, creates the first
- * feed, and re-activates the feed if a previous "capability went away" pass had
- * paused it.
+ * Install + wire a bundled device connector into the user's personal org:
+ * connector definition (idempotent), a no-auth connection, the first feed, and
+ * re-activate the feed if a previous "capability went away" pass had paused it.
+ * Called by {@link reconcileDeviceCapabilities} for each device connector whose
+ * `requiredCapability` is currently advertised by the user's fleet — which
+ * connectors those are is read from the catalog, never hardcoded here.
  *
- * Restricted to the closed bundled set; never touches user-installed connectors.
  * The per-(user, connector) advisory lock serializes concurrent polls / multiple
  * devices so they don't race past the existence checks and create duplicates.
  * Best-effort: failures are logged but never surface to the poll response.
  */
-async function autoWireCapabilityConnector(userId: string, cap: string): Promise<void> {
-  const connectorKey = CAPABILITY_TO_CONNECTOR[cap];
-  if (!connectorKey) return;
-
+async function ensureDeviceConnectorWired(
+  userId: string,
+  organizationId: string,
+  connectorKey: string
+): Promise<void> {
   const sql = getDb();
   try {
-    // 1. Find the user's personal org (the auto-wire target).
-    const personalOrg = await findExistingPersonalOrg(userId, sql);
-    if (!personalOrg) {
-      logger.warn({ userId, cap }, '[auto-wire] No personal org found for user');
-      return;
-    }
-    const organizationId = personalOrg.id;
-
     // Fast path: definition + version + connection + an ACTIVE feed all present
     // → nothing to repair or re-activate. Keeps the per-poll ensure cheap while
     // still healing partially-wired or paused device connectors.
@@ -211,25 +195,25 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
 
     if (connectionId) {
       logger.info(
-        { userId, cap, connectorKey, organizationId, connectionId },
-        '[auto-wire] Auto-wired connector for device capability'
+        { userId, connectorKey, organizationId, connectionId },
+        '[device-connectors] Wired device connector'
       );
     }
   } catch (err) {
     logger.error(
-      { userId, cap, connectorKey, err: errorMessage(err) },
-      '[auto-wire] Failed to auto-wire connector for capability'
+      { userId, connectorKey, err: errorMessage(err) },
+      '[device-connectors] Failed to wire device connector'
     );
   }
 }
 
 /**
  * Pause the auto-wired feeds of `connectorKey` in the user's personal org —
- * called when no recently-seen device of the user still advertises the matching
- * capability, so a `materializeDueFeeds` pass stops creating runs that nothing
- * can claim. Limited to no-auth, user-owned connections in the personal org
- * (exactly what `autoWireCapabilityConnector` creates); `autoWireCapability-
- * Connector` re-activates them if the capability comes back. Best-effort.
+ * called when no recently-seen device of the user still advertises the
+ * connector's `requiredCapability`, so a `materializeDueFeeds` pass stops
+ * creating runs nothing can claim. Limited to no-auth, user-owned connections
+ * in the personal org (exactly what {@link ensureDeviceConnectorWired} creates);
+ * that function re-activates them if the capability comes back. Best-effort.
  */
 async function pauseStaleDeviceFeeds(userId: string, organizationId: string, connectorKey: string) {
   const sql = getDb();
@@ -250,20 +234,38 @@ async function pauseStaleDeviceFeeds(userId: string, organizationId: string, con
   } catch (err) {
     logger.warn(
       { userId, connectorKey, err: errorMessage(err) },
-      '[auto-wire] Failed to pause stale device feeds'
+      '[device-connectors] Failed to pause stale device feeds'
     );
   }
 }
 
 /**
- * Reconcile a user's device connectors against the capabilities their fleet
- * currently advertises (union across devices seen within
- * `DEVICE_WORKER_FRESH_INTERVAL`). Auto-wires / re-activates connectors whose
- * capability is present; pauses the feeds of connectors whose capability has
- * disappeared. Best-effort; runs on every user-scoped poll.
+ * Reconcile a user's device connectors against what their device fleet can
+ * actually serve. The set of device connectors comes from the catalog (any
+ * bundled connector with a `runtime` block + a `requiredCapability`); the set of
+ * served capabilities is the union over the user's devices seen within
+ * `DEVICE_WORKER_FRESH_INTERVAL`. For each device connector: if its capability
+ * is served, wire / re-activate it; otherwise pause its auto-wired feeds so
+ * `materializeDueFeeds` stops creating runs nothing can claim.
+ *
+ * Best-effort; runs on every user-scoped poll. Nothing connector-specific is
+ * hardcoded — adding a new device connector is just a new file in the catalog.
  */
 async function reconcileDeviceCapabilities(userId: string): Promise<void> {
   const sql = getDb();
+
+  let deviceConnectors: BundledDeviceConnector[];
+  try {
+    deviceConnectors = await getBundledDeviceConnectors();
+  } catch (err) {
+    logger.warn(
+      { userId, err: errorMessage(err) },
+      '[device-connectors] Failed to read device connector catalog'
+    );
+    return;
+  }
+  if (deviceConnectors.length === 0) return;
+
   let liveCaps = new Set<string>();
   try {
     const rows = (await sql`
@@ -274,23 +276,26 @@ async function reconcileDeviceCapabilities(userId: string): Promise<void> {
     `) as unknown as Array<{ cap: string }>;
     liveCaps = new Set(rows.map((r) => r.cap));
   } catch (err) {
-    logger.warn({ userId, err: errorMessage(err) }, '[auto-wire] Failed to read device capabilities');
+    logger.warn(
+      { userId, err: errorMessage(err) },
+      '[device-connectors] Failed to read device capabilities'
+    );
     return;
   }
 
-  const present = Object.keys(CAPABILITY_TO_CONNECTOR).filter((cap) => liveCaps.has(cap));
-  const absent = Object.entries(CAPABILITY_TO_CONNECTOR).filter(([cap]) => !liveCaps.has(cap));
-
-  await Promise.allSettled(present.map((cap) => autoWireCapabilityConnector(userId, cap)));
-
-  if (absent.length > 0) {
-    const personalOrg = await findExistingPersonalOrg(userId, sql).catch(() => null);
-    if (personalOrg) {
-      await Promise.allSettled(
-        absent.map(([, connectorKey]) => pauseStaleDeviceFeeds(userId, personalOrg.id, connectorKey))
-      );
-    }
+  const personalOrg = await findExistingPersonalOrg(userId, sql).catch(() => null);
+  if (!personalOrg) {
+    logger.warn({ userId }, '[device-connectors] No personal org found for user');
+    return;
   }
+
+  await Promise.allSettled(
+    deviceConnectors.map((dc) =>
+      liveCaps.has(dc.requiredCapability)
+        ? ensureDeviceConnectorWired(userId, personalOrg.id, dc.key)
+        : pauseStaleDeviceFeeds(userId, personalOrg.id, dc.key)
+    )
+  );
 }
 
 /**

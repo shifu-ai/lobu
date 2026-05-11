@@ -423,17 +423,6 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
         ON public.connector_definitions (required_capability)
         WHERE required_capability IS NOT NULL
       `);
-      // Backfill the gate for bundled device connectors that an earlier build
-      // may have installed before this column existed; reinstalls set it from
-      // the connector's `requiredCapability` anyway.
-      await sql.unsafe(`
-        UPDATE public.connector_definitions SET required_capability = 'screentime'
-        WHERE key = 'apple.screen_time' AND required_capability IS NULL
-      `);
-      await sql.unsafe(`
-        UPDATE public.connector_definitions SET required_capability = 'local_directory'
-        WHERE key = 'local.directory' AND required_capability IS NULL
-      `);
     },
   },
   {
