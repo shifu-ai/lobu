@@ -326,14 +326,16 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // User-scoped workers (e.g. the Lobu Mac Bridge) can only claim runs for orgs
-  // the authenticated user is a member of. Trusted workers (matched WORKER_API_TOKEN)
-  // and anonymous local-dev requests see all pending runs — preserving the
-  // existing server-side worker fleet behavior.
+  // User-scoped workers (e.g. the Lobu Mac Bridge) can only claim runs in the
+  // org their token is bound to, plus the user's personal org (where device
+  // connectors auto-wire) — the set is computed in the /api/workers/* auth
+  // middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
+  // local-dev requests see all pending runs — preserving the existing
+  // server-side worker fleet behavior.
   const workerAuthMode = c.var.workerAuthMode;
   const workerOrgIds = c.var.workerOrgIds;
   if (workerAuthMode === 'user' && (!workerOrgIds || workerOrgIds.length === 0)) {
-    // User has no org memberships — nothing they can ever claim.
+    // No org in scope — nothing this worker can ever claim.
     return c.json({ next_poll_seconds: 30 });
   }
   const orgScopeActive = workerAuthMode === 'user';

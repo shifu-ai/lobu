@@ -18,6 +18,7 @@ import { createAuth } from './auth';
 import { getAuthConfig as getAuthConfigFromEnv } from './auth/config';
 import { mcpAuth } from './auth/middleware';
 import { oauthRoutes } from './auth/oauth/routes';
+import { findExistingPersonalOrg } from './auth/personal-org-provisioning';
 import { credentialRoutes } from './auth/routes';
 import { connectRoutes } from './connect/routes';
 import { getDb } from './db/client';
@@ -600,11 +601,14 @@ import {
 //      Full access to all orgs (existing model).
 //
 //   2. **User-scoped worker** — user OAuth bearer or PAT (the Lobu Mac Bridge
-//      uses an OAuth bearer from the device-code flow). The worker is bound to
-//      the authenticated user; poll filters on the user's org memberships and
-//      heartbeat/stream/complete re-check the run is theirs. `/api/workers/*`
-//      carries no org slug, so the token must resolve to an org on its own
-//      (PAT/OAuth carry a bound org) — a bare session cookie won't work here.
+//      uses an OAuth bearer from the device-code flow). `/api/workers/*` carries
+//      no org slug, so the token must resolve to an org on its own (PAT/OAuth
+//      carry a bound org — a bare session cookie won't work here). The worker is
+//      scoped to that bound org plus the user's personal org (where device
+//      connectors auto-wire); poll filters on that set, and heartbeat/stream/
+//      complete additionally re-check the run is theirs. It does NOT get the
+//      user's other org memberships, so a token narrowly scoped to org A can't
+//      reach into org B.
 //
 // In dev (no WORKER_API_TOKEN configured) and with no user auth, requests pass
 // through unauthenticated — the existing local-dev behavior.
@@ -636,10 +640,18 @@ app.use('/api/workers/*', async (c, next) => {
         return c.json({ error: 'Endpoint not available to user-scoped workers' }, 403);
       }
       const userId = c.var.user.id;
-      const rows = (await getDb()`
-        SELECT "organizationId" FROM member WHERE "userId" = ${userId}
-      `) as unknown as Array<{ organizationId: string }>;
-      const orgIds = rows.map((r) => r.organizationId);
+      // mcpAuth already verified the token resolves to (and the user is a
+      // member of) `c.var.organizationId`. A device worker is scoped to that
+      // org plus the user's personal org (the auto-wire target), and nothing
+      // else.
+      const boundOrgId = c.var.organizationId;
+      if (!boundOrgId) {
+        return c.json({ error: 'Worker token must be bound to an organization' }, 403);
+      }
+      const personalOrg = await findExistingPersonalOrg(userId, getDb());
+      const orgIds = personalOrg
+        ? Array.from(new Set([boundOrgId, personalOrg.id]))
+        : [boundOrgId];
       c.set('workerAuthMode', 'user');
       c.set('workerUserId', userId);
       c.set('workerOrgIds', orgIds);
