@@ -150,16 +150,25 @@ final class WorkerClient {
         _ = try await post("/api/workers/stream", body: Body(type: "batch", run_id: runId, items: items))
     }
 
-    func complete(workerId: String, runId: Int, itemsCollected: Int, error: String?) async throws {
+    func complete(
+        workerId: String,
+        runId: Int,
+        itemsCollected: Int,
+        checkpoint: [String: AnyEncodable]? = nil,
+        error: String?
+    ) async throws {
         struct Body: Encodable {
             let run_id: Int; let worker_id: String; let status: String
             let items_collected: Int; let error_message: String?
+            // nil → key omitted → server keeps the feed's existing checkpoint.
+            let checkpoint: [String: AnyEncodable]?
         }
         _ = try await post(
             "/api/workers/complete",
             body: Body(run_id: runId, worker_id: workerId,
                        status: error == nil ? "success" : "failed",
-                       items_collected: itemsCollected, error_message: error)
+                       items_collected: itemsCollected, error_message: error,
+                       checkpoint: (checkpoint?.isEmpty ?? true) ? nil : checkpoint)
         )
     }
 

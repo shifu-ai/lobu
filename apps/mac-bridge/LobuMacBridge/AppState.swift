@@ -514,11 +514,14 @@ enum SyncDispatcher {
 
         do {
             let items: [WorkerStreamItem]
+            var checkpoint: [String: AnyEncodable]?
             switch job.connector_key {
             case "apple.screen_time":
                 items = try await ScreenTimeSyncService.runScreenTime(job: job)
             case "local.directory":
-                items = try LocalDirectorySyncService.runLocalDirectory(job: job)
+                let out = try LocalDirectorySyncService.runLocalDirectory(job: job)
+                items = out.items
+                checkpoint = out.checkpoint
             default:
                 try await worker.complete(workerId: workerId, runId: job.run_id, itemsCollected: 0,
                                           error: "Mac bridge cannot run connector \(job.connector_key)")
@@ -529,9 +532,11 @@ enum SyncDispatcher {
                 try await worker.stream(runId: job.run_id, items: items)
             }
             try await worker.complete(workerId: workerId, runId: job.run_id,
-                                      itemsCollected: items.count, error: nil)
+                                      itemsCollected: items.count, checkpoint: checkpoint, error: nil)
             return CycleResult(claimedJob: true, itemsStreamed: items.count, connectorKey: job.connector_key, runId: job.run_id)
         } catch {
+            // On failure, leave the checkpoint untouched so the next run re-scans
+            // from where it was.
             try? await worker.complete(workerId: workerId, runId: job.run_id,
                                        itemsCollected: 0, error: error.localizedDescription)
             throw error

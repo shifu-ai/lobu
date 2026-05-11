@@ -1,6 +1,16 @@
 import CryptoKit
 import Foundation
 
+/// Result of a `local.directory` sync pass: the events to stream and the new
+/// feed checkpoint to persist (per-folder last-sync timestamps).
+struct LocalDirectoryOutput {
+    let items: [WorkerStreamItem]
+    /// `{"folder:<hash>": <unix seconds>}` for every folder walked this pass.
+    /// Folders that no longer exist drop out (their key isn't re-added), so the
+    /// checkpoint stays bounded; the server stores it verbatim.
+    let checkpoint: [String: AnyEncodable]
+}
+
 /// Handles `local.directory` jobs: enumerates persisted security-scoped folder
 /// bookmarks, reads eligible text files, and returns WorkerStreamItems.
 ///
@@ -10,26 +20,38 @@ import Foundation
 /// - Max file size: 1 MB per file.
 /// - Max total files: 500 across all bookmarks.
 ///
+/// Incremental: each folder carries a `last sync` timestamp in the feed
+/// checkpoint, and a pass skips (without even reading) files whose mtime predates
+/// it. A folder with no checkpoint entry — newly added, or first run — is fully
+/// scanned. The stored timestamp is the pass *start* time, so a file modified
+/// while a pass is running is picked up next time rather than missed. Server-side
+/// dedup is by `origin_id` (`local-dir:<folderHash>:<filename>`), so a modified
+/// file updates its event; a deleted file leaves its event behind (a present-id
+/// reconcile that tombstones is a known follow-up).
+///
 /// Events carry the folder's *display name* and the file name only — never the
 /// absolute path (which would leak the user's home directory / disk layout into
-/// Lobu). The stable origin id derives the folder part from a hash of the
-/// security-scoped bookmark, so it's stable across syncs without exposing it.
+/// Lobu). The folder hash in `origin_id` / the checkpoint keys is opaque and
+/// stable as long as the bookmark is.
 enum LocalDirectorySyncService {
     private static let allowedExtensions: Set<String> = ["txt", "md", "json", "csv", "html"]
     private static let maxFileSize: Int = 1_048_576   // 1 MB
     private static let maxTotalFiles: Int = 500
 
     /// Opaque, stable 12-hex-char id for a folder bookmark — used in origin ids
-    /// so they don't carry the path. Stable as long as the bookmark is.
+    /// and checkpoint keys so neither carries the path. Stable as long as the
+    /// bookmark is.
     private static func folderKey(for bookmark: Data) -> String {
         SHA256.hash(data: bookmark).prefix(6).map { String(format: "%02x", $0) }.joined()
     }
 
-    static func runLocalDirectory(job: WorkerJob) throws -> [WorkerStreamItem] {
+    static func runLocalDirectory(job: WorkerJob) throws -> LocalDirectoryOutput {
         let bookmarks = (UserDefaults.standard.array(forKey: "lobu.localFolderBookmarks") as? [Data]) ?? []
-        guard !bookmarks.isEmpty else { return [] }
+        let passStartedAt = Int(Date().timeIntervalSince1970)
+        guard !bookmarks.isEmpty else { return LocalDirectoryOutput(items: [], checkpoint: [:]) }
 
         var items: [WorkerStreamItem] = []
+        var checkpoint: [String: AnyEncodable] = [:]
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let fm = FileManager.default
@@ -49,6 +71,9 @@ enum LocalDirectorySyncService {
 
             let folderName = folderURL.lastPathComponent
             let folderId = folderKey(for: bookmark)
+            let checkpointKey = "folder:\(folderId)"
+            // nil ⇒ folder never synced (or first run) ⇒ full scan.
+            let syncedSince: Double? = (job.checkpoint?[checkpointKey]?.intValue).map(Double.init)
 
             guard let entries = try? fm.contentsOfDirectory(
                 at: folderURL,
@@ -71,6 +96,11 @@ enum LocalDirectorySyncService {
 
                 let modifiedAt = resources?.contentModificationDate ?? Date()
 
+                // Skip files unchanged since this folder's last sync — stat only,
+                // no read. Strict `<` so a same-second edit is re-synced (cheap
+                // no-op upsert) rather than missed.
+                if let syncedSince, modifiedAt.timeIntervalSince1970 < syncedSince { continue }
+
                 guard let text = try? String(contentsOf: fileURL, encoding: .utf8) else { continue }
 
                 let filename = fileURL.lastPathComponent
@@ -91,8 +121,10 @@ enum LocalDirectorySyncService {
                 )
                 items.append(item)
             }
+
+            checkpoint[checkpointKey] = AnyEncodable(passStartedAt)
         }
 
-        return items
+        return LocalDirectoryOutput(items: items, checkpoint: checkpoint)
     }
 }
