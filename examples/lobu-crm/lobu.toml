@@ -10,17 +10,17 @@
 #   - producthunt  → the launch / "lobu"
 #   - website (optional) → lobu.ai + competitor changelogs (onyx, dust, glean)
 
-[agents.marketing]
-name = "marketing"
+[agents.crm]
+name = "crm"
 description = "Maintains Lobu's funnel CRM — leads, pilots, inbound triage, weekly digest"
-dir = "./agents/marketing"
+dir = "./agents/crm"
 
-[[agents.marketing.providers]]
+[[agents.crm.providers]]
 id = "z-ai"
 model = "z-ai/glm-4.7"
 key = "$Z_AI_API_KEY"
 
-[agents.marketing.network]
+[agents.crm.network]
 allowed = [
   "github.com", ".github.com", "api.github.com", ".githubusercontent.com",
   "x.com", "api.x.com", "twitter.com",
