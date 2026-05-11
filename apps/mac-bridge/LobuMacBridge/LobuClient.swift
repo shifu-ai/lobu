@@ -122,8 +122,17 @@ final class WorkerClient {
     }
 
     func poll(workerId: String, capabilities: [String: Bool]) async throws -> (job: WorkerJob?, nextPollSeconds: Int?) {
-        struct Body: Encodable { let worker_id: String; let capabilities: [String: Bool] }
-        let data = try await post("/api/workers/poll", body: Body(worker_id: workerId, capabilities: capabilities))
+        struct Body: Encodable {
+            let worker_id: String
+            let capabilities: [String: Bool]
+            let platform: String
+            let app_version: String
+        }
+        let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let data = try await post(
+            "/api/workers/poll",
+            body: Body(worker_id: workerId, capabilities: capabilities, platform: "macos", app_version: appVersion)
+        )
         struct Empty: Decodable { let next_poll_seconds: Int? }
         if let job = try? decoder.decode(WorkerJob.self, from: data) {
             return (job, nil)
