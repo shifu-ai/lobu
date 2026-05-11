@@ -105,17 +105,26 @@ struct MenuBarContent: View {
         VStack(alignment: .leading, spacing: 2) {
             sectionLabel("Recent jobs")
             ForEach(Array(state.recentJobs.prefix(5).enumerated()), id: \.offset) { _, job in
-                HStack(spacing: 0) {
-                    Text(job.displayLabel).font(.caption)
-                    Text(" · \(job.itemsStreamed) items")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(job.timeAgoString)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                Button {
+                    if let url = state.recentJobURL(job) { NSWorkspace.shared.open(url) }
+                } label: {
+                    HStack(spacing: 0) {
+                        Text(job.displayLabel).font(.caption)
+                        Text(" · \(job.itemsStreamed) items")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(job.timeAgoString)
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        Image(systemName: "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                            .padding(.leading, 4)
+                    }
                 }
-                .menuRow(interactive: false)
+                .buttonStyle(.plain)
+                .menuRow()
             }
         }
     }
@@ -238,7 +247,7 @@ struct MenuBarContent: View {
 
     private var footerRow: some View {
         HStack {
-            Button("Quit Lobu") { NSApplication.shared.terminate(nil) }
+            Button("Quit Lobu Bridge") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(.plain)
                 .font(.caption)
             Spacer()

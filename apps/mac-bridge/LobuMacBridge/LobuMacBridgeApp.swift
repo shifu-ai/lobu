@@ -17,6 +17,7 @@ struct LobuMacBridgeApp: App {
                 .renderingMode(.template)
                 .scaledToFit()
                 .frame(width: 17, height: 16)
+                .accessibilityLabel("Lobu Bridge")
         }
         .menuBarExtraStyle(.window)
     }

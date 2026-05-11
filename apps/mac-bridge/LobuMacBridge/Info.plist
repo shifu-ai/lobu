@@ -12,6 +12,8 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Lobu Bridge</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -34,6 +36,6 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>Lobu Mac Bridge needs read access to your home folder to read the Screen Time database at ~/Library/Application Support/Knowledge/knowledgeC.db.</string>
+	<string>Lobu Bridge needs read access to your home folder to read the Screen Time database at ~/Library/Application Support/Knowledge/knowledgeC.db.</string>
 </dict>
 </plist>

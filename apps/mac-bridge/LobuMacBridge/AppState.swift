@@ -5,6 +5,7 @@ import Foundation
 
 struct RecentJob: Codable {
     let connectorKey: String
+    let runId: Int
     let itemsStreamed: Int
     let finishedAt: Date
     var displayLabel: String {
@@ -77,6 +78,23 @@ final class AppState: ObservableObject {
             return match.name
         }
         return chosenSlug
+    }
+
+    /// The org slug runs land in (the user's personal org — that's where the
+    /// auto-wired connectors live). Used to build "open this run" links.
+    private var personalOrgSlug: String? {
+        guard let info = credentials?.userInfo else { return nil }
+        if let slug = info.organization_slug, !slug.isEmpty { return slug }
+        return info.organizations.first?.slug
+    }
+
+    /// Web URL for a recent job's connector, with the run id so the page can
+    /// focus it. nil when we don't know the org slug yet.
+    func recentJobURL(_ job: RecentJob) -> URL? {
+        guard let slug = personalOrgSlug, !slug.isEmpty else { return nil }
+        var base = baseURL
+        while base.hasSuffix("/") { base.removeLast() }
+        return URL(string: "\(base)/\(slug)/connectors/\(job.connectorKey)?run=\(job.runId)")
     }
 
     func setBaseURL(_ value: String) {
@@ -199,9 +217,10 @@ final class AppState: ObservableObject {
             )
             lastPollDate = Date()
             lastPollSuccess = true
-            if result.claimedJob, let key = result.connectorKey {
+            if result.claimedJob, let key = result.connectorKey, let runId = result.runId {
                 let job = RecentJob(
                     connectorKey: key,
+                    runId: runId,
                     itemsStreamed: result.itemsStreamed,
                     finishedAt: Date()
                 )
@@ -308,6 +327,7 @@ enum SyncDispatcher {
         let claimedJob: Bool
         let itemsStreamed: Int
         let connectorKey: String?
+        let runId: Int?
     }
 
     static func runOneCycle(baseURL: String, capabilities: [String: Bool]) async throws -> CycleResult {
@@ -327,7 +347,7 @@ enum SyncDispatcher {
 
         let (job, _) = try await worker.poll(workerId: workerId, capabilities: capabilities)
         guard let job else {
-            return CycleResult(claimedJob: false, itemsStreamed: 0, connectorKey: nil)
+            return CycleResult(claimedJob: false, itemsStreamed: 0, connectorKey: nil, runId: nil)
         }
 
         do {
@@ -340,7 +360,7 @@ enum SyncDispatcher {
             default:
                 try await worker.complete(workerId: workerId, runId: job.run_id, itemsCollected: 0,
                                           error: "Mac bridge cannot run connector \(job.connector_key)")
-                return CycleResult(claimedJob: true, itemsStreamed: 0, connectorKey: job.connector_key)
+                return CycleResult(claimedJob: true, itemsStreamed: 0, connectorKey: job.connector_key, runId: job.run_id)
             }
 
             if !items.isEmpty {
@@ -348,7 +368,7 @@ enum SyncDispatcher {
             }
             try await worker.complete(workerId: workerId, runId: job.run_id,
                                       itemsCollected: items.count, error: nil)
-            return CycleResult(claimedJob: true, itemsStreamed: items.count, connectorKey: job.connector_key)
+            return CycleResult(claimedJob: true, itemsStreamed: items.count, connectorKey: job.connector_key, runId: job.run_id)
         } catch {
             try? await worker.complete(workerId: workerId, runId: job.run_id,
                                        itemsCollected: 0, error: error.localizedDescription)
