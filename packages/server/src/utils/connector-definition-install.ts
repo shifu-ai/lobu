@@ -191,6 +191,7 @@ export async function upsertConnectorDefinitionRecords(params: {
   const optionsSchemaJson = metadata.optionsSchema ? sql.json(metadata.optionsSchema) : null;
   const mcpConfigJson = metadata.mcpConfig ? sql.json(metadata.mcpConfig) : null;
   const openapiConfigJson = metadata.openapiConfig ? sql.json(metadata.openapiConfig) : null;
+  const runtimeJson = metadata.runtime ? sql.json(metadata.runtime) : null;
 
   if (existingRow?.status === 'active') {
     await sql`
@@ -206,6 +207,7 @@ export async function upsertConnectorDefinitionRecords(params: {
           openapi_config = ${openapiConfigJson},
           favicon_domain = ${metadata.faviconDomain ?? null},
           required_capability = ${metadata.requiredCapability ?? null},
+          runtime = ${runtimeJson},
           login_enabled = ${preservedLoginEnabled},
           updated_at = NOW()
       WHERE id = ${existingRow.id}
@@ -216,14 +218,14 @@ export async function upsertConnectorDefinitionRecords(params: {
         organization_id, key, name, description, version,
         auth_schema, feeds_schema, actions_schema, options_schema,
         mcp_config, openapi_config, favicon_domain, required_capability,
-        status, login_enabled
+        runtime, status, login_enabled
       ) VALUES (
         ${params.organizationId}, ${metadata.key}, ${metadata.name},
         ${metadata.description ?? null}, ${metadata.version},
         ${authSchemaJson}, ${feedsSchemaJson}, ${actionsSchemaJson}, ${optionsSchemaJson},
         ${mcpConfigJson}, ${openapiConfigJson},
         ${metadata.faviconDomain ?? null}, ${metadata.requiredCapability ?? null},
-        'active', ${preservedLoginEnabled}
+        ${runtimeJson}, 'active', ${preservedLoginEnabled}
       )
     `;
   }

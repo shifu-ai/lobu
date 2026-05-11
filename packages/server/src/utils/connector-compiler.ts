@@ -21,6 +21,12 @@ export interface ConnectorMetadata {
   mcpConfig?: Record<string, unknown> | null;
   openapiConfig?: Record<string, unknown> | null;
   requiredCapability?: string | null;
+  runtime?: {
+    type: 'cloud' | 'device';
+    platforms?: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
+    plugin?: string;
+    readScopes?: string[];
+  } | null;
 }
 
 const CONNECTOR_RUNNER_CODE = `
@@ -82,6 +88,7 @@ async function main() {
       mcpConfig: def.mcpConfig || null,
       openapiConfig: def.openapiConfig || null,
       requiredCapability: def.requiredCapability || null,
+      runtime: def.runtime || null,
     };
 
     process.send({ success: true, metadata });

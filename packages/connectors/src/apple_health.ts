@@ -36,6 +36,14 @@ export default class AppleHealthConnector extends ConnectorRuntime {
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'healthkit',
+    runtime: {
+      type: 'device',
+      platforms: ['ios'],
+      plugin: 'Health',
+      // capacitor-health permission strings; passed verbatim by the iOS
+      // shell's permission adapter when the user taps "Connect".
+      readScopes: ['steps', 'distance', 'active-calories', 'workouts', 'heart-rate'],
+    },
     authSchema: {
       methods: [{ type: 'none' }],
     },

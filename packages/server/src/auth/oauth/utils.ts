@@ -192,15 +192,29 @@ export function parseScopes(scope: string | null | undefined): string[] {
 // URL Validation
 // ============================================
 
+// Schemes that must never be accepted as redirects — they enable XSS or
+// arbitrary file access if a token ever leaks into one.
+const FORBIDDEN_REDIRECT_SCHEMES = new Set([
+  'javascript:',
+  'data:',
+  'vbscript:',
+  'file:',
+  'about:',
+]);
+
 /**
- * Validate a redirect URI
- * - Must be absolute HTTPS URL (or http://localhost for development)
- * - No fragments allowed
+ * Validate a redirect URI.
+ * - HTTPS — always allowed (web/SPA clients).
+ * - http://localhost / 127.0.0.1 / [::1] — loopback for dev + RFC 8252 native apps.
+ * - Private-use URI schemes (e.g. `ai.lobu.iosbridge://callback`) — allowed per
+ *   RFC 8252 §7.1 for native apps that can't host a public HTTPS endpoint.
+ * - No fragments.
  */
 export function validateRedirectUri(uri: string): boolean {
   try {
     const url = new URL(uri);
     if (url.hash) return false;
+    if (FORBIDDEN_REDIRECT_SCHEMES.has(url.protocol)) return false;
 
     if (url.protocol === 'https:') return true;
 
@@ -214,7 +228,10 @@ export function validateRedirectUri(uri: string): boolean {
       );
     }
 
-    return false;
+    // Any other scheme is treated as a private-use scheme for native apps.
+    // The OAuth spec (RFC 3986 §3.1) requires a scheme to start with a letter
+    // and contain only [A-Za-z0-9+.-]; `new URL` already enforces that.
+    return /^[a-z][a-z0-9+.-]*:$/i.test(url.protocol);
   } catch {
     return false;
   }

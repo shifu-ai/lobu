@@ -27,6 +27,7 @@ export default class AppleRemindersConnector extends ConnectorRuntime {
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'reminders',
+    runtime: { type: 'device', platforms: ['ios'], plugin: 'Reminders' },
     authSchema: { methods: [{ type: 'none' }] },
     feeds: {
       reminders: {

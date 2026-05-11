@@ -1,9 +1,10 @@
 {
   "images": [
     {
-      "filename": "lobster-icon.png",
+      "filename": "AppIcon-512@2x.png",
       "idiom": "universal",
-      "scale": "1x"
+      "platform": "ios",
+      "size": "1024x1024"
     }
   ],
   "info": {

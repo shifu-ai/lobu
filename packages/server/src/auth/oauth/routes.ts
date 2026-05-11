@@ -332,7 +332,7 @@ oauthRoutes.post('/oauth/register', async (c) => {
       return c.json(
         createOAuthError(
           'invalid_request',
-          `Invalid redirect_uri: ${uri}. Must be HTTPS (or http://localhost for development)`
+          `Invalid redirect_uri: ${uri}. Must be HTTPS, http://localhost, or a private-use URI scheme (e.g. ai.lobu.iosbridge://callback).`
         ),
         400
       );

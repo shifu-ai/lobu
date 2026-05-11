@@ -48,6 +48,33 @@ export interface ConnectorDefinition {
    * the iOS Bridge can read HealthKit).
    */
   requiredCapability?: string;
+  /**
+   * Where this connector executes. `"cloud"` (default if omitted) runs on the
+   * server-side worker fleet. `"device"` runs on a user's device — typically
+   * the Lobu iOS / Android shell — and needs a native permission grant before
+   * the worker can claim runs. The web app's connector picker filters by
+   * `platforms` so users only see options that can be authorized on the host
+   * they're currently on.
+   */
+  runtime?: ConnectorRuntimeInfo;
+}
+
+export interface ConnectorRuntimeInfo {
+  type: 'cloud' | 'device';
+  /** When `type === 'device'`, the platforms this connector can run on. */
+  platforms?: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
+  /**
+   * Capacitor/native plugin identifier the device-side adapter map keys on,
+   * e.g. `"Health"` for `capacitor-health`. The web picker passes this through
+   * to the iOS shell so the right `requestAuthorization` flow fires.
+   */
+  plugin?: string;
+  /**
+   * Auth scopes passed verbatim to the device plugin. Shape is plugin-specific
+   * (HealthKit takes a list of sample types; Contacts is boolean). The picker
+   * doesn't interpret these — it forwards them to the platform adapter.
+   */
+  readScopes?: string[];
 }
 
 // =============================================================================

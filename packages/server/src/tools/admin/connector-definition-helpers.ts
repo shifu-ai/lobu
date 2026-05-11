@@ -39,8 +39,17 @@ export type ScopedConnectorDefinitionRow = {
   default_repair_agent_id?: string | null;
   status: string;
   login_enabled?: boolean | null;
+  required_capability?: string | null;
+  runtime?: ConnectorRuntimeInfo | null;
   created_at?: string;
   updated_at?: string;
+};
+
+export type ConnectorRuntimeInfo = {
+  type: 'cloud' | 'device';
+  platforms?: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
+  plugin?: string;
+  readScopes?: string[];
 };
 
 function getOAuthMethods(authSchema: AuthSchema | string): OAuthAuthMethod[] {
@@ -89,6 +98,8 @@ export async function listScopedConnectorDefinitions(params: {
       d.default_repair_agent_id,
       d.status,
       d.login_enabled,
+      d.required_capability,
+      d.runtime,
       d.created_at,
       d.updated_at,
       cv.source_path
