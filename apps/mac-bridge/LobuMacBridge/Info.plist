@@ -13,7 +13,7 @@
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundleDisplayName</key>
-	<string>Lobu Bridge</string>
+	<string>Lobu</string>
 	<key>CFBundlePackageType</key>
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
@@ -36,8 +36,8 @@
 	<key>LSUIElement</key>
 	<true/>
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>Lobu Bridge needs read access to your home folder to read the Screen Time database at ~/Library/Application Support/Knowledge/knowledgeC.db.</string>
+	<string>Lobu needs read access to your home folder to read the Screen Time database at ~/Library/Application Support/Knowledge/knowledgeC.db.</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Lobu Bridge reads your Apple Health activity (steps, distance, active energy, workouts, resting heart rate) so you can query and search it from your Lobu workspace.</string>
+	<string>Lobu reads your Apple Health activity (steps, distance, active energy, workouts, resting heart rate) so you can query and search it from your Lobu workspace.</string>
 </dict>
 </plist>

@@ -116,7 +116,7 @@ final class OAuthClient {
         try await postJSON(
             URL(string: discovery.registration_endpoint)!,
             body: [
-                "client_name": "Lobu Mac Bridge",
+                "client_name": "Lobu for Mac",
                 "software_id": "lobu-mac-bridge",
                 "software_version": "0.1.0",
                 "grant_types": ["urn:ietf:params:oauth:grant-type:device_code", "refresh_token"],

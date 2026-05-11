@@ -1,7 +1,7 @@
 /**
- * Apple Screen Time Connector (V1 runtime) — Mac-bridge only.
+ * Apple Screen Time Connector (V1 runtime) — Lobu for Mac only.
  *
- * Runs on the Lobu Mac Bridge, which reads `~/Library/Application Support/
+ * Runs on Lobu for Mac, which reads `~/Library/Application Support/
  * Knowledge/knowledgeC.db` (the on-device Knowledge store backing Apple's
  * Settings → Screen Time UI). With Full Disk Access granted, the Mac can
  * pull per-app foreground time by day for both Mac usage and (if the user
@@ -21,14 +21,14 @@ import {
 } from '@lobu/connector-sdk';
 
 const BRIDGE_ONLY =
-  'Apple Screen Time runs only on a worker advertising capability "screentime" (the Lobu Mac Bridge with Full Disk Access).';
+  'Apple Screen Time runs only on a worker advertising capability "screentime" (Lobu for Mac with Full Disk Access).';
 
 export default class AppleScreenTimeConnector extends ConnectorRuntime {
   readonly definition: ConnectorDefinition = {
     key: 'apple.screen_time',
     name: 'Apple Screen Time',
     description:
-      'Daily per-app usage totals from the Lobu Mac Bridge, sourced from the Apple Knowledge store. Captures both Mac usage and (if Screen Time iCloud sync is on) the user\'s iOS device usage.',
+      'Daily per-app usage totals from Lobu for Mac, sourced from the Apple Knowledge store. Captures both Mac usage and (if Screen Time iCloud sync is on) the user\'s iOS device usage.',
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'screentime',

@@ -21,7 +21,7 @@ struct LobuMacBridgeApp: App {
                 .renderingMode(.template)
                 .opacity(state.credentials == nil ? 0.4 : 1)
                 .accessibilityLabel(
-                    state.credentials == nil ? "Lobu Bridge — not signed in" : "Lobu Bridge"
+                    state.credentials == nil ? "Lobu — not signed in" : "Lobu"
                 )
         }
         .menuBarExtraStyle(.window)

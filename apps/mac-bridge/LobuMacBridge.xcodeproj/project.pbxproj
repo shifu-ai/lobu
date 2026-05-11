@@ -36,7 +36,7 @@
 		B20000000000000000000010 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B20000000000000000000011 /* LobuMacBridge.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LobuMacBridge.entitlements; sourceTree = "<group>"; };
 		B2000000000000000000000A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		B20000000000000000000012 /* LobuMacBridge.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = LobuMacBridge.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000000000000000000012 /* Lobu.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Lobu.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -82,7 +82,7 @@
 		B40000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				B20000000000000000000012 /* LobuMacBridge.app */,
+				B20000000000000000000012 /* Lobu.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -104,7 +104,7 @@
 			);
 			name = LobuMacBridge;
 			productName = LobuMacBridge;
-			productReference = B20000000000000000000012 /* LobuMacBridge.app */;
+			productReference = B20000000000000000000012 /* Lobu.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -255,7 +255,7 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = ai.lobu.MacBridge;
-				PRODUCT_NAME = "Lobu Bridge";
+				PRODUCT_NAME = Lobu;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};
@@ -280,7 +280,7 @@
 				);
 				MARKETING_VERSION = 0.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = ai.lobu.MacBridge;
-				PRODUCT_NAME = "Lobu Bridge";
+				PRODUCT_NAME = Lobu;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 			};

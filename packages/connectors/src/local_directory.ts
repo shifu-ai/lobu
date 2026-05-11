@@ -1,8 +1,8 @@
 /**
- * Local Directory Connector (V1 runtime) — Mac Bridge only.
+ * Local Directory Connector (V1 runtime) — Lobu for Mac only.
  *
  * Syncs text files (txt/md/json/csv/html) from a local folder on the user's
- * Mac via the Lobu Mac helper. The helper advertises the `local_directory`
+ * Mac via Lobu for Mac. The app advertises the `local_directory`
  * capability on /api/workers/poll, reads the folder, and streams file events
  * back through the standard worker protocol.
  *
@@ -19,7 +19,7 @@ import {
 } from '@lobu/connector-sdk';
 
 const BRIDGE_ONLY_MESSAGE =
-  'local.directory runs only on a worker advertising capability "local_directory" (the Lobu Mac helper). ' +
+  'local.directory runs only on a worker advertising capability "local_directory" (Lobu for Mac). ' +
   'This run was claimed by a worker without that capability — check connector_definitions.required_capability and the poll-time capability filter.';
 
 export default class LocalDirectoryConnector extends ConnectorRuntime {
@@ -27,7 +27,7 @@ export default class LocalDirectoryConnector extends ConnectorRuntime {
     key: 'local.directory',
     name: 'Local Folder',
     description:
-      'Sync text files (txt/md/json/csv/html) from a folder on your Mac via the Lobu Mac helper.',
+      'Sync text files (txt/md/json/csv/html) from a folder on your Mac via Lobu for Mac.',
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'local_directory',

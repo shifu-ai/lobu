@@ -1,5 +1,5 @@
 /**
- * Apple Health Connector (V1 runtime) — Mac Bridge.
+ * Apple Health Connector (V1 runtime) — Lobu device app.
  *
  * Runs on a device bridge with HealthKit access. On iOS this reads the phone's
  * Health store directly; on supported macOS installs HealthKit exposes the
@@ -13,7 +13,7 @@
  *
  * The connector DEFINITION (feeds, event kinds, options) is the source of truth
  * for what data ends up in Lobu and how it's shaped. The EXECUTION lives in the
- * Lobu Mac Bridge, which polls /api/workers/* as a user-scoped worker
+ * Lobu device app, which polls /api/workers/* as a user-scoped worker
  * advertising the `healthkit` capability and streams events back through the
  * standard worker protocol — same `runs` lifecycle as every other connector.
  *
@@ -31,7 +31,7 @@ import {
 } from '@lobu/connector-sdk';
 
 const BRIDGE_ONLY_MESSAGE =
-  'apple.health runs only on a worker advertising capability "healthkit" (the Lobu Mac Bridge with Apple Health permission). ' +
+  'apple.health runs only on a worker advertising capability "healthkit" (Lobu with Apple Health permission). ' +
   'This run was claimed by a worker without that capability — check connector_definitions.required_capability and the poll-time capability filter.';
 
 export default class AppleHealthConnector extends ConnectorRuntime {
@@ -39,7 +39,7 @@ export default class AppleHealthConnector extends ConnectorRuntime {
     key: 'apple.health',
     name: 'Apple Health',
     description:
-      'Sync Apple Health daily activity summaries and workouts from the Lobu Mac Bridge. ' +
+      'Sync Apple Health daily activity summaries and workouts from Lobu on your device. ' +
       'macOS reads HealthKit data synced from the user\'s iPhone (and Apple Watch) via iCloud Health.',
     version: '0.1.0',
     faviconDomain: 'apple.com',

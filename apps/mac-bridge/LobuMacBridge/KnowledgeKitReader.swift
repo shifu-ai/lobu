@@ -29,7 +29,7 @@ final class KnowledgeKitReader {
             switch self {
             case let .databaseNotFound(path): return "Knowledge DB not found at \(path)"
             case .fullDiskAccessDenied:
-                return "Lobu Mac Bridge needs Full Disk Access. Open System Settings → Privacy & Security → Full Disk Access, add Lobu, then try again."
+                return "Lobu needs Full Disk Access. Open System Settings → Privacy & Security → Full Disk Access, add Lobu, then try again."
             case let .sqlite(message): return "SQLite error: \(message)"
             }
         }

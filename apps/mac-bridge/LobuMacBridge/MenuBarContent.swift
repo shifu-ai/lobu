@@ -423,7 +423,7 @@ struct MenuBarContent: View {
 
     private var footerRow: some View {
         HStack {
-            Button("Quit Lobu Bridge") {
+            Button("Quit Lobu") {
                 state.stopLocalLobu()
                 NSApplication.shared.terminate(nil)
             }
