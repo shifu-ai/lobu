@@ -56,6 +56,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             platform: 'ios',
             version: '1.0',
             capabilities: _capabilities,
+            supportedCapabilities: ['healthkit'],
 
             requestCapability: function(cap) {
               return new Promise(function(resolve, reject) {
@@ -77,8 +78,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
                 ];
                 plugin.requestHealthPermissions({ permissions: permissions })
                   .then(function(result) {
-                    // Regardless of individual permission verdicts, the user
-                    // completed the authorization dialog — treat as granted.
+                    // iOS HealthKit does not reveal per-type authorization
+                    // results to third-party apps; the plugin resolves after
+                    // the user finishes the authorization sheet.
                     if (window.lobuNative.capabilities.indexOf('healthkit') === -1) {
                       window.lobuNative.capabilities.push('healthkit');
                     }

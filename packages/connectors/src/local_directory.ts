@@ -11,7 +11,6 @@
  */
 
 import {
-  type ActionContext,
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
@@ -68,7 +67,7 @@ export default class LocalDirectoryConnector extends ConnectorRuntime {
     throw new Error(BRIDGE_ONLY_MESSAGE);
   }
 
-  async execute(_ctx: ActionContext): Promise<ActionResult> {
+  async execute(): Promise<ActionResult> {
     throw new Error(BRIDGE_ONLY_MESSAGE);
   }
 }

@@ -130,10 +130,10 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
 
     await sql`
       INSERT INTO feeds (
-        organization_id, connection_id, feed_key, display_name, status, config
+        organization_id, connection_id, feed_key, display_name, status, config, next_run_at
       ) VALUES (
         ${organizationId}, ${connectionId}, ${firstFeedKey},
-        ${metadata.name}, 'active', NULL
+        ${metadata.name}, 'active', NULL, NOW()
       )
     `;
 
@@ -191,17 +191,20 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let capabilities: Record<string, boolean> = {};
   let platform: string | null = null;
   let app_version: string | null = null;
+  let label: string | null = null;
   try {
     const body = await c.req.json<{
       worker_id: string;
       capabilities?: Record<string, boolean>;
       platform?: string;
       app_version?: string;
+      label?: string;
     }>();
     worker_id = body.worker_id;
     capabilities = body.capabilities ?? {};
     platform = body.platform ?? null;
     app_version = body.app_version ?? null;
+    label = body.label ?? null;
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
   }
@@ -246,15 +249,16 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       const incomingCaps = advertisedCapabilities;
 
       await sql`
-        INSERT INTO device_workers (user_id, worker_id, platform, app_version, capabilities)
+        INSERT INTO device_workers (user_id, worker_id, platform, app_version, capabilities, label)
         VALUES (
           ${workerUserId}, ${worker_id}, ${platform}, ${app_version},
-          ${sql.json(incomingCaps)}
+          ${sql.json(incomingCaps)}, ${label}
         )
         ON CONFLICT (user_id, worker_id) DO UPDATE SET
           platform = EXCLUDED.platform,
           app_version = EXCLUDED.app_version,
           capabilities = EXCLUDED.capabilities,
+          label = COALESCE(EXCLUDED.label, device_workers.label),
           last_seen_at = now()
       `;
 
@@ -294,6 +298,15 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       WITH next_run AS (
         SELECT r.id
         FROM runs r
+        LEFT JOIN LATERAL (
+          SELECT cd.api_type, cd.required_capability
+          FROM connector_definitions cd
+          WHERE cd.key = r.connector_key
+            AND cd.organization_id = r.organization_id
+            AND cd.status = 'active'
+          ORDER BY cd.updated_at DESC, cd.id DESC
+          LIMIT 1
+        ) cd ON true
         WHERE r.status = 'pending'
           -- Connector worker only ever claims its own lanes. The lobu-queue
           -- run types (chat_message, schedule, agent_run, internal) are
@@ -301,16 +314,13 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           -- allow-list keeps the lanes separated.
           AND r.run_type IN ('sync', 'action', 'embed_backfill', 'auth')
           AND (r.approval_status = 'auto' OR r.approval_status = 'approved')
-          AND (${hasBrowser} OR COALESCE((SELECT cd.api_type FROM connector_definitions cd WHERE cd.key = r.connector_key LIMIT 1), 'api') = 'api')
-          AND COALESCE(
-            (SELECT cd.required_capability FROM connector_definitions cd WHERE cd.key = r.connector_key LIMIT 1),
-            ''
-          ) = ANY(${pgTextArray(capabilityMatchSet)}::text[])
+          AND (${hasBrowser} OR COALESCE(cd.api_type, 'api') = 'api')
+          AND COALESCE(cd.required_capability, '') = ANY(${pgTextArray(capabilityMatchSet)}::text[])
           AND (${!orgScopeActive} OR r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[]))
         ORDER BY
           CASE WHEN r.run_type = 'auth' THEN 0 ELSE 1 END,
           r.created_at ASC
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF r SKIP LOCKED
         LIMIT 1
       )
       UPDATE runs r

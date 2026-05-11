@@ -6,7 +6,6 @@
  */
 
 import {
-  type ActionContext,
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
@@ -70,7 +69,7 @@ export default class AppleContactsConnector extends ConnectorRuntime {
     throw new Error(BRIDGE_ONLY);
   }
 
-  async execute(_a: string, _i: unknown, _c: ActionContext): Promise<ActionResult> {
+  async execute(): Promise<ActionResult> {
     throw new Error(BRIDGE_ONLY);
   }
 }

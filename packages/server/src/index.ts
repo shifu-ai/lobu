@@ -606,7 +606,7 @@ import {
 //
 // In dev (no WORKER_API_TOKEN configured) and with no user auth, requests pass
 // through unauthenticated — the existing local-dev behavior.
-app.use('/api/workers/*', mcpAuth, async (c, next) => {
+app.use('/api/workers/*', async (c, next) => {
   const expected = c.env.WORKER_API_TOKEN;
   const provided = c.req.header('Authorization')?.replace('Bearer ', '');
 
@@ -617,40 +617,42 @@ app.use('/api/workers/*', mcpAuth, async (c, next) => {
     return next();
   }
 
-  if (c.var.mcpIsAuthenticated && c.var.user?.id) {
-    // User-scoped workers can only hit the endpoints needed to run a job
-    // end-to-end. Auth-artifact / embeddings / repair-thread endpoints are
-    // for server-side fleets and would leak across orgs without per-handler
-    // scoping (which we haven't added). Block them at the door.
-    const allowedPathsForUserWorker = new Set([
-      '/api/workers/poll',
-      '/api/workers/heartbeat',
-      '/api/workers/stream',
-      '/api/workers/complete',
-    ]);
-    const requestPath = new URL(c.req.url).pathname;
-    if (!allowedPathsForUserWorker.has(requestPath)) {
-      return c.json({ error: 'Endpoint not available to user-scoped workers' }, 403);
+  return mcpAuth(c, async () => {
+    if (c.var.mcpIsAuthenticated && c.var.user?.id) {
+      // User-scoped workers can only hit the endpoints needed to run a job
+      // end-to-end. Auth-artifact / embeddings / repair-thread endpoints are
+      // for server-side fleets and would leak across orgs without per-handler
+      // scoping (which we haven't added). Block them at the door.
+      const allowedPathsForUserWorker = new Set([
+        '/api/workers/poll',
+        '/api/workers/heartbeat',
+        '/api/workers/stream',
+        '/api/workers/complete',
+      ]);
+      const requestPath = new URL(c.req.url).pathname;
+      if (!allowedPathsForUserWorker.has(requestPath)) {
+        return c.json({ error: 'Endpoint not available to user-scoped workers' }, 403);
+      }
+      const userId = c.var.user.id;
+      const rows = (await getDb()`
+        SELECT "organizationId" FROM member WHERE "userId" = ${userId}
+      `) as unknown as Array<{ organizationId: string }>;
+      const orgIds = rows.map((r) => r.organizationId);
+      c.set('workerAuthMode', 'user');
+      c.set('workerUserId', userId);
+      c.set('workerOrgIds', orgIds);
+      return next();
     }
-    const userId = c.var.user.id;
-    const rows = (await getDb()`
-      SELECT "organizationId" FROM member WHERE "userId" = ${userId}
-    `) as unknown as Array<{ organizationId: string }>;
-    const orgIds = rows.map((r) => r.organizationId);
-    c.set('workerAuthMode', 'user');
-    c.set('workerUserId', userId);
-    c.set('workerOrgIds', orgIds);
+
+    if (expected) {
+      return c.json({ error: 'Unauthorized' }, 401);
+    }
+
+    c.set('workerAuthMode', 'anonymous');
+    c.set('workerUserId', null);
+    c.set('workerOrgIds', null);
     return next();
-  }
-
-  if (expected) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
-  c.set('workerAuthMode', 'anonymous');
-  c.set('workerUserId', null);
-  c.set('workerOrgIds', null);
-  return next();
+  });
 });
 
 app.post('/api/workers/poll', pollWorkerJob);

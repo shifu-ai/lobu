@@ -127,11 +127,13 @@ final class WorkerClient {
             let capabilities: [String: Bool]
             let platform: String
             let app_version: String
+            let label: String
         }
         let appVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown"
+        let label = Host.current().localizedName ?? "This Mac"
         let data = try await post(
             "/api/workers/poll",
-            body: Body(worker_id: workerId, capabilities: capabilities, platform: "macos", app_version: appVersion)
+            body: Body(worker_id: workerId, capabilities: capabilities, platform: "macos", app_version: appVersion, label: label)
         )
         struct Empty: Decodable { let next_poll_seconds: Int? }
         if let job = try? decoder.decode(WorkerJob.self, from: data) {

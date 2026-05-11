@@ -81,6 +81,8 @@ type ExtractedConnectorCatalogMetadata = {
   mcp_config: Record<string, unknown> | null;
   openapi_config: Record<string, unknown> | null;
   favicon_domain: string | null;
+  required_capability: string | null;
+  runtime: Record<string, unknown> | null;
   login_enabled: boolean;
 };
 
@@ -94,6 +96,8 @@ interface CatalogConnectorDefinition {
   actions_schema: Record<string, unknown> | null;
   options_schema: Record<string, unknown> | null;
   favicon_domain: string | null;
+  required_capability: string | null;
+  runtime: Record<string, unknown> | null;
   status: 'active';
   login_enabled: boolean;
   source_path: string;
@@ -249,6 +253,8 @@ async function extractConnectorCatalogMetadata(
       mcp_config: metadata.mcpConfig ?? null,
       openapi_config: metadata.openapiConfig ?? null,
       favicon_domain: metadata.faviconDomain ?? null,
+      required_capability: metadata.requiredCapability ?? null,
+      runtime: (metadata.runtime as Record<string, unknown> | undefined) ?? null,
       login_enabled: false,
     } satisfies ExtractedConnectorCatalogMetadata;
 
@@ -310,6 +316,8 @@ export async function listCatalogConnectorDefinitions(
         actions_schema: metadata.actions_schema,
         options_schema: metadata.options_schema,
         favicon_domain: metadata.favicon_domain,
+        required_capability: metadata.required_capability,
+        runtime: metadata.runtime,
         status: 'active',
         login_enabled: metadata.login_enabled,
         source_path: basename(filePath),

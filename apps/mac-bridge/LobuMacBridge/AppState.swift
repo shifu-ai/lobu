@@ -46,7 +46,7 @@ final class AppState: ObservableObject {
 
     @Published var baseURL: String = {
         UserDefaults.standard.string(forKey: "lobuBaseURL")
-            ?? "https://buraks-macbook-pro-1.brill-kanyu.ts.net:8443"
+            ?? "https://app.lobu.ai"
     }()
 
     private let credentialStore = KeychainCredentialStore()
@@ -107,7 +107,7 @@ final class AppState: ObservableObject {
     var connectionStatusLabel: String {
         guard credentials != nil else { return "Sign in to connect" }
         guard let lastPoll = lastPollDate else { return "Connecting…" }
-        if !lastPollSuccess { return "Reconnect — session expired" }
+        if !lastPollSuccess { return "Sync failed — see details" }
         let secs = Int(-lastPoll.timeIntervalSinceNow)
         if secs < 60 { return "Connected · last poll \(secs)s ago" }
         let mins = secs / 60
@@ -225,7 +225,9 @@ final class AppState: ObservableObject {
                     finishedAt: Date()
                 )
                 appendRecentJob(job)
-                setStatus("Streamed \(result.itemsStreamed) items (\(key)).")
+                setStatus("Synced \(result.itemsStreamed) items from \(job.displayLabel).")
+            } else {
+                setStatus("Connected. Waiting for sync jobs.")
             }
         } catch {
             lastPollDate = Date()
@@ -256,6 +258,7 @@ final class AppState: ObservableObject {
             let bookmark = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
             localFolderBookmarks.append(bookmark)
             persistBookmarks()
+            setStatus("Folder added. Lobu will sync supported text files from it.")
         } catch {
             setStatus("Could not bookmark folder: \(error.localizedDescription)")
         }
@@ -265,6 +268,7 @@ final class AppState: ObservableObject {
         guard localFolderBookmarks.indices.contains(index) else { return }
         localFolderBookmarks.remove(at: index)
         persistBookmarks()
+        setStatus("Folder removed.")
     }
 
     private func persistBookmarks() {

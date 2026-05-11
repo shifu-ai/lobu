@@ -14,7 +14,6 @@
  */
 
 import {
-  type ActionContext,
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
@@ -123,7 +122,7 @@ export default class AppleHealthConnector extends ConnectorRuntime {
     throw new Error(BRIDGE_ONLY_MESSAGE);
   }
 
-  async execute(_action: string, _input: unknown, _ctx: ActionContext): Promise<ActionResult> {
+  async execute(): Promise<ActionResult> {
     throw new Error(BRIDGE_ONLY_MESSAGE);
   }
 }

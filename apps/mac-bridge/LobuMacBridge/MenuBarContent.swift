@@ -17,6 +17,9 @@ struct MenuBarContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             statusRow
+            if !state.status.isEmpty {
+                statusMessageRow
+            }
             if state.credentials == nil {
                 signInSection
             } else {
@@ -64,6 +67,20 @@ struct MenuBarContent: View {
             }
         }
         .menuRow()
+    }
+
+    private var statusMessageRow: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: state.lastPollSuccess ? "info.circle" : "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(state.lastPollSuccess ? Color.secondary : Color.orange)
+                .frame(width: 12)
+            Text(state.status)
+                .font(.caption2)
+                .foregroundStyle(state.lastPollSuccess ? Color.secondary : Color.primary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .menuRow(interactive: false)
     }
 
     private var statusColor: Color {
@@ -142,26 +159,40 @@ struct MenuBarContent: View {
     }
 
     private var screenTimeRow: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "clock.fill")
-                .foregroundStyle(.purple)
-                .frame(width: 18)
-            Text("Screen Time").font(.caption)
-            Spacer()
-            if state.hasFDA {
-                Label("Granted", systemImage: "checkmark.circle.fill")
-                    .labelStyle(.iconOnly)
-                    .foregroundStyle(.green)
-                    .font(.caption)
-            } else {
-                Button("Open Settings") {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
-                        NSWorkspace.shared.open(url)
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 8) {
+                Image(systemName: "clock.fill")
+                    .foregroundStyle(.purple)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Screen Time").font(.caption)
+                    if !state.hasFDA {
+                        Text("Enable Full Disk Access, then recheck.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .buttonStyle(.plain)
-                .font(.caption)
-                .foregroundStyle(.orange)
+                Spacer()
+                if state.hasFDA {
+                    Label("Granted", systemImage: "checkmark.circle.fill")
+                        .labelStyle(.iconOnly)
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                } else {
+                    HStack(spacing: 8) {
+                        Button("Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        Button("Recheck") { state.refreshFDAStatus() }
+                            .buttonStyle(.plain)
+                            .font(.caption)
+                    }
+                }
             }
         }
         .menuRow()
@@ -173,7 +204,12 @@ struct MenuBarContent: View {
                 Image(systemName: "folder.fill")
                     .foregroundStyle(.blue)
                     .frame(width: 18)
-                Text("Local folder").font(.caption)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Local folder").font(.caption)
+                    Text("Syncs txt, md, json, csv, and html files.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Add folder…") { openFolderPanel() }
                     .buttonStyle(.plain)
