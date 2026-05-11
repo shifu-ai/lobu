@@ -45,29 +45,41 @@ const DUE_FEED_MATERIALIZE_COOLDOWN_MS = 5000;
 let lastDueFeedMaterializeAttemptAt = 0;
 
 /**
+ * Worker capability → bundled connector key, for the device connectors that
+ * have a working runtime (the Lobu Mac Bridge). When a device worker advertises
+ * one of these we auto-wire the connector into the user's personal org; when no
+ * recently-seen device of the user advertises it any more, we pause the
+ * auto-wired feed so it stops materializing runs no worker can claim. Adding an
+ * entry here is only meaningful once a bridge advertises that capability and a
+ * connector definition declares it as `requiredCapability`.
+ */
+const CAPABILITY_TO_CONNECTOR: Record<string, string> = {
+  screentime: 'apple.screen_time',
+  local_directory: 'local.directory',
+};
+
+/** A device worker counts toward "serves capability X" only if seen this recently. */
+const DEVICE_WORKER_FRESH_INTERVAL = '7 days';
+
+/**
  * Auto-wire a bundled device connector into the user's personal org when a
- * new capability appears on their device worker. Installs the connector
- * definition (idempotent), creates a no-auth connection for the user, and
- * creates the first feed with its default config.
+ * capability appears on their device worker. Installs the connector definition
+ * (idempotent), creates a no-auth connection for the user, creates the first
+ * feed, and re-activates the feed if a previous "capability went away" pass had
+ * paused it.
  *
  * Restricted to the closed bundled set; never touches user-installed connectors.
+ * The per-(user, connector) advisory lock serializes concurrent polls / multiple
+ * devices so they don't race past the existence checks and create duplicates.
  * Best-effort: failures are logged but never surface to the poll response.
  */
 async function autoWireCapabilityConnector(userId: string, cap: string): Promise<void> {
-  // Capability → connector key mapping for the bundled device connectors that
-  // have a working runtime (the Lobu Mac Bridge). Adding a new entry here is
-  // only meaningful once a bridge advertises that capability and a connector
-  // definition declares it as `requiredCapability`.
-  const CAPABILITY_TO_CONNECTOR: Record<string, string> = {
-    screentime: 'apple.screen_time',
-    local_directory: 'local.directory',
-  };
   const connectorKey = CAPABILITY_TO_CONNECTOR[cap];
   if (!connectorKey) return;
 
   const sql = getDb();
   try {
-    // 1. Find the user's personal org.
+    // 1. Find the user's personal org (the auto-wire target).
     const personalOrg = await findExistingPersonalOrg(userId, sql);
     if (!personalOrg) {
       logger.warn({ userId, cap }, '[auto-wire] No personal org found for user');
@@ -75,9 +87,9 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
     }
     const organizationId = personalOrg.id;
 
-    // Fast path: if definition, version, connection, and feed are already in
-    // place, there is nothing to repair. This keeps the per-poll ensure below
-    // cheap while still healing older partially-wired device connectors.
+    // Fast path: definition + version + connection + an ACTIVE feed all present
+    // → nothing to repair or re-activate. Keeps the per-poll ensure cheap while
+    // still healing partially-wired or paused device connectors.
     const existingReady = (await sql`
       SELECT c.id AS connection_id, f.id AS feed_id, cv.connector_key AS version_key
       FROM connector_definitions cd
@@ -90,6 +102,7 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
        AND c.deleted_at IS NULL
       LEFT JOIN feeds f
         ON f.connection_id = c.id
+       AND f.status = 'active'
        AND f.deleted_at IS NULL
       WHERE cd.organization_id = ${organizationId}
         AND cd.key = ${connectorKey}
@@ -108,7 +121,7 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
       return;
     }
 
-    // 2. Ensure the connector definition is installed.
+    // Compile metadata outside the lock (pure CPU + a child process — slow).
     const filePath = findBundledConnectorFile(connectorKey);
     if (!filePath) {
       logger.warn({ connectorKey }, '[auto-wire] Bundled connector file not found');
@@ -117,85 +130,166 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
     const compiledCode = await compileConnectorFromFile(filePath);
     const metadata = await extractConnectorMetadata(compiledCode);
     if (!metadata.key || !metadata.name || !metadata.version) return;
-
-    await upsertConnectorDefinitionRecords({
-      sql,
-      organizationId,
-      metadata,
-      versionRecord: {
-        compiledCode: null,
-        compiledCodeHash: null,
-        sourceCode: null,
-        sourcePath: basename(filePath),
-      },
-    });
-
-    // 3. Reuse or create the connection (no-auth, active).
-    const existingConn = (await sql`
-      SELECT id FROM connections
-      WHERE organization_id = ${organizationId}
-        AND connector_key = ${connectorKey}
-        AND created_by = ${userId}
-        AND deleted_at IS NULL
-      LIMIT 1
-    `) as unknown as Array<{ id: number }>;
-
-    let connectionId = existingConn[0]?.id;
-    if (!connectionId) {
-      const inserted = (await sql`
-        INSERT INTO connections (
-          organization_id, connector_key, display_name, status,
-          auth_profile_id, app_auth_profile_id, config, created_by, visibility
-        ) VALUES (
-          ${organizationId}, ${connectorKey}, ${metadata.name}, 'active',
-          NULL, NULL, NULL, ${userId}, 'private'
-        )
-        RETURNING id
-      `) as unknown as Array<{ id: number }>;
-      connectionId = inserted[0]?.id;
-    }
-    if (!connectionId) return;
-
-    // 4. Ensure the first feed exists and is due at least once.
     const feedsSchema = metadata.feeds as Record<string, { configSchema?: unknown }> | null;
     const firstFeedKey = feedsSchema ? Object.keys(feedsSchema)[0] : null;
     if (!firstFeedKey) return;
 
-    const existingFeed = (await sql`
-      SELECT id FROM feeds
-      WHERE connection_id = ${connectionId}
-        AND feed_key = ${firstFeedKey}
-        AND deleted_at IS NULL
-      LIMIT 1
-    `) as unknown as Array<{ id: number }>;
+    let connectionId: number | undefined;
+    await sql.begin(async (tx) => {
+      // Serialize per (user, connector): two concurrent polls / two devices
+      // both reach here, but only one holds the lock at a time, so the
+      // existence-check-then-insert below is atomic.
+      await tx`SELECT pg_advisory_xact_lock(hashtext('lobu:autowire'), hashtext(${`${userId}:${connectorKey}`}))`;
 
-    if (existingFeed[0]?.id) {
-      await sql`
-        UPDATE feeds
-        SET next_run_at = COALESCE(next_run_at, NOW()),
-            updated_at = current_timestamp
-        WHERE id = ${existingFeed[0].id}
-      `;
-    } else {
-      await sql`
-        INSERT INTO feeds (
-          organization_id, connection_id, feed_key, display_name, status, config, next_run_at
-        ) VALUES (
-          ${organizationId}, ${connectionId}, ${firstFeedKey},
-          ${metadata.name}, 'active', NULL, NOW()
-        )
-      `;
+      // 2. Ensure the connector definition + version are installed (idempotent).
+      await upsertConnectorDefinitionRecords({
+        sql: tx,
+        organizationId,
+        metadata,
+        versionRecord: {
+          compiledCode: null,
+          compiledCodeHash: null,
+          sourceCode: null,
+          sourcePath: basename(filePath),
+        },
+      });
+
+      // 3. Reuse or create the connection (no-auth, active, private).
+      const existingConn = (await tx`
+        SELECT id FROM connections
+        WHERE organization_id = ${organizationId}
+          AND connector_key = ${connectorKey}
+          AND created_by = ${userId}
+          AND deleted_at IS NULL
+        LIMIT 1
+      `) as unknown as Array<{ id: number }>;
+      connectionId = existingConn[0]?.id;
+      if (!connectionId) {
+        const inserted = (await tx`
+          INSERT INTO connections (
+            organization_id, connector_key, display_name, status,
+            auth_profile_id, app_auth_profile_id, config, created_by, visibility
+          ) VALUES (
+            ${organizationId}, ${connectorKey}, ${metadata.name}, 'active',
+            NULL, NULL, NULL, ${userId}, 'private'
+          )
+          RETURNING id
+        `) as unknown as Array<{ id: number }>;
+        connectionId = inserted[0]?.id;
+      }
+      if (!connectionId) return;
+
+      // 4. Ensure the first feed exists, is active, and is due at least once
+      //    (re-activates a feed that "capability went away" had paused).
+      const existingFeed = (await tx`
+        SELECT id FROM feeds
+        WHERE connection_id = ${connectionId}
+          AND feed_key = ${firstFeedKey}
+          AND deleted_at IS NULL
+        LIMIT 1
+      `) as unknown as Array<{ id: number }>;
+
+      if (existingFeed[0]?.id) {
+        await tx`
+          UPDATE feeds
+          SET status = 'active',
+              next_run_at = COALESCE(next_run_at, NOW()),
+              updated_at = current_timestamp
+          WHERE id = ${existingFeed[0].id}
+        `;
+      } else {
+        await tx`
+          INSERT INTO feeds (
+            organization_id, connection_id, feed_key, display_name, status, config, next_run_at
+          ) VALUES (
+            ${organizationId}, ${connectionId}, ${firstFeedKey},
+            ${metadata.name}, 'active', NULL, NOW()
+          )
+        `;
+      }
+    });
+
+    if (connectionId) {
+      logger.info(
+        { userId, cap, connectorKey, organizationId, connectionId },
+        '[auto-wire] Auto-wired connector for device capability'
+      );
     }
-
-    logger.info(
-      { userId, cap, connectorKey, organizationId, connectionId },
-      '[auto-wire] Auto-wired connector for new device capability'
-    );
   } catch (err) {
     logger.error(
       { userId, cap, connectorKey, err: errorMessage(err) },
-      '[auto-wire] Failed to auto-wire connector for new capability'
+      '[auto-wire] Failed to auto-wire connector for capability'
     );
+  }
+}
+
+/**
+ * Pause the auto-wired feeds of `connectorKey` in the user's personal org —
+ * called when no recently-seen device of the user still advertises the matching
+ * capability, so a `materializeDueFeeds` pass stops creating runs that nothing
+ * can claim. Limited to no-auth, user-owned connections in the personal org
+ * (exactly what `autoWireCapabilityConnector` creates); `autoWireCapability-
+ * Connector` re-activates them if the capability comes back. Best-effort.
+ */
+async function pauseStaleDeviceFeeds(userId: string, organizationId: string, connectorKey: string) {
+  const sql = getDb();
+  try {
+    await sql`
+      UPDATE feeds f
+      SET status = 'paused', updated_at = current_timestamp
+      FROM connections c
+      WHERE f.connection_id = c.id
+        AND c.organization_id = ${organizationId}
+        AND c.connector_key = ${connectorKey}
+        AND c.created_by = ${userId}
+        AND c.auth_profile_id IS NULL
+        AND c.deleted_at IS NULL
+        AND f.status = 'active'
+        AND f.deleted_at IS NULL
+    `;
+  } catch (err) {
+    logger.warn(
+      { userId, connectorKey, err: errorMessage(err) },
+      '[auto-wire] Failed to pause stale device feeds'
+    );
+  }
+}
+
+/**
+ * Reconcile a user's device connectors against the capabilities their fleet
+ * currently advertises (union across devices seen within
+ * `DEVICE_WORKER_FRESH_INTERVAL`). Auto-wires / re-activates connectors whose
+ * capability is present; pauses the feeds of connectors whose capability has
+ * disappeared. Best-effort; runs on every user-scoped poll.
+ */
+async function reconcileDeviceCapabilities(userId: string): Promise<void> {
+  const sql = getDb();
+  let liveCaps = new Set<string>();
+  try {
+    const rows = (await sql`
+      SELECT DISTINCT jsonb_array_elements_text(capabilities) AS cap
+      FROM device_workers
+      WHERE user_id = ${userId}
+        AND last_seen_at > now() - ${DEVICE_WORKER_FRESH_INTERVAL}::interval
+    `) as unknown as Array<{ cap: string }>;
+    liveCaps = new Set(rows.map((r) => r.cap));
+  } catch (err) {
+    logger.warn({ userId, err: errorMessage(err) }, '[auto-wire] Failed to read device capabilities');
+    return;
+  }
+
+  const present = Object.keys(CAPABILITY_TO_CONNECTOR).filter((cap) => liveCaps.has(cap));
+  const absent = Object.entries(CAPABILITY_TO_CONNECTOR).filter(([cap]) => !liveCaps.has(cap));
+
+  await Promise.allSettled(present.map((cap) => autoWireCapabilityConnector(userId, cap)));
+
+  if (absent.length > 0) {
+    const personalOrg = await findExistingPersonalOrg(userId, sql).catch(() => null);
+    if (personalOrg) {
+      await Promise.allSettled(
+        absent.map(([, connectorKey]) => pauseStaleDeviceFeeds(userId, personalOrg.id, connectorKey))
+      );
+    }
   }
 }
 
@@ -312,12 +406,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           last_seen_at = now()
       `;
 
-      // Ensure connectors for advertised capabilities are fully wired. The
-      // helper has a cheap fast path, so this also repairs older partial state
-      // (e.g. connection/feed exists but connector_versions is missing).
-      await Promise.allSettled(
-        incomingCaps.map((cap) => autoWireCapabilityConnector(workerUserId, cap))
-      );
+      // Reconcile this user's device connectors against the capabilities their
+      // whole fleet currently advertises: auto-wire / re-activate the ones that
+      // are present (cheap fast path, also heals partially-wired state), pause
+      // the ones that have gone away. The just-upserted row above is already
+      // visible to this query, so the polling device's capabilities count.
+      await reconcileDeviceCapabilities(workerUserId);
     } catch (err) {
       logger.error(
         { worker_id, err: errorMessage(err) },
