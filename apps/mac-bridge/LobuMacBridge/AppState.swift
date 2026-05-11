@@ -21,12 +21,36 @@ final class AppState: ObservableObject {
     private let credentialStore = KeychainCredentialStore()
     private let workerHost = WorkerHost()
 
+    /// Background poll timer. Drives the connector loop on its own cadence so
+    /// the user never has to tap Sync now manually. Cadence matches a typical
+    /// connector schedule — once every 10 min — which is fast enough for
+    /// Screen Time and slow enough to be a non-issue for battery / DB.
+    private var pollTimer: Timer?
+    private static let autoPollInterval: TimeInterval = 600  // 10 min
+
     init() {
         credentials = credentialStore.load()
+        startAutoPollIfSignedIn()
     }
 
     var displayName: String {
         credentials?.displayName ?? "Not signed in"
+    }
+
+    /// The org the user picked when approving the OAuth device login. OAuth
+    /// metadata carries it on userInfo.organization_slug; we map back to the
+    /// human name from the embedded organizations list. Falls back to the slug
+    /// when the org isn't enumerated (rare — happens for cross-org tokens).
+    var activeOrgName: String? {
+        guard let info = credentials?.userInfo else { return nil }
+        let slug = info.organization_slug
+        guard let chosenSlug = slug, !chosenSlug.isEmpty else {
+            return info.organizations.first?.name
+        }
+        if let match = info.organizations.first(where: { $0.slug == chosenSlug }) {
+            return match.name
+        }
+        return chosenSlug
     }
 
     func setBaseURL(_ value: String) {
@@ -71,6 +95,7 @@ final class AppState: ObservableObject {
                     credentials = saved
                     loginCode = nil
                     setStatus("Signed in.")
+                    startAutoPollIfSignedIn()
                     return
                 }
             }
@@ -82,10 +107,35 @@ final class AppState: ObservableObject {
 
     func signOut() {
         if workerHostRunning { stopWorkerHost() }
+        stopAutoPoll()
         credentialStore.clear()
         credentials = nil
         loginCode = nil
         setStatus("Signed out.")
+    }
+
+    // MARK: Auto-poll ------------------------------------------------------------
+
+    private func startAutoPollIfSignedIn() {
+        guard credentials != nil, pollTimer == nil else { return }
+        pollTimer = Timer.scheduledTimer(withTimeInterval: Self.autoPollInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isSyncing else { return }
+                await self.syncNow()
+            }
+        }
+        // Fire one immediately so we don't make the user wait the full interval
+        // on first launch.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(2))
+            if !self.isSyncing { await self.syncNow() }
+        }
+    }
+
+    private func stopAutoPoll() {
+        pollTimer?.invalidate()
+        pollTimer = nil
     }
 
     // MARK: Sync now -------------------------------------------------------------

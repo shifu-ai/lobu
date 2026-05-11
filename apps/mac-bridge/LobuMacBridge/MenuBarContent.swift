@@ -79,7 +79,7 @@ struct MenuBarContent: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(state.displayName).font(.body)
-                if let orgName = state.credentials?.userInfo?.organizations.first?.name {
+                if let orgName = state.activeOrgName {
                     Text(orgName).font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -107,10 +107,15 @@ struct MenuBarContent: View {
     }
 
     private var syncButton: some View {
-        Button(state.isSyncing ? "Syncing…" : "Sync now") {
-            Task { await state.syncNow() }
+        VStack(alignment: .leading, spacing: 4) {
+            Button(state.isSyncing ? "Syncing…" : "Sync now") {
+                Task { await state.syncNow() }
+            }
+            .disabled(state.isSyncing || state.credentials == nil)
+            Text("Lobu auto-syncs every 10 minutes. Sync now is a manual override.")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
         }
-        .disabled(state.isSyncing || state.credentials == nil)
     }
 
     private var workerHostRow: some View {
