@@ -115,8 +115,8 @@ async function ensureDeviceConnectorWired(
     const metadata = await extractConnectorMetadata(compiledCode);
     if (!metadata.key || !metadata.name || !metadata.version) return;
     const feedsSchema = metadata.feeds as Record<string, { configSchema?: unknown }> | null;
-    const firstFeedKey = feedsSchema ? Object.keys(feedsSchema)[0] : null;
-    if (!firstFeedKey) return;
+    const feedKeys = feedsSchema ? Object.keys(feedsSchema) : [];
+    if (feedKeys.length === 0) return;
 
     let connectionId: number | undefined;
     await sql.begin(async (tx) => {
@@ -163,33 +163,38 @@ async function ensureDeviceConnectorWired(
       }
       if (!connectionId) return;
 
-      // 4. Ensure the first feed exists, is active, and is due at least once
-      //    (re-activates a feed that "capability went away" had paused).
-      const existingFeed = (await tx`
-        SELECT id FROM feeds
-        WHERE connection_id = ${connectionId}
-          AND feed_key = ${firstFeedKey}
-          AND deleted_at IS NULL
-        LIMIT 1
-      `) as unknown as Array<{ id: number }>;
+      // 4. Ensure every feed the connector declares exists, is active, and is
+      //    due at least once — multi-feed device connectors (e.g. apple.health
+      //    has daily_summaries + workouts) need all of them wired, not just the
+      //    first one. Also re-activates feeds a previous "capability went away"
+      //    pass had paused.
+      for (const feedKey of feedKeys) {
+        const existingFeed = (await tx`
+          SELECT id FROM feeds
+          WHERE connection_id = ${connectionId}
+            AND feed_key = ${feedKey}
+            AND deleted_at IS NULL
+          LIMIT 1
+        `) as unknown as Array<{ id: number }>;
 
-      if (existingFeed[0]?.id) {
-        await tx`
-          UPDATE feeds
-          SET status = 'active',
-              next_run_at = COALESCE(next_run_at, NOW()),
-              updated_at = current_timestamp
-          WHERE id = ${existingFeed[0].id}
-        `;
-      } else {
-        await tx`
-          INSERT INTO feeds (
-            organization_id, connection_id, feed_key, display_name, status, config, next_run_at
-          ) VALUES (
-            ${organizationId}, ${connectionId}, ${firstFeedKey},
-            ${metadata.name}, 'active', NULL, NOW()
-          )
-        `;
+        if (existingFeed[0]?.id) {
+          await tx`
+            UPDATE feeds
+            SET status = 'active',
+                next_run_at = COALESCE(next_run_at, NOW()),
+                updated_at = current_timestamp
+            WHERE id = ${existingFeed[0].id}
+          `;
+        } else {
+          await tx`
+            INSERT INTO feeds (
+              organization_id, connection_id, feed_key, display_name, status, config, next_run_at
+            ) VALUES (
+              ${organizationId}, ${connectionId}, ${feedKey},
+              ${metadata.name}, 'active', NULL, NOW()
+            )
+          `;
+        }
       }
     });
 

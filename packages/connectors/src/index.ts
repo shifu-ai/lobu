@@ -1,3 +1,4 @@
+export * from './apple_health.ts';
 export * from './apple_screen_time.ts';
 export * from './local_directory.ts';
 export * from './browser-scraper-utils.ts';
