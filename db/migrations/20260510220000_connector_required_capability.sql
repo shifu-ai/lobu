@@ -6,8 +6,13 @@
 -- NULL means "no special capability required" (the default for API/browser
 -- connectors that the existing fleet can run).
 --
--- Initial use case: apple.health, which can only run inside the iOS Bridge
--- app because HealthKit data is unreachable from a server-side worker.
+-- `runtime` carries platform metadata for device-bound connectors (e.g.
+-- `{"platforms": ["macos"]}` for apple.screen_time / local.directory, which
+-- only run inside the Lobu Mac Bridge — that data is unreachable from a
+-- server-side worker). NULL = cloud connector.
+--
+-- Initial use case: apple.screen_time and local.directory, served by the Lobu
+-- Mac Bridge polling /api/workers/* as a user-scoped device worker.
 
 ALTER TABLE public.connector_definitions
     ADD COLUMN IF NOT EXISTS required_capability text,

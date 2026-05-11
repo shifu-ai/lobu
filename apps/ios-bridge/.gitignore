@@ -1,9 +1,0 @@
-node_modules/
-ios/App/build/
-ios/App/DerivedData/
-ios/App/Pods/
-ios/App/output/
-ios/App/App/public/
-ios/capacitor-cordova-ios-plugins/
-.DS_Store
-*.log

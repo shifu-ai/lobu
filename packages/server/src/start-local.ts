@@ -428,10 +428,9 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
   {
     id: 'connector-runtime',
     apply: async (sql) => {
-      // `runtime` carries platform/plugin metadata for device-bound connectors
-      // (Apple Health on iOS, etc). NULL = cloud connector. The web picker
-      // hides device connectors whose `runtime.platforms` exclude the current
-      // Capacitor platform so users only see installable options.
+      // `runtime` carries platform metadata for device-bound connectors
+      // (e.g. apple.screen_time / local.directory, which run inside the Lobu
+      // Mac Bridge). NULL = cloud connector.
       await sql.unsafe(`
         ALTER TABLE public.connector_definitions
         ADD COLUMN IF NOT EXISTS runtime jsonb

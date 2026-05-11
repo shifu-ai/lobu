@@ -7,7 +7,7 @@
  * back through the standard worker protocol.
  *
  * The sync() / execute() stubs here throw immediately if a server-side worker
- * somehow bypassed the capability gate — same pattern as apple_health.ts.
+ * somehow bypassed the capability gate — same pattern as apple_screen_time.ts.
  */
 
 import {

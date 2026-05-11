@@ -54,12 +54,11 @@ let lastDueFeedMaterializeAttemptAt = 0;
  * Best-effort: failures are logged but never surface to the poll response.
  */
 async function autoWireCapabilityConnector(userId: string, cap: string): Promise<void> {
-  // Capability → connector key mapping derived from bundled connectors.
+  // Capability → connector key mapping for the bundled device connectors that
+  // have a working runtime (the Lobu Mac Bridge). Adding a new entry here is
+  // only meaningful once a bridge advertises that capability and a connector
+  // definition declares it as `requiredCapability`.
   const CAPABILITY_TO_CONNECTOR: Record<string, string> = {
-    healthkit: 'apple.health',
-    calendar: 'apple.calendar',
-    reminders: 'apple.reminders',
-    contacts: 'apple.contacts',
     screentime: 'apple.screen_time',
     local_directory: 'local.directory',
   };
@@ -269,8 +268,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     .map(([key]) => key);
   // Trusted fleet workers (WORKER_API_TOKEN) run the no-capability cloud
   // connectors too, so '' (a NULL required_capability becomes '' via COALESCE
-  // below) belongs in their match set. User-scoped workers — the Mac / iOS
-  // bridge, anything in `workerAuthMode === 'user'` — are *device* workers:
+  // below) belongs in their match set. User-scoped workers — the Lobu Mac
+  // Bridge, anything in `workerAuthMode === 'user'` — are *device* workers:
   // they may ONLY claim runs whose connector declares a `required_capability`
   // they advertise, never the cloud connectors. So '' is excluded for them,
   // which means a bridge with no granted capabilities claims *nothing* instead
@@ -281,7 +280,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     : [''].concat(advertisedCapabilities);
 
   // Device-worker registry: upsert device_workers row for user-scoped workers
-  // so /api/devices can enumerate them. Also ensure advertised capability
+  // so /api/me/devices can enumerate them. Also ensure advertised capability
   // connectors are fully wired. Best-effort — never fail the poll.
   const workerUserId = c.var.workerUserId;
   if (workerUserId) {
@@ -316,8 +315,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // User-scoped workers (e.g. iOS Bridge) can only claim runs for orgs the
-  // authenticated user is a member of. Trusted workers (matched WORKER_API_TOKEN)
+  // User-scoped workers (e.g. the Lobu Mac Bridge) can only claim runs for orgs
+  // the authenticated user is a member of. Trusted workers (matched WORKER_API_TOKEN)
   // and anonymous local-dev requests see all pending runs — preserving the
   // existing server-side worker fleet behavior.
   const workerAuthMode = c.var.workerAuthMode;
@@ -1508,7 +1507,7 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
 }
 
 /**
- * GET /api/devices
+ * GET /api/me/devices
  *
  * Returns the calling user's registered device workers.
  * Requires session / PAT / OAuth authentication (mcpAuth).

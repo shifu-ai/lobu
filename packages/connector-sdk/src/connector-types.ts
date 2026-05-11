@@ -44,15 +44,15 @@ export interface ConnectorDefinition {
    * Optional worker capability required to run this connector. Workers advertise
    * capabilities on poll; the runs scheduler only hands a connector run to a
    * worker whose capabilities array includes this value. Unset = any worker
-   * (default API/browser fleet). Example: `'healthkit'` for apple.health (only
-   * the iOS Bridge can read HealthKit).
+   * (default API/browser fleet). Example: `'screentime'` for apple.screen_time
+   * (only the Lobu Mac Bridge, with Full Disk Access, can read the Knowledge store).
    */
   requiredCapability?: string;
   /**
    * Present only for device-bound connectors. Omitting this field means the
-   * connector runs on the server-side worker fleet (cloud). The web connector
-   * picker shows a device connector only when `platforms` includes the host
-   * platform the user is currently on (resolved via `window.Capacitor`).
+   * connector runs on the server-side worker fleet (cloud). `platforms` lists
+   * the host platforms a device worker (e.g. the Lobu Mac Bridge) must be
+   * running on to serve this connector's runs.
    */
   runtime?: ConnectorRuntimeInfo;
 }
@@ -61,9 +61,8 @@ export interface ConnectorRuntimeInfo {
   /** Platforms this connector can run on. */
   platforms: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
   /**
-   * Permission/auth scopes forwarded verbatim to the native platform adapter
-   * (e.g. HealthKit sample-type strings). Optional — omit when the platform
-   * adapter needs no fine-grained scope list (Contacts, Reminders, etc.).
+   * Permission/auth scopes forwarded verbatim to the native platform adapter.
+   * Optional — omit when the platform adapter needs no fine-grained scope list.
    */
   scopes?: string[];
 }

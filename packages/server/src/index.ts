@@ -601,8 +601,8 @@ import {
 //
 //   2. **User-scoped worker** — user OAuth bearer (or PAT, or session). The
 //      worker is bound to the authenticated user; poll/stream/complete must
-//      filter on the user's org memberships. Used by phone-bridge workers
-//      (e.g. the iOS Bridge for apple.health) that can't ship a shared secret.
+//      filter on the user's org memberships. Used by device-bridge workers
+//      (e.g. the Lobu Mac Bridge) that can't ship a shared secret.
 //
 // In dev (no WORKER_API_TOKEN configured) and with no user auth, requests pass
 // through unauthenticated — the existing local-dev behavior.

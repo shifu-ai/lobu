@@ -7,7 +7,6 @@
  * - POST /api/:orgSlug/tokens - Create org-scoped personal access tokens
  */
 
-import { createHmac, randomBytes } from 'node:crypto';
 import { type Context, Hono } from 'hono';
 import { createDbClientFromEnv } from '../db/client';
 import type { Env } from '../index';
@@ -197,59 +196,6 @@ credentialRoutes.post('/:orgSlug/tokens', mcpAuth, async (c) => {
   } catch (error) {
     return c.json({ error: errorMessage(error) }, 400);
   }
-});
-
-/**
- * POST /api/me/web-session-from-oauth
- *
- * Trade an OAuth bearer (e.g. the iOS Bridge's stored access token) for a
- * better-auth web session. The iOS app uses this to seed WKWebView's cookie
- * store so an embedded Lobu page (approval UI, agents, etc.) loads already
- * signed in as the same user — no second OAuth flow inside the web view.
- *
- * Returns the signed cookie value (`${token}.${HMAC}`) and the cookie name
- * the iOS side should set on the Lobu host. We sign server-side so the
- * BETTER_AUTH_SECRET never leaves this process.
- */
-credentialRoutes.post('/me/web-session-from-oauth', mcpAuth, async (c) => {
-  if (!c.var.mcpIsAuthenticated || !c.var.user?.id) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-  const secret = process.env.BETTER_AUTH_SECRET;
-  if (!secret) {
-    return c.json({ error: 'BETTER_AUTH_SECRET not configured on server' }, 500);
-  }
-
-  const userId = c.var.user.id;
-  const sql = createDbClientFromEnv(c.env);
-
-  const token = randomBytes(32).toString('base64url');
-  const sessionId = randomBytes(16).toString('hex');
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-  try {
-    await sql`
-      INSERT INTO session (id, token, "userId", "expiresAt", "createdAt", "updatedAt", "ipAddress", "userAgent")
-      VALUES (${sessionId}, ${token}, ${userId}, ${expiresAt}, NOW(), NOW(),
-              ${c.req.header('x-forwarded-for') ?? null},
-              ${c.req.header('user-agent') ?? 'lobu-ios-bridge'})
-    `;
-  } catch (err) {
-    return c.json({ error: errorMessage(err) }, 500);
-  }
-
-  // better-auth's cookie format: `${token}.${HMAC-SHA256(secret, token) base64}`.
-  // The Lobu deployment serves over HTTPS, so the cookie name carries the
-  // `__Secure-` prefix; only the unprefixed name appears on plain-http localhost.
-  const signature = createHmac('sha256', secret).update(token).digest('base64');
-  const signedValue = `${token}.${signature}`;
-
-  return c.json({
-    cookie_name: '__Secure-better-auth.session_token',
-    cookie_value: signedValue,
-    expires_at: expiresAt.toISOString(),
-    user_id: userId,
-  });
 });
 
 export { credentialRoutes };
