@@ -1,10 +1,10 @@
 # Lobu
 
-> Open-source platform for persistent, sandboxed AI agents with shared memory, installable skills, chat integrations, and MCP access. Self-hosted Lobu runs as a single Node process and uses Postgres with pgvector as the only required external service.
+> Open-source backend for multi-user AI agents with isolated workers, per-user OAuth, connected sources, shared memory, and secrets agents never see. Self-hosted Lobu runs as a single Node process and uses Postgres with pgvector as the only required external service.
 
 ## What Lobu does
 
-Lobu runs autonomous agents where your team already works: Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, REST API, and MCP-capable clients. Each agent runs in an isolated worker with gateway-mediated credentials, scoped network egress, and approval flows for sensitive tool calls. Lobu Memory keeps typed entities, decisions, observations, and preferences reusable across conversations and agents.
+Lobu runs multi-user agents where your team already works: Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, REST API, and MCP-capable clients. Each user or channel gets an isolated worker with gateway-mediated credentials, scoped network egress, and approval flows for sensitive tool calls. Lobu Memory keeps typed entities, decisions, observations, and preferences reusable across conversations and agents.
 
 ## Connect any agent to Lobu
 
@@ -27,7 +27,10 @@ The canonical MCP endpoint at [https://lobu.ai/mcp](https://lobu.ai/mcp) lets MC
 
 ## Deployment
 
-- [Getting started](https://lobu.ai/getting-started/): Boot Lobu as a single Node process (`lobu run`)
+- [Lobu Cloud](https://lobu.ai/deployment/cloud/): Managed deployment with no infrastructure to run
+- [Docker](https://lobu.ai/deployment/docker/): Run the Lobu app container on a single host
+- [Kubernetes](https://lobu.ai/deployment/kubernetes/): Deploy Lobu with the public Helm chart
+- [Getting started](https://lobu.ai/getting-started/): Boot Lobu locally with `lobu run`
 - [Architecture](https://lobu.ai/guides/architecture/): Embedded gateway + worker deployment model
 
 ## Messaging platforms

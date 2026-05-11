@@ -125,13 +125,28 @@ When the user pivots mid-session, the default failure mode is piling unrelated w
 
 ## Development
 
-Prerequisites: Bun and a reachable Postgres (with pgvector) via `DATABASE_URL`.
+Prerequisites: Bun, Node.js **22.x–24.x** (`.nvmrc` and `.node-version` pin `22`), and a reachable Postgres (with pgvector) via `DATABASE_URL`. Node 25+ is rejected at boot — `isolated-vm` (used by `query_sdk` / `run_sdk`) has no Node 25+ build yet (upstream: [`laverdet/isolated-vm#553`](https://github.com/laverdet/isolated-vm/issues/553)).
 
 ```bash
 ./scripts/setup-dev.sh   # first-time setup (builds packages, checks bun)
 make dev                  # boots embedded gateway + workers + Vite HMR on :8787
 make clean-workers        # kill orphaned worker subprocesses if a crash leaves any
 ```
+
+To run multiple worktrees in parallel, drop a gitignored `.env.local` in each
+worktree's repo root with non-default ports — it's sourced after `.env` so it
+overrides:
+
+```bash
+# packages/lobu-other-worktree/.env.local
+PORT=8788
+WORKER_PROXY_PORT=8119
+```
+
+The Tailscale tunnel only forwards to one local port at a time, so whichever
+worktree owns `:8787` is what `https://...ts.net:8443` serves. Other worktrees
+are reachable on `http://localhost:8788` etc. — fine for UI work; only
+webhook/OAuth-callback testing actually needs the public URL.
 
 ### Validation after code changes
 

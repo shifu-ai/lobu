@@ -44,10 +44,16 @@ Local `lobu.toml` projects are still useful for `lobu validate` and `lobu apply`
 
 ### Deployment
 
-Single-process Node app. Run it however you run Node — `node`, `pm2`, `systemd`, or another process supervisor. The app needs `DATABASE_URL` (Postgres + pgvector) reachable from its environment; no orchestrator is required and there is no Helm chart to install.
+Single-process Node remains the simplest deployment: run it with `node`, `pm2`, `systemd`, or another process supervisor. The app needs `DATABASE_URL` (Postgres + pgvector) reachable from its environment.
 
 - **Local dev** (contributing to Lobu itself): clone, `make setup`, `make dev` (boots embedded gateway + workers + Vite HMR on `:8787`).
-- **Production**: `bun run --cwd packages/server build:server`, then `node packages/server/dist/server.bundle.mjs` under your process supervisor of choice.
+- **Production (VM/bare metal)**: `bun run --cwd packages/server build:server`, then `node packages/server/dist/server.bundle.mjs` under your process supervisor of choice.
+- **Production (Kubernetes)**: use the public Helm chart in `charts/lobu`:
+  ```bash
+  helm install lobu oci://ghcr.io/lobu-ai/charts/lobu \
+    --namespace lobu --create-namespace \
+    -f charts/lobu/values.example.yaml
+  ```
 
 ## Architecture
 

@@ -1,9 +1,9 @@
 ---
 title: Getting Started
-description: Choose between managed community access and self-hosted deployment.
+description: Build with Lobu, the open-source backend for multi-user AI agents.
 ---
 
-Deploy sandboxed, persistent AI agents to your infrastructure — one isolated agent per user and channel, from a single deploy.
+Lobu is the open-source backend for multi-user AI agents. It gives every user or channel an isolated agent workspace with connected sources, shared memory, and per-user OAuth isolation.
 
 ## Quick start
 
@@ -57,7 +57,15 @@ If you enable Lobu memory during `init`, the scaffold also creates `models/` plu
 
 ## Develop your agent
 
-The fastest way to build your agent is to point a coding agent at the generated project. Open [Claude Code](https://claude.ai/claude-code), [Codex](https://openai.com/index/codex/), [OpenCode](https://opencode.ai), or any coding agent and paste this prompt:
+Install the Lobu skill into your coding agent so it already understands the project layout, `lobu.toml`, evals, memory wiring, and client setup:
+
+```bash
+npx skills add lobu-ai/lobu --skill lobu
+```
+
+The [vercel-labs/skills](https://github.com/vercel-labs/skills) CLI auto-detects [Claude Code](https://claude.ai/claude-code), [Codex](https://openai.com/index/codex/), [OpenCode](https://opencode.ai), Cursor, and OpenClaw, and drops `SKILL.md` in the right directory. Pin one host with `-a <agent>` (e.g. `-a claude-code`) to scope it.
+
+With the skill installed, open your coding agent in the project and start shaping behavior — it already knows how Lobu works. If you'd rather prime it manually, paste this prompt:
 
 ```
 I am building a Lobu agent in this repository.

@@ -350,7 +350,7 @@ export function Nav({
               fontFamily: "var(--font-display)",
             }}
           >
-            <img src="/lobster-icon.png" alt="Lobu" class="w-7 h-7" />
+            <img src="/lobster-icon.svg" alt="Lobu" class="w-7 h-7" />
             Lobu
           </a>
           <div class="hidden md:flex items-center gap-1">
@@ -394,7 +394,7 @@ export function Nav({
                 color: "var(--color-page-text-inverted)",
               }}
             >
-              Start for free
+              Start building
             </a>
           </div>
         </div>

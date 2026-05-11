@@ -1,0 +1,18 @@
+{{- if .Values.embeddings.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lobu.fullname" . }}-embeddings
+  labels:
+    {{- include "lobu.labels" . | nindent 4 }}
+    app.kubernetes.io/component: embeddings
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.embeddings.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "lobu.embeddingsSelectorLabels" . | nindent 4 }}
+{{- end }}

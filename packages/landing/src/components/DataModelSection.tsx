@@ -1,3 +1,6 @@
+import type { LandingUseCaseId } from "../use-case-definitions";
+import { landingUseCases } from "../use-case-definitions";
+
 type Attribute = { name: string; icon: string };
 
 type EntityCard = {
@@ -9,36 +12,83 @@ type EntityCard = {
   moreCount: number;
 };
 
-const ENTITIES: EntityCard[] = [
+const ENTITY_EMOJI_FALLBACKS: Record<string, string> = {
+  Member: "👤",
+  Person: "👤",
+  Company: "🏢",
+  Founder: "🧑‍🚀",
+  Investor: "🏦",
+  "Fund Round": "💰",
+  Sector: "🏭",
+  Contract: "📜",
+  Clause: "📑",
+  Risk: "⚠️",
+  Incident: "🚨",
+  Service: "🧩",
+  Deploy: "🚀",
+  "Pull Request": "🔧",
+  Customer: "👥",
+  Ticket: "🎫",
+  Issue: "🐞",
+  Organization: "🏢",
+  Deal: "💰",
+  Task: "✅",
+  Project: "📐",
+  Decision: "✅",
+  Topic: "🗂",
+  Match: "🔗",
+  Post: "📝",
+};
+
+const ATTRIBUTE_ICONS: Record<string, string> = {
+  Type: "🏷",
+  Name: "🪪",
+  Company: "🏢",
+  Founder: "🧑‍🚀",
+  Founders: "🧑‍🚀",
+  Funding: "💰",
+  Stage: "📈",
+  Valuation: "📊",
+  Sector: "🏭",
+  Role: "👤",
+  Amount: "💸",
+  Lead: "🏦",
+  Risk: "⚠️",
+  Status: "✅",
+  Owner: "🧑‍💼",
+  Source: "🔗",
+};
+
+const FALLBACK_ENTITIES: EntityCard[] = [
   {
-    id: "member",
-    label: "Member",
+    id: "user",
+    label: "User",
     emoji: "👤",
-    badge: "Standard",
+    badge: "Entity",
     attributes: [
       { name: "Identity", icon: "🪪" },
-      { name: "Preferences", icon: "⚙" },
-      { name: "Decisions", icon: "✅" },
-    ],
-    moreCount: 5,
-  },
-  {
-    id: "asset",
-    label: "Asset",
-    emoji: "💼",
-    badge: "Standard",
-    attributes: [
-      { name: "Valuation", icon: "📊" },
-      { name: "Transaction", icon: "💸" },
-      { name: "Source", icon: "🔗" },
+      { name: "Sources", icon: "🔗" },
+      { name: "Preferences", icon: "⚙️" },
     ],
     moreCount: 3,
+  },
+  {
+    id: "source",
+    label: "Source",
+    emoji: "📄",
+    badge: "Entity",
+    attributes: [
+      { name: "Content", icon: "📝" },
+      { name: "Evidence", icon: "🔎" },
+      { name: "Owner", icon: "🧑‍💼" },
+    ],
+    moreCount: 2,
   },
   {
     id: "topic",
     label: "Topic",
     emoji: "🗂",
-    badge: "Standard",
+    badge: "Entity",
     attributes: [
       { name: "Summary", icon: "📝" },
       { name: "Watchers", icon: "🔔" },
@@ -48,10 +98,87 @@ const ENTITIES: EntityCard[] = [
   },
 ];
 
-const RELATIONSHIPS: { afterIndex: number; label: string }[] = [
-  { afterIndex: 0, label: "owns" },
-  { afterIndex: 1, label: "linked to" },
-];
+function entityEmoji(label: string): string {
+  if (ENTITY_EMOJI_FALLBACKS[label]) return ENTITY_EMOJI_FALLBACKS[label];
+  if (label.endsWith("s") && ENTITY_EMOJI_FALLBACKS[label.slice(0, -1)]) {
+    return ENTITY_EMOJI_FALLBACKS[label.slice(0, -1)];
+  }
+  return "📄";
+}
+
+function attributeIcon(label: string): string {
+  return ATTRIBUTE_ICONS[label] ?? "•";
+}
+
+function buildUseCaseCards(useCaseId?: LandingUseCaseId): {
+  entities: EntityCard[];
+  relationships: { afterIndex: number; label: string }[];
+  description: string;
+} {
+  const useCase = useCaseId ? landingUseCases[useCaseId] : null;
+  if (!useCase) {
+    return {
+      entities: FALLBACK_ENTITIES,
+      relationships: [
+        { afterIndex: 0, label: "connects" },
+        { afterIndex: 1, label: "links to" },
+      ],
+      description:
+        "Users, sources, and topics become typed memory. Extend the schema with your own objects and relationships.",
+    };
+  }
+
+  const children = useCase.memory.recordTree.children ?? [];
+  const entities = useCase.model.entities.slice(0, 3).map((label) => {
+    const selectedId = useCase.memory.entitySelections?.[label];
+    const child = children.find((node) => node.kind === label);
+    const highlights =
+      (selectedId && useCase.memory.nodeHighlights?.[selectedId]) ||
+      (child && useCase.memory.nodeHighlights?.[child.id]) ||
+      [];
+    const attributes = (
+      highlights.length ? highlights : useCase.memory.highlights
+    )
+      .slice(0, 3)
+      .map((field) => ({
+        name: field.label,
+        icon: attributeIcon(field.label),
+      }));
+
+    return {
+      id: selectedId ?? child?.id ?? label.toLowerCase().replace(/\s+/g, "-"),
+      label,
+      emoji: entityEmoji(label),
+      badge: "Entity",
+      attributes,
+      moreCount: Math.max(0, highlights.length - attributes.length),
+    };
+  });
+
+  const relationships = entities.slice(0, -1).map((entity, index) => {
+    const next = entities[index + 1];
+    const matchingRelation = useCase.memory.relations.find((rel) => {
+      const sourceType = rel.sourceType.toLowerCase().replace(/_/g, " ");
+      const targetType = rel.targetType.toLowerCase().replace(/_/g, " ");
+      const left = entity.label.toLowerCase();
+      const right = next.label.toLowerCase();
+      return (
+        (sourceType === left && targetType === right) ||
+        (sourceType === right && targetType === left)
+      );
+    });
+    return {
+      afterIndex: index,
+      label: matchingRelation?.label.replace(/_/g, " ") ?? "linked to",
+    };
+  });
+
+  return {
+    entities: entities.length ? entities : FALLBACK_ENTITIES,
+    relationships,
+    description: `${useCase.label} agents use ${useCase.model.entities.slice(0, 5).join(", ")} as typed memory. Add your own entities and relationships as the workflow grows.`,
+  };
+}
 
 function EntityCardView({ entity }: { entity: EntityCard }) {
   return (
@@ -189,7 +316,13 @@ function MobileConnector({ label }: { label: string }) {
   );
 }
 
-export function DataModelSection() {
+export function DataModelSection({
+  useCaseId,
+}: {
+  useCaseId?: LandingUseCaseId;
+}) {
+  const { entities, relationships, description } = buildUseCaseCards(useCaseId);
+
   return (
     <section class="relative px-4 sm:px-6 max-w-[72rem] mx-auto">
       <div
@@ -216,23 +349,21 @@ export function DataModelSection() {
             class="text-[15px] leading-relaxed max-w-xl"
             style={{ color: "var(--color-page-text-muted)" }}
           >
-            Members, assets, topics. Extend the schema with your own objects and
-            define how they relate. Lobu Memory routes events, embeddings, and
-            watchers along those edges automatically.
+            {description}
           </p>
         </div>
 
         <div class="px-6 sm:px-10 pt-6 pb-10">
           <div class="hidden md:flex items-stretch gap-3">
-            {ENTITIES.map((entity, i) => (
+            {entities.map((entity, i) => (
               <>
                 <div key={entity.id} class="flex-1 min-w-0">
                   <EntityCardView entity={entity} />
                 </div>
-                {RELATIONSHIPS.find((r) => r.afterIndex === i) ? (
+                {relationships.find((r) => r.afterIndex === i) ? (
                   <Connector
                     key={`rel-${i}`}
-                    label={RELATIONSHIPS.find((r) => r.afterIndex === i)!.label}
+                    label={relationships.find((r) => r.afterIndex === i)!.label}
                   />
                 ) : null}
               </>
@@ -244,8 +375,8 @@ export function DataModelSection() {
           </div>
 
           <div class="md:hidden flex flex-col gap-3">
-            {ENTITIES.map((entity, i) => {
-              const rel = RELATIONSHIPS.find((r) => r.afterIndex === i);
+            {entities.map((entity, i) => {
+              const rel = relationships.find((r) => r.afterIndex === i);
               return (
                 <>
                   <EntityCardView key={entity.id} entity={entity} />

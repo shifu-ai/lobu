@@ -3,15 +3,15 @@ title: Comparison
 description: How Lobu compares to other agent deployment options.
 ---
 
-Lobu is multi-tenant agent infrastructure. It handles sandboxing, persistence, platform delivery, and network isolation so you can ship agents to your users without building that plumbing yourself.
+Lobu is the open-source backend for multi-user AI agents. It handles isolation, per-user OAuth, connected sources, shared memory, and platform delivery so you can ship agents without rebuilding that plumbing.
 
-This page compares Lobu against alternatives for deploying agents to production.
+This page compares Lobu against other ways to run agents for multiple users.
 
 ## At a glance
 
 | | Lobu | OpenClaw (direct) | DeepAgents Deploy | Claude Managed Agents |
 |---|---|---|---|---|
-| **What it is** | Self-hosted multi-tenant gateway | Single-user agent runtime | Hosted agent deployment (LangSmith) | Hosted managed agents |
+| **What it is** | Open-source backend for multi-user agents | Single-user agent runtime | Hosted agent deployment (LangSmith) | Hosted managed agents |
 | **Multi-tenant** | Per-user/channel isolation | Single user | Per-thread sandbox | Per-conversation |
 | **Platforms** | Slack, Telegram, WhatsApp, Discord, Teams, Google Chat, REST API | CLI and API | API endpoints (MCP, A2A, Agent Protocol) | API |
 | **Embeddable** | Mount inside Next.js, Express, Hono, Fastify | No | No | No |
@@ -106,7 +106,7 @@ Lobu runs entirely on your infrastructure:
 
 ## When to use Lobu
 
-Lobu is the right choice when you need to **give multiple users their own agents**:
+Use Lobu when your agent needs more than one isolated user or channel:
 
 - **SaaS products** — embed agents in your app where each user gets isolated persistence, tools, and context.
 - **Internal teams** — deploy a single bot to Slack or Teams where every employee gets their own sandboxed agent.
@@ -117,7 +117,7 @@ If you need a single personal agent for yourself, use OpenClaw directly.
 
 ## Lobu vs OpenClaw
 
-Lobu and OpenClaw are complementary. OpenClaw is the agent runtime — the execution engine that runs tools, manages sessions, and talks to LLM providers. Lobu is the infrastructure layer that deploys, isolates, and delivers that runtime to multiple users.
+Lobu and OpenClaw are complementary. OpenClaw is the single-user runtime. Lobu is the multi-user backend around it: routing, isolation, credentials, memory, and delivery.
 
 OpenClaw (~800k LOC) was designed as a **single-tenant, single-user system**. Production deployments need multi-tenant isolation, platform routing, credential separation, network control, and scale-to-zero — concerns OpenClaw doesn't have opinions about.
 

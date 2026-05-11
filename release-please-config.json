@@ -55,6 +55,16 @@
           "type": "json",
           "path": "packages/embeddings/package.json",
           "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "charts/lobu/Chart.yaml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "yaml",
+          "path": "charts/lobu/Chart.yaml",
+          "jsonpath": "$.appVersion"
         }
       ]
     }

@@ -4,7 +4,6 @@ import {
   getLandingUseCaseShowcase,
   type SurfaceHeroCopy,
 } from "../use-case-showcases";
-import { HighlightedText } from "./HighlightedText";
 
 const GitHubIcon = () => (
   <svg
@@ -47,10 +46,10 @@ export type HeroStageId =
   | "knowledge";
 
 const STAGE_TABS: Array<{ id: HeroStageId; label: string; index: number }> = [
-  { id: "model", label: "Model", index: 1 },
-  { id: "integrate", label: "Integrate", index: 2 },
-  { id: "watch", label: "Watch", index: 3 },
-  { id: "connect", label: "Connect", index: 4 },
+  { id: "model", label: "Model data", index: 1 },
+  { id: "integrate", label: "Connect systems", index: 2 },
+  { id: "watch", label: "Monitor signals", index: 3 },
+  { id: "connect", label: "Deploy agents", index: 4 },
 ];
 
 const TAB_CYCLE_MS = 5000;
@@ -87,11 +86,12 @@ export function HeroSection(props: {
     setCycleSeed((s) => s + 1);
   };
 
-  const headlineText = "Proactive agents that never forget.";
-  const headlineHighlight = "never forget";
+  const headlinePrefix = "Open-source backend for";
+  const headlineHighlight = "multi-user";
+  const headlineSuffix = "AI agents";
   const subhead =
     props.heroCopy?.description ??
-    "Build autonomous agents that take action and stay reachable from any chat or AI client.";
+    "Give every user an isolated agent workspace with OAuth, connected sources, shared memory, watchers, and secrets agents never see.";
 
   return (
     <section class="pt-16 pb-8 px-6 relative">
@@ -104,7 +104,7 @@ export function HeroSection(props: {
             border: "1px solid var(--color-page-border)",
           }}
         >
-          Lobu Memory scores 87.1% on LongMemEval, highest of any system
+          Multi-tenant agents with per-user OAuth isolation
           <ArrowRightIcon />
         </a>
 
@@ -116,7 +116,13 @@ export function HeroSection(props: {
             letterSpacing: "-0.025em",
           }}
         >
-          <HighlightedText text={headlineText} highlight={headlineHighlight} />
+          <span class="block">{headlinePrefix}</span>
+          <span class="block">
+            <span style={{ color: "var(--color-tg-accent)" }}>
+              {headlineHighlight}
+            </span>{" "}
+            {headlineSuffix}
+          </span>
         </h1>
 
         <p
@@ -135,7 +141,7 @@ export function HeroSection(props: {
               color: "var(--color-page-text-inverted)",
             }}
           >
-            Start for free
+            Start building
           </a>
           <a
             href={GITHUB_URL}

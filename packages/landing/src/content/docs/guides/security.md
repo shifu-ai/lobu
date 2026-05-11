@@ -3,7 +3,7 @@ title: Security
 description: Isolation, network policy, credentials, and MCP proxy behavior.
 ---
 
-Lobu is built so a compromised worker session cannot leak secrets or reach arbitrary networks. Secrets and outbound policy live on the gateway; workers run sandboxed with no ambient trust.
+Lobu is built for multi-user agents: each user or channel gets an isolated worker, while secrets and outbound policy stay on the gateway. A compromised worker should not see raw credentials or reach arbitrary networks.
 
 ## Core Model
 
@@ -58,8 +58,6 @@ Behavior:
 - **Hostname-only for HTTPS CONNECT** (TLS tunnel is opaque); method + path inspected for plain HTTP.
 - **Audit**: every decision emits a structured `egress-decision` log with verdict, source (`global | grant | judge`), latency, and policy hash. No request bodies/headers are logged.
 - **Required**: `ANTHROPIC_API_KEY` in the gateway env. Gateways with no judged-domain rules never construct the judge client.
-
-A working end-to-end example lives at [`examples/engineering/agents/engineering/skills/egress-guardrail/SKILL.md`](https://github.com/lobu-ai/lobu/blob/main/examples/engineering/agents/engineering/skills/egress-guardrail/SKILL.md).
 
 ## Credentials
 
