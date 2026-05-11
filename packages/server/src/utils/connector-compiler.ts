@@ -22,10 +22,8 @@ export interface ConnectorMetadata {
   openapiConfig?: Record<string, unknown> | null;
   requiredCapability?: string | null;
   runtime?: {
-    type: 'cloud' | 'device';
-    platforms?: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
-    plugin?: string;
-    readScopes?: string[];
+    platforms: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
+    scopes?: string[];
   } | null;
 }
 

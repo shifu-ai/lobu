@@ -438,6 +438,28 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
       `);
     },
   },
+  {
+    id: 'device-workers',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        CREATE TABLE IF NOT EXISTS public.device_workers (
+          user_id text NOT NULL,
+          worker_id text NOT NULL,
+          platform text,
+          app_version text,
+          capabilities jsonb NOT NULL DEFAULT '[]'::jsonb,
+          label text,
+          first_seen_at timestamptz NOT NULL DEFAULT now(),
+          last_seen_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (user_id, worker_id)
+        )
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS device_workers_user_id_idx
+        ON public.device_workers (user_id)
+      `);
+    },
+  },
 ];
 
 async function applyEmbeddedSchemaPatches(sql: MigrationSqlClient) {

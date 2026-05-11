@@ -26,7 +26,7 @@ export default class AppleContactsConnector extends ConnectorRuntime {
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'contacts',
-    runtime: { type: 'device', platforms: ['ios'], plugin: 'Contacts' },
+    runtime: { platforms: ['ios'] },
     authSchema: { methods: [{ type: 'none' }] },
     feeds: {
       contacts: {

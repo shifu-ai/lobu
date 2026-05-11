@@ -33,7 +33,7 @@ export default class AppleScreenTimeConnector extends ConnectorRuntime {
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'screentime',
-    runtime: { type: 'device', platforms: ['macos'], plugin: 'ScreenTime' },
+    runtime: { platforms: ['macos'] },
     authSchema: { methods: [{ type: 'none' }] },
     feeds: {
       daily_app_usage: {

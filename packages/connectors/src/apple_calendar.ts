@@ -28,7 +28,7 @@ export default class AppleCalendarConnector extends ConnectorRuntime {
     version: '0.1.0',
     faviconDomain: 'apple.com',
     requiredCapability: 'calendar',
-    runtime: { type: 'device', platforms: ['ios'], plugin: 'Calendar' },
+    runtime: { platforms: ['ios'] },
     authSchema: { methods: [{ type: 'none' }] },
     feeds: {
       events: {

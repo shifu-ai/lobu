@@ -46,10 +46,8 @@ export type ScopedConnectorDefinitionRow = {
 };
 
 export type ConnectorRuntimeInfo = {
-  type: 'cloud' | 'device';
-  platforms?: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
-  plugin?: string;
-  readScopes?: string[];
+  platforms: Array<'ios' | 'android' | 'macos' | 'windows' | 'linux'>;
+  scopes?: string[];
 };
 
 function getOAuthMethods(authSchema: AuthSchema | string): OAuthAuthMethod[] {

@@ -5,8 +5,10 @@
  * Updated for V1 integration platform: runs-based job model.
  */
 
+import { basename } from 'node:path';
 import type { Context } from 'hono';
 import { createAuth } from './auth';
+import { findExistingPersonalOrg } from './auth/personal-org-provisioning';
 import { getDb, pgTextArray } from './db/client';
 import { emit } from './events/emitter';
 import type { Env } from './index';
@@ -20,6 +22,9 @@ import {
 } from './connectors/repair-agent';
 import { autoLinkEvent } from './utils/auto-linker';
 import { nextRunAt as nextRunAtFromCron } from './utils/cron';
+import { compileConnectorFromFile, findBundledConnectorFile } from './utils/connector-catalog';
+import { extractConnectorMetadata } from './utils/connector-compiler';
+import { upsertConnectorDefinitionRecords } from './utils/connector-definition-install';
 import { resolveConnectorCode } from './utils/ensure-connector-installed';
 import { applyEntityLinks } from './utils/entity-link-upsert';
 import { errorMessage } from './utils/errors';
@@ -38,6 +43,111 @@ function parseEntityIds(raw: unknown): number[] {
 const DUE_FEEDS_LOCK_KEY = 71001;
 const DUE_FEED_MATERIALIZE_COOLDOWN_MS = 5000;
 let lastDueFeedMaterializeAttemptAt = 0;
+
+/**
+ * Auto-wire a bundled device connector into the user's personal org when a
+ * new capability appears on their device worker. Installs the connector
+ * definition (idempotent), creates a no-auth connection for the user, and
+ * creates the first feed with its default config.
+ *
+ * Restricted to the closed bundled set; never touches user-installed connectors.
+ * Best-effort: failures are logged but never surface to the poll response.
+ */
+async function autoWireCapabilityConnector(userId: string, cap: string): Promise<void> {
+  // Capability → connector key mapping derived from bundled connectors.
+  const CAPABILITY_TO_CONNECTOR: Record<string, string> = {
+    healthkit: 'apple.health',
+    calendar: 'apple.calendar',
+    reminders: 'apple.reminders',
+    contacts: 'apple.contacts',
+    screentime: 'apple.screen_time',
+    local_directory: 'local.directory',
+  };
+  const connectorKey = CAPABILITY_TO_CONNECTOR[cap];
+  if (!connectorKey) return;
+
+  const sql = getDb();
+  try {
+    // 1. Find the user's personal org.
+    const personalOrg = await findExistingPersonalOrg(userId, sql);
+    if (!personalOrg) {
+      logger.warn({ userId, cap }, '[auto-wire] No personal org found for user');
+      return;
+    }
+    const organizationId = personalOrg.id;
+
+    // 2. Ensure the connector definition is installed.
+    const filePath = findBundledConnectorFile(connectorKey);
+    if (!filePath) {
+      logger.warn({ connectorKey }, '[auto-wire] Bundled connector file not found');
+      return;
+    }
+    const compiledCode = await compileConnectorFromFile(filePath);
+    const metadata = await extractConnectorMetadata(compiledCode);
+    if (!metadata.key || !metadata.name || !metadata.version) return;
+
+    await upsertConnectorDefinitionRecords({
+      sql,
+      organizationId,
+      metadata,
+      versionRecord: {
+        compiledCode: null,
+        compiledCodeHash: null,
+        sourceCode: null,
+        sourcePath: basename(filePath),
+      },
+    });
+
+    // 3. Check if a connection already exists.
+    const existingConn = (await sql`
+      SELECT id FROM connections
+      WHERE organization_id = ${organizationId}
+        AND connector_key = ${connectorKey}
+        AND created_by = ${userId}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `) as unknown as Array<{ id: number }>;
+    if (existingConn.length > 0) return;
+
+    // 4. Create the connection (no-auth, active).
+    const inserted = (await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, display_name, status,
+        auth_profile_id, app_auth_profile_id, config, created_by, visibility
+      ) VALUES (
+        ${organizationId}, ${connectorKey}, ${metadata.name}, 'active',
+        NULL, NULL, NULL, ${userId}, 'private'
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+    const connectionId = inserted[0]?.id;
+    if (!connectionId) return;
+
+    // 5. Create the first feed with default config.
+    const feedsSchema = metadata.feeds as Record<string, { configSchema?: unknown }> | null;
+    const firstFeedKey = feedsSchema ? Object.keys(feedsSchema)[0] : null;
+    if (!firstFeedKey) return;
+
+    await sql`
+      INSERT INTO feeds (
+        organization_id, connection_id, feed_key, display_name, status, config
+      ) VALUES (
+        ${organizationId}, ${connectionId}, ${firstFeedKey},
+        ${metadata.name}, 'active', NULL
+      )
+    `;
+
+    logger.info(
+      { userId, cap, connectorKey, organizationId, connectionId },
+      '[auto-wire] Auto-wired connector for new device capability'
+    );
+  } catch (err) {
+    logger.error(
+      { userId, cap, connectorKey, err: errorMessage(err) },
+      '[auto-wire] Failed to auto-wire connector for new capability'
+    );
+  }
+}
 
 /**
  * Verify that the request's worker auth scope is allowed to touch this run.
@@ -79,13 +189,19 @@ async function authorizeRunForWorker(
 export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let worker_id: string;
   let capabilities: Record<string, boolean> = {};
+  let platform: string | null = null;
+  let app_version: string | null = null;
   try {
     const body = await c.req.json<{
       worker_id: string;
       capabilities?: Record<string, boolean>;
+      platform?: string;
+      app_version?: string;
     }>();
     worker_id = body.worker_id;
     capabilities = body.capabilities ?? {};
+    platform = body.platform ?? null;
+    app_version = body.app_version ?? null;
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
   }
@@ -100,6 +216,53 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // SQL ANY needs a non-empty array. Prepend '' so that connectors without
   // a required_capability (NULL → '' via COALESCE) always match.
   const capabilityMatchSet = [''].concat(advertisedCapabilities);
+
+  // Device-worker registry: upsert device_workers row for user-scoped workers
+  // so /api/devices can enumerate them. Also auto-wire connectors for any
+  // newly advertised capabilities. Best-effort — never fail the poll.
+  const workerUserId = c.var.workerUserId;
+  if (workerUserId) {
+    try {
+      // Fetch the previous capabilities so we can diff for new ones.
+      const prevRows = (await sql`
+        SELECT capabilities FROM device_workers
+        WHERE user_id = ${workerUserId} AND worker_id = ${worker_id}
+        LIMIT 1
+      `) as unknown as Array<{ capabilities: string[] }>;
+      const prevCaps: string[] = Array.isArray(prevRows[0]?.capabilities)
+        ? (prevRows[0].capabilities as string[])
+        : [];
+
+      // Normalize incoming capabilities to a string[].
+      const incomingCaps = advertisedCapabilities;
+
+      await sql`
+        INSERT INTO device_workers (user_id, worker_id, platform, app_version, capabilities)
+        VALUES (
+          ${workerUserId}, ${worker_id}, ${platform}, ${app_version},
+          ${sql.json(incomingCaps)}
+        )
+        ON CONFLICT (user_id, worker_id) DO UPDATE SET
+          platform = EXCLUDED.platform,
+          app_version = EXCLUDED.app_version,
+          capabilities = EXCLUDED.capabilities,
+          last_seen_at = now()
+      `;
+
+      // Auto-wire connectors for newly seen capabilities.
+      const prevCapsSet = new Set(prevCaps);
+      const newCaps = incomingCaps.filter((cap) => !prevCapsSet.has(cap));
+      for (const cap of newCaps) {
+        // Fire-and-forget; failures are logged inside autoWireCapabilityConnector.
+        autoWireCapabilityConnector(workerUserId, cap).catch(() => undefined);
+      }
+    } catch (err) {
+      logger.error(
+        { worker_id, err: errorMessage(err) },
+        '[pollWorkerJob] device_workers upsert failed (non-fatal)'
+      );
+    }
+  }
 
   // User-scoped workers (e.g. iOS Bridge) can only claim runs for orgs the
   // authenticated user is a member of. Trusted workers (matched WORKER_API_TOKEN)
@@ -1282,6 +1445,57 @@ export async function completeActionRun(c: Context<{ Bindings: Env }>) {
     return c.json({ success: true });
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[completeActionRun] Error');
+    return c.json({ error: errorMessage(err) }, 500);
+  }
+}
+
+/**
+ * GET /api/devices
+ *
+ * Returns the calling user's registered device workers.
+ * Requires session / PAT / OAuth authentication (mcpAuth).
+ */
+export async function listDeviceWorkers(c: Context<{ Bindings: Env }>) {
+  const userId = c.var.user?.id;
+  if (!userId) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  try {
+    const sql = getDb();
+    const rows = (await sql`
+      SELECT
+        worker_id,
+        platform,
+        app_version,
+        capabilities,
+        label,
+        last_seen_at,
+        (last_seen_at > now() - interval '20 minutes') AS online
+      FROM device_workers
+      WHERE user_id = ${userId}
+      ORDER BY last_seen_at DESC
+    `) as unknown as Array<{
+      worker_id: string;
+      platform: string | null;
+      app_version: string | null;
+      capabilities: string[];
+      label: string | null;
+      last_seen_at: string;
+      online: boolean;
+    }>;
+    return c.json({
+      devices: rows.map((r) => ({
+        worker_id: r.worker_id,
+        platform: r.platform,
+        app_version: r.app_version,
+        capabilities: Array.isArray(r.capabilities) ? r.capabilities : [],
+        label: r.label,
+        last_seen_at: r.last_seen_at,
+        online: r.online,
+      })),
+    });
+  } catch (err: unknown) {
+    logger.error({ error: errorMessage(err) }, '[listDeviceWorkers] Error');
     return c.json({ error: errorMessage(err) }, 500);
   }
 }

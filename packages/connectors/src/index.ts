@@ -3,6 +3,7 @@ export * from './apple_contacts.ts';
 export * from './apple_health.ts';
 export * from './apple_reminders.ts';
 export * from './apple_screen_time.ts';
+export * from './local_directory.ts';
 export * from './browser-scraper-utils.ts';
 export * from './capterra.ts';
 export * from './g2.ts';
