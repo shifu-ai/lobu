@@ -226,19 +226,29 @@ final class AppState: ObservableObject {
 
     // MARK: - Sync now ----------------------------------------------------------
 
+    /// Upper bound on jobs drained in one pass — a safety stop in case the
+    /// server keeps handing back claimable runs (it shouldn't for a device).
+    private static let maxJobsPerPass = 25
+
     func syncNow() async {
         guard !isSyncing else { return }
         isSyncing = true
         defer { isSyncing = false }
         refreshFDAStatus()
         do {
-            let result = try await SyncDispatcher.runOneCycle(
-                baseURL: baseURL,
-                capabilities: currentCapabilities
-            )
-            lastPollDate = Date()
-            lastPollSuccess = true
-            if result.claimedJob, let key = result.connectorKey, let runId = result.runId {
+            var handled = 0
+            var lastJob: RecentJob?
+            // Drain the queue: keep claiming until the server has nothing left,
+            // so a backlog (e.g. the first sync after granting two capabilities)
+            // clears in one pass instead of one job per 10-minute timer tick.
+            while handled < Self.maxJobsPerPass {
+                let result = try await SyncDispatcher.runOneCycle(
+                    baseURL: baseURL,
+                    capabilities: currentCapabilities
+                )
+                guard result.claimedJob, let key = result.connectorKey, let runId = result.runId else {
+                    break
+                }
                 let job = RecentJob(
                     connectorKey: key,
                     runId: runId,
@@ -246,7 +256,17 @@ final class AppState: ObservableObject {
                     finishedAt: Date()
                 )
                 appendRecentJob(job)
-                setStatus("Synced \(result.itemsStreamed) items from \(job.displayLabel).")
+                lastJob = job
+                handled += 1
+            }
+            lastPollDate = Date()
+            lastPollSuccess = true
+            if let lastJob {
+                setStatus(
+                    handled == 1
+                        ? "Synced \(lastJob.itemsStreamed) items from \(lastJob.displayLabel)."
+                        : "Synced \(handled) jobs (last: \(lastJob.displayLabel))."
+                )
             } else {
                 setStatus("Connected. Waiting for sync jobs.")
             }
