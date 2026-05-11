@@ -42,10 +42,31 @@ private struct PersistedRecentJob: Decodable {
     }
 }
 
+// MARK: - Connect mode --------------------------------------------------------
+
+/// Which Lobu the bridge talks to. Chosen on the sign-in screen, persisted.
+enum ServerMode: String, CaseIterable {
+    case cloud   // app.lobu.ai
+    case custom  // a self-hosted URL the user enters
+    case local   // a `lobu run` the bridge starts on this Mac (project at ~/lobu)
+}
+
+/// State of the bridge-managed local `lobu run` (only meaningful in `.local` mode).
+enum LocalLobuStatus: Equatable {
+    case stopped
+    case starting
+    case running          // started by us, or adopted an instance already on the port
+    case cliMissing
+    case failed(message: String)
+
+    var isRunning: Bool { self == .running }
+}
+
 // MARK: - AppState ------------------------------------------------------------
 
 /// Top-level observable state for the menu bar app. One source of truth for
-/// sign-in status, sync state, last result, worker-host toggle, and integrations.
+/// sign-in status, sync state, last result, the server/connect mode, and
+/// integrations.
 @MainActor
 final class AppState: ObservableObject {
     @Published var credentials: OAuthCredentials?
@@ -66,6 +87,20 @@ final class AppState: ObservableObject {
             ?? "https://app.lobu.ai"
     }()
 
+    // Sign-in screen state.
+    @Published var serverMode: ServerMode = {
+        ServerMode(rawValue: UserDefaults.standard.string(forKey: "lobuServerMode") ?? "") ?? .cloud
+    }() { didSet { UserDefaults.standard.set(serverMode.rawValue, forKey: "lobuServerMode") } }
+    /// Draft URL for `.custom` mode (the text field). Persisted so it survives restarts.
+    @Published var customServerDraft: String = UserDefaults.standard.string(forKey: "lobuCustomServerURL") ?? "" {
+        didSet { UserDefaults.standard.set(customServerDraft, forKey: "lobuCustomServerURL") }
+    }
+    /// Result of the last reachability probe of `customServerDraft` — nil = not checked yet.
+    @Published var serverReachable: Bool?
+    @Published var localLobuStatus: LocalLobuStatus = .stopped
+
+    private let cloudURL = "https://app.lobu.ai"
+    private let localRunner = LocalLobuRunner()
     private let credentialStore = KeychainCredentialStore()
 
     /// Background poll timer.
@@ -78,7 +113,16 @@ final class AppState: ObservableObject {
         credentials = credentialStore.load()
         loadPersistedState()
         refreshFDAStatus()
-        startAutoPollIfSignedIn()
+        if serverMode == .local && credentials != nil {
+            // Bring the bridge-managed Lobu back up before polling — `start()`
+            // reconnects if it's still running from a previous session.
+            Task { @MainActor in
+                await startLocalLobu()
+                startAutoPollIfSignedIn()
+            }
+        } else {
+            startAutoPollIfSignedIn()
+        }
     }
 
     var displayName: String {
@@ -199,7 +243,76 @@ final class AppState: ObservableObject {
         loginCode = nil
         lastPollDate = nil
         lastPollSuccess = true
+        if serverMode == .local { stopLocalLobu() }
         setStatus("Signed out.")
+    }
+
+    // MARK: - Connect (mode-aware sign-in) --------------------------------------
+
+    /// The sign-in screen's primary action. Resolves the gateway URL for the
+    /// chosen mode (Cloud / self-hosted / a local `lobu run` we start here),
+    /// then runs the OAuth device flow against it.
+    func connect() async {
+        switch serverMode {
+        case .cloud:
+            setBaseURL(cloudURL)
+            await signIn()
+        case .custom:
+            let url = customServerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !url.isEmpty, URL(string: url)?.scheme != nil else {
+                setStatus("Enter a server URL (e.g. http://localhost:8787).")
+                return
+            }
+            setBaseURL(url)
+            await signIn()  // discover() failure now names the URL
+        case .local:
+            await startLocalLobu()
+            guard localLobuStatus.isRunning else { return }  // start failed — error already shown
+            await signIn()
+        }
+    }
+
+    /// Start (or reconnect to) the bridge-managed `lobu run`. Idempotent: if it's
+    /// already up on the port, just adopts it. Updates `baseURL` + status.
+    func startLocalLobu() async {
+        guard localLobuStatus != .starting else { return }
+        localLobuStatus = .starting
+        setStatus("Starting Lobu on this Mac…")
+        do {
+            let url = try await localRunner.start()
+            setBaseURL(url)
+            localLobuStatus = .running
+            setStatus("Lobu is running on this Mac (~/lobu).")
+        } catch LocalLobuRunner.RunnerError.cliNotFound {
+            localLobuStatus = .cliMissing
+            setStatus(LocalLobuRunner.RunnerError.cliNotFound.errorDescription ?? "Lobu CLI not installed.")
+        } catch {
+            localLobuStatus = .failed(message: error.localizedDescription)
+            setStatus(error.localizedDescription)
+        }
+    }
+
+    func stopLocalLobu() {
+        localRunner.stop()
+        localLobuStatus = .stopped
+    }
+
+    /// Probe whatever's currently in `customServerDraft` and update
+    /// `serverReachable` for the "✓ Reachable" hint. No-op if it's blank.
+    func probeServer() async {
+        let url = customServerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else { serverReachable = nil; return }
+        serverReachable = await LocalLobuRunner.isLobuReachable(url)
+    }
+
+    /// On the sign-in screen, look for a `lobu run` already up locally and
+    /// pre-fill the self-hosted field with it so the user doesn't have to type.
+    func suggestLocalServerIfPresent() async {
+        guard serverMode == .custom, customServerDraft.isEmpty else { return }
+        if await LocalLobuRunner.isLobuReachable(LocalLobuRunner.baseURL) {
+            customServerDraft = LocalLobuRunner.baseURL
+            serverReachable = true
+        }
     }
 
     // MARK: - Auto-poll ---------------------------------------------------------

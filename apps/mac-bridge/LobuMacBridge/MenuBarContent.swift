@@ -94,14 +94,31 @@ struct MenuBarContent: View {
     // -------------------------------------------------------------------------
 
     private var signInSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Button(state.isLoggingIn ? "Waiting for approval…" : "Sign in with Lobu") {
-                Task { await state.signIn() }
+        VStack(alignment: .leading, spacing: 5) {
+            sectionLabel("Connect to Lobu")
+
+            Picker("", selection: $state.serverMode) {
+                Text("Lobu Cloud").tag(ServerMode.cloud)
+                Text("Self-hosted").tag(ServerMode.custom)
+                Text("Run on this Mac").tag(ServerMode.local)
             }
-            .buttonStyle(.plain)
-            .font(.caption)
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+            .padding(.horizontal, 6)
             .disabled(state.isLoggingIn)
-            .menuRow()
+            .onChange(of: state.serverMode) { _, mode in
+                if mode == .custom { Task { await state.suggestLocalServerIfPresent() } }
+            }
+
+            modeDetail
+                .padding(.horizontal, 6)
+
+            Button(connectButtonTitle) { Task { await state.connect() } }
+                .buttonStyle(.plain)
+                .font(.caption)
+                .disabled(connectDisabled)
+                .menuRow()
+
             if let code = state.loginCode {
                 HStack {
                     Text("Code").foregroundStyle(.secondary)
@@ -112,6 +129,79 @@ struct MenuBarContent: View {
                 .menuRow(interactive: false)
             }
         }
+        .task { await state.suggestLocalServerIfPresent() }
+    }
+
+    @ViewBuilder private var modeDetail: some View {
+        switch state.serverMode {
+        case .cloud:
+            EmptyView()
+        case .custom:
+            VStack(alignment: .leading, spacing: 3) {
+                TextField("http://localhost:8787", text: $state.customServerDraft)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.caption)
+                    .disabled(state.isLoggingIn)
+                    .onSubmit { Task { await state.probeServer() } }
+                if let reachable = state.serverReachable, !state.customServerDraft.isEmpty {
+                    Label(
+                        reachable ? "Reachable" : "Couldn't reach a Lobu there",
+                        systemImage: reachable ? "checkmark.circle.fill" : "xmark.circle"
+                    )
+                    .font(.caption2)
+                    .foregroundStyle(reachable ? Color.green : Color.secondary)
+                }
+            }
+        case .local:
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Starts `lobu run` at ~/lobu — local PGlite, no Docker or setup.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                switch state.localLobuStatus {
+                case .cliMissing:
+                    Text("Install the Lobu CLI first: npm i -g @lobu/cli")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .starting:
+                    HStack(spacing: 4) {
+                        ProgressView().controlSize(.mini)
+                        Text("Starting…").font(.caption2).foregroundStyle(.secondary)
+                    }
+                case .running:
+                    Label("Running", systemImage: "checkmark.circle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                case let .failed(message):
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .stopped:
+                    EmptyView()
+                }
+            }
+        }
+    }
+
+    private var connectButtonTitle: String {
+        if state.isLoggingIn { return "Waiting for approval…" }
+        switch state.serverMode {
+        case .cloud:  return "Sign in with Lobu"
+        case .custom: return "Sign in"
+        case .local:  return state.localLobuStatus.isRunning ? "Sign in" : "Start & sign in"
+        }
+    }
+
+    private var connectDisabled: Bool {
+        if state.isLoggingIn || state.localLobuStatus == .starting { return true }
+        if state.serverMode == .custom,
+           state.customServerDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return false
     }
 
     // -------------------------------------------------------------------------
@@ -261,6 +351,24 @@ struct MenuBarContent: View {
                 Spacer()
             }
             .menuRow(interactive: false)
+            if state.serverMode == .local {
+                HStack(spacing: 8) {
+                    Text("Local Lobu").font(.caption2).foregroundStyle(.secondary)
+                    Spacer()
+                    switch state.localLobuStatus {
+                    case .running:
+                        Text("running").font(.caption2).foregroundStyle(.secondary)
+                        Button("Stop") { state.stopLocalLobu() }.buttonStyle(.plain).font(.caption2)
+                    case .starting:
+                        ProgressView().controlSize(.mini)
+                    default:
+                        Text("stopped").font(.caption2).foregroundStyle(.secondary)
+                        Button("Start") { Task { await state.startLocalLobu() } }
+                            .buttonStyle(.plain).font(.caption2)
+                    }
+                }
+                .menuRow(interactive: false)
+            }
             HStack(spacing: 10) {
                 Button("Open Lobu \u{2197}") {
                     if let url = URL(string: state.baseURL) { NSWorkspace.shared.open(url) }

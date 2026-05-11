@@ -101,7 +101,15 @@ final class OAuthClient {
     }
 
     func discover() async throws -> OAuthDiscovery {
-        try await getJSON(baseURL.appending(path: ".well-known/oauth-authorization-server"))
+        do {
+            return try await getJSON(baseURL.appending(path: ".well-known/oauth-authorization-server"))
+        } catch {
+            // The first network hop — turn a generic failure into something the
+            // user can act on (wrong URL / wrong port / server not running).
+            throw OAuthClientError.server(
+                "Couldn't reach a Lobu server at \(baseURL.absoluteString) — is it running? Check the URL."
+            )
+        }
     }
 
     func registerClient(_ discovery: OAuthDiscovery) async throws -> RegisteredOAuthClient {
