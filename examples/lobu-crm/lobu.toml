@@ -16,9 +16,9 @@ description = "Maintains Lobu's funnel CRM — leads, pilots, inbound triage, we
 dir = "./agents/marketing"
 
 [[agents.marketing.providers]]
-id = "anthropic"
-model = "claude/sonnet-4-5"
-key = "$ANTHROPIC_API_KEY"
+id = "z-ai"
+model = "z-ai/glm-4.7"
+key = "$Z_AI_API_KEY"
 
 [agents.marketing.network]
 allowed = [
@@ -26,6 +26,7 @@ allowed = [
   "x.com", "api.x.com", "twitter.com",
   "news.ycombinator.com", "hn.algolia.com",
   "api.producthunt.com",
+  "api.z.ai", ".z.ai",
   "lobu.ai",
 ]
 
