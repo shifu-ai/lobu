@@ -25,6 +25,23 @@ struct RecentJob: Codable {
     }
 }
 
+private struct PersistedRecentJob: Decodable {
+    let connectorKey: String
+    let runId: Int?
+    let itemsStreamed: Int
+    let finishedAt: Date
+
+    var current: RecentJob? {
+        guard let runId else { return nil }
+        return RecentJob(
+            connectorKey: connectorKey,
+            runId: runId,
+            itemsStreamed: itemsStreamed,
+            finishedAt: finishedAt
+        )
+    }
+}
+
 // MARK: - AppState ------------------------------------------------------------
 
 /// Top-level observable state for the menu bar app. One source of truth for
@@ -304,9 +321,13 @@ final class AppState: ObservableObject {
     // MARK: - Persistence helpers ----------------------------------------------
 
     private func loadPersistedState() {
-        if let data = UserDefaults.standard.data(forKey: Self.recentJobsKey),
-           let jobs = try? JSONDecoder().decode([RecentJob].self, from: data) {
-            recentJobs = jobs
+        if let data = UserDefaults.standard.data(forKey: Self.recentJobsKey) {
+            if let jobs = try? JSONDecoder().decode([RecentJob].self, from: data) {
+                recentJobs = jobs
+            } else if let legacyJobs = try? JSONDecoder().decode([PersistedRecentJob].self, from: data) {
+                recentJobs = legacyJobs.compactMap(\.current)
+                persistRecentJobs()
+            }
         }
         if let bookmarks = UserDefaults.standard.array(forKey: Self.folderBookmarksKey) as? [Data] {
             localFolderBookmarks = bookmarks

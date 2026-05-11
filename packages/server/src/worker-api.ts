@@ -76,6 +76,39 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
     }
     const organizationId = personalOrg.id;
 
+    // Fast path: if definition, version, connection, and feed are already in
+    // place, there is nothing to repair. This keeps the per-poll ensure below
+    // cheap while still healing older partially-wired device connectors.
+    const existingReady = (await sql`
+      SELECT c.id AS connection_id, f.id AS feed_id, cv.connector_key AS version_key
+      FROM connector_definitions cd
+      LEFT JOIN connector_versions cv
+        ON cv.connector_key = cd.key AND cv.version = cd.version
+      LEFT JOIN connections c
+        ON c.organization_id = cd.organization_id
+       AND c.connector_key = cd.key
+       AND c.created_by = ${userId}
+       AND c.deleted_at IS NULL
+      LEFT JOIN feeds f
+        ON f.connection_id = c.id
+       AND f.deleted_at IS NULL
+      WHERE cd.organization_id = ${organizationId}
+        AND cd.key = ${connectorKey}
+        AND cd.status = 'active'
+      LIMIT 1
+    `) as unknown as Array<{
+      connection_id: number | null;
+      feed_id: number | null;
+      version_key: string | null;
+    }>;
+    if (
+      existingReady[0]?.connection_id &&
+      existingReady[0]?.feed_id &&
+      existingReady[0]?.version_key
+    ) {
+      return;
+    }
+
     // 2. Ensure the connector definition is installed.
     const filePath = findBundledConnectorFile(connectorKey);
     if (!filePath) {
@@ -98,7 +131,7 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
       },
     });
 
-    // 3. Check if a connection already exists.
+    // 3. Reuse or create the connection (no-auth, active).
     const existingConn = (await sql`
       SELECT id FROM connections
       WHERE organization_id = ${organizationId}
@@ -107,35 +140,53 @@ async function autoWireCapabilityConnector(userId: string, cap: string): Promise
         AND deleted_at IS NULL
       LIMIT 1
     `) as unknown as Array<{ id: number }>;
-    if (existingConn.length > 0) return;
 
-    // 4. Create the connection (no-auth, active).
-    const inserted = (await sql`
-      INSERT INTO connections (
-        organization_id, connector_key, display_name, status,
-        auth_profile_id, app_auth_profile_id, config, created_by, visibility
-      ) VALUES (
-        ${organizationId}, ${connectorKey}, ${metadata.name}, 'active',
-        NULL, NULL, NULL, ${userId}, 'private'
-      )
-      RETURNING id
-    `) as unknown as Array<{ id: number }>;
-    const connectionId = inserted[0]?.id;
+    let connectionId = existingConn[0]?.id;
+    if (!connectionId) {
+      const inserted = (await sql`
+        INSERT INTO connections (
+          organization_id, connector_key, display_name, status,
+          auth_profile_id, app_auth_profile_id, config, created_by, visibility
+        ) VALUES (
+          ${organizationId}, ${connectorKey}, ${metadata.name}, 'active',
+          NULL, NULL, NULL, ${userId}, 'private'
+        )
+        RETURNING id
+      `) as unknown as Array<{ id: number }>;
+      connectionId = inserted[0]?.id;
+    }
     if (!connectionId) return;
 
-    // 5. Create the first feed with default config.
+    // 4. Ensure the first feed exists and is due at least once.
     const feedsSchema = metadata.feeds as Record<string, { configSchema?: unknown }> | null;
     const firstFeedKey = feedsSchema ? Object.keys(feedsSchema)[0] : null;
     if (!firstFeedKey) return;
 
-    await sql`
-      INSERT INTO feeds (
-        organization_id, connection_id, feed_key, display_name, status, config, next_run_at
-      ) VALUES (
-        ${organizationId}, ${connectionId}, ${firstFeedKey},
-        ${metadata.name}, 'active', NULL, NOW()
-      )
-    `;
+    const existingFeed = (await sql`
+      SELECT id FROM feeds
+      WHERE connection_id = ${connectionId}
+        AND feed_key = ${firstFeedKey}
+        AND deleted_at IS NULL
+      LIMIT 1
+    `) as unknown as Array<{ id: number }>;
+
+    if (existingFeed[0]?.id) {
+      await sql`
+        UPDATE feeds
+        SET next_run_at = COALESCE(next_run_at, NOW()),
+            updated_at = current_timestamp
+        WHERE id = ${existingFeed[0].id}
+      `;
+    } else {
+      await sql`
+        INSERT INTO feeds (
+          organization_id, connection_id, feed_key, display_name, status, config, next_run_at
+        ) VALUES (
+          ${organizationId}, ${connectionId}, ${firstFeedKey},
+          ${metadata.name}, 'active', NULL, NOW()
+        )
+      `;
+    }
 
     logger.info(
       { userId, cap, connectorKey, organizationId, connectionId },
@@ -230,22 +281,11 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     : [''].concat(advertisedCapabilities);
 
   // Device-worker registry: upsert device_workers row for user-scoped workers
-  // so /api/devices can enumerate them. Also auto-wire connectors for any
-  // newly advertised capabilities. Best-effort — never fail the poll.
+  // so /api/devices can enumerate them. Also ensure advertised capability
+  // connectors are fully wired. Best-effort — never fail the poll.
   const workerUserId = c.var.workerUserId;
   if (workerUserId) {
     try {
-      // Fetch the previous capabilities so we can diff for new ones.
-      const prevRows = (await sql`
-        SELECT capabilities FROM device_workers
-        WHERE user_id = ${workerUserId} AND worker_id = ${worker_id}
-        LIMIT 1
-      `) as unknown as Array<{ capabilities: string[] }>;
-      const prevCaps: string[] = Array.isArray(prevRows[0]?.capabilities)
-        ? (prevRows[0].capabilities as string[])
-        : [];
-
-      // Normalize incoming capabilities to a string[].
       const incomingCaps = advertisedCapabilities;
 
       await sql`
@@ -262,13 +302,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           last_seen_at = now()
       `;
 
-      // Auto-wire connectors for newly seen capabilities.
-      const prevCapsSet = new Set(prevCaps);
-      const newCaps = incomingCaps.filter((cap) => !prevCapsSet.has(cap));
-      for (const cap of newCaps) {
-        // Fire-and-forget; failures are logged inside autoWireCapabilityConnector.
-        autoWireCapabilityConnector(workerUserId, cap).catch(() => undefined);
-      }
+      // Ensure connectors for advertised capabilities are fully wired. The
+      // helper has a cheap fast path, so this also repairs older partial state
+      // (e.g. connection/feed exists but connector_versions is missing).
+      await Promise.allSettled(
+        incomingCaps.map((cap) => autoWireCapabilityConnector(workerUserId, cap))
+      );
     } catch (err) {
       logger.error(
         { worker_id, err: errorMessage(err) },
