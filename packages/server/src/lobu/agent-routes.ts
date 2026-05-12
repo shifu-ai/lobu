@@ -6,7 +6,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { SkillConfig } from '@lobu/core';
+import type { AuthProfile, SkillConfig } from '@lobu/core';
 import { Hono } from 'hono';
 import { mcpAuth } from '../auth/middleware';
 import { getDb } from '../db/client';
@@ -455,12 +455,57 @@ routes.delete('/:agentId', mcpAuth, async (c) => {
 
 // ── Get agent config (settings) ──────────────────────────────────────────────
 
+/** Strip resolved secrets before sending an auth profile to the client. */
+function scrubAuthProfile(profile: {
+  id: string;
+  provider: string;
+  model: string;
+  label: string;
+  authType: string;
+  createdAt: number;
+  metadata?: { email?: string; expiresAt?: number; accountId?: string } | Record<string, unknown>;
+}) {
+  const meta = profile.metadata as
+    | { email?: string; expiresAt?: number; accountId?: string }
+    | undefined;
+  return {
+    id: profile.id,
+    provider: profile.provider,
+    model: profile.model,
+    label: profile.label,
+    authType: profile.authType,
+    createdAt: profile.createdAt,
+    ...(meta?.email || meta?.expiresAt || meta?.accountId
+      ? {
+          metadata: {
+            ...(meta.email ? { email: meta.email } : {}),
+            ...(meta.expiresAt ? { expiresAt: meta.expiresAt } : {}),
+            ...(meta.accountId ? { accountId: meta.accountId } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 routes.get('/:agentId/config', mcpAuth, async (c) => {
   return withOrg(c, async () => {
     const { agentId } = c.req.param();
     const settings = await configStore.getSettings(agentId);
     if (!settings) return c.json({ error: 'Agent not found' }, 404);
-    return c.json(settings);
+
+    // Provider credentials live in user_auth_profiles (keyed by userId+agentId),
+    // not in the agents settings row — surface them here, scrubbed of secrets,
+    // so the providers editor knows which providers are already connected.
+    const user = c.get('user');
+    const authProfilesManager = getLobuCoreServices()?.getAuthProfilesManager?.();
+    const authProfiles =
+      user?.id && authProfilesManager
+        ? (await authProfilesManager.listProfiles(agentId, user.id).catch(() => [])).map(
+            scrubAuthProfile
+          )
+        : [];
+
+    return c.json({ ...settings, authProfiles });
   });
 });
 
@@ -659,13 +704,80 @@ routes.patch('/:agentId/config', mcpAuth, async (c) => {
   if (denied) return denied;
   return withOrg(c, async () => {
     const { agentId } = c.req.param();
-    const updates = await c.req.json();
+    // `authProfiles` is not a column on `agents` — it's persisted per-user via
+    // AuthProfilesManager (user_auth_profiles). Pull it out so it doesn't get
+    // silently dropped by configStore.updateSettings.
+    const { authProfiles, ...settingsUpdates } = (await c.req.json()) as Record<string, unknown> & {
+      authProfiles?: Array<Record<string, unknown>>;
+    };
 
     if (!(await configStore.hasAgent(agentId))) {
       return c.json({ error: 'Agent not found' }, 404);
     }
 
-    await configStore.updateSettings(agentId, updates);
+    await configStore.updateSettings(agentId, settingsUpdates);
+
+    if (Array.isArray(authProfiles)) {
+      const user = c.get('user');
+      const authProfilesManager = getLobuCoreServices()?.getAuthProfilesManager?.();
+      if (user?.id && authProfilesManager) {
+        const installedOrder = Array.isArray(settingsUpdates.installedProviders)
+          ? (settingsUpdates.installedProviders as Array<{ providerId?: string }>)
+              .map((p) => p.providerId)
+              .filter((id): id is string => typeof id === 'string')
+          : [];
+        const primaryProvider =
+          installedOrder[0] ?? (authProfiles[0]?.provider as string | undefined);
+
+        // Drop credentials for providers that were removed from the editor.
+        const keepProviders = new Set(
+          authProfiles
+            .map((p) => p.provider)
+            .filter((p): p is string => typeof p === 'string')
+        );
+        for (const providerId of installedOrder.length ? installedOrder : keepProviders) {
+          keepProviders.add(providerId);
+        }
+        const existingProfiles: AuthProfile[] = await authProfilesManager
+          .listProfiles(agentId, user.id)
+          .catch(() => []);
+        for (const provider of new Set(existingProfiles.map((p) => p.provider))) {
+          if (!keepProviders.has(provider)) {
+            await authProfilesManager
+              .deleteProviderProfiles(agentId, provider, { userId: user.id })
+              .catch(() => undefined);
+          }
+        }
+
+        // Persist any profile that carries a freshly-entered credential. Rows
+        // submitted without one keep whatever is already stored.
+        for (const profile of authProfiles) {
+          const provider = typeof profile.provider === 'string' ? profile.provider : '';
+          const credential =
+            typeof profile.credential === 'string' ? profile.credential.trim() : '';
+          if (!provider || !credential) continue;
+          const label =
+            typeof profile.label === 'string' && profile.label.trim()
+              ? profile.label.trim()
+              : provider;
+          await authProfilesManager.upsertProfile({
+            agentId,
+            userId: user.id,
+            provider,
+            credential,
+            authType:
+              profile.authType === 'oauth' || profile.authType === 'device-code'
+                ? profile.authType
+                : 'api-key',
+            label,
+            ...(typeof profile.model === 'string' ? { model: profile.model } : {}),
+            ...(typeof profile.id === 'string' ? { id: profile.id } : {}),
+            makePrimary: provider === primaryProvider,
+          });
+        }
+      }
+    }
+
     return c.json({ success: true });
   });
 });
