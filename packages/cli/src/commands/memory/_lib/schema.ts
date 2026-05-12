@@ -13,8 +13,9 @@
 
 import { AutoCreateWhenRule } from "@lobu/connector-sdk";
 import { TypeCompiler } from "@sinclair/typebox/compiler";
+import { parseAllDocuments } from "yaml";
 
-export const CURRENT_SCHEMA_VERSION = 1;
+export const CURRENT_SCHEMA_VERSION = 2;
 
 export type ModelType = "entity" | "relationship" | "watcher";
 export type DataRecordType = "entity" | "relationship";
@@ -69,6 +70,12 @@ export interface WatcherSchema {
 }
 
 export type ModelSchema = EntitySchema | RelationshipSchema | WatcherSchema;
+
+export interface ExpandedModelDefinition {
+  data: Record<string, unknown>;
+  file: string;
+  modelType: ModelType;
+}
 
 // ── Seed data files ─────────────────────────────────────────────────
 
@@ -157,6 +164,66 @@ function requireObject(
   return true;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function normalizeModelType(value: unknown): ModelType | null {
+  switch (value) {
+    case "entity":
+      return "entity";
+    case "relationship":
+      return "relationship";
+    case "watcher":
+      return "watcher";
+    default:
+      return null;
+  }
+}
+
+/**
+ * Parse a models YAML file into one entry per document. Handles multi-document
+ * (`---`-separated) streams, surfaces YAML syntax errors with file context, and
+ * skips empty / comments-only documents (which `yaml` parses as `null`) instead
+ * of treating them as malformed model files.
+ */
+export function parseModelYamlFile(
+  raw: string,
+  file: string
+): {
+  documents: Array<{ data: Record<string, unknown>; file: string }>;
+  errors: ValidationError[];
+} {
+  const errors: ValidationError[] = [];
+  const documents: Array<{ data: Record<string, unknown>; file: string }> = [];
+  const parsed = parseAllDocuments(raw);
+  parsed.forEach((doc, idx) => {
+    const documentFile = parsed.length > 1 ? `${file}#${idx + 1}` : file;
+    if (doc.errors.length > 0) {
+      for (const err of doc.errors) {
+        errors.push({
+          file: documentFile,
+          field: "yaml",
+          message: err.message,
+        });
+      }
+      return;
+    }
+    const json = doc.toJSON();
+    if (json === null || json === undefined) return;
+    if (!isRecord(json)) {
+      errors.push({
+        file: documentFile,
+        field: "root",
+        message: "model file must contain a YAML object",
+      });
+      return;
+    }
+    documents.push({ data: json, file: documentFile });
+  });
+  return { documents, errors };
+}
+
 // Single source of truth for auto_create_when shape lives in
 // `@lobu/connector-sdk`'s `AutoCreateWhenRule` schema. Compile once at module
 // load and surface every TypeBox error as a ValidationError.
@@ -188,6 +255,90 @@ function validateAutoCreateWhenRules(
   });
 }
 
+function expandModelSection(
+  parent: Record<string, unknown>,
+  file: string,
+  key: string,
+  modelType: ModelType,
+  errors: ValidationError[]
+): ExpandedModelDefinition[] {
+  const value = parent[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    errors.push({
+      file,
+      field: key,
+      message: `"${key}" must be an array`,
+    });
+    return [];
+  }
+  return value.flatMap((entry, idx) => {
+    const entryFile = `${file}:${key}[${idx}]`;
+    if (!isRecord(entry)) {
+      errors.push({
+        file: entryFile,
+        field: key,
+        message: `each "${key}" entry must be an object`,
+      });
+      return [];
+    }
+    const data = { ...entry, version: parent.version, type: modelType };
+    return [{ data, file: entryFile, modelType }];
+  });
+}
+
+/**
+ * Expand one parsed models YAML document into individual model definitions.
+ * Model files use a dbt-style `version: 2` bundle with top-level
+ * `entities`, `relationships`, and `watchers` arrays.
+ */
+export function expandModelDefinition(
+  parsed: unknown,
+  file: string
+): { models: ExpandedModelDefinition[]; errors: ValidationError[] } {
+  const errors: ValidationError[] = [];
+  if (!isRecord(parsed)) {
+    errors.push({
+      file,
+      field: "root",
+      message: "model file must contain a YAML object",
+    });
+    return { models: [], errors };
+  }
+
+  checkVersion(parsed, file, errors);
+  if (parsed.version !== CURRENT_SCHEMA_VERSION) {
+    errors.push({
+      file,
+      field: "version",
+      message: `model bundle files must declare version: ${CURRENT_SCHEMA_VERSION}`,
+    });
+  }
+
+  const models = [
+    ...expandModelSection(parsed, file, "entities", "entity", errors),
+    ...expandModelSection(
+      parsed,
+      file,
+      "relationships",
+      "relationship",
+      errors
+    ),
+    ...expandModelSection(parsed, file, "watchers", "watcher", errors),
+  ];
+
+  if (models.length === 0 && errors.length === 0) {
+    errors.push({
+      file,
+      field: "entities",
+      message:
+        "model bundle file must declare at least one of: entities, relationships, watchers",
+    });
+  }
+
+  return { models, errors };
+}
+
 export function validateModel(
   parsed: Record<string, unknown>,
   file: string
@@ -195,11 +346,8 @@ export function validateModel(
   const errors: ValidationError[] = [];
   checkVersion(parsed, file, errors);
 
-  const modelType = parsed.type as string | undefined;
-  if (
-    !modelType ||
-    !["entity", "relationship", "watcher"].includes(modelType)
-  ) {
+  const modelType = normalizeModelType(parsed.type);
+  if (!modelType) {
     errors.push({
       file,
       field: "type",
@@ -207,6 +355,8 @@ export function validateModel(
     });
     return errors;
   }
+
+  parsed.type = modelType;
 
   requireString(parsed, "slug", file, errors);
   requireString(parsed, "name", file, errors);

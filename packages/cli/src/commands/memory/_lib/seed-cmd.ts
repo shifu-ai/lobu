@@ -18,6 +18,8 @@ import {
   type ValidationError as SchemaError,
   type SeedEntitySchema,
   type SeedRelationshipSchema,
+  expandModelDefinition,
+  parseModelYamlFile,
   validateDataRecord,
   validateModel,
 } from "./schema.js";
@@ -51,20 +53,28 @@ interface ProjectLayout {
   description?: string;
 }
 
-function readYamlFiles(
-  dir: string
-): Array<{ data: Record<string, unknown>; file: string }> {
+function readYamlModelFilesRecursive(
+  dir: string,
+  prefix = ""
+): Array<{ raw: string; file: string }> {
   if (!existsSync(dir)) return [];
-  return readdirSync(dir)
-    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
-    .sort()
-    .map((f) => ({
-      data: parseYaml(readFileSync(resolve(dir, f), "utf8")) as Record<
-        string,
-        unknown
-      >,
-      file: basename(f),
-    }));
+
+  return readdirSync(dir, { withFileTypes: true })
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .flatMap((entry) => {
+      const relPath = prefix ? join(prefix, entry.name) : entry.name;
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        return readYamlModelFilesRecursive(fullPath, relPath);
+      }
+      if (
+        !entry.isFile() ||
+        (!entry.name.endsWith(".yaml") && !entry.name.endsWith(".yml"))
+      ) {
+        return [];
+      }
+      return [{ raw: readFileSync(fullPath, "utf8"), file: relPath }];
+    });
 }
 
 function readYamlFilesRecursive(
@@ -191,18 +201,33 @@ function resolveProjectLayout(inputPath?: string): ProjectLayout {
 }
 
 /**
- * Load models from the `models/` directory (type in each file).
+ * Load models from every YAML file under the `models/` directory.
  */
 function loadModels(modelsPath: string): ParsedModel[] {
-  const entries = readYamlFiles(modelsPath);
-  for (const { data, file } of entries) {
-    checkErrors(validateModel(data, file));
+  const models: ParsedModel[] = [];
+  const errors: SchemaError[] = [];
+  for (const { raw, file } of readYamlModelFilesRecursive(modelsPath)) {
+    const { documents, errors: parseErrors } = parseModelYamlFile(raw, file);
+    errors.push(...parseErrors);
+    for (const { data: document, file: documentFile } of documents) {
+      const expanded = expandModelDefinition(document, documentFile);
+      errors.push(...expanded.errors);
+      for (const model of expanded.models) {
+        const modelErrors = validateModel(model.data, model.file);
+        if (modelErrors.length > 0) {
+          errors.push(...modelErrors);
+        } else {
+          models.push({
+            data: model.data,
+            file: model.file,
+            modelType: model.modelType,
+          });
+        }
+      }
+    }
   }
-  return entries.map(({ data, file }) => ({
-    data,
-    file,
-    modelType: data.type as ModelType,
-  }));
+  checkErrors(errors);
+  return models;
 }
 
 function loadDataRecords(dataPath: string): ParsedDataRecord[] {
