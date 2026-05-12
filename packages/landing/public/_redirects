@@ -1,0 +1,10 @@
+/skills /#connect-your-data 301
+/skills/ /#connect-your-data 301
+/skills/for/:useCase /for/:useCase 301
+/skills/for/:useCase/ /for/:useCase 301
+/memory /#model-the-world 301
+/memory/ /#model-the-world 301
+/memory/for/:useCase /for/:useCase 301
+/memory/for/:useCase/ /for/:useCase 301
+/pricing /#get-started 301
+/pricing/ /#get-started 301

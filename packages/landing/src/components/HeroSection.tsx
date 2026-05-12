@@ -3,26 +3,24 @@ import {
   getLandingPrompt,
   getLandingUseCaseShowcase,
   getOwlettoUrl,
-  landingUseCaseGroupedOptions,
   type SurfaceHeroCopy,
 } from "../use-case-showcases";
 import { CopyPromptButton } from "./CopyPromptButton";
 import { HighlightedText } from "./HighlightedText";
-import { ScopedUseCaseTabs } from "./ScopedUseCaseTabs";
+
+const GITHUB_URL = "https://github.com/lobu-ai/lobu";
 
 const GitHubIcon = () => (
   <svg
-    width="12"
-    height="12"
+    width="14"
+    height="14"
     viewBox="0 0 24 24"
     fill="currentColor"
     aria-hidden="true"
   >
-    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
+    <path d="M12 .5C5.65.5.5 5.65.5 12A11.5 11.5 0 0 0 8.36 22.1c.58.1.79-.25.79-.56v-1.95c-3.18.69-3.85-1.35-3.85-1.35-.52-1.31-1.27-1.66-1.27-1.66-1.04-.71.08-.7.08-.7 1.15.08 1.75 1.18 1.75 1.18 1.02 1.76 2.68 1.25 3.34.96.1-.74.4-1.25.72-1.54-2.54-.29-5.2-1.27-5.2-5.64 0-1.25.45-2.28 1.18-3.08-.12-.29-.51-1.47.11-3.06 0 0 .96-.31 3.15 1.18a10.9 10.9 0 0 1 5.74 0c2.18-1.49 3.14-1.18 3.14-1.18.62 1.59.23 2.77.11 3.06.74.8 1.18 1.83 1.18 3.08 0 4.38-2.67 5.35-5.22 5.63.41.36.77 1.08.77 2.18v3.24c0 .31.21.66.8.55A11.5 11.5 0 0 0 23.5 12C23.5 5.65 18.35.5 12 .5Z" />
   </svg>
 );
-
-const GITHUB_URL = "https://github.com/lobu-ai/lobu";
 
 export function HeroSection(props: {
   activeUseCaseId?: LandingUseCaseId;
@@ -35,29 +33,19 @@ export function HeroSection(props: {
   const owlettoUrl = getOwlettoUrl(
     props.useScopedOwlettoUrl ? activeUseCase.id : undefined
   );
-  const primaryCtaLabel = props.heroCopy
-    ? `Try the ${activeUseCase.label} demo`
-    : "Try it live";
 
   return (
-    <section class="pt-24 pb-4 px-8 relative">
-      <div class="max-w-5xl mx-auto text-center relative">
+    <section class="relative px-4 pb-8 pt-32 sm:px-8 sm:pb-12 sm:pt-36">
+      <div class="mx-auto max-w-5xl text-center">
         <a
-          href={GITHUB_URL}
-          target="_blank"
-          rel="noopener noreferrer"
-          class="hero-rise hero-rise-1 inline-flex items-center gap-2 text-xs font-semibold tracking-wider uppercase px-3 py-1 mb-5 rounded-full transition-all hover:opacity-80"
-          style={{
-            color: "var(--color-page-text-muted)",
-            border: "1px solid var(--color-page-border)",
-          }}
+          href="/#connect-your-data"
+          class="hero-rise hero-rise-1 inline-flex items-center gap-2 rounded-full border border-[var(--color-page-border)] bg-white px-3 py-1.5 text-xs font-medium text-[var(--color-page-text-muted)] shadow-sm transition-colors hover:text-[var(--color-page-text)]"
         >
-          Open source · Self-hosted
+          Open source · Self-hosted · Now with app-first memory
+          <span aria-hidden="true">→</span>
         </a>
-        <h1
-          class="hero-rise hero-rise-2 text-4xl sm:text-5xl font-bold tracking-tight leading-[1.1] mb-5"
-          style={{ color: "var(--color-page-text)" }}
-        >
+
+        <h1 class="hero-rise hero-rise-2 mx-auto mt-7 max-w-[72rem] text-5xl font-bold leading-[0.98] tracking-[-0.075em] text-[var(--color-page-text)] sm:text-6xl lg:text-[4.9rem]">
           <HighlightedText
             text="The agent that never forgets."
             highlight="never forgets"
@@ -68,80 +56,46 @@ export function HeroSection(props: {
             highlight="never waits"
           />
         </h1>
-        {props.heroCopy ? (
-          <p
-            class="hero-rise hero-rise-3 text-lg mx-auto mb-4 leading-relaxed max-w-3xl"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            {props.heroCopy.description}
-          </p>
-        ) : (
-          <p
-            class="hero-rise hero-rise-3 text-lg mx-auto mb-4 leading-relaxed max-w-3xl"
-            style={{ color: "var(--color-page-text-muted)" }}
-          >
-            Ingests any data, connects any tool, and ships in your chat.
-            <br />
-            Sandboxed on the OpenClaw runtime and fully self-hostable.
-          </p>
-        )}
-        {/* CTA buttons */}
-        <div class="hero-rise hero-rise-4 relative z-20 flex flex-wrap gap-3 mb-6 justify-center items-center">
+
+        <p class="hero-rise hero-rise-3 mx-auto mt-6 max-w-2xl text-base leading-8 text-[var(--color-page-text-muted)] sm:text-xl sm:leading-9">
+          {props.heroCopy?.description ?? (
+            <>
+              Ingest any data, connect any tool, define durable goals, and ship
+              the same agent across Slack, Telegram, WhatsApp, REST, and MCP.
+            </>
+          )}
+        </p>
+
+        <div class="hero-rise hero-rise-4 relative z-20 mt-8 flex flex-wrap items-center justify-center gap-3">
           <a
             href={owlettoUrl}
             target="_blank"
             rel="noopener noreferrer"
-            class="inline-flex items-center gap-2 text-sm font-semibold px-5 py-2.5 rounded-lg transition-all hover:opacity-90"
-            style={{
-              backgroundColor: "var(--color-page-text)",
-              color: "var(--color-page-bg)",
-            }}
+            class="inline-flex items-center gap-2 rounded-xl bg-[var(--color-page-text)] px-5 py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90"
           >
-            {primaryCtaLabel}
+            Start for free
           </a>
-          {props.heroCopy ? (
-            <a
-              href={`${GITHUB_URL}/tree/main/examples/${activeUseCase.examplePath}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              class="inline-flex items-center gap-2 text-sm font-medium px-5 py-2.5 rounded-lg transition-all hover:opacity-90"
-              style={{
-                color: "var(--color-page-text-muted)",
-                border: "1px solid var(--color-page-border)",
-              }}
-            >
-              <GitHubIcon />
-              View source on GitHub
-            </a>
-          ) : (
-            <CopyPromptButton
-              prompt={getLandingPrompt(activeUseCase)}
-              label="Copy prompt to your agent"
-              triggerLabel="Integrate"
-              supportedClients={["chatgpt", "openclaw", "claude", "mcp-client"]}
-              supportedClientHrefForId={(clientId) => {
-                if (clientId === "mcp-client") {
-                  return "/getting-started/memory/";
-                }
+          <a
+            href={GITHUB_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            class="inline-flex items-center gap-2 rounded-xl border border-[var(--color-page-border-active)] bg-white px-5 py-3 text-sm font-medium text-[var(--color-page-text)] transition-colors hover:bg-[var(--color-page-surface)]"
+          >
+            <GitHubIcon />
+            View on GitHub
+          </a>
+          <CopyPromptButton
+            prompt={getLandingPrompt(activeUseCase)}
+            label="Copy prompt to your agent"
+            triggerLabel="Integrate"
+            supportedClients={["chatgpt", "openclaw", "claude", "mcp-client"]}
+            supportedClientHrefForId={(clientId) => {
+              if (clientId === "mcp-client") {
+                return "/getting-started/memory/";
+              }
 
-                return `/connect-from/${clientId}/for/${activeUseCase.id}/`;
-              }}
-            />
-          )}
-        </div>
-
-        <div class="hero-rise hero-rise-5 mt-8 mb-6">
-          <ScopedUseCaseTabs
-            groups={landingUseCaseGroupedOptions}
-            activeId={activeUseCase.id}
-            onSelect={
-              props.linkTabsToCampaigns
-                ? undefined
-                : (id) => props.onActiveUseCaseChange?.(id as LandingUseCaseId)
-            }
-            hrefForId={
-              props.linkTabsToCampaigns ? (id) => `/for/${id}` : undefined
-            }
+              return `/connect-from/${clientId}/for/${activeUseCase.id}/`;
+            }}
           />
         </div>
       </div>

@@ -1,15 +1,16 @@
-import { useState } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 import type { LandingUseCaseId } from "../use-case-definitions";
 import {
   DEFAULT_LANDING_USE_CASE_ID,
+  getLandingUseCaseShowcase,
   type SurfaceHeroCopy,
 } from "../use-case-showcases";
-import { ArchitectureSection } from "./ArchitectureSection";
-import { BenchmarkSection } from "./BenchmarkSection";
+import { AgentScrollStory } from "./AgentScrollStory";
 import { CTA } from "./CTA";
-import { DemoSection } from "./DemoSection";
 import { HeroSection } from "./HeroSection";
-import { LatestBlogPosts, type LatestBlogPost } from "./LatestBlogPosts";
+import type { LatestBlogPost } from "./LatestBlogPosts";
+import { MemoryConfigSection } from "./MemoryConfigSection";
+import { PlatformStory } from "./PlatformStory";
 
 export function LandingPage(props: {
   defaultUseCaseId?: LandingUseCaseId;
@@ -17,8 +18,12 @@ export function LandingPage(props: {
   heroCopy?: SurfaceHeroCopy;
   latestPosts?: LatestBlogPost[];
 }) {
-  const [activeUseCaseId, setActiveUseCaseId] = useState<LandingUseCaseId>(
+  const [activeUseCaseId] = useState<LandingUseCaseId>(
     props.defaultUseCaseId ?? DEFAULT_LANDING_USE_CASE_ID
+  );
+  const activeUseCase = useMemo(
+    () => getLandingUseCaseShowcase(activeUseCaseId),
+    [activeUseCaseId]
   );
   const useScopedOwlettoUrl = Boolean(props.heroCopy);
 
@@ -26,29 +31,17 @@ export function LandingPage(props: {
     <>
       <HeroSection
         activeUseCaseId={activeUseCaseId}
-        onActiveUseCaseChange={setActiveUseCaseId}
         linkTabsToCampaigns={props.linkTabsToCampaigns}
         heroCopy={props.heroCopy}
         useScopedOwlettoUrl={useScopedOwlettoUrl}
       />
-      <DemoSection
-        activeUseCaseId={activeUseCaseId}
-        onActiveUseCaseChange={setActiveUseCaseId}
-        showTabs={false}
-        linkTabsToCampaigns={props.linkTabsToCampaigns}
-      />
-      <div class="hidden md:block">
-        <div class="section-divider" />
-        <ArchitectureSection activeUseCaseId={activeUseCaseId} />
-        <div class="section-divider" />
-      </div>
-      <BenchmarkSection />
-      {props.latestPosts?.length ? (
-        <>
-          <div class="section-divider" />
-          <LatestBlogPosts posts={props.latestPosts} />
-        </>
-      ) : null}
+
+      <PlatformStory activeUseCaseId={activeUseCaseId} />
+
+      <AgentScrollStory activeUseCase={activeUseCase} />
+
+      <MemoryConfigSection activeUseCase={activeUseCase} />
+
       <CTA
         activeUseCaseId={activeUseCaseId}
         useScopedOwlettoUrl={useScopedOwlettoUrl}

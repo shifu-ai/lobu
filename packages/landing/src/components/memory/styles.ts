@@ -5,8 +5,8 @@ export const cardBorderSubtle = "rgba(62, 77, 97, 0.45)";
 export const cardBorderFaint = "rgba(62, 77, 97, 0.42)";
 export const innerCardBg = "rgba(255,255,255,0.03)";
 export const deepBg = "rgba(5, 7, 10, 0.88)";
-export const textColor = "var(--color-page-text)";
-export const textMuted = "var(--color-page-text-muted)";
+export const textColor = "rgb(250, 250, 250)";
+export const textMuted = "rgba(250, 250, 250, 0.68)";
 export const darkBase = "rgb(8, 10, 14)";
 
 // Accent colors

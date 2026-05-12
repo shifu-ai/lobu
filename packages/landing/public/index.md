@@ -1,6 +1,6 @@
 # Lobu
 
-> Open-source platform for deploying persistent, sandboxed AI agents on Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, and REST API. Self-hosted as a single Node process (bring your own Postgres + Redis) with per-agent MCP tools, skills, and memory.
+> Open-source platform for deploying persistent, sandboxed AI agents on Slack, Telegram, WhatsApp, Discord, Microsoft Teams, Google Chat, and REST API. Self-hosted as a single Node process (bring your own Postgres) with per-agent MCP tools, skills, and memory.
 
 ## What Lobu does
 
@@ -15,12 +15,12 @@ The orgless MCP endpoint at [https://lobu.ai/mcp](https://lobu.ai/mcp) exposes `
 - [Home](https://lobu.ai/): Product overview and architecture
 - [Getting started](https://lobu.ai/getting-started/): Install and run your first agent
 - [Comparison](https://lobu.ai/getting-started/comparison/): How Lobu compares to other agent platforms
-- [Pricing](https://lobu.ai/pricing/): Free open source; paid support available
+- [Start building](https://lobu.ai/#get-started): Free open source; paid support available
 
 ## Core concepts
 
-- [Skills](https://lobu.ai/skills/): Reusable agent capabilities via SKILL.md
-- [Memory](https://lobu.ai/memory/): Persistent agent memory powered by Owletto
+- [Connect your data](https://lobu.ai/#connect-your-data): Reusable agent capabilities via SKILL.md, MCP, and network policy
+- [Model the world](https://lobu.ai/#model-the-world): Persistent agent memory powered by Owletto
 - [Architecture](https://lobu.ai/guides/architecture/): Gateway + worker + orchestration overview
 - [Security](https://lobu.ai/guides/security/): Sandboxing, network policy, credential isolation
 - [Tool policy](https://lobu.ai/guides/tool-policy/): Approval model for destructive MCP tools

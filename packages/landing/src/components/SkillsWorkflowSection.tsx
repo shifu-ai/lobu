@@ -118,7 +118,7 @@ function getInitLinesForUseCase(useCase: LandingUseCaseShowcase): TermLine[] {
         },
         {
           label: "Owletto",
-          href: `/memory/for/${useCase.id}`,
+          href: `/for/${useCase.id}/#model-the-world`,
           selected: config.memory === "owletto",
         },
       ],
@@ -475,13 +475,13 @@ export function SkillsWorkflowSection({
                 >
                   Start with the{" "}
                   <a
-                    href="/getting-started/skills/"
+                    href="/#connect-your-data"
                     class="underline decoration-dotted underline-offset-2 hover:opacity-80"
                     style={{ color: "var(--color-tg-accent)" }}
                   >
-                    Lobu skills docs
+                    Lobu platform section
                   </a>{" "}
-                  and paste the prompt on the right into your agent.
+                  or the skills docs, then paste the prompt on the right into your agent.
                 </p>
               </div>
               <PromptWindow

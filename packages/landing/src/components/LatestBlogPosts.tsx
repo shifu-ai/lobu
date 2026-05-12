@@ -34,12 +34,8 @@ export function LatestBlogPosts({ posts }: { posts: LatestBlogPost[] }) {
           <a
             key={post.id}
             href={post.href}
-            class="rounded-[1.5rem] p-5 border transition-transform hover:-translate-y-0.5"
-            style={{
-              background:
-                "linear-gradient(180deg, rgba(21,24,29,0.92) 0%, rgba(13,16,20,0.82) 100%)",
-              borderColor: "rgba(62, 77, 97, 0.55)",
-            }}
+            class="rounded-[1.5rem] border bg-white p-5 shadow-[0_16px_45px_rgba(16,24,40,0.05)] transition-transform hover:-translate-y-0.5"
+            style={{ borderColor: "var(--color-page-border)" }}
           >
             <div class="flex items-center justify-between gap-3 mb-5">
               {post.tag ? (

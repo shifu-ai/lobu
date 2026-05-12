@@ -9,84 +9,47 @@ export function CTA(props: {
   const owlettoUrl = getOwlettoUrl(
     props.useScopedOwlettoUrl ? props.activeUseCaseId : undefined
   );
-  const skillsHref = props.activeUseCaseId
-    ? `/skills/for/${props.activeUseCaseId}`
-    : "/skills";
 
   return (
-    <section class="py-14 px-8 text-center">
-      <div class="max-w-2xl mx-auto">
-        <h2
-          class="text-2xl sm:text-3xl font-bold mb-3 tracking-tight"
-          style={{ color: "var(--color-page-text)" }}
-        >
-          Two ways to see it run.
+    <section id="get-started" class="px-4 py-20 text-center sm:px-8">
+      <div class="mx-auto max-w-2xl">
+        <div class="mb-4 text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-page-text-muted)]">
+          Start building
+        </div>
+        <h2 class="mb-4 text-3xl font-semibold tracking-[-0.055em] text-[var(--color-page-text)] sm:text-4xl">
+          Build the agent your business actually needs.
         </h2>
-        <p
-          class="text-sm mb-8"
-          style={{ color: "var(--color-page-text-muted)" }}
-        >
-          Click through a live workspace, or book 20 minutes with the founder.
+        <p class="mx-auto mb-8 max-w-xl text-sm leading-7 text-[var(--color-page-text-muted)] sm:text-base">
+          Start from the live workspace, copy the implementation prompt into your coding agent, or book 20 minutes to walk through the architecture.
         </p>
-        <div class="flex flex-wrap justify-center gap-3 mb-8">
+        <div class="mb-8 flex flex-wrap justify-center gap-3">
           <a
             href={owlettoUrl}
-            class="inline-flex items-center gap-2 text-sm font-semibold px-6 py-3 rounded-lg transition-all hover:opacity-90"
-            style={{
-              backgroundColor: "var(--color-page-text)",
-              color: "var(--color-page-bg)",
-            }}
+            class="inline-flex items-center gap-2 rounded-xl bg-[var(--color-page-text)] px-6 py-3 text-sm font-semibold text-white transition-opacity hover:opacity-90"
           >
-            Open live workspace
+            Start for free
           </a>
-          <ScheduleCallButton
-            class="inline-flex items-center gap-2 text-sm font-medium px-6 py-3 rounded-lg transition-all hover:opacity-90"
-            style={{
-              backgroundColor: "var(--color-page-surface)",
-              color: "var(--color-page-text)",
-              border: "1px solid var(--color-page-border-active)",
-            }}
-          >
+          <ScheduleCallButton class="inline-flex items-center gap-2 rounded-xl border border-[var(--color-page-border-active)] bg-white px-6 py-3 text-sm font-medium text-[var(--color-page-text)] transition-colors hover:bg-[var(--color-page-surface)]">
             <ScheduleCallIcon />
             Talk to Founder
           </ScheduleCallButton>
         </div>
 
-        {/* Quick links */}
-        <div
-          class="flex flex-wrap items-center gap-4 text-xs justify-center"
-          style={{ color: "var(--color-page-text-muted)" }}
-        >
-          <a
-            href={skillsHref}
-            class="hover:underline underline-offset-2"
-            style={{ color: "var(--color-tg-accent)" }}
-          >
-            Browse Skills
+        <div class="flex flex-wrap items-center justify-center gap-4 text-xs text-[var(--color-page-text-muted)]">
+          <a href="/#model-the-world" class="hover:text-[var(--color-page-text)]">
+            Model the world
           </a>
-          <span style={{ opacity: 0.3 }}>|</span>
-          <a
-            href="/getting-started/"
-            class="hover:underline underline-offset-2"
-            style={{ color: "var(--color-tg-accent)" }}
-          >
-            Self-host Docs
+          <span class="opacity-30">|</span>
+          <a href="/#connect-your-data" class="hover:text-[var(--color-page-text)]">
+            Connect your data
           </a>
-          <span style={{ opacity: 0.3 }}>|</span>
-          <a
-            href="/platforms/rest-api/"
-            class="hover:underline underline-offset-2"
-            style={{ color: "var(--color-tg-accent)" }}
-          >
+          <span class="opacity-30">|</span>
+          <a href="/getting-started/" class="hover:text-[var(--color-page-text)]">
+            Self-host docs
+          </a>
+          <span class="opacity-30">|</span>
+          <a href="/platforms/rest-api/" class="hover:text-[var(--color-page-text)]">
             Embed
-          </a>
-          <span style={{ opacity: 0.3 }}>|</span>
-          <a
-            href="/getting-started/"
-            class="hover:underline underline-offset-2"
-            style={{ color: "var(--color-tg-accent)" }}
-          >
-            Docs
           </a>
         </div>
       </div>
