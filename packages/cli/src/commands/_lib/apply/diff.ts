@@ -1,14 +1,23 @@
 import type { AgentSettings } from "@lobu/core";
+import { ValidationError } from "../../memory/_lib/errors.js";
 import type {
   RemoteAgent,
+  RemoteAuthProfile,
+  RemoteConnection,
+  RemoteConnectorDefinition,
   RemoteEntityType,
+  RemoteFeed,
   RemotePlatform,
   RemoteRelationshipType,
   RemoteWatcher,
 } from "./client.js";
 import type {
   DesiredAgent,
+  DesiredAuthProfile,
+  DesiredConnection,
+  DesiredConnectorDefinition,
   DesiredEntityType,
+  DesiredFeed,
   DesiredPlatform,
   DesiredRelationshipType,
   DesiredWatcher,
@@ -70,18 +79,65 @@ export interface WatcherDiffRow extends BaseRow {
   changedFields?: string[];
 }
 
+export interface ConnectorDefinitionDiffRow extends BaseRow {
+  kind: "connector-definition";
+  desired?: DesiredConnectorDefinition;
+  /**
+   * Whether the desired connector is currently installed remotely. When the
+   * connector key isn't known up front (a local `.ts` the server hasn't
+   * compiled), this is `false` and the verb is "create" — `install_connector`
+   * is idempotent and reports `updated: false` on apply if nothing changed.
+   */
+  installedRemotely?: boolean;
+}
+
+export interface AuthProfileDiffRow extends BaseRow {
+  kind: "auth-profile";
+  desired?: DesiredAuthProfile;
+  remote?: RemoteAuthProfile;
+  changedFields?: string[];
+  /** True for `oauth_account` / `browser_session` profiles not yet `active`. */
+  needsAuth?: boolean;
+}
+
+export interface ConnectionDiffRow extends BaseRow {
+  kind: "connection";
+  desired?: DesiredConnection;
+  remote?: RemoteConnection;
+  changedFields?: string[];
+}
+
+export interface FeedDiffRow extends BaseRow {
+  kind: "feed";
+  /** Owning connection slug. */
+  connectionSlug: string;
+  desired?: DesiredFeed;
+  remote?: RemoteFeed;
+  changedFields?: string[];
+}
+
 export type DiffRow =
   | AgentDiffRow
   | SettingsDiffRow
   | PlatformDiffRow
   | EntityTypeDiffRow
   | RelationshipTypeDiffRow
-  | WatcherDiffRow;
+  | WatcherDiffRow
+  | ConnectorDefinitionDiffRow
+  | AuthProfileDiffRow
+  | ConnectionDiffRow
+  | FeedDiffRow;
 
 export interface DiffPlan {
   rows: DiffRow[];
   /** Aggregate counters for the summary line. */
   counts: { create: number; update: number; noop: number; drift: number };
+  /**
+   * Informational, non-actionable notes — e.g. "connector X is installed
+   * remotely but not declared locally". Rendered after the plan; never block
+   * apply.
+   */
+  notes: string[];
 }
 
 // ── Equality helpers ───────────────────────────────────────────────────────
@@ -366,6 +422,194 @@ function diffWatcher(
   };
 }
 
+// ── Connectors ─────────────────────────────────────────────────────────────
+
+const INTERACTIVE_AUTH_KINDS: ReadonlySet<string> = new Set([
+  "oauth_account",
+  "browser_session",
+]);
+
+function connectorDefinitionId(def: DesiredConnectorDefinition): string {
+  return def.key ?? def.sourceFile;
+}
+
+function diffConnectorDefinition(
+  desired: DesiredConnectorDefinition,
+  installedKeys: ReadonlySet<string>
+): ConnectorDefinitionDiffRow {
+  const id = connectorDefinitionId(desired);
+  // The CLI can't compare source hashes (the server compiles, and the stored
+  // hash is of the *compiled* output) — so we always emit a "sync" row;
+  // `install_connector` is idempotent and reports `updated:false` on apply
+  // when the code is byte-identical, so this never churns remote state.
+  const installedRemotely = desired.key
+    ? installedKeys.has(desired.key)
+    : false;
+  return {
+    kind: "connector-definition",
+    // "update" (re-push) when already installed; `install_connector` is
+    // idempotent and reports `updated:false` if the code is unchanged.
+    verb: installedRemotely ? "update" : "create",
+    id,
+    desired,
+    installedRemotely,
+  };
+}
+
+function diffAuthProfile(
+  desired: DesiredAuthProfile,
+  remote: RemoteAuthProfile | undefined
+): AuthProfileDiffRow {
+  if (!remote) {
+    return {
+      kind: "auth-profile",
+      verb: "create",
+      id: desired.slug,
+      desired,
+      needsAuth: INTERACTIVE_AUTH_KINDS.has(desired.kind),
+    };
+  }
+  // `connector` / `kind` are immutable — `update_auth_profile` can't change
+  // them, so reusing a slug for a different connector/kind would silently push
+  // credentials into the wrong profile. Hard-stop instead.
+  if (
+    remote.connector_key !== desired.connector ||
+    remote.profile_kind !== desired.kind
+  ) {
+    throw new ValidationError(
+      `${desired.sourceFile}: auth_profile "${desired.slug}" is bound to ${remote.connector_key}/${remote.profile_kind} remotely, but the manifest declares ${desired.connector}/${desired.kind} — delete it manually or use a new slug`
+    );
+  }
+  const changed: string[] = [];
+  if ((desired.name ?? "") !== (remote.display_name ?? "")) {
+    changed.push("name");
+  }
+  // Credentials can't be read back from the server (write-only secrets). For
+  // non-interactive kinds with declared credentials, always re-push them
+  // (idempotent) so rotated secrets propagate — show as a redacted "credentials"
+  // change. Interactive kinds never carry credentials in the manifest.
+  const declaresCredentials =
+    !INTERACTIVE_AUTH_KINDS.has(desired.kind) &&
+    desired.credentials !== undefined &&
+    Object.keys(desired.credentials).length > 0;
+  if (declaresCredentials) changed.push("credentials");
+  const needsAuth =
+    INTERACTIVE_AUTH_KINDS.has(desired.kind) && remote.status !== "active";
+  if (changed.length === 0 && !needsAuth) {
+    return {
+      kind: "auth-profile",
+      verb: "noop",
+      id: desired.slug,
+      desired,
+      remote,
+    };
+  }
+  return {
+    kind: "auth-profile",
+    verb: changed.length > 0 ? "update" : "noop",
+    id: desired.slug,
+    desired,
+    remote,
+    ...(changed.length > 0 ? { changedFields: changed } : {}),
+    ...(needsAuth ? { needsAuth: true } : {}),
+  };
+}
+
+function diffConnection(
+  desired: DesiredConnection,
+  remote: RemoteConnection | undefined
+): ConnectionDiffRow {
+  if (!remote) {
+    return {
+      kind: "connection",
+      verb: "create",
+      id: desired.slug,
+      desired,
+    };
+  }
+  // `connector` is immutable — `update` can't change `connector_key`, so a
+  // slug bound to a different connector remotely must be a hard error, never
+  // an "update" that mutates auth/config on the wrong connector.
+  if (remote.connector_key !== desired.connector) {
+    throw new ValidationError(
+      `${desired.sourceFile}: connection "${desired.slug}" is bound to connector "${remote.connector_key}" remotely, but the manifest declares "${desired.connector}" — delete it manually or use a new slug`
+    );
+  }
+  const changed: string[] = [];
+  if ((desired.name ?? "") !== (remote.display_name ?? "")) {
+    changed.push("name");
+  }
+  if (
+    (desired.authProfileSlug ?? null) !== (remote.auth_profile_slug ?? null)
+  ) {
+    changed.push("auth");
+  }
+  if (
+    (desired.appAuthProfileSlug ?? null) !==
+    (remote.app_auth_profile_slug ?? null)
+  ) {
+    changed.push("app_auth");
+  }
+  if (!deepEqual(desired.config ?? {}, remote.config ?? {})) {
+    changed.push("config");
+  }
+  if (changed.length === 0) {
+    return {
+      kind: "connection",
+      verb: "noop",
+      id: desired.slug,
+      desired,
+      remote,
+    };
+  }
+  return {
+    kind: "connection",
+    verb: "update",
+    id: desired.slug,
+    desired,
+    remote,
+    changedFields: changed,
+  };
+}
+
+function diffFeed(
+  connectionSlug: string,
+  desired: DesiredFeed,
+  remote: RemoteFeed | undefined
+): FeedDiffRow {
+  const id = `${connectionSlug}/${desired.feedKey}`;
+  if (!remote) {
+    return {
+      kind: "feed",
+      verb: "create",
+      id,
+      connectionSlug,
+      desired,
+    };
+  }
+  const changed: string[] = [];
+  if ((desired.name ?? "") !== (remote.display_name ?? ""))
+    changed.push("name");
+  if ((desired.schedule ?? null) !== (remote.schedule ?? null)) {
+    changed.push("schedule");
+  }
+  if (!deepEqual(desired.config ?? {}, remote.config ?? {})) {
+    changed.push("config");
+  }
+  if (changed.length === 0) {
+    return { kind: "feed", verb: "noop", id, connectionSlug, desired, remote };
+  }
+  return {
+    kind: "feed",
+    verb: "update",
+    id,
+    connectionSlug,
+    desired,
+    remote,
+    changedFields: changed,
+  };
+}
+
 // ── Top-level diff ─────────────────────────────────────────────────────────
 
 export interface RemoteSnapshot {
@@ -377,6 +621,11 @@ export interface RemoteSnapshot {
   entityTypes: RemoteEntityType[];
   relationshipTypes: RemoteRelationshipType[];
   watchers: RemoteWatcher[];
+  connectorDefinitions: RemoteConnectorDefinition[];
+  authProfiles: RemoteAuthProfile[];
+  connections: RemoteConnection[];
+  /** Feeds keyed by connection ID. */
+  feedsByConnectionId: Map<number, RemoteFeed[]>;
 }
 
 export interface DesiredStateForDiff {
@@ -386,6 +635,11 @@ export interface DesiredStateForDiff {
     relationshipTypes: DesiredRelationshipType[];
   };
   watchers: DesiredWatcher[];
+  connectors: {
+    definitions: DesiredConnectorDefinition[];
+    authProfiles: DesiredAuthProfile[];
+    connections: DesiredConnection[];
+  };
 }
 
 export interface ComputeDiffOptions {
@@ -529,8 +783,160 @@ export function computeDiff(
     }
   }
 
+  const notes: string[] = [];
+
+  // Connectors run only on a full apply (`--only agents|memory` skips them).
+  const desiredConnectors = desired.connectors ?? {
+    definitions: [],
+    authProfiles: [],
+    connections: [],
+  };
+  // Sort remote collections so drift rows + notes render deterministically
+  // regardless of server response ordering.
+  const remoteConnectorDefinitions = [
+    ...(remote.connectorDefinitions ?? []),
+  ].sort((a, b) => a.key.localeCompare(b.key));
+  const remoteAuthProfiles = [...(remote.authProfiles ?? [])].sort((a, b) =>
+    a.slug.localeCompare(b.slug)
+  );
+  const remoteConnections = [...(remote.connections ?? [])].sort((a, b) =>
+    a.slug.localeCompare(b.slug)
+  );
+  const remoteFeedsByConnectionId =
+    remote.feedsByConnectionId ?? new Map<number, RemoteFeed[]>();
+  if (!only) {
+    const installedKeys = new Set(
+      remoteConnectorDefinitions.filter((d) => d.installed).map((d) => d.key)
+    );
+    const declaredKeys = new Set(
+      desiredConnectors.definitions
+        .map((d) => d.key)
+        .filter((k): k is string => !!k)
+    );
+    // Connectors referenced by a desired auth profile / connection are (or
+    // will be) installed in the org too — bundled ones included — so they
+    // aren't "undeclared".
+    const referencedConnectorKeys = new Set<string>([
+      ...desiredConnectors.authProfiles.map((p) => p.connector),
+      ...desiredConnectors.connections.map((c) => c.connector),
+    ]);
+    // Auto-discovered `.connector.ts` files whose key the CLI can't know up
+    // front (the server compiles them). When any exist, suppress the
+    // "undeclared remote connector" notes entirely — we can't tell which
+    // remote connector corresponds to which local file.
+    const hasUnnamedLocalDefs = desiredConnectors.definitions.some(
+      (d) => d.key === null
+    );
+    for (const def of desiredConnectors.definitions) {
+      rows.push(diffConnectorDefinition(def, installedKeys));
+    }
+    // Bundled connectors referenced by a desired auth-profile / connection that
+    // the org doesn't have installed yet — `lobu apply` will install them from
+    // the catalog's server-side `source_uri`. Surface them as plan rows so the
+    // operator approves these connector-definition mutations too. (Skipped when
+    // a locally-supplied connector declares the same key — that one wins.)
+    const installableByKey = new Map(
+      remoteConnectorDefinitions
+        .filter((d) => d.installable && d.source_uri)
+        .map((d) => [d.key, d])
+    );
+    for (const key of [...referencedConnectorKeys].sort()) {
+      if (installedKeys.has(key)) continue;
+      if (declaredKeys.has(key)) continue; // a local def supplies this key
+      const entry = installableByKey.get(key);
+      if (!entry?.source_uri) continue;
+      rows.push({
+        kind: "connector-definition",
+        verb: "create",
+        id: key,
+        // No `desired` — this is a bundled install, handled by
+        // `installConnectorDefinitions`'s bundled-referenced loop, not the
+        // plan-row loop. The render falls back to `id` (the connector key).
+      });
+    }
+    // Conservative: never auto-uninstall remote connector definitions that
+    // aren't declared/referenced locally — just note them.
+    if (!hasUnnamedLocalDefs) {
+      for (const def of remoteConnectorDefinitions) {
+        if (
+          def.installed &&
+          !declaredKeys.has(def.key) &&
+          !referencedConnectorKeys.has(def.key)
+        ) {
+          notes.push(
+            `connector "${def.key}" is installed remotely but not declared in connectors/ — uninstall it manually if it's no longer wanted (lobu apply never auto-uninstalls connectors).`
+          );
+        }
+      }
+    }
+
+    const remoteAuthBySlug = new Map(
+      remoteAuthProfiles.map((p) => [p.slug, p])
+    );
+    const desiredAuthSlugs = new Set(
+      desiredConnectors.authProfiles.map((p) => p.slug)
+    );
+    for (const profile of desiredConnectors.authProfiles) {
+      rows.push(diffAuthProfile(profile, remoteAuthBySlug.get(profile.slug)));
+    }
+    for (const remoteProfile of remoteAuthProfiles) {
+      if (!desiredAuthSlugs.has(remoteProfile.slug)) {
+        rows.push({
+          kind: "auth-profile",
+          verb: "drift",
+          id: remoteProfile.slug,
+          remote: remoteProfile,
+        });
+      }
+    }
+
+    const remoteConnBySlug = new Map(remoteConnections.map((c) => [c.slug, c]));
+    const desiredConnSlugs = new Set(
+      desiredConnectors.connections.map((c) => c.slug)
+    );
+    for (const conn of desiredConnectors.connections) {
+      const remoteConn = remoteConnBySlug.get(conn.slug);
+      rows.push(diffConnection(conn, remoteConn));
+      // Nested feeds — diffed by feed_key within the connection. Only diffable
+      // when the connection already exists remotely; for a new connection the
+      // feeds are created right after the connection-creation step.
+      const remoteFeeds = remoteConn
+        ? [...(remoteFeedsByConnectionId.get(remoteConn.id) ?? [])].sort(
+            (a, b) => a.feed_key.localeCompare(b.feed_key)
+          )
+        : [];
+      const remoteFeedByKey = new Map(remoteFeeds.map((f) => [f.feed_key, f]));
+      const desiredFeedKeys = new Set(conn.feeds.map((f) => f.feedKey));
+      for (const feed of conn.feeds) {
+        rows.push(diffFeed(conn.slug, feed, remoteFeedByKey.get(feed.feedKey)));
+      }
+      for (const remoteFeed of remoteFeeds) {
+        if (!desiredFeedKeys.has(remoteFeed.feed_key)) {
+          rows.push({
+            kind: "feed",
+            verb: "drift",
+            id: `${conn.slug}/${remoteFeed.feed_key}`,
+            connectionSlug: conn.slug,
+            remote: remoteFeed,
+          });
+        }
+      }
+    }
+    for (const remoteConn of remoteConnections) {
+      if (!desiredConnSlugs.has(remoteConn.slug)) {
+        rows.push({
+          kind: "connection",
+          verb: "drift",
+          id: remoteConn.slug,
+          remote: remoteConn,
+        });
+      }
+    }
+  }
+
   const counts = { create: 0, update: 0, noop: 0, drift: 0 };
   for (const row of rows) counts[row.verb]++;
 
-  return { rows, counts };
+  notes.sort();
+  return { rows, counts, notes };
 }

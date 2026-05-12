@@ -186,6 +186,12 @@ const UpdateAction = Type.Object({
         'Reassign which device worker runs this connection. Null moves it back to the cloud pool (only allowed if the connector has no required_capability).',
     })
   ),
+  replace_config: Type.Optional(
+    Type.Boolean({
+      description:
+        'When true and `config` is provided, replace the stored connection config with exactly that object (declarative apply); when false/omitted, merge into the existing config (default).',
+    })
+  ),
 });
 
 const DeleteAction = Type.Object({
@@ -897,13 +903,27 @@ async function handleCreate(
           .usable
       : false;
 
+  // A `pending_auth` auth profile is OK on create *only* for kinds that can
+  // actually become active out of band — `oauth_account` (OAuth callback) and
+  // `browser_session` (already handled above). The connection is created
+  // `pending_auth` and the callback flips both to `active`. This lets a
+  // connection reference a freshly created oauth_account profile in the same
+  // `lobu apply`. An `env`/`oauth_app` profile that's not active is an error.
   if (
     authSelection?.authProfile &&
     authSelection.authProfile.profile_kind !== 'browser_session' &&
-    authSelection.authProfile.status !== 'active'
+    authSelection.authProfile.status !== 'active' &&
+    !(
+      authSelection.authProfile.status === 'pending_auth' &&
+      authSelection.authProfile.profile_kind === 'oauth_account'
+    )
   ) {
     return {
-      error: `Selected auth profile '${authSelection.authProfile.slug}' is not active.`,
+      error: `Selected auth profile '${authSelection.authProfile.slug}' is ${authSelection.authProfile.status}${
+        authSelection.authProfile.profile_kind === 'oauth_account'
+          ? ' — must be active or pending_auth'
+          : ' — must be active'
+      }.`,
     };
   }
 
@@ -971,9 +991,11 @@ async function handleCreate(
     interactiveAuthProfileId = profile.id;
   }
 
-  const connectionStatus = interactiveMethod
-    ? 'pending_auth'
-    : authSelection?.authProfile?.profile_kind === 'browser_session' && !browserProfileUsable
+  const connectionStatus =
+    interactiveMethod ||
+    (authSelection?.authProfile?.profile_kind === 'browser_session' &&
+      !browserProfileUsable) ||
+    authSelection?.authProfile?.status === 'pending_auth'
       ? 'pending_auth'
       : 'active';
 
@@ -1516,6 +1538,12 @@ async function handleUpdate(
     };
   }
 
+  // Config write mode: declarative `lobu apply` passes `replace_config: true`
+  // so a removed manifest key actually disappears remotely. Default (merge)
+  // is preserved for the web UI / partial updates.
+  const replaceConfig = args.replace_config === true && args.config !== undefined;
+  const connectionConfigForReplace = splitConfig.connectionConfig ?? {};
+
   // Slug is only ever changed when the caller passes one explicitly — a
   // display_name change never touches it (that's the whole point of a stable
   // identity for `lobu apply`). An explicit slug is validated for format and
@@ -1547,7 +1575,11 @@ async function handleUpdate(
           status = COALESCE(${effectiveStatus}, status),
           auth_profile_id = ${nextAuthProfileId},
           app_auth_profile_id = ${nextAppAuthProfileId},
-          config = CASE WHEN ${splitConfig.connectionConfig ? sql.json(splitConfig.connectionConfig) : null}::jsonb IS NOT NULL THEN COALESCE(config, '{}'::jsonb) || ${splitConfig.connectionConfig ? sql.json(splitConfig.connectionConfig) : null}::jsonb ELSE config END,
+          config = ${
+            replaceConfig
+              ? sql`${sql.json(connectionConfigForReplace)}::jsonb`
+              : sql`CASE WHEN ${splitConfig.connectionConfig ? sql.json(splitConfig.connectionConfig) : null}::jsonb IS NOT NULL THEN COALESCE(config, '{}'::jsonb) || ${splitConfig.connectionConfig ? sql.json(splitConfig.connectionConfig) : null}::jsonb ELSE config END`
+          },
           updated_at = NOW()
       WHERE id = ${args.connection_id} AND organization_id = ${organizationId} AND deleted_at IS NULL
       RETURNING *

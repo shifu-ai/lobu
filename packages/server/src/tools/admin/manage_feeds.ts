@@ -68,6 +68,12 @@ const UpdateFeedAction = Type.Object({
   display_name: Type.Optional(Type.String()),
   entity_ids: Type.Optional(Type.Array(Type.Number())),
   config: Type.Optional(Type.Record(Type.String(), Type.Any())),
+  replace_config: Type.Optional(
+    Type.Boolean({
+      description:
+        'When true and `config` is provided, replace the stored feed config with exactly that object (declarative apply); when false/omitted, merge into the existing config (default).',
+    })
+  ),
   schedule: Type.Optional(Type.String({ description: 'Cron expression for sync schedule' })),
   repair_agent_id: Type.Optional(
     Type.Union([Type.String(), Type.Null()], {
@@ -254,9 +260,13 @@ async function handleCreateFeed(
   }
 
   const conn = connRows[0] as any;
-  if (conn.status !== 'active') {
-    return { error: `Connection is ${conn.status}, must be active to create feeds` };
+  // A `pending_auth` connection is OK — the feed is created `paused` (the
+  // `feeds.status` CHECK only allows active|paused|error). The OAuth/connect
+  // callback un-pauses the connection's feeds when it activates the connection.
+  if (conn.status !== 'active' && conn.status !== 'pending_auth') {
+    return { error: `Connection is ${conn.status}, must be active or pending_auth to create feeds` };
   }
+  const feedInitialStatus = conn.status === 'active' ? 'active' : 'paused';
 
   const feedsSchema = conn.feeds_schema as Record<string, any> | null;
   if (feedsSchema && !feedsSchema[args.feed_key]) {
@@ -270,7 +280,8 @@ async function handleCreateFeed(
   if (scheduleError) {
     return { error: scheduleError };
   }
-  const nextRunAtVal = nextRunAt(schedule);
+  // Don't schedule a first run for a feed whose connection is still pending auth.
+  const nextRunAtVal = feedInitialStatus === 'active' ? nextRunAt(schedule) : null;
   const entityIdsValue =
     args.entity_ids && args.entity_ids.length > 0 ? pgBigintArray(args.entity_ids) : null;
 
@@ -287,7 +298,7 @@ async function handleCreateFeed(
       organization_id, connection_id, feed_key, display_name, status,
       entity_ids, config, schedule, next_run_at
     ) VALUES (
-      ${organizationId}, ${args.connection_id}, ${args.feed_key}, ${displayName}, 'active',
+      ${organizationId}, ${args.connection_id}, ${args.feed_key}, ${displayName}, ${feedInitialStatus},
       ${entityIdsValue}::bigint[],
       ${args.config ? sql.json(args.config) : null},
       ${schedule}, ${nextRunAtVal}
@@ -346,12 +357,20 @@ async function handleUpdateFeed(
   const hasRepairAgentArg = Object.hasOwn(args, 'repair_agent_id');
   const repairAgentValue = hasRepairAgentArg ? (args.repair_agent_id ?? null) : null;
 
+  // Declarative `lobu apply` passes `replace_config: true` so removed manifest
+  // keys disappear remotely; default (merge) is preserved for the web UI.
+  const replaceFeedConfig = args.replace_config === true && args.config !== undefined;
+
   const updated = await sql`
     UPDATE feeds
     SET display_name = COALESCE(${args.display_name ?? null}::text, display_name),
         status = COALESCE(${args.status ?? null}::text, status),
         entity_ids = COALESCE(${entityIdsValue}::bigint[], entity_ids),
-        config = CASE WHEN ${args.config ? sql.json(args.config) : null}::jsonb IS NOT NULL THEN COALESCE(config, '{}'::jsonb) || ${args.config ? sql.json(args.config) : null}::jsonb ELSE config END,
+        config = ${
+          replaceFeedConfig
+            ? sql`${sql.json(args.config ?? {})}::jsonb`
+            : sql`CASE WHEN ${args.config ? sql.json(args.config) : null}::jsonb IS NOT NULL THEN COALESCE(config, '{}'::jsonb) || ${args.config ? sql.json(args.config) : null}::jsonb ELSE config END`
+        },
         schedule = COALESCE(${args.schedule ?? null}::text, schedule),
         next_run_at = CASE WHEN ${args.schedule ?? null}::text IS NOT NULL THEN ${args.schedule ? nextRunAt(args.schedule) : null}::timestamptz ELSE next_run_at END,
         repair_agent_id = CASE WHEN ${hasRepairAgentArg} THEN ${repairAgentValue}::text ELSE repair_agent_id END,
