@@ -481,7 +481,8 @@ export function SkillsWorkflowSection({
                   >
                     Lobu platform section
                   </a>{" "}
-                  or the skills docs, then paste the prompt on the right into your agent.
+                  or the skills docs, then paste the prompt on the right into
+                  your agent.
                 </p>
               </div>
               <PromptWindow

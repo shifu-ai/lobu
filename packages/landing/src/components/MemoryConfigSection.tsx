@@ -25,15 +25,27 @@ function Tile({
   );
 }
 
-function Step({ index, title, body }: { index: string; title: string; body: string }) {
+function Step({
+  index,
+  title,
+  body,
+}: {
+  index: string;
+  title: string;
+  body: string;
+}) {
   return (
     <div class="flex gap-3 rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-4">
       <span class="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-orange-50 text-xs font-semibold text-orange-700">
         {index}
       </span>
       <div>
-        <div class="text-sm font-semibold text-[var(--color-page-text)]">{title}</div>
-        <div class="mt-1 text-xs leading-5 text-[var(--color-page-text-muted)]">{body}</div>
+        <div class="text-sm font-semibold text-[var(--color-page-text)]">
+          {title}
+        </div>
+        <div class="mt-1 text-xs leading-5 text-[var(--color-page-text-muted)]">
+          {body}
+        </div>
       </div>
     </div>
   );
@@ -44,11 +56,16 @@ export function MemoryConfigSection({
 }: {
   activeUseCase: LandingUseCaseShowcase;
 }) {
-  const nodes = activeUseCase.memory.recordTree.children?.slice(0, 4) ?? [activeUseCase.memory.recordTree];
+  const nodes = activeUseCase.memory.recordTree.children?.slice(0, 4) ?? [
+    activeUseCase.memory.recordTree,
+  ];
   const relation = activeUseCase.memory.relations[0];
 
   return (
-    <section id="memory" class="bg-[var(--color-page-bg)] px-4 py-24 sm:px-8 lg:py-32">
+    <section
+      id="memory"
+      class="bg-[var(--color-page-bg)] px-4 py-24 sm:px-8 lg:py-32"
+    >
       <div class="mx-auto max-w-[76rem]">
         <div class="mx-auto mb-16 max-w-3xl text-center">
           <div class="mb-5 text-xs font-semibold uppercase tracking-[0.22em] text-[var(--color-tg-accent)]">
@@ -58,19 +75,24 @@ export function MemoryConfigSection({
             A seismic shift in agent memory flexibility.
           </h2>
           <p class="mx-auto mt-6 max-w-2xl text-base leading-8 text-[var(--color-page-text-muted)] sm:text-lg">
-            Keep one agent local, or give every approved agent the same typed graph. The product surface shows what is remembered, where it came from, and how the next run can reuse it.
+            Keep one agent local, or give every approved agent the same typed
+            graph. The product surface shows what is remembered, where it came
+            from, and how the next run can reuse it.
           </p>
         </div>
 
         <div class="grid gap-px overflow-hidden rounded-[1.5rem] border border-[var(--color-page-border)] bg-[var(--color-page-border)] lg:grid-cols-3">
           <Tile eyebrow="Filesystem" title="Local context">
-            Scratch files, intermediate reports, and one-off notes stay close to the worker that created them.
+            Scratch files, intermediate reports, and one-off notes stay close to
+            the worker that created them.
           </Tile>
           <Tile eyebrow="Owletto" title="Shared graph">
-            Typed entities, relationships, watchers, and connector data are shared across agents and users.
+            Typed entities, relationships, watchers, and connector data are
+            shared across agents and users.
           </Tile>
           <Tile eyebrow="Gateway" title="Safe access">
-            Workers receive scoped memory context and placeholders, not raw credentials or OAuth tokens.
+            Workers receive scoped memory context and placeholders, not raw
+            credentials or OAuth tokens.
           </Tile>
         </div>
 
@@ -118,12 +140,17 @@ export function MemoryConfigSection({
                     {activeUseCase.label} entities
                   </div>
                 </div>
-                <span class="text-xs text-[var(--color-page-text-muted)]">Live</span>
+                <span class="text-xs text-[var(--color-page-text-muted)]">
+                  Live
+                </span>
               </div>
 
               <div class="grid gap-3 sm:grid-cols-2">
                 {nodes.map((node) => (
-                  <div key={node.id} class="rounded-2xl border border-[var(--color-page-border)] bg-white p-4">
+                  <div
+                    key={node.id}
+                    class="rounded-2xl border border-[var(--color-page-border)] bg-white p-4"
+                  >
                     <div class="text-[10px] font-semibold uppercase tracking-[0.18em] text-orange-700">
                       {node.kind}
                     </div>
@@ -143,9 +170,15 @@ export function MemoryConfigSection({
                     Relationship
                   </div>
                   <div class="flex flex-wrap gap-2 text-xs">
-                    <span class="rounded-full bg-orange-50 px-3 py-1 text-orange-700">{relation.source}</span>
-                    <span class="rounded-full bg-blue-50 px-3 py-1 font-mono text-blue-700">{relation.label}</span>
-                    <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">{relation.target}</span>
+                    <span class="rounded-full bg-orange-50 px-3 py-1 text-orange-700">
+                      {relation.source}
+                    </span>
+                    <span class="rounded-full bg-blue-50 px-3 py-1 font-mono text-blue-700">
+                      {relation.label}
+                    </span>
+                    <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-700">
+                      {relation.target}
+                    </span>
                   </div>
                 </div>
               ) : null}

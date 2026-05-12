@@ -71,18 +71,20 @@ function Shell({
       </div>
       <div class="grid min-h-[34rem] grid-cols-[10rem_1fr] bg-[linear-gradient(90deg,#fbfbfa_0,#fbfbfa_10rem,#fff_10rem,#fff_100%)] max-md:grid-cols-1 max-md:bg-white">
         <aside class="border-r border-[var(--color-page-border)] p-3 max-md:hidden">
-          {["Home", "World model", "Sources", "Goals", "Channels"].map((item, index) => (
-            <div
-              key={item}
-              class={`mb-1 rounded-lg px-3 py-2 text-xs ${
-                index === 1
-                  ? "bg-[var(--color-page-surface)] font-semibold text-[var(--color-page-text)]"
-                  : "text-[var(--color-page-text-muted)]"
-              }`}
-            >
-              {item}
-            </div>
-          ))}
+          {["Home", "World model", "Sources", "Goals", "Channels"].map(
+            (item, index) => (
+              <div
+                key={item}
+                class={`mb-1 rounded-lg px-3 py-2 text-xs ${
+                  index === 1
+                    ? "bg-[var(--color-page-surface)] font-semibold text-[var(--color-page-text)]"
+                    : "text-[var(--color-page-text-muted)]"
+                }`}
+              >
+                {item}
+              </div>
+            )
+          )}
         </aside>
         <div class="min-w-0 p-4 sm:p-6">{children}</div>
       </div>
@@ -98,7 +100,9 @@ function Card({
   className?: string;
 }) {
   return (
-    <div class={`rounded-2xl border border-[var(--color-page-border)] bg-white p-4 shadow-sm ${className}`.trim()}>
+    <div
+      class={`rounded-2xl border border-[var(--color-page-border)] bg-white p-4 shadow-sm ${className}`.trim()}
+    >
       {children}
     </div>
   );
@@ -117,7 +121,10 @@ function ModelWorld(showcase: LandingUseCaseShowcase) {
   const relation = showcase.memory.relations[0];
 
   return (
-    <Shell section="Model the world" title={`${showcase.label} operating model`}>
+    <Shell
+      section="Model the world"
+      title={`${showcase.label} operating model`}
+    >
       <div class="grid gap-4 lg:grid-cols-[1fr_0.82fr]">
         <div class="grid gap-4">
           <div class="flex flex-wrap items-center justify-between gap-3">
@@ -134,7 +141,14 @@ function ModelWorld(showcase: LandingUseCaseShowcase) {
 
           <div class="grid gap-3 sm:grid-cols-2">
             {nodes.slice(0, 4).map((node, index) => (
-              <Card key={node.id} className={index === 0 ? "bg-orange-50/55 border-orange-200" : "bg-[var(--color-page-bg)]"}>
+              <Card
+                key={node.id}
+                className={
+                  index === 0
+                    ? "bg-orange-50/55 border-orange-200"
+                    : "bg-[var(--color-page-bg)]"
+                }
+              >
                 <div class="mb-2 inline-flex rounded-full border border-orange-200 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-orange-700">
                   {node.kind}
                 </div>
@@ -175,7 +189,10 @@ function ModelWorld(showcase: LandingUseCaseShowcase) {
               "Let watchers merge fresh facts into the graph",
               "Recall the graph from every run and chat surface",
             ].map((item, index) => (
-              <div key={item} class="flex gap-3 rounded-xl bg-white p-3 text-sm text-[var(--color-page-text)] shadow-sm">
+              <div
+                key={item}
+                class="flex gap-3 rounded-xl bg-white p-3 text-sm text-[var(--color-page-text)] shadow-sm"
+              >
                 <span class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-orange-50 text-xs font-semibold text-orange-700">
                   {index + 1}
                 </span>
@@ -200,8 +217,13 @@ function ConnectData(showcase: LandingUseCaseShowcase) {
           <SmallLabel>Connected sources</SmallLabel>
           <div class="mt-4 grid gap-2">
             {skills.map((skill) => (
-              <div key={skill} class="flex items-center justify-between rounded-xl bg-white px-3 py-3 shadow-sm">
-                <div class="text-sm font-semibold text-[var(--color-page-text)]">{skill}</div>
+              <div
+                key={skill}
+                class="flex items-center justify-between rounded-xl bg-white px-3 py-3 shadow-sm"
+              >
+                <div class="text-sm font-semibold text-[var(--color-page-text)]">
+                  {skill}
+                </div>
                 <div class="text-xs text-emerald-700">approved</div>
               </div>
             ))}
@@ -217,9 +239,16 @@ function ConnectData(showcase: LandingUseCaseShowcase) {
                 ["Worker", "Receives scoped tools and context"],
                 ["MCP", "Runs through approved proxy calls"],
               ].map(([title, body]) => (
-                <div key={title} class="rounded-xl bg-[var(--color-page-bg)] p-3">
-                  <div class="text-sm font-semibold text-[var(--color-page-text)]">{title}</div>
-                  <p class="mt-1 text-xs leading-5 text-[var(--color-page-text-muted)]">{body}</p>
+                <div
+                  key={title}
+                  class="rounded-xl bg-[var(--color-page-bg)] p-3"
+                >
+                  <div class="text-sm font-semibold text-[var(--color-page-text)]">
+                    {title}
+                  </div>
+                  <p class="mt-1 text-xs leading-5 text-[var(--color-page-text-muted)]">
+                    {body}
+                  </p>
                 </div>
               ))}
             </div>
@@ -228,7 +257,10 @@ function ConnectData(showcase: LandingUseCaseShowcase) {
             <SmallLabel>Network policy</SmallLabel>
             <div class="mt-4 flex flex-wrap gap-2">
               {domains.map((domain) => (
-                <span key={domain} class="rounded-full border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-1.5 text-xs text-[var(--color-page-text-muted)]">
+                <span
+                  key={domain}
+                  class="rounded-full border border-[var(--color-page-border)] bg-[var(--color-page-bg)] px-3 py-1.5 text-xs text-[var(--color-page-text-muted)]"
+                >
                   {domain}
                 </span>
               ))}
@@ -271,10 +303,15 @@ function DefineGoals(showcase: LandingUseCaseShowcase) {
           <SmallLabel>Run timeline</SmallLabel>
           <div class="mt-4 space-y-2">
             {trace.map((row, index) => (
-              <div key={`${row.call}-${index}`} class="flex items-start gap-3 rounded-xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-3">
+              <div
+                key={`${row.call}-${index}`}
+                class="flex items-start gap-3 rounded-xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-3"
+              >
                 <span class="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-orange-500" />
                 <div class="min-w-0">
-                  <div class="truncate font-mono text-xs text-[var(--color-page-text)]">{row.call}</div>
+                  <div class="truncate font-mono text-xs text-[var(--color-page-text)]">
+                    {row.call}
+                  </div>
                   <div class="mt-1 line-clamp-2 text-xs leading-5 text-[var(--color-page-text-muted)]">
                     {row.result}
                   </div>
@@ -294,11 +331,17 @@ function ConnectEverywhere(showcase: LandingUseCaseShowcase) {
       <div class="grid gap-4 lg:grid-cols-[1fr_0.8fr]">
         <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {deliverySurfaces.slice(0, 6).map((surface) => (
-            <a key={surface.id} href={surface.href} class="rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-4 transition-colors hover:bg-white">
+            <a
+              key={surface.id}
+              href={surface.href}
+              class="rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-4 transition-colors hover:bg-white"
+            >
               <div class="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-[var(--color-page-text)] shadow-sm">
                 {surface.renderIcon(16)}
               </div>
-              <div class="text-sm font-semibold text-[var(--color-page-text)]">{surface.label}</div>
+              <div class="text-sm font-semibold text-[var(--color-page-text)]">
+                {surface.label}
+              </div>
               <p class="mt-2 text-xs leading-5 text-[var(--color-page-text-muted)]">
                 {surface.detail}
               </p>
@@ -308,7 +351,9 @@ function ConnectEverywhere(showcase: LandingUseCaseShowcase) {
         <Card>
           <SmallLabel>Same agent, every surface</SmallLabel>
           <p class="mt-3 text-sm leading-6 text-[var(--color-page-text-muted)]">
-            The same {showcase.label.toLowerCase()} memory, approvals, and run trace render into chat, REST, and MCP clients through platform adapters.
+            The same {showcase.label.toLowerCase()} memory, approvals, and run
+            trace render into chat, REST, and MCP clients through platform
+            adapters.
           </p>
           <div class="mt-5 rounded-2xl bg-[var(--color-page-bg)] p-4 text-sm leading-6 text-[var(--color-page-text)]">
             {showcase.runtime.response}
@@ -374,7 +419,10 @@ export function PlatformStory(props: { activeUseCaseId?: LandingUseCaseId }) {
   }, []);
 
   useEffect(() => {
-    if (paused || window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    if (
+      paused ||
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
       return;
     }
 

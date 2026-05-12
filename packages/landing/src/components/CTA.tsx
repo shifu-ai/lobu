@@ -20,7 +20,9 @@ export function CTA(props: {
           Build the agent your business actually needs.
         </h2>
         <p class="mx-auto mb-8 max-w-xl text-sm leading-7 text-[var(--color-page-text-muted)] sm:text-base">
-          Start from the live workspace, copy the implementation prompt into your coding agent, or book 20 minutes to walk through the architecture.
+          Start from the live workspace, copy the implementation prompt into
+          your coding agent, or book 20 minutes to walk through the
+          architecture.
         </p>
         <div class="mb-8 flex flex-wrap justify-center gap-3">
           <a
@@ -36,19 +38,31 @@ export function CTA(props: {
         </div>
 
         <div class="flex flex-wrap items-center justify-center gap-4 text-xs text-[var(--color-page-text-muted)]">
-          <a href="/#model-the-world" class="hover:text-[var(--color-page-text)]">
+          <a
+            href="/#model-the-world"
+            class="hover:text-[var(--color-page-text)]"
+          >
             Model the world
           </a>
           <span class="opacity-30">|</span>
-          <a href="/#connect-your-data" class="hover:text-[var(--color-page-text)]">
+          <a
+            href="/#connect-your-data"
+            class="hover:text-[var(--color-page-text)]"
+          >
             Connect your data
           </a>
           <span class="opacity-30">|</span>
-          <a href="/getting-started/" class="hover:text-[var(--color-page-text)]">
+          <a
+            href="/getting-started/"
+            class="hover:text-[var(--color-page-text)]"
+          >
             Self-host docs
           </a>
           <span class="opacity-30">|</span>
-          <a href="/platforms/rest-api/" class="hover:text-[var(--color-page-text)]">
+          <a
+            href="/platforms/rest-api/"
+            class="hover:text-[var(--color-page-text)]"
+          >
             Embed
           </a>
         </div>

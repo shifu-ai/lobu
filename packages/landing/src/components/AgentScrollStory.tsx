@@ -63,7 +63,9 @@ function FigureCard({
         <div class="absolute left-1/2 top-14 h-20 w-20 -translate-x-1/2 rotate-45 rounded-2xl border border-[var(--color-page-border)]" />
         <div class="absolute left-1/2 top-12 h-10 w-10 -translate-x-1/2 rounded-full border border-orange-300 bg-orange-50" />
       </div>
-      <h3 class="text-lg font-semibold text-[var(--color-page-text)]">{title}</h3>
+      <h3 class="text-lg font-semibold text-[var(--color-page-text)]">
+        {title}
+      </h3>
       <p class="mt-3 text-sm leading-6 text-[var(--color-page-text-muted)]">
         {body}
       </p>
@@ -75,7 +77,10 @@ function IntakeVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
   const events = showcase.runtime.events.slice(0, 3);
 
   return (
-    <ProductFrame title={`${showcase.label} intake`} eyebrow="Chat → structured work">
+    <ProductFrame
+      title={`${showcase.label} intake`}
+      eyebrow="Chat → structured work"
+    >
       <div class="grid gap-4 lg:grid-cols-[1fr_0.8fr]">
         <div class="rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-4">
           <div class="mb-4 flex items-center justify-between text-xs text-[var(--color-page-text-muted)]">
@@ -90,7 +95,10 @@ function IntakeVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
                 </div>
                 <div>
                   <div class="text-sm font-semibold text-[var(--color-page-text)]">
-                    {event.source} <span class="font-normal text-[var(--color-page-text-muted)]">{event.time}</span>
+                    {event.source}{" "}
+                    <span class="font-normal text-[var(--color-page-text-muted)]">
+                      {event.time}
+                    </span>
                   </div>
                   <p class="mt-1 text-sm leading-6 text-[var(--color-page-text-muted)]">
                     {event.text}
@@ -104,10 +112,21 @@ function IntakeVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
           </div>
         </div>
         <div class="grid content-start gap-3">
-          {["Collected source updates", "Classified urgency", "Created run with context"].map((item, index) => (
-            <div key={item} class="flex items-center justify-between rounded-2xl border border-[var(--color-page-border)] bg-white p-4">
-              <span class="text-sm font-medium text-[var(--color-page-text)]">{item}</span>
-              <span class="font-mono text-xs text-[var(--color-tg-accent)]">0{index + 1}</span>
+          {[
+            "Collected source updates",
+            "Classified urgency",
+            "Created run with context",
+          ].map((item, index) => (
+            <div
+              key={item}
+              class="flex items-center justify-between rounded-2xl border border-[var(--color-page-border)] bg-white p-4"
+            >
+              <span class="text-sm font-medium text-[var(--color-page-text)]">
+                {item}
+              </span>
+              <span class="font-mono text-xs text-[var(--color-tg-accent)]">
+                0{index + 1}
+              </span>
             </div>
           ))}
         </div>
@@ -116,7 +135,11 @@ function IntakeVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
   );
 }
 
-function OperatingModelVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
+function OperatingModelVisual({
+  showcase,
+}: {
+  showcase: LandingUseCaseShowcase;
+}) {
   const nodes = getNodes(showcase);
 
   return (
@@ -128,7 +151,10 @@ function OperatingModelVisual({ showcase }: { showcase: LandingUseCaseShowcase }
           </div>
           <div class="space-y-3">
             {nodes.map((node) => (
-              <div key={node.id} class="rounded-xl border border-[var(--color-page-border)] bg-white p-3">
+              <div
+                key={node.id}
+                class="rounded-xl border border-[var(--color-page-border)] bg-white p-3"
+              >
                 <div class="text-[10px] font-semibold uppercase tracking-[0.16em] text-orange-700">
                   {node.kind}
                 </div>
@@ -148,7 +174,9 @@ function OperatingModelVisual({ showcase }: { showcase: LandingUseCaseShowcase }
               Watcher output
             </div>
             <div class="space-y-2 font-mono text-xs leading-6 text-[var(--color-page-text)]">
-              <div>risk_level: <span class="text-orange-700">updated</span></div>
+              <div>
+                risk_level: <span class="text-orange-700">updated</span>
+              </div>
               <div>activity_delta: new signal captured</div>
               <div>relationships: linked across records</div>
             </div>
@@ -159,7 +187,10 @@ function OperatingModelVisual({ showcase }: { showcase: LandingUseCaseShowcase }
             </div>
             <div class="relative space-y-4 before:absolute before:bottom-2 before:left-[0.45rem] before:top-2 before:w-px before:bg-[var(--color-page-border)]">
               {["Poll", "Extract", "Merge", "Recall"].map((item) => (
-                <div key={item} class="relative flex items-center gap-3 text-sm text-[var(--color-page-text-muted)]">
+                <div
+                  key={item}
+                  class="relative flex items-center gap-3 text-sm text-[var(--color-page-text-muted)]"
+                >
                   <span class="relative z-10 h-2.5 w-2.5 rounded-full bg-orange-500" />
                   {item}
                 </div>
@@ -182,7 +213,10 @@ function RunVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
       </div>
       <div class="grid gap-2">
         {trace.map((row, index) => (
-          <div key={`${row.call}-${index}`} class="flex items-start gap-3 rounded-2xl border border-[var(--color-page-border)] bg-white p-3">
+          <div
+            key={`${row.call}-${index}`}
+            class="flex items-start gap-3 rounded-2xl border border-[var(--color-page-border)] bg-white p-3"
+          >
             <span class="mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500" />
             <div class="min-w-0">
               <div class="truncate font-mono text-xs text-[var(--color-page-text)]">
@@ -207,7 +241,11 @@ function ShipVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
     <ProductFrame title="Delivery surfaces" eyebrow="One agent everywhere">
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {deliverySurfaces.slice(0, 6).map((surface) => (
-          <a key={surface.id} href={surface.href} class="rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-4 transition-colors hover:bg-white">
+          <a
+            key={surface.id}
+            href={surface.href}
+            class="rounded-2xl border border-[var(--color-page-border)] bg-[var(--color-page-bg)] p-4 transition-colors hover:bg-white"
+          >
             <div class="mb-3 grid h-9 w-9 place-items-center rounded-xl bg-white text-[var(--color-page-text)] shadow-sm">
               {surface.renderIcon(16)}
             </div>
@@ -221,7 +259,8 @@ function ShipVisual({ showcase }: { showcase: LandingUseCaseShowcase }) {
         ))}
       </div>
       <div class="mt-4 rounded-2xl border border-[var(--color-page-border)] bg-white p-4 text-sm leading-6 text-[var(--color-page-text-muted)]">
-        Same {showcase.label.toLowerCase()} context, approvals, and memory across every surface.
+        Same {showcase.label.toLowerCase()} context, approvals, and memory
+        across every surface.
       </div>
     </ProductFrame>
   );
@@ -260,19 +299,32 @@ function AttioBlock({
   );
 }
 
-export function AgentScrollStory({ activeUseCase }: { activeUseCase: LandingUseCaseShowcase }) {
+export function AgentScrollStory({
+  activeUseCase,
+}: {
+  activeUseCase: LandingUseCaseShowcase;
+}) {
   return (
-    <section id="how-it-works" class="bg-[var(--color-page-bg)] px-4 py-24 sm:px-8 lg:py-32">
+    <section
+      id="how-it-works"
+      class="bg-[var(--color-page-bg)] px-4 py-24 sm:px-8 lg:py-32"
+    >
       <div class="mx-auto max-w-[76rem]">
         <div class="mb-16 flex flex-wrap items-center gap-x-10 gap-y-4 text-sm font-semibold text-[var(--color-page-text-muted)]">
-          {["Slack", "GitHub", "OpenClaw", "Owletto", "Claude", "Telegram"].map((item) => (
-            <span key={item}>{item}</span>
-          ))}
+          {["Slack", "GitHub", "OpenClaw", "Owletto", "Claude", "Telegram"].map(
+            (item) => (
+              <span key={item}>{item}</span>
+            )
+          )}
         </div>
 
         <div class="mb-20 max-w-6xl">
           <h2 class="text-5xl font-semibold leading-[1.02] tracking-[-0.06em] text-[var(--color-page-text)] sm:text-6xl lg:text-7xl">
-            A new species of agent platform. <span class="text-[rgba(28,29,31,0.38)]">Purpose-built for teams that need memory, tools, goals, and chat-native delivery in one system.</span>
+            A new species of agent platform.{" "}
+            <span class="text-[rgba(28,29,31,0.38)]">
+              Purpose-built for teams that need memory, tools, goals, and
+              chat-native delivery in one system.
+            </span>
           </h2>
         </div>
 
