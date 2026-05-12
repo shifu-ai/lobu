@@ -18,6 +18,7 @@ import { createAuth } from './auth';
 import { getAuthConfig as getAuthConfigFromEnv } from './auth/config';
 import { mcpAuth } from './auth/middleware';
 import { oauthRoutes } from './auth/oauth/routes';
+import { findExistingPersonalOrg } from './auth/personal-org-provisioning';
 import { credentialRoutes } from './auth/routes';
 import { connectRoutes } from './connect/routes';
 import { getDb } from './db/client';
@@ -584,22 +585,96 @@ import {
   getActiveAuthRun,
   getAuthRun,
   heartbeat,
+  listDeviceWorkers,
   pollAuthSignal,
   pollWorkerJob,
   postAuthSignal,
   streamContent,
 } from './worker-api';
 
-// Worker API authentication middleware — validates WORKER_API_TOKEN when configured
+// Worker API authentication.
+//
+// Two ways to authenticate a request to /api/workers/*:
+//
+//   1. **Trusted worker** — `Authorization: Bearer ${WORKER_API_TOKEN}`. Shared
+//      secret in the server env; used by server-side connector-worker fleets.
+//      Full access to all orgs (existing model).
+//
+//   2. **User-scoped worker** — user OAuth bearer or PAT (Lobu for Mac
+//      uses an OAuth bearer from the device-code flow). `/api/workers/*` carries
+//      no org slug, so the token must resolve to an org on its own (PAT/OAuth
+//      carry a bound org — a bare session cookie won't work here). The worker is
+//      scoped to that bound org plus the user's personal org (where device
+//      connectors auto-wire); poll filters on that set, and heartbeat/stream/
+//      complete additionally re-check the run is theirs. It does NOT get the
+//      user's other org memberships, so a token narrowly scoped to org A can't
+//      reach into org B.
+//
+// In dev (no WORKER_API_TOKEN configured) and with no user auth, requests pass
+// through unauthenticated — the existing local-dev behavior.
 app.use('/api/workers/*', async (c, next) => {
   const expected = c.env.WORKER_API_TOKEN;
-  if (expected) {
-    const provided = c.req.header('Authorization')?.replace('Bearer ', '');
-    if (provided !== expected) {
+  const provided = c.req.header('Authorization')?.replace('Bearer ', '');
+
+  if (expected && provided === expected) {
+    c.set('workerAuthMode', 'trusted');
+    c.set('workerUserId', null);
+    c.set('workerOrgIds', null);
+    return next();
+  }
+
+  return mcpAuth(c, async () => {
+    if (c.var.mcpIsAuthenticated && c.var.user?.id) {
+      // User-scoped workers can only hit the endpoints needed to run a job
+      // end-to-end. Auth-artifact / embeddings / repair-thread endpoints are
+      // for server-side fleets and would leak across orgs without per-handler
+      // scoping (which we haven't added). Block them at the door.
+      const allowedPathsForUserWorker = new Set([
+        '/api/workers/poll',
+        '/api/workers/heartbeat',
+        '/api/workers/stream',
+        '/api/workers/complete',
+      ]);
+      const requestPath = new URL(c.req.url).pathname;
+      if (!allowedPathsForUserWorker.has(requestPath)) {
+        return c.json({ error: 'Endpoint not available to user-scoped workers' }, 403);
+      }
+      const scopes = c.var.mcpAuthInfo?.scopes ?? [];
+      if (
+        !scopes.includes('device_worker:run') &&
+        !scopes.includes('mcp:write') &&
+        !scopes.includes('mcp:admin')
+      ) {
+        return c.json({ error: 'Worker token missing device_worker:run scope' }, 403);
+      }
+      const userId = c.var.user.id;
+      // mcpAuth already verified the token resolves to (and the user is a
+      // member of) `c.var.organizationId`. A device worker is scoped to that
+      // org plus the user's personal org (the auto-wire target), and nothing
+      // else.
+      const boundOrgId = c.var.organizationId;
+      if (!boundOrgId) {
+        return c.json({ error: 'Worker token must be bound to an organization' }, 403);
+      }
+      const personalOrg = await findExistingPersonalOrg(userId, getDb());
+      const orgIds = personalOrg
+        ? Array.from(new Set([boundOrgId, personalOrg.id]))
+        : [boundOrgId];
+      c.set('workerAuthMode', 'user');
+      c.set('workerUserId', userId);
+      c.set('workerOrgIds', orgIds);
+      return next();
+    }
+
+    if (expected) {
       return c.json({ error: 'Unauthorized' }, 401);
     }
-  }
-  return next();
+
+    c.set('workerAuthMode', 'anonymous');
+    c.set('workerUserId', null);
+    c.set('workerOrgIds', null);
+    return next();
+  });
 });
 
 app.post('/api/workers/poll', pollWorkerJob);
@@ -612,6 +687,10 @@ app.post('/api/workers/fetch-events', fetchEventsForEmbedding);
 app.post('/api/workers/emit-auth-artifact', emitAuthArtifact);
 app.post('/api/workers/poll-auth-signal', pollAuthSignal);
 app.post('/api/workers/complete-auth', completeAuthRun);
+// Device worker registry. Authenticated (mcpAuth); returns the calling user's
+// devices. Lives under /api/me/ so the workspace resolver treats it as
+// user-scoped (no org slug in the URL).
+app.get('/api/me/devices', mcpAuth, listDeviceWorkers);
 // UI → worker signal channel. Separate path prefix so the worker API auth
 // middleware above doesn't cover it (this one is hit from the web session).
 app.get('/api/auth-runs/active', getActiveAuthRun);

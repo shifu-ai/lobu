@@ -411,6 +411,54 @@ const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
       `);
     },
   },
+  {
+    id: 'connector-required-capability',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        ALTER TABLE public.connector_definitions
+        ADD COLUMN IF NOT EXISTS required_capability text
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS connector_definitions_required_capability_idx
+        ON public.connector_definitions (required_capability)
+        WHERE required_capability IS NOT NULL
+      `);
+    },
+  },
+  {
+    id: 'connector-runtime',
+    apply: async (sql) => {
+      // `runtime` carries platform metadata for device-bound connectors
+      // (e.g. apple.screen_time / local.directory, which run inside the Lobu
+      // Lobu for Mac). NULL = cloud connector.
+      await sql.unsafe(`
+        ALTER TABLE public.connector_definitions
+        ADD COLUMN IF NOT EXISTS runtime jsonb
+      `);
+    },
+  },
+  {
+    id: 'device-workers',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        CREATE TABLE IF NOT EXISTS public.device_workers (
+          user_id text NOT NULL,
+          worker_id text NOT NULL,
+          platform text,
+          app_version text,
+          capabilities jsonb NOT NULL DEFAULT '[]'::jsonb,
+          label text,
+          first_seen_at timestamptz NOT NULL DEFAULT now(),
+          last_seen_at timestamptz NOT NULL DEFAULT now(),
+          PRIMARY KEY (user_id, worker_id)
+        )
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS device_workers_user_id_idx
+        ON public.device_workers (user_id)
+      `);
+    },
+  },
 ];
 
 async function applyEmbeddedSchemaPatches(sql: MigrationSqlClient) {
