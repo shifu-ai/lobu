@@ -25,12 +25,41 @@ type MessagingClientRecord = {
   externalUrl: string | null;
   linkedUserName: null;
   linkedUserEmail: null;
+  /** True for Lobu's own surfaces (CLI, Mac/iOS bridges) — never for messaging clients. */
+  firstParty: false;
   details: {
     connectionId: string | null;
     description: string | null;
     connectionMetadata: Record<string, unknown> | null;
   };
 };
+
+/**
+ * Software ids Lobu's own surfaces register with — the exact, non-spoofable
+ * signal for first-party clients. (Keep in sync with the CLI / bridge clients.)
+ */
+const LOBU_FIRST_PARTY_SOFTWARE_IDS = new Set([
+  'lobu-cli',
+  'lobu',
+  'lobu-mac-bridge',
+  'lobu-ios-bridge',
+  'lobu-bridge',
+]);
+
+/**
+ * Recognises Lobu's first-party surfaces (CLI, Mac/iOS bridges) so the UI can
+ * fold them into a "your devices & tools" group instead of listing them
+ * alongside third-party MCP apps. Prefers the exact software-id allowlist;
+ * the "Lobu …" client-name check is a best-effort fallback for clients that
+ * register without a known software id (and could in theory be spoofed — this
+ * is a display category, not an access boundary).
+ */
+function isFirstPartyLobuClient(name: string | null, softwareId: string | null): boolean {
+  const s = (softwareId ?? '').trim().toLowerCase();
+  if (s && LOBU_FIRST_PARTY_SOFTWARE_IDS.has(s)) return true;
+  const n = (name ?? '').trim().toLowerCase();
+  return n === 'lobu' || n.startsWith('lobu ') || n.startsWith('lobu-');
+}
 
 const PLATFORM_SCHEMAS: Record<
   string,
@@ -303,6 +332,7 @@ async function listMessagingClients(options: {
       externalUrl: externalUrlForMessagingIdentity(platform, row.user_id),
       linkedUserName: null,
       linkedUserEmail: null,
+      firstParty: false as const,
       details: {
         connectionId: null,
         description: null,
@@ -370,12 +400,15 @@ routes.get('/', mcpAuth, async (c) => {
 
         if (agentId && assignedAgentId !== agentId) return null;
 
+        const title = asNonEmptyString(clientInfo?.name) || asNonEmptyString(client.client_name);
+        const softwareId = asNonEmptyString(client.software_id);
+
         return {
           id: client.client_id,
           kind: 'mcp' as const,
-          title: asNonEmptyString(clientInfo?.name) || asNonEmptyString(client.client_name),
+          title,
           identifier: client.client_id,
-          platform: asNonEmptyString(client.software_id),
+          platform: softwareId,
           assignedAgentId,
           assignedAgentName: assignedAgentId
             ? (agentNames.get(assignedAgentId) ?? assignedAgentId)
@@ -392,6 +425,7 @@ routes.get('/', mcpAuth, async (c) => {
               : null,
           linkedUserName: client.user_name ?? null,
           linkedUserEmail: client.user_email ?? null,
+          firstParty: isFirstPartyLobuClient(title, softwareId),
           details: {
             softwareVersion: client.software_version ?? null,
             redirectUris: client.redirect_uris,
