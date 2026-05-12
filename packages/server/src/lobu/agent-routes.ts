@@ -6,7 +6,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { SkillConfig } from '@lobu/core';
+import type { AuthProfile, SkillConfig } from '@lobu/core';
 import { Hono } from 'hono';
 import { mcpAuth } from '../auth/middleware';
 import { getDb } from '../db/client';
@@ -243,6 +243,110 @@ function requireSessionOrAdminPat(c: any): Response | null {
   return c.json({ error: 'Authentication required' }, 401);
 }
 
+/**
+ * Strip secret material from a stored auth profile before returning it to the
+ * web client. `user_auth_profiles` only ever holds refs (not plaintext), but
+ * we still drop `credentialRef` / `metadata.*Ref` so the UI never sees them.
+ * `credential` is surfaced as an empty string to match the client type — the
+ * UI uses it only as "is a key already saved?" signal, never reads its value.
+ */
+function sanitizeAuthProfileForClient(profile: AuthProfile) {
+  const metadata = profile.metadata
+    ? {
+        ...(profile.metadata.email ? { email: profile.metadata.email } : {}),
+        ...(typeof profile.metadata.expiresAt === 'number'
+          ? { expiresAt: profile.metadata.expiresAt }
+          : {}),
+        ...(profile.metadata.accountId ? { accountId: profile.metadata.accountId } : {}),
+      }
+    : undefined;
+  return {
+    id: profile.id,
+    provider: profile.provider,
+    model: profile.model,
+    credential: '',
+    label: profile.label,
+    authType: profile.authType,
+    ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
+    createdAt: profile.createdAt,
+  };
+}
+
+/** Whitelist client-supplied profile metadata down to the non-secret fields. */
+function sanitizeClientProfileMetadata(
+  metadata: AuthProfile['metadata']
+): AuthProfile['metadata'] | undefined {
+  if (!metadata) return undefined;
+  const next = {
+    ...(metadata.email ? { email: metadata.email } : {}),
+    ...(typeof metadata.expiresAt === 'number' ? { expiresAt: metadata.expiresAt } : {}),
+    ...(metadata.accountId ? { accountId: metadata.accountId } : {}),
+  };
+  return Object.keys(next).length > 0 ? next : undefined;
+}
+
+/**
+ * Reconcile the user-scoped auth profiles for `(userId, agentId)` against the
+ * list the web client just submitted in a `PATCH /config` body.
+ *
+ *   - entries in `desired` that carry a non-empty `credential` are upserted
+ *     first (the secret is written to the secret store, the ref to the profile
+ *     JSON) — done before any removal so a failed write can't leave the user
+ *     with fewer credentials than they started with.
+ *   - profiles in the store but absent from `desired` are then removed (with
+ *     their secrets), so deleting a provider row in the UI actually deletes it.
+ *   - entries with an empty/absent `credential` are unchanged rows the client
+ *     round-tripped — left as-is so the stored secret is preserved.
+ *
+ * Throws if the auth-profiles manager is unavailable; the caller surfaces that
+ * rather than reporting a save that was dropped.
+ */
+async function reconcileAgentAuthProfiles(
+  agentId: string,
+  userId: string,
+  desired: AuthProfile[]
+): Promise<void> {
+  const manager = getLobuCoreServices()?.getAuthProfilesManager?.();
+  if (!manager) {
+    throw new Error('Auth profile store is not available — retry once startup completes');
+  }
+  const store = manager.getUserAuthProfileStore();
+  for (const profile of desired) {
+    const credential = typeof profile.credential === 'string' ? profile.credential.trim() : '';
+    if (!credential) continue;
+    const metadata = sanitizeClientProfileMetadata(profile.metadata);
+    await manager.upsertProfile({
+      userId,
+      agentId,
+      id: profile.id,
+      provider: profile.provider,
+      credential,
+      authType: profile.authType,
+      label: profile.label,
+      model: profile.model,
+      ...(metadata ? { metadata } : {}),
+      makePrimary: true,
+    });
+  }
+  const desiredIds = new Set(desired.map((profile) => profile.id).filter(Boolean));
+  const current = await store.list(userId, agentId);
+  for (const existing of current) {
+    if (!desiredIds.has(existing.id)) {
+      await store.remove(userId, agentId, {
+        provider: existing.provider,
+        profileId: existing.id,
+      });
+    }
+  }
+}
+
+/** True if the submitted profile list contains at least one fresh credential. */
+function hasFreshCredential(profiles: AuthProfile[]): boolean {
+  return profiles.some(
+    (profile) => typeof profile.credential === 'string' && profile.credential.trim().length > 0
+  );
+}
+
 // ── List agents ──────────────────────────────────────────────────────────────
 
 routes.get('/', mcpAuth, async (c) => {
@@ -460,7 +564,21 @@ routes.get('/:agentId/config', mcpAuth, async (c) => {
     const { agentId } = c.req.param();
     const settings = await configStore.getSettings(agentId);
     if (!settings) return c.json({ error: 'Agent not found' }, 404);
-    return c.json(settings);
+
+    // `configStore` doesn't carry auth profiles (they live in
+    // `user_auth_profiles`, keyed by the requesting user). Merge the caller's
+    // sanitized profiles in so the agent settings UI can show which providers
+    // already have a credential connected.
+    const user = c.get('user');
+    const authProfilesManager = getLobuCoreServices()?.getAuthProfilesManager?.();
+    const authProfiles =
+      user?.id && authProfilesManager
+        ? (await authProfilesManager.getUserAuthProfileStore().list(user.id, agentId)).map(
+            sanitizeAuthProfileForClient
+          )
+        : [];
+
+    return c.json({ ...settings, authProfiles });
   });
 });
 
@@ -665,7 +783,40 @@ routes.patch('/:agentId/config', mcpAuth, async (c) => {
       return c.json({ error: 'Agent not found' }, 404);
     }
 
-    await configStore.updateSettings(agentId, updates);
+    // Auth profiles aren't part of the agent settings row — they're
+    // user-scoped and live in `user_auth_profiles` with secrets in the secret
+    // store. Pull them out of the settings patch and persist them through the
+    // proper path; otherwise an api-key typed into the UI is silently dropped.
+    const { authProfiles, ...settingsUpdates } = updates as {
+      authProfiles?: AuthProfile[];
+    } & Record<string, unknown>;
+    if (Array.isArray(authProfiles)) {
+      const user = c.get('user');
+      if (!user?.id) {
+        // Admin-PAT callers (`lobu apply`) manage declared-agent credentials
+        // out of band; reject only if they actually tried to set one here.
+        if (hasFreshCredential(authProfiles)) {
+          return c.json(
+            { error: 'Setting agent auth profiles requires a web session' },
+            403
+          );
+        }
+      } else {
+        try {
+          await reconcileAgentAuthProfiles(agentId, user.id, authProfiles);
+        } catch (error) {
+          return c.json(
+            {
+              error:
+                error instanceof Error ? error.message : 'Failed to persist auth profiles',
+            },
+            503
+          );
+        }
+      }
+    }
+
+    await configStore.updateSettings(agentId, settingsUpdates);
     return c.json({ success: true });
   });
 });
