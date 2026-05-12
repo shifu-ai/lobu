@@ -30,6 +30,7 @@ import {
 } from './utils/connector-catalog';
 import { extractConnectorMetadata } from './utils/connector-compiler';
 import { upsertConnectorDefinitionRecords } from './utils/connector-definition-install';
+import { ensureUniqueConnectionSlug } from './utils/connections';
 import { resolveConnectorCode } from './utils/ensure-connector-installed';
 import { applyEntityLinks } from './utils/entity-link-upsert';
 import { errorMessage } from './utils/errors';
@@ -182,12 +183,24 @@ async function ensureDeviceConnectorWired(
       `) as unknown as Array<{ id: number }>;
       connectionId = existingConn[0]?.id;
       if (!connectionId) {
+        // Stable slug for `lobu apply` diffing — same generation path as
+        // manage_connections. No insert-retry here: this whole block runs
+        // under a `pg_advisory_xact_lock` keyed on (userId, connectorKey) plus
+        // the existence check above, so the slug can't be raced for this
+        // (org, connector, user) tuple — and a unique violation would abort
+        // the surrounding transaction, making a retry pointless anyway.
+        const slug = await ensureUniqueConnectionSlug({
+          organizationId,
+          connectorKey,
+          displayName: metadata.name,
+          db: tx,
+        });
         const inserted = (await tx`
           INSERT INTO connections (
-            organization_id, connector_key, display_name, status,
+            organization_id, connector_key, slug, display_name, status,
             auth_profile_id, app_auth_profile_id, config, created_by, visibility
           ) VALUES (
-            ${organizationId}, ${connectorKey}, ${metadata.name}, 'active',
+            ${organizationId}, ${connectorKey}, ${slug}, ${metadata.name}, 'active',
             NULL, NULL, NULL, ${userId}, 'private'
           )
           RETURNING id
