@@ -291,6 +291,87 @@ export const EMBEDDED_SCHEMA_PATCHES: EmbeddedSchemaPatch[] = [
     },
   },
   {
+    // Mirrors db/migrations/20260513120000_auth_profiles_device_binding.sql.
+    // Lets a 'browser_session' auth_profile live on a device worker (cookies on
+    // disk in user_data_dir, auth_data empty) instead of in server-side
+    // auth_data jsonb.
+    id: 'auth-profiles-device-binding',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        ALTER TABLE public.auth_profiles
+        ADD COLUMN IF NOT EXISTS device_worker_id uuid
+      `);
+      await sql.unsafe(`
+        ALTER TABLE public.auth_profiles
+        ADD COLUMN IF NOT EXISTS browser_kind text
+      `);
+      await sql.unsafe(`
+        ALTER TABLE public.auth_profiles
+        ADD COLUMN IF NOT EXISTS user_data_dir text
+      `);
+      await sql.unsafe(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'auth_profiles_device_worker_id_fkey'
+          ) THEN
+            ALTER TABLE public.auth_profiles
+              ADD CONSTRAINT auth_profiles_device_worker_id_fkey
+              FOREIGN KEY (device_worker_id)
+              REFERENCES public.device_workers (id)
+              ON DELETE CASCADE;
+          END IF;
+        END $$;
+      `);
+      await sql.unsafe(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'auth_profiles_browser_kind_check'
+          ) THEN
+            ALTER TABLE public.auth_profiles
+              ADD CONSTRAINT auth_profiles_browser_kind_check
+              CHECK (browser_kind IS NULL OR browser_kind = ANY (ARRAY['chrome','brave','arc','edge']));
+          END IF;
+        END $$;
+      `);
+      await sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS auth_profiles_device_worker_idx
+        ON public.auth_profiles (device_worker_id)
+        WHERE device_worker_id IS NOT NULL
+      `);
+    },
+  },
+  {
+    // Mirrors db/migrations/20260513150000_auth_profiles_cdp_url.sql
+    id: 'auth-profiles-cdp-url',
+    apply: async (sql) => {
+      await sql.unsafe(`
+        ALTER TABLE public.auth_profiles
+        ADD COLUMN IF NOT EXISTS cdp_url text
+      `);
+      await sql.unsafe(`
+        DO $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint WHERE conname = 'auth_profiles_device_browser_path_xor'
+          ) THEN
+            ALTER TABLE public.auth_profiles
+              ADD CONSTRAINT auth_profiles_device_browser_path_xor
+              CHECK (
+                device_worker_id IS NULL
+                OR profile_kind <> 'browser_session'
+                OR (
+                  (user_data_dir IS NOT NULL AND cdp_url IS NULL)
+                  OR (user_data_dir IS NULL AND cdp_url IS NOT NULL)
+                )
+              );
+          END IF;
+        END $$;
+      `);
+    },
+  },
+  {
     // Mirrors db/migrations/20260513200000_notifications_as_events.sql.
     // Idempotent: only migrates rows from `notifications` if the table still
     // exists; subsequent boots no-op.

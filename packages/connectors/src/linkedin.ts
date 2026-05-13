@@ -19,7 +19,12 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
-import { getBrowserCookies, validateCookieNotExpired } from './browser-scraper-utils';
+import {
+  getBrowserCdpUrl,
+  getBrowserCookies,
+  getBrowserUserDataDir,
+  validateCookieNotExpired,
+} from './browser-scraper-utils';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -316,23 +321,37 @@ export default class LinkedInConnector extends ConnectorRuntime {
     // Normalize URL - remove trailing slash
     const baseUrl = companyUrl.replace(/\/$/, '');
 
-    const cookies = getBrowserCookies(ctx.checkpoint as any, ctx.sessionState as any, 'linkedin');
-    validateCookieNotExpired(cookies, 'li_at', 'linkedin');
+    const userDataDir = getBrowserUserDataDir(ctx.sessionState);
+    const cdpUrlFromSession = getBrowserCdpUrl(ctx.sessionState);
+    const cdpUrl = cdpUrlFromSession ?? 'auto';
+    // No need to require cookies when the device tells us to attach directly
+    // (managed --user-data-dir on disk, or an explicit CDP endpoint pointed
+    // at the user's running Chrome). The cookie cascade is only the fallback
+    // for the cloud/auto path.
+    const skipServerCookies = !!userDataDir || !!cdpUrlFromSession;
+    const cookies = skipServerCookies
+      ? []
+      : getBrowserCookies(ctx.checkpoint as any, ctx.sessionState as any, 'linkedin');
+    if (!skipServerCookies) {
+      validateCookieNotExpired(cookies, 'li_at', 'linkedin');
+    }
 
     const maxScrolls = (config.max_scrolls as number) ?? (feedKey === 'jobs' ? 3 : 5);
 
     if (feedKey === 'jobs') {
-      return this.syncJobs(baseUrl, cookies, maxScrolls, checkpoint);
+      return this.syncJobs(baseUrl, cookies, maxScrolls, checkpoint, userDataDir, cdpUrl);
     }
 
-    return this.syncUpdates(baseUrl, cookies, maxScrolls, checkpoint);
+    return this.syncUpdates(baseUrl, cookies, maxScrolls, checkpoint, userDataDir, cdpUrl);
   }
 
   private async syncUpdates(
     baseUrl: string,
     cookies: any[],
     maxScrolls: number,
-    checkpoint: LinkedInCheckpoint
+    checkpoint: LinkedInCheckpoint,
+    userDataDir: string | undefined,
+    cdpUrl: string | 'auto'
   ): Promise<SyncResult> {
     const postsUrl = `${baseUrl}/posts/`;
 
@@ -350,8 +369,9 @@ export default class LinkedInConnector extends ConnectorRuntime {
         navigationTimeoutMs: 20000,
       },
       url: postsUrl,
-      cdpUrl: 'auto',
+      cdpUrl,
       cookies,
+      userDataDir,
       parseResponse: parseCompanyUpdates,
       checkAuth: async (page) => {
         const url = page.url();
@@ -401,7 +421,9 @@ export default class LinkedInConnector extends ConnectorRuntime {
     baseUrl: string,
     cookies: any[],
     maxScrolls: number,
-    checkpoint: LinkedInCheckpoint
+    checkpoint: LinkedInCheckpoint,
+    userDataDir: string | undefined,
+    cdpUrl: string | 'auto'
   ): Promise<SyncResult> {
     const jobsUrl = `${baseUrl}/jobs/`;
 
@@ -420,8 +442,9 @@ export default class LinkedInConnector extends ConnectorRuntime {
         navigationTimeoutMs: 20000,
       },
       url: jobsUrl,
-      cdpUrl: 'auto',
+      cdpUrl,
       cookies,
+      userDataDir,
       parseResponse: parseJobListings,
       checkAuth: async (page) => {
         const url = page.url();
