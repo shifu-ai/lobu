@@ -343,7 +343,7 @@ export function createGatewayApp(
         c: any,
         agentId: string
       ): Promise<{ userId: string; platform: string } | null> => {
-        const payload = verifySettingsSessionOrToken(c);
+        const payload = await verifySettingsSessionOrToken(c);
         if (!payload) return null;
         const principal = {
           userId: payload.userId,
@@ -695,7 +695,7 @@ export function createGatewayApp(
   }
 
   async function hasDevRouteAccess(c: any): Promise<boolean> {
-    if (verifySettingsSessionOrToken(c)) return true;
+    if (await verifySettingsSessionOrToken(c)) return true;
     const authHeader = c.req.header("Authorization");
     if (!authHeader?.startsWith("Bearer ")) return false;
     const token = authHeader.slice(7);
