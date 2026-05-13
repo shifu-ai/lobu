@@ -87,3 +87,6 @@ packages/*/~/
 .connector-child-*.mjs
 **/.connector-child-*.mjs
 .claude/scheduled_tasks.lock
+
+# Embedded PGlite dev data (make dev without DATABASE_URL)
+.lobu-dev/
