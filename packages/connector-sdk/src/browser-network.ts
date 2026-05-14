@@ -73,6 +73,17 @@ async function acquireForNetworkSync(
   stealth: boolean,
   userDataDir: string | undefined
 ): Promise<NetworkBrowser> {
+  // Mirror-mode priority: when the caller already handed us a populated
+  // cookie set and didn't pin a specific CDP endpoint, force the headless
+  // Playwright + addCookies path. Otherwise an auto-CDP discovery would
+  // attach to the user's running Chrome (e.g. M144 remote-debugging
+  // toggle) and silently bypass the cookies we just decrypted — fine in
+  // the sense that it'd still scrape, but it'd be running through the
+  // user's live session instead of the isolated mirror we promised.
+  if (cookies.length > 0 && cdpUrl === 'auto') {
+    cdpUrl = null;
+  }
+
   // --- Persistent profile path: cookies live on disk ---
   if (userDataDir) {
     const playwrightModule = 'playwright';

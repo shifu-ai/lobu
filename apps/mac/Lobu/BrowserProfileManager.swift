@@ -58,7 +58,6 @@ struct InstalledBrowserProfile: Identifiable, Hashable {
     let directoryName: String
     let displayName: String
     var id: String { "\(browser.kind.rawValue)/\(directoryName)" }
-    var sourcePath: URL { browser.userDataRoot.appendingPathComponent(directoryName) }
 }
 
 /// Discovers installed Chromium-family browsers + their profiles, and owns
@@ -122,93 +121,35 @@ enum BrowserProfileManager {
             .sorted { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
     }
 
-    /// Materialize a managed --user-data-dir by copying the user's source
-    /// profile. Returns the absolute path to give to the server (and to
-    /// Playwright's launchPersistentContext at run time).
-    static func materializeManagedProfile(from source: InstalledBrowserProfile, named name: String) throws -> URL {
-        let dirName = "\(source.browser.kind.rawValue)-\(slugify(name))-\(UUID().uuidString.prefix(8))"
-        let target = managedRoot.appendingPathComponent(dirName, isDirectory: true)
-        try FileManager.default.createDirectory(at: managedRoot, withIntermediateDirectories: true)
-        // Copy the full source profile dir. For a fresh-blank profile, callers
-        // can skip this and just createDirectory(target) — but most users want
-        // to inherit their existing cookies.
-        try FileManager.default.copyItem(at: source.sourcePath, to: target)
-        return target
+    /// Detect a live Chrome CDP endpoint for the given user-data root.
+    /// Reads `<root>/DevToolsActivePort` — the file Chrome writes when
+    /// either the M144 chrome://inspect toggle is enabled OR Chrome was
+    /// launched with `--remote-debugging-port=<N>`. Both modes serve a
+    /// standard CDP WebSocket; M144 additionally disables HTTP
+    /// `/json/version` discovery, which is why we don't probe that
+    /// endpoint here.
+    ///
+    /// The Mac UI uses this for menu-bar pre-fill; the connector
+    /// subprocess re-reads DevToolsActivePort itself at sync time to get
+    /// the full ws:// path. Returns nil when Chrome isn't exposing CDP.
+    static func autoDetectCdpUrl(matchUserDataRoot: URL? = nil) async -> String? {
+        guard let root = matchUserDataRoot,
+              let port = readDevToolsActivePort(at: root)
+        else { return nil }
+        return "http://127.0.0.1:\(port)"
     }
 
-    /// Open Chrome (or matching browser) at `url` pointed at the managed
-    /// --user-data-dir so the user can complete an interactive login that
-    /// writes cookies into the profile dir. Throws if the OS reports the
-    /// launch failed — callers should surface to the user instead of
-    /// silently leaving the profile in `pending_auth` forever.
-    static func launchManaged(browser: InstalledBrowser, managedDir: URL, openingURL url: URL) async throws {
-        let config = NSWorkspace.OpenConfiguration()
-        config.arguments = ["--user-data-dir=\(managedDir.path)", url.absoluteString]
-        config.activates = true
-        let target = browser.applicationURL
-        _ = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<NSRunningApplication, Error>) in
-            NSWorkspace.shared.openApplication(at: target, configuration: config) { running, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let running {
-                    continuation.resume(returning: running)
-                } else {
-                    continuation.resume(throwing: NSError(
-                        domain: "Lobu.BrowserProfileManager",
-                        code: 1,
-                        userInfo: [NSLocalizedDescriptionKey: "Browser failed to launch"]
-                    ))
-                }
-            }
-        }
+    private static func readDevToolsActivePort(at userDataRoot: URL) -> Int? {
+        let path = userDataRoot.appendingPathComponent("DevToolsActivePort")
+        guard FileManager.default.fileExists(atPath: path.path),
+              let contents = try? String(contentsOf: path, encoding: .utf8)
+        else { return nil }
+        let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+        guard let first = lines.first,
+              let port = Int(first.trimmingCharacters(in: .whitespaces)),
+              port > 0, port < 65536
+        else { return nil }
+        return port
     }
 
-    static func removeManagedProfile(at path: URL) {
-        try? FileManager.default.removeItem(at: path)
-    }
-
-    /// Probe localhost for a Chrome (or any Chromium-family browser) running
-    /// with `--remote-debugging-port`. Returns the discovered URL, or nil if
-    /// nothing's listening. The default Chrome port is 9222; we also try a few
-    /// neighbouring ports the user might've picked.
-    static func autoDetectCdpUrl() async -> String? {
-        for port in [9222, 9223, 9224, 9225] {
-            if await isCdpReachable(port: port) {
-                return "http://127.0.0.1:\(port)"
-            }
-        }
-        return nil
-    }
-
-    static func isCdpReachable(port: Int) async -> Bool {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/json/version") else { return false }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 1.0
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return (response as? HTTPURLResponse)?.statusCode == 200
-        } catch {
-            return false
-        }
-    }
-
-    private static func slugify(_ value: String) -> String {
-        let lowered = value.lowercased()
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        let mapped = lowered.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
-        let joined = String(mapped)
-        // Collapse runs of '-' for a tidy slug.
-        var result = ""
-        var lastWasDash = false
-        for ch in joined {
-            if ch == "-" {
-                if lastWasDash { continue }
-                lastWasDash = true
-            } else {
-                lastWasDash = false
-            }
-            result.append(ch)
-        }
-        return result.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-    }
 }
