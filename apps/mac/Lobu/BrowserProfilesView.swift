@@ -61,20 +61,14 @@ struct SingleBrowserRow: View {
 
     @State private var sourceProfiles: [InstalledBrowserProfile] = []
     @State private var savingDir: String?
-    @State private var confirmingDeleteId: Int?
-    /// Detected CDP port via DevToolsActivePort on view appear. Pre-fills
-    /// the browser-level port input. nil when Chrome isn't exposing
-    /// remote debugging.
+    /// Detected CDP port via DevToolsActivePort on view appear. Surfaced
+    /// inline in the "Connect to my Chrome" menu row; nil when Chrome
+    /// isn't exposing remote debugging.
     @State private var detectedCdpPort: Int?
     /// Single browser-level opt-in to CDP attach. Chrome runs one CDP
-    /// server per user-data root, so the consent + port input live at
-    /// the browser header — every profile under this Chrome inherits the
-    /// same setting when the user clicks Mirror.
+    /// server per user-data root, so the consent is browser-wide — every
+    /// profile under this Chrome inherits this setting on the next mirror.
     @State private var allowCdp: Bool = false
-    /// Browser-level CDP port override. Empty string means "auto-discover
-    /// via DevToolsActivePort at sync time"; non-empty pins a specific
-    /// port for unusual Chrome launches.
-    @State private var cdpPortText: String = ""
 
     private var myProfiles: [WorkerClient.BrowserAuthProfile] {
         hub.profiles.filter { $0.browser_kind == browser.kind.rawValue }
@@ -89,50 +83,69 @@ struct SingleBrowserRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                Image(systemName: "globe")
-                    .foregroundStyle(.blue)
-                    .frame(width: 18)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(browser.kind.displayName).font(.caption)
-                    Text(headerStatus())
-                        .font(.caption2).foregroundStyle(.secondary)
-                }
-                Spacer()
-                // Single browser-level CDP control: port input +
-                // checkbox. One Chrome process = one CDP server, so this
-                // applies to every profile under this browser. Hidden
-                // entirely when DevToolsActivePort hasn't found a live
-                // listener — there's nothing meaningful to attach to.
-                if detectedCdpPort != nil {
-                    TextField(
-                        detectedCdpPort.map(String.init) ?? "port",
-                        text: $cdpPortText
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.mini).font(.caption2)
-                    .frame(maxWidth: 60)
-                    Toggle("Use my Chrome", isOn: $allowCdp)
-                        .toggleStyle(.checkbox)
-                        .controlSize(.mini).font(.caption2)
-                        .help(
-                            "Run connectors inside your real Chrome (best for sites like Revolut that pin sessions to a browser fingerprint). Off = Lobu only reads cookies, never touches the live browser process."
-                        )
-                }
-            }
-            .padding(.vertical, 4)
-            .padding(.horizontal, 6)
+        let mirroredCount = sourceProfiles.filter { mirroredProfile(for: $0) != nil }.count
 
-            ForEach(sourceProfiles) { src in
-                sourceProfileRow(src)
-                    .padding(.leading, 32).padding(.trailing, 6)
+        return VStack(alignment: .leading, spacing: 2) {
+            Menu {
+                // CDP attach row — only when DevToolsActivePort detected a
+                // live Chrome listener. One Chrome process = one CDP server,
+                // so this is browser-wide, sits above the per-profile
+                // section. The label embeds the detected port so the user
+                // sees what they're attaching to without a separate textfield
+                // (NSMenu can't host one cleanly anyway).
+                if let port = detectedCdpPort {
+                    Section("Live browser session") {
+                        Toggle(
+                            "Connect to my Chrome (port \(port))",
+                            isOn: $allowCdp
+                        )
+                        if allowCdp {
+                            Button("Disconnect Chrome", role: .destructive) {
+                                allowCdp = false
+                            }
+                        }
+                    }
+                }
+
+                Section(sourceProfiles.isEmpty ? "" : "Profiles") {
+                    ForEach(sourceProfiles) { src in
+                        Toggle(
+                            isOn: profileBinding(for: src)
+                        ) {
+                            Text(src.displayName)
+                        }
+                        .disabled(savingDir == src.directoryName)
+                    }
+                    if sourceProfiles.isEmpty {
+                        Text("No \(browser.kind.displayName) profiles found")
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "globe")
+                        .foregroundStyle(.blue)
+                        .frame(width: 18)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(browser.kind.displayName).font(.caption)
+                        Text(headerStatus(
+                            mirroredCount: mirroredCount,
+                            totalCount: sourceProfiles.count
+                        ))
+                        .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .padding(.vertical, 4)
+                .padding(.horizontal, 6)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
-            if sourceProfiles.isEmpty {
-                Text("No \(browser.kind.displayName) profiles found on this Mac.")
-                    .font(.caption2).foregroundStyle(.secondary)
-                    .padding(.leading, 32).padding(.bottom, 4)
-            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)  // we draw our own chevron to match the other Integration rows
+
             // Surface any save / fetch failure inline so the user sees
             // what's wrong instead of "I clicked Mirror and nothing
             // happened." Stays as long as hub.loadError is non-nil; the
@@ -163,7 +176,14 @@ struct SingleBrowserRow: View {
         }
     }
 
-    private func headerStatus() -> String {
+    private func headerStatus(mirroredCount: Int, totalCount: Int) -> String {
+        // When the user already has profiles mirrored, the count is the
+        // most useful summary — the descriptive blurbs belong on the
+        // first run / discovery experience, not on the steady-state UI.
+        if totalCount > 0 {
+            let suffix = totalCount == 1 ? "profile" : "profiles"
+            return "\(mirroredCount) of \(totalCount) \(suffix) mirrored"
+        }
         if detectedCdpPort != nil {
             return
                 "Your Chrome is reachable. Check 'Use my Chrome' to let Lobu run inside it for sites that need a live session."
@@ -172,55 +192,22 @@ struct SingleBrowserRow: View {
             "Cookies stay on this Mac. Connectors run headless."
     }
 
-    @ViewBuilder
-    private func sourceProfileRow(_ source: InstalledBrowserProfile) -> some View {
-        let mirrored = mirroredProfile(for: source)
-        let isMirrored = mirrored != nil
-        HStack(alignment: .center, spacing: 6) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(source.displayName).font(.caption)
-                if isMirrored {
-                    Text(mirroredStatus(mirrored!))
-                        .font(.caption2).foregroundStyle(.secondary)
+    /// Binding wired into a profile-checkbox row. Reads the current
+    /// mirror state for `source`; flipping the binding kicks off the
+    /// async mirror / delete operation without dismissing the menu.
+    /// Errors land in `hub.loadError` and surface as the inline banner
+    /// under the row.
+    private func profileBinding(for source: InstalledBrowserProfile) -> Binding<Bool> {
+        Binding(
+            get: { mirroredProfile(for: source) != nil },
+            set: { wantsMirror in
+                if wantsMirror {
+                    Task { await mirror(source) }
+                } else if let existing = mirroredProfile(for: source) {
+                    Task { await delete(existing) }
                 }
             }
-            Spacer()
-            if !isMirrored {
-                Button(action: { Task { await mirror(source) } }) {
-                    HStack(spacing: 2) {
-                        Image(systemName: "plus").font(.caption2)
-                        Text("Mirror").font(.caption)
-                    }
-                    .foregroundStyle(.blue)
-                }
-                .buttonStyle(.plain)
-                .disabled(savingDir == source.directoryName)
-            } else if let m = mirrored, confirmingDeleteId == m.id {
-                Button("Confirm", role: .destructive) {
-                    Task { await delete(m) }
-                }
-                .buttonStyle(.plain).font(.caption2).foregroundStyle(.red)
-                Button("Cancel") { confirmingDeleteId = nil }
-                    .buttonStyle(.plain).font(.caption2).foregroundStyle(.secondary)
-            } else if let m = mirrored {
-                Button(action: { confirmingDeleteId = m.id }) {
-                    Image(systemName: "trash").font(.caption2)
-                }
-                .buttonStyle(.plain).foregroundStyle(.secondary)
-            }
-        }
-        .padding(.vertical, 1)
-    }
-
-    private func mirroredStatus(_ p: WorkerClient.BrowserAuthProfile) -> String {
-        let allowed = p.auth_data?.allow_cdp_attach == true
-        if allowed && detectedCdpPort != nil {
-            return "mirrored · uses live Chrome"
-        }
-        if allowed {
-            return "mirrored · would use live Chrome (not running with debug)"
-        }
-        return "mirrored · cookies only"
+        )
     }
 
     @MainActor
@@ -231,26 +218,15 @@ struct SingleBrowserRow: View {
         }
         savingDir = source.directoryName
         defer { savingDir = nil }
-        // Three browser-level knobs (shared across profiles under this
-        // Chrome — Chrome runs one CDP server per user-data root, so
-        // per-profile controls would be lying about the architecture):
-        //   - allow_cdp_attach (checkbox): the consent. Off (default)
-        //     means Lobu never touches the live Chrome.
-        //   - cdpPortText (port input): a pinned override. When set,
-        //     the connector subprocess uses exactly this port at sync
-        //     time, skipping DevToolsActivePort discovery.
-        //   - If the box is on and no port is given, DevToolsActivePort
-        //     auto-discovery kicks in at sync time.
-        let pinnedPort: Int? = {
-            let raw = cdpPortText.trimmingCharacters(in: .whitespaces)
-            guard !raw.isEmpty,
-                  let port = Int(raw),
-                  port > 0, port < 65536
-            else { return nil }
-            return port
-        }()
-        let cdpUrl: String? = (allowCdp && pinnedPort != nil)
-            ? "http://127.0.0.1:\(pinnedPort!)"
+        // allow_cdp_attach is the single browser-level consent. When the
+        // user has connected Chrome (`allowCdp`) AND DevToolsActivePort
+        // surfaced a live port, pin that port for the new profile so the
+        // connector subprocess attaches directly at sync time. When the
+        // user is connected but the port wasn't detected at view-appear
+        // time, leave cdpUrl nil — the worker re-reads DevToolsActivePort
+        // on every sync, so a Chrome that starts later still attaches.
+        let cdpUrl: String? = (allowCdp && detectedCdpPort != nil)
+            ? "http://127.0.0.1:\(detectedCdpPort!)"
             : nil
         do {
             let workerId = LobuWorkerIdentity.current()
@@ -281,7 +257,6 @@ struct SingleBrowserRow: View {
         do {
             try await client.deleteMyBrowserAuthProfile(workerId: workerId, profileId: profile.id)
             hub.remove(profile)
-            confirmingDeleteId = nil
         } catch {
             hub.loadError = error.localizedDescription
         }
