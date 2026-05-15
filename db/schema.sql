@@ -2242,13 +2242,6 @@ ALTER TABLE ONLY public.agent_users
     ADD CONSTRAINT agent_users_pkey PRIMARY KEY (agent_id, platform, user_id);
 
 --
--- Name: agents agents_organization_id_id_key; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.agents
-    ADD CONSTRAINT agents_organization_id_id_key UNIQUE (organization_id, id);
-
---
 -- Name: agents agents_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -4996,4 +4989,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260514130000'),
     ('20260514160000'),
     ('20260515120000'),
-    ('20260515150000');
+    ('20260515150000'),
+    ('20260515160000');
