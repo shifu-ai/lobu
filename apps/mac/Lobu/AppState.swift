@@ -223,6 +223,17 @@ final class AppState: ObservableObject {
             // reconnects if it's still running from a previous session.
             Task { @MainActor in
                 await startLocalLobu()
+                // No-auth credentials are only safe to keep using if we own
+                // the process. If LocalLobuRunner adopted a pre-existing
+                // server, that could be a squatter — drop the saved creds
+                // and surface the connection card again. The user can sign
+                // in via OAuth at that point if they trust whatever's there.
+                if credentials != nil && !localRunner.spawnedThisSession {
+                    NSLog("[Lobu] startup: didn't spawn local server; clearing no-auth credentials")
+                    credentialStore.clear()
+                    credentials = nil
+                    return
+                }
                 startAutoPollIfSignedIn()
             }
         } else {
@@ -384,9 +395,10 @@ final class AppState: ObservableObject {
 
     // MARK: - Connect (URL-driven sign-in) --------------------------------------
 
-    /// The connection card's primary action. Auto-starts the embedded server
-    /// when the URL is the exact one our runner manages; otherwise just OAuths
-    /// against the typed URL.
+    /// The connection card's primary action. When the URL is the embedded
+    /// server we manage, spawn it (with `LOBU_NO_AUTH=1`) and stamp the menu
+    /// bar with synthesised credentials — no OAuth, no token. Anything else
+    /// runs the normal OAuth device flow.
     func connect() async {
         let raw = customServerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let urlString = raw.isEmpty ? cloudURL : raw
@@ -403,13 +415,64 @@ final class AppState: ObservableObject {
             await startLocalLobu()
             guard localLobuStatus.isRunning else { return }
         }
-        // serverMode = .local ONLY when this URL is the runner we manage. Other
-        // loopback URLs (someone else's localhost dev server, custom ports) get
-        // .remote so we don't auto-spawn our runner on next launch.
+        // serverMode = .local ONLY when this URL is the runner we manage.
+        // Other loopback URLs (someone else's localhost dev server, custom
+        // ports) get .remote so we don't auto-spawn our runner on next launch.
         serverMode = autoStart ? .local : .remote
         setBaseURL(urlString)
+
+        // Only adopt no-auth credentials when WE spawned the server this
+        // session. If LocalLobuRunner.start() adopted a pre-existing
+        // process (orphan from a previous run, developer's `lobu run`, or
+        // worst case a malicious squatter on :8787), we don't own the port
+        // — sending any header to it could leak. Fall through to OAuth in
+        // those cases.
+        if autoStart, localRunner.spawnedThisSession {
+            adoptLocalCredentials(baseURL: urlString)
+            startAutoPollIfSignedIn()
+            return
+        }
         await signIn()
     }
+
+    /// Synthesise credentials for the no-auth server. The token field is a
+    /// dummy — the server short-circuits auth via the `LOBU_NO_AUTH=1` env
+    /// the runner was spawned with, so no header value is actually validated.
+    /// Identity constants mirror the contract in
+    /// `packages/server/src/start-local.ts` (BOOTSTRAP_USER_*, BOOTSTRAP_ORG_*).
+    private func adoptLocalCredentials(baseURL: String) {
+        let info = OAuthUserInfo(
+            sub: AppState.bootstrapUserId,
+            email: AppState.bootstrapUserEmail,
+            name: AppState.bootstrapUserName,
+            picture: nil,
+            organization_slug: AppState.bootstrapOrgSlug,
+            organizations: [.init(slug: AppState.bootstrapOrgSlug, name: AppState.bootstrapOrgName)]
+        )
+        let creds = OAuthCredentials(
+            baseURL: baseURL,
+            clientID: "menubar-no-auth",
+            clientSecret: nil,
+            accessToken: "noauth",
+            refreshToken: nil,
+            expiresAt: nil,
+            userInfo: info
+        )
+        do { try credentialStore.save(creds) } catch {
+            NSLog("[Lobu] no-auth: failed to persist synthesised credentials: \(error.localizedDescription)")
+        }
+        credentials = creds
+        setStatus("")
+    }
+
+    // Contract with `ensureBootstrapPat` in packages/server/src/start-local.ts.
+    // Changing either side without the other makes the menu bar's display
+    // disagree with reality.
+    private static let bootstrapUserId    = "bootstrap-user"
+    private static let bootstrapUserName  = "Local Developer"
+    private static let bootstrapUserEmail = "dev@lobu.local"
+    private static let bootstrapOrgSlug   = "dev"
+    private static let bootstrapOrgName   = "Local Dev"
 
     /// True iff this URL targets the embedded server the menu bar manages.
     /// Requires an exact scheme + host + effective-port match against

@@ -43,6 +43,7 @@ import { listMigrationFiles, loadMigrationUpSection } from './db/migration-loade
 import type { Env } from './index';
 import { getEnvFromProcess } from './utils/env';
 import logger from './utils/logger';
+import { isLoopbackHost } from './utils/loopback';
 
 const DATA_DIR = process.env.LOBU_DATA_DIR || join(homedir(), '.lobu', 'data');
 const PORT = parseInt(process.env.PORT || '8787', 10);
@@ -70,6 +71,8 @@ function readPositiveIntEnv(name: string, fallback: number): number {
 function isTruthyEnv(name: string): boolean {
   return /^(1|true|yes|on)$/i.test(process.env[name]?.trim() ?? '');
 }
+
+// `isLoopbackHost` lives in `./utils/loopback` so `server.ts` can share it.
 
 async function main() {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -187,23 +190,49 @@ async function main() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  // ─── Listen ──────────────────────────────────────────────────
-
-  httpServer.listen(PORT, HOST, () => {
-    logger.info(`Lobu running at http://${HOST}:${PORT}`);
-    logger.info(`Data: ${DATA_DIR}`);
-  });
-
   // ─── Bootstrap PAT ───────────────────────────────────────────
-  // Self-skips when the deployment already has users (production safety) or
-  // when a bootstrap PAT has already been minted under LOBU_DATA_DIR.
-  // Replaces the previous LOBU_LOCAL_BOOTSTRAP env-flag gate — operators no
-  // longer need to opt in for first-run local dev.
+  // Runs BEFORE listen so that:
+  //   (a) the bootstrap user / org / PAT row are guaranteed to exist before
+  //       the first request can land — no-auth mode would otherwise 503
+  //       during the gap between listen() and ensureBootstrapPat()'s await.
+  //   (b) a stale bootstrap-pat.txt (file exists, DB rows missing because
+  //       LOBU_DATA_DIR was wiped) gets re-minted now, while we still own
+  //       the boot sequence.
   try {
     await ensureBootstrapPat(dbUrl);
   } catch (err) {
     logger.warn({ err }, 'Bootstrap PAT setup failed');
   }
+
+  // ─── Listen ──────────────────────────────────────────────────
+
+  // No-auth mode is loopback-only by design. Refuse to listen on anything
+  // other than the IPv4 loopback /8 / ::1 (matches isLoopbackHost) — both
+  // via the configured HOST (early fail) and via a post-listen
+  // `server.address()` check that catches DNS / hostname surprises.
+  const noAuth = process.env.LOBU_NO_AUTH === '1';
+  if (noAuth && !isLoopbackHost(HOST)) {
+    logger.error(
+      { host: HOST },
+      'LOBU_NO_AUTH=1 requires loopback bind (127.0.0.0/8 or ::1). Refusing to start.'
+    );
+    process.exit(1);
+  }
+  httpServer.listen(PORT, HOST, () => {
+    if (noAuth) {
+      const addr = httpServer.address();
+      if (typeof addr === 'object' && addr && !isLoopbackHost(addr.address)) {
+        logger.error(
+          { address: addr.address },
+          'LOBU_NO_AUTH=1 server bound to a non-loopback address after listen() — refusing to serve.'
+        );
+        process.exit(1);
+      }
+    }
+    logger.info(`Lobu running at http://${HOST}:${PORT}`);
+    logger.info(`Data: ${DATA_DIR}`);
+    if (noAuth) logger.info('No-auth mode active (LOBU_NO_AUTH=1) — every request attributed to local user');
+  });
 }
 
 // ─── Migrations ──────────────────────────────────────────────────
@@ -341,13 +370,6 @@ async function ensureBootstrapPat(dbUrl: string): Promise<void> {
   }
 
   const patFilePath = join(DATA_DIR, BOOTSTRAP_PAT_FILENAME);
-  if (existsSync(patFilePath)) {
-    logger.info(
-      { path: patFilePath, org: BOOTSTRAP_ORG_SLUG },
-      'Bootstrap PAT already provisioned (delete the file to re-mint)'
-    );
-    return;
-  }
 
   // Reuse the same dynamic-import shape `runMigrations` above uses so we share
   // postgres' module init cost with that path on first boot.
@@ -355,16 +377,54 @@ async function ensureBootstrapPat(dbUrl: string): Promise<void> {
   const sql = pg.default(dbUrl, { max: 1 });
 
   try {
-    // Production safety: skip when users already exist. A deployment that has
-    // real users provisioned via the web UI must not get a "Local Developer"
-    // user grafted in alongside them.
-    const userCountRows = await sql<[{ count: number }]>`
-      SELECT count(*)::int AS count FROM "user"
+    // Stale-state detection: previously this early-returned whenever the PAT
+    // file existed, but if LOBU_DATA_DIR was wiped between runs the row was
+    // gone and no-auth mode would 503 forever. Now we check all three rows
+    // (user + org + member) — if ANY is missing the bootstrap re-runs to
+    // restore consistency. Partial state could otherwise wedge getNoAuthUser
+    // forever.
+    const stateRows = await sql<
+      [{ user_exists: boolean; org_exists: boolean; member_exists: boolean }]
+    >`
+      SELECT
+        EXISTS(SELECT 1 FROM "user"         WHERE id = ${BOOTSTRAP_USER_ID})   AS user_exists,
+        EXISTS(SELECT 1 FROM "organization" WHERE id = ${BOOTSTRAP_ORG_ID})    AS org_exists,
+        EXISTS(SELECT 1 FROM "member"       WHERE id = ${BOOTSTRAP_MEMBER_ID}) AS member_exists
     `;
-    if ((userCountRows[0]?.count ?? 0) > 0) {
+    const allPresent =
+      stateRows[0]?.user_exists && stateRows[0]?.org_exists && stateRows[0]?.member_exists;
+    if (allPresent) {
+      if (existsSync(patFilePath)) {
+        logger.info(
+          { path: patFilePath, org: BOOTSTRAP_ORG_SLUG },
+          'Bootstrap user + org + member already provisioned'
+        );
+      } else {
+        logger.warn(
+          { org: BOOTSTRAP_ORG_SLUG },
+          'Bootstrap rows exist but PAT file is missing — external-CLI token reuse is broken; delete the user row to re-mint'
+        );
+      }
+      return;
+    }
+    if (stateRows[0]?.user_exists || stateRows[0]?.org_exists || stateRows[0]?.member_exists) {
+      logger.warn(
+        stateRows[0],
+        'Bootstrap state is partial — re-minting to restore consistency'
+      );
+    }
+
+    // Production safety: skip when OTHER users exist. A deployment that has
+    // real users provisioned via the web UI must not get a "Local Developer"
+    // user grafted in alongside them. (The bootstrap-user check above doesn't
+    // catch this — those other-user rows have different ids.)
+    const otherUserCountRows = await sql<[{ count: number }]>`
+      SELECT count(*)::int AS count FROM "user" WHERE id <> ${BOOTSTRAP_USER_ID}
+    `;
+    if ((otherUserCountRows[0]?.count ?? 0) > 0) {
       logger.debug(
-        { userCount: userCountRows[0]?.count },
-        'Skipping bootstrap PAT — deployment already has users'
+        { userCount: otherUserCountRows[0]?.count },
+        'Skipping bootstrap PAT — deployment already has non-bootstrap users'
       );
       return;
     }
