@@ -463,12 +463,12 @@ struct MenuBarContent: View {
     private var connectButtonTitle: String {
         if state.isLoggingIn { return "Waiting for approval…" }
         let raw = state.customServerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        // "Start & sign in" exactly when connect() would auto-start the runner.
-        // Anything else (other loopback ports, https-on-localhost, remote URLs)
-        // is just a plain "Sign in" because we won't spawn the runner.
+        // Managed-runner path lifts the bootstrap PAT — no OAuth, no browser,
+        // no "sign in." Just "Start" when the server isn't up, "Connect" when
+        // it already is (rare — usually we run continuously).
         let willStartRunner = URL(string: raw).map(AppState.matchesManagedRunner) ?? false
-        if willStartRunner && !state.localLobuStatus.isRunning {
-            return "Start & sign in"
+        if willStartRunner {
+            return state.localLobuStatus.isRunning ? "Connect" : "Start"
         }
         return "Sign in"
     }

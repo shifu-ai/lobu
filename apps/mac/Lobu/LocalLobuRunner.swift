@@ -40,6 +40,16 @@ final class LocalLobuRunner {
     static let port = 8787
     static let baseURL = "http://localhost:\(port)"
 
+    /// Path to the bootstrap PAT file `lobu run` writes on first boot of an
+    /// empty embedded server (see `ensureBootstrapPat` in
+    /// `packages/server/src/start-local.ts`). The menu bar reads this so it
+    /// can skip OAuth entirely — the server already created the user, org,
+    /// and a long-lived token for us.
+    static var bootstrapPATPath: URL {
+        URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("lobu/data/bootstrap-pat.txt")
+    }
+
     private(set) var process: Process?
     private let projectDir: URL
     private let logFile: URL

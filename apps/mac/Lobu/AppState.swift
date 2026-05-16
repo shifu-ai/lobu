@@ -385,8 +385,9 @@ final class AppState: ObservableObject {
     // MARK: - Connect (URL-driven sign-in) --------------------------------------
 
     /// The connection card's primary action. Auto-starts the embedded server
-    /// when the URL is the exact one our runner manages; otherwise just OAuths
-    /// against the typed URL.
+    /// when the URL is the exact one our runner manages, then sidesteps OAuth
+    /// by lifting the bootstrap PAT `lobu run` writes for us. For everything
+    /// else, falls through to the normal OAuth device flow.
     func connect() async {
         let raw = customServerDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let urlString = raw.isEmpty ? cloudURL : raw
@@ -403,12 +404,71 @@ final class AppState: ObservableObject {
             await startLocalLobu()
             guard localLobuStatus.isRunning else { return }
         }
-        // serverMode = .local ONLY when this URL is the runner we manage. Other
-        // loopback URLs (someone else's localhost dev server, custom ports) get
-        // .remote so we don't auto-spawn our runner on next launch.
+        // serverMode = .local ONLY when this URL is the runner we manage.
+        // Other loopback URLs (someone else's dev server, custom ports) get
+        // .remote so next launch doesn't auto-spawn our runner.
         serverMode = autoStart ? .local : .remote
+
+        // No-auth path for the managed runner: the server's bootstrap minted
+        // a long-lived PAT + a user + an org for us; reading that file and
+        // synthesising credentials is the entire "sign-in". If the file
+        // isn't there yet (race) or unreadable, fall back to OAuth so we're
+        // never strictly worse than before.
+        if autoStart, await adoptBootstrapCredentialsIfAvailable(baseURL: urlString) {
+            startAutoPollIfSignedIn()
+            return
+        }
+
         setBaseURL(urlString)
         await signIn()
+    }
+
+    /// Try to read `lobu run`'s bootstrap PAT and adopt the bootstrap user as
+    /// the menu bar's identity. Returns true when credentials were set.
+    private func adoptBootstrapCredentialsIfAvailable(baseURL: String) async -> Bool {
+        guard let pat = await waitForBootstrapPAT() else { return false }
+        // Synthesised user info mirrors the constants in start-local.ts's
+        // ensureBootstrapPat — keep these in lock-step if you change either.
+        let info = OAuthUserInfo(
+            sub: "bootstrap-user",
+            email: "dev@lobu.local",
+            name: "Local Developer",
+            picture: nil,
+            organization_slug: "dev",
+            organizations: [.init(slug: "dev", name: "Local Dev")]
+        )
+        let creds = OAuthCredentials(
+            baseURL: baseURL,
+            clientID: "menubar-local",
+            clientSecret: nil,
+            accessToken: pat,
+            refreshToken: nil,
+            expiresAt: nil,
+            userInfo: info
+        )
+        do { try credentialStore.save(creds) } catch {
+            NSLog("[Lobu] failed to persist bootstrap credentials: \(error.localizedDescription)")
+        }
+        credentials = creds
+        setBaseURL(baseURL)
+        setStatus("")
+        return true
+    }
+
+    /// Poll for the bootstrap PAT file `lobu run` writes after binding. The
+    /// HTTP listener comes up before `ensureBootstrapPat` finishes, so the
+    /// runner being "reachable" doesn't guarantee the file exists yet.
+    private func waitForBootstrapPAT(timeout: TimeInterval = 10) async -> String? {
+        let path = LocalLobuRunner.bootstrapPATPath
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let raw = try? String(contentsOf: path, encoding: .utf8) {
+                let token = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !token.isEmpty { return token }
+            }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        }
+        return nil
     }
 
     /// True iff this URL targets the embedded server the menu bar manages.
