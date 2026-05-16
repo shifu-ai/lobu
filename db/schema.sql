@@ -255,6 +255,7 @@ CREATE TABLE public.auth_profiles (
     browser_kind text,
     user_data_dir text,
     cdp_url text,
+    is_default_for_connector boolean DEFAULT false NOT NULL,
     CONSTRAINT auth_profiles_browser_kind_check CHECK (((browser_kind IS NULL) OR (browser_kind = ANY (ARRAY['chrome'::text, 'brave'::text, 'arc'::text, 'edge'::text])))),
     CONSTRAINT auth_profiles_connector_key_required CHECK (((connector_key IS NOT NULL) OR (profile_kind = 'browser_session'::text))),
     CONSTRAINT auth_profiles_device_browser_path_mutex CHECK (((device_worker_id IS NULL) OR (profile_kind <> 'browser_session'::text) OR (user_data_dir IS NULL) OR (cdp_url IS NULL))),
@@ -2857,6 +2858,12 @@ CREATE INDEX agents_organization_id_idx ON public.agents USING btree (organizati
 CREATE INDEX auth_profiles_connector_kind_idx ON public.auth_profiles USING btree (organization_id, connector_key, profile_kind, status);
 
 --
+-- Name: auth_profiles_default_for_connector_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX auth_profiles_default_for_connector_unique ON public.auth_profiles USING btree (organization_id, connector_key) WHERE (is_default_for_connector AND (profile_kind = 'oauth_app'::text));
+
+--
 -- Name: auth_profiles_device_worker_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4999,6 +5006,7 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260515120000'),
     ('20260515150000'),
     ('20260515160000'),
+    ('20260515170000'),
     ('20260516120000'),
     ('20260516200000'),
     ('20260516200100');
