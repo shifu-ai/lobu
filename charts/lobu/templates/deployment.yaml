@@ -7,20 +7,48 @@ metadata:
     app.kubernetes.io/component: api
 spec:
   replicas: {{ .Values.app.replicaCount }}
-  {{- with .Values.app.strategy }}
+  {{- /*
+  Deploy strategy resolution:
+    1. Explicit `app.strategy` override always wins.
+    2. Else if `app.allowMultiReplica: true` AND workspaces is RWX
+       (or disabled) → RollingUpdate (maxSurge: 1, maxUnavailable: 0).
+       This is the operator opt-in path for true blue/green deploys.
+    3. Else → Recreate (the safe default).
+
+  Why `allowMultiReplica` is an explicit flag, not auto-detected from
+  RWX: even with RWX storage, several in-memory components break with
+  >1 gateway replicas OR during the brief RollingUpdate overlap:
+    * `SseManager` (gateway/services/sse-manager.ts) — SSE streams are
+      pod-local; a job claimed by pod B broadcasts to no-one if the
+      client is on pod A.
+    * AskUser question routing
+      (gateway/connections/interaction-bridge.ts:193-214) — pending
+      questions live in a per-pod Map, button clicks can land on the
+      wrong pod and be dropped.
+    * Telegram polling mode (gateway/connections/chat-instance-manager
+      .ts:610-613) — every replica long-polls the same bot, causing
+      conflicts.
+  RWX is necessary but not sufficient. The flag forces operators to
+  acknowledge "I have only webhook-mode Chat connections AND no
+  AskUser/SSE flows in flight" before opting in.
+  */}}
+  {{- $rwxConfigured := has "ReadWriteMany" (.Values.app.workspaces.accessModes | default (list)) }}
+  {{- $rollSafe := and .Values.app.allowMultiReplica (or (not .Values.app.workspaces.enabled) $rwxConfigured) }}
+  {{- if .Values.app.strategy }}
   strategy:
-    {{- toYaml . | nindent 4 }}
+    {{- toYaml .Values.app.strategy | nindent 4 }}
+  {{- else if $rollSafe }}
+  # Operator opted in via app.allowMultiReplica + RWX workspaces.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   {{- else }}
-  {{- if .Values.app.workspaces.enabled }}
-  # The workspaces PVC is RWO so we can't have two pods mount it at once;
-  # default to Recreate to avoid scheduling conflicts. Single-replica
-  # operators see a brief (~30s) "no available server" window on every
-  # deploy as a result. To eliminate it, set RWX storage on workspaces
-  # (or move workspaces off this deployment entirely) and override
-  # `app.strategy` to RollingUpdate via values. See PR #773 discussion.
+  # Safe default. RWO PVC + in-memory SSE/AskUser/Telegram-polling
+  # state make rolling overlap unsafe — see comment above.
   strategy:
     type: Recreate
-  {{- end }}
   {{- end }}
   selector:
     matchLabels:
