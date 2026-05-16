@@ -423,20 +423,45 @@ final class AppState: ObservableObject {
         await signIn()
     }
 
-    /// Try to read `lobu run`'s bootstrap PAT and adopt the bootstrap user as
-    /// the menu bar's identity. Returns true when credentials were set.
+    /// Try to read `lobu run`'s bootstrap PAT, verify it actually works
+    /// against the server we're connecting to, and only then adopt it as
+    /// the menu bar's identity. The verification step prevents two real
+    /// failure modes pi flagged in PR #777 review:
+    ///   1. A stale or unrelated process is squatting on :8787 and would
+    ///      silently receive our PAT.
+    ///   2. The file exists but the DB was reset / PAT was revoked /
+    ///      bootstrap was skipped — UI would transition to "signed in"
+    ///      and break later.
+    /// Identity comes from the server's `/userinfo` response, not from
+    /// hardcoded constants — so if the server's bootstrap constants drift
+    /// the menu bar still shows the right name/org.
     private func adoptBootstrapCredentialsIfAvailable(baseURL: String) async -> Bool {
         guard let pat = await waitForBootstrapPAT() else { return false }
-        // Synthesised user info mirrors the constants in start-local.ts's
-        // ensureBootstrapPat — keep these in lock-step if you change either.
-        let info = OAuthUserInfo(
-            sub: "bootstrap-user",
-            email: "dev@lobu.local",
-            name: "Local Developer",
-            picture: nil,
-            organization_slug: "dev",
-            organizations: [.init(slug: "dev", name: "Local Dev")]
-        )
+        let oauth: OAuthClient
+        do {
+            oauth = try OAuthClient(baseURL: baseURL)
+        } catch {
+            NSLog("[Lobu] bootstrap adopt: OAuthClient init failed: \(error.localizedDescription)")
+            return false
+        }
+        let discovery: OAuthDiscovery
+        do {
+            discovery = try await oauth.discover()
+        } catch {
+            NSLog("[Lobu] bootstrap adopt: discovery failed: \(error.localizedDescription)")
+            return false
+        }
+        let info: OAuthUserInfo?
+        do {
+            info = try await oauth.fetchUserInfo(discovery.userinfo_endpoint, accessToken: pat)
+        } catch {
+            NSLog("[Lobu] bootstrap adopt: userinfo rejected the PAT — not our server, or PAT is stale: \(error.localizedDescription)")
+            return false
+        }
+        guard let info else {
+            NSLog("[Lobu] bootstrap adopt: userinfo returned no user")
+            return false
+        }
         let creds = OAuthCredentials(
             baseURL: baseURL,
             clientID: "menubar-local",
@@ -446,8 +471,11 @@ final class AppState: ObservableObject {
             expiresAt: nil,
             userInfo: info
         )
-        do { try credentialStore.save(creds) } catch {
-            NSLog("[Lobu] failed to persist bootstrap credentials: \(error.localizedDescription)")
+        do {
+            try credentialStore.save(creds)
+        } catch {
+            NSLog("[Lobu] bootstrap adopt: keychain save failed: \(error.localizedDescription)")
+            return false
         }
         credentials = creds
         setBaseURL(baseURL)
