@@ -3404,12 +3404,6 @@ CREATE INDEX idx_events_embedding ON public.event_embeddings USING ivfflat (embe
 CREATE INDEX idx_events_entity_ids ON public.events USING gin (entity_ids);
 
 --
--- Name: idx_events_entity_ids_occurred_at; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_events_entity_ids_occurred_at ON public.events USING btree ((entity_ids[1]), occurred_at DESC, id DESC) WHERE ((entity_ids IS NOT NULL) AND (entity_ids <> '{}'::bigint[]));
-
---
 -- Name: idx_events_feed_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3488,12 +3482,6 @@ CREATE INDEX idx_events_missing_embedding_backfill ON public.events USING btree 
 CREATE INDEX idx_events_organization_id ON public.events USING btree (organization_id) WHERE (organization_id IS NOT NULL);
 
 --
--- Name: idx_events_origin_parent_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_events_origin_parent_id ON public.events USING btree (origin_parent_id);
-
---
 -- Name: idx_events_raw_content_trgm; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -3528,18 +3516,6 @@ CREATE INDEX idx_events_source_embedding ON public.event_embeddings USING btree 
 --
 
 CREATE UNIQUE INDEX idx_events_superseded_by ON public.events USING btree (supersedes_event_id) WHERE (supersedes_event_id IS NOT NULL);
-
---
--- Name: idx_events_thread_lookup; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_events_thread_lookup ON public.events USING btree (origin_parent_id, occurred_at) WHERE (origin_parent_id IS NOT NULL);
-
---
--- Name: idx_events_type; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX idx_events_type ON public.events USING btree (origin_type) WHERE (origin_type IS NOT NULL);
 
 --
 -- Name: idx_feeds_connection; Type: INDEX; Schema: public; Owner: -
@@ -5009,4 +4985,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260515170000'),
     ('20260516120000'),
     ('20260516200000'),
-    ('20260516200100');
+    ('20260516200100'),
+    ('20260517010000');
