@@ -312,9 +312,15 @@ app.use('/*', async (c, next) => {
           .filter((entry) => isValidFrameAncestor(entry))
           .join(' ')
       : 'https://lobu.ai https://*.lobu.ai';
+    // /embedded is the Chrome-extension sidepanel target — it must be framable
+    // from any chrome-extension:// origin. Other routes keep the default
+    // 'self' + lobu.ai allowlist so the rest of the app can't be embedded by
+    // arbitrary extensions.
+    const path = new URL(c.req.url).pathname;
+    const extensionAllowed = path === '/embedded' ? ' chrome-extension:' : '';
     c.header(
       'Content-Security-Policy',
-      `frame-ancestors 'self' ${frameAncestors}`
+      `frame-ancestors 'self' ${frameAncestors}${extensionAllowed}`
     );
   }
 
@@ -558,6 +564,7 @@ import {
   listDeviceWorkers,
   listMyDeviceAuthProfiles,
   listMyDeviceFeeds,
+  mintDeviceChildToken,
   updateDeviceWorkerOrg,
   pollAuthSignal,
   pollWorkerJob,
@@ -678,6 +685,9 @@ app.delete('/api/workers/me/feeds/:id', deleteMyDeviceFeed);
 app.get('/api/me/devices', mcpAuth, listDeviceWorkers);
 app.patch('/api/me/devices/:id', mcpAuth, updateDeviceWorkerOrg);
 app.delete('/api/me/devices/:id', mcpAuth, deleteDeviceWorker);
+// Mint a child device-worker token for the caller — used by the Owletto Mac
+// bridge's native-messaging host to auto-pair Owletto for Chrome.
+app.post('/api/me/devices/mint-child-token', mcpAuth, mintDeviceChildToken);
 // UI → worker signal channel. Separate path prefix so the worker API auth
 // middleware above doesn't cover it (this one is hit from the web session).
 app.get('/api/auth-runs/active', getActiveAuthRun);

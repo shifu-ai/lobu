@@ -5,8 +5,10 @@
  * Updated for V1 integration platform: runs-based job model.
  */
 
+import { authorizeCapabilities, isKnownPlatform } from '@lobu/core';
 import type { Context } from 'hono';
 import { createAuth } from './auth';
+import { PersonalAccessTokenService } from './auth/tokens';
 import { getDb, parsePgNumberArray, pgBigintArray, pgTextArray } from './db/client';
 import { emit } from './events/emitter';
 import type { Env } from './index';
@@ -164,9 +166,74 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // which means a bridge with no granted capabilities claims *nothing* instead
   // of hijacking-and-failing arbitrary embedded-server connector runs (e.g. hackernews).
   const isUserScopedWorker = c.var.workerAuthMode === 'user';
+  // User-scoped (device) callers must post a non-empty worker_id. An empty
+  // or missing id would otherwise let a bound PAT (see below) sidestep the
+  // binding check by claiming all worker rows under `(user_id, "")`.
+  if (isUserScopedWorker && (!worker_id || worker_id.length === 0)) {
+    return c.json({ error: 'worker_id is required' }, 400);
+  }
+  // Worker-id binding: when the caller's PAT was minted via
+  // /api/me/devices/mint-child-token, its row in personal_access_tokens
+  // carries a non-NULL `worker_id`. The poll body must use the same id —
+  // otherwise the caller could escape platform binding by registering
+  // arbitrary fresh worker_ids and picking their own platform on each.
+  // Comparing unconditionally (not `&& worker_id`) catches the empty-string
+  // case too.
+  const boundWorkerId = c.var.mcpAuthInfo?.workerId ?? null;
+  if (boundWorkerId && boundWorkerId !== worker_id) {
+    return c.json(
+      {
+        error: 'worker_id_mismatch',
+        error_description: `this token is bound to worker_id '${boundWorkerId}'`,
+      },
+      403
+    );
+  }
+  // Platform binding: once a (user_id, worker_id) row has set its platform,
+  // subsequent polls cannot change it. Without this lock a chrome-extension
+  // PAT could post `platform: "macos"` and unlock the macOS allowlist —
+  // the gateway's capability authorization would otherwise believe the
+  // self-reported platform. We read the stored platform first, reject
+  // mismatches, and use the stored value for authorization.
+  let effectivePlatform: string | null = platform;
+  if (isUserScopedWorker && c.var.workerUserId && worker_id) {
+    const existing = (await sql`
+      SELECT platform FROM device_workers
+      WHERE user_id = ${c.var.workerUserId} AND worker_id = ${worker_id}
+      LIMIT 1
+    `) as unknown as Array<{ platform: string | null }>;
+    if (existing.length > 0 && existing[0].platform) {
+      if (platform && platform !== existing[0].platform) {
+        return c.json(
+          {
+            error: 'platform_mismatch',
+            error_description: `worker is bound to platform '${existing[0].platform}'`,
+          },
+          403
+        );
+      }
+      effectivePlatform = existing[0].platform;
+    }
+  }
+  // For user-scoped (device) workers, authorize the advertised capability set
+  // against the platform-specific allowlist in @lobu/core. Anything outside
+  // the allowlist for the device's reported platform is silently dropped —
+  // a chrome-extension can't claim `os.shell`, an iOS bridge can't claim
+  // `browser.debugger`, etc. Trusted-fleet workers (no platform) skip this.
+  let authorizedCapabilities = advertisedCapabilities;
+  if (isUserScopedWorker) {
+    const auth = authorizeCapabilities(effectivePlatform, advertisedCapabilities);
+    authorizedCapabilities = auth.authorized;
+    if (auth.dropped.length > 0) {
+      logger.warn(
+        { worker_id, platform: effectivePlatform, dropped: auth.dropped },
+        '[pollWorkerJob] dropped capabilities not allowed for platform'
+      );
+    }
+  }
   const capabilityMatchSet = isUserScopedWorker
-    ? advertisedCapabilities
-    : [''].concat(advertisedCapabilities);
+    ? authorizedCapabilities
+    : [''].concat(authorizedCapabilities);
 
   // Device-worker registry: upsert device_workers row for user-scoped workers
   // so /api/me/devices can enumerate them. Also ensure advertised capability
@@ -185,7 +252,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let deviceWorkerId: string | null = null;
   if (workerUserId) {
     try {
-      const incomingCaps = advertisedCapabilities;
+      const incomingCaps = authorizedCapabilities;
 
       // `xmax = 0` on the RETURNING row distinguishes a brand-new device
       // registration from a routine poll-update so we only emit the
@@ -201,7 +268,12 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
           )
         )
         ON CONFLICT (user_id, worker_id) DO UPDATE SET
-          platform = EXCLUDED.platform,
+          -- platform is set-once: COALESCE preserves the original value,
+          -- so a compromised PAT can't re-platform a Chrome worker into a
+          -- macOS one to unlock OS capabilities. The mismatch check above
+          -- already rejects deliberate attempts; this is defense-in-depth
+          -- against a race between the SELECT and the UPSERT.
+          platform = COALESCE(device_workers.platform, EXCLUDED.platform),
           app_version = EXCLUDED.app_version,
           capabilities = EXCLUDED.capabilities,
           label = COALESCE(EXCLUDED.label, device_workers.label),
@@ -286,11 +358,15 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               AND con.device_worker_id IS NULL
             )
             -- (B) user-scoped device worker: an unpinned capability-matched
-            --     device connector in an org this worker can see ...
+            --     device connector in an org this worker can see. Capability
+            --     match goes through the authorized set — a chrome-extension
+            --     claiming os.shell is dropped server-side (see
+            --     @lobu/core/capabilities), and that dropped string MUST NOT
+            --     match a connectors required_capability here either.
             OR (
               ${isUserScopedWorker}
               AND cd.required_capability IS NOT NULL
-              AND cd.required_capability = ANY(${pgTextArray(advertisedCapabilities)}::text[])
+              AND cd.required_capability = ANY(${pgTextArray(authorizedCapabilities)}::text[])
               AND con.device_worker_id IS NULL
               AND r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
             )
@@ -305,7 +381,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
               AND con.device_worker_id = ${deviceWorkerId}::uuid
               AND (
                 cd.required_capability IS NULL
-                OR cd.required_capability = ANY(${pgTextArray(advertisedCapabilities)}::text[])
+                OR cd.required_capability = ANY(${pgTextArray(authorizedCapabilities)}::text[])
               )
               AND r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
             )
@@ -1622,6 +1698,107 @@ export async function listDeviceWorkers(c: Context<{ Bindings: Env }>) {
   } catch (err: unknown) {
     logger.error({ error: errorMessage(err) }, '[listDeviceWorkers] Error');
     captureServerError(c, err, 'listDeviceWorkers');
+    return c.json({ error: errorMessage(err) }, 500);
+  }
+}
+
+/**
+ * POST /api/me/devices/mint-child-token  { platform, label? }
+ *
+ * Hand-off path for the Mac bridge to pair a sibling device (today: the
+ * Owletto Chrome extension) without a second OAuth dance. The Mac app's
+ * bearer authenticates the caller; we mint a fresh PAT in the same user's
+ * personal org, generate a new worker_id, and return both for the sibling
+ * to use as if it had completed device-authorization on its own.
+ *
+ * Scope of the child token is the same `device_worker:run` scope the
+ * regular Mac OAuth flow ends up with — capability authorization at
+ * /api/workers/poll still constrains what the child can advertise per its
+ * declared `platform` (see @lobu/core/capabilities).
+ */
+export async function mintDeviceChildToken(c: Context<{ Bindings: Env }>) {
+  const userId = c.var.user?.id;
+  if (!userId) {
+    return c.json({ error: 'Unauthorized' }, 401);
+  }
+  // The caller must already hold a device-worker bearer — i.e. a session
+  // that itself was minted for running on a device (the Mac bridge's
+  // signed-in OAuth token, or a previously-issued child PAT). A plain
+  // browser/web session shouldn't be allowed to silently escalate into a
+  // device worker; if a user wants to pair Chrome from a browser they go
+  // through the OAuth device-authorization flow, not this endpoint.
+  const callerScopes = c.var.mcpAuthInfo?.scopes ?? [];
+  if (!callerScopes.includes('device_worker:run')) {
+    return c.json(
+      { error: 'insufficient_scope', required: 'device_worker:run' },
+      403
+    );
+  }
+
+  let body: { platform?: string; label?: string };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid or missing JSON body' }, 400);
+  }
+  const platform = (body.platform ?? '').trim();
+  if (!platform) {
+    return c.json({ error: 'platform is required' }, 400);
+  }
+  // Only known device platforms can mint children — keeps the surface tight.
+  // Today: chrome-extension. (The Mac app calling for itself would just use
+  // its existing OAuth token; macos/ios don't need this path.)
+  if (platform !== 'chrome-extension' || !isKnownPlatform(platform)) {
+    return c.json({ error: `platform '${platform}' is not eligible for child-token mint` }, 400);
+  }
+  const label = body.label?.toString().trim() || null;
+
+  try {
+    const sql = getDb();
+    // Same org-resolution rule as /api/workers/poll: prefer the calling
+    // token's org, fall back to the user's personal org.
+    const orgRows = (await sql`
+      SELECT id FROM organization
+      WHERE (metadata::jsonb)->>'personal_org_for_user_id' = ${userId}
+      LIMIT 1
+    `) as unknown as Array<{ id: string }>;
+    const organizationId =
+      (c.var.organizationId as string | null | undefined) ?? orgRows[0]?.id ?? null;
+
+    const workerId = crypto.randomUUID();
+    const patService = new PersonalAccessTokenService(sql);
+    const created = await patService.create(
+      userId,
+      organizationId,
+      `device:${platform}:${workerId.slice(0, 8)}`,
+      {
+        scope: 'device_worker:run',
+        description: label ?? undefined,
+        workerId,
+      }
+    );
+    // Pre-create the device_workers row with platform set. The next poll
+    // call from the child sees this row, can't change platform (poll's
+    // ON CONFLICT preserves it via COALESCE + a SELECT-then-reject check),
+    // and the gateway's capability authorization uses the stored platform
+    // rather than whatever the bearer self-reports.
+    await sql`
+      INSERT INTO device_workers (user_id, worker_id, platform, capabilities, organization_id)
+      VALUES (${userId}, ${workerId}, ${platform}, ${sql.json([])}, ${organizationId})
+      ON CONFLICT (user_id, worker_id) DO NOTHING
+    `;
+
+    const gatewayUrl = new URL(c.req.url).origin;
+    return c.json({
+      worker_id: workerId,
+      access_token: created.token,
+      gateway_url: gatewayUrl,
+      label,
+      platform,
+    });
+  } catch (err) {
+    logger.error({ err: errorMessage(err) }, '[mintDeviceChildToken] failed');
+    captureServerError(c, err, 'mintDeviceChildToken');
     return c.json({ error: errorMessage(err) }, 500);
   }
 }
