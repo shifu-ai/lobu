@@ -425,43 +425,40 @@ final class AppState: ObservableObject {
 
     /// Try to read `lobu run`'s bootstrap PAT, verify it actually works
     /// against the server we're connecting to, and only then adopt it as
-    /// the menu bar's identity. The verification step prevents two real
-    /// failure modes pi flagged in PR #777 review:
-    ///   1. A stale or unrelated process is squatting on :8787 and would
-    ///      silently receive our PAT.
-    ///   2. The file exists but the DB was reset / PAT was revoked /
-    ///      bootstrap was skipped — UI would transition to "signed in"
-    ///      and break later.
-    /// Identity comes from the server's `/userinfo` response, not from
-    /// hardcoded constants — so if the server's bootstrap constants drift
-    /// the menu bar still shows the right name/org.
+    /// the menu bar's identity. Verification prevents two failure modes
+    /// pi flagged in PR #777 review:
+    ///   1. A stale / unrelated / malicious process squatting on :8787
+    ///      receiving our PAT.
+    ///   2. The file exists but DB was reset / PAT revoked / bootstrap
+    ///      skipped — UI would transition to "signed in" and break later.
+    ///
+    /// We deliberately do NOT use `/userinfo` for verification: that
+    /// endpoint only accepts OAuth tokens, not PATs, so it 403s every
+    /// time. Instead we hit a real org-scoped REST endpoint (the unread
+    /// notifications count — cheapest auth-required call) against the
+    /// `baseURL` we already control. No server-supplied URLs are
+    /// followed, so a malicious metadata response can't redirect the PAT.
+    ///
+    /// Identity is synthesised from the same constants `ensureBootstrapPat`
+    /// uses in `packages/server/src/start-local.ts` (BOOTSTRAP_USER_*,
+    /// BOOTSTRAP_ORG_*). Keep these in lock-step if you change either.
     private func adoptBootstrapCredentialsIfAvailable(baseURL: String) async -> Bool {
         guard let pat = await waitForBootstrapPAT() else { return false }
-        let oauth: OAuthClient
+        let verifyClient = WorkerClient(baseURL: baseURL, accessToken: pat)
         do {
-            oauth = try OAuthClient(baseURL: baseURL)
+            _ = try await verifyClient.getUnreadCount(orgSlug: AppState.bootstrapOrgSlug)
         } catch {
-            NSLog("[Lobu] bootstrap adopt: OAuthClient init failed: \(error.localizedDescription)")
+            NSLog("[Lobu] bootstrap adopt: verify call rejected the PAT — not our server, or PAT is stale: \(error.localizedDescription)")
             return false
         }
-        let discovery: OAuthDiscovery
-        do {
-            discovery = try await oauth.discover()
-        } catch {
-            NSLog("[Lobu] bootstrap adopt: discovery failed: \(error.localizedDescription)")
-            return false
-        }
-        let info: OAuthUserInfo?
-        do {
-            info = try await oauth.fetchUserInfo(discovery.userinfo_endpoint, accessToken: pat)
-        } catch {
-            NSLog("[Lobu] bootstrap adopt: userinfo rejected the PAT — not our server, or PAT is stale: \(error.localizedDescription)")
-            return false
-        }
-        guard let info else {
-            NSLog("[Lobu] bootstrap adopt: userinfo returned no user")
-            return false
-        }
+        let info = OAuthUserInfo(
+            sub: AppState.bootstrapUserId,
+            email: AppState.bootstrapUserEmail,
+            name: AppState.bootstrapUserName,
+            picture: nil,
+            organization_slug: AppState.bootstrapOrgSlug,
+            organizations: [.init(slug: AppState.bootstrapOrgSlug, name: AppState.bootstrapOrgName)]
+        )
         let creds = OAuthCredentials(
             baseURL: baseURL,
             clientID: "menubar-local",
@@ -482,6 +479,15 @@ final class AppState: ObservableObject {
         setStatus("")
         return true
     }
+
+    // Contract with `ensureBootstrapPat` in packages/server/src/start-local.ts.
+    // Changing either side without the other will make the menu bar's display
+    // disagree with reality.
+    private static let bootstrapUserId    = "bootstrap-user"
+    private static let bootstrapUserName  = "Local Developer"
+    private static let bootstrapUserEmail = "dev@lobu.local"
+    private static let bootstrapOrgSlug   = "dev"
+    private static let bootstrapOrgName   = "Local Dev"
 
     /// Poll for the bootstrap PAT file `lobu run` writes after binding. The
     /// HTTP listener comes up before `ensureBootstrapPat` finishes, so the
