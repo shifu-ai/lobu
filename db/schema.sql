@@ -1991,7 +1991,7 @@ CREATE TABLE public.watchers (
     current_version_id integer,
     schedule text,
     next_run_at timestamp with time zone,
-    agent_id text,
+    agent_id text NOT NULL,
     connection_id text,
     scheduler_client_id text,
     source_watcher_id integer,
@@ -3774,7 +3774,7 @@ CREATE INDEX idx_watcher_windows_watcher ON public.watcher_windows USING btree (
 -- Name: idx_watchers_agent_id; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_watchers_agent_id ON public.watchers USING btree (agent_id) WHERE (agent_id IS NOT NULL);
+CREATE INDEX idx_watchers_agent_id ON public.watchers USING btree (agent_id);
 
 --
 -- Name: idx_watchers_connection_id; Type: INDEX; Schema: public; Owner: -
@@ -4997,4 +4997,5 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260517010000'),
     ('20260517020000'),
     ('20260517030000'),
-    ('20260517040000');
+    ('20260517040000'),
+    ('20260517050000');

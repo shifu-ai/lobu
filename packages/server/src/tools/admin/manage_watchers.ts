@@ -1140,6 +1140,13 @@ async function handleCreateFromVersion(
       `Access denied: watcher version ${args.version_id} does not belong to your organization`
     );
   }
+  if (!version.agent_id) {
+    // Source watcher has no agent — cloning would silently inherit null and
+    // produce active zombies the scheduler skips. Same invariant as handleCreate.
+    throw new ToolUserError(
+      `Source watcher version ${args.version_id} has no agent_id; assign an agent on the source before cloning.`
+    );
+  }
 
   // Fetch entity names for name pattern substitution
   const entityRows = await sql`
@@ -1228,6 +1235,26 @@ async function handleUpdate(
     }
   }
 
+  // Match the invariant from handleCreate: a watcher with no agent_id is
+  // a zombie the scheduler will never run (automation joins on
+  // `agent_id IS NOT NULL`). Reject explicit nulling, and reject updates
+  // that would leave a scheduled watcher orphaned.
+  if (args.agent_id === null) {
+    throw new ToolUserError(
+      'agent_id cannot be set to null — every watcher must have an owning agent.'
+    );
+  }
+  if (args.schedule !== null && args.schedule !== undefined && args.agent_id === undefined) {
+    const currentRows = await sql`
+      SELECT agent_id FROM watchers WHERE id = ${args.watcher_id} LIMIT 1
+    `;
+    const currentAgentId = (currentRows[0] as { agent_id: string | null } | undefined)?.agent_id;
+    if (currentAgentId === null) {
+      throw new ToolUserError(
+        'Cannot schedule a watcher with no owning agent. Assign agent_id in the same update.'
+      );
+    }
+  }
 
   const updatedFields: string[] = [];
   if (args.model_config !== undefined) updatedFields.push('model_config');

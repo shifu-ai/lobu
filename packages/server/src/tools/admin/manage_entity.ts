@@ -17,7 +17,7 @@
  */
 
 import { type Static, Type } from '@sinclair/typebox';
-import { getDb } from '../../db/client';
+import { getDb, pgTextArray } from '../../db/client';
 import type { Env } from '../../index';
 import {
   batchLoadRelationships,
@@ -855,6 +855,7 @@ async function resolveLinkedColumns(
     [...buckets.entries()].map(async ([bucketKey, { entityType, lookupField, values }]) => {
       if (values.size === 0) return;
       const valuesArr = [...values];
+      const valuesLiteral = pgTextArray(valuesArr);
       const rows =
         lookupField === 'slug'
           ? await sql<{ slug: string; entity_type: string; name: string; lookup_value: string }>`
@@ -864,7 +865,7 @@ async function resolveLinkedColumns(
               WHERE e.organization_id = ${organizationId}
                 AND e.deleted_at IS NULL
                 AND et.slug = ${entityType}
-                AND e.slug = ANY(${valuesArr}::text[])
+                AND e.slug = ANY(${valuesLiteral}::text[])
             `
           : await sql<{ slug: string; entity_type: string; name: string; lookup_value: string }>`
               SELECT e.slug, et.slug AS entity_type, e.name, (e.metadata->>${lookupField}) AS lookup_value
@@ -873,7 +874,7 @@ async function resolveLinkedColumns(
               WHERE e.organization_id = ${organizationId}
                 AND e.deleted_at IS NULL
                 AND et.slug = ${entityType}
-                AND (e.metadata->>${lookupField}) = ANY(${valuesArr}::text[])
+                AND (e.metadata->>${lookupField}) = ANY(${valuesLiteral}::text[])
             `;
       if (rows.length === 0) return;
       const bucketMap: Record<string, { slug: string; entity_type: string; name: string }> = {};
