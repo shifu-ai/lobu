@@ -111,20 +111,54 @@ Out of scope (follow-ups):
   a workspace dep only — until the extension story lands and we know
   whether the public surface stays this small.
 
-## Manual verification
+## Verification — what's proven, what's blocked
 
-Until the e2e harness exists, the bridge is verified end-to-end by:
+Automated (passing in smoke tests):
 
-1. `bunx playwriter mcp` (or `playwriter cli`) to launch their bundled
-   relay + auto-install the extension into Chrome.
-2. Run a connector with `cdpUrl` set to `ws://127.0.0.1:19988` (the
-   playwriter default).
-3. Connector should drive the active tab in your real Chrome.
+- Bridge starts via `startBridgeServer`, listens on the configured loopback port.
+- `bridge.url` is shaped correctly: `ws://host:port/cdp[?token=...]`.
+- `/cdp` route's token query-param auth gate works (401 without, !401 with).
+- playwriter's `/json/version` discovery URL still points at `/cdp`
+  (drift check for future upstream releases).
+- `chromium.connectOverCDP(bridge.url)` reaches the relay end-to-end — the
+  relay accepts the WS upgrade and either pairs the client to an attached
+  extension or cleanly rejects with no-extension (verified with no
+  extension loaded).
 
-This package replaces step 1 with `startBridgeServer({ token })` — the
-extension half stays manual until the follow-up.
+Verified manually via a throwaway Chrome (Playwright `launchPersistentContext`
++ `--load-extension`) + service-worker `evaluate("toggleExtensionForActiveTab()")`:
+
+- Extension connects to `ws://.../extension`, the relay registers it,
+  `globalThis.toggleExtensionForActiveTab()` (exposed by playwriter's bg
+  script) triggers `chrome.debugger.attach` on the active tab, and the
+  relay forwards `Target.attachedToTarget` events to Playwright clients.
+
+Blocked at the moment (NOT a bug in this wrapper):
+
+- After extension attach succeeds, `chromium.connectOverCDP(bridge.url)`
+  hangs at the CDP-shim handshake for 30s and times out. Reproduces
+  identically against playwriter's relay **without** this wrapper, with
+  both `patchright` and `playwright-vanilla`, and `playwriter browser list`
+  also fails to see the connected extension. Issue is in `playwriter@0.1.0`
+  on npm, not in this wrapper or in our acquireBrowser hook.
+
+  Follow-ups: vendor playwriter from the github main branch (currently
+  ~0.1.6, but it's a pnpm workspace with internal deps so `bun add` from
+  github can't resolve it cleanly) OR switch the underlying implementation
+  to Microsoft's [Playwright MCP Bridge](https://github.com/microsoft/playwright-mcp)
+  or [ruifigueira/playwright-crx](https://github.com/ruifigueira/playwright-crx)
+  before depending on this in any real connector.
 
 ## License
 
-BUSL-1.1 (Lobu wrapper). The underlying `playwriter` package is MIT —
-see its repository for attribution.
+BUSL-1.1 (Lobu wrapper).
+
+### Third-party attribution
+
+This package depends on [`playwriter`](https://github.com/remorses/playwriter)
+by Tommaso De Rossi (`xmorse`). Playwriter is distributed under the MIT
+License (LICENSE file in the playwriter repo; the npm `license` field is
+empty but the source LICENSE is MIT). Source review and security audit of
+the playwriter dependency tree is a prerequisite before any production use
+of this bridge — the relay grants control of the user's signed-in browser
+and pulls in ~100 transitive packages including native binding optionals.
