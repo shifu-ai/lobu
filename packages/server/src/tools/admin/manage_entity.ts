@@ -17,7 +17,7 @@
  */
 
 import { type Static, Type } from '@sinclair/typebox';
-import { getDb } from '../../db/client';
+import { getDb, pgTextArray } from '../../db/client';
 import type { Env } from '../../index';
 import {
   batchLoadRelationships,
@@ -295,6 +295,12 @@ type ManageEntityResult =
         space_name?: string | null;
         view_url?: string;
       }>;
+      // Server-side resolution of every `x-link-entity-type` column referenced
+      // by the page. Keyed by `${entityType}:${lookupField}`, then by the
+      // lookup value from the row's metadata. Previously each entity-list page
+      // fanned out one `manage_entity.list` per linked column (4× ~2.5 s on
+      // the Company page); the FE now reads from this map instead.
+      linked_entities?: Record<string, Record<string, { slug: string; entity_type: string; name: string }>>;
       metadata: {
         page_size: number;
         has_more: boolean;
@@ -733,10 +739,14 @@ async function handleList(
   const schema = entityTypeRow?.metadata_schema as Record<string, unknown> | null;
   const relSpecs = (schema?.['x-table-relationships'] ?? []) as RelationshipColumnSpec[];
   const entityIds = entities.map((e) => e.id);
-  const relMap =
+
+  // Batch-load relationships and linked-column lookups in parallel.
+  const [relMap, linkedEntities] = await Promise.all([
     relSpecs.length > 0 && entityIds.length > 0
-      ? await batchLoadRelationships(entityIds, relSpecs, ctx.organizationId)
-      : new Map();
+      ? batchLoadRelationships(entityIds, relSpecs, ctx.organizationId)
+      : Promise.resolve(new Map()),
+    resolveLinkedColumns(entities, schema, ctx.organizationId),
+  ]);
 
   const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
   const ownerSlug = await getOrganizationSlug(ctx.organizationId);
@@ -779,6 +789,7 @@ async function handleList(
         ...(relMap.size > 0 && relMap.has(e.id) ? { relationships: relMap.get(e.id) } : {}),
       };
     }),
+    ...(Object.keys(linkedEntities).length > 0 ? { linked_entities: linkedEntities } : {}),
     metadata: {
       page_size: entities.length,
       has_more: hasMore,
@@ -790,6 +801,92 @@ async function handleList(
       filtered_by_type: args.entity_type,
     },
   };
+}
+
+/**
+ * Resolve every `x-link-entity-type` column on the schema to `{slug, name}`
+ * pairs in one batch per (entityType, lookupField). Replaces the previous
+ * FE pattern of `useQueries` fanning out one full-table fetch per linked
+ * column. Returns a map keyed `${entityType}:${lookupField}` → lookup-value
+ * → ref. Empty object if the schema declares no linked columns or none of
+ * the visible rows reference linked values.
+ */
+async function resolveLinkedColumns(
+  entities: Array<{ metadata?: Record<string, any> | null }>,
+  schema: Record<string, unknown> | null,
+  organizationId: string
+): Promise<Record<string, Record<string, { slug: string; entity_type: string; name: string }>>> {
+  if (!schema || entities.length === 0) return {};
+  const properties = (schema as { properties?: Record<string, any> }).properties;
+  if (!properties) return {};
+
+  // Collect (linkedType, lookupField) → set of referenced values from the rows.
+  const buckets = new Map<
+    string,
+    { entityType: string; lookupField: string; values: Set<string> }
+  >();
+  for (const [columnKey, prop] of Object.entries(properties)) {
+    const linkedType = (prop as { 'x-link-entity-type'?: unknown })['x-link-entity-type'];
+    if (typeof linkedType !== 'string' || linkedType === '') continue;
+    const lookupFieldRaw = (prop as { 'x-link-lookup-field'?: unknown })['x-link-lookup-field'];
+    const lookupField = typeof lookupFieldRaw === 'string' && lookupFieldRaw ? lookupFieldRaw : 'slug';
+    const bucketKey = `${linkedType}:${lookupField}`;
+    let bucket = buckets.get(bucketKey);
+    if (!bucket) {
+      bucket = { entityType: linkedType, lookupField, values: new Set() };
+      buckets.set(bucketKey, bucket);
+    }
+    for (const e of entities) {
+      const raw = e.metadata?.[columnKey];
+      const list = Array.isArray(raw) ? raw : [raw];
+      for (const v of list) {
+        if (v == null) continue;
+        const s = String(v).trim();
+        if (s !== '') bucket.values.add(s);
+      }
+    }
+  }
+  if (buckets.size === 0) return {};
+
+  const sql = getDb();
+  const out: Record<string, Record<string, { slug: string; entity_type: string; name: string }>> = {};
+
+  await Promise.all(
+    [...buckets.entries()].map(async ([bucketKey, { entityType, lookupField, values }]) => {
+      if (values.size === 0) return;
+      const valuesArr = [...values];
+      const valuesLiteral = pgTextArray(valuesArr);
+      const rows =
+        lookupField === 'slug'
+          ? await sql<{ slug: string; entity_type: string; name: string; lookup_value: string }>`
+              SELECT e.slug, et.slug AS entity_type, e.name, e.slug AS lookup_value
+              FROM entities e
+              JOIN entity_types et ON et.id = e.entity_type_id
+              WHERE e.organization_id = ${organizationId}
+                AND e.deleted_at IS NULL
+                AND et.slug = ${entityType}
+                AND e.slug = ANY(${valuesLiteral}::text[])
+            `
+          : await sql<{ slug: string; entity_type: string; name: string; lookup_value: string }>`
+              SELECT e.slug, et.slug AS entity_type, e.name, (e.metadata->>${lookupField}) AS lookup_value
+              FROM entities e
+              JOIN entity_types et ON et.id = e.entity_type_id
+              WHERE e.organization_id = ${organizationId}
+                AND e.deleted_at IS NULL
+                AND et.slug = ${entityType}
+                AND (e.metadata->>${lookupField}) = ANY(${valuesLiteral}::text[])
+            `;
+      if (rows.length === 0) return;
+      const bucketMap: Record<string, { slug: string; entity_type: string; name: string }> = {};
+      for (const r of rows) {
+        if (r.lookup_value == null) continue;
+        bucketMap[r.lookup_value] = { slug: r.slug, entity_type: r.entity_type, name: r.name };
+      }
+      out[bucketKey] = bucketMap;
+    })
+  );
+
+  return out;
 }
 
 async function handleGet(

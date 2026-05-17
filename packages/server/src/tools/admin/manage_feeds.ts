@@ -152,8 +152,46 @@ async function handleListFeeds(
   const limit = args.limit ?? 50;
   const offset = args.offset ?? 0;
 
-  let query = sql`
-    SELECT f.*, c.connector_key, c.display_name AS connection_name,
+  // Build the filtered "page" of feeds first, then compute event_count in a
+  // single GROUP BY over the (connection_id, feed_key) pairs in that page.
+  // The previous shape ran a correlated `SELECT COUNT(*) FROM current_event_records`
+  // per row, which is O(N feeds) × an anti-join over the entire events table —
+  // ~880ms per feed on a busy connection. Batching collapses it to one scan.
+  let pageQuery = sql`
+    SELECT f.*
+    FROM feeds f
+    JOIN connections c ON c.id = f.connection_id
+    WHERE f.organization_id = ${organizationId} AND c.deleted_at IS NULL AND f.deleted_at IS NULL
+  `;
+
+  if (args.connection_id) {
+    pageQuery = sql`${pageQuery} AND f.connection_id = ${args.connection_id}`;
+  }
+  if (args.entity_id) {
+    pageQuery = sql`${pageQuery} AND ${args.entity_id} = ANY(f.entity_ids)`;
+  }
+  if (args.status) {
+    pageQuery = sql`${pageQuery} AND f.status = ${args.status}`;
+  }
+
+  pageQuery = sql`${pageQuery} ORDER BY f.created_at DESC LIMIT ${limit} OFFSET ${offset}`;
+
+  const query = sql`
+    WITH page AS MATERIALIZED (
+      ${pageQuery}
+    ),
+    event_counts AS (
+      SELECT e.connection_id, e.feed_key, COUNT(*)::int AS event_count
+      FROM events e
+      WHERE e.organization_id = ${organizationId}
+        -- ANY(ARRAY(...)) keeps the planner on a single index scan per
+        -- distinct connection. IN (subquery) or a join causes Postgres to
+        -- re-scan the connection_id index per (connection, feed_key) pair.
+        AND e.connection_id = ANY(ARRAY(SELECT DISTINCT connection_id FROM page))
+        AND NOT EXISTS (SELECT 1 FROM events n WHERE n.supersedes_event_id = e.id)
+      GROUP BY e.connection_id, e.feed_key
+    )
+    SELECT p.*, c.connector_key, c.display_name AS connection_name,
            c.status AS connection_status,
            c.device_worker_id,
            dw.label AS device_label,
@@ -171,12 +209,12 @@ async function handleListFeeds(
            (
              SELECT string_agg(DISTINCT ent.name, ', ' ORDER BY ent.name)
              FROM entities ent
-             WHERE ent.id = ANY(f.entity_ids)
+             WHERE ent.id = ANY(p.entity_ids)
            ) AS entity_names,
-           (SELECT COUNT(*) FROM runs r WHERE r.feed_id = f.id AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[]))::int AS active_runs,
-           (SELECT COUNT(*) FROM current_event_records e WHERE e.connection_id = f.connection_id AND e.feed_key = f.feed_key)::int AS event_count
-    FROM feeds f
-    JOIN connections c ON c.id = f.connection_id
+           (SELECT COUNT(*) FROM runs r WHERE r.feed_id = p.id AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[]))::int AS active_runs,
+           COALESCE(ec.event_count, 0)::int AS event_count
+    FROM page p
+    JOIN connections c ON c.id = p.connection_id
     LEFT JOIN device_workers dw ON dw.id = c.device_worker_id
     LEFT JOIN LATERAL (
       SELECT name
@@ -188,20 +226,9 @@ async function handleListFeeds(
       LIMIT 1
     ) cd ON TRUE
     LEFT JOIN auth_profiles ap ON ap.id = c.auth_profile_id
-    WHERE f.organization_id = ${organizationId} AND c.deleted_at IS NULL AND f.deleted_at IS NULL
+    LEFT JOIN event_counts ec ON ec.connection_id = p.connection_id AND ec.feed_key = p.feed_key
+    ORDER BY p.created_at DESC
   `;
-
-  if (args.connection_id) {
-    query = sql`${query} AND f.connection_id = ${args.connection_id}`;
-  }
-  if (args.entity_id) {
-    query = sql`${query} AND ${args.entity_id} = ANY(f.entity_ids)`;
-  }
-  if (args.status) {
-    query = sql`${query} AND f.status = ${args.status}`;
-  }
-
-  query = sql`${query} ORDER BY f.created_at DESC LIMIT ${limit} OFFSET ${offset}`;
 
   const rows = await query;
   return { action: 'list_feeds', feeds: rows, total: rows.length, limit, offset };
