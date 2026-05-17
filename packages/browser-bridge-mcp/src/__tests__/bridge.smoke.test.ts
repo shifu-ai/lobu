@@ -48,8 +48,13 @@ describe("browser-bridge-mcp smoke", () => {
   });
 
   test("MCP client can connect and list browser_* tools", async () => {
-    const client = new Client({ name: "lobu-bridge-smoke", version: "0.0.0" }, {});
-    const transport = new StreamableHTTPClientTransport(new URL(`${bridge.url}/mcp`));
+    const client = new Client(
+      { name: "lobu-bridge-smoke", version: "0.0.0" },
+      {}
+    );
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`${bridge.url}/mcp`)
+    );
     try {
       await client.connect(transport);
       const { tools } = await client.listTools();

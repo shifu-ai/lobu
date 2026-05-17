@@ -68,7 +68,9 @@ function resolveMcpBin(): string {
   const pkgPath = require.resolve("@playwright/mcp/package.json");
   const pkg = require(pkgPath) as { bin?: string | Record<string, string> };
   const binEntry =
-    typeof pkg.bin === "string" ? pkg.bin : (pkg.bin?.["playwright-mcp"] ?? "cli.js");
+    typeof pkg.bin === "string"
+      ? pkg.bin
+      : (pkg.bin?.["playwright-mcp"] ?? "cli.js");
   const pkgDir = pkgPath.replace(/[/\\]package\.json$/, "");
   return `${pkgDir}/${binEntry}`;
 }
@@ -138,10 +140,12 @@ export async function startMcpBridgeServer(
   });
 
   child.once("error", NOOP); // surface via close() rejection if relevant
-  await waitForListening(`http://${host}:${port}/`, 10_000).catch(async (err) => {
-    child.kill("SIGTERM");
-    throw err;
-  });
+  await waitForListening(`http://${host}:${port}/`, 10_000).catch(
+    async (err) => {
+      child.kill("SIGTERM");
+      throw err;
+    }
+  );
 
   let closed = false;
   return {
@@ -204,7 +208,9 @@ export async function acquireBridgeMcp(
     },
     {}
   );
-  const transport = new StreamableHTTPClientTransport(new URL(`${opts.bridgeUrl}/mcp`));
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`${opts.bridgeUrl}/mcp`)
+  );
   await client.connect(transport);
   return {
     client,
