@@ -26,7 +26,7 @@
  * later (vendored fork, in-house rewrite) without churning every caller.
  */
 
-import { startPlayWriterCDPRelayServer } from 'playwriter';
+import { startPlayWriterCDPRelayServer } from "playwriter";
 
 export interface BridgeServerOptions {
   /**
@@ -84,7 +84,7 @@ export async function startBridgeServer(
   opts: BridgeServerOptions = {}
 ): Promise<BridgeServer> {
   const port = opts.port ?? 19988;
-  const host = opts.host ?? '127.0.0.1';
+  const host = opts.host ?? "127.0.0.1";
   const logger = opts.logger ?? NOOP_LOGGER;
 
   const server = await startPlayWriterCDPRelayServer({
