@@ -18,6 +18,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import {
   acquireBridgeMcp,
+  EXPECTED_BROWSER_TOOLS,
   startMcpBridgeServer,
   type McpBridgeServer,
 } from "../index.js";
@@ -61,12 +62,13 @@ describe("browser-bridge-mcp smoke", () => {
       expect(tools.length).toBeGreaterThan(0);
 
       // Microsoft's playwright-mcp ships standard browser_* tools when run
-      // with --extension. Concrete signal that we're talking to the right
-      // server, not just a random HTTP service.
-      const toolNames = tools.map((t) => t.name);
-      expect(toolNames).toContain("browser_navigate");
-      expect(toolNames).toContain("browser_click");
-      expect(toolNames).toContain("browser_snapshot");
+      // with --extension. Pinned-contract assertion: if @playwright/mcp
+      // drops/renames any of these in a future release, this fails loud
+      // (intentional — versions are alpha-ish; upgrades need re-verifying).
+      const toolNames = new Set(tools.map((t) => t.name));
+      for (const expected of EXPECTED_BROWSER_TOOLS) {
+        expect(toolNames.has(expected)).toBe(true);
+      }
     } finally {
       await client.close().catch(() => undefined);
     }

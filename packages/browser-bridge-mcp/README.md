@@ -45,9 +45,24 @@ MCP client (browser_navigate, ── playwright-mcp        ──  WebSocket  �
   (Revolut, banking). Stays out of this PR; the first such connector will
   flesh the pattern out.
 - **Production auth + audit.** The MCP HTTP server binds to loopback by
-  default; that's the only security posture. Per-tool auth, per-session
-  scoping, audit logging, and the Mac per-profile consent surface are
-  follow-ups.
+  default; that's the only security posture. Loopback is not a hard
+  security boundary — any local process can reach the port. Production
+  needs: random port + capability token in the URL, per-tool consent
+  scoping, audit log per call, and the Mac per-profile consent surface.
+  Follow-up.
+- **Typed connector helpers.** `acquireBridgeMcp` returns a raw MCP
+  `Client` today. Connector authors shouldn't have to memorise tool names
+  or parse raw tool results long-term — a typed helper layer
+  (`navigate(url)`, `snapshot()`, `click(ref)`, `evaluate(...)`) with
+  normalised errors (`"extension missing"`, `"no browser attached"`,
+  `"tool unavailable"`) is the right level. Stays out of this spike;
+  added alongside the first MCP-based connector so the helper shape is
+  driven by real usage.
+- **Wire into `make build-packages` + publish scripts.** Currently this
+  package builds only via its own `bun run build`. Wire it into the
+  monorepo build/publish only once the bridge has a first concrete
+  consumer (the first MCP-based connector) — until then it's a spike
+  artifact, intentionally not on the release path.
 
 ## Usage
 
@@ -95,11 +110,27 @@ the `createConnection(config, contextGetter)` factory expects you to
 *provide* a context, not receive one. So our wrapper is "spawn the bin in
 extension mode and let it own the browser connection."
 
+**Explicit consequence: existing Playwright `Browser`/`Page` connectors
+are NOT portable to this bridge as-is.** A bridge connector must be
+written (or rewritten) against MCP tools: `browser_navigate(url)`,
+`browser_snapshot()`, `browser_click({ ref })`, `browser_evaluate(...)`,
+etc. The snapshot model (refs into an accessibility-tree-like structure)
+is different from Playwright's locator model. Plan a real rewrite, not a
+type-swap.
+
 For Lobu specifically, the connectors that need this bridge are a small
 subset (sites that fingerprint or need MFA-trusted sessions — Revolut,
 banking). Connectors that don't need the user's real Chrome continue to
 use the existing `acquireBrowser` Playwright path in `@lobu/connector-sdk`
 against a managed Chromium. Two surfaces, each in its zone of strength.
+
+## Version coupling
+
+`@playwright/mcp` is `0.0.x` and pulls alpha Playwright. We pin the major
+range; expected tool names live in `EXPECTED_BROWSER_TOOLS` and the smoke
+suite asserts on them. **Treat any `@playwright/mcp` upgrade as
+breaking-by-default** — rerun manual e2e (extension install + tool
+roundtrip) and update `EXPECTED_BROWSER_TOOLS` if anything moved.
 
 ## Manual e2e (operator step)
 

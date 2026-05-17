@@ -40,6 +40,22 @@ import { createRequire } from "node:module";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+/**
+ * Tool names this wrapper expects to be advertised by `@playwright/mcp` when
+ * run with `--extension`. Centralised so the smoke test, runtime
+ * preflighting, and any future typed helpers can share one source of truth.
+ *
+ * `@playwright/mcp` is `0.0.x` and pulls alpha Playwright; treat these as a
+ * pinned-contract assertion. If an upgrade drops or renames any of these,
+ * the smoke test (and `acquireBridgeMcp` preflight, when added) fail loud
+ * with a clear "unsupported tool surface" message.
+ */
+export const EXPECTED_BROWSER_TOOLS = [
+  "browser_navigate",
+  "browser_click",
+  "browser_snapshot",
+] as const;
+
 export interface McpBridgeServerOptions {
   /** TCP port for the MCP HTTP server. Defaults to 19998 (different from playwriter's 19988). */
   port?: number;
@@ -47,8 +63,12 @@ export interface McpBridgeServerOptions {
   host?: "localhost" | "127.0.0.1" | "::1";
   /** Extra args to forward to `playwright-mcp`. Use with caution; the spike pins `--extension`. */
   extraArgs?: readonly string[];
-  /** stdio sink. Defaults to silent so the MCP server doesn't spam the connector log. */
-  stderr?: "inherit" | "ignore" | "pipe";
+  /**
+   * If true, the child's stderr is forwarded to this process's stderr.
+   * Default false — stderr is captured into a bounded ring buffer that's
+   * surfaced on startup failure so silent crashes are diagnosable.
+   */
+  logStderr?: boolean;
 }
 
 export interface McpBridgeServer {
@@ -75,10 +95,19 @@ function resolveMcpBin(): string {
   return `${pkgDir}/${binEntry}`;
 }
 
-async function waitForListening(url: string, timeoutMs: number): Promise<void> {
+async function waitForListening(
+  url: string,
+  timeoutMs: number,
+  childExited: { reason: string | null }
+): Promise<void> {
   const start = Date.now();
   let lastError: unknown;
   while (Date.now() - start < timeoutMs) {
+    if (childExited.reason) {
+      throw new Error(
+        `MCP bridge server child exited before ready: ${childExited.reason}`
+      );
+    }
     try {
       // playwright-mcp answers GET / with the MCP discovery; we just want
       // to know "something is listening." Any HTTP response counts.
@@ -95,6 +124,13 @@ async function waitForListening(url: string, timeoutMs: number): Promise<void> {
     })`
   );
 }
+
+function formatHostForUrl(host: string): string {
+  // IPv6 literals must be bracketed in URLs (e.g. http://[::1]:port).
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+const STDERR_BUFFER_BYTES = 32 * 1024;
 
 /**
  * Start `playwright-mcp --extension --port <port>` as a child process.
@@ -129,35 +165,89 @@ export async function startMcpBridgeServer(
     String(port),
     "--host",
     host,
-    // Allow both forms in case a connector mints the URL with the IP.
+    // Allow both forms so a connector that mints URLs with either name or
+    // IP works. Loopback binding is the actual security boundary.
     "--allowed-hosts",
-    `localhost:${port},127.0.0.1:${port}`,
+    `localhost:${port},127.0.0.1:${port},[::1]:${port}`,
     ...(opts.extraArgs ?? []),
   ];
 
   const child: ChildProcess = spawn(process.execPath, [bin, ...args], {
-    stdio: ["ignore", "ignore", opts.stderr ?? "ignore"],
+    stdio: ["ignore", "ignore", "pipe"],
   });
 
-  child.once("error", NOOP); // surface via close() rejection if relevant
-  await waitForListening(`http://${host}:${port}/`, 10_000).catch(
-    async (err) => {
-      child.kill("SIGTERM");
-      throw err;
+  // Track early exit so the readiness loop can fail fast instead of
+  // polling a port nothing's listening on for the full timeout.
+  const exited: { reason: string | null } = { reason: null };
+  child.once("exit", (code, signal) => {
+    exited.reason = signal ? `signal ${signal}` : `code ${code ?? "?"}`;
+  });
+  child.once("error", (err) => {
+    exited.reason = `spawn error: ${err.message}`;
+  });
+
+  // Bounded stderr ring buffer — surfaced on startup failure for
+  // diagnosability. If `logStderr` is true, also tee to this process.
+  let stderrBuf = "";
+  child.stderr?.on("data", (chunk: Buffer) => {
+    if (opts.logStderr) process.stderr.write(chunk);
+    stderrBuf += chunk.toString("utf8");
+    if (stderrBuf.length > STDERR_BUFFER_BYTES) {
+      stderrBuf = stderrBuf.slice(-STDERR_BUFFER_BYTES);
     }
-  );
+  });
+  child.stderr?.on("error", NOOP);
+
+  const readyUrl = `http://${formatHostForUrl(host)}:${port}/`;
+  try {
+    await waitForListening(readyUrl, 10_000, exited);
+  } catch (err) {
+    if (child.exitCode === null && !child.killed) child.kill("SIGTERM");
+    const tail = stderrBuf.trim().slice(-2_000);
+    const detail = tail ? `\n--- child stderr (tail) ---\n${tail}` : "";
+    throw new Error(`${err instanceof Error ? err.message : String(err)}${detail}`);
+  }
+
+  // Parent-exit cleanup so a crashed/killed parent doesn't orphan the
+  // playwright-mcp child. SIGINT/SIGTERM forward; `exit` is best-effort
+  // (synchronous kill, no wait).
+  const cleanupOnExit = () => {
+    if (child.exitCode === null && !child.killed) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ignore
+      }
+    }
+  };
+  const forwardAndDie = (sig: NodeJS.Signals) => () => {
+    cleanupOnExit();
+    process.exit(sig === "SIGINT" ? 130 : 143);
+  };
+  const onSigint = forwardAndDie("SIGINT");
+  const onSigterm = forwardAndDie("SIGTERM");
+  process.once("exit", cleanupOnExit);
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
 
   let closed = false;
   return {
-    url: `http://${host}:${port}`,
+    url: `http://${formatHostForUrl(host)}:${port}`,
     async close() {
       if (closed) return;
       closed = true;
-      if (child.exitCode !== null) return;
+      process.removeListener("exit", cleanupOnExit);
+      process.removeListener("SIGINT", onSigint);
+      process.removeListener("SIGTERM", onSigterm);
+      if (child.exitCode !== null || child.killed) return;
       child.kill("SIGTERM");
       await new Promise<void>((resolve) => {
         const t = setTimeout(() => {
-          child.kill("SIGKILL");
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // ignore
+          }
           resolve();
         }, 2_000);
         child.once("exit", () => {
