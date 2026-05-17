@@ -1,18 +1,23 @@
 /**
  * Browser Acquisition
  *
- * Single entry point for all browser-based connectors. Implements a two-layer
- * cascade:
+ * Single entry point for all browser-based connectors. Implements a cascade:
  *
- *   1. CDP — connect to user's real Chrome via raw CDP protocol.
+ *   1. Bridge — when `bridgeUrl` is set, the connector drives the user's
+ *      real signed-in Chrome through @lobu/browser-bridge (a CDP relay
+ *      backed by a chrome.debugger extension). Used for sites that need
+ *      the user's actual MFA-trusted session — Revolut, banking, etc.
+ *      Connects via Playwright's connectOverCDP through the bridge URL.
+ *
+ *   2. CDP — connect to user's real Chrome via raw CDP protocol.
  *      Uses CdpPage for DOM scraping (avoids Playwright's connectOverCDP crash
  *      on browsers with many tabs). For network interception, callers use
  *      Playwright's connectOverCDP on the resolved wsUrl directly.
  *
- *   2. Playwright — launch headless browser, inject stored cookies.
+ *   3. Playwright — launch headless browser, inject stored cookies.
  *      Cookies may come from a previous CDP session (freshest) or CLI capture.
  *
- * Both paths share the same caller API. Fresh cookies are always captured
+ * All paths share the same caller API. Fresh cookies are always captured
  * from the resulting context so the caller can persist them for future fallback.
  */
 
@@ -27,6 +32,22 @@ import { launchBrowser } from './launcher.js';
 // ---------------------------------------------------------------------------
 
 export interface AcquireBrowserOptions {
+  /**
+   * @lobu/browser-bridge endpoint that fronts the user's real signed-in
+   * Chrome (via the chrome.debugger-backed extension). When set, takes
+   * precedence over `cdpUrl` and `userDataDir`. Pair with `bridgeAuthToken`.
+   *
+   * Used for connectors against sites that need the user's real
+   * MFA-trusted session — Revolut, banking, etc. — where a Lobu-launched
+   * Chromium would be detected or wouldn't have the session.
+   */
+  bridgeUrl?: string;
+  /**
+   * Bearer token for the bridge connection. Required whenever `bridgeUrl`
+   * is set in any non-local-dev environment. Passed as
+   * `Authorization: Bearer <token>` on the CDP WebSocket handshake.
+   */
+  bridgeAuthToken?: string;
   /** CDP endpoint URL, 'auto' to auto-discover, or null to skip CDP entirely. */
   cdpUrl?: string | 'auto' | null;
   /** Stored cookies for Playwright fallback. May be empty. */
@@ -93,6 +114,19 @@ export class BrowserAuthCascadeError extends Error {
 export async function acquireBrowser(opts: AcquireBrowserOptions): Promise<AcquiredBrowser> {
   const attempts: Array<{ layer: string; error: string }> = [];
 
+  // --- Bridge: drive user's real signed-in Chrome via @lobu/browser-bridge ---
+  // Highest priority — when the caller picked this mode, falling back to a
+  // headless Playwright launch would silently lose the user's session and
+  // (for sites like Revolut) get the connector blocked. Fail loud instead.
+  if (opts.bridgeUrl) {
+    try {
+      return await acquireViaBridge(opts);
+    } catch (err: any) {
+      attempts.push({ layer: 'Bridge', error: err.message });
+      throw new BrowserAuthCascadeError(attempts);
+    }
+  }
+
   // --- Persistent profile path: cookies live in --user-data-dir ---
   // Skip CDP entirely — the profile dir is authoritative for cookies/state.
   if (opts.userDataDir) {
@@ -131,6 +165,53 @@ export async function acquireBrowser(opts: AcquireBrowserOptions): Promise<Acqui
 // ---------------------------------------------------------------------------
 // Layer implementations
 // ---------------------------------------------------------------------------
+
+async function acquireViaBridge(opts: AcquireBrowserOptions): Promise<AcquiredBrowser> {
+  // Dynamic playwright import to match the pattern in acquireViaPersistent —
+  // playwright is an optional peer dep; connector-sdk consumers without it
+  // shouldn't pay the import cost just because the type signature exists.
+  const playwrightModule = 'playwright';
+  const { chromium } = await import(/* @vite-ignore */ playwrightModule);
+
+  const url = opts.bridgeUrl!;
+  const headers: Record<string, string> | undefined = opts.bridgeAuthToken
+    ? { authorization: `Bearer ${opts.bridgeAuthToken}` }
+    : undefined;
+  const screenshotDir = process.env.BROWSER_SCREENSHOT_DIR ?? '/tmp/feed-screenshots';
+
+  const browser = (await chromium.connectOverCDP(url, { headers })) as Browser;
+  try {
+    // The bridge fronts the user's existing Chrome — there is already a
+    // default context with their open tabs/cookies/storage. Use it rather
+    // than newContext, which on connectOverCDP returns an isolated incognito
+    // context that defeats the whole point.
+    const contexts = browser.contexts();
+    const context = (contexts.length > 0 ? contexts[0] : await browser.newContext()) as BrowserContext;
+    if (opts.cookies.length > 0) {
+      await context.addCookies(opts.cookies);
+    }
+    const pages = context.pages();
+    const page = pages.length > 0 ? pages[0] : await context.newPage();
+
+    sdkLogger.info({ url }, '[BrowserAcquire] Connected via @lobu/browser-bridge');
+
+    return {
+      browser,
+      context,
+      page,
+      cdpPage: null,
+      cdpWsUrl: url,
+      backend: 'playwright',
+      ownsBrowser: false, // user's Chrome — caller must NOT close it
+      screenshotDir,
+    };
+  } catch (err) {
+    // Bridge connect succeeded but downstream setup failed. Drop the WS
+    // connection so we don't leak a CDP attachment on the user's Chrome.
+    await browser.close().catch(() => {});
+    throw err;
+  }
+}
 
 async function acquireViaCdp(opts: AcquireBrowserOptions): Promise<AcquiredBrowser> {
   const wsUrl = await resolveCdpUrl(opts.cdpUrl === 'auto' ? 'auto' : opts.cdpUrl, {

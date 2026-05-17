@@ -1,0 +1,53 @@
+{
+  "name": "@lobu/browser-bridge",
+  "version": "0.0.0",
+  "description": "CDP relay that lets Lobu Playwright connectors drive the user's already-signed-in Chrome via a chrome.debugger-backed extension. Spike: thin wrapper around playwriter.",
+  "license": "BUSL-1.1",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "playwriter": "0.1.0"
+  },
+  "peerDependencies": {
+    "playwright": "npm:patchright@^1.57.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "20.19.9",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/lobu-ai/lobu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lobu-ai/lobu.git",
+    "directory": "packages/browser-bridge"
+  }
+}
