@@ -49,13 +49,14 @@ const token = randomBytes(32).toString('hex');
 const bridge = await startBridgeServer({ token });
 
 try {
-  const browser = await chromium.connectOverCDP(bridge.url, {
-    headers: { authorization: `Bearer ${token}` },
-  });
+  // bridge.url already contains the /cdp path and ?token=... query.
+  // Do NOT pass an Authorization Bearer header — the underlying relay's
+  // /cdp route only checks the query token.
+  const browser = await chromium.connectOverCDP(bridge.url);
   const page = (await browser.contexts())[0].pages()[0];
   await page.goto('https://app.revolut.com');
   // ... your existing Playwright connector code, unchanged ...
-  await browser.close();
+  await browser.close(); // disconnects CDP only — does NOT close user's Chrome.
 } finally {
   bridge.close();
 }
@@ -68,11 +69,19 @@ import { acquireBrowser } from '@lobu/connector-sdk';
 
 const { browser, page } = await acquireBrowser({
   bridgeUrl: bridge.url,
-  bridgeAuthToken: token,
   cookies: [],
   authDomains: [],
 });
 ```
+
+## Cost of taking this dep
+
+Any consumer of `@lobu/browser-bridge` pays the full `playwriter` install
+cost (~10 MB unpacked, ~100 transitive packages including hono,
+`@xmorse/playwright-core`, the MCP SDK, and a couple of native-binding
+optionals). Worth knowing before importing this into a hot path or a
+client-side bundle. For server-side connector use this is fine; it's the
+same magnitude as Playwright itself.
 
 ## What's in / out of scope for this spike PR
 
@@ -97,6 +106,10 @@ Out of scope (follow-ups):
   Chrome with the extension loaded plus a Playwright snippet).
 - Origin-header rejection on the bridge WS (playwriter's auth model is
   token-based; Origin validation is part of its extension story).
+- Wiring this package into `make build-packages` and the publish scripts.
+  The spike doesn't ship via the normal release flow — it's installable as
+  a workspace dep only — until the extension story lands and we know
+  whether the public surface stays this small.
 
 ## Manual verification
 

@@ -26,14 +26,6 @@
   "dependencies": {
     "playwriter": "0.1.0"
   },
-  "peerDependencies": {
-    "playwright": "npm:patchright@^1.57.0"
-  },
-  "peerDependenciesMeta": {
-    "playwright": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@types/node": "20.19.9",
     "typescript": "^5.7.2"

@@ -35,19 +35,18 @@ export interface AcquireBrowserOptions {
   /**
    * @lobu/browser-bridge endpoint that fronts the user's real signed-in
    * Chrome (via the chrome.debugger-backed extension). When set, takes
-   * precedence over `cdpUrl` and `userDataDir`. Pair with `bridgeAuthToken`.
+   * precedence over `cdpUrl` and `userDataDir`.
+   *
+   * Pass the URL returned by `BridgeServer.url` directly — it already
+   * contains the `/cdp` path and `?token=...` query for auth. Do NOT
+   * pass a Bearer header; the underlying relay only checks the query
+   * token on its CDP route.
    *
    * Used for connectors against sites that need the user's real
    * MFA-trusted session — Revolut, banking, etc. — where a Lobu-launched
    * Chromium would be detected or wouldn't have the session.
    */
   bridgeUrl?: string;
-  /**
-   * Bearer token for the bridge connection. Required whenever `bridgeUrl`
-   * is set in any non-local-dev environment. Passed as
-   * `Authorization: Bearer <token>` on the CDP WebSocket handshake.
-   */
-  bridgeAuthToken?: string;
   /** CDP endpoint URL, 'auto' to auto-discover, or null to skip CDP entirely. */
   cdpUrl?: string | 'auto' | null;
   /** Stored cookies for Playwright fallback. May be empty. */
@@ -174,22 +173,36 @@ async function acquireViaBridge(opts: AcquireBrowserOptions): Promise<AcquiredBr
   const { chromium } = await import(/* @vite-ignore */ playwrightModule);
 
   const url = opts.bridgeUrl!;
-  const headers: Record<string, string> | undefined = opts.bridgeAuthToken
-    ? { authorization: `Bearer ${opts.bridgeAuthToken}` }
-    : undefined;
   const screenshotDir = process.env.BROWSER_SCREENSHOT_DIR ?? '/tmp/feed-screenshots';
 
-  const browser = (await chromium.connectOverCDP(url, { headers })) as Browser;
+  // bridgeUrl is the full ws://host:port/cdp?token=... — auth lives in the
+  // query string, NOT in headers. Don't pass an Authorization Bearer here.
+  const browser = (await chromium.connectOverCDP(url)) as Browser;
   try {
-    // The bridge fronts the user's existing Chrome — there is already a
-    // default context with their open tabs/cookies/storage. Use it rather
-    // than newContext, which on connectOverCDP returns an isolated incognito
-    // context that defeats the whole point.
+    // The bridge fronts the user's existing Chrome — there should already
+    // be a default context with the user's open tabs/cookies/storage. Use
+    // it rather than newContext, which on connectOverCDP returns an
+    // isolated incognito context and defeats the whole point.
+    //
+    // Fail loud if there's no context — silently creating a fresh incognito
+    // would (a) lose the user's session, and (b) the connector would happily
+    // run against the wrong browser state and get blocked. Worse than
+    // throwing.
     const contexts = browser.contexts();
-    const context = (contexts.length > 0 ? contexts[0] : await browser.newContext()) as BrowserContext;
+    if (contexts.length === 0) {
+      throw new Error(
+        '@lobu/browser-bridge: connected to relay but no browser context was advertised. ' +
+          'The extension probably is not attached to any tab. Open Chrome and click ' +
+          "the Lobu extension's toolbar icon on a tab, then retry."
+      );
+    }
+    const context = contexts[0] as BrowserContext;
     if (opts.cookies.length > 0) {
       await context.addCookies(opts.cookies);
     }
+    // pages()[0] picks an arbitrary attached tab. Acceptable for the spike
+    // since the extension attaches one tab at a time today; multi-tab
+    // selection (active tab, named tab, new tab) is a follow-up.
     const pages = context.pages();
     const page = pages.length > 0 ? pages[0] : await context.newPage();
 
@@ -202,12 +215,19 @@ async function acquireViaBridge(opts: AcquireBrowserOptions): Promise<AcquiredBr
       cdpPage: null,
       cdpWsUrl: url,
       backend: 'playwright',
-      ownsBrowser: false, // user's Chrome — caller must NOT close it
+      // user's Chrome — caller must NOT call browser.close() (would close
+      // their browser). Cleanup of the CDP attachment is handled by the
+      // extension on disconnect; the relay closes the WS when bridge.close()
+      // is invoked on the BridgeServer handle (separate concern from
+      // ownsBrowser).
+      ownsBrowser: false,
       screenshotDir,
     };
   } catch (err) {
     // Bridge connect succeeded but downstream setup failed. Drop the WS
     // connection so we don't leak a CDP attachment on the user's Chrome.
+    // browser.close() on a connectOverCDP Browser disconnects the CDP
+    // session — it does NOT close the user's Chrome itself.
     await browser.close().catch(() => {});
     throw err;
   }

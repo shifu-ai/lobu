@@ -56,7 +56,18 @@ export interface BridgeServerOptions {
 }
 
 export interface BridgeServer {
-  /** CDP endpoint URL — pass directly to `chromium.connectOverCDP(url, ...)`. */
+  /**
+   * Full CDP WebSocket URL — pass directly to `chromium.connectOverCDP(url)`.
+   *
+   * Already includes the `/cdp` path that playwriter's relay listens on, plus
+   * `?token=...` when a token was configured. Bypasses the http→ws discovery
+   * roundtrip Playwright would otherwise do (and which playwriter's
+   * `/json/version` doesn't propagate the token through, so the discovered
+   * URL would 401 on /cdp).
+   *
+   * Do NOT also pass an `Authorization: Bearer` header — playwriter's /cdp
+   * route only checks the query token; the header is ignored there.
+   */
   readonly url: string;
   /** Stop the relay and disconnect any attached extensions. */
   close(): void;
@@ -73,9 +84,9 @@ const NOOP_LOGGER = {
  * Connector usage:
  *
  *     const bridge = await startBridgeServer({ token: randomToken() });
- *     const browser = await chromium.connectOverCDP(bridge.url, {
- *       headers: { authorization: `Bearer ${token}` },
- *     });
+ *     // bridge.url already contains the /cdp path and ?token=... query.
+ *     // Do NOT also pass headers — playwriter's CDP route ignores them.
+ *     const browser = await chromium.connectOverCDP(bridge.url);
  *     // ... run connector ...
  *     await browser.close();
  *     bridge.close();
@@ -94,8 +105,9 @@ export async function startBridgeServer(
     logger,
   });
 
+  const tokenQuery = opts.token ? `?token=${encodeURIComponent(opts.token)}` : "";
   return {
-    url: `ws://${host}:${port}`,
+    url: `ws://${host}:${port}/cdp${tokenQuery}`,
     close: () => server.close(),
   };
 }
