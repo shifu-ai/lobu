@@ -27,6 +27,7 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+import { ensureDefaultAgent } from './auth/default-provisioning';
 import { generatePAT, getPATPrefix, hashToken } from './auth/oauth/utils';
 
 import { PGlite } from '@electric-sql/pglite';
@@ -202,6 +203,20 @@ async function main() {
     await ensureBootstrapPat(dbUrl);
   } catch (err) {
     logger.warn({ err }, 'Bootstrap PAT setup failed');
+  }
+
+  // ─── Default agent (Mac-app onboarding) ──────────────────────
+  // Auto-provision the Owletto Personal agent for the bootstrap org
+  // the first time the deployment boots. Sticky against deletion via a
+  // sentinel in `organization.metadata` — if the user removes the agent
+  // through the web UI we do NOT recreate it on the next boot.
+  //
+  // Best-effort: failure here does not block boot. The Mac app degrades to
+  // an empty-agents state instead of failing to start the server.
+  try {
+    await ensureDefaultAgent(BOOTSTRAP_ORG_ID);
+  } catch (err) {
+    logger.warn({ err }, 'Default-agent provisioning failed');
   }
 
   // ─── Listen ──────────────────────────────────────────────────
