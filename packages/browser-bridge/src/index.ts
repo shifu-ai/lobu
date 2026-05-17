@@ -43,9 +43,11 @@ export interface BridgeServerOptions {
    */
   host?: string;
   /**
-   * Bearer token required on connections. When set, callers must include
-   * `Authorization: Bearer <token>` on the CDP WebSocket. Strongly
-   * recommended; the spike accepts undefined for local dev only.
+   * Token required on connections. When set, it is embedded as `?token=...`
+   * in the returned `url` — callers just pass `bridge.url` to
+   * `connectOverCDP`; no header plumbing. Strongly recommended for any
+   * non-local-dev environment; the spike accepts undefined for local dev
+   * only.
    */
   token?: string;
   /**
@@ -105,7 +107,9 @@ export async function startBridgeServer(
     logger,
   });
 
-  const tokenQuery = opts.token ? `?token=${encodeURIComponent(opts.token)}` : "";
+  const tokenQuery = opts.token
+    ? `?token=${encodeURIComponent(opts.token)}`
+    : "";
   return {
     url: `ws://${host}:${port}/cdp${tokenQuery}`,
     close: () => server.close(),

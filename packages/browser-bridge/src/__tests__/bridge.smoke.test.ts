@@ -24,7 +24,10 @@ describe("browser-bridge smoke (no token)", () => {
   let bridge: BridgeServer;
 
   beforeAll(async () => {
-    bridge = await startBridgeServer({ port: TEST_PORT_NOAUTH, host: "127.0.0.1" });
+    bridge = await startBridgeServer({
+      port: TEST_PORT_NOAUTH,
+      host: "127.0.0.1",
+    });
   });
 
   afterAll(() => {
@@ -44,7 +47,9 @@ describe("browser-bridge smoke (no token)", () => {
     // matching what we expose as bridge.url. If these diverge in a future
     // playwriter release, callers using bridge.url stay safe but the
     // divergence is worth surfacing.
-    const res = await fetch(`http://127.0.0.1:${TEST_PORT_NOAUTH}/json/version`);
+    const res = await fetch(
+      `http://127.0.0.1:${TEST_PORT_NOAUTH}/json/version`
+    );
     expect(res.status).toBe(200);
     const body = (await res.json()) as { webSocketDebuggerUrl?: string };
     expect(body.webSocketDebuggerUrl).toMatch(/^ws:\/\/.+\/cdp$/);
