@@ -928,6 +928,17 @@ async function handleCreate(
     sources,
   });
 
+  if (!args.agent_id) {
+    // The scheduler joins on `agent_id IS NOT NULL` (see
+    // packages/server/src/watchers/automation.ts:469), so a watcher without
+    // an agent has no way to execute. Schema-wise `agent_id` is `Type.Optional`
+    // because the field is shared across all manage_watchers actions, but
+    // create enforces it: a watcher with no owning agent is a zombie row.
+    throw new ToolUserError(
+      'agent_id is required to create a watcher (the agent that executes it).'
+    );
+  }
+
   if (args.schedule) {
     const scheduleError = validateSchedule(args.schedule);
     if (scheduleError) {
@@ -1216,6 +1227,7 @@ async function handleUpdate(
       return { error: scheduleError } as any;
     }
   }
+
 
   const updatedFields: string[] = [];
   if (args.model_config !== undefined) updatedFields.push('model_config');
