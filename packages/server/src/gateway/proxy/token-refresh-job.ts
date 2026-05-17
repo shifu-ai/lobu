@@ -8,7 +8,7 @@ const logger = createLogger("token-refresh-job");
 
 const EXPIRY_BUFFER_MS = 5 * 60 * 1000; // Refresh tokens expiring within 5 minutes
 
-export interface RefreshableProvider {
+interface RefreshableProvider {
   providerId: string;
   oauthClient: OAuthClient;
 }
@@ -44,9 +44,19 @@ export class TokenRefreshJob {
       agentId,
       organizationId,
     } of userAuthProfiles.scanAllOAuth()) {
-      await orgContext.run({ organizationId }, () =>
-        this.maybeRefresh(userId, agentId)
-      );
+      // Isolate per-(user, agent) failures so one bad row (expired refresh
+      // token, DB hiccup, provider 5xx) doesn't abort the entire scan and
+      // strand every later user's tokens until the next 30-min tick.
+      try {
+        await orgContext.run({ organizationId }, () =>
+          this.maybeRefresh(userId, agentId)
+        );
+      } catch (err) {
+        logger.warn(
+          { userId, agentId, organizationId, err: String(err) },
+          "Token refresh failed for user/agent — continuing scan"
+        );
+      }
     }
   }
 

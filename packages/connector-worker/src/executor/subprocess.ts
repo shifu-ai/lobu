@@ -158,19 +158,8 @@ export class SubprocessExecutor implements SyncExecutor {
       }
 
       // Node subprocess execution is process isolation, not a security sandbox.
-      // Keep permission flags disabled unless the connector runtime is made compatible.
-      try {
-        const nodeVersion = parseInt(process.versions.node.split('.')[0], 10);
-        if (nodeVersion >= 20) {
-          // Uncomment only when the connector runtime is compatible with Node permissions:
-          // execArgv.push('--experimental-permission');
-          // execArgv.push(`--allow-fs-read=/tmp/*,${__dirname}/*`);
-          // execArgv.push('--allow-fs-write=/tmp/*');
-        }
-      } catch {
-        // Ignore - permissions are best-effort
-      }
-
+      // Node --experimental-permission flags intentionally NOT enabled — the
+      // connector runtime isn't compatible. Revisit if that changes.
       const child = fork(childRunnerPath, [], {
         stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
         execArgv,
@@ -245,10 +234,10 @@ export class SubprocessExecutor implements SyncExecutor {
       const combinedTail = (): string => {
         const out = stdoutTail.toString();
         const err = stderrTail.toString();
-        if (!out && !err) return '';
-        if (!out) return `[stderr]\n${err}`;
-        if (!err) return `[stdout]\n${out}`;
-        return `[stdout]\n${out}\n[stderr]\n${err}`;
+        const parts: string[] = [];
+        if (out) parts.push(`[stdout]\n${out}`);
+        if (err) parts.push(`[stderr]\n${err}`);
+        return parts.join('\n');
       };
 
       const computeExitReason = (tail: string): SubprocessExitReason => {
@@ -257,8 +246,10 @@ export class SubprocessExecutor implements SyncExecutor {
         return 'crash';
       };
 
-      // Handle messages from child
+      // Handle messages from child. The child runs untrusted connector code,
+      // so validate shape at this trust boundary before dereferencing fields.
       const onMessage = (msg: any) => {
+        if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') return;
         if (msg.type === 'content_chunk') {
           const items = Array.isArray(msg.items) ? msg.items : [];
           queueTask(async () => {
@@ -306,13 +297,21 @@ export class SubprocessExecutor implements SyncExecutor {
               const signal = await hooks.onAwaitAuthSignal(name, {
                 timeoutMs: timeoutMs ?? undefined,
               });
-              child.send({ type: 'await_signal_response', requestId, signal });
+              try {
+                child.send({ type: 'await_signal_response', requestId, signal });
+              } catch {
+                /* IPC closed — child already exited. */
+              }
             } catch (err) {
-              child.send({
-                type: 'await_signal_response',
-                requestId,
-                error: err instanceof Error ? err.message : String(err),
-              });
+              try {
+                child.send({
+                  type: 'await_signal_response',
+                  requestId,
+                  error: err instanceof Error ? err.message : String(err),
+                });
+              } catch {
+                /* IPC closed — child already exited. */
+              }
             }
           });
           return;
@@ -363,7 +362,9 @@ export class SubprocessExecutor implements SyncExecutor {
           // (which is also written to gateway logs by upstream callers).
           const rawMessage = msg.error?.message ?? 'Subprocess reported error';
           const error = new SubprocessError(redactOutput(rawMessage), diagnostics);
-          error.name = msg.error?.name ?? 'SubprocessError';
+          // Redact `name` too — connector code can throw `class Err extends Error { name = '<secret>' }`
+          // and Error.toString() / log formatters print `${name}: ${message}`.
+          error.name = msg.error?.name ? redactOutput(String(msg.error.name)) : 'SubprocessError';
           if (msg.error?.stack) error.stack = redactOutput(msg.error.stack);
           settle(() => reject(error));
           return;
@@ -439,17 +440,45 @@ export class SubprocessExecutor implements SyncExecutor {
       child.stdout?.on('data', onStdout);
       child.stderr?.on('data', onStderr);
 
-      // Send the compiled code and context to the child
-      child.send({
-        compiledCode,
-        context: {
-          options: context.options,
-          checkpoint: context.checkpoint,
-          env: context.env,
-          sessionState: context.sessionState,
-          apiType: context.apiType,
+      // Send the compiled code and context to the child. Use the callback
+      // form so a failed send (e.g. child died before IPC handshake, or fork
+      // resolved to a non-existent file) rejects the executor promise
+      // instead of going unhandled on the IPC channel.
+      child.send(
+        {
+          compiledCode,
+          context: {
+            options: context.options,
+            checkpoint: context.checkpoint,
+            env: context.env,
+            sessionState: context.sessionState,
+            apiType: context.apiType,
+          },
         },
-      });
+        (err) => {
+          if (err) {
+            const tail = redactOutput(combinedTail());
+            const diagnostics: SubprocessDiagnostics = {
+              exitCode: null,
+              exitSignal: null,
+              outputTail: tail,
+              exitReason: 'crash',
+            };
+            settle(() => {
+              try {
+                child.kill('SIGKILL');
+              } catch {
+                /* already dead */
+              }
+              reject(
+                new SubprocessError(`Subprocess IPC send failed: ${err.message}`, diagnostics, {
+                  cause: err,
+                })
+              );
+            });
+          }
+        }
+      );
     });
   }
 }

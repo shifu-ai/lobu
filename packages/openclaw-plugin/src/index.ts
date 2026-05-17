@@ -81,11 +81,7 @@ export async function runWithAbortDeadline<T>(
   }
 }
 
-// Minimal fallback context used before the workspace instructions are fetched.
-// Initialized lazily per mode (gateway vs standalone) in register().
 let FALLBACK_SYSTEM_CONTEXT: string | null = null;
-
-// Workspace instructions fetched from MCP server (includes entity types, event kinds, schemas).
 let cachedWorkspaceInstructions: string | null = null;
 
 const DEFAULT_RPC_VERSION = '2.0';
@@ -103,15 +99,11 @@ const PLUGIN_VERSION = (() => {
   }
 })();
 
-// Session-level token obtained via device code login flow
 let sessionToken: string | null = null;
-// Session-level refresh token for token renewal
-let _sessionRefreshToken: string | null = null;
+let sessionRefreshToken: string | null = null;
 let sessionClientId: string | null = null;
 let sessionClientSecret: string | null = null;
 let sessionIssuer: string | null = null;
-
-// MCP Streamable HTTP session ID (obtained from initialize handshake)
 let mcpSessionId: string | null = null;
 
 const MCP_PROTOCOL_VERSION = '2025-03-26';
@@ -145,12 +137,39 @@ async function mcpFetch(
     mcpSessionId = newSessionId;
   }
 
-  const data = await response.json();
+  // A misbehaving proxy can return HTML (502/504) or empty body — never let
+  // a non-JSON payload throw out of mcpFetch and bury the HTTP status. The
+  // caller inspects `response.ok` / `response.status` and `parseErrorMessage`
+  // tolerates `data` being null.
+  let data: unknown = null;
+  try {
+    data = await response.json();
+  } catch {
+    data = null;
+  }
   return { data, response };
 }
 
 // Worker daemon process (auto-started after login)
 let workerProcess: ChildProcess | null = null;
+let workerCleanupRegistered = false;
+
+function registerWorkerCleanupOnce(): void {
+  if (workerCleanupRegistered) return;
+  workerCleanupRegistered = true;
+  const cleanup = () => {
+    if (workerProcess && workerProcess.exitCode === null && !workerProcess.killed) {
+      try {
+        workerProcess.kill();
+      } catch {}
+    }
+  };
+  // Module-scope registration prevents listener accumulation across re-registers
+  // (would otherwise trip MaxListenersExceededWarning).
+  process.on('exit', cleanup);
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
+}
 
 // --- Token persistence (compatible with packages/cli/src/lib/openclaw-auth.ts) ---
 
@@ -238,10 +257,10 @@ function saveStoredSession(
     updatedAt: new Date().toISOString(),
   };
   store.activeServer = key;
-  // Keep legacy field for backward compat with older CLI versions
-  (store as any).activeContext = key;
+  store.activeContext = key;
 
-  mkdirSync(dirname(storePath), { recursive: true });
+  // 0o700 on the parent dir, 0o600 on the file — both hold OAuth tokens.
+  mkdirSync(dirname(storePath), { recursive: true, mode: 0o700 });
   writeFileSync(storePath, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
 }
 
@@ -283,19 +302,14 @@ function getLogger(api: Record<string, unknown>): PluginLogger {
   return fallbackLogger;
 }
 
-function getHookRegistrar(
-  api: Record<string, unknown>
-): (
+type HookRegistrar = (
   event: string,
   handler: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown
-) => void {
+) => void;
+
+function getHookRegistrar(api: Record<string, unknown>): HookRegistrar {
   const on = api.on;
-  if (typeof on === 'function') {
-    return on as any;
-  }
-  return () => {
-    /* no-op */
-  };
+  return typeof on === 'function' ? (on as HookRegistrar) : () => {};
 }
 
 function readPluginConfig(api: Record<string, unknown>, pluginId: string): PluginConfig {
@@ -410,7 +424,7 @@ function getWorkerToken(): string | null {
 
 function clearSessionTokens(): void {
   sessionToken = null;
-  _sessionRefreshToken = null;
+  sessionRefreshToken = null;
 }
 
 function deriveOAuthBaseUrl(mcpUrl: string): string {
@@ -442,21 +456,19 @@ function spawnWorkerDaemon(mcpUrl: string, accessToken: string, log: PluginLogge
 
     workerProcess.unref();
 
+    // `spawn()` can throw synchronously for some failures, but missing
+    // binaries / EACCES / EPERM surface as an async 'error' event. Without
+    // a listener Node treats the error as uncaught and crashes the gateway.
+    workerProcess.on('error', (err: unknown) => {
+      log.warn(
+        `lobu: worker daemon process error: ${err instanceof Error ? err.message : String(err)}`
+      );
+      workerProcess = null;
+    });
+
     log.info(`lobu: worker daemon spawned (pid=${workerProcess.pid})`);
 
-    // Clean up on process exit
-    const cleanup = () => {
-      if (workerProcess && workerProcess.exitCode === null && !workerProcess.killed) {
-        try {
-          workerProcess.kill();
-        } catch {
-          // Best-effort cleanup
-        }
-      }
-    };
-    process.on('exit', cleanup);
-    process.on('SIGINT', cleanup);
-    process.on('SIGTERM', cleanup);
+    registerWorkerCleanupOnce();
   } catch (err) {
     log.warn(
       `lobu: failed to spawn worker daemon: ${err instanceof Error ? err.message : String(err)}`
@@ -498,7 +510,7 @@ async function initiateDeviceLogin(
   });
 
   if (!regResponse.ok) {
-    const errText = await regResponse.text();
+    const errText = (await regResponse.text()).slice(0, 500);
     throw new Error(`Client registration failed: ${errText}`);
   }
 
@@ -519,7 +531,7 @@ async function initiateDeviceLogin(
   });
 
   if (!deviceResponse.ok) {
-    const errText = await deviceResponse.text();
+    const errText = (await deviceResponse.text()).slice(0, 500);
     throw new Error(`Device authorization failed: ${errText}`);
   }
 
@@ -609,12 +621,12 @@ async function pollDeviceLogin(
  * the script source.
  */
 function refreshStoredTokenSync(mcpUrl: string): void {
-  if (!_sessionRefreshToken || !sessionClientId || !sessionIssuer) return;
+  if (!sessionRefreshToken || !sessionClientId || !sessionIssuer) return;
 
   const body: Record<string, string> = {
     grant_type: 'refresh_token',
     client_id: sessionClientId,
-    refresh_token: _sessionRefreshToken,
+    refresh_token: sessionRefreshToken,
   };
   if (sessionClientSecret) body.client_secret = sessionClientSecret;
 
@@ -650,69 +662,77 @@ function refreshStoredTokenSync(mcpUrl: string): void {
     if (typeof tokens.access_token !== 'string') return;
 
     sessionToken = tokens.access_token;
-    if (typeof tokens.refresh_token === 'string') _sessionRefreshToken = tokens.refresh_token;
+    if (typeof tokens.refresh_token === 'string') sessionRefreshToken = tokens.refresh_token;
     try {
       saveStoredSession(mcpUrl, {
         issuer: sessionIssuer,
         clientId: sessionClientId,
         clientSecret: sessionClientSecret,
-        refreshToken: _sessionRefreshToken!,
+        refreshToken: sessionRefreshToken!,
         accessToken: sessionToken,
       });
-    } catch {
-      // Best-effort persist.
-    }
+    } catch {}
   } catch {
-    // Best-effort refresh — fall back to the persisted (possibly stale) token.
+    // Fall back to the persisted (possibly stale) token.
   }
 }
 
+// Refresh tokens are single-use on most OAuth servers: if two concurrent
+// callers both hit a 401 they'd each post the same refresh_token and the
+// second request would fail (or worse, invalidate the just-issued access
+// token). Funnel concurrent refreshes through a single in-flight promise.
+let inFlightRefresh: Promise<boolean> | null = null;
+
 async function tryRefreshToken(mcpUrl: string): Promise<boolean> {
-  if (!_sessionRefreshToken || !sessionClientId || !sessionIssuer) return false;
+  if (!sessionRefreshToken || !sessionClientId || !sessionIssuer) return false;
+  if (inFlightRefresh) return inFlightRefresh;
 
-  try {
-    const body: Record<string, string> = {
-      grant_type: 'refresh_token',
-      client_id: sessionClientId,
-      refresh_token: _sessionRefreshToken,
-    };
-    if (sessionClientSecret) {
-      body.client_secret = sessionClientSecret;
-    }
-
-    const response = await fetch(`${sessionIssuer}/oauth/token`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) return false;
-
-    const data = (await response.json()) as Record<string, unknown>;
-    if (typeof data.access_token !== 'string') return false;
-
-    sessionToken = data.access_token;
-    if (typeof data.refresh_token === 'string') {
-      _sessionRefreshToken = data.refresh_token;
-    }
-
-    // Persist refreshed tokens
+  inFlightRefresh = (async () => {
     try {
-      saveStoredSession(mcpUrl, {
-        issuer: sessionIssuer,
-        clientId: sessionClientId,
-        clientSecret: sessionClientSecret,
-        refreshToken: _sessionRefreshToken!,
-        accessToken: sessionToken,
-      });
-    } catch {
-      // Best-effort persist
-    }
+      const body: Record<string, string> = {
+        grant_type: 'refresh_token',
+        client_id: sessionClientId!,
+        refresh_token: sessionRefreshToken!,
+      };
+      if (sessionClientSecret) {
+        body.client_secret = sessionClientSecret;
+      }
 
-    return true;
-  } catch {
-    return false;
-  }
+      const response = await fetch(`${sessionIssuer}/oauth/token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+
+      if (!response.ok) return false;
+
+      const data = (await response.json()) as Record<string, unknown>;
+      if (typeof data.access_token !== 'string') return false;
+
+      sessionToken = data.access_token;
+      if (typeof data.refresh_token === 'string') {
+        sessionRefreshToken = data.refresh_token;
+      }
+
+      try {
+        saveStoredSession(mcpUrl, {
+          issuer: sessionIssuer!,
+          clientId: sessionClientId!,
+          clientSecret: sessionClientSecret,
+          refreshToken: sessionRefreshToken!,
+          accessToken: sessionToken,
+        });
+      } catch {}
+
+      return true;
+    } catch {
+      return false;
+    } finally {
+      inFlightRefresh = null;
+    }
+  })();
+  return inFlightRefresh;
 }
 
 async function reinitializeMcpSession(config: ResolvedPluginConfig): Promise<boolean> {
@@ -776,19 +796,20 @@ async function callMcpTool(
     params: { name: toolName, arguments: args },
   };
 
-  let result: { data: unknown; response: Response };
-  try {
-    result = await mcpFetch(config.mcpUrl, rpcBody, authHeaders, options?.signal);
-  } catch (err) {
-    throw new Error(`MCP fetch failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-
-  let { data, response } = result;
+  let { data, response } = await mcpFetch(
+    config.mcpUrl,
+    rpcBody,
+    authHeaders,
+    options?.signal
+  );
 
   // Auto-refresh on 401/403 if we have a refresh token
   if ((response.status === 401 || response.status === 403) && config.mcpUrl) {
+    if (options?.signal?.aborted) {
+      throw new Error('aborted');
+    }
     const refreshed = await tryRefreshToken(config.mcpUrl);
-    if (refreshed && sessionToken) {
+    if (refreshed && sessionToken && !options?.signal?.aborted) {
       authHeaders.Authorization = `Bearer ${sessionToken}`;
       const retryBody = { ...rpcBody, id: `${rpcId}-retry` };
       const retry = await mcpFetch(config.mcpUrl, retryBody, authHeaders, options?.signal);
@@ -876,6 +897,11 @@ async function fetchWorkspaceInstructions(
   config: ResolvedPluginConfig,
   log: PluginLogger
 ): Promise<void> {
+  // Called fire-and-forget from `lobu_login_check`. Without a deadline a
+  // hanging MCP server keeps the awaiter alive indefinitely (and pins the
+  // plugin's auth state). Bound it the same way recall is bounded.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RECALL_TIMEOUT_MS);
   try {
     const token = await resolveAuthToken(config);
     const authHeaders: Record<string, string> = { ...config.headers };
@@ -893,7 +919,8 @@ async function fetchWorkspaceInstructions(
           clientInfo: { name: 'openclaw-lobu', version: '1.0.0' },
         },
       },
-      authHeaders
+      authHeaders,
+      controller.signal
     );
 
     if (!response.ok) return;
@@ -910,6 +937,8 @@ async function fetchWorkspaceInstructions(
     log.warn(
       `lobu: failed to fetch workspace instructions: ${err instanceof Error ? err.message : String(err)}`
     );
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -1042,14 +1071,11 @@ const plugin = {
       log.warn('lobu: missing config.mcpUrl (plugins.entries.openclaw-lobu.config.mcpUrl)');
     }
 
-    // Initialize fallback system context based on mode
     FALLBACK_SYSTEM_CONTEXT = renderFallbackSystemContext({
       gatewayMode: !!config.gatewayAuthUrl,
     });
 
-    // Gateway mode: proxy handles auth + tools. Nothing to check at startup.
-
-    // Load persisted token if no auth is configured via config/env (standalone mode only)
+    // Load persisted token in standalone mode when no auth is configured via config/env.
     if (
       config.mcpUrl &&
       !config.gatewayAuthUrl &&
@@ -1060,7 +1086,7 @@ const plugin = {
       const stored = loadStoredSession(config.mcpUrl);
       if (stored?.accessToken) {
         sessionToken = stored.accessToken;
-        _sessionRefreshToken = stored.refreshToken || null;
+        sessionRefreshToken = stored.refreshToken || null;
         sessionClientId = stored.clientId || null;
         sessionClientSecret = stored.clientSecret || null;
         sessionIssuer = stored.issuer || null;
@@ -1177,7 +1203,7 @@ const plugin = {
 
             if (result.status === 'complete') {
               sessionToken = result.accessToken;
-              _sessionRefreshToken = result.refreshToken || null;
+              sessionRefreshToken = result.refreshToken || null;
               sessionClientId = activeDeviceLogin.clientId;
               sessionClientSecret = activeDeviceLogin.clientSecret || null;
               sessionIssuer = activeDeviceLogin.issuer;
@@ -1430,30 +1456,23 @@ const plugin = {
         if (!Array.isArray(messages) || messages.length < 2) return;
         if (messages.length <= lastCapturedLen) return;
 
-        // Find the last assistant message, then the user message immediately
-        // before it — pairing the answer with the question that prompted it
-        // (not a trailing unanswered user message with the previous reply).
-        let assistantIdx = -1;
-        for (let i = messages.length - 1; i >= 0; i--) {
-          if (isRecord(messages[i]) && (messages[i] as Record<string, unknown>).role === 'assistant') {
-            const t = messageText(messages[i]);
-            if (t.trim()) { assistantIdx = i; break; }
+        // Pair the last non-empty assistant message with the user message immediately
+        // before it (the question that prompted it).
+        const findLast = (role: 'user' | 'assistant', upTo: number): number => {
+          for (let i = upTo; i >= 0; i--) {
+            const m = messages[i];
+            if (isRecord(m) && m.role === role && messageText(m).trim()) return i;
           }
-        }
-        if (assistantIdx < 1) return;
+          return -1;
+        };
 
-        let userIdx = -1;
-        for (let i = assistantIdx - 1; i >= 0; i--) {
-          if (isRecord(messages[i]) && (messages[i] as Record<string, unknown>).role === 'user') {
-            const t = messageText(messages[i]);
-            if (t.trim()) { userIdx = i; break; }
-          }
-        }
+        const assistantIdx = findLast('assistant', messages.length - 1);
+        if (assistantIdx < 1) return;
+        const userIdx = findLast('user', assistantIdx - 1);
         if (userIdx < 0) return;
 
         const lastUser = messageText(messages[userIdx]).trim();
         const lastAssistant = messageText(messages[assistantIdx]).trim();
-        if (!lastUser || !lastAssistant) return;
 
         const combined = `User: ${lastUser}\nAssistant: ${lastAssistant}`;
         if (combined.length < 16 || combined.includes('<lobu-memory>')) return;

@@ -12,7 +12,6 @@ import {
 import {
   bumpInterval,
   DEVICE_CODE_GRANT_TYPE,
-  type DeviceAuthorization,
   discoverOAuth,
   fetchUserInfo,
   type OAuthDiscovery,
@@ -77,12 +76,14 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
         "  Confirm the context URL is correct: `lobu context current`.\n"
       )
     );
+    process.exitCode = 1;
     return;
   }
 
+  const { deviceAuthorizationEndpoint, registrationEndpoint } = discovery;
   if (
-    !discovery.deviceAuthorizationEndpoint ||
-    !discovery.registrationEndpoint ||
+    !deviceAuthorizationEndpoint ||
+    !registrationEndpoint ||
     !discovery.grantTypesSupported.includes(DEVICE_CODE_GRANT_TYPE)
   ) {
     console.log(
@@ -93,33 +94,22 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     console.log(
       chalk.dim("  Use `--token <pat>` with a personal access token instead.\n")
     );
+    process.exitCode = 1;
     return;
   }
 
   console.log(chalk.dim(`\n  Context: ${target.name}`));
   console.log(chalk.dim(`  Issuer:  ${discovery.issuer}`));
 
-  let client: RegisteredClient;
-  try {
-    client = await registerClient(
-      discovery.registrationEndpoint,
-      options.cliVersion ?? "unknown"
-    );
-  } catch (err) {
-    console.log(chalk.red(`\n  ${(err as Error).message}\n`));
-    return;
-  }
+  const client = await tryOAuthStep(() =>
+    registerClient(registrationEndpoint, options.cliVersion ?? "unknown")
+  );
+  if (!client) return;
 
-  let authorization: DeviceAuthorization;
-  try {
-    authorization = await startDeviceAuthorization(
-      discovery.deviceAuthorizationEndpoint,
-      client
-    );
-  } catch (err) {
-    console.log(chalk.red(`\n  ${(err as Error).message}\n`));
-    return;
-  }
+  const authorization = await tryOAuthStep(() =>
+    startDeviceAuthorization(deviceAuthorizationEndpoint, client)
+  );
+  if (!authorization) return;
 
   const verificationUrl =
     authorization.verificationUriComplete ?? authorization.verificationUri;
@@ -174,6 +164,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
     if (result.status === "error") {
       spinner.fail(result.message);
       console.log();
+      process.exitCode = 1;
       return;
     }
 
@@ -218,6 +209,7 @@ export async function loginCommand(options: LoginOptions): Promise<void> {
 
   spinner.fail("Login request expired. Run `lobu login` again.");
   console.log();
+  process.exitCode = 1;
 }
 
 async function loginWithToken(
@@ -227,6 +219,7 @@ async function loginWithToken(
   const token = rawToken.trim();
   if (!token) {
     console.log(chalk.red("\n  Token cannot be empty.\n"));
+    process.exitCode = 1;
     return;
   }
 
@@ -261,4 +254,14 @@ async function revokeExisting(existing: Credentials): Promise<void> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function tryOAuthStep<T>(fn: () => Promise<T>): Promise<T | undefined> {
+  try {
+    return await fn();
+  } catch (err) {
+    console.log(chalk.red(`\n  ${(err as Error).message}\n`));
+    process.exitCode = 1;
+    return undefined;
+  }
 }

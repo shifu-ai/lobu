@@ -22,18 +22,13 @@ export interface EnhancedBrowser {
   screenshotDir: string;
 }
 
-/**
- * Add Puppeteer-compatible methods to Playwright Page
- */
+/** Add Puppeteer-compatible `setUserAgent` to a Playwright Page. */
 function addCompatibilityMethods(page: any): any {
   if (!page.setUserAgent) {
     page.setUserAgent = async (userAgent: string) => {
-      await page.setExtraHTTPHeaders({
-        'User-Agent': userAgent,
-      });
+      await page.setExtraHTTPHeaders({ 'User-Agent': userAgent });
     };
   }
-
   return page;
 }
 
@@ -134,8 +129,17 @@ export async function captureErrorArtifacts(
   try {
     await mkdir(screenshotDir, { recursive: true });
 
+    // feedType is caller-controlled and lands in on-disk filenames. Strip
+    // path separators, parent-dir references, and any non-filename-safe
+    // characters to prevent traversal outside screenshotDir.
+    const safeFeedType =
+      (typeof feedType === 'string' ? feedType : 'unknown')
+        .replace(/[^a-zA-Z0-9._-]/g, '_')
+        .replace(/^\.+/, '_')
+        .slice(0, 64) || 'unknown';
+
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const baseFilename = `${feedType}-${timestamp}`;
+    const baseFilename = `${safeFeedType}-${timestamp}`;
 
     const screenshotPath = join(screenshotDir, `${baseFilename}.png`);
     try {
@@ -184,7 +188,7 @@ export async function captureErrorArtifacts(
           screenshot: screenshotPath,
           html: htmlPath,
         },
-        debug_hint: `To debug: BROWSER_DEBUG=1 pnpm sync ${feedType} [options]`,
+        debug_hint: `To debug: BROWSER_DEBUG=1 pnpm sync ${safeFeedType} [options]`,
       },
       '[BrowserLauncher] Feed failed'
     );

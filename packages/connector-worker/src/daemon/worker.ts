@@ -30,24 +30,20 @@ const DEFAULT_EXECUTOR_TIMEOUT_MS = 600000;
 export class WorkerDaemon {
   private client: WorkerClient;
   private env: Env;
-  private config: Required<
-    Omit<
-      DaemonConfig,
-      'apiUrl' | 'workerId' | 'workerApiToken' | 'capabilities' | 'executor' | 'version'
-    >
-  > & {
+  private config: {
+    pollIntervalMs: number;
+    maxConcurrentJobs: number;
     executor: Partial<ExecutorConfig>;
   };
   private running = false;
   private activeJobs = 0;
 
   constructor(daemonConfig: DaemonConfig, env: Env) {
-    const capabilities = daemonConfig.capabilities ?? DEFAULT_CAPABILITIES;
     this.client = new WorkerClient({
       apiUrl: daemonConfig.apiUrl,
       workerId: daemonConfig.workerId,
       authToken: daemonConfig.workerApiToken ?? env.WORKER_API_TOKEN,
-      capabilities,
+      capabilities: daemonConfig.capabilities ?? DEFAULT_CAPABILITIES,
       version: daemonConfig.version,
     });
 
@@ -169,7 +165,14 @@ export class WorkerDaemon {
 export async function startDaemon(config: DaemonConfig, env: Env): Promise<WorkerDaemon> {
   const daemon = new WorkerDaemon(config, env);
 
+  let shuttingDown = false;
   const gracefulShutdown = async (signal: string) => {
+    if (shuttingDown) {
+      // Second signal — operator wants out now. Hard exit.
+      console.error(`[daemon] Received ${signal} during shutdown, forcing exit`);
+      process.exit(130);
+    }
+    shuttingDown = true;
     console.error(`\n[daemon] Received ${signal}, shutting down...`);
     daemon.stop();
     const allDone = await daemon.waitForActiveJobs();
@@ -180,8 +183,12 @@ export async function startDaemon(config: DaemonConfig, env: Env): Promise<Worke
   };
 
   // Handle shutdown signals
-  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.on('SIGINT', () => {
+    void gracefulShutdown('SIGINT');
+  });
+  process.on('SIGTERM', () => {
+    void gracefulShutdown('SIGTERM');
+  });
 
   await daemon.start();
   return daemon;

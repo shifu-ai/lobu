@@ -5,11 +5,7 @@ interface AudioProviderSuggestions {
   usedFallback: boolean;
 }
 
-const FALLBACK_PROVIDER_ENTRIES = [
-  { id: "chatgpt" },
-  { id: "gemini" },
-  { id: "elevenlabs" },
-] as const;
+const FALLBACK_PROVIDER_IDS = ["chatgpt", "gemini", "elevenlabs"] as const;
 
 const KNOWN_PROVIDER_LABELS: Record<string, string> = {
   chatgpt: "ChatGPT/OpenAI",
@@ -48,7 +44,7 @@ function getFallbackSuggestions(
   available: boolean | null
 ): AudioProviderSuggestions {
   return {
-    providerIds: FALLBACK_PROVIDER_ENTRIES.map((entry) => entry.id),
+    providerIds: [...FALLBACK_PROVIDER_IDS],
     providerDisplayList: "",
     available,
     usedFallback: true,
@@ -119,6 +115,8 @@ export async function fetchAudioProviderSuggestions(params: {
       `${params.gatewayUrl}/internal/audio/capabilities`,
       {
         headers: { Authorization: `Bearer ${params.workerToken}` },
+        // Capability probing is best-effort; never block the agent turn on it.
+        signal: AbortSignal.timeout(15_000),
       }
     );
     if (!response.ok) {

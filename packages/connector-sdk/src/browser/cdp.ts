@@ -62,14 +62,20 @@ export async function tryWebSocketCdp(
   const wsUrl = `ws://${host}:${port}/devtools/browser`;
 
   return new Promise<CdpVersionInfo | null>((resolve) => {
-    const timer = setTimeout(() => {
+    let ws: WebSocket;
+    const closeWs = () => {
       try {
-        ws.close();
-      } catch {}
+        ws?.close();
+      } catch {
+        /* best-effort */
+      }
+    };
+
+    const timer = setTimeout(() => {
+      closeWs();
       resolve(null);
     }, timeoutMs);
 
-    let ws: WebSocket;
     try {
       ws = new WebSocket(wsUrl);
     } catch {
@@ -84,23 +90,21 @@ export async function tryWebSocketCdp(
 
     ws.onmessage = (event) => {
       clearTimeout(timer);
+      closeWs();
       try {
         const data = JSON.parse(event.data as string);
         const result = data?.result;
         if (!result?.product) {
-          ws.close();
           resolve(null);
           return;
         }
         const ua = result.userAgent as string | undefined;
-        ws.close();
         resolve({
           Browser: result.product,
           webSocketDebuggerUrl: wsUrl,
           isHeadless: ua ? /headless/i.test(ua) : false,
         });
       } catch {
-        ws.close();
         resolve(null);
       }
     };

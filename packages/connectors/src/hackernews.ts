@@ -16,6 +16,7 @@ import {
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
+import { validatePublicUrl } from './browser-scraper-utils.ts';
 
 // ---------------------------------------------------------------------------
 // Algolia HN API types
@@ -261,11 +262,36 @@ export default class HackerNewsConnector extends ConnectorRuntime {
         `&numericFilters=${encodeURIComponent(`created_at_i>${lookbackTimestamp}`)}`;
 
       const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error(`Algolia API error (${response.status}): ${await response.text()}`);
+
+      // Honor Algolia's rate-limit response so we don't hammer them and turn
+      // a transient 429 into "Unexpected token < in JSON" when the next call
+      // returns an HTML error page.
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('Retry-After');
+        const waitMs = retryAfter ? Math.min(60_000, Math.max(1, Number(retryAfter)) * 1000) : 5000;
+        await this.sleep(Number.isFinite(waitMs) ? waitMs : 5000);
+        continue;
       }
 
-      const data = (await response.json()) as AlgoliaResponse;
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        throw new Error(`Algolia API error (${response.status}): ${text}`);
+      }
+
+      // Algolia normally returns JSON, but proxies/captive portals occasionally
+      // return HTML. Surface a useful error instead of a bare SyntaxError that
+      // makes the connector look broken when the upstream is at fault.
+      let data: AlgoliaResponse;
+      try {
+        data = (await response.json()) as AlgoliaResponse;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Algolia API returned non-JSON response: ${message}`);
+      }
+
+      if (!data || !Array.isArray(data.hits)) {
+        throw new Error('Algolia API returned an unexpected response shape');
+      }
 
       for (const hit of data.hits) {
         if (contentType === 'comment') {
@@ -404,6 +430,15 @@ export default class HackerNewsConnector extends ConnectorRuntime {
 
   private async fetchExternalContent(url: string): Promise<string | null> {
     try {
+      // SSRF guard — `url` is supplied by whoever submitted the HN story and
+      // is therefore attacker-controllable. Refuse to fetch private/internal
+      // addresses (loopback, 169.254.169.254 cloud metadata, RFC1918, etc.).
+      try {
+        validatePublicUrl(url);
+      } catch {
+        return null;
+      }
+
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), this.CONTENT_FETCH_TIMEOUT);
 

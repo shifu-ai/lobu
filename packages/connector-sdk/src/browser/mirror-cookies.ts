@@ -7,7 +7,7 @@
  * Playwright-ready Cookie[] to the runner. macOS only in v1.
  */
 
-import { execSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -146,6 +146,24 @@ export async function decryptChromeCookiesMacOS(
     );
   }
 
+  // `sourceProfileDir` is supplied by the CLI/UI (user-picked Chrome
+  // profile slug like "Default" or "Profile 1"). Reject anything that
+  // contains path separators or parent-dir references so the join below
+  // can't escape `userDataRoot` and read an arbitrary SQLite file.
+  const profileDir = params.sourceProfileDir;
+  if (
+    typeof profileDir !== 'string' ||
+    profileDir.length === 0 ||
+    /[/\\\0]/.test(profileDir) ||
+    profileDir === '.' ||
+    profileDir === '..' ||
+    profileDir.startsWith('..')
+  ) {
+    throw new Error(
+      `Invalid sourceProfileDir '${profileDir}': must be a single Chrome profile directory name (e.g. "Default", "Profile 1")`
+    );
+  }
+
   const cookiePath = join(params.userDataRoot, params.sourceProfileDir, 'Cookies');
   if (!existsSync(cookiePath)) {
     throw new Error(
@@ -174,8 +192,19 @@ export async function decryptChromeCookiesMacOS(
   try {
     let keychainKey: string | null = null;
     try {
-      keychainKey = execSync(
-        `security find-generic-password -w -s "${cfg.keychain.service}" -a "${cfg.keychain.account}"`,
+      // execFileSync (no shell) — keychain service/account are hardcoded today
+      // but if the browserConfig table ever grows from caller input, the shell
+      // form would be a command-injection foothold. Pass args explicitly.
+      keychainKey = execFileSync(
+        'security',
+        [
+          'find-generic-password',
+          '-w',
+          '-s',
+          cfg.keychain.service,
+          '-a',
+          cfg.keychain.account,
+        ],
         { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }
       ).trim();
     } catch {
@@ -193,14 +222,7 @@ export async function decryptChromeCookiesMacOS(
     const derivedKey = pbkdf2Sync(keychainKey, 'saltysalt', 1003, 16, 'sha1');
 
     const db = new DatabaseSync(tmpCookiePath, { readOnly: true });
-    const rows = db
-      .prepare(
-        `SELECT name, host_key, path, encrypted_value,
-                CAST(expires_utc AS TEXT) as expires_utc_text,
-                is_httponly, is_secure, samesite
-         FROM cookies`
-      )
-      .all() as Array<{
+    let rows: Array<{
       name: string;
       host_key: string;
       path: string;
@@ -210,7 +232,25 @@ export async function decryptChromeCookiesMacOS(
       is_secure: number;
       samesite: number;
     }>;
-    db.close();
+    try {
+      rows = db
+        .prepare(
+          `SELECT name, host_key, path, encrypted_value,
+                  CAST(expires_utc AS TEXT) as expires_utc_text,
+                  is_httponly, is_secure, samesite
+           FROM cookies`
+        )
+        .all() as typeof rows;
+    } finally {
+      // Close the SQLite handle even if prepare/all throws — otherwise the
+      // temp DB stays open until the process exits, which on a hot reload
+      // path leaks one fd per sync.
+      try {
+        db.close();
+      } catch {
+        /* best-effort */
+      }
+    }
 
     const cookies: Cookie[] = [];
     let totalDecrypted = 0;
@@ -261,19 +301,11 @@ export async function decryptChromeCookiesMacOS(
       // handful of cookies decrypt to garbage (pre-M80 layout, legacy
       // v10 variants); reject anything with non-printable bytes since
       // those are clearly metadata leaking through, not a real value.
-      if (!row.name || row.name.length === 0) {
+      if (!row.name || !row.host_key || !isLikelyCookieValue(value)) {
         filtered += 1;
         continue;
       }
-      if (!row.host_key || row.host_key.length === 0) {
-        filtered += 1;
-        continue;
-      }
-      if (!isLikelyCookieValue(value)) {
-        filtered += 1;
-        continue;
-      }
-      const cookiePath = row.path && row.path.length > 0 ? row.path : '/';
+      const rowPath = row.path && row.path.length > 0 ? row.path : '/';
 
       const expiresUtc = BigInt(row.expires_utc_text ?? '0');
       const expiresUnix =
@@ -293,7 +325,7 @@ export async function decryptChromeCookiesMacOS(
         name: row.name,
         value,
         domain: row.host_key,
-        path: cookiePath,
+        path: rowPath,
         expires: expiresUnix,
         httpOnly: row.is_httponly === 1,
         secure: row.is_secure === 1,
@@ -321,22 +353,13 @@ function extractCookieValue(buf: Buffer): string {
   return buf.slice(32).toString('utf-8');
 }
 
-/** Build a host-matching predicate for an allow-list. Mirrors the SQL
- * the old CLI helper used: exact host match, leading-dot variant, or
- * subdomain wildcard. */
+/** Build a host-matching predicate for an allow-list: exact host match or
+ * subdomain match (matches `.example.com` and `sub.example.com`). */
 function buildAllowMatcher(domains: string[]): (host: string) => boolean {
-  const patterns = domains.map((d) => {
-    const clean = d.replace(/^\./, '').toLowerCase();
-    return { exact: clean, dotted: `.${clean}`, suffix: `.${clean}` };
-  });
+  const patterns = domains.map((d) => d.replace(/^\./, '').toLowerCase());
   return (host: string) => {
     const normalized = host.toLowerCase();
-    for (const p of patterns) {
-      if (normalized === p.exact) return true;
-      if (normalized === p.dotted) return true;
-      if (normalized.endsWith(p.suffix)) return true;
-    }
-    return false;
+    return patterns.some((p) => normalized === p || normalized.endsWith(`.${p}`));
   };
 }
 
