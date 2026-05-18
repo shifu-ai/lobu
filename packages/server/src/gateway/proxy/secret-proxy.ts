@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager.js";
 import type { ProviderCredentialContext } from "../embedded.js";
 import type { ProviderUpstreamConfig } from "../modules/module-system.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import type { SecretStore } from "../secrets/index.js";
 import { getClientIp } from "../utils/rate-limiter.js";
 
@@ -193,10 +194,16 @@ export function lookupPlaceholderMapping(
   const mapping = placeholderCache.get(uuid);
   if (!mapping) return null;
   if (
-    expectedOrganizationId &&
-    mapping.organizationId &&
+    expectedOrganizationId !== undefined &&
     mapping.organizationId !== expectedOrganizationId
   ) {
+    // Force the check whenever the caller supplied an expected org.
+    // Pre-fix this also gated on `mapping.organizationId` being set,
+    // which let a legacy mapping (minted before the org-id pivot) sail
+    // through whenever the caller's URL named any org — a worker from
+    // org B could resolve a legacy unscoped mapping owned by org A under
+    // org B's request. Now: if the caller has an org expectation, the
+    // mapping must match it, including refusing to match `undefined`.
     logger.warn(
       {
         mappingAgentId: mapping.agentId,
@@ -206,6 +213,18 @@ export function lookupPlaceholderMapping(
       "Placeholder mapping rejected: organization mismatch"
     );
     return null;
+  }
+  // Surface every legacy unscoped access so the deprecation can be
+  // planned. A mapping with no `organizationId` is from before the pivot
+  // and should disappear once all in-flight placeholders rotate.
+  if (!mapping.organizationId) {
+    logger.warn(
+      {
+        mappingAgentId: mapping.agentId,
+        expectedOrg: expectedOrganizationId,
+      },
+      "Placeholder mapping accessed without organizationId — legacy row, schedule rotation"
+    );
   }
   return mapping;
 }
@@ -543,9 +562,20 @@ export class SecretProxy {
         const orgId = await this.agentOrgResolver(urlAgentId);
         if (orgId) expectedOrganizationId = orgId;
       } catch (err) {
-        logger.warn(
+        // Fail closed. Falling through with `expectedOrganizationId =
+        // undefined` on a transient DB error downgrades the placeholder /
+        // secret-lookup org checks for the entire request — a window where
+        // a worker bound to org A could resolve a placeholder pointed at
+        // org B's URL because the binding step lost its expected-org
+        // anchor. The isolation invariant matters more than the brief
+        // 503 window during a DB hiccup.
+        logger.error(
           { urlAgentId, err: String(err) },
-          "agentOrgResolver failed — falling through without org expectation"
+          "agentOrgResolver failed — rejecting request to preserve org isolation"
+        );
+        return c.json(
+          { error: "Service Unavailable: failed to resolve agent organization" },
+          503
         );
       }
     }
@@ -617,18 +647,36 @@ export class SecretProxy {
     if (urlAgentId && resolvedSlug && this.authProfilesManager) {
       const providerId = this.slugToProviderId.get(resolvedSlug);
       if (providerId) {
-        const profile = await this.authProfilesManager.getBestProfile(
-          urlAgentId,
-          providerId,
-          undefined,
-          providerContext
+        // Run the credential lookup under the caller's expected org context
+        // when we have one. Without this wrapper, `AuthProfilesManager`
+        // calls its OWN `agentOrgResolver` to derive the org — and on a
+        // transient DB error that resolver logs a warning and returns
+        // undefined, then falls through to unscoped credential reads
+        // (`auth-profiles-manager.ts:251-275`). Wrapping here makes the
+        // org explicit so the resolver short-circuits and a DB hiccup
+        // cannot downgrade scoping for a request whose org we already
+        // know from the worker token / URL.
+        const runWithOrg = <T>(fn: () => Promise<T>): Promise<T> =>
+          expectedOrganizationId
+            ? orgContext.run({ organizationId: expectedOrganizationId }, fn)
+            : fn();
+        const authProfilesManager = this.authProfilesManager;
+        const profile = await runWithOrg(() =>
+          authProfilesManager.getBestProfile(
+            urlAgentId,
+            providerId,
+            undefined,
+            providerContext
+          )
         );
         const userIdForRefresh = providerContext?.userId;
         const credential = profile && userIdForRefresh
-          ? await this.authProfilesManager.ensureFreshCredential(profile, {
-              userId: userIdForRefresh,
-              agentId: urlAgentId,
-            })
+          ? await runWithOrg(() =>
+              authProfilesManager.ensureFreshCredential(profile, {
+                userId: userIdForRefresh,
+                agentId: urlAgentId,
+              })
+            )
           : profile?.credential;
         if (credential) {
           headers.authorization = `Bearer ${credential}`;
