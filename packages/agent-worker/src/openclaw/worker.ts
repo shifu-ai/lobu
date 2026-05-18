@@ -55,6 +55,7 @@ import {
 } from "./model-resolver";
 import { checkSandboxLeak } from "./sandbox-leak";
 import {
+  clearSnapshots,
   hydrateFromSnapshot,
   type TerminalStatus,
   writeSnapshot,
@@ -344,15 +345,19 @@ export class OpenClawWorker implements WorkerExecutor {
     // turns; throwing here surfaces it on the first turn and the runs
     // queue's retry path handles re-delivery. Codex round 2 quality
     // win D on PR #865.
-    if (process.env.LOBU_SESSION_STORE === "snapshot") {
+    //
+    // Phase 5: snapshot is the default; setting LOBU_SESSION_STORE=file
+    // opts out (legacy / local-dev path that keeps reading session.jsonl
+    // straight off disk without writing to Postgres).
+    if (process.env.LOBU_SESSION_STORE !== "file") {
       if (typeof this.config.runId !== "number") {
         throw new Error(
-          "LOBU_SESSION_STORE=snapshot but WorkerConfig.runId is missing — runs-queue dispatch did not stamp runId on the job payload"
+          "Snapshot mode (LOBU_SESSION_STORE != 'file') but WorkerConfig.runId is missing — runs-queue dispatch did not stamp runId on the job payload"
         );
       }
       if (!this.config.runJobToken) {
         throw new Error(
-          "LOBU_SESSION_STORE=snapshot but WorkerConfig.runJobToken is missing — MessageConsumer did not mint a per-run worker token"
+          "Snapshot mode (LOBU_SESSION_STORE != 'file') but WorkerConfig.runJobToken is missing — MessageConsumer did not mint a per-run worker token"
         );
       }
     }
@@ -607,8 +612,8 @@ export class OpenClawWorker implements WorkerExecutor {
     // (possibly on a different pod) can hydrate from it. Hydrate filters
     // `terminal_status='completed'`, so we ONLY POST on the success path
     // — writing `failed`/`timeout`/`cancelled` rows is pure network
-    // waste (codex round 2 quality win C on PR #865). Opt-in via
-    // LOBU_SESSION_STORE=snapshot.
+    // waste (codex round 2 quality win C on PR #865). Default-on in
+    // Phase 5; LOBU_SESSION_STORE=file opts out for legacy/local-dev.
     //
     // The runs queue has already moved this run to a terminal state by
     // the time cleanup() fires (sse-client.ts:865 finally block runs
@@ -617,7 +622,7 @@ export class OpenClawWorker implements WorkerExecutor {
     // released when the subprocess exits, so by the next claim's boot
     // this snapshot is the visible "latest" row.
     if (
-      process.env.LOBU_SESSION_STORE === "snapshot" &&
+      process.env.LOBU_SESSION_STORE !== "file" &&
       this.sessionFilePath &&
       this.terminalStatus === "completed"
     ) {
@@ -957,9 +962,9 @@ export class OpenClawWorker implements WorkerExecutor {
 
     const sessionFile = path.join(workspaceDir, ".openclaw", "session.jsonl");
     // Capture for cleanup() — it reads the file back to write the snapshot
-    // at terminal time. Set unconditionally so non-snapshot deployments
-    // still get a defined value (snapshot writer no-ops when LOBU_SESSION_STORE
-    // is unset).
+    // at terminal time. Set unconditionally so file-mode opt-outs
+    // still get a defined value (snapshot writer no-ops when
+    // LOBU_SESSION_STORE=file).
     this.sessionFilePath = sessionFile;
     const providerStateFile = path.join(
       workspaceDir,
@@ -968,9 +973,10 @@ export class OpenClawWorker implements WorkerExecutor {
     );
 
     // Hydrate from the latest completed Postgres snapshot BEFORE the
-    // provider-state check or SessionManager.open(). Opt-in via
-    // LOBU_SESSION_STORE=snapshot — default unset preserves today's
-    // file-only behavior. Phase 5 flips the default.
+    // provider-state check or SessionManager.open(). Phase 5: snapshot
+    // mode is the default; LOBU_SESSION_STORE=file opts out and keeps
+    // the legacy file-only behaviour for local-dev / single-replica
+    // self-hosters.
     //
     // Order matters: hydrate → provider check (may unlink) →
     // SessionManager.open(). The provider-change unlink at line ~925 still
@@ -980,7 +986,7 @@ export class OpenClawWorker implements WorkerExecutor {
     // PG rows remain readable without poisoning the new conversation
     // (hydrate would only resurrect them if a subsequent run completes
     // successfully and overwrites the latest pointer).
-    if (process.env.LOBU_SESSION_STORE === "snapshot") {
+    if (process.env.LOBU_SESSION_STORE !== "file") {
       const gatewayUrl = process.env.DISPATCHER_URL;
       const workerToken = process.env.WORKER_TOKEN;
       if (gatewayUrl && workerToken) {
@@ -1000,7 +1006,7 @@ export class OpenClawWorker implements WorkerExecutor {
         }
       } else {
         logger.warn(
-          "LOBU_SESSION_STORE=snapshot set but DISPATCHER_URL or WORKER_TOKEN missing; snapshot disabled"
+          "Snapshot mode active (LOBU_SESSION_STORE != 'file') but DISPATCHER_URL or WORKER_TOKEN missing; snapshot disabled"
         );
       }
     }
@@ -1543,6 +1549,21 @@ Use it when the user references past discussions or you need context.`);
           logger.info("Deleted session file for session reset");
         } catch {
           // File may not exist
+        }
+
+        // Also purge the Postgres snapshots for this (org, agent, conv)
+        // — in snapshot mode (the Phase 5 default) the next worker boot
+        // would otherwise rehydrate from the now-flushed conversation
+        // and the user-visible "Starting fresh" would be a lie. Best-
+        // effort: a failure here is logged but doesn't block the reset
+        // since the local unlink already happened and the snapshot
+        // helper is a no-op in file mode.
+        if (process.env.LOBU_SESSION_STORE !== "file") {
+          const gatewayUrl = process.env.DISPATCHER_URL;
+          const workerToken = process.env.WORKER_TOKEN;
+          if (gatewayUrl && workerToken) {
+            await clearSnapshots({ gatewayUrl, workerToken });
+          }
         }
 
         // Send visible confirmation to user
