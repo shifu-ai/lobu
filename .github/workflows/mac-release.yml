@@ -64,6 +64,13 @@ on:
       version:
         description: 'Release version, e.g. 0.42.0 (must have a lobu-v<version> release)'
         required: true
+  # Auto-fires every time release-please publishes a GitHub Release (which
+  # happens once a `chore(main): release lobu X.Y.Z` PR is merged). The job
+  # guard below filters out anything that isn't a `lobu-v*` tag, so other
+  # release-creating workflows in this repo don't accidentally rebuild the
+  # Mac DMG.
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -71,6 +78,9 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || startsWith(github.event.release.tag_name, 'lobu-v')
     steps:
       - uses: actions/checkout@v4
 
@@ -189,9 +199,43 @@ jobs:
             exit 1
           fi
 
+      # workflow_dispatch carries the version as an input; release-triggered
+      # runs carry it on github.event.release.tag_name in the form
+      # `lobu-v<X.Y.Z>` (set by release-please). Strip the prefix so the
+      # value matches the dispatch input shape.
+      #
+      # Untrusted inputs are passed through `env:` (never interpolated
+      # straight into a `run:` block) and validated against a strict semver
+      # regex before they reach $GITHUB_OUTPUT — a tag like
+      # `lobu-v7.2.0;rm -rf /` would pass the prefix-only job guard but is
+      # rejected here, so downstream steps that interpolate `steps.v.outputs.version`
+      # (notarytool, the release-attach action, the appcast publisher) can't
+      # be tricked into executing shell.
       - name: Resolve version
         id: v
-        run: echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="$DISPATCH_VERSION"
+          else
+            VERSION="${RELEASE_TAG#lobu-v}"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not resolve a version (event=$EVENT_NAME)"
+            exit 1
+          fi
+          # Strict semver-ish: digits.digits.digits with an optional `-prerelease`
+          # suffix of alphanum / dot / hyphen. Anything else (shell metachars,
+          # path traversal, whitespace) is rejected.
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Refusing to use version '$VERSION' — not a valid semver."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Detect signing mode
         id: mode
