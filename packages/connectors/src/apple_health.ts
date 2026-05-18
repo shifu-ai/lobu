@@ -45,7 +45,7 @@ export default class AppleHealthConnector extends ConnectorRuntime {
     faviconDomain: 'apple.com',
     requiredCapability: 'healthkit',
     runtime: {
-      platforms: ['ios', 'macos'],
+      platforms: ['macos'],
       scopes: ['steps', 'distance', 'active-calories', 'exercise-minutes', 'workouts', 'resting-heart-rate'],
     },
     authSchema: {
