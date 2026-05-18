@@ -2,7 +2,14 @@ apiVersion: v2
 name: lobu
 description: Lobu self-hosted AI agent platform
 type: application
-version: 7.1.0
+# Chart version is decoupled from the node-package release-please cycle.
+# It continues the numbering established by the previous fork at
+# packages/owletto/deploy/charts/lobu (most recently bumped to 0.3.0 by
+# lobu#878 / owletto#179, the worker-smoke gate). 0.4.0 marks the
+# consolidation: this chart is now the single source of truth and Flux
+# pulls directly from lobu-ai/lobu. See the consolidation PR description
+# for context.
+version: 0.4.0
 appVersion: 7.1.0
 keywords:
   - lobu
