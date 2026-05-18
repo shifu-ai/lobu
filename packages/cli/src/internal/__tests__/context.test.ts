@@ -9,12 +9,14 @@ import {
 } from "bun:test";
 import * as fs from "node:fs/promises";
 import {
+  addContext,
   DEFAULT_CONTEXT_NAME,
   findContextByMemoryUrl,
   findContextByUrl,
   getActiveOrg,
   getServerConfig,
   loadContextConfig,
+  removeContext,
   setActiveOrg,
   setServerConfig,
 } from "../context";
@@ -141,6 +143,93 @@ describe("context management", () => {
       databaseUrl: "postgres://new/db",
       port: 8788,
     });
+  });
+
+  test("addContext stores optional server config (port + cwd + lifecycle)", async () => {
+    readFileSpy.mockResolvedValue(JSON.stringify({ contexts: {} }));
+
+    await addContext("verify-flow", "http://localhost:8788", {
+      port: 8788,
+      cwd: "/Users/me/Code/lobu/.claude/worktrees/verify-flow",
+      lifecycle: "managed",
+    });
+
+    const [, written] = writeFileSpy.mock.calls.at(-1)!;
+    const saved = JSON.parse(written as string);
+    expect(saved.contexts["verify-flow"]).toEqual({
+      apiUrl: "http://localhost:8788",
+      server: {
+        port: 8788,
+        cwd: "/Users/me/Code/lobu/.claude/worktrees/verify-flow",
+        lifecycle: "managed",
+      },
+    });
+  });
+
+  test("addContext refuses to overwrite the default context", async () => {
+    readFileSpy.mockResolvedValue(
+      JSON.stringify({
+        contexts: {
+          [DEFAULT_CONTEXT_NAME]: { apiUrl: "https://app.lobu.ai/api/v1" },
+        },
+      })
+    );
+
+    await expect(
+      addContext(DEFAULT_CONTEXT_NAME, "http://localhost:8788")
+    ).rejects.toThrow(/Cannot overwrite the default context/);
+    expect(writeFileSpy.mock.calls.length).toBe(0);
+  });
+
+  test("addContext without server keeps shape backwards-compatible", async () => {
+    readFileSpy.mockResolvedValue(JSON.stringify({ contexts: {} }));
+
+    await addContext("plain", "https://example.com/api/v1");
+
+    const [, written] = writeFileSpy.mock.calls.at(-1)!;
+    const saved = JSON.parse(written as string);
+    expect(saved.contexts.plain).toEqual({
+      apiUrl: "https://example.com/api/v1",
+    });
+  });
+
+  test("removeContext deletes the entry and resets currentContext if needed", async () => {
+    readFileSpy.mockResolvedValue(
+      JSON.stringify({
+        currentContext: "verify-flow",
+        contexts: {
+          lobu: { apiUrl: "https://app.lobu.ai/api/v1" },
+          "verify-flow": { apiUrl: "http://localhost:8788" },
+        },
+      })
+    );
+
+    await removeContext("verify-flow");
+    const [, written] = writeFileSpy.mock.calls.at(-1)!;
+    const saved = JSON.parse(written as string);
+    expect(saved.contexts["verify-flow"]).toBeUndefined();
+    expect(saved.currentContext).toBe(DEFAULT_CONTEXT_NAME);
+  });
+
+  test("removeContext is idempotent for missing entries", async () => {
+    readFileSpy.mockResolvedValue(JSON.stringify({ contexts: {} }));
+
+    await removeContext("never-existed");
+    expect(writeFileSpy.mock.calls.length).toBe(0);
+  });
+
+  test("removeContext refuses the default context", async () => {
+    readFileSpy.mockResolvedValue(
+      JSON.stringify({
+        contexts: {
+          [DEFAULT_CONTEXT_NAME]: { apiUrl: "https://app.lobu.ai/api/v1" },
+        },
+      })
+    );
+
+    await expect(removeContext(DEFAULT_CONTEXT_NAME)).rejects.toThrow(
+      /Cannot remove the default context/
+    );
   });
 
   test("drops invalid server fields during normalization", async () => {

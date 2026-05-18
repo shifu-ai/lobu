@@ -543,10 +543,69 @@ Memory:
     .command("add <name>")
     .description("Add a named context")
     .requiredOption("--api-url <url>", "API base URL for this context")
-    .action(async (name: string, options: { apiUrl: string }) => {
-      const { contextAddCommand } = await import("./commands/context.js");
-      await contextAddCommand({ name, apiUrl: options.apiUrl });
-    });
+    .option(
+      "--port <port>",
+      "Server port (when this context owns a managed lobu server)",
+      (value: string) => {
+        if (!/^\d+$/.test(value)) {
+          throw new Error(`--port must be an integer, got "${value}"`);
+        }
+        const n = Number.parseInt(value, 10);
+        if (n < 1 || n > 65535) {
+          throw new Error(`--port must be in 1-65535, got ${n}`);
+        }
+        return n;
+      }
+    )
+    .option("--host <host>", "Server host (default: 127.0.0.1)")
+    .option(
+      "--database-url <url>",
+      "Postgres DATABASE_URL for the managed server"
+    )
+    .option(
+      "--data-dir <path>",
+      "LOBU_DATA_DIR for the managed server (state, PGlite)"
+    )
+    .option(
+      "--cwd <path>",
+      "Working directory the lifecycle owner cd's into before spawning `lobu run` (used by per-worktree contexts)"
+    )
+    .option(
+      "--lifecycle <mode>",
+      "managed | external — managed means the menubar spawns `lobu run`",
+      (value: string) => {
+        if (value !== "managed" && value !== "external") {
+          throw new Error(`--lifecycle must be 'managed' or 'external'`);
+        }
+        return value;
+      }
+    )
+    .action(
+      async (
+        name: string,
+        options: {
+          apiUrl: string;
+          port?: number;
+          host?: string;
+          databaseUrl?: string;
+          dataDir?: string;
+          cwd?: string;
+          lifecycle?: "managed" | "external";
+        }
+      ) => {
+        const { contextAddCommand } = await import("./commands/context.js");
+        await contextAddCommand({
+          name,
+          apiUrl: options.apiUrl,
+          port: options.port,
+          host: options.host,
+          databaseUrl: options.databaseUrl,
+          dataDir: options.dataDir,
+          cwd: options.cwd,
+          lifecycle: options.lifecycle,
+        });
+      }
+    );
 
   context
     .command("use <name>")
@@ -554,6 +613,14 @@ Memory:
     .action(async (name: string) => {
       const { contextUseCommand } = await import("./commands/context.js");
       await contextUseCommand(name);
+    });
+
+  context
+    .command("rm <name>")
+    .description("Remove a named context (idempotent)")
+    .action(async (name: string) => {
+      const { contextRmCommand } = await import("./commands/context.js");
+      await contextRmCommand(name);
     });
 
   // ─── status ─────────────────────────────────────────────────────────
