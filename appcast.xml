@@ -1,11 +1,18 @@
-<?xml version="1.0" standalone="yes"?>
-<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle"
-     xmlns:dc="http://purl.org/dc/elements/1.1/"
-     version="2.0">
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>Lobu for Mac</title>
         <link>https://lobu-ai.github.io/lobu/appcast.xml</link>
         <description>In-app updates for Lobu for Mac, signed with EdDSA.</description>
         <language>en</language>
+        <item>
+            <title>Version 0.0.0-sparkle-debug</title>
+            <pubDate>Mon, 18 May 2026 01:35:54 GMT</pubDate>
+            <sparkle:version>0.0.0-sparkle-debug</sparkle:version>
+            <sparkle:shortVersionString>0.0.0-sparkle-debug</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://github.com/lobu-ai/lobu/releases/tag/lobu-v0.0.0-sparkle-debug</sparkle:releaseNotesLink>
+            <enclosure url="https://github.com/lobu-ai/lobu/releases/download/lobu-v0.0.0-sparkle-debug/Lobu.dmg" sparkle:edSignature="Dt+Mrf1X5lwfJ70e8IiiHzGqwewmOLIWlWVDmVp/PBwWga2r482E9hFHWfZ3eGQMEnSE2tyXJ3X/xD8oIgflCA==" length="1997774" type="application/octet-stream" />
+        </item>
     </channel>
 </rss>
