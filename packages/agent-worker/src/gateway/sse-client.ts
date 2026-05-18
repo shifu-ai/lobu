@@ -919,6 +919,21 @@ export class GatewayClient {
       workspace: {
         baseDirectory: process.env.WORKSPACE_DIR || "/workspace",
       },
+      // Threaded through from MessageConsumer (set from the runs-queue
+      // claim's job.id). Used by cleanup() to attribute the snapshot to
+      // the correct run; codex P1#1 on PR #865.
+      runId:
+        typeof payload.runId === "number" && Number.isFinite(payload.runId)
+          ? payload.runId
+          : undefined,
+      // Per-run JWT minted by MessageConsumer alongside runId. Worker
+      // uses this for the snapshot POST instead of the deployment-
+      // lifetime WORKER_TOKEN, so the gateway can enforce
+      // tokenData.runId === body.runId — codex round 2 finding A.
+      runJobToken:
+        typeof payload.runJobToken === "string" && payload.runJobToken
+          ? payload.runJobToken
+          : undefined,
     };
   }
 

@@ -51,6 +51,26 @@ export interface MessagePayload {
   // Per-agent network configuration for sandbox isolation
   networkConfig?: NetworkConfig;
 
+  // The runs.id of the row the runs-queue claimed when this message was
+  // dispatched. Threaded all the way to the worker so the per-run
+  // agent_transcript_snapshot POST can attribute the snapshot to the
+  // correct run unambiguously. Without this, the snapshot route would
+  // have to guess via "latest run for (org, agent, conv)", which races
+  // with the next user message enqueuing a fresh run while the previous
+  // worker is still in cleanup() — see codex P1#1 on PR #865.
+  runId?: number;
+
+  // Per-run worker JWT bound to `runId` above. Minted by the runs-queue
+  // dispatcher (`MessageConsumer.handleMessage`) so the snapshot route
+  // can require `tokenData.runId === body.runId` and reject any attempt
+  // by a same-(org, agent, conv) deployment-lifetime token to write
+  // under a different run's slot — codex round 2 finding A on PR #865.
+  // Optional only because non-runs-queue paths (e.g. direct enqueue from
+  // legacy code) still go through MessagePayload; in those cases the
+  // worker falls back to the deployment-lifetime WORKER_TOKEN and the
+  // snapshot path is skipped if the env var requires it.
+  runJobToken?: string;
+
   // Per-agent egress judge configuration (operator-level overrides for the LLM egress judge).
   egressConfig?: AgentEgressConfig;
 

@@ -11,10 +11,49 @@ import { createLogger } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import { getDb } from "../../../db/client.js";
 import type { WorkerConnectionManager } from "../../gateway/connection-manager.js";
 import { errorResponse } from "../shared/helpers.js";
-import { createTokenVerifier } from "../shared/agent-ownership.js";
+import { createOwnershipResolver } from "../shared/agent-ownership.js";
 import { verifySettingsSession } from "./settings-auth.js";
+
+/**
+ * Read the latest completed transcript snapshot for an agent's most-recent
+ * conversation. Returns the raw JSONL content + sessionId-equivalent, or
+ * null when no snapshot exists.
+ *
+ * The `organizationId` MUST be the authorised org id resolved by the caller
+ * (typically via `verifyOwnedAgentAccess` → `AgentOwnershipResult.
+ * organizationId`). Agents are keyed `(organization_id, id)` — the SAME
+ * agentId can exist across orgs — so a prior version that resolved org
+ * from agentId alone could serve a different org's bytes to a wrongly-
+ * cookied session. Codex P2 on PR #865, same shape as PR #836's tenant-
+ * isolation findings.
+ *
+ * Returns null when:
+ *   - `organizationId` is empty / undefined (no scope to query under)
+ *   - no completed snapshot exists for `(org, agent)`
+ *
+ * Only fires when LOBU_SESSION_STORE=snapshot — file-mode keeps reading
+ * workspaces/* untouched, so existing deploys see no behaviour change.
+ */
+export async function readLatestSnapshotJsonl(
+  agentId: string,
+  organizationId: string | undefined
+): Promise<string | null> {
+  if (!organizationId) return null;
+  const sql = getDb();
+  const snapshotRows = await sql<{ snapshot_jsonl: string }>`
+    SELECT snapshot_jsonl
+    FROM public.agent_transcript_snapshot
+    WHERE organization_id = ${organizationId}
+      AND agent_id = ${agentId}
+      AND terminal_status = 'completed'
+    ORDER BY run_id DESC
+    LIMIT 1
+  `;
+  return snapshotRows[0]?.snapshot_jsonl ?? null;
+}
 
 const logger = createLogger("agent-history-routes");
 
@@ -170,18 +209,29 @@ function entryToMessage(entry: SessionEntry): ParsedMessage | null {
 async function readSessionMessages(
   agentId: string,
   cursorParam: string,
-  limit: number
+  limit: number,
+  organizationId: string | undefined
 ) {
-  const sessionPath = await findSessionFile(agentId);
-  if (!sessionPath) {
-    return {
-      messages: [],
-      nextCursor: null,
-      hasMore: false,
-      sessionId: "none",
-    };
+  // In snapshot mode, the disk file may be empty (a fresh pod has no
+  // workspaces/ tree on a multi-replica gateway). Try the PG snapshot
+  // first; fall through to the disk read if the snapshot is missing so
+  // local-dev workspaces/* trees keep working without DB migrations.
+  let content: string | null = null;
+  if (process.env.LOBU_SESSION_STORE === "snapshot") {
+    content = await readLatestSnapshotJsonl(agentId, organizationId);
   }
-  const content = await readFile(sessionPath, "utf-8");
+  if (content === null) {
+    const sessionPath = await findSessionFile(agentId);
+    if (!sessionPath) {
+      return {
+        messages: [],
+        nextCursor: null,
+        hasMore: false,
+        sessionId: "none",
+      };
+    }
+    content = await readFile(sessionPath, "utf-8");
+  }
   const { entries, sessionId } = parseSessionEntries(content);
 
   const allMessages: ParsedMessage[] = [];
@@ -208,19 +258,30 @@ async function readSessionMessages(
   };
 }
 
-async function readSessionStats(agentId: string) {
-  const sessionPath = await findSessionFile(agentId);
-  if (!sessionPath) {
-    return {
-      sessionId: "none",
-      messageCount: 0,
-      userMessages: 0,
-      assistantMessages: 0,
-      totalInputTokens: 0,
-      totalOutputTokens: 0,
-    };
+async function readSessionStats(
+  agentId: string,
+  organizationId: string | undefined
+) {
+  // Same fallback shape as readSessionMessages — DB first in snapshot mode,
+  // disk read if absent.
+  let content: string | null = null;
+  if (process.env.LOBU_SESSION_STORE === "snapshot") {
+    content = await readLatestSnapshotJsonl(agentId, organizationId);
   }
-  const content = await readFile(sessionPath, "utf-8");
+  if (content === null) {
+    const sessionPath = await findSessionFile(agentId);
+    if (!sessionPath) {
+      return {
+        sessionId: "none",
+        messageCount: 0,
+        userMessages: 0,
+        assistantMessages: 0,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
+      };
+    }
+    content = await readFile(sessionPath, "utf-8");
+  }
   const { entries, sessionId } = parseSessionEntries(content);
 
   let messageCount = 0;
@@ -266,18 +327,27 @@ export function createAgentHistoryRoutes(deps: {
 }) {
   const app = new Hono();
   const { connectionManager } = deps;
-  const verifyToken = createTokenVerifier({
+  const resolveOwnership = createOwnershipResolver({
     userAgentsStore: deps.userAgentsStore,
     agentMetadataStore: deps.agentConfigStore,
   });
 
-  async function getAuthorizedAgentId(c: Context): Promise<string | null> {
+  /**
+   * Returns the agentId AND the authorised organizationId so the snapshot
+   * fallback (which queries by `(org, agent)`) cannot cross tenants. agents
+   * is keyed (organization_id, id) — different orgs can share an agentId —
+   * so the agent-id alone is not a tenant boundary. Codex P2 on PR #865.
+   */
+  async function getAuthorizedAgentScope(
+    c: Context
+  ): Promise<{ agentId: string; organizationId: string | undefined } | null> {
     const session = await verifySettingsSession(c);
     if (!session) return null;
     const agentId = c.req.param("agentId") || session.agentId || null;
     if (!agentId || !isSafeAgentId(agentId)) return null;
-    const verified = await verifyToken(session, agentId);
-    return verified ? agentId : null;
+    const result = await resolveOwnership(session, agentId);
+    if (!result.authorized) return null;
+    return { agentId, organizationId: result.organizationId };
   }
 
   /**
@@ -332,13 +402,28 @@ export function createAgentHistoryRoutes(deps: {
 
   // Agent status
   app.get("/status", async (c) => {
-    const agentId = await getAuthorizedAgentId(c);
-    if (!agentId) return errorResponse(c, "Unauthorized", 401);
+    const scope = await getAuthorizedAgentScope(c);
+    if (!scope) return errorResponse(c, "Unauthorized", 401);
 
-    const { connected, resolvedAgentId } = await resolveActiveAgent(agentId);
+    const { connected, resolvedAgentId } = await resolveActiveAgent(
+      scope.agentId
+    );
 
-    // Even if worker HTTP is unreachable, check if session file exists on disk
-    const hasSessionFile = !!(await findSessionFile(resolvedAgentId));
+    // Even if worker HTTP is unreachable, check if session content exists.
+    // Same fallback shape as readSessionMessages: snapshot first, disk
+    // second. Avoids reporting `connected: false` when the worker is dead
+    // but a PG snapshot is recoverable.
+    let hasSessionFile = false;
+    if (process.env.LOBU_SESSION_STORE === "snapshot") {
+      hasSessionFile =
+        (await readLatestSnapshotJsonl(
+          resolvedAgentId,
+          scope.organizationId
+        )) !== null;
+    }
+    if (!hasSessionFile) {
+      hasSessionFile = !!(await findSessionFile(resolvedAgentId));
+    }
 
     return c.json({
       connected: connected || hasSessionFile,
@@ -350,16 +435,17 @@ export function createAgentHistoryRoutes(deps: {
 
   // Session messages
   app.get("/session/messages", async (c) => {
-    const agentId = await getAuthorizedAgentId(c);
-    if (!agentId) return errorResponse(c, "Unauthorized", 401);
+    const scope = await getAuthorizedAgentScope(c);
+    if (!scope) return errorResponse(c, "Unauthorized", 401);
 
     const cursor = c.req.query("cursor") || "";
     const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
 
     const result = await proxyOrFallback(
-      agentId,
+      scope.agentId,
       `/session/messages?cursor=${cursor}&limit=${limit}`,
-      (resolved) => readSessionMessages(resolved, cursor, limit)
+      (resolved) =>
+        readSessionMessages(resolved, cursor, limit, scope.organizationId)
     );
 
     if (!result) {
@@ -380,13 +466,13 @@ export function createAgentHistoryRoutes(deps: {
 
   // Session stats
   app.get("/session/stats", async (c) => {
-    const agentId = await getAuthorizedAgentId(c);
-    if (!agentId) return errorResponse(c, "Unauthorized", 401);
+    const scope = await getAuthorizedAgentScope(c);
+    if (!scope) return errorResponse(c, "Unauthorized", 401);
 
     const result = await proxyOrFallback(
-      agentId,
+      scope.agentId,
       "/session/stats",
-      readSessionStats
+      (resolved) => readSessionStats(resolved, scope.organizationId)
     );
 
     if (!result) {

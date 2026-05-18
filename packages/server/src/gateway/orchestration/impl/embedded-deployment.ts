@@ -2,6 +2,7 @@ import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { createLogger, ErrorCode, OrchestratorError } from "@lobu/core";
+import { getDb } from "../../../db/client.js";
 import type { ModelProviderModule } from "../../modules/module-system.js";
 import {
   BaseDeploymentManager,
@@ -124,6 +125,143 @@ interface EmbeddedWorkerEntry {
   env: Record<string, string>;
   lastActivity: Date;
   workspaceDir: string;
+  /**
+   * Release the cross-pod advisory lock held for this conversation while the
+   * worker is alive. Called from the `exit` handler so the lock survives the
+   * entire subprocess lifetime, not just the spawn transaction. Undefined
+   * when `LOBU_SESSION_STORE=snapshot` is unset (no PG lock taken).
+   */
+  releaseConvLock?: () => Promise<void>;
+}
+
+/** Stable namespace id for `pg_advisory_lock(key1, key2)` per-conversation locks. */
+const CONV_LOCK_KEY1 = 0x6c6f6275; // "lobu" in ASCII, signed int32-safe.
+
+/**
+ * Acquire a session-level (NOT transaction-level) advisory lock on
+ * `(org, agent, conversationId)`. Returns a release function that drops the
+ * lock and the underlying reserved connection. Returns `null` if the lock is
+ * held by another pod — caller should bail and let the runs queue re-deliver.
+ *
+ * Why session-level (`pg_try_advisory_lock`) over transaction-level: the
+ * lock has to outlive any single query — it spans the entire worker
+ * subprocess lifetime, which can be tens of minutes. A transaction-scoped
+ * lock would release at the next commit/rollback and let a sibling pod
+ * steal the conversation mid-run. The `sql.reserve()` connection is
+ * dedicated and lock state survives until we explicitly release.
+ *
+ * No-op in embedded mode (`LOBU_DISABLE_PREPARE=1`). Embedded mode pins the
+ * pg pool to a single connection (see `createDbClient` in db/client.ts), so
+ * `reserve()` would block any sibling query forever. Embedded also can't
+ * have multi-pod races by definition — the in-process `workers` Map (see
+ * `spawnDeployment` above) already gates per-conversation concurrency.
+ * Returning a no-op release lets the caller treat all modes uniformly.
+ */
+export async function acquireConversationLock(
+  organizationId: string,
+  agentId: string,
+  conversationId: string
+): Promise<{ release: () => Promise<void> } | null> {
+  if (process.env.LOBU_DISABLE_PREPARE === "1") {
+    // Embedded mode: in-process Map is the sole gate. Return a sentinel so
+    // the caller's wiring (entry.releaseConvLock, exit handler, etc.)
+    // stays uniform.
+    return { release: async () => {} };
+  }
+
+  // `getDb()` returns the wrapped tagged-template client; `.reserve()` is on
+  // the raw `postgres()` client. We access it via the shared singleton —
+  // same pattern better-auth uses for its dedicated connection (see
+  // `getAuthDialect()` in db/client.ts).
+  const sql = getDb() as unknown as {
+    reserve: () => Promise<
+      ((
+        strings: TemplateStringsArray,
+        ...values: unknown[]
+      ) => Promise<unknown[]>) & {
+        release: () => void;
+      }
+    >;
+  };
+  const reserved = await sql.reserve();
+  const key2 = hashConvKey2(organizationId, agentId, conversationId);
+  try {
+    const rows = (await reserved`SELECT pg_try_advisory_lock(${CONV_LOCK_KEY1}, ${key2}) AS acquired`) as Array<{ acquired: boolean }>;
+    if (!rows[0]?.acquired) {
+      reserved.release();
+      return null;
+    }
+  } catch (err) {
+    reserved.release();
+    throw err;
+  }
+  return {
+    async release() {
+      // Retry the unlock query up to 3× with linear-ish backoff. A
+      // transient DB hiccup mid-release would otherwise leave the
+      // conversation locked until the gateway recycles — every
+      // subsequent dispatch for that conv would `pg_try_advisory_lock`
+      // → false → DEPLOYMENT_CREATE_FAILED → runs-queue retry → repeat.
+      // Codex round 2 quality win E on PR #865.
+      const MAX_ATTEMPTS = 3;
+      const BACKOFF_MS = 100;
+      let lastErr: unknown = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+          await reserved`SELECT pg_advisory_unlock(${CONV_LOCK_KEY1}, ${key2})`;
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          if (attempt < MAX_ATTEMPTS) {
+            await new Promise((r) => setTimeout(r, BACKOFF_MS * attempt));
+          }
+        }
+      }
+      if (lastErr) {
+        // Log loudly so an operator notices — a stuck lock blocks every
+        // subsequent dispatch for the conversation. Includes the lock
+        // key triple so the operator can target a manual
+        // pg_advisory_unlock from psql if needed.
+        logger.error(
+          `Failed to release advisory lock after ${MAX_ATTEMPTS} attempts for ${organizationId}/${agentId}/${conversationId}: ${lastErr instanceof Error ? lastErr.message : String(lastErr)}`
+        );
+      }
+      // ALWAYS return the reserved connection to the pool — keeping it
+      // pinned would starve the pool faster than the stuck lock starves
+      // any one conversation.
+      try {
+        reserved.release();
+      } catch {
+        /* postgres.js release is sync best-effort */
+      }
+    },
+  };
+}
+
+/**
+ * Derive a 32-bit signed integer from `(org, agent, conv)` for the second
+ * advisory-lock key. Postgres takes (int32, int32); we want a stable hash
+ * over a string triple. Same shape as the existing
+ * `hashtext('lobu:autowire', ${userId}:${connectorKey})` pattern in
+ * worker-api/device-reconcile.ts but computed in Node so we don't pay a
+ * round-trip just to feed the lock.
+ */
+function hashConvKey2(
+  organizationId: string,
+  agentId: string,
+  conversationId: string
+): number {
+  // FNV-1a 32-bit. Cheap, no extra deps, stable across Node versions.
+  const input = `${organizationId}:${agentId}:${conversationId}`;
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = (hash + ((hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24))) | 0;
+  }
+  // pg_advisory_lock takes a signed int32; |0 already brings the value into
+  // that range. Return as-is.
+  return hash;
 }
 
 function buildEmbeddedWorkerPath(
@@ -324,94 +462,194 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     const workspaceDir = path.resolve(`workspaces/${agentId}`);
     fs.mkdirSync(workspaceDir, { recursive: true, mode: 0o700 });
 
-    const commonEnvVars = await this.generateEnvironmentVariables(
-      username,
-      userId,
-      deploymentName,
-      messageData,
-      true
-    );
-
-    commonEnvVars.WORKSPACE_DIR = workspaceDir;
-    const embeddedPath = buildEmbeddedWorkerPath(
-      this.config.worker.binPathEntries,
-      commonEnvVars.PATH || process.env.PATH
-    );
-    if (embeddedPath) {
-      commonEnvVars.PATH = embeddedPath;
+    // Cross-pod gate for snapshot mode: only one pod at a time may run a
+    // worker for a given (org, agent, conversationId). Without this two
+    // pods that both claim chat_message runs for the same conversation
+    // would hydrate from the same `completed` snapshot, run independently,
+    // and produce divergent next snapshots — one reply silently wins.
+    //
+    // The lock is held by a reserved Postgres connection for the lifetime
+    // of the worker subprocess (released in the `exit` handler below). If
+    // another pod has the lock we surface a re-queueable failure so the
+    // runs queue retries on a different pod or after the current holder
+    // releases.
+    //
+    // Only enforced when the gateway is in snapshot mode (the env flag is
+    // read from the gateway process, not from the worker env that's still
+    // being assembled below). PVC-based legacy behaviour keeps single-
+    // writer at the kernel level via the RWO mount.
+    const snapshotModeEnabled =
+      process.env.LOBU_SESSION_STORE === "snapshot";
+    const conversationId =
+      typeof messageData?.conversationId === "string"
+        ? messageData.conversationId
+        : null;
+    const organizationId =
+      typeof messageData?.organizationId === "string"
+        ? messageData.organizationId
+        : null;
+    let convLock: { release: () => Promise<void> } | null = null;
+    if (snapshotModeEnabled && organizationId && conversationId) {
+      try {
+        convLock = await acquireConversationLock(
+          organizationId,
+          agentId,
+          conversationId
+        );
+      } catch (err) {
+        logger.error(
+          `Failed to acquire conversation lock: ${err instanceof Error ? err.message : String(err)}`
+        );
+        throw new OrchestratorError(
+          ErrorCode.DEPLOYMENT_CREATE_FAILED,
+          "Could not acquire per-conversation lock"
+        );
+      }
+      if (!convLock) {
+        // Another pod is running this conversation. Surface as a
+        // re-queueable failure — the runs queue's standard retry path
+        // re-delivers with a delay (`retry_delay_seconds` set per
+        // run_type). No need to special-case here.
+        logger.info(
+          `Conversation lock busy for ${organizationId}/${agentId}/${conversationId}; deferring spawn`
+        );
+        throw new OrchestratorError(
+          ErrorCode.DEPLOYMENT_CREATE_FAILED,
+          "Conversation lock busy on another pod"
+        );
+      }
     }
 
-    // Serialize allowed domains for worker-side just-bash bootstrap
-    const allowedDomains = messageData?.networkConfig?.allowedDomains ?? [];
-    if (allowedDomains.length > 0) {
-      commonEnvVars.JUST_BASH_ALLOWED_DOMAINS = JSON.stringify(allowedDomains);
-    }
-
-    // Determine spawn command based on nix packages. Monorepo development
-    // runs the TypeScript worker via Bun; published CLI installs resolve the
-    // compiled @lobu/worker dist entry and can run it with Node.
-    const nixPackages = messageData?.nixConfig?.packages ?? [];
-    const workerEntryPoint = this.getWorkerEntryPoint();
-    const workerInvocation = buildWorkerInvocation(workerEntryPoint);
-
-    let command: string;
-    let spawnArgs: string[];
-
-    if (nixPackages.length > 0) {
-      // `nix-shell -p <arg>` evaluates each <arg> as a Nix *expression*, so a
-      // bare package string like `pkgs.fetchurl; builtins.exec …` or
-      // `import ./evil.nix` would run code at evaluation time. Never forward
-      // the raw skill string: validate it to a strict leaf (or known
-      // `<namespace>.<leaf>`) identifier and re-emit an explicit `pkgs.<name>`
-      // attribute reference instead.
-      const packageRefs = nixPackages.map(nixPackageAttrRef);
-      // Wrap in nix-shell so nix binaries are on PATH. `-E` takes a single
-      // expression that resolves to the build inputs; `pkgs` is bound to the
-      // nixpkgs set via a `let` and every ref was validated above.
-      command = "nix-shell";
-      spawnArgs = [
-        "-E",
-        `let pkgs = import <nixpkgs> {}; in pkgs.mkShell { buildInputs = [ ${packageRefs.join(" ")} ]; }`,
-        "--run",
-        buildShellCommand(workerInvocation.command, workerInvocation.args),
-      ];
-      logger.info(
-        `Spawning embedded worker ${deploymentName} with nix packages: ${nixPackages.join(", ")}`
+    // Ownership of `convLock` transfers from this local scope to the
+    // child's exit handler closure ONLY after `spawn()` returns and the
+    // exit handler is wired. Until then, any throw in the spawn-prep
+    // block must release the lock (and the underlying reserved pg
+    // connection) to avoid leaking a per-conversation lock until the
+    // gateway recycles. Codex P1#2 on PR #865.
+    let child: ChildProcess;
+    let commonEnvVars: Record<string, string>;
+    try {
+      commonEnvVars = await this.generateEnvironmentVariables(
+        username,
+        userId,
+        deploymentName,
+        messageData,
+        true
       );
-    } else {
-      command = workerInvocation.command;
-      spawnArgs = workerInvocation.args;
-    }
 
-    // On Linux production hosts, wrap the worker in a transient systemd
-    // user scope: cgroup limits + IPAddressDeny + capability drops. Falls
-    // back transparently on macOS / Linux hosts without user systemd.
-    const systemdRun = locateSystemdRun();
-    if (systemdRun) {
-      const unitName = makeUnitName(deploymentName);
-      const innerCommand = command;
-      const innerArgs = spawnArgs;
-      command = systemdRun;
-      spawnArgs = [
-        ...buildSystemdRunArgs({ unitName, workspaceDir }),
-        "--",
-        innerCommand,
-        ...innerArgs,
-      ];
-      logger.info(
-        `Spawning embedded worker ${deploymentName} under systemd-run scope ${unitName}`
+      commonEnvVars.WORKSPACE_DIR = workspaceDir;
+      // Forward the snapshot-mode flag so workers know to hydrate from
+      // Postgres and write back on cleanup. Mirrors gateway-side
+      // process.env so the lock acquisition above and the worker's
+      // session-store selection stay in lockstep.
+      if (snapshotModeEnabled) {
+        commonEnvVars.LOBU_SESSION_STORE = "snapshot";
+      }
+      const embeddedPath = buildEmbeddedWorkerPath(
+        this.config.worker.binPathEntries,
+        commonEnvVars.PATH || process.env.PATH
       );
+      if (embeddedPath) {
+        commonEnvVars.PATH = embeddedPath;
+      }
+
+      // Serialize allowed domains for worker-side just-bash bootstrap
+      const allowedDomains = messageData?.networkConfig?.allowedDomains ?? [];
+      if (allowedDomains.length > 0) {
+        commonEnvVars.JUST_BASH_ALLOWED_DOMAINS =
+          JSON.stringify(allowedDomains);
+      }
+
+      // Determine spawn command based on nix packages. Monorepo development
+      // runs the TypeScript worker via Bun; published CLI installs resolve the
+      // compiled @lobu/worker dist entry and can run it with Node.
+      const nixPackages = messageData?.nixConfig?.packages ?? [];
+      const workerEntryPoint = this.getWorkerEntryPoint();
+      const workerInvocation = buildWorkerInvocation(workerEntryPoint);
+
+      let command: string;
+      let spawnArgs: string[];
+
+      if (nixPackages.length > 0) {
+        // `nix-shell -p <arg>` evaluates each <arg> as a Nix *expression*, so a
+        // bare package string like `pkgs.fetchurl; builtins.exec …` or
+        // `import ./evil.nix` would run code at evaluation time. Never forward
+        // the raw skill string: validate it to a strict leaf (or known
+        // `<namespace>.<leaf>`) identifier and re-emit an explicit `pkgs.<name>`
+        // attribute reference instead.
+        const packageRefs = nixPackages.map(nixPackageAttrRef);
+        // Wrap in nix-shell so nix binaries are on PATH. `-E` takes a single
+        // expression that resolves to the build inputs; `pkgs` is bound to the
+        // nixpkgs set via a `let` and every ref was validated above.
+        command = "nix-shell";
+        spawnArgs = [
+          "-E",
+          `let pkgs = import <nixpkgs> {}; in pkgs.mkShell { buildInputs = [ ${packageRefs.join(" ")} ]; }`,
+          "--run",
+          buildShellCommand(workerInvocation.command, workerInvocation.args),
+        ];
+        logger.info(
+          `Spawning embedded worker ${deploymentName} with nix packages: ${nixPackages.join(", ")}`
+        );
+      } else {
+        command = workerInvocation.command;
+        spawnArgs = workerInvocation.args;
+      }
+
+      // On Linux production hosts, wrap the worker in a transient systemd
+      // user scope: cgroup limits + IPAddressDeny + capability drops. Falls
+      // back transparently on macOS / Linux hosts without user systemd.
+      const systemdRun = locateSystemdRun();
+      if (systemdRun) {
+        const unitName = makeUnitName(deploymentName);
+        const innerCommand = command;
+        const innerArgs = spawnArgs;
+        command = systemdRun;
+        spawnArgs = [
+          ...buildSystemdRunArgs({ unitName, workspaceDir }),
+          "--",
+          innerCommand,
+          ...innerArgs,
+        ];
+        logger.info(
+          `Spawning embedded worker ${deploymentName} under systemd-run scope ${unitName}`
+        );
+      }
+
+      child = spawn(command, spawnArgs, {
+        // Workers must not inherit gateway-only secrets or telemetry settings
+        // (DATABASE_URL, SENTRY_DSN, OAuth secrets, etc.). Everything a worker
+        // needs is assembled explicitly above, with optional operator-provided
+        // values forwarded only via WORKER_ENV_*.
+        env: commonEnvVars,
+        cwd: workspaceDir,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    } catch (err) {
+      // Pre-spawn throw (generateEnvironmentVariables, nix package
+      // validation, getWorkerEntryPoint, synchronous spawn() failure).
+      // No child process exists, so no exit handler will fire to release
+      // the lock — release it here before re-throwing.
+      if (convLock) {
+        void convLock.release();
+      }
+      throw err;
     }
 
-    const child = spawn(command, spawnArgs, {
-      // Workers must not inherit gateway-only secrets or telemetry settings
-      // (DATABASE_URL, SENTRY_DSN, OAuth secrets, etc.). Everything a worker
-      // needs is assembled explicitly above, with optional operator-provided
-      // values forwarded only via WORKER_ENV_*.
-      env: commonEnvVars,
-      cwd: workspaceDir,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    // Idempotent lock release. Captured by both the error and exit
+    // handlers below; killWorker no longer touches the lock directly so
+    // the lock survives until the child actually exits (codex P1#3 on
+    // PR #865 — the prior killWorker released BEFORE SIGTERM, letting a
+    // sibling pod claim the conversation while the dying worker was
+    // still flushing its snapshot).
+    let lockReleased = false;
+    const releaseLockOnce = async (): Promise<void> => {
+      if (lockReleased) return;
+      lockReleased = true;
+      if (convLock) {
+        await convLock.release();
+      }
+    };
 
     // Spawn errors (binary missing, EACCES, fork failure) fire on the child
     // *after* spawn() returns, so without an "error" listener Node would
@@ -422,6 +660,7 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
         `Embedded worker ${deploymentName} spawn error: ${err.message}`
       );
       this.workers.delete(deploymentName);
+      releaseLockOnce();
     });
 
     child.stdout?.on("data", (data: Buffer) => {
@@ -436,10 +675,12 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     });
 
     child.once("exit", (code, signal) => {
-      const entry = this.workers.get(deploymentName);
-      if (entry) {
-        this.workers.delete(deploymentName);
-      }
+      // Always release the lock here. The killWorker path may have
+      // already deleted the map entry (to short-circuit duplicate
+      // deletes), but the lock release is gated on its own idempotency
+      // flag and is the authoritative release point — codex P1#3.
+      this.workers.delete(deploymentName);
+      releaseLockOnce();
       if (signal) {
         logger.info(
           `Embedded worker ${deploymentName} exited with signal ${signal}`
@@ -458,6 +699,10 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       env: commonEnvVars,
       lastActivity: new Date(),
       workspaceDir,
+      // Expose the idempotent release on the entry for introspection /
+      // tests. The exit handler is the authoritative release site;
+      // killWorker no longer touches this field.
+      ...(convLock ? { releaseConvLock: releaseLockOnce } : {}),
     });
 
     logger.info(
@@ -522,14 +767,26 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     }
   }
 
-  /** Send SIGTERM, then SIGKILL after timeout. Resolves on child exit. */
+  /** Send SIGTERM, then SIGKILL after timeout. Resolves on child exit.
+   *
+   * Does NOT release the conversation lock — the child's exit handler is
+   * the authoritative release site, and the release call there is
+   * idempotent. Releasing here before `await exited` (as a prior version
+   * did) lets a sibling pod claim the conversation while this worker is
+   * still flushing its cleanup() snapshot. Codex P1#3 on PR #865.
+   */
   private async killWorker(
     entry: EmbeddedWorkerEntry,
     deploymentName: string
   ): Promise<void> {
     const child = entry.process;
 
-    // Delete from map first to prevent race with the exit handler.
+    // Delete from the map up front so callers see an empty
+    // listDeployments() the moment kill returns — the public contract
+    // hasn't changed. The lock release is deliberately NOT touched here
+    // (codex P1#3): the exit handler in spawnDeployment is the
+    // authoritative release site, and the release helper is idempotent
+    // so a duplicate `workers.delete()` is harmless.
     this.workers.delete(deploymentName);
 
     // Already exited — `exitCode`/`signalCode` are the only reliable

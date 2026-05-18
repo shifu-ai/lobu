@@ -41,6 +41,21 @@ export interface MessagePayload {
   jobId?: string; // Optional job ID from gateway
   teamId?: string; // Optional team ID (WhatsApp uses top-level, Slack uses platformMetadata)
 
+  // The runs.id of the row that dispatched this job. Set by the gateway
+  // MessageConsumer (stamped from the runs-queue claim's job.id) and
+  // threaded into WorkerConfig.runId. The worker's cleanup() uses it to
+  // attribute the agent_transcript_snapshot row to the correct run —
+  // see codex P1#1 on PR #865.
+  runId?: number;
+
+  // Per-run worker JWT bound to `runId` above. Minted by MessageConsumer
+  // and threaded into WorkerConfig.runJobToken. The worker uses THIS
+  // token (not the deployment-lifetime WORKER_TOKEN) when calling the
+  // snapshot endpoint, so the route's `tokenData.runId === body.runId`
+  // equality check can reject any cross-run impersonation — codex round
+  // 2 finding A on PR #865.
+  runJobToken?: string;
+
   // Job type (default: "message")
   jobType?: JobType;
 
