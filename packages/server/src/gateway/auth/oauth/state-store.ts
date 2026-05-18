@@ -94,6 +94,29 @@ export class OAuthStateStore<T extends object> {
   }
 
   /**
+   * Read the state payload without consuming it. Used when the caller needs
+   * to validate side-channel context (e.g. that the callback session's org
+   * matches the state's org) before atomically burning the install link —
+   * without this, any failed-validation hit would force the user to restart
+   * the OAuth flow even though the state is still otherwise valid.
+   *
+   * The row is left intact; callers must call `consume()` themselves once
+   * validation passes (or rely on the TTL sweep if validation fails).
+   */
+  async peek(state: string): Promise<(T & { createdAt: number }) | null> {
+    const sql = getDb();
+    const rows = await sql`
+      SELECT payload FROM oauth_states
+      WHERE id = ${state}
+        AND scope = ${this.keyPrefix}
+        AND expires_at > now()
+      LIMIT 1
+    `;
+    if (rows.length === 0) return null;
+    return (rows[0] as { payload: T & { createdAt: number } }).payload;
+  }
+
+  /**
    * Generate a cryptographically secure random state string.
    */
   private generateState(): string {
@@ -135,6 +158,13 @@ export function createOAuthStateStore(
 
 interface SlackInstallStateData {
   redirectUri: string;
+  /**
+   * Active org of the session that initiated the install. The callback
+   * verifies the callback-side session's active org matches; mismatch
+   * rejects the install so an OAuth link minted under org A's session can
+   * never plant a connection into org B.
+   */
+  organizationId: string;
 }
 
 export function createSlackInstallStateStore(): OAuthStateStore<SlackInstallStateData> {
