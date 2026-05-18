@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, extname, join, resolve } from 'node:path';
+import { extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build, type Plugin } from 'esbuild';
 import { EXTERNAL_RUNTIME_DEPS } from '../../../connector-worker/src/runtime-deps';
@@ -134,17 +134,40 @@ const bundledFileCache = new Map<string, string | null>();
 export function findBundledConnectorFile(key: string): string | null {
   const cached = bundledFileCache.get(key);
   if (cached !== undefined) return cached;
-  const fileName = `${key.replace(/\./g, '_')}.ts`;
+  // Mirror the worker-side resolver in compile-connector.ts: try the
+  // subdir layout first (`browser.evaluate` → `browser/evaluate.ts`) and
+  // fall back to the flat underscore convention (`chrome.tabs` →
+  // `chrome_tabs.ts`). Keep these in sync if either side changes.
+  const candidates = [`${key.replace(/\./g, '/')}.ts`, `${key.replace(/\./g, '_')}.ts`];
   let found: string | null = null;
-  for (const candidate of DEFAULT_CONNECTOR_DIR_CANDIDATES) {
-    const filePath = resolve(candidate, fileName);
-    if (existsSync(filePath)) {
-      found = filePath;
-      break;
+  outer: for (const dir of DEFAULT_CONNECTOR_DIR_CANDIDATES) {
+    for (const fileName of candidates) {
+      const filePath = resolve(dir, fileName);
+      if (!filePath.startsWith(`${dir}/`)) continue;
+      if (existsSync(filePath)) {
+        found = filePath;
+        break outer;
+      }
     }
   }
   bundledFileCache.set(key, found);
   return found;
+}
+
+// Derive the persisted source_path (relative to the bundled-connectors
+// catalog dir) for a file resolved by findBundledConnectorFile. Used by
+// auto-install / device-reconcile so subdir-grouped connectors
+// (`browser/evaluate.ts`) round-trip correctly through
+// `connectorSourcePathToUri`. Falls back to basename if the file lives
+// outside every known candidate (shouldn't happen in practice, but keeps
+// the call site simple).
+export function bundledConnectorSourcePath(filePath: string): string {
+  for (const dir of DEFAULT_CONNECTOR_DIR_CANDIDATES) {
+    if (filePath.startsWith(`${dir}/`)) {
+      return relative(dir, filePath);
+    }
+  }
+  return relative(resolve(filePath, '..'), filePath);
 }
 
 export function normalizeFileSourceUri(value: string): string | null {
@@ -349,12 +372,39 @@ export async function listCatalogConnectorDefinitions(
       continue;
     }
 
-    const entries = await readdir(dirPath, { withFileTypes: true });
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      if (!entry.isFile()) continue;
-      if (extname(entry.name) !== '.ts' || entry.name.endsWith('.d.ts')) continue;
+    // Scan one level deep so primitive groupings like `browser/*.ts` are
+    // discovered alongside top-level service connectors. Two-level scan
+    // keeps the loader bounded — connectors don't currently nest deeper.
+    const candidatePaths: string[] = [];
+    const topEntries = await readdir(dirPath, { withFileTypes: true });
+    for (const entry of topEntries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const entryPath = resolve(dirPath, entry.name);
+      if (entry.isFile()) {
+        if (extname(entry.name) !== '.ts' || entry.name.endsWith('.d.ts')) continue;
+        candidatePaths.push(entryPath);
+        continue;
+      }
+      if (entry.isDirectory()) {
+        // Skip private / non-connector folders. `__tests__` ships test files
+        // that import `bun:test`, which esbuild can't resolve and which
+        // surface as catalog-cold-scan warnings; any leading-underscore name
+        // is by convention not a connector grouping.
+        if (entry.name === '__tests__' || entry.name.startsWith('_')) continue;
+        try {
+          const subEntries = await readdir(entryPath, { withFileTypes: true });
+          for (const sub of subEntries.sort((a, b) => a.name.localeCompare(b.name))) {
+            if (!sub.isFile()) continue;
+            if (extname(sub.name) !== '.ts' || sub.name.endsWith('.d.ts')) continue;
+            candidatePaths.push(resolve(entryPath, sub.name));
+          }
+        } catch {
+          // Subdir unreadable — skip silently. Top-level scan still produced
+          // whatever it could; don't fail the whole catalog over one bad dir.
+        }
+      }
+    }
 
-      const filePath = resolve(dirPath, entry.name);
+    for (const filePath of candidatePaths) {
       const metadata = await extractConnectorCatalogMetadata(filePath);
       if (!metadata || seenKeys.has(metadata.key)) continue;
 
@@ -373,7 +423,9 @@ export async function listCatalogConnectorDefinitions(
         runtime: metadata.runtime,
         status: 'active',
         login_enabled: metadata.login_enabled,
-        source_path: basename(filePath),
+        // Preserve subdirectory in source_path so worker resolvers can
+        // find `browser/evaluate.ts` etc. without colliding on basename.
+        source_path: relative(dirPath, filePath),
         source_uri: pathToFileURL(filePath).toString(),
         installed: false,
         installable: true,

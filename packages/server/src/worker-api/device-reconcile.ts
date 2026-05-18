@@ -9,10 +9,10 @@
  * creating runs nothing can claim.
  */
 
-import { basename } from 'node:path';
 import { getDb, pgTextArray } from '../db/client';
 import {
   type BundledDeviceConnector,
+  bundledConnectorSourcePath,
   compileConnectorFromFile,
   findBundledConnectorFile,
   getBundledDeviceConnectors,
@@ -122,8 +122,13 @@ async function ensureDeviceConnectorWired(
     if (
       existingReady[0]?.connection_id &&
       existingReady[0]?.version_key &&
-      declaredFeedKeys.length > 0 &&
-      declaredFeedKeys.every((feedKey) => activeFeedKeys.has(feedKey))
+      // userManaged-only connectors (e.g. local.directory, browser/*) report
+      // declaredFeedKeys=[]. Once the connection + definition are installed,
+      // every subsequent poll has nothing to verify — fast-path out.
+      // Composing primitives still hit /api/workers/me/feeds to mint
+      // explicit per-instance rows; that path is unchanged.
+      (declaredFeedKeys.length === 0 ||
+        declaredFeedKeys.every((feedKey) => activeFeedKeys.has(feedKey)))
     ) {
       return;
     }
@@ -165,7 +170,7 @@ async function ensureDeviceConnectorWired(
           compiledCode: null,
           compiledCodeHash: null,
           sourceCode: null,
-          sourcePath: basename(filePath),
+          sourcePath: bundledConnectorSourcePath(filePath),
         },
       });
 
