@@ -70,7 +70,6 @@ export {
 } from "./lobu-toml-schema";
 export * from "./logger";
 // Module system
-export type { ActionButton, ModuleSessionContext } from "./modules";
 export * from "./modules";
 export type { OtelConfig, Span, Tracer } from "./otel";
 // OpenTelemetry tracing
@@ -154,9 +153,18 @@ export type { McpStatus, McpToolDef } from "./utils/mcp-tool-instructions";
 export * from "./utils/network-domains";
 export * from "./utils/retry";
 export * from "./utils/sanitize";
+// Shared OpenClaw session.jsonl parser (gateway + worker).
+export {
+  entryToMessage,
+  parseSessionEntries,
+  type ParsedMessage,
+  type SessionEntry,
+} from "./utils/session-file";
 export * from "./utils/urls";
 export * from "./worker/auth";
 export type {
   WorkerTransport,
   WorkerTransportConfig,
 } from "./worker/transport";
+// Gateway ↔ worker wire contract (MessagePayload, JobType, QueuedMessage).
+export type { JobType, MessagePayload, QueuedMessage } from "./worker/wire";
