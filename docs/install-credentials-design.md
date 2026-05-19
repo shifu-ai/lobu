@@ -223,143 +223,251 @@ then unlock with Touch ID") writes itself.
 
 ---
 
-## Device pairing: OTP URL flow
+## Device pairing: reuse `/exchange-token` + single-use PATs
 
 Humans should never see or paste the raw `ENCRYPTION_KEY`. It is the
 cryptographic root (install operator's better-auth password +
 at-rest encryption key, both unchanged from v3 core), but the
 **user-visible entry point** for every non-CLI client is a one-time
-pairing URL. The CLI keeps its direct path because it has filesystem
-access to `.env`.
+pairing URL.
+
+**Correction over the prior addendum draft.** An earlier draft of
+this section proposed a new `pairing_otps` table + a new
+`GET /auth/pair?token=<otp>` route. That over-built. Lobu already
+has the deep-link → session machinery:
+
+- `GET /exchange-token?token=<X>&next=<path>`
+  (`packages/server/src/auth/routes.ts:292`) takes a token, resolves
+  it via `resolveDeepLinkToken` (line 266), mints a session cookie
+  via `mintSessionCookieValue`, applies `Referrer-Policy: no-referrer`,
+  redirects to `next` (relative-path-only — open-redirect protected).
+- `resolveDeepLinkToken` accepts a PAT (`owl_pat_*`, validated through
+  `PersonalAccessTokenService.verify()`) or a Better Auth session
+  token.
+- `PersonalAccessTokenService.create()` / `.verify()` / `.revoke()`
+  (`packages/server/src/auth/tokens.ts`) cover the full lifecycle.
+- `personal_access_tokens` already has `expires_at` and `revoked_at`
+  columns (verified against the baseline migration). Missing:
+  `single_use`.
+
+So the actual delta is small. Reuse `/exchange-token`. Add one
+column to `personal_access_tokens`. The pairing URL is just a PAT
+URL.
 
 ### Flow
 
 ```
-   lobu init
+   lobu init / lobu run (first boot)
        │
-       ├── writes .env (ENCRYPTION_KEY, today's behaviour)
+       ├── .env with ENCRYPTION_KEY                       (today, unchanged)
        │
-       └── writes ~/.lobu/install/<install-id>/pairing.url  (mode 0600)
-              │       contains a single-use OTP URL, ~10 min expiry
+       └── PersonalAccessTokenService.create({
+              user_id:     <install_operator.id>,
+              single_use:  true,                          (NEW column)
+              expires_at:  now() + 10 min,                (existing column)
+              name:        'pairing',
+              scope:       null,                          (no MCP scopes — session-only)
+           })
               │
-              ▼
-   server boot → ensureInstallOperator() → INSERT into pairing_otps
-              {token, install_op_id, expires_at, used_at=NULL}
-              ▼
-   GET /auth/pair?token=<otp>
-       1. validate (exists, not expired, used_at IS NULL)
-       2. mark used_at = NOW()
-       3. sign caller in as install operator (Set-Cookie)
-       4. 302 → /auth/enrol-credential   (passkey | passcode)
-              ▼
-   user enrols on this device → SPA loads normally
-   subsequent opens: passkey / passcode (per addendum #1)
+              └── writes URL to ~/.lobu/install/<install-id>/pairing.url
+                   (mode 0600)
+                   http://localhost:PORT/exchange-token
+                        ?token=owl_pat_<...>
+                        &next=/auth/enrol-credential
+                       ▼
+   menubar / Chrome ext / second device opens the URL
+                       ▼
+   GET /exchange-token?token=...&next=...     (today, unchanged route)
+       1. resolveDeepLinkToken → PersonalAccessTokenService.verify
+       2. verify() sees single_use=true → revoke inline
+          (set revoked_at = NOW())                       (NEW behaviour)
+       3. mintSessionCookieValue → Set-Cookie session
+       4. 302 → /auth/enrol-credential                   (NEW SPA page)
+                       ▼
+   user enrols passkey + passcode on this device (per addendum #1)
+                       ▼
+   subsequent opens: passkey / passcode unlocks a stored PAT
 ```
 
-### What `lobu init` emits
+### Schema delta — one column
+
+```sql
+ALTER TABLE personal_access_tokens
+  ADD COLUMN IF NOT EXISTS single_use boolean NOT NULL DEFAULT false;
+
+CREATE INDEX IF NOT EXISTS personal_access_tokens_single_use_idx
+  ON personal_access_tokens (single_use)
+  WHERE single_use = true AND revoked_at IS NULL;
+```
+
+That's the whole migration. Default `false` means every existing PAT
+is unaffected. The partial index keeps the rare-case lookup cheap
+without bloating the common case.
+
+### Service delta — ~20 LOC in `PersonalAccessTokenService.verify`
+
+After the existing token-hash lookup succeeds:
+
+```ts
+if (pat.single_use && !pat.revoked_at) {
+  // Atomic revoke before returning. The verify() caller (typically
+  // /exchange-token) only ever sees a "valid" decision when the
+  // revoke succeeded — a replay reaches the same code path, finds
+  // revoked_at IS NOT NULL via the WHERE clause, and returns null.
+  await this.sql`
+    UPDATE personal_access_tokens
+       SET revoked_at = NOW(), updated_at = NOW()
+     WHERE id = ${pat.id} AND revoked_at IS NULL
+  `;
+}
+```
+
+The verify SELECT already filters `revoked_at IS NULL`
+(tokens.ts:101); the new revoke writes through that filter, so
+concurrent replays race for the UPDATE — only one wins, the
+others' SELECT in `verify()` re-fires on the next attempt and
+returns null.
+
+### What `lobu init` / `lobu run` emits
 
 Unchanged: `.env` with `ENCRYPTION_KEY`. **Added**:
-`~/.lobu/install/<install-id>/pairing.url` (mode `0600`) containing
-one URL of the form `http://localhost:PORT/auth/pair?token=<otp>`.
-Single-use, ~10 min expiry. The file is the bridge between CLI-time
-provisioning and GUI-time first connection.
+`~/.lobu/install/<install-id>/pairing.url` (mode `0600`) — one URL
+of the form
+`http://localhost:PORT/exchange-token?token=owl_pat_<...>&next=/auth/enrol-credential`.
+The PAT inside the URL is the single-use, ~10 min-expiring credential
+minted at first boot for the install operator. The file is the
+bridge between CLI-time provisioning and GUI-time first connection.
 
-### Server-side
+Provisioning happens at first `lobu run` (not `lobu init`) because
+`PersonalAccessTokenService.create()` needs a live DB; the same
+`ensureInstallOperator()` boot path that provisions the operator
+row also mints the pairing PAT and writes the file, idempotently
+(no-op if the file exists AND the PAT inside it still validates).
 
-New `pairing_otps` table — five columns: `token` (PK, random 32
-bytes), `install_op_id` (FK → `user.id`), `expires_at`, `used_at`,
-`created_at`. New route `GET /auth/pair?token=<otp>`:
+### "Pair another device" — tiny new endpoint
 
-1. Validate (`exists`, `expires_at > NOW()`, `used_at IS NULL`).
-2. Atomically mark `used_at = NOW()` (write-once, race-safe).
-3. Mint a better-auth session for `install_op_id` (same path
-   `/api/local-init` uses internally).
-4. 302 to `/auth/enrol-credential` so passkey/passcode enrolment
-   happens immediately after sign-in.
+When the install operator (already signed in) wants to add another
+device:
 
-### Per-client first-pairing
+```
+POST /auth/pair-token       (NEW — authenticated route)
+   → requires a valid session for the install operator
+   → PersonalAccessTokenService.create({
+        user_id: <session.userId>,
+        single_use: true,
+        expires_at: now() + 10 min,
+        name: 'pairing',
+      })
+   → returns { url: 'http://.../exchange-token?token=...&next=/auth/enrol-credential' }
+```
 
-- **Menubar (macOS)**: bundles the CLI. After install: internally
-  runs `lobu init`, reads `pairing.url` from disk, opens it in the
-  webview → SPA auths via OTP → user enrols passkey or passcode →
-  done. User never sees the OTP itself.
-- **Chrome extension**: same-machine case uses native-messaging to
-  read the pairing file → opens the URL in a popup → enrols a
-  passkey. Cross-machine case: SPA's "Pair another device" minted
-  a separate OTP, user opens that URL in the extension's browser.
-- **Second device (phone, other laptop)**: SPA settings → "Pair
-  another device" → mints a fresh OTP (different token, same
-  shape) → renders as QR or copyable URL → user opens on the
-  other device → enrols a credential on that device.
+SPA renders the URL as a QR code and a copyable string. New device
+opens the URL → `/exchange-token` handles it via the same code path
+that handled init-time pairing → enrolment screen → done.
+
+The route is ~30 LOC. It does one thing: mint a single-use PAT for
+the caller's own user and shape the URL. Lives next to
+`/exchange-token` in `auth/routes.ts`.
+
+### New SPA page — `/auth/enrol-credential`
+
+A new authenticated route in the SPA that runs after
+`/exchange-token` redirects to it. UI:
+
+- **Enrol passkey** (button → WebAuthn registration via better-auth's
+  passkey plugin, already wired at `auth/index.tsx:536`).
+- **Set a 4–6 digit passcode** (macOS-only, per addendum #1; the
+  passcode gates a stored PAT in Keychain).
+- **Skip** (rare, but allowed — operator can revisit from settings).
+
+Inline form, no modal (DESIGN_GUIDELINES §1, §8). After enrolment
+the SPA loads normally.
 
 ### CLI is unaffected
 
-`lobu login` keeps reading `ENCRYPTION_KEY` directly from `.env`
-and POSTs to `/api/auth/sign-in/email`. The CLI runs on the install
-host with `.env` in reach; an OTP would be ceremony with no benefit.
-
-### Subsequent pairings
-
-SPA's "Pair another device" is the user-facing minter. Each
-invocation produces a fresh OTP row in `pairing_otps`; the init-time
-OTP is not reused.
+`lobu login` keeps reading `ENCRYPTION_KEY` directly from `.env` and
+POSTs to `/api/auth/sign-in/email`. The CLI runs on the install host
+with `.env` in reach; a single-use PAT would be ceremony with no
+benefit.
 
 ### Revocation
 
-Pairing OTPs are revocable: set `used_at` early to invalidate any
-in-flight token (the operator's "I lost the email I sent that URL
-to" recovery). Per-device PATs minted post-pairing are independently
-revocable via the existing `personal_access_tokens` table — revoking
-a device's PAT logs that device out without affecting other paired
-devices.
+- **Pairing URL not yet used**: operator hits "Cancel pairing" in
+  SPA settings → that view lists single-use PATs named `'pairing'`
+  with `revoked_at IS NULL` → revoke via the existing
+  `PersonalAccessTokenService.revoke()` path. No new revoke
+  primitive.
+- **Pairing URL already used**: per-device PAT minted by the menubar
+  / extension AFTER the OTP-style redemption is independently
+  revocable through the existing PAT-list UI. Revoke that device's
+  PAT to log it out without affecting other paired devices.
 
 ### Security considerations
 
-- **No referer leak.** The redirect target (`/auth/enrol-credential`)
-  must not include the OTP. Strip it from the URL before
-  `Set-Cookie`. Apply `Referrer-Policy: no-referrer` on the
-  `/auth/pair` response (same hardening `/exchange-token` already
-  has at `auth/routes.ts:293`).
-- **Clear the pairing file after first use.** Once the OTP is
-  consumed, `lobu init` / menubar bootstrap deletes the
-  `pairing.url` file. A stale URL on disk after the OTP has expired
-  is harmless but noisy — clean up to avoid operator confusion.
-- **Server-enforced expiry.** Don't trust the URL's query string for
-  expiry hints — the `expires_at` check happens against the DB row.
-  Clients can render "expired" UI from a `410 Gone` response.
-- **One operator per OTP.** Multi-tenant: pairing OTPs are only
-  valid for the install operator they were minted for. The
-  `pairing_otps.install_op_id` constraint enforces this; the route
-  never resolves an OTP to a different user. Tenant operators get
-  their own auth surface (`/sign-up` / `/sign-in/email`), not OTP
-  pairing.
+- **Referer leak — already mitigated.** `/exchange-token` already
+  sets `Referrer-Policy: no-referrer` (routes.ts:293). The
+  redirect target (`/auth/enrol-credential`) does not carry the
+  token. No new code needed.
+- **Open-redirect — already mitigated.** `/exchange-token` rejects
+  non-relative `next` values (routes.ts:320-321). No new code.
+- **Replay — single-use closes it.** A redeemed pairing PAT is
+  revoked before the verify call returns; any second request with
+  the same URL gets `401` from `/exchange-token`'s
+  `invalid_token` branch.
+- **Clear the pairing file after first use.** The menubar /
+  extension bootstrap deletes `pairing.url` after the redirect
+  completes successfully. Stale file = harmless (the PAT is
+  revoked) but noisy; clean up to avoid operator confusion.
+- **Multi-tenant.** Pairing PATs are minted for a specific
+  `user_id`. `/exchange-token` signs the caller in as that user.
+  No cross-operator pairing — to pair as a tenant operator, that
+  tenant operator signs in normally and uses `/auth/pair-token`
+  from their own session.
 
 ### What stays the same
 
 - `ENCRYPTION_KEY` IS the install operator's better-auth password
   (v3 core).
 - `ENCRYPTION_KEY` encrypts at-rest data (today's behaviour).
-- CLI reads `.env` directly; no OTP for CLI.
+- CLI reads `.env` directly; no pairing PAT for CLI.
+- `/exchange-token` route, `resolveDeepLinkToken`,
+  `mintSessionCookieValue`, `PersonalAccessTokenService` — all
+  reused, no shape change.
 - Passkey / passcode enrolment after first pairing — unchanged,
-  just driven by the OTP redirect instead of a paste prompt.
+  just driven by the `/exchange-token` redirect instead of a paste
+  prompt.
 
 ### What changes
 
-- New `pairing_otps` table + small migration in Stage 2.
-- New `GET /auth/pair?token=<otp>` route — the only public-facing
-  surface for pairing.
-- `lobu init` writes `pairing.url` alongside `.env`.
-- SPA gains "Pair another device" in settings (Stage 2 UI).
+- **One column** on `personal_access_tokens`: `single_use boolean
+  NOT NULL DEFAULT false` + partial index.
+- **~20 LOC** in `PersonalAccessTokenService.verify` to revoke on
+  first successful verify when `single_use=true`.
+- **New `POST /auth/pair-token` route** (~30 LOC, authenticated)
+  mints a fresh single-use PAT for the caller and returns the URL.
+- **`ensureInstallOperator()` boot path** writes
+  `~/.lobu/install/<install-id>/pairing.url` alongside provisioning
+  the operator. Idempotent (no-op if file present and PAT inside
+  still valid).
+- **New SPA page** `/auth/enrol-credential` — the redirect target,
+  offers passkey + passcode enrolment.
+- **SPA settings**: "Pair another device" calls
+  `POST /auth/pair-token` and renders the returned URL as QR +
+  copyable string.
+
+No new tables. No new auth primitive. No new deep-link route.
 
 ### Out of scope
 
 - Linux / Windows equivalents of macOS Keychain for passcode UX —
   passkey works on all platforms via WebAuthn; passcode stays
   macOS-first per addendum #1.
-- Server-side QR rendering — the server returns a URL; clients can
-  render QR locally if useful.
-- Multi-tenant pairing OTPs that mint sessions for non-install
-  operators — separate flow, not in v1.
+- Server-side QR rendering — `POST /auth/pair-token` returns the
+  URL string; clients render QR locally if useful.
+- Multi-tenant pairing for non-install operators — covered by the
+  reuse of `/auth/pair-token` from any authenticated session;
+  works the same way for tenant operators in multi-user mode, no
+  separate flow needed.
 
 ---
 
@@ -625,13 +733,17 @@ work has them available.
    a `principal_kind='install_operator'` user with the hashed
    ENCRYPTION_KEY as their better-auth password.
 3. **Humans never see the raw `ENCRYPTION_KEY` on GUI clients.**
-   `lobu init` emits a one-time pairing URL (`~/.lobu/install/<id>/pairing.url`,
-   mode 0600). Menubar / Chrome extension / second device open that
-   URL → server validates the OTP, signs in as the install operator,
-   redirects to credential enrolment (passkey or 4–6 digit passcode,
-   or both). The passcode is a Keychain ACL over a stored PAT —
-   **never a KDF input** — so its low entropy is fine. CLI is the
-   only client that reads `ENCRYPTION_KEY` directly from `.env`.
+   First `lobu run` writes
+   `~/.lobu/install/<id>/pairing.url` (mode 0600) containing a
+   `/exchange-token?token=...&next=/auth/enrol-credential` URL whose
+   token is a **single-use PAT** (one new column on
+   `personal_access_tokens`, auto-revoked on first verify). Menubar /
+   Chrome extension / second device open the URL → existing
+   `/exchange-token` route signs caller in as the install operator →
+   credential enrolment (passkey + macOS passcode). No new
+   `pairing_otps` table, no new auth primitive — reuses
+   `PersonalAccessTokenService` + the existing deep-link flow. CLI is
+   the only client that reads `ENCRYPTION_KEY` directly from `.env`.
 4. **`/api/local-init` becomes a session-to-PAT exchange.** No
    anonymous mint. CSRF / loopback checks stay as defence-in-depth.
    The "zero users → /sign-up redirect" branch dies (operator is
@@ -655,24 +767,37 @@ work has them available.
    `/api/auth/sign-in/email` with synthetic email + ENCRYPTION_KEY,
    exchange session for PAT, persist to contexts.json. Existing
    `--token` path stays for PATs.
-3. **OTP-pairing surface** (see "Device pairing: OTP URL flow"):
-   - New `pairing_otps` table + migration (token PK, install_op_id
-     FK, expires_at, used_at, created_at).
-   - New `GET /auth/pair?token=<otp>` route: validate, atomically
-     mark used, sign in as install operator, redirect to
-     `/auth/enrol-credential` with `Referrer-Policy: no-referrer`.
-   - `lobu init` writes `~/.lobu/install/<install-id>/pairing.url`
-     (mode `0600`) alongside `.env`.
-   - SPA settings: "Pair another device" mints a fresh OTP +
-     renders URL/QR.
-4. **Credential-enrolment route** (the OTP redirect target): offers
-   **passkey + passcode** side-by-side (both, either, or skip).
-   Inline form, no modal (per DESIGN_GUIDELINES §1 + §8). After
-   enrolment, normal SPA loads. Passcode path is **macOS-only** in
-   v3 (Keychain ACL + `kSecAttrAccessControlUserPresence`);
-   Linux/Windows equivalents are future work. Web SPA: passkey-only.
+3. **Pairing — extend `personal_access_tokens` + reuse
+   `/exchange-token`** (see "Device pairing" section above):
+   - Migration: `ALTER TABLE personal_access_tokens
+     ADD COLUMN single_use boolean NOT NULL DEFAULT false` + partial
+     index on `(single_use) WHERE single_use=true AND revoked_at IS NULL`.
+   - `PersonalAccessTokenService.verify()`: ~20 LOC to auto-revoke
+     on first successful verify when `single_use=true`.
+   - `ensureInstallOperator()` boot path also mints a single-use,
+     10-min-expiry PAT (`name='pairing'`) for the operator and
+     writes `~/.lobu/install/<id>/pairing.url` (mode `0600`)
+     containing the `/exchange-token?token=...&next=/auth/enrol-credential`
+     URL. Idempotent — no-op if the file exists and the PAT inside
+     still validates.
+   - **No** new `pairing_otps` table. **No** new `/auth/pair` route.
+     Existing `/exchange-token` (`auth/routes.ts:292`) handles the
+     redemption + redirect; existing `Referrer-Policy: no-referrer`
+     + relative-path-only `next` guard already apply.
+   - New `POST /auth/pair-token` route (~30 LOC, authenticated):
+     mints a fresh single-use PAT for the caller's own user, returns
+     `{ url }`. SPA "Pair another device" calls it and renders the
+     URL as QR + copyable string.
+4. **New SPA route `/auth/enrol-credential`** (the `next=` target
+   `/exchange-token` redirects to): offers **passkey + passcode**
+   side-by-side (both, either, or skip). Inline form, no modal
+   (DESIGN_GUIDELINES §1 + §8). After enrolment, normal SPA loads.
+   Passcode is **macOS-only** in v3 (Keychain ACL +
+   `kSecAttrAccessControlUserPresence`); Linux/Windows are future
+   work. Web SPA: passkey-only.
 5. **`/api/auth/config` returns `hasInstallOperator`** so the SPA
-   knows to show "Connect this device" vs `/sign-up`.
+   knows install pairing has happened (vs `/sign-up` for fresh
+   multi-tenant installs).
 6. **Exclude install operator from single-user-mode count** in
    `auth/index.tsx:567` and `auth/config.ts` `hasUser` query.
 7. **Reject `@lobu.local` signups** server-side so the synthetic
@@ -680,11 +805,15 @@ work has them available.
 8. **`/api/local-init` reframe**: require a valid session cookie;
    remove "zero users" branch.
 9. **E2E tests**: (a) `lobu init` → `lobu run` → `lobu login` works;
-   (b) menubar opens `pairing.url` → OTP redeems → passkey/passcode
-   enrolment works; (c) restart `lobu run` + `lobu login` still works
-   (operator persists); (d) wrong `ENCRYPTION_KEY` → 401;
-   (e) `/api/local-init` rejects unauthenticated callers;
-   (f) replay of a used OTP → `410 Gone`; (g) expired OTP → `410 Gone`.
+   (b) menubar opens `pairing.url` → `/exchange-token` redeems →
+   passkey/passcode enrolment works; (c) restart `lobu run` +
+   `lobu login` still works (operator persists); (d) wrong
+   `ENCRYPTION_KEY` → 401; (e) `/api/local-init` rejects
+   unauthenticated callers; (f) replay of a single-use PAT URL
+   → `401 invalid_token` (the same response `/exchange-token`
+   already returns for revoked tokens); (g) expired PAT
+   → `401 invalid_token`; (h) `POST /auth/pair-token` requires a
+   valid session.
 
 ## Out of scope for Stage 2
 
