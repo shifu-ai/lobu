@@ -223,6 +223,146 @@ then unlock with Touch ID") writes itself.
 
 ---
 
+## Device pairing: OTP URL flow
+
+Humans should never see or paste the raw `ENCRYPTION_KEY`. It is the
+cryptographic root (install operator's better-auth password +
+at-rest encryption key, both unchanged from v3 core), but the
+**user-visible entry point** for every non-CLI client is a one-time
+pairing URL. The CLI keeps its direct path because it has filesystem
+access to `.env`.
+
+### Flow
+
+```
+   lobu init
+       │
+       ├── writes .env (ENCRYPTION_KEY, today's behaviour)
+       │
+       └── writes ~/.lobu/install/<install-id>/pairing.url  (mode 0600)
+              │       contains a single-use OTP URL, ~10 min expiry
+              │
+              ▼
+   server boot → ensureInstallOperator() → INSERT into pairing_otps
+              {token, install_op_id, expires_at, used_at=NULL}
+              ▼
+   GET /auth/pair?token=<otp>
+       1. validate (exists, not expired, used_at IS NULL)
+       2. mark used_at = NOW()
+       3. sign caller in as install operator (Set-Cookie)
+       4. 302 → /auth/enrol-credential   (passkey | passcode)
+              ▼
+   user enrols on this device → SPA loads normally
+   subsequent opens: passkey / passcode (per addendum #1)
+```
+
+### What `lobu init` emits
+
+Unchanged: `.env` with `ENCRYPTION_KEY`. **Added**:
+`~/.lobu/install/<install-id>/pairing.url` (mode `0600`) containing
+one URL of the form `http://localhost:PORT/auth/pair?token=<otp>`.
+Single-use, ~10 min expiry. The file is the bridge between CLI-time
+provisioning and GUI-time first connection.
+
+### Server-side
+
+New `pairing_otps` table — five columns: `token` (PK, random 32
+bytes), `install_op_id` (FK → `user.id`), `expires_at`, `used_at`,
+`created_at`. New route `GET /auth/pair?token=<otp>`:
+
+1. Validate (`exists`, `expires_at > NOW()`, `used_at IS NULL`).
+2. Atomically mark `used_at = NOW()` (write-once, race-safe).
+3. Mint a better-auth session for `install_op_id` (same path
+   `/api/local-init` uses internally).
+4. 302 to `/auth/enrol-credential` so passkey/passcode enrolment
+   happens immediately after sign-in.
+
+### Per-client first-pairing
+
+- **Menubar (macOS)**: bundles the CLI. After install: internally
+  runs `lobu init`, reads `pairing.url` from disk, opens it in the
+  webview → SPA auths via OTP → user enrols passkey or passcode →
+  done. User never sees the OTP itself.
+- **Chrome extension**: same-machine case uses native-messaging to
+  read the pairing file → opens the URL in a popup → enrols a
+  passkey. Cross-machine case: SPA's "Pair another device" minted
+  a separate OTP, user opens that URL in the extension's browser.
+- **Second device (phone, other laptop)**: SPA settings → "Pair
+  another device" → mints a fresh OTP (different token, same
+  shape) → renders as QR or copyable URL → user opens on the
+  other device → enrols a credential on that device.
+
+### CLI is unaffected
+
+`lobu login` keeps reading `ENCRYPTION_KEY` directly from `.env`
+and POSTs to `/api/auth/sign-in/email`. The CLI runs on the install
+host with `.env` in reach; an OTP would be ceremony with no benefit.
+
+### Subsequent pairings
+
+SPA's "Pair another device" is the user-facing minter. Each
+invocation produces a fresh OTP row in `pairing_otps`; the init-time
+OTP is not reused.
+
+### Revocation
+
+Pairing OTPs are revocable: set `used_at` early to invalidate any
+in-flight token (the operator's "I lost the email I sent that URL
+to" recovery). Per-device PATs minted post-pairing are independently
+revocable via the existing `personal_access_tokens` table — revoking
+a device's PAT logs that device out without affecting other paired
+devices.
+
+### Security considerations
+
+- **No referer leak.** The redirect target (`/auth/enrol-credential`)
+  must not include the OTP. Strip it from the URL before
+  `Set-Cookie`. Apply `Referrer-Policy: no-referrer` on the
+  `/auth/pair` response (same hardening `/exchange-token` already
+  has at `auth/routes.ts:293`).
+- **Clear the pairing file after first use.** Once the OTP is
+  consumed, `lobu init` / menubar bootstrap deletes the
+  `pairing.url` file. A stale URL on disk after the OTP has expired
+  is harmless but noisy — clean up to avoid operator confusion.
+- **Server-enforced expiry.** Don't trust the URL's query string for
+  expiry hints — the `expires_at` check happens against the DB row.
+  Clients can render "expired" UI from a `410 Gone` response.
+- **One operator per OTP.** Multi-tenant: pairing OTPs are only
+  valid for the install operator they were minted for. The
+  `pairing_otps.install_op_id` constraint enforces this; the route
+  never resolves an OTP to a different user. Tenant operators get
+  their own auth surface (`/sign-up` / `/sign-in/email`), not OTP
+  pairing.
+
+### What stays the same
+
+- `ENCRYPTION_KEY` IS the install operator's better-auth password
+  (v3 core).
+- `ENCRYPTION_KEY` encrypts at-rest data (today's behaviour).
+- CLI reads `.env` directly; no OTP for CLI.
+- Passkey / passcode enrolment after first pairing — unchanged,
+  just driven by the OTP redirect instead of a paste prompt.
+
+### What changes
+
+- New `pairing_otps` table + small migration in Stage 2.
+- New `GET /auth/pair?token=<otp>` route — the only public-facing
+  surface for pairing.
+- `lobu init` writes `pairing.url` alongside `.env`.
+- SPA gains "Pair another device" in settings (Stage 2 UI).
+
+### Out of scope
+
+- Linux / Windows equivalents of macOS Keychain for passcode UX —
+  passkey works on all platforms via WebAuthn; passcode stays
+  macOS-first per addendum #1.
+- Server-side QR rendering — the server returns a URL; clients can
+  render QR locally if useful.
+- Multi-tenant pairing OTPs that mint sessions for non-install
+  operators — separate flow, not in v1.
+
+---
+
 ## `/api/local-init` — what changes, what stays
 
 **Today (post-PR #909):** loopback caller hits the endpoint, the
@@ -484,12 +624,14 @@ work has them available.
    `ensureInstallOperator()` at boot, which idempotently provisions
    a `principal_kind='install_operator'` user with the hashed
    ENCRYPTION_KEY as their better-auth password.
-3. **Web/menubar first-open: "paste install secret" → sign in →
-   immediately enrol a passkey (or a 4–6 digit passcode, or both).**
-   Subsequent opens on that device unlock via the enrolled convenience
-   credential; the install secret is never re-prompted. 1Password
-   Secret Key pattern. The passcode is a UI lock over a Keychain-
-   stored PAT — **never a KDF input** — so its low entropy is fine.
+3. **Humans never see the raw `ENCRYPTION_KEY` on GUI clients.**
+   `lobu init` emits a one-time pairing URL (`~/.lobu/install/<id>/pairing.url`,
+   mode 0600). Menubar / Chrome extension / second device open that
+   URL → server validates the OTP, signs in as the install operator,
+   redirects to credential enrolment (passkey or 4–6 digit passcode,
+   or both). The passcode is a Keychain ACL over a stored PAT —
+   **never a KDF input** — so its low entropy is fine. CLI is the
+   only client that reads `ENCRYPTION_KEY` directly from `.env`.
 4. **`/api/local-init` becomes a session-to-PAT exchange.** No
    anonymous mint. CSRF / loopback checks stay as defence-in-depth.
    The "zero users → /sign-up redirect" branch dies (operator is
@@ -513,28 +655,36 @@ work has them available.
    `/api/auth/sign-in/email` with synthetic email + ENCRYPTION_KEY,
    exchange session for PAT, persist to contexts.json. Existing
    `--token` path stays for PATs.
-3. **Web/menubar "Connect this device" screen**: new route
-   (e.g. `/auth/connect-install`), single password-style input,
-   POST to better-auth sign-in, then redirect to a convenience-
-   enrolment route offering **passkey + passcode** side-by-side
-   (both, either, or skip). Inline form, no modal (per
-   DESIGN_GUIDELINES §1 + §8). After enrolment, normal SPA loads.
-   Passcode path is **macOS-only** in v3 (Keychain ACL +
-   `kSecAttrAccessControlUserPresence`); Linux/Windows equivalents
-   are future work. Web SPA: passkey-only.
-4. **`/api/auth/config` returns `hasInstallOperator`** so the SPA
+3. **OTP-pairing surface** (see "Device pairing: OTP URL flow"):
+   - New `pairing_otps` table + migration (token PK, install_op_id
+     FK, expires_at, used_at, created_at).
+   - New `GET /auth/pair?token=<otp>` route: validate, atomically
+     mark used, sign in as install operator, redirect to
+     `/auth/enrol-credential` with `Referrer-Policy: no-referrer`.
+   - `lobu init` writes `~/.lobu/install/<install-id>/pairing.url`
+     (mode `0600`) alongside `.env`.
+   - SPA settings: "Pair another device" mints a fresh OTP +
+     renders URL/QR.
+4. **Credential-enrolment route** (the OTP redirect target): offers
+   **passkey + passcode** side-by-side (both, either, or skip).
+   Inline form, no modal (per DESIGN_GUIDELINES §1 + §8). After
+   enrolment, normal SPA loads. Passcode path is **macOS-only** in
+   v3 (Keychain ACL + `kSecAttrAccessControlUserPresence`);
+   Linux/Windows equivalents are future work. Web SPA: passkey-only.
+5. **`/api/auth/config` returns `hasInstallOperator`** so the SPA
    knows to show "Connect this device" vs `/sign-up`.
-5. **Exclude install operator from single-user-mode count** in
+6. **Exclude install operator from single-user-mode count** in
    `auth/index.tsx:567` and `auth/config.ts` `hasUser` query.
-6. **Reject `@lobu.local` signups** server-side so the synthetic
+7. **Reject `@lobu.local` signups** server-side so the synthetic
    operator email namespace can't be squatted.
-7. **`/api/local-init` reframe**: require a valid session cookie;
+8. **`/api/local-init` reframe**: require a valid session cookie;
    remove "zero users" branch.
-8. **E2E tests**: (a) `lobu init` → `lobu run` → `lobu login` works;
-   (b) menubar "paste install secret" → passkey enrolment works;
-   (c) restart `lobu run` + `lobu login` still works (operator
-   persists); (d) wrong `ENCRYPTION_KEY` → 401; (e) `/api/local-init`
-   rejects unauthenticated callers.
+9. **E2E tests**: (a) `lobu init` → `lobu run` → `lobu login` works;
+   (b) menubar opens `pairing.url` → OTP redeems → passkey/passcode
+   enrolment works; (c) restart `lobu run` + `lobu login` still works
+   (operator persists); (d) wrong `ENCRYPTION_KEY` → 401;
+   (e) `/api/local-init` rejects unauthenticated callers;
+   (f) replay of a used OTP → `410 Gone`; (g) expired OTP → `410 Gone`.
 
 ## Out of scope for Stage 2
 
