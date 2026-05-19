@@ -1546,6 +1546,24 @@ CREATE TABLE public.organization_lobu_links (
 );
 
 --
+-- Name: passkey; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.passkey (
+    id text NOT NULL,
+    name text,
+    "publicKey" text NOT NULL,
+    "userId" text NOT NULL,
+    "credentialID" text NOT NULL,
+    counter bigint DEFAULT 0 NOT NULL,
+    "deviceType" text NOT NULL,
+    "backedUp" boolean DEFAULT false NOT NULL,
+    transports text,
+    "createdAt" timestamp with time zone DEFAULT now() NOT NULL,
+    aaguid text
+);
+
+--
 -- Name: pending_interactions; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -2848,6 +2866,13 @@ ALTER TABLE ONLY public.organization
 
 ALTER TABLE ONLY public.organization
     ADD CONSTRAINT organization_slug_key UNIQUE (slug);
+
+--
+-- Name: passkey passkey_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.passkey
+    ADD CONSTRAINT passkey_pkey PRIMARY KEY (id);
 
 --
 -- Name: pending_interactions pending_interactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
@@ -4294,6 +4319,18 @@ CREATE INDEX oauth_tokens_token_hash_idx ON public.oauth_tokens USING btree (tok
 CREATE INDEX oauth_tokens_user_id_idx ON public.oauth_tokens USING btree (user_id);
 
 --
+-- Name: passkey_credential_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX passkey_credential_id_idx ON public.passkey USING btree ("credentialID");
+
+--
+-- Name: passkey_user_id_idx; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX passkey_user_id_idx ON public.passkey USING btree ("userId");
+
+--
 -- Name: personal_access_tokens_active_idx; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5067,6 +5104,13 @@ ALTER TABLE ONLY public.organization_lobu_links
     ADD CONSTRAINT organization_lobu_links_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES public.organization(id) ON DELETE CASCADE;
 
 --
+-- Name: passkey passkey_userId_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.passkey
+    ADD CONSTRAINT "passkey_userId_fkey" FOREIGN KEY ("userId") REFERENCES public."user"(id) ON DELETE CASCADE;
+
+--
 -- Name: pending_interactions pending_interactions_organization_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -5343,5 +5387,6 @@ INSERT INTO public.schema_migrations (version) VALUES
     ('20260518050000'),
     ('20260518060000'),
     ('20260518070000'),
+    ('20260519000000'),
     ('20260519020000'),
     ('20260519020001');
