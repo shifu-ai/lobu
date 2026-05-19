@@ -1999,7 +1999,7 @@ CREATE TABLE public."user" (
 -- Name: TABLE "user"; Type: COMMENT; Schema: public; Owner: -
 --
 
-COMMENT ON TABLE public."user" IS 'Better-auth user table — one row per signed-in human. Profile fields (name, email, image) flow from the auth provider. Membership in organizations lives in the member table.';
+COMMENT ON TABLE public."user" IS 'Better-auth user table — one row per principal that can authenticate. Most rows are signed-in humans (principal_kind=''human''); the auto-provisioned install operator (principal_kind=''install_operator'') is a system actor whose better-auth password is the install''s ENCRYPTION_KEY. Profile fields (name, email, image) flow from the auth provider. Membership in organizations lives in the member table.';
 
 --
 -- Name: user_auth_profiles; Type: TABLE; Schema: public; Owner: -
