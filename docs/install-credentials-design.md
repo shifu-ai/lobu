@@ -1,498 +1,575 @@
-# Install Operator Credentials — design (A1 redesign)
+# Install Operator Credentials — design (A1 v3)
 
-Status: **draft**. Supersedes the original "install identity at boot" spike
-(`docs/install-identity-design.md` — not landed). The A1 brief was rewritten
-after design review surfaced two structural problems with the original
-direction.
+Status: **draft**. Third revision of the A1 design. Supersedes the
+"password-at-init" model (v2, commits `5fbef11a` + `f9c883d5` on this
+branch) and the earlier "install identity at boot" spike
+(`docs/install-identity-design.md`, never landed).
 
-This doc is design-only. **No implementation.** Reviewed and approved here,
-implementation follows as a separate PR.
-
----
-
-## Why the original A1 was abandoned
-
-Original A1 ("install identity at boot"): provision a `principal_kind='install'`
-user row at server boot, mint install-scoped PATs for loopback callers via
-`POST /api/local-init`.
-
-Two problems:
-
-1. **The trust boundary was network-topology, not cryptographic.** Codex
-   flagged this from the start. A loopback endpoint that hands out an
-   admin-grade PAT to any local caller means "any same-host process can
-   become Lobu." Same-host unprivileged users (multi-tenant Linux box,
-   container with multiple UIDs, shared dev VM) can call `/api/local-init`
-   and walk away with admin. Container port-maps and forward-stripping
-   reverse proxies amplify the attack surface. The mitigations we
-   considered — Unix-domain sockets, bootstrap-token files at `0600` —
-   are real defences, but they're patching a structural issue: the
-   endpoint had no secret to verify.
-2. **The "install" principal is a new audit class.** Stage 2 of the
-   original plan needed: `principal_kind` column, audit-label rendering
-   in the events browser, a claim-flow to fork install-owned events into
-   the first human's workspace, and special-casing the single-user-mode
-   counter. All of that is real work paid for by a principal class that
-   exists *only* because the CLI couldn't bootstrap a credential.
-
-The redesign replaces the install identity with **a real user with at
-least one credential, established at first install action.** Trust
-becomes cryptographic (you need the password / passkey to sign in),
-audit becomes attribution-by-operator-name (no "Lobu install" pseudo-
-user), and the single-user-mode counter is unchanged.
+This doc is design-only. **No implementation.** Reviewed and approved
+here, implementation follows as a separate PR.
 
 ---
 
-## Refined model: password-at-init with flexible first credential
+## TL;DR
 
-The install operator is **a normal `better-auth` user**. The user has
-one or more credentials attached (password, passkey, magic-link, OAuth).
-Better Auth supports all of these natively. **The TYPE of the first
-credential depends on which install channel registers the user.**
+**`ENCRYPTION_KEY` is the install operator's auth credential.** The
+random 32-byte hex value that `lobu init` already writes to `.env`
+(packages/cli/src/commands/init.ts:413) doubles as the install
+operator's password in better-auth. Same secret unlocks at-rest
+encryption AND signs into the web/CLI. No separate password prompt,
+no separate vault key, no separate v2 migration.
 
-### Install channels and their first credential
+This collapses what previous revisions split into "v1 auth" and
+"v2 encryption-at-rest." They were always the same thing.
 
-| Channel | First credential | Subsequent credentials |
+---
+
+## Why this is better than v2 (password-at-init)
+
+| Concern | v2 (password-at-init) | v3 (ENCRYPTION_KEY-as-password) |
 |---|---|---|
-| `lobu init` (CLI scaffold, no webview) | Password (prompted at init) | Passkey via web settings; OAuth via web settings |
-| Menubar / web `/sign-up` (first-open) | Passkey (WebAuthn enrolment) | Password via web settings ("Enable CLI access"); OAuth |
-| Headless CI / Docker | Password (env or stdin) via `lobu init --yes --mode <mode> --password "$LOBU_PASSWORD"` | — |
-| Multi-tenant cloud (operator brings own users) | Admin bootstrap token (separate design, see §6) | Each tenant user signs up normally via web |
+| Scaffold UX | Interactive password prompt at `lobu init` | None — `lobu init` is silent like today |
+| Number of irreplaceable secrets | 2 (password + ENCRYPTION_KEY) | 1 (ENCRYPTION_KEY) |
+| Recovery story | Recovery-key file + magic link, new design | Same as today — `ENCRYPTION_KEY` was already irreplaceable |
+| v2 vault migration | Wrap ENCRYPTION_KEY with password-derived key | Not needed — auth-credential IS the vault key from day one |
+| Key rotation semantics | Two independent rotations | Rotate once → revokes auth AND invalidates at-rest reads ("rotate = nuke") |
+| First-device web/menubar UX | Sign-up with email + passkey enrolment | "Paste install secret" once → enrol passkey, never see it again (1Password Secret Key pattern) |
 
-The model is **additive** — credentials layer on. A CLI-first user who
-later installs the menubar uses their existing password to sign in
-through the menubar's password form, then is offered passkey enrolment
-as a convenience. A menubar-first user who later wants CLI goes to web
-settings → "Enable CLI access" → sets a password retroactively. No
-forking, no second account.
-
-### What this replaces
-
-- **No install-identity principal class.** Every actor is a real human
-  user (or, in multi-tenant cloud mode, a real human in their tenant org).
-- **No install-scoped PAT minting from `/api/local-init` to unauthenticated
-  callers.** The endpoint still exists for the menubar — but it now
-  requires a valid Better Auth session cookie (the menubar already holds
-  one after passkey sign-in). The "zero users yet, mint anyway" branch
-  is gone.
-- **No boot-time provisioning of synthetic users.** First-boot DB is
-  empty until the operator runs `lobu init` or visits `/sign-up`.
+The 1Password / Bitwarden analogy isn't decoration — it's the
+operative model. `ENCRYPTION_KEY` plays the role of 1Password's
+**Secret Key**: an unmemorable, machine-generated, never-rotated-
+unless-you-mean-it credential that you paste **once per new device**
+and is replaced by a passkey thereafter.
 
 ---
 
-## CLI flow — `lobu init`
-
-`lobu init` is the entrypoint for non-menubar installs. It does
-three things in order:
-
-1. **Scaffold project files** (`lobu.toml`, `agents/`, `.env`). This part
-   already works in the existing scaffold flow.
-2. **Set the install mode.** Writes `LOBU_SINGLE_USER=1` or `=0` to the
-   project `.env`. Default is `1` (single-user). Override with
-   `--mode multi-user`.
-3. **Mint the first operator's credential.**
-   - Interactive mode: prompt for email, prompt for password (with
-     confirm + strength check). Hash via better-auth's credential
-     hasher and insert the user + account row directly into the DB.
-     This is the only place we write a credential outside of better-auth's
-     HTTP flow; it's a one-shot bootstrap, not a long-lived path.
-   - `--yes` mode (CI): require `--password "$LOBU_PASSWORD"` and
-     `--email "$LOBU_EMAIL"`. No prompts; fail if either is missing.
-   - `--mode multi-user`: skip step 3 entirely. No initial user is
-     created. The first menubar/web visitor signs up normally.
-
-After `lobu init` finishes, the operator can run `lobu run` to boot the
-server. The first `lobu login --password "$PASSWORD"` call POSTs to
-`/api/auth/sign-in/email` (Better Auth's built-in handler), receives a
-session, and exchanges it for a PAT through `/api/local-init`.
-
-### Why direct-insert is OK for `lobu init`
-
-Better Auth's HTTP signup path requires the server to be running. `lobu
-init` runs **before** the server boots, against a fresh DB. The
-alternative would be `lobu init` → start server → HTTP signup → stop
-server, which is fragile and produces a worse error story when the
-signup fails. Direct insert is one place using the same hashing
-function Better Auth uses internally; we re-export it from the auth
-module for this purpose.
-
----
-
-## Menubar / web flow — `/sign-up` with passkey-first
-
-The menubar bundles the SPA. On first open against an empty install:
-
-1. SPA detects `hasUser=false` (via the existing `/api/auth/config`
-   endpoint) and shows the `/sign-up` page.
-2. The sign-up form offers **passkey enrolment** as the primary path —
-   "Use Touch ID / Face ID / security key." Email + display name only;
-   no password field.
-3. Better Auth's passkey plugin (`@better-auth/passkey`, already wired
-   in `auth/index.tsx:536`) completes the WebAuthn ceremony, creates
-   the user, attaches the passkey credential.
-4. Personal org is provisioned by the existing `databaseHooks.user.create.after`
-   hook. Default agent is provisioned. No claim flow.
-
-Password fallback is offered for users whose browser doesn't support
-WebAuthn, or who want a password for CLI access from the start. The
-existing email+password flow handles this — no new code.
-
----
-
-## Web settings — "Enable CLI access"
-
-A menubar-first user who later wants CLI sees a new section in their
-account settings:
-
-> **CLI access**
-> The Lobu CLI signs in with a password. You currently have no password
-> set. Click below to choose one.
->
-> [Set password]
-
-Inline form (per DESIGN_GUIDELINES §1 — embedded, not modal). On submit,
-hits `/api/auth/set-password` (better-auth's built-in). After save, the
-operator can run `lobu login --password "$X"` from the CLI.
-
-The same section also lists active PATs (already exists) — adding
-"Reset CLI password" as an inline action when a password exists is a
-small additive change.
-
----
-
-## `LOBU_SINGLE_USER` — where it lives
-
-Today: `LOBU_SINGLE_USER=1` is set by `start-local.ts` line 113-115 if
-unset, persisted to the project `.env` only when the operator manually
-writes it. The auth hook reads it from `c.env` (`auth/index.tsx:567`).
-
-Under the redesign: **stays in `.env`, owned by `lobu init`.** Reasons:
-- `.env` is the source of truth the operator already edits. Putting
-  install-mode in the DB and `.env` creates two places to disagree.
-- `lobu init` already writes `.env`; one more line is trivial.
-- Multi-tenant cloud installs override via env at deploy time
-  (Kubernetes `Env`, Docker `-e`), which works today.
-
-The auth hook's check is unchanged. The redesign doesn't move
-`LOBU_SINGLE_USER` into the DB.
-
----
-
-## What happens to PR #902 ("first signup = install identity")
-
-PR #902 removed the pre-seeded `bootstrap-user` row and added a hook
-that lets the first `/sign-up` claim the install's single-user slot.
-**Survives in spirit.** The new model:
-
-- `bootstrap-user` stays gone (PR #902 was right to remove it).
-- "First signup = the install's operator" is the same outcome — there's
-  just no name for it (`principal_kind='install'`). The first user IS
-  the install operator; subsequent signups are blocked by the
-  single-user-mode hook.
-- The `/api/local-init` "no_user_yet" branch is **revised**, not
-  removed: when `LOBU_SINGLE_USER=1` and zero users exist, return a
-  pointer at `lobu init` for CLI callers (`X-Lobu-Client: cli`) and
-  `/sign-up` for browser callers. The CLI is then expected to prompt
-  the operator to run `lobu init`, which it can do from the same
-  process.
-
-The Stage-2 work in PR #902 that wired the SPA's `/sign-up` route +
-config-endpoint copy + `signup_url` redirect target is untouched.
-
----
-
-## `/api/local-init` after the redesign
-
-The endpoint stays, with two changes:
-
-1. **No more anonymous loopback mint.** Today, a loopback caller with
-   `X-Lobu-Client: anything` gets a session + PAT for "whichever user
-   exists." After the redesign, this branch requires a valid existing
-   session cookie (or a `?token=` exchange) — i.e. the caller must
-   already be authenticated through Better Auth. The endpoint becomes
-   a **session-to-PAT exchange** for clients that hold a session token
-   from password / passkey sign-in but need a long-lived PAT for
-   bearer auth.
-
-2. **Loopback peer check + X-Lobu-Client header stay**, downgraded
-   from "primary trust boundary" to "CSRF defence-in-depth." Cryptographic
-   trust (the session/password) is the primary; the network checks
-   block CSRF and accidental LAN exposure.
-
-The CLI flow becomes:
+## The boot flow
 
 ```
-lobu login --password "$X"
-  → POST /api/auth/sign-in/email { email, password }
-    → Set-Cookie: better-auth.session_token=<...>
-  → POST /api/local-init  (with the cookie)
-    → 200 { session_token, device_token (PAT) }
-  → CLI persists device_token to ~/.config/lobu/credentials.json
+$ lobu init my-install
+  → writes .env with ENCRYPTION_KEY=<32 random bytes hex>    (today, unchanged)
+  → writes lobu.toml, agents/, etc.                          (today, unchanged)
+  No prompts. No interactive steps.
+
+$ lobu run
+  → loads .env (today)
+  → migrates DB (today)
+  → ensureInstallOperator()  ← NEW, idempotent
+      if no user has principal_kind='install_operator':
+        - INSERT user (id='operator_<rand>', email='operator@<hostname>.local',
+                        name='Install operator', principal_kind='install_operator')
+        - INSERT account (providerId='credential', userId=<above>,
+                          password=better_auth_hash(ENCRYPTION_KEY))
+        - run databaseHooks.user.create.after → personal org + default agent
+      else:
+        - no-op
+  → start HTTP listener
 ```
 
-`lobu login --token "$PAT"` continues to work for users who minted a
-PAT from web settings — no password needed.
+`ensureInstallOperator()` is idempotent. It runs every boot. On the
+first boot of a fresh install it provisions the operator; on every
+subsequent boot it sees the row and returns immediately. **The hash
+in the `account` row is the trust anchor** — anyone who can produce
+the same plaintext can sign in.
+
+### Why this isn't network-topology trust
+
+The original "install identity at boot" A1 was network-topology
+(loopback-only `/api/local-init` mints a PAT). v3 is cryptographic:
+the secret is a 256-bit random value held in `.env`. An attacker
+needs to read `.env` itself (which already grants at-rest decrypt
+today). No new trust boundary.
+
+Same-host unprivileged user on a multi-tenant Linux box? They need
+read access to `.env`. If they have that, they already had at-rest
+decrypt today — no regression. If they don't, `/api/auth/sign-in/email`
+returns 401 like for any wrong password.
 
 ---
 
-## Token lifecycle and audit
+## CLI auth — `lobu login`
 
-**Token storage**: unchanged. Same `personal_access_tokens` table.
-PATs are owned by real human users.
+```
+$ lobu login                    # no args, on the install host
+  → reads .env, grabs ENCRYPTION_KEY
+  → POST /api/auth/sign-in/email { email: 'operator@<hostname>.local',
+                                    password: ENCRYPTION_KEY }
+  → receives Set-Cookie: better-auth.session_token
+  → POST /api/local-init (with cookie)
+  → receives { device_token: <owl_pat_*>, ... }
+  → persists in ~/.lobu/contexts.json under context 'local'  (today, unchanged)
+```
 
-**Revocation**: unchanged. Same admin UI, same `revoke()` path. There's
-no install-identity PAT to special-case.
+The email is **derived deterministically from the install** (e.g.
+`operator@<hostname>.local` or `operator@<install_id>.lobu.local`).
+The CLI doesn't need to be told what it is; it computes the same
+value the server used at provision time.
 
-**Audit labels**: events created by automation (watcher runs, scheduled
-tasks, agent execution) attribute to whichever **human operator** owns
-the agent. Today's `metadata.author_name` field already carries the
-user's display name; the events browser already renders this. No new
-column, no `[system]` badge to design.
+`lobu login --token <pat>` (no `.env`, cloud/cross-machine case)
+**unchanged** — paste a PAT minted from web settings.
 
-The one wrinkle: in multi-tenant cloud mode (§6), automation runs
-under an admin-bootstrap token that doesn't belong to any specific
-tenant operator. That path needs an explicit "system" attribution —
-addressed in §6 below.
+### What happens if `.env` is missing or corrupted
+
+`lobu login` errors out: "ENCRYPTION_KEY not found in .env — is this
+a Lobu project directory?" Same error the rest of the CLI produces
+today when the project isn't set up. No new failure mode.
 
 ---
 
-## Multi-tenant mode — admin bootstrap token
+## Web / menubar — first-open flow
 
-`lobu init --mode multi-user` skips the credential prompt. The result
-is a server that boots empty; the first menubar/web visitor signs up
-and becomes the first human, no single-user cap.
+The menubar bundles the SPA. On first open against an install that
+has a `principal_kind='install_operator'` row but no human session
+on this device:
 
-But automation deployment is still needed: a Kubernetes Job that runs
-`lobu apply` against the multi-tenant install at deploy time has no
-user to sign in as. The fix: **a one-time admin bootstrap token,
-generated by `lobu init --mode multi-user`** and stored at
-`$LOBU_DATA_DIR/.admin-bootstrap-token` (perms `0600`).
+1. SPA hits `/api/auth/config`, sees `hasInstallOperator=true,
+   currentDeviceHasSession=false`.
+2. Renders a **"Connect this device" screen**:
+   > **Connect your Lobu install**
+   >
+   > Paste your install secret to set up this device. You'll find it
+   > as `ENCRYPTION_KEY` in your project's `.env`.
+   >
+   > [paste field] [Connect]
+3. On submit, POST to `/api/auth/sign-in/email` with the synthetic
+   operator email + pasted value. Set-Cookie returns.
+4. SPA immediately routes to **passkey enrolment** (better-auth's
+   `passkey` plugin, already wired at auth/index.tsx:536):
+   > **Set up Touch ID / Face ID for this device**
+   >
+   > Next time you open Lobu here, you'll sign in with biometrics —
+   > you won't need the install secret again.
+   >
+   > [Enable passkey] [Skip]
+5. After passkey enrolment (or skip), normal SPA loads.
 
-The token is a single-use admin grant: the first time it's used, it
-mints an "admin" user (`is_admin=true` column on `user`), the token
-self-destructs (deleted from the file + a corresponding `revoked_at`
-in the DB), and from then on the admin signs in via password like
-anyone else. The admin user owns automation events; the audit label
-is just their display name (`"Admin"` or whatever they pick).
+**Subsequent opens on the same device**: passkey or passcode (see
+below). The install secret is never re-prompted on this device. It's
+the bootstrap credential, not a daily-driver.
 
-Design of this admin-token mechanism is **out of scope for this PR**
-— it's a separate concern that the multi-tenant cloud story owns. This
-doc notes it to confirm the redesign handles the case without forcing
-the install-identity principal class back in.
+**Connecting another device**: same flow — paste once, enrol
+passkey/passcode, done. The user can have N device passkeys all
+bound to the same `install_operator` user row.
+
+### Convenient unlock: passkey or passcode
+
+After the initial sign-in (step 3 above), the menubar offers
+**post-sign-in** enrolment for everyday convenience. Both options
+unlock a PAT stored in the OS keychain; neither changes the
+better-auth credential layer:
+
+| Option | What it does | Storage |
+|---|---|---|
+| **Passkey** (recommended) | WebAuthn, Touch ID / Face ID | macOS Keychain, Secure Enclave-backed where available |
+| **Passcode** (4–6 digit PIN) | Releases a stored PAT from Keychain after PIN check | macOS Keychain with `kSecAttrAccessControlUserPresence` + PIN gate; Keychain enforces rate-limit + lockout |
+
+Both can be enrolled in parallel — either unlocks. The user can
+disable one in settings. If neither enrolment finishes, the menubar
+falls back to "paste install secret each open" — mildly annoying
+but secure.
+
+Daily flow with a passcode enrolled: user opens menubar → passcode
+prompt → Keychain releases the stored PAT → menubar authenticates
+to the gateway with that PAT. The passcode never travels off-device
+and never touches the gateway.
+
+**Security considerations.**
+
+- **The passcode is NOT a KDF input.** A 4–6 digit PIN has ~13–20
+  bits of entropy and would be brute-forceable offline in minutes
+  if used to derive cryptographic material against disk-stored
+  ciphertext. The passcode is **a UI lock over a stored PAT**, not
+  an alternative auth credential at the better-auth layer.
+- **Rate limiting belongs to the OS.** macOS Keychain has
+  hardware-backed throttling and progressive lockout for ACL
+  checks; we delegate to it rather than implementing our own
+  rate-limited PIN store. Same reason iOS uses the Secure Enclave
+  for the device passcode.
+- **`ENCRYPTION_KEY` remains the root of trust.** Passkey + passcode
+  are device-local conveniences over a PAT that was issued *because*
+  the operator proved possession of `ENCRYPTION_KEY` once. Revoke
+  the PAT (web settings) and both convenience unlocks stop working
+  for that device.
+- **Cross-device passcode sync is out of scope.** Each device has
+  its own Keychain entry. A passcode set on the laptop doesn't
+  unlock the desktop menubar; the desktop sets its own.
+
+**Platform scope.** Passcode path is **macOS-first** because the
+menubar lives there and Keychain ACLs make it cheap. Linux Secret
+Service and Windows DPAPI have rough equivalents but each needs
+its own ACL design — flagged as future work, not a v3 blocker.
+**The web SPA does not get a passcode option** — browsers don't
+expose Keychain ACL equivalents portably; passkey is the answer
+there.
+
+### Why this is the 1Password pattern
+
+1Password's Secret Key:
+- Generated once at account creation, never changes.
+- Stored in the 1Password app's vault and the user's emergency kit.
+- Required once per device, then replaced by biometrics.
+- Combined with the master password for at-rest decryption.
+
+v3's `ENCRYPTION_KEY`:
+- Generated once at `lobu init`, never changes.
+- Stored in `.env` (the operator's vault — backed up with the
+  project; or stored in their password manager).
+- Required once per device, then replaced by passkey.
+- Currently encrypts at-rest secrets; v3 adds "also unlocks auth."
+
+The mental model maps cleanly. The marketing-page sentence ("Lobu
+gives you a vault-grade install secret — paste it once per device,
+then unlock with Touch ID") writes itself.
+
+---
+
+## `/api/local-init` — what changes, what stays
+
+**Today (post-PR #909):** loopback caller hits the endpoint, the
+server looks up "the single user," mints a session + worker PAT.
+No password check anywhere in the path.
+
+**Under v3:** the endpoint becomes a **session-to-PAT exchange**:
+
+1. Caller must already hold a valid `better-auth.session_token`
+   cookie (obtained from `/api/auth/sign-in/email` with the
+   `ENCRYPTION_KEY`).
+2. Server reads the session, identifies the user, mints/returns a
+   worker-scoped PAT bound to that user + their personal org.
+3. Existing loopback peer check + `X-Lobu-Client` header gate stay
+   as **defence-in-depth** (CSRF + accidental LAN exposure), not as
+   the primary trust boundary.
+
+The "zero users → no_user_yet → /sign-up" branch (auth/routes.ts:431)
+**goes away**. Once `ensureInstallOperator()` lands, there is always
+a user; the legacy 404 case is unreachable.
+
+---
+
+## Multi-tenant mode
+
+`LOBU_SINGLE_USER` semantics (existing toggle, set by start-local.ts:113-115):
+
+- `=1` (default): only the install operator + their passkey-enrolled
+  devices. The `databaseHooks.user.create.before` hook
+  (auth/index.tsx:567) blocks additional `/sign-up` calls. Install
+  operator is the lone human-facing identity.
+- `=0` (multi-tenant cloud): install operator still exists (still
+  owns at-rest encryption), but `/sign-up` is open. Each tenant
+  signs up normally with their own email + password / passkey /
+  OAuth. Their auth flows **don't touch `ENCRYPTION_KEY`** — they
+  authenticate against better-auth normally.
+
+The install operator in multi-tenant mode is the **admin / system
+actor**: it owns the at-rest key material, it's what `lobu apply`
+authenticates as in CI deployments (paste `ENCRYPTION_KEY` as a CI
+secret), and it doesn't appear in tenant-facing UI.
+
+### Excluding the install operator from the single-user counter
+
+The `before` hook at auth/index.tsx:567 counts existing users to
+enforce single-user mode. Install operator must be excluded from
+that count (it isn't "a human user" for the cap). One extra
+predicate in the count query:
+
+```sql
+SELECT count(*)
+  FROM "user"
+ WHERE id <> 'bootstrap-user'
+   AND principal_kind <> 'install_operator'
+```
+
+`principal_kind` is the same discriminator the original install-identity
+spike proposed — but instead of being a new audit class, here it's
+**purely an internal flag** to exclude the operator from
+human-facing counts. It doesn't change audit labels (events
+attribute by author name; install operator's name is "Install
+operator" and renders normally).
+
+---
+
+## Key rotation
+
+Rotating `ENCRYPTION_KEY` today already invalidates at-rest reads
+(secrets in `secret-proxy` and the secrets table can't be decrypted
+with the new value). Under v3, rotation **also invalidates auth**:
+the install operator's stored password hash matches the old value;
+the new value won't sign in.
+
+This is desirable. "Rotate = nuke" is the vault property — losing
+trust in `ENCRYPTION_KEY` means losing trust in everything it
+gated. Half-rotated states (auth invalidated, secrets still
+readable) would be a worse failure mode.
+
+### Mechanical rotation (operator wants to change keys)
+
+Two paths:
+
+1. **Backup-restore**: dump → rotate `ENCRYPTION_KEY` → re-encrypt
+   all secrets with the new key → re-hash the install operator's
+   account row with the new value → restore. This is the documented
+   procedure; it's a deliberate operation, not a one-click feature.
+2. **Forget-and-recreate**: nuke `.env`, re-run `lobu init`,
+   re-onboard all integrations. For a fresh `/tmp` install with
+   nothing to lose, fastest path.
+
+v3 doesn't ship rotation tooling. The doc captures it so future
+work knows what "rotation" means.
+
+---
+
+## Migration of existing installs
+
+### Installs that already have web-signed-up users
+
+(PR #902-era installs where the operator signed up via `/sign-up`
+with email + password.) These keep working **independently**. Their
+better-auth credential rows are unchanged, their sign-in still works.
+
+The install operator is added **alongside** them on next boot
+(`ensureInstallOperator()` provisions the row if missing). The
+existing humans don't lose access; the install operator is just an
+additional system actor.
+
+In single-user mode this means the deployment effectively has two
+"users": the install operator (auth via ENCRYPTION_KEY) and the
+one human (auth via their original password/passkey). The
+single-user cap excludes the install operator (per the
+`principal_kind` predicate above), so the human count stays at 1.
+
+### Installs minted via the old `/api/local-init` anonymous-mint path
+
+(Where a `user` row exists but has no credentials — only the
+session+PAT minted by the legacy local-init.) Two-step migration:
+
+1. `ensureInstallOperator()` adds the install operator row.
+2. If the SPA detects `hasUser=true && noCredentials=true` for the
+   pre-existing row, it routes that user to "Set a password" before
+   showing UI (mirroring PR #917 Q5).
+
+Both rows coexist; the operator can use either to sign in.
+
+### Installs without an `ENCRYPTION_KEY` in `.env` yet
+
+Pre-`lobu init` installs (dev checkouts that ran `make dev` directly
+in the monorepo). The dev path uses
+`LOBU_ALLOW_EPHEMERAL_ENCRYPTION_KEY=1` to generate a per-boot key.
+**Under v3, the install operator is provisioned with whatever value
+the server boots with that session.** Restarting the server with a
+fresh ephemeral key invalidates the operator's auth — which is
+correct, since restarting also invalidates at-rest reads.
+
+Dev contributors using `make dev` should set a real `ENCRYPTION_KEY`
+in `.env.local` if they want sessions to survive reboots. This is
+already true today for any at-rest-encrypted data; v3 just extends
+"survive reboots" to "login survives reboots."
+
+---
+
+## Vault semantics — what changes
+
+Today:
+- `.env` `ENCRYPTION_KEY` decrypts at-rest secrets in `secret-proxy`,
+  the secrets table, etc.
+- Better-auth credentials are independent. Anyone with a valid
+  password can sign in; ENCRYPTION_KEY isn't checked.
+
+v3:
+- `.env` `ENCRYPTION_KEY` decrypts at-rest secrets (unchanged).
+- `.env` `ENCRYPTION_KEY` is also the install operator's password.
+  Anyone who can produce it can sign in as the operator.
+- The two properties are now coupled: lose `ENCRYPTION_KEY` → lose
+  both. Rotate it → invalidate both.
+
+This is the **vault property**. The auth credential and the
+encryption credential are the same atom; v1 and v2 collapse into a
+single design.
+
+### What's still TODO (out of scope for v3)
+
+v3 doesn't change how at-rest encryption works in `secret-proxy`
+(packages/server/src/lobu/gateway.ts). The plumbing stays. The
+**only thing v3 adds** is the install operator row + provisioning
+hook + login-with-ENCRYPTION_KEY UX. The encryption code path is
+untouched.
+
+Future enhancements that this design enables but doesn't ship:
+- OS keychain integration (macOS Keychain, Linux Secret Service,
+  Windows DPAPI) — store `ENCRYPTION_KEY` outside `.env` per device.
+- `MASTER_KEY` in-memory hardening (sealed boxes, `mlock`).
+- Per-operator vault sub-keys (1Password Teams style).
+
+None of these block v3 from shipping.
 
 ---
 
 ## Open questions
 
-### Q1 — Menubar-first headless variant
+### Q1 — Menubar-first headless CLI handoff
 
-**Scenario**: a user installs Lobu via the menubar, never touches the
-CLI, then later wants to script something. Today they'd go to web
-settings and create a PAT. Under the redesign, that path still works
-— but it's a few clicks vs `lobu init`'s one-shot.
+**Scenario:** user installed via menubar, paste-the-secret + passkey
+flow. Their `.env` is on the install host (somewhere they'd have to
+SSH to). Now they want CLI access from a laptop without going
+spelunking for `.env`.
 
-**Option A**: add a `lobu cli-token` command (or similar) that, given
-an existing session token (deep-linked from the menubar's "Use in
-CLI" button), mints a PAT and persists it. The menubar opens
-`lobu://cli-init?token=<session>` which the CLI handles.
-**Option B**: leave it as "go to web settings, generate a PAT, paste
-it into `lobu login --token`."
+**Option A** — menubar shows the install secret in settings under
+"Connect another device." Operator copies it, pastes into
+`lobu login --secret <value>` on the laptop. CLI persists to
+`~/.lobu/contexts.json` as today.
 
-**Recommendation**: **B for v1.** The menubar-first user who wants CLI
-is rare; the existing flow works. Add **A** later if friction is real.
+**Option B** — generate a PAT from web settings, paste into
+`lobu login --token <pat>` as today. Doesn't require exposing the
+install secret.
 
-### Q2 — Password recovery
+**Recommendation: B is the default**, A is an opt-in convenience.
+Showing the install secret in UI dilutes the "paste once per device"
+discipline; PATs are cheaper to mint and revoke.
 
-**Scenario**: operator loses their password. In single-user mode,
-losing the password locks them out of their install permanently —
-unless they have a passkey or magic-link as a second credential.
+### Q2 — Multi-tenant admin bootstrap (CI / unattended deployments)
 
-**Options**:
-1. **`lobu reset-password` CLI** — same-host loopback flow that
-   verifies via the data-dir's filesystem perms (same UID = same
-   trust) and updates the password directly. This is the
-   network-topology trust model we just abandoned; reject for the
-   same reasons.
-2. **Recovery key at init** — `lobu init` generates a 256-bit recovery
-   token, writes to `$LOBU_DATA_DIR/.recovery-key` (`0600`), prints
-   it once to stdout. Operator can `lobu reset-password --recovery-key
-   "$X"` later. The key file IS a same-host-trust mechanism, but it's
-   a long-lived secret an attacker would have to read directly off
-   disk; **cryptographic** (need the key) **and** behind FS perms.
-3. **Recovery via email** — magic link sent to the operator's email,
-   reuse Better Auth's existing password-reset flow. Requires
-   `RESEND_API_KEY` set; local dev installs without it can't recover.
-4. **No recovery** — lose the password, restore from backup or
-   reinstall. Brutal but defensible for `/tmp` scaffolds.
+For headless `lobu apply` in CI, the deployer pastes `ENCRYPTION_KEY`
+as a CI secret, the CLI signs in as the install operator, runs the
+apply. Same flow as local — no separate admin token needed.
 
-**Recommendation**: **(2) + (3) layered.** Recovery-key file at init
-for installs without email; magic-link fallback for installs with
-`RESEND_API_KEY` set. Both backends, operator picks at reset time.
+Operator security: `ENCRYPTION_KEY` in CI secrets is functionally
+equivalent to a long-lived admin PAT. Operators who want a
+revocable credential for CI mint a PAT from web settings and use
+that instead; `ENCRYPTION_KEY` is the *bootstrap*, not the
+*everyday-CI-secret*.
 
-### Q3 — Vault-grade KDF (v2)
+### Q3 — Recovery story
 
-Covered in detail in **"Forward compatibility with v2 encryption-at-rest"**
-below. v1 stays auth-only. v1 design choices are constrained to keep
-v2's wrap-the-key extension a clean follow-up, not a re-architecture.
+Today: losing `.env` means losing at-rest decrypt = total loss.
+Under v3 that loss also invalidates auth (no new failure mode).
+The recovery story is **whatever the operator already has for**
+**`ENCRYPTION_KEY`** — backup, password manager, emergency kit
+print-out.
 
-### Q4 — CSRF on `/api/local-init`
+The "recovery-key file at `lobu init`" idea from v2 (PR #917 Q2)
+**dissolves**. There's no separate auth credential to recover
+without the encryption key. Either you have the encryption key and
+can sign in, or you don't and you've lost the data anyway.
 
-The existing `X-Lobu-Client` header and loopback peer check are
-**CSRF mitigations**, not the trust boundary. They stay.
+This is the cleanest outcome of v3: one secret to back up, not two.
 
-A web page on `evil.com` can't add custom headers to a `fetch()`
-against `http://localhost:8787` without a CORS preflight, which
-this endpoint doesn't permit. The header gate keeps that intact even
-though the redesign's primary trust is the session cookie itself
-(which an `evil.com` page also can't forge or read).
+### Q4 — Email collisions in multi-tenant
 
-### Q5 — Existing-install migration
+Synthetic operator email `operator@<hostname>.local` could collide
+in multi-tenant cloud installs (same hostname behind a load
+balancer). Use `operator+<install_id_8>@lobu.local` instead — the
+install_id is deterministic per deployment and avoids hostname
+ambiguity. Reserved namespace (`@lobu.local` is non-routable; humans
+can't sign up with that domain by accident — add a server-side
+reject of `@lobu.local` in better-auth's signup path).
 
-Installs that already have a web-signup user (because they ran the
-old `bootstrap-user`-removal flow or used `/sign-up` first) are
-**already in the new model.** They have a real `user` row with a
-real password (or OAuth account or passkey). No migration needed.
+### Q5 — Better-auth password hashing
 
-Installs that were minted via the original `/api/local-init`
-"no_user_yet → mint for whoever's first" branch may have a user
-with no credentials at all (the row exists, no password was ever
-typed). Detect this at SPA load by hitting `/api/auth/config` and
-checking `hasUser && !hasCredentials` — if so, the SPA routes them
-to a "Set your password" wall before any other UI. One-time prompt
-per install.
+Better-auth's `account.password` column stores a hash. Default is
+scrypt; switching to Argon2id is a known knob. v3 doesn't require
+Argon2id specifically — the hash function is opaque to the design.
+But Stage 2 implementation should standardise on Argon2id while
+we're touching the auth surface (it's the modern default for new
+designs), and persist the params on the account row so future-future
+work has them available.
 
 ---
 
-## Forward compatibility with v2 encryption-at-rest
+## Decision summary (5 bullets)
 
-v1 lands auth only. v2 (separate PR, future) will extend the same
-password material into a **wrapping key** that protects at-rest
-encryption of stored secrets — the 1Password / Bitwarden vault
-model. v1 must not foreclose this; the constraints below are the
-minimum needed to keep v2 a clean follow-up.
-
-### v1 constraints (do these now)
-
-1. **Persist Argon2id parameters with each credential.** When the
-   user sets or rotates a password, store `kdf_salt`, `kdf_memory_kib`,
-   `kdf_iterations`, `kdf_parallelism`, and `kdf_purpose='auth'`
-   alongside the password hash. Verify whether better-auth already
-   exposes these (it uses scrypt by default — may need a custom
-   `password.hash` / `password.verify` to switch to Argon2id and
-   surface the params). If absent, store them in a sibling table
-   keyed by `accountId`. **In v2, the same `(password, salt, params)`
-   tuple derives a wrapping key with `kdf_purpose='wrap'`.**
-2. **Don't commit-fingerprint the password.** Avoid HMAC commits,
-   "password presence" tokens, or any derived material that locks
-   the password into a single use. The plaintext only ever exists
-   in memory during sign-in; v2 just runs a second KDF pass against
-   it before discarding.
-3. **Keep `ENCRYPTION_KEY` plumbing single-source.** Today `.env`
-   holds it and `secret-proxy` reads it. v2 swaps the source (file
-   on disk → unwrap on sign-in → in-memory `MASTER_KEY`) without
-   touching call sites. Don't sprinkle `ENCRYPTION_KEY` reads across
-   new files in v1 — go through the existing accessor.
-4. **Passkey-only users**: v2 can't derive a wrapping key from a
-   passkey alone (no shared secret). v1 doesn't need to solve this,
-   but the schema should allow `kdf_params` to be NULL for credentials
-   that can't unlock the vault — v2 will gate vault features on
-   "has at least one password-or-recovery-key credential."
-
-### v2 target model (out of scope, documented for direction)
-
-```
-Boot:
-  ENCRYPTION_KEY removed from .env
-  $LOBU_DATA_DIR/master.wrapped   (AEAD ciphertext of MASTER_KEY)
-  $LOBU_DATA_DIR/.recovery.wrapped (backup wrap with recovery key)
-
-Sign-in (password):
-  password ──Argon2id(salt, params)──▶ wrapping_key
-  wrapping_key ──AEAD-decrypt──▶ MASTER_KEY (in memory)
-  MASTER_KEY ──▶ secret-proxy / secrets table (existing call sites)
-
-Workers / scheduler: blocked until first unlock.
-Password change:    re-wrap master.wrapped only. No secret re-encryption.
-Recovery:           recovery_key ──▶ unwrap .recovery.wrapped ──▶ MASTER_KEY
-Migration of v1:    take existing ENCRYPTION_KEY → wrap with password-derived
-                    key → write master.wrapped → delete from .env.
-```
-
-The diagram is the contract. v1's job is to land `(password, salt,
-Argon2id params)` storage so v2 can swap the KDF call site for the
-wrap step without schema churn.
-
-### Explicit non-goals for v1
-
-- Implementing wrap/unwrap, `master.wrapped`, or any change to
-  `secret-proxy`.
-- OS keychain integration (macOS Keychain, Linux Secret Service,
-  Windows DPAPI) — separate design, separate PR.
-- Per-operator vault keys (1Password Teams style).
-- `MASTER_KEY` in-memory hardening (sealed boxes, `mlock`,
-  page-fault avoidance).
+1. **`ENCRYPTION_KEY` from `.env` IS the install operator's
+   password.** Same secret unlocks at-rest encryption (today) and
+   gates auth (new). One irreplaceable secret, not two.
+2. **`lobu init` doesn't prompt** — the secret is still generated
+   randomly into `.env` as today. `lobu run` calls
+   `ensureInstallOperator()` at boot, which idempotently provisions
+   a `principal_kind='install_operator'` user with the hashed
+   ENCRYPTION_KEY as their better-auth password.
+3. **Web/menubar first-open: "paste install secret" → sign in →
+   immediately enrol a passkey (or a 4–6 digit passcode, or both).**
+   Subsequent opens on that device unlock via the enrolled convenience
+   credential; the install secret is never re-prompted. 1Password
+   Secret Key pattern. The passcode is a UI lock over a Keychain-
+   stored PAT — **never a KDF input** — so its low entropy is fine.
+4. **`/api/local-init` becomes a session-to-PAT exchange.** No
+   anonymous mint. CSRF / loopback checks stay as defence-in-depth.
+   The "zero users → /sign-up redirect" branch dies (operator is
+   always present after first boot).
+5. **v1 ≡ v2 vault.** No separate wrap-the-key step, no migration
+   from v1 to v2, no extra recovery flow. The auth credential and
+   the at-rest encryption key are the same value from day one.
+   Key rotation = revoke everything (the desired vault property).
 
 ---
-
-## Decision summary (for the review at the top of the PR)
-
-1. **No install-identity principal class.** Every actor is a real
-   user; trust is cryptographic.
-2. **`lobu init` mints the first password-credentialled user at
-   project scaffold time.** Interactive prompt, or `--yes --password`
-   for CI. Multi-user mode skips this.
-3. **Menubar / web `/sign-up` defaults to passkey enrolment.** No
-   password forced.
-4. **CLI access for menubar-first users**: enable via web settings
-   → "Set password." Inline form, no modal.
-5. **`/api/local-init` becomes a session-to-PAT exchange.** No
-   anonymous mint. CSRF/loopback checks stay as defence-in-depth.
-6. **`LOBU_SINGLE_USER` stays in `.env`**, owned by `lobu init`.
-7. **PR #902's "first signup = install operator" survives in spirit**
-   — same outcome, no principal-class rename.
-8. **Multi-tenant cloud mode** gets a separate one-time admin
-   bootstrap token (out of scope for this PR's implementation).
-9. **Password recovery** = recovery-key file at init + magic-link
-   fallback (open for review).
-10. **Vault-grade KDF** deferred to v2 — but v1 lands Argon2id params
-    storage so v2's wrap-the-key extension is a clean follow-up, not
-    a re-architecture. See "Forward compatibility with v2
-    encryption-at-rest" above.
-
----
-
-## Out of scope for the implementation PR (Stage 2)
-
-- Multi-tenant admin bootstrap token (separate design, separate PR).
-- Vault-grade KDF wrap/unwrap of `MASTER_KEY` (v2). v1 stores
-  Argon2id params; v2 uses them to derive the wrapping key.
-- Audit `[system]` labels (no install-identity = no system pseudo-user
-  = no labels to design).
-- Claim flow (no install-identity = nothing to claim).
-- `principal_kind` column / discriminator (no install-identity).
 
 ## In scope for Stage 2 implementation (NOT this PR)
 
-1. `lobu init` CLI: password prompt, `--yes --password --mode`, write
-   `.env`, direct-insert user + account rows.
-2. SPA `/sign-up`: passkey-first form (default), password fallback.
-3. SPA settings: "Enable CLI access" / "Set password" inline section.
-4. `/api/local-init`: require session, return PAT; remove "no user
-   yet → mint" branch; replace with "ask the caller to run `lobu init`."
-5. `/api/auth/config`: surface `hasCredentials` so the SPA can route
-   credential-less users to "set password" before showing UI.
-6. Recovery: write `.recovery-key` at `lobu init`; `lobu reset-password
-   --recovery-key`; magic-link fallback path.
-7. **Argon2id KDF params storage** — switch better-auth to Argon2id
-   (or wrap its hasher) and persist `(kdf_salt, kdf_memory_kib,
-   kdf_iterations, kdf_parallelism, kdf_purpose)` on the credential
-   row. v2 wrap-the-key reuses the same row.
-8. Tests: e2e cover (a) `lobu init` → `lobu login --password` works;
-   (b) menubar passkey signup → CLI password-set flow works; (c)
-   `/api/local-init` rejects unauthenticated callers;
-   (d) password rotate updates `kdf_*` columns (regression hook
-   for v2).
+1. **Server-side `ensureInstallOperator()`** in `start-local.ts`.
+   Hash `ENCRYPTION_KEY` via better-auth's hasher, INSERT user +
+   account, trigger existing `databaseHooks.user.create.after` for
+   personal-org provisioning. Idempotent. Add `principal_kind`
+   column (default `'human'`, value `'install_operator'` for this
+   row).
+2. **CLI `lobu login` default path**: read `.env`, POST to
+   `/api/auth/sign-in/email` with synthetic email + ENCRYPTION_KEY,
+   exchange session for PAT, persist to contexts.json. Existing
+   `--token` path stays for PATs.
+3. **Web/menubar "Connect this device" screen**: new route
+   (e.g. `/auth/connect-install`), single password-style input,
+   POST to better-auth sign-in, then redirect to a convenience-
+   enrolment route offering **passkey + passcode** side-by-side
+   (both, either, or skip). Inline form, no modal (per
+   DESIGN_GUIDELINES §1 + §8). After enrolment, normal SPA loads.
+   Passcode path is **macOS-only** in v3 (Keychain ACL +
+   `kSecAttrAccessControlUserPresence`); Linux/Windows equivalents
+   are future work. Web SPA: passkey-only.
+4. **`/api/auth/config` returns `hasInstallOperator`** so the SPA
+   knows to show "Connect this device" vs `/sign-up`.
+5. **Exclude install operator from single-user-mode count** in
+   `auth/index.tsx:567` and `auth/config.ts` `hasUser` query.
+6. **Reject `@lobu.local` signups** server-side so the synthetic
+   operator email namespace can't be squatted.
+7. **`/api/local-init` reframe**: require a valid session cookie;
+   remove "zero users" branch.
+8. **E2E tests**: (a) `lobu init` → `lobu run` → `lobu login` works;
+   (b) menubar "paste install secret" → passkey enrolment works;
+   (c) restart `lobu run` + `lobu login` still works (operator
+   persists); (d) wrong `ENCRYPTION_KEY` → 401; (e) `/api/local-init`
+   rejects unauthenticated callers.
 
-The 5-PR landing order the user mentioned applies — this design doc
-PR is #1 of 5. Coordinate with `scaffold-dx` for the `.env` template
-wording around `LOBU_SINGLE_USER` and password expectations.
+## Out of scope for Stage 2
+
+- Key rotation tooling (operators do it via backup-restore for now).
+- OS keychain integration for storing `ENCRYPTION_KEY` itself
+  (the menubar passcode flow uses Keychain for the PAT, which is
+  a different artifact).
+- Linux Secret Service / Windows DPAPI equivalents for the
+  passcode convenience path — macOS-first in v3.
+- Cross-device passcode sync (each device keeps its own Keychain
+  entry).
+- Building our own rate-limited PIN store — Keychain ACLs already
+  do this with hardware-backed throttling.
+- `MASTER_KEY` in-memory hardening (sealed boxes, `mlock`).
+- Per-operator vault sub-keys.
+- The audit `[system]` label discussion from v2's doc — install
+  operator events render with name "Install operator," no new
+  badge.
+
+---
+
+## What previous revisions got wrong (kept for traceability)
+
+- **v1 (install identity at boot, never landed):** trust boundary
+  was network-topology, not cryptographic. Reviewers flagged "any
+  same-host process can become Lobu." Abandoned.
+- **v2 (password-at-init, this branch's first commit):** asked the
+  operator to type a password at `lobu init`. Created two
+  irreplaceable secrets (password + ENCRYPTION_KEY), needed a
+  separate recovery story, and required a future "wrap-the-key"
+  migration to land vault-grade encryption. v3 collapses both
+  secrets into one.
+
+The five-PR landing order from earlier still applies: this design
+doc PR is #1 of 5. Coordinate with `scaffold-dx` on `.env` template
+comments noting that `ENCRYPTION_KEY` is now the install secret;
+coordinate with `build-hygiene` on the migration adding
+`principal_kind` to `user`.
