@@ -731,7 +731,14 @@ work has them available.
    randomly into `.env` as today. `lobu run` calls
    `ensureInstallOperator()` at boot, which idempotently provisions
    a `principal_kind='install_operator'` user with the hashed
-   ENCRYPTION_KEY as their better-auth password.
+   ENCRYPTION_KEY as their better-auth password. Every actor is a
+   real better-auth user row. A `principal_kind` column on `user`
+   (default `'human'`, value `'install_operator'` for the
+   auto-provisioned install operator) is a **discriminator
+   column — NOT a separate identity model**. The single-user-mode
+   hook caps human operators at 1 while allowing `install_operator`
+   to coexist; the count predicate is
+   `WHERE principal_kind <> 'install_operator'`.
 3. **Humans never see the raw `ENCRYPTION_KEY` on GUI clients.**
    First `lobu run` writes
    `~/.lobu/install/<id>/pairing.url` (mode 0600) containing a
