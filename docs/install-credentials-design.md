@@ -331,22 +331,9 @@ for installs without email; magic-link fallback for installs with
 
 ### Q3 — Vault-grade KDF (v2)
 
-The user mentioned "like you're building Vault." A natural extension:
-the operator's password also derives `ENCRYPTION_KEY` (used to encrypt
-secrets at rest in `secret-proxy` and the secrets table). Then losing
-the password = losing access to secrets, but also = nobody can read
-secrets without authenticating.
-
-**This is a big change**: every secret in the DB is currently
-encrypted with `ENCRYPTION_KEY` from `.env` or an ephemeral key.
-Re-keying on password change requires re-encrypting every secret.
-And operators with passkey-only credentials (no password) need
-a separate key-derivation source.
-
-**Defer to v2.** Flagged here so we don't lock out the option in
-v1's schema. The minimal hook: store `kdf_params` on the user row
-(salt, iteration count, derivation purpose) so a future migration
-can derive a wrapping key without re-architecting.
+Covered in detail in **"Forward compatibility with v2 encryption-at-rest"**
+below. v1 stays auth-only. v1 design choices are constrained to keep
+v2's wrap-the-key extension a clean follow-up, not a re-architecture.
 
 ### Q4 — CSRF on `/api/local-init`
 
@@ -376,6 +363,77 @@ per install.
 
 ---
 
+## Forward compatibility with v2 encryption-at-rest
+
+v1 lands auth only. v2 (separate PR, future) will extend the same
+password material into a **wrapping key** that protects at-rest
+encryption of stored secrets — the 1Password / Bitwarden vault
+model. v1 must not foreclose this; the constraints below are the
+minimum needed to keep v2 a clean follow-up.
+
+### v1 constraints (do these now)
+
+1. **Persist Argon2id parameters with each credential.** When the
+   user sets or rotates a password, store `kdf_salt`, `kdf_memory_kib`,
+   `kdf_iterations`, `kdf_parallelism`, and `kdf_purpose='auth'`
+   alongside the password hash. Verify whether better-auth already
+   exposes these (it uses scrypt by default — may need a custom
+   `password.hash` / `password.verify` to switch to Argon2id and
+   surface the params). If absent, store them in a sibling table
+   keyed by `accountId`. **In v2, the same `(password, salt, params)`
+   tuple derives a wrapping key with `kdf_purpose='wrap'`.**
+2. **Don't commit-fingerprint the password.** Avoid HMAC commits,
+   "password presence" tokens, or any derived material that locks
+   the password into a single use. The plaintext only ever exists
+   in memory during sign-in; v2 just runs a second KDF pass against
+   it before discarding.
+3. **Keep `ENCRYPTION_KEY` plumbing single-source.** Today `.env`
+   holds it and `secret-proxy` reads it. v2 swaps the source (file
+   on disk → unwrap on sign-in → in-memory `MASTER_KEY`) without
+   touching call sites. Don't sprinkle `ENCRYPTION_KEY` reads across
+   new files in v1 — go through the existing accessor.
+4. **Passkey-only users**: v2 can't derive a wrapping key from a
+   passkey alone (no shared secret). v1 doesn't need to solve this,
+   but the schema should allow `kdf_params` to be NULL for credentials
+   that can't unlock the vault — v2 will gate vault features on
+   "has at least one password-or-recovery-key credential."
+
+### v2 target model (out of scope, documented for direction)
+
+```
+Boot:
+  ENCRYPTION_KEY removed from .env
+  $LOBU_DATA_DIR/master.wrapped   (AEAD ciphertext of MASTER_KEY)
+  $LOBU_DATA_DIR/.recovery.wrapped (backup wrap with recovery key)
+
+Sign-in (password):
+  password ──Argon2id(salt, params)──▶ wrapping_key
+  wrapping_key ──AEAD-decrypt──▶ MASTER_KEY (in memory)
+  MASTER_KEY ──▶ secret-proxy / secrets table (existing call sites)
+
+Workers / scheduler: blocked until first unlock.
+Password change:    re-wrap master.wrapped only. No secret re-encryption.
+Recovery:           recovery_key ──▶ unwrap .recovery.wrapped ──▶ MASTER_KEY
+Migration of v1:    take existing ENCRYPTION_KEY → wrap with password-derived
+                    key → write master.wrapped → delete from .env.
+```
+
+The diagram is the contract. v1's job is to land `(password, salt,
+Argon2id params)` storage so v2 can swap the KDF call site for the
+wrap step without schema churn.
+
+### Explicit non-goals for v1
+
+- Implementing wrap/unwrap, `master.wrapped`, or any change to
+  `secret-proxy`.
+- OS keychain integration (macOS Keychain, Linux Secret Service,
+  Windows DPAPI) — separate design, separate PR.
+- Per-operator vault keys (1Password Teams style).
+- `MASTER_KEY` in-memory hardening (sealed boxes, `mlock`,
+  page-fault avoidance).
+
+---
+
 ## Decision summary (for the review at the top of the PR)
 
 1. **No install-identity principal class.** Every actor is a real
@@ -396,15 +454,18 @@ per install.
    bootstrap token (out of scope for this PR's implementation).
 9. **Password recovery** = recovery-key file at init + magic-link
    fallback (open for review).
-10. **Vault-grade KDF** deferred to v2; minimal `kdf_params`
-    column shape allowed for in v1 schema.
+10. **Vault-grade KDF** deferred to v2 — but v1 lands Argon2id params
+    storage so v2's wrap-the-key extension is a clean follow-up, not
+    a re-architecture. See "Forward compatibility with v2
+    encryption-at-rest" above.
 
 ---
 
 ## Out of scope for the implementation PR (Stage 2)
 
 - Multi-tenant admin bootstrap token (separate design, separate PR).
-- Vault-grade KDF / secret re-keying (v2).
+- Vault-grade KDF wrap/unwrap of `MASTER_KEY` (v2). v1 stores
+  Argon2id params; v2 uses them to derive the wrapping key.
 - Audit `[system]` labels (no install-identity = no system pseudo-user
   = no labels to design).
 - Claim flow (no install-identity = nothing to claim).
@@ -422,9 +483,15 @@ per install.
    credential-less users to "set password" before showing UI.
 6. Recovery: write `.recovery-key` at `lobu init`; `lobu reset-password
    --recovery-key`; magic-link fallback path.
-7. Tests: e2e cover (a) `lobu init` → `lobu login --password` works;
+7. **Argon2id KDF params storage** — switch better-auth to Argon2id
+   (or wrap its hasher) and persist `(kdf_salt, kdf_memory_kib,
+   kdf_iterations, kdf_parallelism, kdf_purpose)` on the credential
+   row. v2 wrap-the-key reuses the same row.
+8. Tests: e2e cover (a) `lobu init` → `lobu login --password` works;
    (b) menubar passkey signup → CLI password-set flow works; (c)
-   `/api/local-init` rejects unauthenticated callers.
+   `/api/local-init` rejects unauthenticated callers;
+   (d) password rotate updates `kdf_*` columns (regression hook
+   for v2).
 
 The 5-PR landing order the user mentioned applies — this design doc
 PR is #1 of 5. Coordinate with `scaffold-dx` for the `.env` template
