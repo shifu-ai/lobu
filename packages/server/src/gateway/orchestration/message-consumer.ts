@@ -78,29 +78,19 @@ export class MessageConsumer {
     const { messageData, reason } = info;
     if (!messageData.conversationId) return;
 
-    // Only notify when a turn is actually outstanding. A long-lived worker that
-    // already replied and then dies (idle crash, or reaped) has no pending or
-    // claimed message in its thread queue, so notifying would be a false
-    // "before it could reply". `active` counts claimed/running rows, so a
-    // worker that crashed mid-turn (its row still claimed) is correctly caught.
-    // Fail open: if the stats lookup throws, notify rather than risk a silent
-    // strand.
-    try {
-      const stats = await this.queue.getQueueStats(
-        `thread_message_${info.deploymentName}`
-      );
-      if (stats.waiting + stats.active === 0) {
-        logger.info(
-          { deploymentName: info.deploymentName },
-          "Worker exited with no outstanding turn — skipping crash notice"
-        );
-        return;
-      }
-    } catch {
-      // ignore — fall through and notify
-    }
-
-    const userMessage = `The worker handling your request stopped unexpectedly (${reason}) before it could reply. Please retry in a moment.`;
+    // Notify on every unexpected death. We deliberately do NOT gate on the
+    // thread-message queue depth: that row is marked completed the moment the
+    // worker acknowledges *receipt* (before it processes/replies), so a crash
+    // during the long processing window would show 0 outstanding and be
+    // suppressed — re-stranding the turn (the exact silent-hang #946 is about).
+    // The cost of not gating is a benign edge: if a long-lived worker dies
+    // while idle *after* already replying, the conversation may see a spurious
+    // "stopped unexpectedly" notice. For the direct-API/CLI path that session
+    // has already received `complete` and closed, so the late event is a no-op;
+    // on chat platforms it is a rare, non-destructive false alarm. Surfacing a
+    // real mid-turn crash is worth that. Wording stays neutral on whether a
+    // reply happened.
+    const userMessage = `The worker handling your request stopped unexpectedly (${reason}). Please retry in a moment.`;
     try {
       const responseQueue = "thread_response";
       await this.queue.createQueue(responseQueue);
