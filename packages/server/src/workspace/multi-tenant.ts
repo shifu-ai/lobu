@@ -5,7 +5,7 @@ import { OAuthProvider } from '../auth/oauth/provider';
 import type { AuthInfo } from '../auth/oauth/types';
 import { PersonalAccessTokenService } from '../auth/tokens';
 import { isPublicReadable } from '../auth/tool-access';
-import { getDb, simpleQuery } from '../db/client';
+import { getDb } from '../db/client';
 import type { Env } from '../index';
 import logger from '../utils/logger';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
@@ -70,13 +70,11 @@ export async function getCachedMembershipRole(
   const key = `${organizationId}:${userId}`;
   const cached = memberRoleCache.get(key);
   if (cached !== undefined) return cached;
-  const rows = await simpleQuery(
-    getDb()`
+  const rows = await getDb()`
       SELECT role FROM "member"
       WHERE "organizationId" = ${organizationId} AND "userId" = ${userId}
       LIMIT 1
-    `
-  );
+    `;
   const role = rows.length > 0 ? (rows[0].role as string) : null;
   memberRoleCache.set(key, role);
   return role;
@@ -90,11 +88,9 @@ export async function getCachedOrgBySlug(
 ): Promise<{ id: string; visibility: string } | null> {
   const cached = orgSlugCache.get(slug);
   if (cached) return cached;
-  const rows = await simpleQuery(
-    getDb()`
+  const rows = await getDb()`
       SELECT id, visibility FROM "organization" WHERE slug = ${slug} LIMIT 1
-    `
-  );
+    `;
   if (rows.length === 0) return null;
   const record = {
     id: rows[0].id as string,
@@ -113,11 +109,9 @@ export async function getCachedOrgBySlug(
 export async function getOrgById(
   organizationId: string
 ): Promise<{ slug: string; visibility: string } | null> {
-  const rows = await simpleQuery(
-    getDb()`
+  const rows = await getDb()`
       SELECT slug, visibility FROM "organization" WHERE id = ${organizationId} LIMIT 1
-    `
-  );
+    `;
   if (rows.length === 0) return null;
   return {
     slug: rows[0].slug as string,
@@ -167,11 +161,11 @@ export class MultiTenantProvider implements WorkspaceProvider {
         requestedOrgId = cached.id;
         requestedOrgVisibility = cached.visibility;
       } else {
-        const orgResult = await simpleQuery(sql`
+        const orgResult = await sql`
           SELECT id, visibility FROM "organization"
           WHERE slug = ${requestedOrgSlug}
           LIMIT 1
-        `);
+        `;
         if (orgResult.length === 0) {
           return c.json(
             {
@@ -226,11 +220,11 @@ export class MultiTenantProvider implements WorkspaceProvider {
         if (cached !== undefined) return cached;
       }
 
-      const result = await simpleQuery(sql`
+      const result = await sql`
         SELECT role FROM "member"
         WHERE "organizationId" = ${orgId} AND "userId" = ${userId}
         LIMIT 1
-      `);
+      `;
       const role = result.length > 0 ? (result[0].role as string) : null;
       memberRoleCache.set(cacheKey, role);
       return role;
@@ -293,13 +287,13 @@ export class MultiTenantProvider implements WorkspaceProvider {
           }
         );
       }
-      const agentRows = await simpleQuery(sql`
+      const agentRows = await sql`
         SELECT owner_user_id
         FROM agents
         WHERE id = ${tokenData.agentId}
           AND organization_id = ${requestedOrgId}
         LIMIT 1
-      `);
+      `;
       if (agentRows.length === 0) {
         return c.json(
           { error: 'insufficient_scope', error_description: 'Worker token is not valid for this organization' },
@@ -307,13 +301,13 @@ export class MultiTenantProvider implements WorkspaceProvider {
         );
       }
       const directAuthUserId = (agentRows[0]?.owner_user_id as string | undefined) ?? tokenData.userId;
-      const roleRows = await simpleQuery(sql`
+      const roleRows = await sql`
         SELECT role
         FROM "member"
         WHERE "organizationId" = ${requestedOrgId}
           AND "userId" = ${directAuthUserId}
         LIMIT 1
-      `);
+      `;
       const directAuthRole = roleRows[0]?.role as string | undefined;
       if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
         return c.json(
@@ -444,12 +438,12 @@ export class MultiTenantProvider implements WorkspaceProvider {
       let bearerUser: { id: string; email: string; name: string; emailVerified: boolean } | null =
         null;
       try {
-        const userRows = await simpleQuery(sql`
+        const userRows = await sql`
           SELECT id, email, name, "emailVerified"
           FROM "user"
           WHERE id = ${authInfo.userId}
           LIMIT 1
-        `);
+        `;
         if (userRows.length > 0) {
           const row = userRows[0] as {
             id: string;
@@ -618,30 +612,26 @@ export class MultiTenantProvider implements WorkspaceProvider {
       const params: string[] = [];
       const searchClause = search ? `AND o.name ILIKE $${params.push(`%${search}%`)}` : '';
 
-      return simpleQuery(
-        sql.unsafe(
-          `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at, false as is_member, o.visibility
+      return sql.unsafe(
+        `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at, false as is_member, o.visibility
          FROM "organization" o
          WHERE o.visibility = 'public' ${searchClause}
          ORDER BY o.name ASC`,
-          params
-        )
+        params
       );
     }
 
     const params: string[] = [userId];
     const searchClause = search ? `AND o.name ILIKE $${params.push(`%${search}%`)}` : '';
 
-    return simpleQuery(
-      sql.unsafe(
-        `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at,
+    return sql.unsafe(
+      `SELECT o.id, o.name, o.slug, o.logo, o.description, o."createdAt" as created_at,
               (m."userId" IS NOT NULL) as is_member, o.visibility
        FROM "organization" o
        LEFT JOIN "member" m ON o.id = m."organizationId" AND m."userId" = $1
        WHERE (m."userId" IS NOT NULL OR o.visibility = 'public') ${searchClause}
        ORDER BY o.name ASC`,
-        params
-      )
+      params
     );
   }
 
@@ -651,9 +641,9 @@ export class MultiTenantProvider implements WorkspaceProvider {
 
   async getOrgSlug(orgId: string): Promise<string | null> {
     const sql = getDb();
-    const rows = await simpleQuery(sql`
+    const rows = await sql`
       SELECT slug FROM "organization" WHERE id = ${orgId} LIMIT 1
-    `);
+    `;
     return rows[0]?.slug ?? null;
   }
 
@@ -661,11 +651,9 @@ export class MultiTenantProvider implements WorkspaceProvider {
     if (orgIds.length === 0) return new Map();
     const sql = getDb();
     const placeholders = orgIds.map((_, i) => `$${i + 1}`).join(', ');
-    const rows = await simpleQuery(
-      sql.unsafe<{ id: string; slug: string }>(
-        `SELECT id, slug FROM "organization" WHERE id IN (${placeholders})`,
-        orgIds
-      )
+    const rows = await sql.unsafe<{ id: string; slug: string }>(
+      `SELECT id, slug FROM "organization" WHERE id IN (${placeholders})`,
+      orgIds
     );
     return new Map(rows.map((row) => [row.id, row.slug]));
   }
@@ -676,7 +664,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
     if (cached !== undefined) return cached;
 
     const sql = getDb();
-    const rows = await simpleQuery(sql`
+    const rows = await sql`
       SELECT
         n.slug,
         n.type,
@@ -688,21 +676,21 @@ export class MultiTenantProvider implements WorkspaceProvider {
       LEFT JOIN organization o ON n.type = 'organization' AND n.ref_id = o.id
       WHERE n.slug = ${slug}
         AND n.type = ${type}
-    `);
+    `;
     if (rows.length === 0) {
       // Fallback: namespace entry may be missing, query organization table directly
       if (type === 'organization') {
-        const orgRows = await simpleQuery(sql`
+        const orgRows = await sql`
           SELECT id, name, slug FROM organization WHERE slug = ${slug} LIMIT 1
-        `);
+        `;
         if (orgRows.length > 0) {
           const org = orgRows[0] as { id: string; name: string; slug: string };
           // Self-heal: backfill the missing namespace entry
-          await simpleQuery(sql`
+          await sql`
             INSERT INTO namespace (slug, type, ref_id)
             VALUES (${slug}, 'organization', ${org.id})
             ON CONFLICT (slug) DO NOTHING
-          `);
+          `;
           const result: ResolvedOwner = {
             slug: org.slug,
             type: 'organization',

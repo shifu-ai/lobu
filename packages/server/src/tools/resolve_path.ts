@@ -9,7 +9,7 @@
 
 import * as Sentry from '@sentry/node';
 import { type Static, Type } from '@sinclair/typebox';
-import { createDbClientFromEnv, getDb, simpleQuery } from '../db/client';
+import { createDbClientFromEnv, getDb } from '../db/client';
 import type { Env } from '../index';
 import { entityLinkMatchSql } from '../utils/content-search';
 import {
@@ -361,7 +361,7 @@ async function _resolvePath(
       // Cross-org tolerance: a tenant path can traverse into a public-catalog entity.
       // $member is per-tenant — never fall back to a public catalog's $member row, since
       // member-redaction uses the caller's workspace role, not the resolved entity's org.
-      const row = await simpleQuery(sql`
+      const row = await sql`
         SELECT e.id, et.slug AS entity_type, e.slug, e.name, e.parent_id
         FROM entities e
         JOIN entity_types et ON et.id = e.entity_type_id
@@ -379,7 +379,7 @@ async function _resolvePath(
           )
         ORDER BY (e.organization_id = ${workspace.id}) DESC, e.id ASC
         LIMIT 1
-      `);
+      `;
 
       if (row.length === 0) {
         throw new ToolUserError(
@@ -401,7 +401,7 @@ async function _resolvePath(
 
     // Leaf entity: fetch core data (without expensive COUNT subqueries).
     // Cross-org tolerance: same widening as the intermediate query, excluding $member.
-    const row = await simpleQuery(sql`
+    const row = await sql`
         SELECT
           e.id,
           et.slug AS entity_type,
@@ -432,7 +432,7 @@ async function _resolvePath(
           )
         ORDER BY (e.organization_id = ${workspace.id}) DESC, e.id ASC
         LIMIT 1
-      `);
+      `;
 
     if (row.length === 0) {
       throw new ToolUserError(
@@ -471,15 +471,13 @@ async function _resolvePath(
       { cleanTemplate: entityCleanTpl, templateData: entityTemplateData },
     ] = await Sentry.startSpan({ name: 'entity:counts+tabs', op: 'db' }, () =>
       Promise.all([
-        simpleQuery(
-          sql.unsafe<{ cnt: number }>(
-            `SELECT COUNT(*) as cnt FROM current_event_records ev
+        sql.unsafe<{ cnt: number }>(
+          `SELECT COUNT(*) as cnt FROM current_event_records ev
              WHERE ${entityLinkMatchSql(`${Number(entityRow.id)}::bigint`, 'ev')}
                AND ev.organization_id = $1`,
-            [workspace.id]
-          )
+          [workspace.id]
         ),
-        simpleQuery(sql`
+        sql`
           SELECT COUNT(DISTINCT cn.connector_key) as cnt
           FROM feeds f
           JOIN connections cn ON cn.id = f.connection_id
@@ -487,13 +485,11 @@ async function _resolvePath(
             AND f.organization_id = ${workspace.id}
             AND f.deleted_at IS NULL
             AND cn.deleted_at IS NULL
-        `),
-        simpleQuery(
-          sql`SELECT COUNT(*) as cnt FROM watchers i
+        `,
+        sql`SELECT COUNT(*) as cnt FROM watchers i
               WHERE ${Number(entityRow.id)}::int = ANY(i.entity_ids)
                 AND i.organization_id = ${workspace.id}
-                AND i.status = 'active'`
-        ),
+                AND i.status = 'active'`,
         fetchTabs(sql, 'entity', String(entityRow.id), workspace.id),
         fetchTabs(sql, 'entity_type', entityRow.entity_type, workspace.id),
         processTemplateDataSources(entityRow.json_template, entityDataCtx, sql),
@@ -512,11 +508,11 @@ async function _resolvePath(
     let safeEntityMetadata = rawEntityMetadata;
     const canSeeEmail = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
     if (!canSeeEmail) {
-      const schemaRow = await simpleQuery(sql`
+      const schemaRow = await sql`
         SELECT metadata_schema FROM entity_types
         WHERE slug = '$member' AND organization_id = ${workspace.id} AND deleted_at IS NULL
         LIMIT 1
-      `);
+      `;
       const memberSchema = (schemaRow[0]?.metadata_schema as Record<string, unknown> | null) ?? null;
       const { emailField } = resolveMemberSchemaFieldsFromSchema(memberSchema);
       if (entityRow.entity_type === '$member' && emailField in safeEntityMetadata) {
@@ -558,7 +554,7 @@ async function _resolvePath(
     // Fetch children + siblings without per-row COUNT subqueries.
     // content_count is omitted to avoid expensive GIN index scans over the events table.
     const [childRows, siblingRows] = await Promise.all([
-      simpleQuery(sql`
+      sql`
         SELECT e.id, et.slug AS entity_type, e.slug, e.name,
           e.metadata::jsonb->>'market' as market
         FROM entities e
@@ -566,8 +562,8 @@ async function _resolvePath(
         WHERE e.organization_id = ${workspace.id}
           AND e.parent_id = ${resolvedEntity.id}
         ORDER BY e.name ASC
-      `),
-      simpleQuery(sql`
+      `,
+      sql`
         SELECT e.id, et.slug AS entity_type, e.slug, e.name
         FROM entities e
         JOIN entity_types et ON et.id = e.entity_type_id
@@ -578,7 +574,7 @@ async function _resolvePath(
             OR e.parent_id = ${resolvedEntity.parent_id}
           )
         ORDER BY e.name ASC
-      `),
+      `,
     ]);
 
     children = childRows.map((row) => ({
@@ -685,7 +681,7 @@ async function listEntityTypes(
   sql: DbClient,
   organizationId: string
 ): Promise<BootstrapEntityTypeSummary[]> {
-  const rows = await simpleQuery(sql`
+  const rows = await sql`
     SELECT
       et.id,
       et.slug,
@@ -701,7 +697,7 @@ async function listEntityTypes(
       AND et.organization_id = ${organizationId}
     GROUP BY et.id, et.slug, et.name, et.description, et.icon, et.color
     ORDER BY et.name ASC
-  `);
+  `;
 
   return rows.map((row) => ({
     id: Number(row.id),
@@ -723,7 +719,7 @@ async function fetchScopeSummary(
   // Agents are org-scoped; devices are owned by the requesting user. Both are
   // sidebar-nav badges that don't narrow with the focused entity, so fetch
   // them regardless of `entity`.
-  const [navRow] = await simpleQuery(sql`
+  const [navRow] = await sql`
     SELECT
       (
         SELECT COUNT(*)::int
@@ -735,7 +731,7 @@ async function fetchScopeSummary(
         FROM device_workers dw
         WHERE dw.user_id = ${userId}
       ) AS devices_count
-  `);
+  `;
   const agentsCount = Number((navRow as { agents_count?: number } | undefined)?.agents_count) || 0;
   const devicesCount =
     Number((navRow as { devices_count?: number } | undefined)?.devices_count) || 0;
@@ -750,7 +746,7 @@ async function fetchScopeSummary(
     };
   }
 
-  const [row] = await simpleQuery(sql`
+  const [row] = await sql`
     SELECT
       (
         SELECT COUNT(*)::int
@@ -769,7 +765,7 @@ async function fetchScopeSummary(
         WHERE w.organization_id = ${organizationId}
           AND w.status = 'active'
       ) AS watchers_count
-  `);
+  `;
 
   return {
     total_content: Number((row as { total_content?: number } | undefined)?.total_content) || 0,
@@ -793,9 +789,8 @@ async function fetchRecentContent(
     entityId !== null
       ? `AND ${entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev')}`
       : '';
-  const rows = await simpleQuery(
-    sql.unsafe<Record<string, unknown>>(
-      `
+  const rows = await sql.unsafe<Record<string, unknown>>(
+    `
     SELECT
       ev.id,
       ev.entity_ids,
@@ -823,8 +818,7 @@ async function fetchRecentContent(
     ORDER BY COALESCE(ev.occurred_at, ev.created_at) DESC
     LIMIT $2
   `,
-      [organizationId, BOOTSTRAP_RECENT_LIMIT]
-    )
+    [organizationId, BOOTSTRAP_RECENT_LIMIT]
   );
 
   return (rows as Array<Record<string, unknown>>).map((row) => ({
@@ -851,7 +845,7 @@ async function fetchRecentFeeds(
   organizationId: string,
   entityId: number | null
 ): Promise<BootstrapFeedItem[]> {
-  const rows = await simpleQuery(sql`
+  const rows = await sql`
     WITH scoped_feeds AS (
       SELECT
         f.id,
@@ -904,7 +898,7 @@ async function fetchRecentFeeds(
     FROM scoped_feeds sf
     LEFT JOIN event_counts ec ON ec.feed_id = sf.id
     ORDER BY COALESCE(sf.updated_at, sf.created_at) DESC
-  `);
+  `;
 
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     id: Number(row.id),
@@ -929,7 +923,7 @@ async function fetchRecentWatchers(
   organizationId: string,
   entityId: number | null
 ): Promise<BootstrapWatcherItem[]> {
-  const rows = await simpleQuery(sql`
+  const rows = await sql`
     WITH scoped_watchers AS (
       SELECT
         w.id,
@@ -979,7 +973,7 @@ async function fetchRecentWatchers(
     LEFT JOIN entity_types pet ON pet.id = parent.entity_type_id
     LEFT JOIN watcher_window_counts wwc ON wwc.watcher_id = sw.id
     ORDER BY COALESCE(sw.updated_at, sw.created_at) DESC
-  `);
+  `;
 
   return (rows as Array<Record<string, unknown>>).map((row) => ({
     watcher_id: String(row.watcher_id),
@@ -1029,7 +1023,7 @@ async function listConnectorDefinitions(
   sql: DbClient,
   organizationId: string
 ): Promise<BootstrapConnectorDefinition[]> {
-  const rows = await simpleQuery(sql`
+  const rows = await sql`
     SELECT
       d.key,
       d.name,
@@ -1041,7 +1035,7 @@ async function listConnectorDefinitions(
     WHERE d.status = 'active'
       AND d.organization_id = ${organizationId}
     ORDER BY d.name ASC
-  `);
+  `;
 
   return rows.map((row) => ({
     key: String(row.key),
@@ -1060,7 +1054,7 @@ async function fetchTabs(
   resourceId: string,
   organizationId: string
 ): Promise<ViewTemplateTab[]> {
-  const rows = await simpleQuery(sql`
+  const rows = await sql`
     SELECT
       vtat.tab_name,
       vtat.tab_order,
@@ -1073,7 +1067,7 @@ async function fetchTabs(
       AND vtat.resource_id = ${resourceId}
       AND vtat.organization_id = ${organizationId}
     ORDER BY vtat.tab_order ASC, vtat.tab_name ASC
-  `);
+  `;
 
   return rows.map((row) => ({
     tab_name: String(row.tab_name),

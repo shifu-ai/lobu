@@ -26,10 +26,6 @@ export interface DbClient {
   end?: () => Promise<void>;
 }
 
-export function simpleQuery<T>(query: DbQuery<T>): DbQuery<T> {
-  return query;
-}
-
 /**
  * Format a JS string array as a PostgreSQL array literal.
  *
