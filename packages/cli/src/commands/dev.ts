@@ -9,7 +9,13 @@ import chalk from "chalk";
 import ora from "ora";
 import { isLoadError, loadConfig } from "../config/loader.js";
 import { resolveApiClient } from "../internal/api-client.js";
-import { addContext, getServerConfig } from "../internal/context.js";
+import {
+  addContext,
+  getCurrentContextName,
+  getServerConfig,
+  setActiveOrg,
+  setCurrentContext,
+} from "../internal/context.js";
 import { type Credentials, saveCredentials } from "../internal/credentials.js";
 import { parseEnvContent } from "../internal/index.js";
 import { loadProjectLink } from "../internal/project-link.js";
@@ -412,6 +418,7 @@ async function announceLocalSignIn(
       device_token?: string;
       session_token?: string;
       user?: { id?: string; email?: string; name?: string };
+      organization?: { id?: string; slug?: string; name?: string };
     };
     // CLI gets the worker-scoped PAT — works against /api/workers/* (used
     // by lobu apply and everything else). The session_token is
@@ -431,6 +438,32 @@ async function announceLocalSignIn(
       ...(body.user?.id ? { userId: body.user.id } : {}),
     };
     await saveCredentials(creds, contextName);
+    // Bind the bootstrap org slug returned by /api/local-init to the
+    // context. Without this, `lobu apply -c local` errors with
+    // "No organization selected" until the user manually runs
+    // `lobu org set <slug>`. The server is the source of truth — it
+    // auto-provisioned this org for the install operator.
+    const orgSlug = body.organization?.slug?.trim();
+    if (orgSlug) {
+      await setActiveOrg(orgSlug, contextName).catch(() => undefined);
+    }
+    // Auto-switch the active context so plain `lobu apply` / `lobu chat`
+    // from any shell hit this loopback server instead of whatever cloud
+    // context was active. Announce on stderr when we actually flip so the
+    // user isn't surprised — `lobu run` on a fresh box silently lands on
+    // `local`; `lobu run` from a shell previously on `lobu` cloud prints
+    // the switch.
+    try {
+      const current = await getCurrentContextName();
+      if (current !== contextName) {
+        await setCurrentContext(contextName);
+        process.stderr.write(
+          `Switched active context to "${contextName}" (lobu run)\n`
+        );
+      }
+    } catch {
+      // Best-effort — failing to switch shouldn't kill the run banner.
+    }
 
     const url = new URL(gatewayUrl);
     url.searchParams.set("lobu_token", body.session_token ?? cliToken);

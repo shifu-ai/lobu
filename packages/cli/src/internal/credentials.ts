@@ -2,8 +2,11 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   DEFAULT_CONTEXT_NAME,
+  getCurrentContextName,
   LOBU_CONFIG_DIR,
   resolveContext,
+  setActiveOrg,
+  setCurrentContext,
 } from "./context.js";
 import { refreshTokens } from "./oauth.js";
 
@@ -171,6 +174,7 @@ async function tryLocalInit(contextName?: string): Promise<Credentials | null> {
       device_token?: string;
       session_token?: string;
       user?: { id?: string; email?: string; name?: string };
+      organization?: { id?: string; slug?: string; name?: string };
     };
     // Prefer device_token (PAT scoped with device_worker:run + mcp:*) so
     // `lobu chat` / `lobu apply` / worker poll all pass the scope gate on
@@ -185,6 +189,32 @@ async function tryLocalInit(contextName?: string): Promise<Credentials | null> {
       ...(body.user?.id ? { userId: body.user.id } : {}),
     };
     await saveCredentials(creds, target.name);
+    // Bind the local-init org slug to the context so `lobu apply` /
+    // `lobu chat` / `lobu org current` find it without a manual
+    // `lobu org set <slug>`. The server's bootstrap auto-provisions the
+    // single user's personal org and returns it in the response — that
+    // slug is the source of truth for this loopback install.
+    const orgSlug = body.organization?.slug?.trim();
+    if (orgSlug) {
+      await setActiveOrg(orgSlug, target.name).catch(() => undefined);
+    }
+    // Auto-switch the active context so subsequent `lobu apply` / `lobu chat`
+    // invocations (without `-c <name>`) hit the same loopback server. Without
+    // this, a user previously on the `lobu` cloud context who runs `lobu run`
+    // locally still sees cloud for every other command — and the fact that a
+    // local context exists is invisible. Announce on stderr so the change is
+    // visible but doesn't pollute stdout pipelines.
+    try {
+      const current = await getCurrentContextName();
+      if (current !== target.name) {
+        await setCurrentContext(target.name);
+        process.stderr.write(
+          `Switched active context to "${target.name}" (lobu run)\n`
+        );
+      }
+    } catch {
+      // Best-effort — a write failure here shouldn't break the auth flow.
+    }
     return creds;
   } catch {
     return null;
