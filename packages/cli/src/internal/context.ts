@@ -4,17 +4,15 @@ import { join } from "node:path";
 
 export const LOBU_CONFIG_DIR = join(homedir(), ".config", "lobu");
 export const DEFAULT_CONTEXT_NAME = "lobu";
-const DEFAULT_API_URL = "https://app.lobu.ai/api/v1";
+const DEFAULT_CONTEXT_URL = "https://app.lobu.ai/api/v1";
 
 const CONTEXTS_FILE = join(LOBU_CONFIG_DIR, "config.json");
 
 export const DEFAULT_MEMORY_URL = "https://lobu.ai/mcp";
 
 export interface LobuServerConfig {
-  databaseUrl?: string;
   port?: number;
   host?: string;
-  dataDir?: string;
   // Directory the lifecycle owner should `cd` into before spawning
   // `lobu run`. Used by per-worktree contexts so the menubar launches
   // the server against the worktree's source (hot-reload on the right
@@ -22,16 +20,16 @@ export interface LobuServerConfig {
   cwd?: string;
   // "managed" → the Mac menubar (or another lifecycle owner) spawns
   // `lobu run` for this context. "external" → just connect; never
-  // spawn or kill. Absent → infer from apiUrl: loopback ⇒ managed,
-  // remote ⇒ external. Today only the Mac menubar reads this.
+  // spawn or kill. Absent → infer at the lifecycle owner only.
   lifecycle?: "managed" | "external";
 }
 
 interface LobuContextEntry {
-  apiUrl: string;
+  url: string;
   activeOrg?: string;
   memoryUrl?: string;
-  server?: LobuServerConfig;
+  lifecycle?: "managed" | "external";
+  cwd?: string;
 }
 
 interface LobuContextConfig {
@@ -41,13 +39,23 @@ interface LobuContextConfig {
 
 export interface ResolvedContext {
   name: string;
-  apiUrl: string;
+  url: string;
   source: "default" | "config" | "env";
+}
+
+interface StoredContextEntry {
+  url?: unknown;
+  apiUrl?: unknown;
+  activeOrg?: unknown;
+  memoryUrl?: unknown;
+  lifecycle?: unknown;
+  cwd?: unknown;
+  server?: unknown;
 }
 
 interface StoredContextConfig {
   currentContext?: string;
-  contexts?: Record<string, LobuContextEntry>;
+  contexts?: Record<string, StoredContextEntry>;
 }
 
 export async function loadContextConfig(): Promise<LobuContextConfig> {
@@ -156,7 +164,7 @@ export async function resolveContext(
   if (envApiUrl) {
     return {
       name: requestedContext || (await getCurrentContextName()),
-      apiUrl: normalizeApiUrl(envApiUrl),
+      url: normalizeApiUrl(envApiUrl),
       source: "env",
     };
   }
@@ -165,11 +173,7 @@ export async function resolveContext(
   const contextName = requestedContext || config.currentContext;
   const context = config.contexts[contextName];
   if (context) {
-    return {
-      name: contextName,
-      apiUrl: normalizeApiUrl(context.apiUrl),
-      source: contextName === DEFAULT_CONTEXT_NAME ? "default" : "config",
-    };
+    return contextToResolvedContext(contextName, context);
   }
 
   throw new Error(
@@ -179,7 +183,7 @@ export async function resolveContext(
 
 export async function addContext(
   name: string,
-  apiUrl: string,
+  url: string,
   server?: LobuServerConfig
 ): Promise<LobuContextConfig> {
   const trimmedName = name.trim();
@@ -194,12 +198,19 @@ export async function addContext(
 
   const config = await loadContextConfig();
   const entry: LobuContextEntry = {
-    apiUrl: normalizeAndValidateApiUrl(apiUrl),
+    url: normalizeAndValidateApiUrl(url),
   };
-  const normalizedServer = server ? normalizeServerConfig(server) : undefined;
-  if (normalizedServer) {
-    entry.server = normalizedServer;
+  const lifecycle = normalizeLifecycle(server?.lifecycle);
+  const cwd = server?.cwd?.trim();
+  // `cwd` only takes effect for managed contexts — getServerConfig() drops
+  // everything else. Persisting it on a non-managed context would be a silent
+  // no-op, so reject the combination instead of saving dead config.
+  if (cwd && lifecycle !== "managed") {
+    throw new Error("`cwd` can only be set on managed contexts.");
   }
+  if (lifecycle) entry.lifecycle = lifecycle;
+  if (cwd) entry.cwd = cwd;
+
   config.contexts[trimmedName] = entry;
   await saveContextConfig(config);
   return config;
@@ -239,7 +250,7 @@ export async function setCurrentContext(
   const config = await loadContextConfig();
   if (!config.contexts[trimmedName]) {
     throw new Error(
-      `Unknown context "${trimmedName}". Run \`lobu context add ${trimmedName} --api-url <url>\` first.`
+      `Unknown context "${trimmedName}". Run \`lobu context add ${trimmedName} --url <url>\` first.`
     );
   }
 
@@ -250,25 +261,12 @@ export async function setCurrentContext(
 
 function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
   const contexts: Record<string, LobuContextEntry> = {
-    [DEFAULT_CONTEXT_NAME]: { apiUrl: DEFAULT_API_URL },
+    [DEFAULT_CONTEXT_NAME]: { url: DEFAULT_CONTEXT_URL },
   };
 
   for (const [name, value] of Object.entries(raw.contexts ?? {})) {
-    if (!value || typeof value.apiUrl !== "string") {
-      continue;
-    }
-    contexts[name] = {
-      apiUrl: normalizeApiUrl(value.apiUrl),
-      activeOrg:
-        typeof value.activeOrg === "string"
-          ? value.activeOrg.trim()
-          : undefined,
-      memoryUrl:
-        typeof value.memoryUrl === "string"
-          ? value.memoryUrl.trim()
-          : undefined,
-      server: normalizeServerConfig(value.server),
-    };
+    const normalized = normalizeContextEntry(value);
+    if (normalized) contexts[name] = normalized;
   }
 
   const currentContext =
@@ -282,35 +280,68 @@ function normalizeContextConfig(raw: StoredContextConfig): LobuContextConfig {
   };
 }
 
-function normalizeServerConfig(raw: unknown): LobuServerConfig | undefined {
+function normalizeContextEntry(
+  raw: StoredContextEntry
+): LobuContextEntry | undefined {
   if (!raw || typeof raw !== "object") return undefined;
+  const legacyServer = normalizeLegacyServerConfig(raw.server);
+  const rawUrl = firstString(raw.url, raw.apiUrl);
+  if (!rawUrl) return undefined;
+
+  // Reject hand-edited / malformed stored URLs (e.g. "localhost:4111" with no
+  // scheme) instead of letting them survive normalization. Every write path
+  // already validates, so a stored entry that fails validation is corrupt —
+  // dropping it keeps the invariant that resolveContext() returns a usable
+  // endpoint.
+  let normalizedUrl: string;
+  try {
+    normalizedUrl = normalizeAndValidateApiUrl(rawUrl);
+  } catch {
+    return undefined;
+  }
+
+  const entry: LobuContextEntry = { url: normalizedUrl };
+  const activeOrg = normalizeString(raw.activeOrg);
+  if (activeOrg) entry.activeOrg = activeOrg;
+  const memoryUrl = normalizeString(raw.memoryUrl);
+  if (memoryUrl) entry.memoryUrl = memoryUrl;
+  const lifecycle = normalizeLifecycle(raw.lifecycle) ?? legacyServer.lifecycle;
+  if (lifecycle) entry.lifecycle = lifecycle;
+  const cwd = normalizeString(raw.cwd) ?? legacyServer.cwd;
+  if (cwd) entry.cwd = cwd;
+
+  return entry;
+}
+
+function normalizeLegacyServerConfig(
+  raw: unknown
+): Pick<LobuServerConfig, "cwd" | "lifecycle"> {
+  if (!raw || typeof raw !== "object") return {};
   const src = raw as Record<string, unknown>;
-  const out: LobuServerConfig = {};
+  const out: Pick<LobuServerConfig, "cwd" | "lifecycle"> = {};
+  const cwd = normalizeString(src.cwd);
+  if (cwd) out.cwd = cwd;
+  const lifecycle = normalizeLifecycle(src.lifecycle);
+  if (lifecycle) out.lifecycle = lifecycle;
+  return out;
+}
 
-  if (typeof src.databaseUrl === "string" && src.databaseUrl.trim()) {
-    out.databaseUrl = src.databaseUrl.trim();
-  }
-  if (
-    typeof src.port === "number" &&
-    Number.isInteger(src.port) &&
-    src.port > 0
-  ) {
-    out.port = src.port;
-  }
-  if (typeof src.host === "string" && src.host.trim()) {
-    out.host = src.host.trim();
-  }
-  if (typeof src.dataDir === "string" && src.dataDir.trim()) {
-    out.dataDir = src.dataDir.trim();
-  }
-  if (typeof src.cwd === "string" && src.cwd.trim()) {
-    out.cwd = src.cwd.trim();
-  }
-  if (src.lifecycle === "managed" || src.lifecycle === "external") {
-    out.lifecycle = src.lifecycle;
-  }
+function normalizeLifecycle(
+  value: unknown
+): "managed" | "external" | undefined {
+  return value === "managed" || value === "external" ? value : undefined;
+}
 
-  return Object.keys(out).length === 0 ? undefined : out;
+function normalizeString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    const normalized = normalizeString(value);
+    if (normalized) return normalized;
+  }
+  return undefined;
 }
 
 export async function getServerConfig(
@@ -319,13 +350,16 @@ export async function getServerConfig(
   const config = await loadContextConfig();
   // Honor LOBU_CONTEXT the same way resolveContext() does — without this,
   // a caller that sets the env var to pin a context (e.g. the Mac menubar
-  // spawning `lobu run` with LOBU_CONTEXT=local) gets the server block
-  // from `currentContext` instead, because no contextName was passed.
+  // spawning `lobu run` with LOBU_CONTEXT=local) gets the server settings
+  // from `currentContext` instead.
   const name =
     contextName?.trim() ||
     process.env.LOBU_CONTEXT?.trim() ||
     config.currentContext;
-  return config.contexts[name]?.server;
+  const context = config.contexts[name];
+  if (!context || context.lifecycle !== "managed") return undefined;
+
+  return deriveManagedServerConfig(context);
 }
 
 export async function setServerConfig(
@@ -339,15 +373,75 @@ export async function setServerConfig(
     throw new Error(`Unknown context "${name}".`);
   }
 
-  context.server = server ? normalizeServerConfig(server) : undefined;
+  if (!server) {
+    delete context.lifecycle;
+    delete context.cwd;
+  } else {
+    const lifecycle = normalizeLifecycle(server.lifecycle);
+    const cwd = server.cwd?.trim();
+    // Same invariant as addContext: a non-managed context with a `cwd` is dead
+    // config — getServerConfig() never returns it.
+    if (cwd && lifecycle !== "managed") {
+      throw new Error("`cwd` can only be set on managed contexts.");
+    }
+    if (lifecycle) context.lifecycle = lifecycle;
+    else delete context.lifecycle;
+    if (cwd) context.cwd = cwd;
+    else delete context.cwd;
+  }
   await saveContextConfig(config);
   return config;
+}
+
+function deriveManagedServerConfig(
+  context: LobuContextEntry
+): LobuServerConfig | undefined {
+  const out: LobuServerConfig = { lifecycle: context.lifecycle };
+  if (context.cwd) out.cwd = context.cwd;
+
+  try {
+    const parsed = new URL(context.url);
+    const port = derivePort(parsed);
+    if (port && Number.isInteger(port) && port > 0 && port <= 65535) {
+      out.port = port;
+    }
+    const host = stripIpv6Brackets(parsed.hostname);
+    if (host) {
+      out.host = host;
+    }
+  } catch {
+    // URL validation happens when contexts are saved/loaded; ignore here so a
+    // hand-edited malformed config does not make the caller crash.
+  }
+
+  return Object.keys(out).length === 0 ? undefined : out;
+}
+
+/**
+ * Resolve the effective port for a parsed context URL. An explicit `:port`
+ * wins; otherwise fall back to the protocol default (80 for http, 443 for
+ * https) so callers that bind from this struct don't drift from a context URL
+ * like `http://localhost/api/v1` that already implies a port.
+ */
+function derivePort(parsed: URL): number | undefined {
+  if (parsed.port) return Number.parseInt(parsed.port, 10);
+  if (parsed.protocol === "http:") return 80;
+  if (parsed.protocol === "https:") return 443;
+  return undefined;
+}
+
+/**
+ * `new URL("http://[::1]:8787").hostname` returns `[::1]` with brackets, which
+ * Node's `server.listen({ host })` rejects. Strip them before exporting HOST.
+ */
+function stripIpv6Brackets(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "");
 }
 
 function normalizeAndValidateApiUrl(apiUrl: string): string {
   const normalized = normalizeApiUrl(apiUrl.trim());
   if (!normalized) {
-    throw new Error("API URL cannot be empty.");
+    throw new Error("URL cannot be empty.");
   }
 
   try {
@@ -356,7 +450,7 @@ function normalizeAndValidateApiUrl(apiUrl: string): string {
       throw new Error("Missing protocol or host");
     }
   } catch {
-    throw new Error(`Invalid API URL: ${apiUrl}`);
+    throw new Error(`Invalid URL: ${apiUrl}`);
   }
 
   return normalized;
@@ -377,7 +471,7 @@ export async function findContextByUrl(
   const normalizedSearch = normalizeApiUrl(apiUrl);
 
   for (const [name, context] of Object.entries(config.contexts)) {
-    if (normalizeApiUrl(context.apiUrl) === normalizedSearch) {
+    if (normalizeApiUrl(context.url) === normalizedSearch) {
       return contextToResolvedContext(name, context);
     }
   }
@@ -409,7 +503,7 @@ function contextToResolvedContext(
 ): ResolvedContext {
   return {
     name,
-    apiUrl: normalizeApiUrl(context.apiUrl),
+    url: normalizeApiUrl(context.url),
     source: name === DEFAULT_CONTEXT_NAME ? "default" : "config",
   };
 }
