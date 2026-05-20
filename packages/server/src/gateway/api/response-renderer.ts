@@ -56,6 +56,35 @@ export class ApiResponseRenderer implements ResponseRenderer {
   }
 
   /**
+   * Handle a complete, non-streamed message (the `content` field).
+   * Broadcasts it to SSE clients as an `output` event so direct-API/CLI
+   * clients render it identically to streamed deltas.
+   */
+  async handleContent(
+    payload: ThreadResponsePayload,
+    _sessionKey: string
+  ): Promise<void> {
+    const sessionId =
+      (payload.platformMetadata?.sessionId as string) || payload.conversationId;
+
+    if (!sessionId) {
+      logger.warn("No session ID found in payload for content broadcast");
+      return;
+    }
+
+    this.sseManager.broadcast(sessionId, "output", {
+      type: "delta",
+      content: payload.content,
+      timestamp: payload.timestamp || Date.now(),
+      messageId: payload.messageId,
+    });
+
+    logger.debug(
+      `Broadcast content to session ${sessionId}: ${payload.content?.length || 0} chars`
+    );
+  }
+
+  /**
    * Handle completion of response processing
    * Sends completion event to SSE clients
    */

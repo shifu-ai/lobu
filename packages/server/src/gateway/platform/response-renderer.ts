@@ -29,6 +29,23 @@ export interface ResponseRenderer {
   ): Promise<string | null>;
 
   /**
+   * Handle a complete, non-streamed message (the `content` field).
+   *
+   * Unlike `handleDelta` (incremental stream chunk) or `handleEphemeral`
+   * (auth/OAuth notice gated on the `ephemeral` flag), this is a buffered,
+   * user-facing message delivered in one shot — e.g. a gateway-originated
+   * notice the worker never streamed as deltas. Without a renderer for it,
+   * such a payload is silently dropped and only `complete` reaches the user.
+   *
+   * @param payload - The thread response payload carrying `content`
+   * @param sessionKey - Unique key for this response session
+   */
+  handleContent?(
+    payload: ThreadResponsePayload,
+    sessionKey: string
+  ): Promise<void>;
+
+  /**
    * Handle completion of response processing.
    * Called when all content has been processed (processedMessageIds is set).
    * Should finalize any streams, send buffered content, clear status indicators.

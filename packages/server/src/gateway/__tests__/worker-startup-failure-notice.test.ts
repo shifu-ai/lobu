@@ -34,6 +34,7 @@ function createApiConsumer() {
   };
   const renderer = {
     handleDelta: mock(async () => "m1"),
+    handleContent: mock(async () => undefined),
     handleError: mock(async () => undefined),
     handleCompletion: mock(async () => undefined),
     handleEphemeral: mock(async () => undefined),
@@ -100,24 +101,44 @@ describe("worker-startup-failure notice reaches direct-API clients (lobu-ai/lobu
     expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
   });
 
-  test("a non-ephemeral `content` notice is dropped — only completion fires (the original bug)", async () => {
-    const { consumer, renderer } = createApiConsumer();
+  test("a non-ephemeral `content` notice is surfaced via handleContent, then completes (scalable router fix)", async () => {
+    const { consumer, renderer, sseManager } = createApiConsumer();
 
     await consumer.handleThreadResponse({
       id: "job-content",
       data: {
         ...apiPayloadBase,
-        // The pre-fix shape: a human-readable message in `content` with no
-        // `ephemeral` flag. Nothing renders it; the user only sees `complete`.
-        content: "Worker startup failed and your request could not be processed.",
+        // A human-readable message in `content` with no `ephemeral` flag.
+        // Pre-fix this was dropped (only `complete` fired); now the router
+        // renders it through handleContent so no notice silently vanishes.
+        content: "A buffered, non-streamed notice for the user.",
         processedMessageIds: ["m1"],
       },
     });
 
-    expect(renderer.handleError).not.toHaveBeenCalled();
+    expect(renderer.handleContent).toHaveBeenCalledTimes(1);
+    // Falls through to completion so the turn still terminates.
+    expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
+    // Not misrouted as a stream chunk, ephemeral, or error.
     expect(renderer.handleDelta).not.toHaveBeenCalled();
     expect(renderer.handleEphemeral).not.toHaveBeenCalled();
-    // Completion still fires (this is why the gateway returns a bare `complete`).
-    expect(renderer.handleCompletion).toHaveBeenCalledTimes(1);
+    expect(renderer.handleError).not.toHaveBeenCalled();
+    void sseManager;
+  });
+
+  test("an `ephemeral` content payload still routes to handleEphemeral, not handleContent", async () => {
+    const { consumer, renderer } = createApiConsumer();
+
+    await consumer.handleThreadResponse({
+      id: "job-ephemeral",
+      data: {
+        ...apiPayloadBase,
+        ephemeral: true,
+        content: "Visit https://example.com to authorize.",
+      },
+    });
+
+    expect(renderer.handleEphemeral).toHaveBeenCalledTimes(1);
+    expect(renderer.handleContent).not.toHaveBeenCalled();
   });
 });

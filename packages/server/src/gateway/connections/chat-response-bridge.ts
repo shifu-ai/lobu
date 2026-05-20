@@ -598,6 +598,32 @@ export class ChatResponseBridge implements ResponseRenderer {
   }
 
   async handleEphemeral(payload: ThreadResponsePayload): Promise<void> {
+    await this.postBufferedContent(payload, "ephemeral");
+  }
+
+  /**
+   * Handle a complete, non-streamed message (the `content` field) — e.g. a
+   * gateway-originated notice the worker never streamed as deltas. Posted as
+   * a normal in-thread message, identical to the ephemeral path.
+   */
+  async handleContent(
+    payload: ThreadResponsePayload,
+    _sessionKey: string
+  ): Promise<void> {
+    await this.postBufferedContent(payload, "content");
+  }
+
+  // --- Private ---
+
+  /**
+   * Post a complete `content` message to the platform target. Shared by the
+   * ephemeral and content render paths — both deliver a one-shot buffered
+   * message (with optional settings link-buttons), they differ only in intent.
+   */
+  private async postBufferedContent(
+    payload: ThreadResponsePayload,
+    label: "ephemeral" | "content"
+  ): Promise<void> {
     if (!payload.content) return;
 
     const ctx = this.extractResponseContext(payload);
@@ -641,7 +667,7 @@ export class ChatResponseBridge implements ResponseRenderer {
           } catch (error) {
             logger.warn(
               { connectionId, error: String(error) },
-              "Failed to render ephemeral settings button"
+              `Failed to render ${label} settings button`
             );
             const fallbackText = `${processedContent}\n\n${linkButtons.map((button) => `${button.text}: ${button.url}`).join("\n")}`;
             await target.post(fallbackText.trim());
@@ -654,12 +680,10 @@ export class ChatResponseBridge implements ResponseRenderer {
     } catch (error) {
       logger.error(
         { connectionId, error: String(error) },
-        "Failed to send ephemeral message"
+        `Failed to send ${label} message`
       );
     }
   }
-
-  // --- Private ---
 
   private async resolveTarget(
     instance: any,

@@ -263,6 +263,26 @@ export class UnifiedThreadResponseConsumer {
       return;
     }
 
+    // Handle a complete, non-streamed message (the `content` field).
+    // Gateway-originated notices and any buffered (non-delta) message arrive
+    // here. Without this branch a content-bearing payload falls straight
+    // through to completion and the user sees a bare `complete` with no
+    // content — the silent-success bug in lobu-ai/lobu#946. Render it, then
+    // fall through so the same payload's `processedMessageIds` still
+    // terminates the turn. `ephemeral` content is handled by its own branch
+    // above and returns before reaching here.
+    if (data.content && !data.ephemeral && renderer.handleContent) {
+      if (cliSessionId) {
+        this.sseManager.broadcast(cliSessionId, "output", {
+          type: "delta",
+          content: data.content,
+          timestamp: data.timestamp,
+          messageId: data.messageId,
+        });
+      }
+      await renderer.handleContent(data, sessionKey);
+    }
+
     // Handle completion
     if (data.processedMessageIds?.length) {
       if (cliSessionId) {
