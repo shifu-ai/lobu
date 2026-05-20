@@ -554,7 +554,7 @@ Memory:
     )
     .option(
       "--data-dir <path>",
-      "LOBU_DATA_DIR for the managed server (state, embedded Postgres)"
+      "Embedded Postgres data directory (stored as DATABASE_URL=file://<path>)"
     )
     .option(
       "--cwd <path>",

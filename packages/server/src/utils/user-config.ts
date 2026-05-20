@@ -114,8 +114,10 @@ export function applyUserServerConfigToEnv(
   if (cfg.host && !process.env.HOST?.trim()) {
     process.env.HOST = cfg.host;
   }
-  if (cfg.dataDir && !process.env.LOBU_DATA_DIR?.trim()) {
-    process.env.LOBU_DATA_DIR = cfg.dataDir;
+  // Legacy `dataDir` config maps to an embedded DATABASE_URL (file://<dir>) —
+  // DATABASE_URL is the single backend selector now.
+  if (cfg.dataDir && !process.env.DATABASE_URL?.trim()) {
+    process.env.DATABASE_URL = `file://${cfg.dataDir}`;
   }
 
   return cfg;

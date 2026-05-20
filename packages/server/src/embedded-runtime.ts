@@ -38,23 +38,22 @@ export interface EmbeddedRuntime {
 }
 
 /**
- * Resolve the embedded data root. `DATABASE_URL` holds a directory path (the
- * CLI / Mac app inject it); the cluster lives at `<root>/.lobu/pgdata`. `file:`
- * and a leading `~` are accepted. `LOBU_DATA_DIR` is honoured as a fallback for
- * direct (non-CLI) invocation; otherwise an explicit path is required.
+ * Resolve the embedded data root from `DATABASE_URL` (a `file://` / path value;
+ * the CLI / Mac app inject it). The cluster lives at `<root>/.lobu/pgdata`.
+ * A leading `~` is expanded. `DATABASE_URL` is the single source of truth — a
+ * postgres:// URL routes to the external path before this is ever called.
  */
 function resolveDataRoot(): string {
 	const dbUrl = process.env.DATABASE_URL?.trim();
-	if (dbUrl && !/^postgres(ql)?:\/\//i.test(dbUrl)) {
-		let p = dbUrl.replace(/^file:(\/\/)?/i, "");
-		if (p === "~" || p.startsWith("~/")) p = join(homedir(), p.slice(1));
-		return p;
+	if (!dbUrl) {
+		throw new Error(
+			"DATABASE_URL is required: a file:// path for embedded Postgres " +
+				"(e.g. file://~/.lobu) or a postgres:// URL for an external database.",
+		);
 	}
-	if (process.env.LOBU_DATA_DIR) return process.env.LOBU_DATA_DIR;
-	throw new Error(
-		"DATABASE_URL must be a directory path (e.g. file://~/.lobu) for embedded " +
-			"Postgres mode. A postgres:// URL connects to an external Postgres instead.",
-	);
+	let p = dbUrl.replace(/^file:(\/\/)?/i, "");
+	if (p === "~" || p.startsWith("~/")) p = join(homedir(), p.slice(1));
+	return p;
 }
 
 function resolveExistingPath(

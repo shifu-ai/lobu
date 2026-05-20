@@ -67,11 +67,10 @@ LOBU="node ${CLI_BIN}"
 # ─── 2. start server ───────────────────────────────────────────────────
 echo "==> step 2: start the embedded server on :${PORT}"
 
-# Unset DATABASE_URL — with only LOBU_DATA_DIR set, server.ts boots an embedded
-# Postgres rooted there and writes its own DATABASE_URL into process.env.
+# DATABASE_URL=file://<dir> → server.ts boots an embedded Postgres rooted there
+# (cluster at <dir>/.lobu/pgdata) and rewrites DATABASE_URL to the TCP URL.
 env \
-  -u DATABASE_URL \
-  LOBU_DATA_DIR="${DATA_DIR}" \
+  DATABASE_URL="file://${DATA_DIR}" \
   PORT="${PORT}" \
   HOST=127.0.0.1 \
   bun run "${REPO_ROOT}/packages/server/src/server.ts" \

@@ -111,11 +111,13 @@ export async function devCommand(
   const userServerEnv: Record<string, string> = {};
   if (userServerConfig?.databaseUrl)
     userServerEnv.DATABASE_URL = userServerConfig.databaseUrl;
+  else if (userServerConfig?.dataDir)
+    // Legacy `dataDir` → an embedded DATABASE_URL (file://<dir>). DATABASE_URL
+    // is the single backend selector.
+    userServerEnv.DATABASE_URL = `file://${userServerConfig.dataDir}`;
   if (userServerConfig?.port)
     userServerEnv.PORT = String(userServerConfig.port);
   if (userServerConfig?.host) userServerEnv.HOST = userServerConfig.host;
-  if (userServerConfig?.dataDir)
-    userServerEnv.LOBU_DATA_DIR = userServerConfig.dataDir;
 
   const mergedEnv = {
     ...userServerEnv,
@@ -188,14 +190,12 @@ export async function devCommand(
   }
 
   // Embedded: resolve the data root and pass it through as the explicit
-  // DATABASE_URL path the single server bundle reads. Precedence: an explicit
-  // path-form DATABASE_URL > LOBU_DATA_DIR (set by the Mac app / dev-native) >
-  // the user's home dir. The bundle puts the cluster at <root>/.lobu/pgdata.
+  // DATABASE_URL path the single server bundle reads. A path-form DATABASE_URL
+  // wins; otherwise default to the user's home dir. The bundle puts the cluster
+  // at <root>/.lobu/pgdata.
   let embeddedDataRoot: string | null = null;
   if (mode === "embedded") {
-    embeddedDataRoot = resolveEmbeddedDataRoot(
-      databaseUrlRaw || mergedEnv.LOBU_DATA_DIR || "~"
-    );
+    embeddedDataRoot = resolveEmbeddedDataRoot(databaseUrlRaw || "~");
     mergedEnv.DATABASE_URL = embeddedDataRoot;
   }
 
