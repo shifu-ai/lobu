@@ -288,6 +288,52 @@ export async function initCommand(
     })
   );
 
+  // Database: local embedded Postgres (zero-config) or an existing one. The
+  // chosen value is written verbatim to DATABASE_URL — `file://.` boots an
+  // isolated embedded PG under ./.lobu/pgdata; a postgres:// URL connects out.
+  const databaseChoice = await promptOrDefault({
+    flag: undefined,
+    useDefaults,
+    defaultValue: "embedded",
+    validate: (v: string) =>
+      v === "embedded" ||
+      v === "external" ||
+      /^(postgres(ql)?|file):/i.test(v.trim())
+        ? true
+        : "Must be 'embedded', 'external', or a postgres:// / file:// URL",
+    prompt: () =>
+      select<string>({
+        message: "Database?",
+        choices: [
+          {
+            name: "Local embedded Postgres — zero-config, data in ./.lobu (recommended)",
+            value: "embedded",
+          },
+          { name: "Connect to an existing Postgres", value: "external" },
+        ],
+        default: "embedded",
+      }),
+  });
+
+  let databaseUrl: string;
+  if (databaseChoice === "external") {
+    databaseUrl = (
+      await input({
+        message: "Postgres connection URL?",
+        validate: (v: string) =>
+          /^postgres(ql)?:\/\//i.test(v.trim())
+            ? true
+            : "Must be a postgres:// URL",
+      })
+    ).trim();
+  } else if (/^(postgres(ql)?|file):/i.test(databaseChoice.trim())) {
+    // A URL passed directly (e.g. via --yes with an explicit value).
+    databaseUrl = databaseChoice.trim();
+  } else {
+    // embedded → isolated per-project Postgres at ./.lobu/pgdata
+    databaseUrl = "file://.";
+  }
+
   const publicGatewayUrl = await promptOrDefault({
     flag: options.publicUrl,
     useDefaults,
@@ -575,6 +621,7 @@ export async function initCommand(
       ENCRYPTION_KEY: answers.encryptionKey,
       GATEWAY_PORT: gatewayPort,
       WORKER_PROXY_PORT: workerProxyPort,
+      DATABASE_URL: databaseUrl,
       WORKER_ALLOWED_DOMAINS: answers.allowedDomains,
       WORKER_DISALLOWED_DOMAINS: answers.disallowedDomains,
     };
@@ -678,14 +725,12 @@ export async function initCommand(
     if (!here) {
       console.log(chalk.cyan(`  ${n++}. cd ${projectName}`));
     }
-    console.log(
-      chalk.cyan(
-        `  ${n++}. Start the local stack: lobu run (uses a local embedded Postgres by default)`
-      )
-    );
+    console.log(chalk.cyan(`  ${n++}. Start the local stack: lobu run`));
     console.log(
       chalk.dim(
-        "       Optional: set DATABASE_URL in .env to use external Postgres instead."
+        databaseUrl.startsWith("file:")
+          ? "       Database: local embedded Postgres (./.lobu). Edit DATABASE_URL in .env to connect to an external one."
+          : "       Database: external Postgres (DATABASE_URL in .env)."
       )
     );
     if (lobuUrl) {
