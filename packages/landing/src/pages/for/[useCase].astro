@@ -6,7 +6,6 @@ import { LandingPage } from "../../components/LandingPage";
 import { Nav } from "../../components/Nav";
 import {
   getLandingUseCaseShowcase,
-  getSurfaceHeroCopy,
   landingUseCaseRouteEntries,
 } from "../../use-case-showcases";
 import { getLatestPosts } from "../../latest-posts";
@@ -39,8 +38,6 @@ const latestPosts = await getLatestPosts(3);
       <LandingPage
         client:load
         defaultUseCaseId={showcase.id}
-        linkTabsToCampaigns
-        heroCopy={getSurfaceHeroCopy("landing", showcase.id)}
         latestPosts={latestPosts}
       />
     </main>
