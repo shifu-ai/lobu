@@ -4,14 +4,18 @@ After making changes on a feature branch, the agent runs `make review`
 locally. `scripts/review.sh` drives the deterministic test suites in cwd,
 invokes `pi` against `git diff <base>...HEAD` (base defaults to `main`,
 override with `BASE=<branch>` or `--base <branch>`), and prints a JSON
-verdict matching this schema. If a PR exists for the current branch, the
-script also posts an idempotent PR comment (marker-keyed upsert) with the
-verdict — that posting is a bonus, not a requirement. **GitHub Actions
-does not run review** — it's a local-driven shadow mode owned by the
-agent doing the work.
+verdict matching this schema. The script posts a `pi-review` commit status
+whenever GitHub auth is available; if a PR exists for the current branch, it
+also posts an idempotent PR comment (marker-keyed upsert) with the verdict.
+**GitHub Actions does not run review** — it's a local-driven gate owned by
+the agent doing the work.
 
-A future merge bot will read this verdict and decide whether to auto-merge.
-For now the verdict is informational and **no gate logic exists yet**.
+Branch protection can require the `pi-review` status. The status fails when
+any merge gate below fails: `bug_free_confidence < 80`, `bugs > 0`,
+`slop > 15`, `simplicity < 70`, `blockers` is non-empty,
+`tests_adequate == false`, or `behavior_change_risk == "high"`. Thresholds
+are tunable for one-off runs with `PI_REVIEW_MIN_BUG_FREE`,
+`PI_REVIEW_MAX_SLOP`, and `PI_REVIEW_MIN_SIMPLICITY`.
 
 The schema is reviewer-agnostic — a second independent reviewer can be
 added later without touching the shape below.
@@ -64,8 +68,8 @@ How sure the reviewer is that the change works correctly and won't break prod.
 **Calibration rule:** do not go above 90 unless the reviewer would genuinely
 stake the team on this.
 
-**Future gate:** auto-merge will require `bug_free_confidence >= 80` (and
-equivalent thresholds from any additional reviewer that gets wired in).
+**Gate:** `make review` passes only when `bug_free_confidence >= 80` by
+default. Override for one run with `PI_REVIEW_MIN_BUG_FREE=<n>`.
 
 ### `bugs` (integer, ≥0)
 
@@ -85,7 +89,7 @@ didn't verify, you don't get to count.
 
 Style nits and naming preferences do not count.
 
-**Future gate:** auto-merge will require `bugs == 0`.
+**Gate:** `make review` passes only when `bugs == 0`.
 
 ### `slop` (integer, 0–100)
 
@@ -115,7 +119,8 @@ ratio of slop lines to total changed lines:
 diff; 50 = significant fraction of the diff is waste; 80+ = the diff is
 mostly waste.
 
-**Future gate:** auto-merge will require `slop <= 30`.
+**Gate:** `make review` passes only when `slop <= 15` by default. Override for
+one run with `PI_REVIEW_MAX_SLOP=<n>`.
 
 ### `simplicity` (integer, 0–100)
 
@@ -133,12 +138,15 @@ How elegant the change is for the goal it's pursuing. Higher = simpler.
 clever side effect is low simplicity. A 200-line change that reads
 top-to-bottom is high simplicity.
 
-**Future gate:** auto-merge will require `simplicity >= 60`.
+**Gate:** `make review` passes only when `simplicity >= 70` by default.
+Override for one run with `PI_REVIEW_MIN_SIMPLICITY=<n>`.
 
 > **Independent axes.** `bug_free_confidence`, `slop`, and `simplicity` are
 > independent. A change can score high `bug_free_confidence` (works), high
 > `slop` (lots of unused code added), and low `simplicity` (overengineered).
-> All three must clear their thresholds for auto-merge.
+> The `pi-review` status requires all seven gates to pass: these three metrics,
+> `bugs == 0`, `blockers.length == 0`, `behavior_change_risk != "high"`, and
+> `tests_adequate == true`.
 
 ### `blockers` (array of strings)
 
@@ -155,7 +163,7 @@ test setup) are NOT blockers — they belong in `notes` with an `[env]`
 prefix. A failing test only blocks when the failing test, or the source
 code it exercises, appears in `git diff --name-only "$BASE_BRANCH...HEAD"`.
 
-**Future gate:** auto-merge will require `blockers.length == 0`.
+**Gate:** `make review` passes only when `blockers.length == 0`.
 
 ### `change_type` (enum)
 
@@ -166,8 +174,9 @@ Maps to conventional-commit prefix. Use the prefix that best describes the
 measure (e.g. `feat` + `test`), prefer `feat`. If you would split this PR,
 say so in `notes`.
 
-**Future use:** `docs` / `chore` / `test` PRs will get a more permissive gate
-than `feat` / `fix` / `refactor`.
+**Note:** the current `pi-review` status applies one gate policy to all change
+types. If a docs/chore/test PR needs an exception, use an explicit env override
+or admin merge.
 
 ### `behavior_change_risk` (enum)
 
@@ -183,8 +192,8 @@ One of: `none`, `low`, `medium`, `high`.
   data integrity, or anything with cross-system consequences (queue,
   scheduler, retry).
 
-**Future gate:** `high` will require human approval even if scores otherwise
-pass.
+**Gate:** `make review` fails when risk is `high`; that path requires human
+approval / admin merge even if scores otherwise pass.
 
 ### `tests_adequate` (boolean)
 
@@ -192,8 +201,8 @@ pass.
 are warranted because behavior_change_risk is `none`). `false` if a
 behavior change ships without test coverage.
 
-**Future gate:** `false` blocks auto-merge unless `change_type` is `docs` /
-`chore`.
+**Gate:** `make review` fails when `tests_adequate` is `false`. For docs/chore
+exceptions, use an explicit env override or admin merge.
 
 ### `suggested_fixes` (array of objects)
 
@@ -232,17 +241,14 @@ Path → category mapping:
 When a path matches multiple patterns, the more specific one wins
 (`__tests__/**` beats `packages/*/src/**`).
 
-**Future use:** the merge bot uses these to apply per-category gates (e.g.
-`docs`-only PRs skip the bugs/slop gates).
+**Note:** categories are currently informational and may be used for more
+nuanced gates later.
 
-## Shadow-mode reminder
+## Local gate flow
 
-Merges are not gated by this verdict yet. The point of shadow mode is to
-observe how the verdicts track real-world PR outcomes so the gate
-thresholds above can be calibrated before they are wired up.
-
-Today's flow: agent finishes a change → runs `make review` from the
-branch's worktree → pi reviews and prints the JSON verdict (and posts a
-PR comment if a PR exists) → human reads the verdict and decides whether
-to merge. A future merge bot will read the verdict and apply the gate
-thresholds above; that bot doesn't exist yet.
+Today's flow: agent finishes a change → opens a PR → runs `make review` from
+the branch's worktree → pi reviews and prints the JSON verdict → the script
+posts/updates the `pi-review` commit status and PR comment. Branch protection
+can require `pi-review`, so a new commit remains unmergeable until the local
+review runs and passes for that exact SHA. Human/admin merge remains the
+explicit escape hatch for intentional exceptions.
