@@ -705,6 +705,64 @@ export async function initCommand(
     await mkdir(join(projectDir, "skills"), { recursive: true });
     await writeFile(join(projectDir, "skills", ".gitkeep"), "");
 
+    // Connector authoring surface: package.json declares the connector SDK
+    // (provided by the runtime — externalized at compile, here for editor
+    // types) plus any npm deps the user adds; tsconfig gives the editor
+    // resolution; the connectors/ dir holds `*.connector.ts`. `lobu apply`
+    // runs `bun install --ignore-scripts` here and bundles each connector's
+    // own deps.
+    //
+    // `--here` can target a directory that already has a package.json /
+    // tsconfig.json — merge into package.json (preserve the user's fields, just
+    // add the SDK devDependency) and never overwrite an existing tsconfig.
+    const pkgJsonPath = join(projectDir, "package.json");
+    let pkgJson: Record<string, unknown>;
+    try {
+      pkgJson = JSON.parse(await readFile(pkgJsonPath, "utf-8")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      pkgJson = {
+        name: projectName,
+        version: "0.0.0",
+        private: true,
+        type: "module",
+      };
+    }
+    pkgJson.devDependencies = {
+      ...((pkgJson.devDependencies as Record<string, string> | undefined) ??
+        {}),
+      "@lobu/connector-sdk": `^${cliVersion}`,
+    };
+    await writeFile(pkgJsonPath, `${JSON.stringify(pkgJson, null, 2)}\n`);
+
+    const tsconfigPath = join(projectDir, "tsconfig.json");
+    try {
+      await readFile(tsconfigPath, "utf-8"); // exists — leave the user's config untouched
+    } catch {
+      await writeFile(
+        tsconfigPath,
+        `${JSON.stringify(
+          {
+            compilerOptions: {
+              target: "ES2022",
+              module: "Preserve",
+              moduleResolution: "bundler",
+              strict: true,
+              skipLibCheck: true,
+              noEmit: true,
+            },
+            include: ["connectors/**/*.ts"],
+          },
+          null,
+          2
+        )}\n`
+      );
+    }
+    await mkdir(join(projectDir, "connectors"), { recursive: true });
+    await writeFile(join(projectDir, "connectors", ".gitkeep"), "");
+
     await renderTemplate(
       "AGENTS.md.tmpl",
       variables,
