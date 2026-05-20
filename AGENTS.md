@@ -249,6 +249,8 @@ Without an editor integration, biome's `--write` still rewrites files at commit 
 
 ### Validation after code changes
 
+**After completing changes on a feature branch, run `make review`** — runs typecheck/unit/integration tests in cwd, calls local `pi` with the diff (`git diff main...HEAD`) and test results, prints a multi-axis JSON verdict (`bug_free_confidence`, `bugs`, `slop`, `simplicity`). If a PR exists for the current branch, also posts a PR comment with the verdict (marker-keyed upsert). Override the base with `BASE=<branch>` or `--base <branch>`. See `docs/REVIEW_SCHEMA.md`.
+
 **E2E before merge (hard gate).** For any bug-fix PR, do a red → fix → green cycle before opening:
 
 1. Reproduce the failure first (boot PGlite for SQL bugs, the gateway for SSE/runtime bugs, the actual binary for CLI bugs). Capture output.
