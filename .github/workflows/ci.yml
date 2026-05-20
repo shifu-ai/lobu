@@ -202,11 +202,18 @@ jobs:
         # the `import` condition and fails to load if dist is absent —
         # which transitively breaks every integration file whose import
         # graph touches `queue-helpers` / `worker-api` / `connector-catalog`.
+        #
+        # pgvector-embedded must build too: the test backend
+        # (src/__tests__/setup/embedded-postgres-backend.ts) imports
+        # `@lobu/pgvector-embedded`, so vite resolves its `import` condition
+        # (./dist/index.js) at transform time even though the embedded backend
+        # is never started when DATABASE_URL points at the external Postgres.
         run: |
           cd packages/core && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
+          cd packages/pgvector-embedded && bun run build && cd ../..
 
       - name: Verify Postgres health (fail fast if pgvector setup is broken)
         run: |

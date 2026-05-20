@@ -4,7 +4,7 @@
  * Spawns a real PostgreSQL 18 (embedded-postgres) on a throwaway datadir and
  * returns a plain DATABASE_URL any postgres.js client can use — so `make test`
  * needs no external Postgres, exactly like `lobu run`. Same binary + pgvector
- * injection as the production embedded path (src/start-local.ts), so tests
+ * injection as the production embedded path (src/embedded-runtime.ts), so tests
  * exercise the real engine (prepared statements, multi-conn pool, LISTEN/NOTIFY,
  * cube/earthdistance, pgvector) with no PGlite-specific quirks.
  */
