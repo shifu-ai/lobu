@@ -55,12 +55,13 @@ jobs:
       - name: Install PostgreSQL 18 dev (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo install -d /usr/share/postgresql-common/pgdg
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-            | sudo gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
-          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
-            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          # Use the official pgdg setup script rather than a hand-rolled
+          # curl|gpg --dearmor pipe: the latter intermittently fails on GitHub
+          # runners with "gpg: cannot open '/dev/tty'". The script adds the
+          # repo + key non-interactively.
           sudo apt-get update
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y postgresql-server-dev-18 build-essential
           echo "PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config" >> "$GITHUB_ENV"
 
