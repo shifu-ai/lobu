@@ -1,9 +1,9 @@
 /**
  * Shared server lifecycle spine.
  *
- * Both entry points — `server.ts` (external Postgres) and `start-local.ts`
- * (local embedded Postgres) —
- * call into `createServerLifecycle()` so middleware ordering, route mounts,
+ * `server.ts` is the single entry for both backends (external Postgres and
+ * local embedded Postgres); it calls into `createServerLifecycle()` so
+ * middleware ordering, route mounts,
  * httpServer timeouts, shutdown sequence, and signal wiring stay identical
  * by construction. Drift between the two modes was the root cause of #948;
  * the only way to express a per-mode difference now is the four named hooks
@@ -69,19 +69,6 @@ export interface ServerLifecycleConfig {
 export interface ServerLifecycleHandles {
 	/** Starts the listener and registers signal handlers. Resolves once listening. */
 	start: () => Promise<void>;
-}
-
-/**
- * Apply the LOBU_DEV_PROJECT_PATH fallback so downstream
- * `buildGatewayConfig()` can derive worker paths even when the server is
- * invoked from a package subdir (`cd packages/server && bun run dev`) or
- * via `lobu run` from a project subdir. Both entries call this before
- * lifecycle construction.
- */
-export function applyDevProjectPathDefault(packageRepoRoot: string): void {
-	if (!process.env.LOBU_DEV_PROJECT_PATH) {
-		process.env.LOBU_DEV_PROJECT_PATH = packageRepoRoot;
-	}
 }
 
 /**
