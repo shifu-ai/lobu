@@ -20,12 +20,12 @@
  *      throws (saveConnection calls getOrgId() strict) and the boot loop
  *      crashes silently, masking the underlying failure.
  *
- * Uses PGlite via the shared gateway test harness; no network.
+ * Uses the embedded Postgres gateway test harness; no network.
  */
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -34,7 +34,7 @@ const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
 });
 

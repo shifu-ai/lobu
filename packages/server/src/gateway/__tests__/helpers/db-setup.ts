@@ -2,9 +2,9 @@
  * Bun:test PG harness shared across the gateway test suite.
  *
  * Store tests in this directory read/write Postgres directly, so callers
- * need a real DB. We boot an ephemeral PGlite once per test process the
- * first time `ensurePgliteForGatewayTests()` is called, run migrations, and
- * reuse it for the rest of the suite.
+ * need a real DB. The first time `ensureDbForGatewayTests()` is called we use
+ * DATABASE_URL if set, else spawn an ephemeral embedded Postgres once per test
+ * process, run migrations, and reuse it for the rest of the suite.
  *
  * Tests that don't need PG (pure helpers, classification logic, etc.) can
  * skip calling this entirely and pay no cost.
@@ -12,9 +12,9 @@
 
 import { closeDbSingleton, getDb } from "../../../db/client.js";
 import {
-  startPgliteBackend,
-  type PgliteBackend,
-} from "../../../__tests__/setup/pglite-backend.js";
+  type EmbeddedBackend,
+  startEmbeddedBackend,
+} from "../../../__tests__/setup/embedded-postgres-backend.js";
 import {
   cleanupTestDatabase,
   closeTestDb,
@@ -22,22 +22,21 @@ import {
 } from "../../../__tests__/setup/test-db.js";
 
 let initPromise: Promise<void> | null = null;
-let backend: PgliteBackend | null = null;
+let backend: EmbeddedBackend | null = null;
 
 /**
- * Idempotent. Starts PGlite + runs migrations on first call, returns the
+ * Idempotent. Starts the DB + runs migrations on first call, returns the
  * same Promise on every subsequent call. Tests should `await` it from a
  * `beforeAll` — repeated calls are cheap.
  */
-export function ensurePgliteForGatewayTests(): Promise<void> {
+export function ensureDbForGatewayTests(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
     if (!process.env.DATABASE_URL) {
-      backend = await startPgliteBackend();
+      backend = await startEmbeddedBackend();
       process.env.DATABASE_URL = backend.url;
       process.env.PGSSLMODE = "disable";
-      process.env.LOBU_DISABLE_PREPARE = "1";
     }
     if (!process.env.ENCRYPTION_KEY) {
       process.env.ENCRYPTION_KEY =

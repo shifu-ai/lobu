@@ -1,9 +1,9 @@
 /**
- * Local Server Entry Point (PGlite mode).
+ * Local Server Entry Point (embedded PostgreSQL mode).
  *
  * Mode-specific bootstrap only:
  *   - apply user-config / forced env-var writes BEFORE anything reads env
- *   - start PGlite + socket server + run migrations
+ *   - spawn a real PostgreSQL 18 (embedded-postgres, pgvector injected) + run migrations
  *   - fork embeddings child
  *   - hand off to `createServerLifecycle()` for the shared spine
  *
@@ -41,18 +41,19 @@ import { applyUserServerConfigToEnv } from "./utils/user-config";
 // / PORT / HOST reads below so user-config overrides from
 // ~/.config/lobu/config.json land in time.
 //
-// DATABASE_URL is also filled in, but this bundle always boots PGlite and
-// overwrites it below. External-Postgres routing happens upstream in
-// `lobu run` (packages/cli/src/commands/dev.ts), which switches bundles when
-// the user config or env pins DATABASE_URL. So in practice only LOBU_DATA_DIR
-// / PORT / HOST flow through this call.
+// DATABASE_URL is also filled in, but this bundle always boots its own
+// embedded PostgreSQL and overwrites it below. External-Postgres routing
+// happens upstream in `lobu run` (packages/cli/src/commands/dev.ts), which
+// switches bundles when the user config or env pins DATABASE_URL. So in
+// practice only LOBU_DATA_DIR / PORT / HOST flow through this call.
 applyUserServerConfigToEnv();
 
-import { PGlite } from "@electric-sql/pglite";
-import { pg_trgm } from "@electric-sql/pglite/contrib/pg_trgm";
-import { vector } from "@electric-sql/pglite/vector";
-import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { assertExternalDepsResolvable } from "@lobu/connector-worker/compile";
+import {
+	injectPgvector,
+	resolveEmbeddedNativeDir,
+} from "@lobu/pgvector-embedded";
+import EmbeddedPostgres from "embedded-postgres";
 import { ensureDefaultAgent } from "./auth/default-provisioning";
 import { ensureInstallOperator } from "./auth/install-operator";
 import {
@@ -62,7 +63,28 @@ import {
 import { getEnvFromProcess } from "./utils/env";
 import logger from "./utils/logger";
 
-const DATA_DIR = process.env.LOBU_DATA_DIR || join(homedir(), ".lobu", "data");
+/**
+ * Embedded data root. `DATABASE_URL` holds a directory path (the CLI / menubar
+ * inject it); the Postgres cluster lives at `<root>/.lobu/pgdata`. `file:` and
+ * a leading `~` are accepted. `LOBU_DATA_DIR` is a fallback for direct
+ * (non-CLI) invocation; an explicit path is otherwise required.
+ */
+function resolveDataRoot(): string {
+	const dbUrl = process.env.DATABASE_URL?.trim();
+	if (dbUrl && !/^postgres(ql)?:\/\//i.test(dbUrl)) {
+		let p = dbUrl.replace(/^file:(\/\/)?/i, "");
+		if (p === "~" || p.startsWith("~/")) p = join(homedir(), p.slice(1));
+		return p;
+	}
+	if (process.env.LOBU_DATA_DIR) return process.env.LOBU_DATA_DIR;
+	throw new Error(
+		"DATABASE_URL must be set to a directory path for embedded Postgres mode " +
+			"(e.g. DATABASE_URL=~/.lobu). A postgres:// URL routes to the external-PG entrypoint instead.",
+	);
+}
+
+const DATA_ROOT = resolveDataRoot();
+const PG_DATA_DIR = join(DATA_ROOT, ".lobu", "pgdata");
 const PORT = parseInt(process.env.PORT || "8787", 10);
 // Loopback-only by default: the embedded local-runner ships a
 // loopback-trust endpoint (`POST /api/local-init`) that mints worker-scoped
@@ -86,24 +108,13 @@ function resolveExistingPath(
 	return null;
 }
 
-function readPositiveIntEnv(name: string, fallback: number): number {
-	const raw = process.env[name]?.trim();
-	if (!raw) return fallback;
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
-}
-
-function isTruthyEnv(name: string): boolean {
-	return /^(1|true|yes|on)$/i.test(process.env[name]?.trim() ?? "");
-}
-
 async function main(): Promise<void> {
-	mkdirSync(DATA_DIR, { recursive: true });
+	mkdirSync(join(DATA_ROOT, ".lobu"), { recursive: true });
 
 	// Set all env vars FIRST — before any imports that might read them. The
 	// server-lifecycle module is imported dynamically below for exactly this
 	// reason: its transitive imports (`./index`, gateway, scheduler) read env
-	// at module-evaluation time, and pglite socket setup must finish first.
+	// at module-evaluation time, and the embedded Postgres must be up first.
 	if (!process.env.BETTER_AUTH_SECRET) {
 		process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("base64");
 		logger.info(
@@ -120,8 +131,7 @@ async function main(): Promise<void> {
 		process.env.NODE_ENV = "development";
 	}
 	process.env.PGSSLMODE = "disable";
-	process.env.LOBU_DISABLE_PREPARE = "1";
-	// Single-user mode default: the embedded runner spawns its own PGlite,
+	// Single-user mode default: the embedded runner spawns its own PostgreSQL,
 	// seeds a single bootstrap user, and is expected to be used by exactly
 	// one operator on one machine. Block additional sign-ups so the
 	// operator can't accidentally fork into a second account (one for the
@@ -138,49 +148,39 @@ async function main(): Promise<void> {
 		process.env.LOBU_DEV_PROJECT_PATH = PACKAGE_REPO_ROOT;
 	}
 
-	// ─── PGlite ──────────────────────────────────────────────────
+	// ─── Embedded PostgreSQL ─────────────────────────────────────
+	// Real PostgreSQL 18 (embedded-postgres) spawned as a child process.
+	// embedded-postgres bundles pg_trgm but NOT pgvector, so the host
+	// platform's prebuilt vector library is injected into the binary tree
+	// before boot (idempotent). Unlike the old PGlite socket path this is a
+	// real wire-protocol PG — prepared statements, a multi-connection pool,
+	// and LISTEN/NOTIFY all work natively, so LOBU_DISABLE_PREPARE is
+	// intentionally NOT set here.
 
-	logger.info({ dataDir: DATA_DIR }, "Starting PGlite");
-	const db = await PGlite.create({
-		dataDir: DATA_DIR,
-		extensions: { vector, pg_trgm },
+	injectPgvector(resolveEmbeddedNativeDir());
+
+	const pgDataDir = PG_DATA_DIR;
+	const pgPort =
+		parseInt(process.env.LOBU_PG_PORT || "", 10) || (await findFreePort());
+	const pg = new EmbeddedPostgres({
+		databaseDir: pgDataDir,
+		user: "postgres",
+		password: "postgres",
+		port: pgPort,
+		persistent: true,
 	});
 
-	// ─── PGlite Socket Server ────────────────────────────────────
-	// Start socket FIRST, then run everything (including migrations)
-	// through it. No direct PGlite access after this point.
+	// initdb refuses a non-empty datadir; skip it when the cluster already
+	// exists so `lobu run` restarts reuse the same data instead of erroring.
+	if (!existsSync(join(pgDataDir, "PG_VERSION"))) {
+		logger.info({ pgDataDir }, "Initialising embedded PostgreSQL cluster");
+		await pg.initialise();
+	}
+	await pg.start();
 
-	const pgSocketPort = parseInt(process.env.PG_SOCKET_PORT || "0", 10);
-	const socketServer = new PGLiteSocketServer({
-		db,
-		port: pgSocketPort,
-		maxConnections: readPositiveIntEnv(
-			"LOBU_PGLITE_SOCKET_MAX_CONNECTIONS",
-			64,
-		),
-		idleTimeout: readPositiveIntEnv("LOBU_PGLITE_SOCKET_IDLE_TIMEOUT_MS", 0),
-		debug: isTruthyEnv("LOBU_PGLITE_SOCKET_DEBUG"),
-	});
-	socketServer.addEventListener("error", (event: Event) => {
-		logger.error(
-			{ error: (event as CustomEvent).detail },
-			"PGlite socket server error",
-		);
-	});
-	socketServer.addEventListener("close", () => {
-		logger.warn("PGlite socket server closed");
-	});
-	// Wait for listening event to get the actual port (especially when port=0)
-	const actualPgPort = await new Promise<number>((resolve) => {
-		socketServer.addEventListener("listening", (e: Event) => {
-			resolve((e as CustomEvent).detail?.port ?? pgSocketPort);
-		});
-		socketServer.start();
-	});
-	// sslmode=disable is required — PGlite socket doesn't support SSL negotiation
-	const dbUrl = `postgresql://postgres@127.0.0.1:${actualPgPort}/postgres?sslmode=disable`;
+	const dbUrl = `postgresql://postgres:postgres@127.0.0.1:${pgPort}/postgres?sslmode=disable`;
 	process.env.DATABASE_URL = dbUrl;
-	logger.info({ port: actualPgPort }, "PGlite socket server ready");
+	logger.info({ port: pgPort }, "Embedded PostgreSQL ready");
 
 	// ─── Embeddings Service (child process) ──────────────────────
 
@@ -203,7 +203,7 @@ async function main(): Promise<void> {
 	let personalOrgId: string | null = null;
 
 	const lifecycle = createServerLifecycle({
-		mode: "pglite",
+		mode: "embedded-postgres",
 		env,
 		host: HOST,
 		port: PORT,
@@ -253,8 +253,8 @@ async function main(): Promise<void> {
 		// connector external dep, instead of letting each feed silently fail
 		// with "Missing npm dependency: X" hours later. Runs after listen() so
 		// the sync require.resolve walk doesn't add to cold-boot latency.
-		// Without this hook, PGlite mode silently re-introduces the drift the
-		// refactor exists to prevent — flagged by pi review on #951.
+		// Without this hook, embedded-postgres mode silently re-introduces the
+		// drift the refactor exists to prevent — flagged by pi review on #951.
 		postListenHooks: [
 			() => {
 				try {
@@ -265,24 +265,23 @@ async function main(): Promise<void> {
 				}
 			},
 		],
-		// PGlite-specific teardown — runs after stopLobuGateway + closeDbSingleton
-		// so gateway's postgres.js connections release before the socket goes
-		// away underneath them.
+		// Embedded-postgres teardown — runs after stopLobuGateway +
+		// closeDbSingleton so gateway's postgres.js connections release before
+		// the PG child process is stopped underneath them.
 		extraTeardown: [
 			() => {
 				embeddingsChild?.kill();
 			},
-			() => socketServer.stop(),
-			() => db.close(),
+			() => pg.stop(),
 		],
 	});
 
 	try {
 		await lifecycle.start();
-		logger.info(`Data: ${DATA_DIR}`);
+		logger.info(`Data: ${PG_DATA_DIR}`);
 	} catch (err) {
-		// Bridge to reportBootFailure so PGlite-mode boot crashes get the same
-		// structured + plain-text fallback logging as Postgres mode.
+		// Bridge to reportBootFailure so embedded-postgres-mode boot crashes get
+		// the same structured + plain-text fallback logging as Postgres mode.
 		reportBootFailure(err);
 	}
 }

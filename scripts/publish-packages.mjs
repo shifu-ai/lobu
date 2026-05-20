@@ -24,6 +24,8 @@ const PACKAGES = [
   { dir: "packages/connector-sdk", transform: rewriteWorkspaceRefs },
   { dir: "packages/agent-worker", transform: rewriteWorkspaceRefs },
   { dir: "packages/embeddings", transform: rewriteWorkspaceRefs },
+  // Before cli — cli depends on @lobu/pgvector-embedded (workspace:*).
+  { dir: "packages/pgvector-embedded", transform: rewriteWorkspaceRefs },
   { dir: "packages/cli", transform: rewriteWorkspaceRefs },
   {
     dir: "packages/openclaw-plugin",

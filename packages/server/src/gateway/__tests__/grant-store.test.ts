@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { GrantStore } from "../permissions/grant-store.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -23,7 +23,7 @@ describe("GrantStore (PG-backed)", () => {
   let store: GrantStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

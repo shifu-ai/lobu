@@ -206,8 +206,7 @@ export function resetReservedLockCountForTests(): void {
  * Force the internal counter to a specific value. Test-only — production
  * code MUST go through `acquireConversationLock` so increment+decrement
  * pair via the canonical path. Used by the cap-enforcement test which
- * needs to stage the counter without actually consuming PG connections
- * (PGlite pins us to a single shared connection).
+ * needs to stage the counter without actually consuming PG connections.
  */
 export function setReservedLockCountForTests(value: number): void {
   reservedLockCount = Math.max(0, value);
@@ -226,25 +225,17 @@ export function setReservedLockCountForTests(value: number): void {
  * steal the conversation mid-run. The `sql.reserve()` connection is
  * dedicated and lock state survives until we explicitly release.
  *
- * No-op in embedded mode (`LOBU_DISABLE_PREPARE=1`). Embedded mode pins the
- * pg pool to a single connection (see `createDbClient` in db/client.ts), so
- * `reserve()` would block any sibling query forever. Embedded also can't
- * have multi-pod races by definition — the in-process `workers` Map (see
- * `spawnDeployment` above) already gates per-conversation concurrency.
- * Returning a no-op release lets the caller treat all modes uniformly.
+ * The local embedded backend takes this same real path now that it runs on a
+ * real multi-connection Postgres (no single-connection pin). In a single
+ * process the lock is uncontended and the in-process `workers` Map (see
+ * `spawnDeployment` above) is the primary per-conversation gate; the advisory
+ * lock is the cross-pod gate that matters in clustered deployments.
  */
 export async function acquireConversationLock(
   organizationId: string,
   agentId: string,
   conversationId: string
 ): Promise<{ release: () => Promise<void> } | null> {
-  if (process.env.LOBU_DISABLE_PREPARE === "1") {
-    // Embedded mode: in-process Map is the sole gate. Return a sentinel so
-    // the caller's wiring (entry.releaseConvLock, exit handler, etc.)
-    // stays uniform.
-    return { release: async () => {} };
-  }
-
   // Hard cap on reserved connections held across all live workers. Each lock
   // pins one postgres-js pool slot for the worker's lifetime; without a cap
   // multi-pod × multi-conversation pressure exhausts the pool and stalls

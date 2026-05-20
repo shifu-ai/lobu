@@ -46,6 +46,11 @@ const commonOptions = {
           if (args.kind === 'entry-point') return null;
           const id = args.path;
           if (id.startsWith('.') || id.startsWith('/')) return null;
+          // @lobu/pgvector-embedded ships prebuilt binary assets under
+          // prebuilt/ that esbuild can't inline; keep it external so it loads
+          // from node_modules with its assets intact (like the npm externals).
+          if (id === '@lobu/pgvector-embedded' || id.startsWith('@lobu/pgvector-embedded/'))
+            return { external: true };
           if (id.startsWith('@lobu/')) return null;
           return { external: true };
         });

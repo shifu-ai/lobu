@@ -100,28 +100,15 @@ const PG_OID_JSONB = 3802;
 // =========================================================
 
 interface CreatedDbClient {
-  /** Client used by application code; in pglite mode this is queue-serialized. */
+  /** Client used by application code. */
   wrapped: DbClient;
-  /** Raw postgres.js Sql client. Bypasses the serialization queue — only safe
-   *  for callers that own their own connection (e.g. Kysely via reserve()). */
+  /** Raw postgres.js Sql client (same instance as `wrapped`); named for the
+   *  call sites that need the full Sql surface, e.g. Kysely via reserve(). */
   raw: Sql;
 }
 
 function createDbClient(connectionString: string, maxConnections?: number): CreatedDbClient {
-  const embeddedCompatMode = process.env.LOBU_DISABLE_PREPARE === '1';
-
-  // PGlite's socket server can't safely interleave queries that postgres.js
-  // (and Kysely's reserve() path used by better-auth) pipeline across multiple
-  // connections — concurrent requests collide on the unnamed prepared statement
-  // and crash with "bind message supplies N parameters, but prepared statement
-  // requires M". Pin the embedded pool to a single connection so everything
-  // serializes. With a single connection, named prepared statements (postgres.js
-  // default) are safe again — and necessary: `prepare: false` mangles the
-  // dynamically-composed `sql` fragments used by tools like manage_connections
-  // into "syntax error at or near \"$1\"" on PGlite.
-  const poolMax = embeddedCompatMode
-    ? 1
-    : (maxConnections ?? parseInt(process.env.DB_POOL_MAX || '20', 10));
+  const poolMax = maxConnections ?? parseInt(process.env.DB_POOL_MAX || '20', 10);
 
   const rawClient = postgres(connectionString, {
     max: poolMax,
@@ -174,9 +161,7 @@ function createDbClient(connectionString: string, maxConnections?: number): Crea
     },
   });
 
-  // Always hand back the raw postgres.js client. In embedded mode the pool is
-  // already pinned to 1 connection (above), which serializes queries at the
-  // connection level — so no JS-side serialization wrapper is needed. An earlier
+  // Hand back the raw postgres.js client directly. An earlier serialization
   // wrapper broke postgres.js fragment nesting (`sql`${query} AND …``) by
   // returning a Promise instead of a PendingQuery, which surfaced as
   // "syntax error at or near \"$1\"" from tools like manage_connections.
@@ -238,12 +223,7 @@ export async function closeDbSingleton(): Promise<void> {
  * Kysely dialect bound to the singleton postgres.js client. Used by better-auth
  * so that auth queries share the same connection pool as the rest of the app
  * instead of opening a second pg.Pool with its own (cold-prone) connections.
- *
- * Uses the raw (un-wrapped) postgres.js client because PostgresJSDialect calls
- * sql.reserve() to acquire a dedicated connection — a code path the in-process
- * pglite serialization wrapper doesn't proxy. This matches the pre-refactor
- * behavior where better-auth ran on its own pg.Pool entirely outside the
- * wrapper, so pglite tests that exercise auth retain their existing semantics.
+ * PostgresJSDialect calls sql.reserve() to acquire a dedicated connection.
  */
 export function getAuthDialect(): PostgresJSDialect {
   ensureSingleton();

@@ -47,14 +47,16 @@ describe("lobu run backend bundle resolution", () => {
     mkdirSync(commandsDir, { recursive: true });
 
     const postgresBundlePath = join(root, "dist", "server.bundle.mjs");
-    const pgliteBundlePath = join(root, "dist", "start-local.bundle.mjs");
+    const embeddedBundlePath = join(root, "dist", "start-local.bundle.mjs");
     writeFileSync(postgresBundlePath, "// bundle placeholder\n");
-    writeFileSync(pgliteBundlePath, "// bundle placeholder\n");
+    writeFileSync(embeddedBundlePath, "// bundle placeholder\n");
 
     expect(resolveBackendBundle(commandsDir, "postgres")).toBe(
       postgresBundlePath
     );
-    expect(resolveBackendBundle(commandsDir, "pglite")).toBe(pgliteBundlePath);
+    expect(resolveBackendBundle(commandsDir, "embedded")).toBe(
+      embeddedBundlePath
+    );
   });
 
   test("CLI package declares runtime deps for the embedded server bundle", () => {
@@ -96,16 +98,15 @@ describe("lobu run backend bundle resolution", () => {
 
     // These are server build/dev deps today, but the embedded runtime imports
     // them at startup, while compiling bundled connector code, or while running
-    // local PGlite.
-    for (const name of [
-      "dotenv",
-      "esbuild",
-      "vite",
-      "@electric-sql/pglite",
-      "@electric-sql/pglite-socket",
-    ]) {
+    // the local embedded Postgres.
+    for (const name of ["dotenv", "esbuild", "vite", "embedded-postgres"]) {
       expect(cliRuntimeDeps[name]).toBeDefined();
     }
+
+    // @lobu/pgvector-embedded is the one @lobu/* dep the bundle keeps EXTERNAL
+    // (it ships prebuilt binary assets esbuild can't inline), so the published
+    // CLI must declare it explicitly.
+    expect(cliRuntimeDeps["@lobu/pgvector-embedded"]).toBeDefined();
 
     // Compiled connector code deliberately leaves these native/browser deps
     // external, so npx-installed CLIs must provide them too.

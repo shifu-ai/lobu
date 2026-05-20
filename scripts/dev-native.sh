@@ -130,13 +130,13 @@ mkdir -p "$LOBU_WORKSPACE_ROOT"
 # --- Run -------------------------------------------------------------------
 
 if [ -z "${DATABASE_URL:-}" ]; then
-  # No external Postgres → boot the embedded PGlite backend (src/start-local.ts).
+  # No external Postgres → boot the embedded Postgres backend (src/start-local.ts).
   # First run mints a web login (dev@lobu.local / lobudev123, org "dev") and a
   # bootstrap PAT under LOBU_DATA_DIR. Vite HMR still runs in-process.
   export LOBU_DATA_DIR="${LOBU_DATA_DIR:-$REPO_ROOT/.lobu-dev}"
   export PGSSLMODE=disable
   mkdir -p "$LOBU_DATA_DIR"
-  echo "→ no DATABASE_URL set — booting embedded PGlite"
+  echo "→ no DATABASE_URL set — booting embedded Postgres"
   echo "→ server on http://${HOST}:${PORT}   (Vite HMR in-process)"
   echo "→ data dir: $LOBU_DATA_DIR"
   echo "→ first run seeds a web login: dev@lobu.local / lobudev123   (org 'dev')"

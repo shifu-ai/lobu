@@ -786,9 +786,9 @@ async function fetchRecentContent(
   organizationId: string,
   entityId: number | null
 ): Promise<BootstrapContentItem[]> {
-  // Inline the entity-link match as raw SQL — postgres.js can't combine
-  // sql.unsafe() inside a tagged template that also has $N values when
-  // running against PGlite (prepare:false simple-query mode).
+  // Inline the entity-link match as raw SQL — this whole query is built as a
+  // single sql.unsafe() statement rather than mixing sql.unsafe() fragments
+  // inside a tagged template that also carries $N values.
   const entityFilter =
     entityId !== null
       ? `AND ${entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev')}`

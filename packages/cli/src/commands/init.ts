@@ -680,7 +680,7 @@ export async function initCommand(
     }
     console.log(
       chalk.cyan(
-        `  ${n++}. Start the local stack: lobu run (uses PGlite by default)`
+        `  ${n++}. Start the local stack: lobu run (uses a local embedded Postgres by default)`
       )
     );
     console.log(

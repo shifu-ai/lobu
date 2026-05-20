@@ -554,7 +554,7 @@ Memory:
     )
     .option(
       "--data-dir <path>",
-      "LOBU_DATA_DIR for the managed server (state, PGlite)"
+      "LOBU_DATA_DIR for the managed server (state, embedded Postgres)"
     )
     .option(
       "--cwd <path>",

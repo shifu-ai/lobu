@@ -58,6 +58,11 @@
         },
         {
           "type": "json",
+          "path": "packages/pgvector-embedded/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "packages/promptfoo-provider/package.json",
           "jsonpath": "$.version"
         },

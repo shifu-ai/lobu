@@ -63,7 +63,14 @@ if [ -f .env ]; then
   . ./.env
   set +a
 fi
-[ -n "${DATABASE_URL:-}" ] || { echo "DATABASE_URL not set." >&2; exit 2; }
+
+# Tests must NOT run against whatever DATABASE_URL .env points at (often a
+# shared/tailnet DB) — they run DDL like `DROP SCHEMA public`. Unset it so the
+# test harness spawns an isolated, ephemeral embedded Postgres per run (see
+# packages/server/src/__tests__/setup/embedded-postgres-backend.ts). This also
+# removes the old "ALTER SCHEMA public OWNER" hack: the embedded cluster's
+# bootstrap role already owns its schema.
+unset DATABASE_URL
 
 # --- build ------------------------------------------------------------------
 # Tests need workspace packages built. Worktree's `dist/` may be stale or
@@ -77,16 +84,6 @@ BUILD_EXIT=$?
 set -e
 if [ $BUILD_EXIT -ne 0 ]; then
   echo "!! build failed (exit $BUILD_EXIT) — proceeding so pi can review the diff, but unit tests will likely fail" >&2
-fi
-
-# --- DB schema ownership ----------------------------------------------------
-# Postgres 15+ restricts CREATE on the `public` schema to its owner. Integration
-# tests run DDL as the DATABASE_URL user — make them the schema owner so
-# `setupTestDatabase` doesn't trip on "must be owner of schema public".
-
-DB_USER="$(printf '%s' "$DATABASE_URL" | sed -E 's|^postgres(ql)?://([^:@/]+).*|\2|')"
-if [ -n "$DB_USER" ] && [ "$DB_USER" != "$DATABASE_URL" ]; then
-  psql "$DATABASE_URL" -tAc "ALTER SCHEMA public OWNER TO \"$DB_USER\"" >/dev/null 2>&1 || true
 fi
 
 # --- test suites ------------------------------------------------------------

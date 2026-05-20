@@ -1,15 +1,13 @@
 /**
- * Integration tests for RunsQueue against a real Postgres (PGlite in CI).
+ * Integration tests for RunsQueue against a real Postgres.
  *
  * Covers the production behaviors that unit-level mocking cannot exercise —
  * SKIP LOCKED concurrency, graceful shutdown release, priority + expires_at +
  * retryDelay options, startup recovery scan.
  *
- * PGlite is a single-process WASM Postgres so the SKIP LOCKED concurrency
- * test cannot exercise real cross-process contention. We assert the
- * single-process behavior is correct; the production guarantee (FOR UPDATE
- * SKIP LOCKED is row-locked at the heap-tuple level) is unchanged because
- * the SQL is the same.
+ * The SKIP LOCKED concurrency test drives multiple pooled connections against
+ * the real embedded Postgres; the production guarantee (FOR UPDATE SKIP LOCKED
+ * is row-locked at the heap-tuple level) holds because the SQL is identical.
  */
 
 import {
@@ -24,14 +22,14 @@ import {
 import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
 import { getDb } from "../../db/client.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 
 let queue: RunsQueue | null = null;
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 beforeEach(async () => {
@@ -48,7 +46,7 @@ afterEach(async () => {
 });
 
 afterAll(async () => {
-  // No global teardown — db-setup.ts owns the PGlite lifecycle.
+  // No global teardown — db-setup.ts owns the embedded Postgres lifecycle.
 });
 
 describe("RunsQueue — SKIP LOCKED claim concurrency", () => {

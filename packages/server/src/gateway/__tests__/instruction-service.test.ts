@@ -3,7 +3,7 @@ import { createPostgresAgentConfigStore } from "../../lobu/stores/postgres-store
 import { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { InstructionService } from "../services/instruction-service.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 
@@ -12,7 +12,7 @@ describe("InstructionService", () => {
   let service: InstructionService;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

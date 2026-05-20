@@ -1,17 +1,11 @@
 /**
  * Integration tests for the per-run agent_transcript_snapshot path.
  *
- * Backed by the ephemeral PGlite gateway harness (`ensurePgliteForGatewayTests`).
+ * Backed by the embedded Postgres gateway harness (`ensureDbForGatewayTests`).
  * Covers the gateway-side surface: HTTP snapshot routes, advisory lock,
  * /agent-history fallback resolver, and schema constraints. The worker-side
  * helpers (hydrate / writeSnapshot) are tested in
  * `packages/agent-worker/src/openclaw/__tests__/transcript-snapshot.test.ts`.
- *
- * Test-isolation note: PGlite pins postgres.js to a single connection. The
- * cross-pod advisory lock cannot be exercised end-to-end here (the second
- * acquire would block forever on the same connection); the embedded-mode
- * no-op path is asserted instead, and the genuine cross-pod race is covered
- * by the dual-psql repro in the PR body.
  */
 
 import {
@@ -27,20 +21,19 @@ import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
 import { UserAgentsStore } from "../auth/user-agents-store.js";
 import { createTranscriptRoutes } from "../gateway/transcript-routes.js";
-import { acquireConversationLock } from "../orchestration/impl/embedded-deployment.js";
 import {
   createAgentHistoryRoutes,
   readLatestSnapshotJsonl,
 } from "../routes/public/agent-history.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 beforeEach(async () => {
@@ -702,49 +695,6 @@ describe("agent_transcript_snapshot — /agent-history fallback", () => {
     expect(out).toBe(jsonl);
     // Splitting on \n recovers the same line set the admin UI parses.
     expect(out!.split("\n").filter((l) => l.length > 0)).toEqual(lines);
-  });
-});
-
-describe("agent_transcript_snapshot — advisory lock helper", () => {
-  test.skipIf(process.env.LOBU_DISABLE_PREPARE !== "1")("lock-no-op-in-embedded-mode: PGlite-pinned pool returns sentinel without reserving", async () => {
-    // Embedded mode pins the postgres.js pool to a single connection; the
-    // real reserve()-based path would block forever. The helper detects
-    // LOBU_DISABLE_PREPARE=1 (set by ensurePgliteForGatewayTests) and
-    // returns a no-op release. The genuine cross-pod path is asserted in
-    // the PR body's dual-psql repro. Skipped against real Postgres
-    // (CI integration job) — the sentinel-mode assertion does not hold
-    // there since sequential acquires on the same key would block.
-
-    const a = await acquireConversationLock("org_lock_a", "agent-x", "conv-x");
-    expect(a).not.toBeNull();
-    // No real lock held → second acquire on the same key also succeeds.
-    const b = await acquireConversationLock("org_lock_a", "agent-x", "conv-x");
-    expect(b).not.toBeNull();
-    await a!.release();
-    await b!.release();
-  });
-
-  test.skipIf(process.env.LOBU_DISABLE_PREPARE !== "1")("lock-cross-conv-parallelism (embedded sentinel): different (org,agent,conv) acquire independently", async () => {
-    // Asserts the helper's keying — even in embedded sentinel mode the
-    // call shape passes through and each acquire/release pairs cleanly.
-    // The real-PG path uses pg_try_advisory_lock(int32, int32) where each
-    // unique (org,agent,conv) hashes to a distinct key2. Skipped against
-    // real Postgres (CI integration job) — without the embedded sentinel
-    // shortcut, the cap+reserve path could collide with the lock counter
-    // state pre-set by other tests; the cross-pod parallelism property
-    // is tested at the lock keying layer (hashConvKey2) not here.
-    const a = await acquireConversationLock("org_x", "agent-x", "conv-A");
-    const b = await acquireConversationLock("org_x", "agent-x", "conv-B");
-    const c = await acquireConversationLock("org_x", "agent-y", "conv-A");
-    const d = await acquireConversationLock("org_y", "agent-x", "conv-A");
-    expect(a).not.toBeNull();
-    expect(b).not.toBeNull();
-    expect(c).not.toBeNull();
-    expect(d).not.toBeNull();
-    await a!.release();
-    await b!.release();
-    await c!.release();
-    await d!.release();
   });
 });
 

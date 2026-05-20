@@ -39,5 +39,5 @@ function assertSupportedNodeVersion(): void {
 // Run on module load so a single side-effect import at the top of an entry
 // file fires the check BEFORE any other static import executes. ESM evaluates
 // sibling imports in textual order; placing this module's import first
-// guarantees the assertion runs before instrument.ts, dotenv, pglite, etc.
+// guarantees the assertion runs before instrument.ts, dotenv, embedded-postgres, etc.
 assertSupportedNodeVersion();

@@ -3,7 +3,7 @@ import { PostgresSecretStore } from "../../lobu/stores/postgres-secret-store.js"
 import { UserAuthProfileStore } from "../auth/settings/user-auth-profile-store.js";
 import {
   ensureEncryptionKey,
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -12,7 +12,7 @@ let secretStore: PostgresSecretStore;
 let store: UserAuthProfileStore;
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 beforeEach(async () => {

@@ -1,36 +1,20 @@
 /**
  * Global Test Setup
  *
- * Runs once before all tests to set up the test database. Supports two
- * interchangeable backends so the same integration tests can execute against
- * either:
+ * Runs once before all tests. One backend story:
+ *   - If DATABASE_URL is set → use that Postgres (CI, or a local one you pin).
+ *   - Otherwise → spawn an ephemeral embedded Postgres (real PG 18 + pgvector),
+ *     so `make test` needs no external database — same engine as `lobu run`.
  *
- *   - `postgres` (default) — external Postgres via DATABASE_URL. Matches the
- *     historical test contract; full-suite compatible.
- *   - `pglite` (opt-in via `pnpm test:pglite` / LOBU_TEST_BACKEND=pglite) —
- *     ephemeral in-memory PGlite + socket server. Zero external dependencies.
- *     Currently reliable for targeted runs (e.g. the PostgresSecretStore
- *     suite); the full integration suite under a single vitest worker still
- *     exhausts the PGlite socket's connection pool, so it's not yet the
- *     default.
- *
- * The rest of the test suite is backend-agnostic: it reads DATABASE_URL and
- * uses postgres.js, so migrations, fixtures, and assertions are reused as-is.
+ * The suite is backend-agnostic: it reads DATABASE_URL and uses postgres.js, so
+ * migrations, fixtures, and assertions are identical either way.
  */
 
 import { closeDbSingleton } from '../../db/client';
-import { type PgliteBackend, startPgliteBackend } from './pglite-backend';
+import { type EmbeddedBackend, startEmbeddedBackend } from './embedded-postgres-backend';
 import { closeTestDb, setupTestDatabase } from './test-db';
 
-let pglite: PgliteBackend | null = null;
-
-function resolveBackend(): 'pglite' | 'postgres' {
-  const explicit = process.env.LOBU_TEST_BACKEND?.trim().toLowerCase();
-  if (explicit === 'pglite' || explicit === 'postgres') return explicit;
-  // Default to external Postgres — matches the historical test contract.
-  // Opt into PGlite explicitly via `pnpm test:pglite`.
-  return 'postgres';
-}
+let embedded: EmbeddedBackend | null = null;
 
 export async function setup(): Promise<void> {
   if (process.env.SKIP_TEST_DB_SETUP === '1') {
@@ -38,27 +22,16 @@ export async function setup(): Promise<void> {
     return;
   }
 
-  const backend = resolveBackend();
-
-  if (backend === 'pglite') {
-    console.log('\n🧬 Starting ephemeral PGlite backend for tests...');
-    pglite = await startPgliteBackend();
-    process.env.DATABASE_URL = pglite.url;
-    // Matches the production embedded path in src/start-local.ts — the
-    // PGlite socket doesn't support SSL negotiation or prepared statements.
-    process.env.PGSSLMODE = 'disable';
-    process.env.LOBU_DISABLE_PREPARE = '1';
-    console.log(`✅ PGlite ready at ${pglite.url}`);
-  } else {
-    const databaseUrl = process.env.DATABASE_URL?.trim();
-    if (!databaseUrl) {
-      throw new Error(
-        'LOBU_TEST_BACKEND=postgres requires DATABASE_URL. ' +
-          'Example: DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5433/lobu_test'
-      );
-    }
+  const databaseUrl = process.env.DATABASE_URL?.trim();
+  if (databaseUrl) {
     process.env.DATABASE_URL = databaseUrl;
-    console.log(`\n🗄️  Using external Postgres at ${databaseUrl}`);
+    console.log(`\n🗄️  Using Postgres at ${databaseUrl}`);
+  } else {
+    console.log('\n🐘 No DATABASE_URL — spawning ephemeral embedded Postgres...');
+    embedded = await startEmbeddedBackend();
+    process.env.DATABASE_URL = embedded.url;
+    process.env.PGSSLMODE = 'disable';
+    console.log(`✅ Embedded Postgres ready at ${embedded.url}`);
   }
 
   // Deterministic 32-byte hex key for AES-256-GCM in tests. Same value the
@@ -77,8 +50,8 @@ export async function setup(): Promise<void> {
 }
 
 export async function teardown(): Promise<void> {
-  if (pglite) {
-    await pglite.stop();
-    pglite = null;
+  if (embedded) {
+    await embedded.stop();
+    embedded = null;
   }
 }

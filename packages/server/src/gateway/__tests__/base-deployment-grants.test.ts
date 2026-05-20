@@ -8,7 +8,7 @@ import {
 import { GrantStore } from "../permissions/grant-store.js";
 import { PolicyStore } from "../permissions/policy-store.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -76,7 +76,7 @@ describe("BaseDeploymentManager.syncNetworkConfigGrants", () => {
   let manager: TestDeploymentManager;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

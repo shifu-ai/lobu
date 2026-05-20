@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -18,7 +18,7 @@ const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 async function loadChatInstanceManager() {

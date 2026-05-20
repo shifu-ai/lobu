@@ -142,6 +142,19 @@ export default class ApplePhotosConnector extends ConnectorRuntime {
                   type: ['string', 'null'],
                   description:
                     'Reverse-geocoded human-readable place from CLGeocoder when available offline.',
+                  // TODO(geo-enrichment tiers): the gateway only does the BASIC
+                  // tier — nearest city/region/country via the bundled
+                  // `geo_lookup()` (cube+earthdistance over GeoNames; no PostGIS).
+                  // Accurate tiers must be filled in HERE, on-device, because
+                  // they need Apple frameworks the server can't call:
+                  //   - street address  → CLGeocoder.reverseGeocodeLocation
+                  //   - venue / POI ("Joe's Pizza") → MKLocalSearch /
+                  //     MKLocalPointsOfInterestRequest near the coordinate,
+                  //     or the place name Apple Photos already attached.
+                  // Populate place_name (and a future address/venue field) from
+                  // the device; the gateway leaves them as-is and only backfills
+                  // city/region/country when null. Cloud Places API is the
+                  // cross-platform fallback if geo ever runs off-Mac.
                 },
                 people: {
                   type: 'array',

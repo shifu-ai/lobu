@@ -6,13 +6,13 @@ import {
   sweepExpiredOAuthStates,
 } from "../auth/oauth/state-store.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 
 describe("OAuthStateStore (Postgres-backed)", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

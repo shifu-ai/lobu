@@ -101,13 +101,13 @@ let validToken: string;
 let originalFetch: typeof fetch;
 
 beforeAll(async () => {
-  // GrantStore is now PG-backed; bring up an ephemeral PGlite for the
+  // GrantStore is now PG-backed; bring up an ephemeral embedded Postgres for the
   // tool-approval tests below. Seed `agent1` so the grants FK accepts
   // inserts keyed on it.
-  const { ensurePgliteForGatewayTests, seedAgentRow } = await import(
+  const { ensureDbForGatewayTests, seedAgentRow } = await import(
     "./helpers/db-setup.js"
   );
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
   await seedAgentRow("agent1");
   originalEnv = process.env.ENCRYPTION_KEY;
   process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;

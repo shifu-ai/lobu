@@ -25,15 +25,6 @@ const testEnv: Env = {
   DATABASE_URL: process.env.DATABASE_URL,
 };
 
-/**
- * Some handlers compose postgres.js tagged-template fragments
- * (`sql\`${query} ORDER BY ...\``). PGlite's socket shim treats the fragment
- * as a parameter instead of inlining, which produces "Promise" as $1 and a
- * syntax error. Those dispatches work on real Postgres. The test suite runs
- * under PGlite by default (fast, zero-deps) so we skip those cases here.
- */
-const IS_PGLITE = process.env.LOBU_TEST_BACKEND === "pglite";
-const pgOnlyIt = IS_PGLITE ? it.skip : it;
 
 describe("ClientSDK namespace dispatch (read paths)", () => {
   let sdk: ClientSDK;
@@ -62,11 +53,11 @@ describe("ClientSDK namespace dispatch (read paths)", () => {
     sdk = buildClientSDK(ctx, testEnv);
   });
 
-  pgOnlyIt("entities.list dispatches cleanly", async () => {
+  it("entities.list dispatches cleanly", async () => {
     await expect(sdk.entities.list()).resolves.toBeDefined();
   });
 
-  pgOnlyIt("entitySchema.listTypes dispatches cleanly", async () => {
+  it("entitySchema.listTypes dispatches cleanly", async () => {
     await expect(sdk.entitySchema.listTypes()).resolves.toBeDefined();
   });
 
@@ -74,11 +65,11 @@ describe("ClientSDK namespace dispatch (read paths)", () => {
     await expect(sdk.entitySchema.listRelTypes()).resolves.toBeDefined();
   });
 
-  pgOnlyIt("connections.list dispatches cleanly", async () => {
+  it("connections.list dispatches cleanly", async () => {
     await expect(sdk.connections.list()).resolves.toBeDefined();
   });
 
-  pgOnlyIt(
+  it(
     "connections.listConnectorDefinitions dispatches cleanly",
     async () => {
       await expect(
@@ -87,42 +78,41 @@ describe("ClientSDK namespace dispatch (read paths)", () => {
     },
   );
 
-  pgOnlyIt("feeds.list dispatches cleanly", async () => {
+  it("feeds.list dispatches cleanly", async () => {
     await expect(sdk.feeds.list()).resolves.toBeDefined();
   });
 
-  pgOnlyIt("authProfiles.list dispatches cleanly", async () => {
+  it("authProfiles.list dispatches cleanly", async () => {
     await expect(sdk.authProfiles.list()).resolves.toBeDefined();
   });
 
-  pgOnlyIt("operations.listAvailable dispatches cleanly", async () => {
+  it("operations.listAvailable dispatches cleanly", async () => {
     await expect(sdk.operations.listAvailable()).resolves.toBeDefined();
   });
 
-  // NOTE: operations.listRuns trips a pre-existing handler bug on PGlite
-  // (un-awaited SQL fragment injected as $1). Covered separately once that
-  // handler is fixed — the wrapper dispatch itself is asserted by the
-  // listAvailable test above.
+  // NOTE: the wrapper dispatch itself is asserted by the listAvailable test
+  // above; operations.listRuns result-shape is covered by the operations
+  // suite, not duplicated here.
 
-  pgOnlyIt("watchers.list dispatches cleanly", async () => {
+  it("watchers.list dispatches cleanly", async () => {
     await expect(sdk.watchers.list()).resolves.toBeDefined();
   });
 
-  pgOnlyIt("classifiers.list dispatches cleanly", async () => {
+  it("classifiers.list dispatches cleanly", async () => {
     await expect(sdk.classifiers.list()).resolves.toBeDefined();
   });
 
-  pgOnlyIt("organizations.list dispatches cleanly", async () => {
+  it("organizations.list dispatches cleanly", async () => {
     const orgs = await sdk.organizations.list();
     expect(Array.isArray(orgs)).toBe(true);
   });
 
-  pgOnlyIt("organizations.current returns the session org", async () => {
+  it("organizations.current returns the session org", async () => {
     const current = await sdk.organizations.current();
     expect(current.slug).toBe("dispatch-sdk");
   });
 
-  pgOnlyIt("knowledge.search dispatches cleanly", async () => {
+  it("knowledge.search dispatches cleanly", async () => {
     await expect(
       sdk.knowledge.search({ query: "nothing-here-likely" }),
     ).resolves.toBeDefined();

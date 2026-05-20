@@ -28,7 +28,7 @@ import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
 import { createSmokeRoutes } from "../routes/internal/smoke.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 
@@ -54,7 +54,7 @@ function restoreEnv() {
 }
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 beforeEach(async () => {

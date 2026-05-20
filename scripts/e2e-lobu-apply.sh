@@ -4,7 +4,7 @@
 #
 # Boots `start-local.ts` (auto-bootstraps an admin PAT on empty data dir),
 # drives the CLI through create → noop → update → drift, and asserts the
-# round-trip against PGlite.
+# round-trip against the local embedded Postgres.
 #
 # Idempotent: cleans up its own server, data dir, and project dir on exit.
 
@@ -67,15 +67,13 @@ LOBU="node ${CLI_BIN}"
 # ─── 2. start server ───────────────────────────────────────────────────
 echo "==> step 2: start start-local.ts on :${PORT}"
 
-# Unset DATABASE_URL — start-local.ts boots PGlite and writes its own
-# socket URL into process.env. A pre-set DATABASE_URL would race with the
-# socket bind.
+# Unset DATABASE_URL — start-local.ts boots an embedded Postgres rooted at
+# LOBU_DATA_DIR and writes its own DATABASE_URL into process.env.
 env \
   -u DATABASE_URL \
   LOBU_DATA_DIR="${DATA_DIR}" \
   PORT="${PORT}" \
   HOST=127.0.0.1 \
-  PG_SOCKET_PORT=0 \
   bun run "${REPO_ROOT}/packages/server/src/start-local.ts" \
     >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

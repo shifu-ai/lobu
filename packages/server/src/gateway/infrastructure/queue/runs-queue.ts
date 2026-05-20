@@ -812,11 +812,8 @@ export class RunsQueue implements IMessageQueue {
       this.staleSweepInFlight = true;
       try {
         const sql = getDb();
-        // Threshold is a hard-coded constant; inline as a SQL literal so this
-        // query has zero placeholders. Tagged-template parameter interpolation
-        // here is unnecessary and trips a PGlite quirk where parameterized
-        // RETURNING queries occasionally surface as "supplies N parameters but
-        // statement requires 0" under embedded-compat (prepare:false).
+        // Threshold is a hard-coded constant, so inline it as a SQL literal —
+        // no placeholders needed.
         const thresholdMs = CLAIM_VISIBILITY_TIMEOUT_MS;
         const result = await sql.unsafe(
           `UPDATE public.runs

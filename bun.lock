@@ -17,7 +17,7 @@
     },
     "packages/agent-worker": {
       "name": "@lobu/worker",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "bin": {
         "lobu-worker": "./dist/index.js",
       },
@@ -44,7 +44,7 @@
     },
     "packages/cli": {
       "name": "@lobu/cli",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "bin": {
         "lobu": "bin/lobu.js",
       },
@@ -60,8 +60,6 @@
         "@chat-adapter/telegram": "4.26.0",
         "@chat-adapter/whatsapp": "4.26.0",
         "@clack/prompts": "^1.2.0",
-        "@electric-sql/pglite": "^0.4.3",
-        "@electric-sql/pglite-socket": "^0.1.3",
         "@hono/node-server": "^1.13.7",
         "@hono/zod-openapi": "^1.2.1",
         "@inquirer/prompts": "^7.10.1",
@@ -69,6 +67,7 @@
         "@lobu/connector-worker": "workspace:*",
         "@lobu/core": "workspace:*",
         "@lobu/embeddings": "workspace:*",
+        "@lobu/pgvector-embedded": "workspace:*",
         "@lobu/worker": "workspace:*",
         "@mariozechner/pi-ai": "^0.51.6",
         "@modelcontextprotocol/sdk": "^1.27.1",
@@ -91,6 +90,7 @@
         "commander": "^14.0.1",
         "cron-parser": "^5.5.0",
         "dotenv": "^16.4.5",
+        "embedded-postgres": "18.3.0-beta.17",
         "esbuild": "^0.27.0",
         "handlebars": "^4.7.9",
         "hono": "^4.10.4",
@@ -129,7 +129,7 @@
     },
     "packages/connector-sdk": {
       "name": "@lobu/connector-sdk",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "dependencies": {
         "@lobu/core": "workspace:*",
         "@sinclair/typebox": "^0.34.41",
@@ -153,7 +153,7 @@
     },
     "packages/connector-worker": {
       "name": "@lobu/connector-worker",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "bin": {
         "connector-worker": "./dist/bin.js",
       },
@@ -176,7 +176,7 @@
     },
     "packages/connectors": {
       "name": "@lobu/connectors",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "dependencies": {
         "@lobu/connector-sdk": "workspace:*",
         "baileys": "7.0.0-rc.9",
@@ -190,7 +190,7 @@
     },
     "packages/core": {
       "name": "@lobu/core",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "dependencies": {
         "@opentelemetry/api": "^1.9.0",
         "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
@@ -209,7 +209,7 @@
     },
     "packages/embeddings": {
       "name": "@lobu/embeddings",
-      "version": "7.2.0",
+      "version": "8.0.0",
       "dependencies": {
         "@hono/node-server": "^1.13.7",
         "@xenova/transformers": "^2.17.2",
@@ -240,7 +240,10 @@
     },
     "packages/openclaw-plugin": {
       "name": "@lobu/openclaw-plugin",
-      "version": "7.2.0",
+      "version": "8.0.0",
+      "dependencies": {
+        "@lobu/core": "workspace:*",
+      },
       "devDependencies": {
         "@types/node": "^20.10.0",
         "postgres": "^3.4.7",
@@ -320,9 +323,17 @@
         "vitest": "^2.1.8",
       },
     },
+    "packages/pgvector-embedded": {
+      "name": "@lobu/pgvector-embedded",
+      "version": "8.0.0",
+      "devDependencies": {
+        "@types/node": "20.19.9",
+        "typescript": "^5.7.2",
+      },
+    },
     "packages/promptfoo-provider": {
       "name": "@lobu/promptfoo-provider",
-      "version": "0.1.0",
+      "version": "8.0.0",
       "devDependencies": {
         "@types/node": "^20.10.0",
         "typescript": "^5.3.3",
@@ -375,12 +386,11 @@
         "zod": "^4.4.0",
       },
       "devDependencies": {
-        "@electric-sql/pglite": "^0.4.3",
-        "@electric-sql/pglite-postgis": "^0.0.7",
-        "@electric-sql/pglite-socket": "^0.1.3",
+        "@lobu/pgvector-embedded": "workspace:*",
         "@types/react": "^19.2.14",
         "@vitest/coverage-v8": "^2.1.8",
         "dotenv": "^16.4.5",
+        "embedded-postgres": "18.3.0-beta.17",
         "esbuild": "^0.27.0",
         "tsx": "^4.19.2",
         "typescript": "^5.7.2",
@@ -727,9 +737,21 @@
 
     "@electric-sql/pglite": ["@electric-sql/pglite@0.4.4", "", {}, "sha512-g/6CWAJ4XOkObWCWAQ2IReZD8VvsDy3poRHSKvpRR2F96F8WJ3HVbjpso3gN7l0q6QPPgvxSSpl/qo5k8a7mkQ=="],
 
-    "@electric-sql/pglite-postgis": ["@electric-sql/pglite-postgis@0.0.7", "", { "peerDependencies": { "@electric-sql/pglite": "0.4.5" } }, "sha512-qWbWD3WG+PL0gBQ2YzvK0RI7C0i+VPxEpGWb8cT99x1x7kujCtfTCL2gRxFWmh5rqjoZTyY69HkcXphQH4bTNA=="],
+    "@embedded-postgres/darwin-arm64": ["@embedded-postgres/darwin-arm64@18.3.0-beta.17", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Pvrej3Xz5flfyVc9mchVfekrKoTJyvPtM3U0vjuXamZkRKmi+inP2zRmnmzYecIVbr7Zhu82xbsCENMXrwMp9Q=="],
 
-    "@electric-sql/pglite-socket": ["@electric-sql/pglite-socket@0.1.4", "", { "peerDependencies": { "@electric-sql/pglite": "0.4.4" }, "bin": { "pglite-server": "dist/scripts/server.js" } }, "sha512-2LuMFxJPE2FbjWDrWpylWwhZ5uT03rQfBLM7g2AdZmiG3JjC8sbYFkFR4ZeoqVcn22wKzpJTXFV22mQ+s4Oueg=="],
+    "@embedded-postgres/darwin-x64": ["@embedded-postgres/darwin-x64@18.3.0-beta.17", "", { "os": "darwin", "cpu": "x64" }, "sha512-MVWe+C47pPoMD9LlIWGQkvZ5Xsu3IBo54CYqnIps/Z1byMIUBNc7y/dZ3mfqEwiCbVDVqirG0CU462xnrSEfKA=="],
+
+    "@embedded-postgres/linux-arm": ["@embedded-postgres/linux-arm@18.3.0-beta.17", "", { "os": "linux", "cpu": "arm" }, "sha512-Y2vw7p80PO/Ko7CDm8CCpStnNfMe+oc11e0WZtqAVRjxO6H0oic/ehULhUsWU3mZm5jq7wQAv37VMzf4JN+SFQ=="],
+
+    "@embedded-postgres/linux-arm64": ["@embedded-postgres/linux-arm64@18.3.0-beta.17", "", { "os": "linux", "cpu": "arm64" }, "sha512-hXp7yHJHYWkdjkgF6As8whEHbdYxhBdmXeLpLTw0aiac0O6+0Cbqk3cOR9U+e49oyIpElHVwZUo6OewquSRhSg=="],
+
+    "@embedded-postgres/linux-ia32": ["@embedded-postgres/linux-ia32@18.3.0-beta.17", "", { "os": "linux", "cpu": "ia32" }, "sha512-hVUOM+7QxkzAIdN3gewfVwL1EpJIx+0qUiNTD8cMqRtaZyU87e4AFIvBS0UiDJ9xzMTVWr/X24wePtbvIbkopg=="],
+
+    "@embedded-postgres/linux-ppc64": ["@embedded-postgres/linux-ppc64@18.3.0-beta.17", "", { "os": "linux", "cpu": "ppc64" }, "sha512-p3/u4YUqSdE2CKUBlC84JGZCi6RnE1fyeLPIIVy2DJUiKtExR5rE3OpDJcVoN40uecYGL+nR4qFocGzDwG1TBw=="],
+
+    "@embedded-postgres/linux-x64": ["@embedded-postgres/linux-x64@18.3.0-beta.17", "", { "os": "linux", "cpu": "x64" }, "sha512-8orSD6NNopSLtjqir4dWQBrj+g8j1eJjWd9mB60A3xbWMzIBIPQpzT7XzbacW9YFSl/DejOLnRXfff+Wr13Tgw=="],
+
+    "@embedded-postgres/windows-x64": ["@embedded-postgres/windows-x64@18.3.0-beta.17", "", { "os": "win32", "cpu": "x64" }, "sha512-kDC5aBsmhWDjeQjj2V4g+Bk+pMeDU27b7l0rBbaKgtt2gsNmCB34ULg/5cqs2kqUKSk/tiGMHKCNE+zQZ+s4rg=="],
 
     "@emnapi/core": ["@emnapi/core@1.10.0", "", { "dependencies": { "@emnapi/wasi-threads": "1.2.1", "tslib": "^2.4.0" } }, "sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw=="],
 
@@ -1058,6 +1080,8 @@
     "@lobu/openclaw-plugin": ["@lobu/openclaw-plugin@workspace:packages/openclaw-plugin"],
 
     "@lobu/owletto": ["@lobu/owletto@workspace:packages/owletto"],
+
+    "@lobu/pgvector-embedded": ["@lobu/pgvector-embedded@workspace:packages/pgvector-embedded"],
 
     "@lobu/promptfoo-provider": ["@lobu/promptfoo-provider@workspace:packages/promptfoo-provider"],
 
@@ -2037,6 +2061,8 @@
 
     "async": ["async@3.2.6", "", {}, "sha512-htCUDlxyyCLMgaM3xXg0C0LW2xqfuQ6p05pCEIsXuyQ+a1koYKTuBMzRNwmybfLgvJDMd0r1LTn4+E0Ti6C2AA=="],
 
+    "async-exit-hook": ["async-exit-hook@2.0.1", "", {}, "sha512-NW2cX8m1Q7KPA7a5M2ULQeZ2wR5qI5PAbw5L0UOMxdioVk9PMZ0h1TmyZEkPYrCvYjDlFICusOu1dlEKAAeXBw=="],
+
     "async-lock": ["async-lock@1.4.1", "", {}, "sha512-Az2ZTpuytrtqENulXwO3GGv1Bztugx6TT37NIo7imr/Qo0gsYiGtSdBa2B6fsXhTpVZDNfu1Qn3pk531e3q+nQ=="],
 
     "async-mutex": ["async-mutex@0.5.0", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-1A94B18jkJ3DYq284ohPxoXbfTA5HsQ7/Mf4DEhcyLx3Bz27Rh59iScbB6EPiP+B+joue6YCxcMXSbFC1tZKwA=="],
@@ -2374,6 +2400,8 @@
     "electron-to-chromium": ["electron-to-chromium@1.5.344", "", {}, "sha512-4MxfbmNDm+KPh066EZy+eUnkcDPcZ35wNmOWzFuh/ijvHsve6kbLTLURy88uCNK5FbpN+yk2nQY6BYh1GEt+wg=="],
 
     "elen": ["elen@1.0.10", "", {}, "sha512-ZL799/V/kzxYJ6Wlfktreq6qQWfGc3VkGUQJW5lZQ8/MhsQiKTAwERPfhEwIsV2movRGe2DfV7H2MjRw76Z7Wg=="],
+
+    "embedded-postgres": ["embedded-postgres@18.3.0-beta.17", "", { "dependencies": { "async-exit-hook": "^2.0.1", "pg": "^8.7.3" }, "optionalDependencies": { "@embedded-postgres/darwin-arm64": "^18.3.0-beta.17", "@embedded-postgres/darwin-x64": "^18.3.0-beta.17", "@embedded-postgres/linux-arm": "^18.3.0-beta.17", "@embedded-postgres/linux-arm64": "^18.3.0-beta.17", "@embedded-postgres/linux-ia32": "^18.3.0-beta.17", "@embedded-postgres/linux-ppc64": "^18.3.0-beta.17", "@embedded-postgres/linux-x64": "^18.3.0-beta.17", "@embedded-postgres/windows-x64": "^18.3.0-beta.17" } }, "sha512-1biFWyuPVtAV5S9RBgcr4PGuAdNL9WhnNZVQ5Arp3gsB24Ci9X9s/8Z7RFYFSc6tJWcj9kzF55YcDAcr3jLUbQ=="],
 
     "emoji-regex": ["emoji-regex@10.6.0", "", {}, "sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A=="],
 
