@@ -83,6 +83,34 @@ export function resolveEmbeddedDataRoot(databaseUrl: string): string {
 }
 
 /**
+ * Decide whether `lobu run` must refuse to boot because the EFFECTIVE
+ * DATABASE_URL points at a shared/non-local DB the project never opted into.
+ *
+ * `mergedEnv` gives the shell higher precedence than the project's `.env`, so
+ * the project only "owns" the URL when its `.env` value is the exact one that
+ * survived the merge. Gating on project-`.env` *presence* alone (the old bug)
+ * let a shared/prod shell URL win silently whenever `.env` also happened to
+ * define its own DATABASE_URL — re-pointing "local dev" at shared/prod data.
+ *
+ * Exported for unit tests; the safety gate in `devCommand` is the consumer.
+ */
+export function shouldRefuseSharedDatabaseUrl(input: {
+  effectiveDatabaseUrl: string | undefined;
+  projectEnvDatabaseUrl: string | undefined;
+  unsafeSharedDb: boolean | undefined;
+}): boolean {
+  const effective = input.effectiveDatabaseUrl?.trim();
+  if (!effective) return false;
+  if (input.unsafeSharedDb) return false;
+
+  const projectEnv = input.projectEnvDatabaseUrl?.trim();
+  const projectEnvOwnsIt = !!projectEnv && projectEnv === effective;
+  if (projectEnvOwnsIt) return false;
+
+  return isSharedDatabaseUrl(effective);
+}
+
+/**
  * `lobu run` — start the embedded Lobu stack.
  *
  * `DATABASE_URL` selects the backend (see `isExternalDatabaseUrl`): a
@@ -109,12 +137,6 @@ export async function devCommand(
   // Precedence: shell > project .env > user config > defaults.
   const userServerConfig = await getServerConfig().catch(() => undefined);
   const userServerEnv: Record<string, string> = {};
-  if (userServerConfig?.databaseUrl)
-    userServerEnv.DATABASE_URL = userServerConfig.databaseUrl;
-  else if (userServerConfig?.dataDir)
-    // Legacy `dataDir` → an embedded DATABASE_URL (file://<dir>). DATABASE_URL
-    // is the single backend selector.
-    userServerEnv.DATABASE_URL = `file://${userServerConfig.dataDir}`;
   if (userServerConfig?.port)
     userServerEnv.PORT = String(userServerConfig.port);
   if (userServerConfig?.host) userServerEnv.HOST = userServerConfig.host;
@@ -135,16 +157,16 @@ export async function devCommand(
       : "embedded";
 
   // Refuse to boot against a shared/non-local external DATABASE_URL inherited
-  // from the parent shell rather than the project's own .env or the user's
-  // config. A common footgun: "local lobu run" silently writes into prod / a
-  // teammate's tailnet DB. Embedded paths are always local, so this guard only
-  // applies to external postgres:// URLs.
+  // from the parent shell rather than the project's own .env. A common footgun:
+  // "local lobu run" silently writes into prod / a teammate's tailnet DB.
+  // Embedded paths are always local (not URLs), so this only fires for external
+  // postgres:// URLs; project pinning in .env is explicit consent.
   if (
-    mode === "external" &&
-    !envVars.DATABASE_URL?.trim() &&
-    !userServerEnv.DATABASE_URL?.trim() &&
-    isSharedDatabaseUrl(databaseUrlRaw) &&
-    !options.unsafeSharedDb
+    shouldRefuseSharedDatabaseUrl({
+      effectiveDatabaseUrl: databaseUrlRaw,
+      projectEnvDatabaseUrl: envVars.DATABASE_URL,
+      unsafeSharedDb: options.unsafeSharedDb,
+    })
   ) {
     spinner.fail("DATABASE_URL inherited from shell points at a shared DB");
     console.error(
