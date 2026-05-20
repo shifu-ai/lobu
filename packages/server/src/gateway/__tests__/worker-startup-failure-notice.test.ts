@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, mock, test } from "bun:test";
 
+import { ApiResponseRenderer } from "../api/response-renderer.js";
 import { MessageConsumer } from "../orchestration/message-consumer.js";
 import { UnifiedThreadResponseConsumer } from "../platform/unified-thread-consumer.js";
 
@@ -140,5 +141,35 @@ describe("worker-startup-failure notice reaches direct-API clients (lobu-ai/lobu
 
     expect(renderer.handleEphemeral).toHaveBeenCalledTimes(1);
     expect(renderer.handleContent).not.toHaveBeenCalled();
+  });
+
+  // Real renderer (no mock for the rendering step): confirm the actual SSE
+  // event `lobu chat` parses is emitted. The CLI's `output` case reads
+  // `data.content` (chat.ts), so the wire shape matters.
+  test("real ApiResponseRenderer.handleContent emits an `output` SSE event the CLI renders", async () => {
+    const broadcasts: Array<{ session: string; event: string; data: any }> = [];
+    const sseManager = {
+      broadcast: (session: string, event: string, data: unknown) => {
+        broadcasts.push({ session, event, data });
+      },
+    };
+    const renderer = new ApiResponseRenderer(sseManager as any);
+
+    await renderer.handleContent(
+      {
+        ...apiPayloadBase,
+        content: "Worker startup failed and your request could not be processed.",
+      } as any,
+      "u1:m1"
+    );
+
+    expect(broadcasts).toHaveLength(1);
+    expect(broadcasts[0]?.event).toBe("output");
+    expect(broadcasts[0]?.session).toBe("conv-1");
+    expect(broadcasts[0]?.data).toMatchObject({
+      type: "delta",
+      content: "Worker startup failed and your request could not be processed.",
+      messageId: "m1",
+    });
   });
 });
