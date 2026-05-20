@@ -1,94 +1,1083 @@
 import { useState } from "preact/hooks";
-import type { LandingUseCaseId } from "../use-case-definitions";
-import {
-  DEFAULT_LANDING_USE_CASE_ID,
-  getLobuBaseUrl,
-  getLobuUrl,
-  type SurfaceHeroCopy,
-} from "../use-case-showcases";
-import { ArchitectureSection } from "./ArchitectureSection";
+import snippetsManifest from "../generated/landing-snippets.json";
+import { getLobuBaseUrl } from "../use-case-showcases";
+import { ArchitectureDiagram } from "./ArchitectureDiagram";
+import { CodeBlock, type CodeSnippet } from "./CodeBlock";
 import { CTA } from "./CTA";
-import { FeatureBlock } from "./FeatureBlock";
-import { SharedMemoryGraphic, SkillsGraphic } from "./FeatureGraphics";
-import { HeroProductCard } from "./HeroProductCard";
-import { HeroSection, type HeroStageId } from "./HeroSection";
 import { LatestBlogPosts, type LatestBlogPost } from "./LatestBlogPosts";
 
-export function LandingPage(props: {
-  defaultUseCaseId?: LandingUseCaseId;
-  heroCopy?: SurfaceHeroCopy;
-  latestPosts?: LatestBlogPost[];
-}) {
-  const [activeUseCaseId] = useState<LandingUseCaseId>(
-    props.defaultUseCaseId ?? DEFAULT_LANDING_USE_CASE_ID
-  );
-  const [activeStage, setActiveStage] = useState<HeroStageId>("integrate");
-  const [autoAdvance, setAutoAdvance] = useState(true);
-  const startUrl = props.defaultUseCaseId
-    ? getLobuUrl(activeUseCaseId)
-    : getLobuBaseUrl();
+type ExampleEntry = {
+  slug: string;
+  label: string;
+  description: string | null;
+  githubUrl: string;
+};
 
-  const handleStageChange = (id: HeroStageId) => {
-    setAutoAdvance(false);
-    setActiveStage(id);
-  };
+type LandingSnippets = {
+  connector: CodeSnippet;
+  memorySchema: CodeSnippet;
+  watcher: CodeSnippet;
+  reaction: CodeSnippet;
+  agentToml: CodeSnippet;
+  skill: CodeSnippet;
+  examples: ExampleEntry[];
+};
 
+const snippets = snippetsManifest as LandingSnippets;
+
+const EXAMPLE_BASE_URL = "https://github.com/lobu-ai/lobu/tree/main/examples";
+
+const SETUP_PROMPT = `I want to build a Lobu agent.
+
+1. Install the Lobu skill so you have the project conventions and tooling:
+   /plugin install lobu
+
+2. Walk me through the skill's onboarding interview (it asks what the agent should do, who uses it, where data comes from, where I'll talk to it, what should run on a schedule). Pause at every real decision and ask me — don't fake credentials, don't guess.
+
+3. Scaffold the project per my answers (lobu.toml, models/schema.yaml, connectors/, models/reactions/), boot it locally, send a test message via the chosen channel, and show me the memory event that was written.
+
+Lobu is an open-source event-sourced backend for AI agents — connectors emit events, memory keeps the structured record, agents react in real time and dream on cron. Repo: https://github.com/lobu-ai/lobu — Docs: https://lobu.ai/docs/`;
+
+const GITHUB_URL = "https://github.com/lobu-ai/lobu";
+
+export function LandingPage(props: { latestPosts?: LatestBlogPost[] }) {
   return (
     <>
-      <HeroSection
-        activeUseCaseId={activeUseCaseId}
-        activeStage={activeStage}
-        onActiveStageChange={setActiveStage}
-        autoAdvance={autoAdvance}
-        onStopAutoAdvance={() => setAutoAdvance(false)}
-        heroCopy={props.heroCopy}
-        startUrl={startUrl}
-      />
-
-      <section class="px-4 sm:px-6 pt-2 pb-12">
-        <HeroProductCard
-          stage={activeStage}
-          onStageChange={handleStageChange}
-          useCaseId={activeUseCaseId}
-        />
-      </section>
-
-      <section
-        id="memory"
-        class="relative px-4 sm:px-6 max-w-[72rem] mx-auto pt-10"
-      >
-        <FeatureBlock
-          eyebrow="Memory"
-          title="Source-backed context, kept fresh."
-          description="Connect a source once. Lobu types it into memory agents can search and cite. Watchers refresh it on schedule."
-          ctaLabel="Read the memory guide"
-          ctaHref="/getting-started/memory/"
-          graphic={<SharedMemoryGraphic />}
-        />
-      </section>
-
-      <section
-        id="skills"
-        class="relative px-4 sm:px-6 max-w-[72rem] mx-auto pt-10"
-      >
-        <FeatureBlock
-          eyebrow="Skills"
-          title="One agent, every surface."
-          description="Bundle tools, packages, and network access into a skill. The same agent runs in Slack, Telegram, REST, MCP, and ChatGPT — no per-platform plumbing."
-          ctaLabel="Explore skills"
-          ctaHref="/getting-started/skills/"
-          graphic={<SkillsGraphic />}
-          reverse
-        />
-      </section>
-
-      <ArchitectureSection activeUseCaseId={activeUseCaseId} />
-
-      <CTA startUrl={startUrl} />
-
+      <Hero />
+      <Container className="py-14 sm:py-20">
+        <ArchitectureDiagram />
+      </Container>
+      <ConnectorsSection />
+      <MemorySection />
+      <WatchersSection />
+      <SkillsSection />
+      <AgentsSection />
+      <BrowseExamplesSection />
+      <RunAnywhereSection />
+      <CTA startUrl={getLobuBaseUrl()} />
       {props.latestPosts?.length ? (
         <LatestBlogPosts posts={props.latestPosts} />
       ) : null}
     </>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Layout helpers                                                            */
+/* -------------------------------------------------------------------------- */
+
+function Container(props: {
+  children: preact.ComponentChildren;
+  className?: string;
+}) {
+  return (
+    <section
+      class={`relative mx-auto w-full max-w-[72rem] px-4 sm:px-6 ${props.className ?? ""}`}
+    >
+      {props.children}
+    </section>
+  );
+}
+
+function Eyebrow(props: { children: preact.ComponentChildren }) {
+  return (
+    <div
+      class="mb-3 font-mono text-[11.5px] font-semibold uppercase tracking-[0.12em]"
+      style={{ color: "var(--color-tg-accent)" }}
+    >
+      {props.children}
+    </div>
+  );
+}
+
+function SectionHeading(props: {
+  children: preact.ComponentChildren;
+  className?: string;
+}) {
+  return (
+    <h2
+      class={`font-display text-[1.85rem] font-bold leading-[1.1] tracking-tight sm:text-[2.25rem] ${props.className ?? ""}`}
+      style={{ color: "var(--color-page-text)" }}
+    >
+      {props.children}
+    </h2>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Hero                                                                      */
+/* -------------------------------------------------------------------------- */
+
+const CAST_SRC = "/casts/claude.cast";
+
+const NPX_COMMAND = "npx @lobu/cli@latest init my-agent";
+
+function Hero() {
+  const [copied, setCopied] = useState(false);
+  const [npxCopied, setNpxCopied] = useState(false);
+
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(SETUP_PROMPT);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2200);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const onCopyNpx = async () => {
+    try {
+      await navigator.clipboard.writeText(NPX_COMMAND);
+      setNpxCopied(true);
+      window.setTimeout(() => setNpxCopied(false), 2000);
+    } catch {
+      setNpxCopied(false);
+    }
+  };
+
+  return (
+    <section class="px-4 pb-12 pt-20 text-center sm:pb-16 sm:pt-28">
+      <Container>
+        <span
+          class="hero-rise hero-rise-1 mb-6 inline-block rounded-full border px-3.5 py-1.5 text-[11.5px] font-medium"
+          style={{
+            borderColor: "var(--color-page-border)",
+            color: "var(--color-page-text-muted)",
+          }}
+        >
+          Open source · TypeScript · Postgres · Multi-tenant · BYO model
+        </span>
+        <h1
+          class="hero-rise hero-rise-2 mx-auto max-w-[58rem] font-display text-[clamp(2.25rem,4.8vw,3.5rem)] font-bold leading-[1.06] tracking-[-0.028em]"
+          style={{ color: "var(--color-page-text)" }}
+        >
+          <em class="not-italic" style={{ color: "var(--color-tg-accent)" }}>
+            Proactive
+          </em>{" "}
+          AI agents on
+          <br />
+          <em class="not-italic" style={{ color: "var(--color-tg-accent)" }}>
+            self-building
+          </em>{" "}
+          knowledge graph
+        </h1>
+        <p
+          class="hero-rise hero-rise-3 mx-auto mt-5 max-w-[42rem] text-[17px] leading-[1.55]"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          Connectors stream events into an append-only memory. LLM watchers
+          shape them into entities your agent can search and cite. Open source,
+          multi-tenant, BYO model.
+        </p>
+        <div class="hero-rise hero-rise-4 mt-8 flex flex-wrap items-center justify-center gap-3">
+          <button
+            class="inline-flex items-center gap-2 rounded-lg px-5 py-3 text-[14.5px] font-semibold transition-transform hover:-translate-y-px"
+            onClick={onCopy}
+            style={{
+              backgroundColor: "var(--color-page-text)",
+              color: "var(--color-page-bg)",
+            }}
+            type="button"
+          >
+            <CopyIcon copied={copied} />
+            <span>
+              {copied ? "Copied — paste into your agent" : "Copy setup prompt"}
+            </span>
+          </button>
+          <a
+            class="inline-flex items-center gap-2 rounded-lg border px-5 py-3 text-[14.5px] font-semibold transition-colors hover:bg-[var(--color-page-surface-dim)]"
+            href={GITHUB_URL}
+            rel="noopener noreferrer"
+            style={{
+              borderColor: "var(--color-page-border)",
+              color: "var(--color-page-text)",
+              backgroundColor: "var(--color-page-surface)",
+            }}
+            target="_blank"
+          >
+            <GithubIcon />
+            View on GitHub
+          </a>
+        </div>
+        <p
+          class="hero-rise hero-rise-4 mt-3.5 text-[13px]"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          or paste the prompt into <span class="font-mono">claude code</span>,{" "}
+          <span class="font-mono">cursor</span>, or{" "}
+          <span class="font-mono">opencode</span> — it'll scaffold the project
+          for you
+        </p>
+        <div class="hero-rise hero-rise-5 mx-auto mt-10 max-w-[44rem]">
+          <TerminalWindow npxCopied={npxCopied} onCopyNpx={onCopyNpx} />
+        </div>
+      </Container>
+    </section>
+  );
+}
+
+function TerminalWindow(props: { npxCopied: boolean; onCopyNpx: () => void }) {
+  return (
+    <div
+      class="overflow-hidden rounded-lg border"
+      style={{
+        backgroundColor: "var(--color-landing-code-bg)",
+        borderColor: "var(--color-page-border)",
+      }}
+    >
+      <div
+        class="flex items-center gap-3 border-b px-3 py-2 sm:px-4"
+        style={{ borderColor: "var(--color-page-border)" }}
+      >
+        <div aria-hidden="true" class="flex shrink-0 items-center gap-1.5">
+          <span
+            class="block h-3 w-3 rounded-full"
+            style={{ backgroundColor: "#ee5847" }}
+          />
+          <span
+            class="block h-3 w-3 rounded-full"
+            style={{ backgroundColor: "#f6bd2c" }}
+          />
+          <span
+            class="block h-3 w-3 rounded-full"
+            style={{ backgroundColor: "#66c84a" }}
+          />
+        </div>
+        <span class="flex-1" />
+        <span
+          class="hidden shrink-0 truncate font-mono text-[11.5px] sm:inline"
+          style={{ color: "var(--color-landing-code-comment)" }}
+        >
+          scaffold a lobu agent ·
+        </span>
+        <button
+          class="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-1 font-mono text-[11.5px] transition-colors hover:border-[color:var(--color-tg-accent)]"
+          onClick={props.onCopyNpx}
+          style={{
+            borderColor: "var(--color-page-border)",
+            color: "var(--color-page-text)",
+          }}
+          title="Copy command"
+          type="button"
+        >
+          <span class="hidden sm:inline">{NPX_COMMAND}</span>
+          <span class="sm:hidden">npx @lobu/cli init</span>
+          <span
+            aria-hidden="true"
+            class="shrink-0"
+            style={{ color: "var(--color-page-text-muted)" }}
+          >
+            <CopyIcon copied={props.npxCopied} />
+          </span>
+          <span class="sr-only">
+            {props.npxCopied ? "Copied" : "Copy command"}
+          </span>
+        </button>
+      </div>
+      <HeroAsciinema />
+    </div>
+  );
+}
+
+function CopyIcon(props: { copied: boolean }) {
+  return props.copied ? (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="14"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="14"
+    >
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  ) : (
+    <svg
+      aria-hidden="true"
+      fill="none"
+      height="14"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+      viewBox="0 0 24 24"
+      width="14"
+    >
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function GithubIcon() {
+  return (
+    <svg
+      aria-hidden="true"
+      fill="currentColor"
+      height="14"
+      viewBox="0 0 24 24"
+      width="14"
+    >
+      <path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2c-3.3.7-4-1.4-4-1.4-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.4-1.3-5.4-5.9 0-1.3.5-2.4 1.3-3.2-.1-.3-.6-1.5.1-3.2 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0c2.3-1.5 3.3-1.2 3.3-1.2.7 1.7.2 2.9.1 3.2.8.8 1.3 1.9 1.3 3.2 0 4.6-2.8 5.6-5.4 5.9.4.3.8 1 .8 2v3c0 .3.2.7.8.6A12 12 0 0 0 12 .5z" />
+    </svg>
+  );
+}
+
+/**
+ * Slot for the vendored asciinema-player. The script tag in
+ * BaseLayout.astro defines window.AsciinemaPlayer; we mount it into the
+ * container on first paint. If the cast 404s the container stays empty —
+ * the page never errors.
+ *
+ * Playback is gated so the cast doesn't start on its own. On every
+ * platform we show the player's "click to play" overlay, start a 5s
+ * timer, and call `player.play()` when it elapses. If the user clicks
+ * the play button before 5s, the player's `play` event fires and we
+ * cancel the timer so we don't fight with a manual play.
+ *
+ * The ref-callback captures the player instance and the listener /
+ * timer cleanup on `node.__lobuHeroCleanup` so a follow-up render (or
+ * unmount) can detach everything cleanly.
+ */
+function HeroAsciinema() {
+  // role="img" + aria-label give screen readers a single semantic anchor for
+  // the whole player. The visually-hidden <p> sibling renders even when the
+  // asciinema player script fails to mount (JS error, blocked CDN, JS off),
+  // so assistive tech and no-JS visitors still get the gist of what plays.
+  // The asciinema mount target is a separate child <div> so the player's
+  // DOM rewrites don't clobber the summary.
+  return (
+    <div
+      class="w-full overflow-hidden"
+      role="img"
+      aria-label="Demo: scaffold a Lobu agent with the CLI — paste the prompt, get a project with lobu.toml, schema.yaml, and a validated config in under a minute."
+      style={{
+        backgroundColor: "var(--color-landing-code-bg)",
+      }}
+    >
+      <p class="sr-only">
+        Asciicast: <code>claude</code> opens, the user pastes a setup prompt,
+        Claude runs <code>lobu init support-bot</code>, writes{" "}
+        <code>models/schema.yaml</code> with customer and ticket entities, then
+        runs <code>lobu validate</code> which prints{" "}
+        <code>lobu.toml is valid</code>.
+      </p>
+      <div
+        class="w-full"
+        ref={(node) => {
+          type CleanupNode = HTMLDivElement & {
+            __lobuHeroCleanup?: () => void;
+          };
+          if (!node) return;
+          const typedNode = node as CleanupNode;
+          if (typedNode.dataset.asciinemaMounted === "1") return;
+          const player =
+            typeof window !== "undefined"
+              ? (
+                  window as unknown as {
+                    AsciinemaPlayer?: {
+                      create: (
+                        src: string,
+                        el: Element,
+                        opts?: Record<string, unknown>
+                      ) =>
+                        | {
+                            play?: () => void;
+                            addEventListener?: (
+                              event: string,
+                              cb: () => void
+                            ) => void;
+                            removeEventListener?: (
+                              event: string,
+                              cb: () => void
+                            ) => void;
+                          }
+                        | undefined;
+                    };
+                  }
+                ).AsciinemaPlayer
+              : null;
+          if (!player) return;
+          const instance = player.create(CAST_SRC, node, {
+            autoPlay: false,
+            loop: true,
+            idleTimeLimit: 2,
+            fit: "width",
+            terminalFontSize: "13px",
+            theme: "asciinema",
+          });
+          typedNode.dataset.asciinemaMounted = "1";
+
+          const timer = window.setTimeout(() => {
+            try {
+              instance?.play?.();
+            } catch {
+              // asciinema-player's play() is a no-op pre-init; ignore.
+            }
+          }, 5000);
+
+          const onManualPlay = () => {
+            window.clearTimeout(timer);
+          };
+          instance?.addEventListener?.("play", onManualPlay);
+
+          typedNode.__lobuHeroCleanup = () => {
+            window.clearTimeout(timer);
+            instance?.removeEventListener?.("play", onManualPlay);
+          };
+        }}
+      />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Static sections                                                           */
+/* -------------------------------------------------------------------------- */
+
+function BrowseExamplesSection() {
+  const examples = snippets.examples;
+  return (
+    <section
+      class="border-t py-16"
+      style={{ borderColor: "var(--color-page-border)" }}
+    >
+      <Container>
+        <div class="mb-10 text-center">
+          <Eyebrow>Browse the repo</Eyebrow>
+          <SectionHeading className="mx-auto">Examples</SectionHeading>
+          <p
+            class="mx-auto mt-3 max-w-[42rem] text-[14.5px]"
+            style={{ color: "var(--color-page-text-muted)" }}
+          >
+            Clone any one, run{" "}
+            <code class="font-mono text-[13.5px]">lobu apply</code>, and you
+            have a working agent.
+          </p>
+        </div>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 md:grid-cols-3">
+          {examples.map((ex) => (
+            <a
+              class="flex flex-col rounded-lg border p-4 transition-colors hover:border-[color:var(--color-tg-accent)]"
+              href={ex.githubUrl}
+              key={ex.slug}
+              rel="noopener noreferrer"
+              style={{
+                borderColor: "var(--color-page-border)",
+                backgroundColor: "var(--color-page-surface)",
+              }}
+              target="_blank"
+            >
+              <span
+                class="mb-2 font-mono text-[12.5px]"
+                style={{ color: "var(--color-page-text)" }}
+              >
+                examples/{ex.slug}
+              </span>
+              {ex.description ? (
+                <span
+                  class="text-[13px] leading-[1.5]"
+                  style={{ color: "var(--color-page-text-muted)" }}
+                >
+                  {ex.description}
+                </span>
+              ) : null}
+            </a>
+          ))}
+        </div>
+      </Container>
+    </section>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Product sections (Connectors / Memory / Watchers / Agents)               */
+/* -------------------------------------------------------------------------- */
+
+/** Small footer link rendered under each section's code panel, linking to the
+ *  full example on GitHub. Matches the ProductLink monospace-path treatment. */
+function ExampleFooterLink({ slug }: { slug: string }) {
+  return (
+    <a
+      class="mt-3 inline-flex items-center gap-1 text-[13px] transition-colors hover:text-[color:var(--color-tg-accent)]"
+      href={`${EXAMPLE_BASE_URL}/${slug}`}
+      rel="noopener noreferrer"
+      style={{ color: "var(--color-page-text-muted)" }}
+      target="_blank"
+    >
+      Full example:{" "}
+      <code
+        class="font-mono text-[13px]"
+        style={{ color: "var(--color-page-text)" }}
+      >
+        examples/{slug}
+      </code>
+      <span aria-hidden="true">→</span>
+    </a>
+  );
+}
+
+function ProductGrid(props: {
+  reverse?: boolean;
+  text: preact.ComponentChildren;
+  code: preact.ComponentChildren;
+}) {
+  return (
+    <div
+      class={`grid items-start gap-10 md:gap-16 ${
+        props.reverse
+          ? "md:grid-cols-[1.15fr_1fr]"
+          : "md:grid-cols-[1fr_1.15fr]"
+      }`}
+    >
+      {props.reverse ? (
+        <>
+          <div class="min-w-0">{props.code}</div>
+          <div class="min-w-0">{props.text}</div>
+        </>
+      ) : (
+        <>
+          <div class="min-w-0">{props.text}</div>
+          <div class="min-w-0">{props.code}</div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function FeatureList(props: { items: Array<preact.ComponentChildren> }) {
+  return (
+    <ul class="my-5 grid gap-2.5">
+      {props.items.map((item, i) => (
+        <li
+          key={i}
+          class="relative pl-6 text-[14.5px] leading-[1.55]"
+          style={{ color: "var(--color-page-text)" }}
+        >
+          <span
+            aria-hidden="true"
+            class="absolute left-0 top-0 font-bold"
+            style={{ color: "var(--color-tg-accent)" }}
+          >
+            →
+          </span>
+          {item}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ProductLink(props: {
+  href: string;
+  children: preact.ComponentChildren;
+}) {
+  return (
+    <a
+      class="border-b pb-0.5 text-[14px] font-semibold transition-colors hover:text-[color:var(--color-tg-accent)] hover:border-[color:var(--color-tg-accent)]"
+      href={props.href}
+      style={{
+        color: "var(--color-page-text)",
+        borderColor: "var(--color-page-border)",
+      }}
+    >
+      {props.children} →
+    </a>
+  );
+}
+
+function ConnectorsSection() {
+  return (
+    <Container className="py-16 sm:py-20">
+      <ProductGrid
+        text={
+          <div>
+            <Eyebrow>Connectors</Eyebrow>
+            <SectionHeading>
+              One typed event stream from every source.
+            </SectionHeading>
+            <p
+              class="mt-4 max-w-[28rem] text-[16px] leading-[1.6]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              YAML to configure. TypeScript to extend, via{" "}
+              <code class="font-mono text-[14px]">@lobu/connector-sdk</code>.
+            </p>
+            <FeatureList
+              items={[
+                <>
+                  <b>On-device collection</b> — paired Chrome and macOS
+                  connectors capture local context no cloud agent can see.
+                </>,
+                <>
+                  <b>Multi-tenant OAuth</b> — each user signs in with their own
+                  account; workers never see the token.
+                </>,
+                <>
+                  <b>Durable checkpointing</b> — connectors resume from the last
+                  cursor after restart. No missed events.
+                </>,
+                <>
+                  <b>MCP proxy</b> — wrap any MCP server (Stripe, GitHub,
+                  internal) as a Lobu connector.
+                </>,
+                <>
+                  <b>Custom in TypeScript</b> — drop a{" "}
+                  <code class="font-mono text-[13px]">*.connector.ts</code> in
+                  your repo,{" "}
+                  <code class="font-mono text-[13px]">lobu apply</code> picks it
+                  up.
+                </>,
+              ]}
+            />
+            <ProductLink href="/getting-started/connector-sdk/">
+              Read the connector-sdk docs
+            </ProductLink>
+          </div>
+        }
+        code={
+          <div>
+            <CodeBlock badge="typescript" snippet={snippets.connector} />
+            <ExampleFooterLink slug="ecommerce" />
+          </div>
+        }
+      />
+    </Container>
+  );
+}
+
+function MemorySection() {
+  return (
+    <Container className="py-16 sm:py-20">
+      <ProductGrid
+        reverse
+        text={
+          <div>
+            <Eyebrow>Memory</Eyebrow>
+            <SectionHeading>
+              An event-sourced database for AI agents.
+            </SectionHeading>
+            <p
+              class="mt-4 max-w-[28rem] text-[16px] leading-[1.6]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              Declare entity types in YAML. Lobu stores them as append-only
+              events with full audit. Multi-tenant by default — agents see only
+              their scope.
+            </p>
+            <FeatureList
+              items={[
+                <>
+                  <b>Entity types &amp; relationships</b> — declare what your
+                  agent should remember; link entities with typed relations.
+                </>,
+                <>
+                  <b>Append-only</b> — every change is a new event. Tombstones
+                  supersede; nothing is destroyed.
+                </>,
+                <>
+                  <b>Agent-assisted modeling</b> — paste the setup prompt into
+                  Claude Code or Cursor; it interviews you and drafts{" "}
+                  <code class="font-mono text-[13px]">schema.yaml</code>.
+                </>,
+                <>
+                  <b>Per-user / per-org isolation</b> — your agents only see the
+                  memory they're scoped to.
+                </>,
+              ]}
+            />
+            <ProductLink href="/getting-started/memory/">
+              Read the memory guide
+            </ProductLink>
+          </div>
+        }
+        code={
+          <div>
+            <CodeBlock badge="entities" snippet={snippets.memorySchema} />
+            <ExampleFooterLink slug="sales" />
+          </div>
+        }
+      />
+    </Container>
+  );
+}
+
+function WatchersSection() {
+  return (
+    <Container className="py-16 sm:py-20">
+      <ProductGrid
+        text={
+          <div>
+            <Eyebrow>Watchers</Eyebrow>
+            <SectionHeading>
+              Turn events into memory. With prompts.
+            </SectionHeading>
+            <p
+              class="mt-4 max-w-[28rem] text-[16px] leading-[1.6]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              A watcher is a <code class="font-mono text-[14px]">prompt</code> +{" "}
+              <code class="font-mono text-[14px]">extraction_schema</code>. Lobu
+              runs the LLM, validates, and persists the output to memory.{" "}
+              <b>No application code</b> — fire on events, or run on cron.
+            </p>
+            <FeatureList
+              items={[
+                <>
+                  <b>Reactive</b> — fires on the event stream (e.g.{" "}
+                  <code class="font-mono text-[13px]">
+                    linear.issue.created
+                  </code>
+                  ).
+                </>,
+                <>
+                  <b>Dreaming</b> — runs on cron. Aggregates the previous day's
+                  events into higher-level entities.
+                </>,
+                <>
+                  <b>No-code ETL</b> — the prompt is your transformation; the
+                  schema is your output type.
+                </>,
+                <>
+                  <b>Reactions are optional</b> — drop in a{" "}
+                  <code class="font-mono text-[13px]">*.reaction.ts</code> only
+                  when you need imperative code on top.
+                </>,
+                <>
+                  <b>Auditable</b> — every run lands as events in the durable
+                  log.
+                </>,
+              ]}
+            />
+            <ProductLink href="/getting-started/reaction-sdk/">
+              Read the watchers guide
+            </ProductLink>
+          </div>
+        }
+        code={
+          <div class="space-y-3.5">
+            <CodeBlock badge="reactive + dreaming" snippet={snippets.watcher} />
+            <p
+              class="text-[13px]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              When the watcher extracts data, this reaction runs:
+            </p>
+            <CodeBlock
+              badge="optional · typescript"
+              snippet={snippets.reaction}
+            />
+            <ExampleFooterLink slug="sales" />
+          </div>
+        }
+      />
+    </Container>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Skills section — snippet is the YAML frontmatter of the deliveroo-order   */
+/*  SKILL.md, trimmed at build time by gen-landing-snippets.ts (the example   */
+/*  that exercises every field the pitch promises: nixPackages,               */
+/*  network.allow, network.judge, judges.default).                            */
+/* -------------------------------------------------------------------------- */
+
+function SkillsSection() {
+  return (
+    <Container className="py-16 sm:py-20">
+      <ProductGrid
+        reverse
+        text={
+          <div>
+            <Eyebrow>Skills</Eyebrow>
+            <SectionHeading>
+              Bundle tools, packages, and policy into one drop-in.
+            </SectionHeading>
+            <p
+              class="mt-4 max-w-[28rem] text-[16px] leading-[1.6]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              A skill is a folder with a{" "}
+              <code class="font-mono text-[14px]">SKILL.md</code>. Drop it in{" "}
+              <code class="font-mono text-[13px]">skills/</code> or{" "}
+              <code class="font-mono text-[13px]">
+                agents/&lt;id&gt;/skills/
+              </code>
+              , <code class="font-mono text-[13px]">lobu apply</code> picks it
+              up. The agent gets instructions, tools, packages, and a per-domain
+              LLM egress policy in one shot.
+            </p>
+            <FeatureList
+              items={[
+                <>
+                  <b>Instructions</b> — markdown describing when the agent
+                  should use this skill.
+                </>,
+                <>
+                  <b>Tools</b> — TypeScript functions the agent calls.
+                  Auto-registered as MCP tools.
+                </>,
+                <>
+                  <b>Network</b> — allowed domains + per-domain LLM egress judge
+                  in YAML.
+                </>,
+                <>
+                  <b>Packages</b> — Nix packages (git, jq, etc.) merged into the
+                  worker env.
+                </>,
+              ]}
+            />
+            <ProductLink href="/getting-started/">
+              Read the skills guide
+            </ProductLink>
+          </div>
+        }
+        code={
+          <div>
+            <CodeBlock badge="skill" snippet={snippets.skill} />
+            <p
+              class="mt-2 text-[13px]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              Plus the markdown body — instructions for when and how the agent
+              should use this skill.
+            </p>
+            <ExampleFooterLink slug="office-bot" />
+          </div>
+        }
+      />
+    </Container>
+  );
+}
+
+function AgentsSection() {
+  return (
+    <Container className="py-16 sm:py-20">
+      <ProductGrid
+        reverse
+        text={
+          <div>
+            <Eyebrow>Agents</Eyebrow>
+            <SectionHeading>One agent. Every chat surface.</SectionHeading>
+            <p
+              class="mt-4 max-w-[28rem] text-[16px] leading-[1.6]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              Declare your agent in{" "}
+              <code class="font-mono text-[14px]">lobu.toml</code> — provider,
+              model, skills. One config, every surface below.
+            </p>
+            <FeatureList
+              items={[
+                <>
+                  <b>Every chat surface</b> — Slack, Telegram, Discord, Teams,
+                  WhatsApp, HTTP, MCP. Same{" "}
+                  <code class="font-mono text-[13px]">lobu.toml</code>.
+                </>,
+                <>
+                  <b>BYO model</b> — Anthropic, OpenAI, Z.ai, OpenRouter, your
+                  own.
+                </>,
+                <>
+                  <b>Per-user isolation</b> — workers scoped by user/channel.
+                  Secrets stay in the proxy.
+                </>,
+                <>
+                  <b>Durable &amp; audited</b> — every agent action is an event
+                  in the log.
+                </>,
+              ]}
+            />
+            <ProductLink href="/getting-started/">
+              Read the agents guide
+            </ProductLink>
+          </div>
+        }
+        code={
+          <div>
+            <CodeBlock badge="agent" snippet={snippets.agentToml} />
+            <ExampleFooterLink slug="sales" />
+          </div>
+        }
+      />
+    </Container>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Run anywhere                                                              */
+/* -------------------------------------------------------------------------- */
+
+function RunAnywhereSection() {
+  const cards: Array<{
+    eyebrow: string;
+    title: string;
+    body: preact.ComponentChildren;
+    code: preact.ComponentChildren;
+  }> = [
+    {
+      eyebrow: "Local",
+      title: "Embedded, single process.",
+      body: (
+        <>
+          Gateway, workers, memory, embeddings — all in one Node process.
+          Postgres is the only external.
+        </>
+      ),
+      code: (
+        <>
+          <span style={{ color: "var(--color-landing-code-comment)" }}>$</span>{" "}
+          lobu run{"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          gateway{"   "}
+          <span style={{ color: "var(--color-landing-code-key)" }}>:8787</span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          worker{"    "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            pid=&lt;n&gt;
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          memory{"    "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            N entities
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          watchers{"  "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            N armed
+          </span>
+        </>
+      ),
+    },
+    {
+      eyebrow: "Self-host",
+      title: "Docker. Helm. Your cloud.",
+      body: (
+        <>
+          Helm chart and Dockerfiles in the repo (
+          <code class="font-mono text-[13px]">charts/lobu/</code>,{" "}
+          <code class="font-mono text-[13px]">docker/app/</code>). Run on GCP,
+          AWS, Fly, Render, or bare metal.
+        </>
+      ),
+      code: (
+        <>
+          <span style={{ color: "var(--color-landing-code-comment)" }}>
+            # Kubernetes
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>$</span>{" "}
+          helm install lobu ./charts/lobu{"\n\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>
+            # Docker
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>$</span>{" "}
+          docker build -f docker/app/Dockerfile .
+        </>
+      ),
+    },
+    {
+      eyebrow: "Lobu Cloud",
+      title: "Managed runtime.",
+      body: (
+        <>
+          Same code, run by Lobu. Per-user isolation, secret proxy, automatic
+          upgrades.
+        </>
+      ),
+      code: (
+        <>
+          <span style={{ color: "var(--color-landing-code-comment)" }}>$</span>{" "}
+          lobu apply{"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          org{"      "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            &lt;your-org&gt;
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          region{"   "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            &lt;your-region&gt;
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          agents{"   "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            N deployed
+          </span>
+          {"\n"}
+          <span style={{ color: "var(--color-landing-code-comment)" }}>→</span>{" "}
+          gateway{"  "}
+          <span style={{ color: "var(--color-landing-code-string)" }}>
+            &lt;your-org&gt;.lobu.run
+          </span>
+        </>
+      ),
+    },
+  ];
+  return (
+    <Container className="py-16 sm:py-20">
+      <div class="mb-10 text-center">
+        <Eyebrow>Run anywhere</Eyebrow>
+        <SectionHeading className="mx-auto">
+          Local, your cloud, or Lobu Cloud.
+        </SectionHeading>
+        <p
+          class="mx-auto mt-3 max-w-[34rem] text-[15px]"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          Same <code class="font-mono text-[13px]">lobu.toml</code> +{" "}
+          <code class="font-mono text-[13px]">models/</code> +{" "}
+          <code class="font-mono text-[13px]">connectors/</code> +{" "}
+          <code class="font-mono text-[13px]">agents/</code>. One command to
+          boot embedded; Docker + Helm for self-hosting; Lobu Cloud when you
+          don't want to run it yourself.
+        </p>
+      </div>
+      <div class="grid gap-6 md:grid-cols-3">
+        {cards.map((card) => (
+          <div
+            key={card.title}
+            class="flex min-w-0 flex-col rounded-lg border p-6"
+            style={{
+              borderColor: "var(--color-page-border)",
+              backgroundColor: "var(--color-page-surface)",
+            }}
+          >
+            <Eyebrow>{card.eyebrow}</Eyebrow>
+            <h3
+              class="mb-2 text-[1.05rem] font-bold tracking-tight"
+              style={{ color: "var(--color-page-text)" }}
+            >
+              {card.title}
+            </h3>
+            <p
+              class="mb-4 text-[14.5px] leading-[1.55]"
+              style={{ color: "var(--color-page-text-muted)" }}
+            >
+              {card.body}
+            </p>
+            <pre
+              class="overflow-x-auto rounded-lg px-3 py-2.5 font-mono text-[12.5px] leading-[1.65]"
+              style={{
+                backgroundColor: "var(--color-landing-code-bg)",
+                color: "var(--color-landing-code-text)",
+              }}
+            >
+              {card.code}
+            </pre>
+          </div>
+        ))}
+      </div>
+    </Container>
   );
 }

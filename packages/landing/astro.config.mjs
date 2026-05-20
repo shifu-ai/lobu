@@ -66,6 +66,8 @@ export default defineConfig({
             { label: "Comparison", link: "/getting-started/comparison/" },
             { label: "Skills", link: "/getting-started/skills/" },
             { label: "Memory", link: "/getting-started/memory/" },
+            { label: "Connector SDK", link: "/getting-started/connector-sdk/" },
+            { label: "Reactions", link: "/getting-started/reaction-sdk/" },
           ],
         },
         { label: "Deployment", autogenerate: { directory: "deployment" } },
@@ -98,7 +100,9 @@ export default defineConfig({
             { label: "Providers", link: "/reference/providers/" },
             { label: "CLI", link: "/reference/cli/" },
             { label: "Lobu memory CLI", link: "/reference/lobu-memory/" },
-            { label: "API Reference", link: "/reference/api-reference/" },
+            { label: "@lobu/connector-sdk", link: "/reference/connector-sdk/" },
+            { label: "Reactions", link: "/reference/reaction-sdk/" },
+            { label: "REST API", link: "/reference/api-reference/" },
           ],
         },
       ],
@@ -115,6 +119,12 @@ export default defineConfig({
     sitemap(),
   ],
   vite: {
+    // Read .env from the repo root so PUBLIC_POSTHOG_KEY (and any other
+    // workspace-wide env we add later) reaches the build / dev server.
+    // Without this, Vite scopes envDir to this package and the repo-root
+    // .env is invisible — PosthogAnalytics then silently no-ops because
+    // posthogKey is undefined.
+    envDir: resolve(__dirname, "../.."),
     plugins: [settingsMockPlugin(), tailwindcss()],
     resolve: {
       alias: {

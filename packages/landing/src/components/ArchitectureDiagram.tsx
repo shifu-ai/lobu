@@ -1,606 +1,590 @@
-import type { LandingUseCaseId } from "../use-case-definitions";
+// biome-ignore-all format: stays compact for the landing-page panel
 import { messagingChannels } from "./platforms";
 
-const gatewayLayer = {
-  label: "Lobu",
-  sublabel: "Control Plane",
-  features: [
-    "Workers never see secrets",
-    "HTTP proxy with domain allowlist",
-    "MCP proxy with per-user OAuth",
-    "BYO provider keys (Anthropic etc.)",
-  ],
-};
+/**
+ * Architecture diagram — layered stream story (NOT cycling pairs).
+ *
+ *   ┌────────────┐         ┌────────────┐         ┌────────────┐
+ *   │ Connectors │ events  │   Memory   │  chat   │   Agents   │
+ *   │   (logos)  │ ──────► │  events    │ ──────► │  chat bots │
+ *   │ sdk pill   │         │  ↓ cron·LLM│  read   │  other     │
+ *   │            │         │  entities  │ ──────► │  agents    │
+ *   │            │         │  (table)   │         │  sdk pill  │
+ *   └────────────┘         └────────────┘         └────────────┘
+ *
+ * Continuous stream pulse in the `events` box telegraphs "live stream";
+ * the entities widget renders as a small table grid to signal structured
+ * data rather than a freeform blob.
+ * Honors prefers-reduced-motion (drops animations entirely).
+ */
 
-const runtimeLayer = {
-  label: "OpenClaw Runtime",
-  sublabel: "per-user isolation",
-  features: [
-    "One sandbox per user and channel",
-    "Subprocess isolation with just-bash virtual filesystems",
-    "systemd-run hardening on Linux production hosts",
-    "No direct internet access (gateway proxy only)",
-    "Nix reproducible environments",
-    "OpenTelemetry for observability",
-  ],
-};
+/* -------------------------------------------------------------------------- */
+/*  Connector brand glyphs (simpleicons-style paths, MIT)                     */
+/* -------------------------------------------------------------------------- */
 
-function Arrow() {
+type Brand = { key: string; label: string; path: string };
+
+const CONNECTOR_BRANDS: Brand[] = [
+  {
+    key: "github",
+    label: "GitHub",
+    path: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12",
+  },
+  {
+    key: "linear",
+    label: "Linear",
+    path: "M.403 13.795A12.131 12.131 0 0 0 10.203 23.6L.403 13.795zM.182 10.103l13.715 13.714a12.18 12.18 0 0 0 3.137-1.21L1.392 6.966a12.18 12.18 0 0 0-1.21 3.137zm3.135-5.836a12.16 12.16 0 0 1 1.51-1.84L21.572 19.17a12.137 12.137 0 0 1-1.84 1.51L3.317 4.267zM6.682 1.43A12.12 12.12 0 0 1 12 0c6.626 0 12 5.374 12 12 0 1.872-.428 3.643-1.193 5.22L6.682 1.43Z",
+  },
+  {
+    key: "stripe",
+    label: "Stripe",
+    path: "M13.479 9.883c-1.626-.604-2.512-1.067-2.512-1.803 0-.622.511-.977 1.422-.977 1.668 0 3.379.642 4.558 1.22l.666-4.111c-.935-.446-2.847-1.177-5.49-1.177-1.87 0-3.425.489-4.536 1.401-1.155.954-1.757 2.334-1.757 4.005 0 3.027 1.847 4.328 4.855 5.42 1.937.696 2.587 1.192 2.587 1.954 0 .74-.629 1.158-1.77 1.158-1.396 0-3.741-.69-5.323-1.585L5.5 19.612c1.305.74 3.722 1.5 6.245 1.5 1.977 0 3.629-.464 4.752-1.358 1.262-.985 1.915-2.432 1.915-4.155 0-3.105-1.89-4.392-4.933-5.516z",
+  },
+  {
+    key: "notion",
+    label: "Notion",
+    path: "M4.459 4.208c.746.606 1.026.56 2.428.466l13.215-.793c.28 0 .047-.28-.046-.326L17.86 1.968c-.42-.326-.981-.7-2.055-.607L3.01 2.295c-.466.046-.56.28-.374.466zm.793 3.08v13.904c0 .747.373 1.027 1.214.98l14.523-.84c.841-.046.935-.56.935-1.167V6.354c0-.606-.233-.933-.748-.887l-15.177.887c-.56.047-.747.327-.747.933zm14.337.745c.093.42 0 .84-.42.888l-.7.14v10.264c-.608.327-1.168.514-1.635.514-.748 0-.935-.234-1.495-.933l-4.577-7.186v6.952L12.21 19s0 .84-1.168.84l-3.222.186c-.093-.186 0-.653.327-.746l.84-.233V9.854L7.822 9.76c-.094-.42.14-1.026.793-1.073l3.456-.233 4.764 7.279v-6.44l-1.215-.139c-.093-.514.28-.887.747-.933zM1.936 1.035l13.31-.98c1.634-.14 2.055-.047 3.082.7l4.249 2.986c.7.513.934.653.934 1.213v16.378c0 1.026-.373 1.634-1.68 1.726l-15.458.934c-.98.047-1.448-.093-1.962-.747l-3.129-4.06c-.56-.747-.793-1.306-.793-1.96V2.667c0-.839.374-1.54 1.447-1.632z",
+  },
+  {
+    key: "gmail",
+    label: "Gmail",
+    path: "M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z",
+  },
+  {
+    key: "hubspot",
+    label: "HubSpot",
+    path: "M18.164 7.93V5.084a2.198 2.198 0 0 0 1.267-1.978v-.067A2.2 2.2 0 0 0 17.238.845h-.067a2.2 2.2 0 0 0-2.193 2.194v.067a2.198 2.198 0 0 0 1.267 1.978v2.846a6.215 6.215 0 0 0-2.964 1.305L5.42 3.183A2.482 2.482 0 1 0 .55 3.91c.005.351.085.696.235 1.013l7.736 6.018a6.226 6.226 0 0 0 .094 7.012l-2.354 2.353a2.014 2.014 0 0 0-.583-.092 2.025 2.025 0 1 0 2.024 2.025 2.015 2.015 0 0 0-.093-.584l2.328-2.329a6.243 6.243 0 1 0 8.232-9.396zm-.97 9.343a3.2 3.2 0 1 1 0-6.4 3.2 3.2 0 0 1 0 6.4z",
+  },
+];
+
+function ConnectorGlyph({ brand, size = 22 }: { brand: Brand; size?: number }) {
   return (
-    <svg
-      width="32"
-      height="12"
-      viewBox="0 0 32 12"
-      fill="none"
-      class="shrink-0 hidden md:block self-center"
-      aria-hidden="true"
-    >
-      <line
-        x1="0"
-        y1="6"
-        x2="26"
-        y2="6"
-        stroke="var(--color-page-text-muted)"
-        stroke-width="1.5"
-      />
-      <polyline
-        points="22,2 28,6 22,10"
-        stroke="var(--color-page-text-muted)"
-        stroke-width="1.5"
-        fill="none"
-      />
+    <svg width={size} height={size} viewBox="0 0 24 24" aria-label={brand.label} role="img">
+      <title>{brand.label}</title>
+      <path d={brand.path} fill="var(--color-page-text)" />
     </svg>
   );
 }
 
-function FeatureList({
-  features,
-  accent,
-}: {
-  features: string[];
-  accent?: boolean;
-}) {
-  return (
-    <ul class="mt-4 space-y-2 w-full max-w-[230px]">
-      {features.map((f) => (
-        <li
-          key={f}
-          class="text-xs leading-relaxed flex gap-2"
-          style={{ color: "var(--color-page-text-muted)" }}
-        >
-          <span
-            class="shrink-0 mt-1 w-1 h-1 rounded-full"
-            style={{
-              backgroundColor: accent
-                ? "var(--color-tg-accent)"
-                : "var(--color-page-text-muted)",
-            }}
-          />
-          {f}
-        </li>
-      ))}
-    </ul>
-  );
-}
+/* -------------------------------------------------------------------------- */
+/*  Component                                                                 */
+/* -------------------------------------------------------------------------- */
 
-function PlatformColumn() {
+export function ArchitectureDiagram() {
   return (
-    <div class="flex flex-col items-center flex-1 min-w-0">
-      <div
-        class="text-[9px] uppercase tracking-wider mb-1"
-        style={{ color: "var(--color-page-text-muted)" }}
-      >
-        Messaging platforms
-      </div>
-      <div class="w-full max-w-[200px] space-y-1.5">
-        {messagingChannels.map((channel) => (
-          <div
-            key={channel.id}
-            class="rounded-lg px-4 py-2 flex items-center gap-2.5"
-            style={{
-              backgroundColor: "var(--color-page-surface-dim)",
-              border: "1px solid var(--color-page-border)",
-            }}
-          >
-            <span style={{ color: "var(--color-page-text-muted)" }}>
-              {channel.renderIcon(14)}
-            </span>
-            <div>
-              <div
-                class="text-xs font-semibold"
-                style={{ color: "var(--color-page-text)" }}
-              >
-                {channel.label}
-              </div>
-              <div
-                class="text-[9px]"
-                style={{ color: "var(--color-page-text-muted)" }}
-              >
-                {channel.detail}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-      <FeatureList
-        features={[
-          "Link users across platforms with single sign-on",
-          "Approval flows, rich cards, buttons, and more",
-        ]}
-      />
+    <div class="flex flex-col gap-6">
+      <Header />
+      <DiagramBoard />
+      <PulseStyles />
     </div>
   );
 }
 
-const gatewayBadges = [
-  {
-    label: "Secrets",
-    href: "/guides/security/",
-    icon: (
-      <svg
-        width={10}
-        height={10}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-      </svg>
-    ),
-  },
-  {
-    label: "Single Sign-On (IdP)",
-    href: null,
-    icon: (
-      <svg
-        width={10}
-        height={10}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-        <circle cx="12" cy="7" r="4" />
-      </svg>
-    ),
-  },
-  {
-    label: "Skill Registry",
-    href: "/getting-started/skills/",
-    icon: (
-      <svg
-        width={10}
-        height={10}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <rect x="2" y="3" width="7" height="7" rx="1" />
-        <rect x="15" y="3" width="7" height="7" rx="1" />
-        <rect x="2" y="14" width="7" height="7" rx="1" />
-        <rect x="15" y="14" width="7" height="7" rx="1" />
-      </svg>
-    ),
-  },
-  {
-    label: "Traces",
-    href: "/guides/observability/",
-    icon: (
-      <svg
-        width={10}
-        height={10}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-      </svg>
-    ),
-  },
-  {
-    label: "Sandboxing",
-    href: "/guides/security/",
-    icon: (
-      <svg
-        width={10}
-        height={10}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        stroke-width="2"
-        stroke-linecap="round"
-        stroke-linejoin="round"
-        aria-hidden="true"
-      >
-        <path d="M12 2L2 7l10 5 10-5-10-5z" />
-        <path d="M2 17l10 5 10-5" />
-        <path d="M2 12l10 5 10-5" />
-      </svg>
-    ),
-  },
-];
-
-function GatewayColumn({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
+function Header() {
+  // Eyebrow + heading + lede mirror Eyebrow / SectionHeading from
+  // LandingPage.tsx so the architecture block reads as a peer to the
+  // other landing sections rather than its own one-off treatment.
   return (
-    <div class="flex flex-col items-center flex-1 min-w-0">
+    <div class="flex flex-col">
       <div
-        class="text-[9px] uppercase tracking-wider mb-1"
+        class="mb-3 font-mono text-[11.5px] font-semibold uppercase tracking-[0.12em]"
+        style={{ color: "var(--color-tg-accent)" }}
+      >
+        Architecture
+      </div>
+      <h2
+        class="font-display text-[1.85rem] font-bold leading-[1.1] tracking-tight sm:text-[2.25rem]"
+        style={{ color: "var(--color-page-text)" }}
+      >
+        Stream events. Derive entities. Expose agents.
+      </h2>
+      <p
+        class="mt-3 max-w-2xl text-[15px] leading-relaxed"
         style={{ color: "var(--color-page-text-muted)" }}
       >
-        Bring your own agent
+        Connectors stream events into memory. Watchers derive typed entities. Agents read that memory or talk to users.
+      </p>
+    </div>
+  );
+}
+
+function DiagramBoard() {
+  return (
+    <div
+      class="relative rounded-lg border p-6 sm:p-8"
+      style={{
+        borderColor: "var(--color-page-border)",
+        backgroundColor: "var(--color-page-surface)",
+        boxShadow: "0 1px 0 0 var(--color-page-border)",
+      }}
+    >
+      <div class="hidden lg:block">
+        <DesktopBoard />
       </div>
-      <AgentStack useCaseId={useCaseId} />
-      <AttachmentPill
-        label="Lobu Memory"
-        href="/getting-started/memory/"
-        icon={<MemoryIcon size={11} />}
-      />
-      <DashedConnector />
+      <div class="block lg:hidden">
+        <MobileBoard />
+      </div>
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Desktop board — three column layered story                                */
+/* -------------------------------------------------------------------------- */
+
+function DesktopBoard() {
+  return (
+    <div class="grid grid-cols-[1fr_auto_1.1fr_auto_1.1fr] items-stretch gap-x-2">
+      <ConnectorsColumn />
+      <ColumnArrow label="events" />
+      <MemoryColumn />
+      <ColumnArrow label="chat" sublabel="read" split />
+      <AgentsColumn />
+    </div>
+  );
+}
+
+function MobileBoard() {
+  return (
+    <div class="flex flex-col gap-4">
+      <ConnectorsColumn />
+      <VerticalArrow label="events" />
+      <MemoryColumn />
+      <VerticalArrow label="chat · read" />
+      <AgentsColumn />
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Columns                                                                   */
+/* -------------------------------------------------------------------------- */
+
+function ConnectorsColumn() {
+  return (
+    <ColumnCard heading="Connectors" footer="event stream → memory">
+      <div class="grid grid-cols-3 gap-2">
+        {CONNECTOR_BRANDS.map((b) => (
+          <div
+            key={b.key}
+            class="flex items-center justify-center rounded-lg border py-2.5"
+            style={{
+              borderColor: "var(--color-page-border)",
+              backgroundColor: "var(--color-page-bg)",
+            }}
+          >
+            <ConnectorGlyph brand={b} size={20} />
+          </div>
+        ))}
+      </div>
+      <SdkPill label="@lobu/connector-sdk" caption="write your own — TypeScript" />
+    </ColumnCard>
+  );
+}
+
+function MemoryColumn() {
+  return (
+    <ColumnCard heading="Memory" footer="append-only · typed entities">
+      <div class="flex flex-col">
+        <StreamBox label="events" />
+        <DerivationArrow />
+        <EntitiesTable />
+      </div>
+    </ColumnCard>
+  );
+}
+
+function AgentsColumn() {
+  return (
+    <ColumnCard heading="Agents" footer="expose to users · or read in code">
+      <div class="flex flex-col gap-3">
+        <SubBlock heading="Chat bots">
+          <div class="grid grid-cols-3 gap-1.5">
+            {messagingChannels.map((c) => (
+              <div
+                key={c.id}
+                class="flex items-center justify-center rounded-lg border py-2"
+                style={{
+                  borderColor: "var(--color-page-border)",
+                  backgroundColor: "var(--color-page-bg)",
+                  color: "var(--color-page-text)",
+                }}
+                role="img"
+                aria-label={c.label}
+              >
+                {c.renderIcon(18)}
+              </div>
+            ))}
+          </div>
+        </SubBlock>
+        <SubBlock heading="Other agents">
+          <div class="flex flex-wrap gap-1.5">
+            {(["HTTP", "MCP", "SDK"] as const).map((p) => (
+              <span
+                key={p}
+                class="rounded-lg border px-2 py-1 font-mono text-[11px]"
+                style={{
+                  borderColor: "var(--color-page-border)",
+                  backgroundColor: "var(--color-page-bg)",
+                  color: "var(--color-page-text)",
+                }}
+              >
+                {p}
+              </span>
+            ))}
+          </div>
+          <div
+            class="mt-1 text-[11.5px]"
+            style={{ color: "var(--color-page-text-muted)" }}
+          >
+            read memory programmatically
+          </div>
+          <SdkPill label="reactions" caption="automate actions — from @lobu/connector-sdk" />
+        </SubBlock>
+      </div>
+    </ColumnCard>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/*  Building blocks                                                           */
+/* -------------------------------------------------------------------------- */
+
+function ColumnCard({
+  heading,
+  footer,
+  children,
+}: {
+  heading: string;
+  footer: string;
+  children: preact.ComponentChildren;
+}) {
+  return (
+    <div
+      class="flex flex-col gap-3 rounded-lg border p-4"
+      style={{
+        borderColor: "var(--color-page-border)",
+        backgroundColor: "var(--color-page-bg)",
+      }}
+    >
       <div
-        class="rounded-xl px-4 py-3 text-center w-full max-w-[220px] shadow-sm"
+        class="font-mono text-[10.5px] uppercase tracking-[0.18em]"
+        style={{ color: "var(--color-page-text-muted)" }}
+      >
+        {heading}
+      </div>
+      <div class="flex flex-1 flex-col gap-3">{children}</div>
+      <div
+        class="border-t pt-2 text-[11.5px]"
+        style={{
+          borderColor: "var(--color-page-border)",
+          color: "var(--color-page-text-muted)",
+        }}
+      >
+        {footer}
+      </div>
+    </div>
+  );
+}
+
+function SdkPill({ label, caption }: { label: string; caption: string }) {
+  return (
+    <div class="mt-1 flex flex-col gap-1">
+      <span
+        class="inline-flex items-center self-start rounded-lg border px-2 py-1 font-mono text-[11px]"
+        style={{
+          borderColor: "var(--color-page-border)",
+          backgroundColor: "var(--color-page-surface-dim)",
+          color: "var(--color-page-text)",
+        }}
+      >
+        {label}
+      </span>
+      <span
+        class="text-[11.5px]"
+        style={{ color: "var(--color-page-text-muted)" }}
+      >
+        {caption}
+      </span>
+    </div>
+  );
+}
+
+function SubBlock({
+  heading,
+  children,
+}: {
+  heading: string;
+  children: preact.ComponentChildren;
+}) {
+  return (
+    <div class="flex flex-col gap-1.5">
+      <div
+        class="font-mono text-[10.5px] uppercase tracking-[0.14em]"
+        style={{ color: "var(--color-page-text-muted)" }}
+      >
+        {heading}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Two stream boxes (events / entities). Pulse dots live inside as
+ * absolutely-positioned spans driven by pure CSS keyframes. The keyframes
+ * are gated by `@media (prefers-reduced-motion: reduce)` so reduced-motion
+ * sessions see a static frame.
+ */
+function StreamBox({ label }: { label: string }) {
+  return (
+    <div
+      class="relative flex items-center overflow-hidden rounded-lg border px-3 py-2.5"
+      style={{
+        borderColor: "var(--color-page-border)",
+        backgroundColor: "var(--color-page-surface-dim)",
+      }}
+    >
+      <span
+        class="font-mono text-[12px]"
+        style={{ color: "var(--color-page-text)" }}
+      >
+        {label}
+      </span>
+      <span class="ml-auto inline-flex items-center gap-1.5">
+        <span class="lobu-pulse-dot lobu-pulse-dot--a" aria-hidden="true" />
+        <span class="lobu-pulse-dot lobu-pulse-dot--b" aria-hidden="true" />
+        <span class="lobu-pulse-dot lobu-pulse-dot--c" aria-hidden="true" />
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Entities widget — small table grid. Header row + 3 placeholder rows
+ * to signal "structured records, not freeform text". Cells use neutral
+ * monospace dashes/blocks so the table reads as a schema preview rather
+ * than fake data. Sits in the same box family as StreamBox.
+ */
+function EntitiesTable() {
+  const HEADERS = ["name", "type", "updated"] as const;
+  // Placeholder rows — labelled generically so the widget reads as a
+  // schema preview, not a snapshot of a real customer's data.
+  const ROWS: ReadonlyArray<readonly [string, string, string]> = [
+    ["Customer A", "company", "2d"],
+    ["Customer B", "person", "5h"],
+    ["Customer C", "meeting", "1h"],
+  ];
+  return (
+    <div
+      class="relative overflow-hidden rounded-lg border"
+      style={{
+        borderColor: "var(--color-page-border)",
+        backgroundColor: "var(--color-page-surface-dim)",
+      }}
+    >
+      <div
+        class="flex items-center justify-between border-b px-3 py-1.5"
+        style={{ borderColor: "var(--color-page-border)" }}
+      >
+        <span
+          class="font-mono text-[12px]"
+          style={{ color: "var(--color-page-text)" }}
+        >
+          entities
+        </span>
+        <span
+          class="font-mono text-[10px] uppercase tracking-[0.14em]"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          table
+        </span>
+      </div>
+      <div class="px-2 py-1.5">
+        <div
+          class="grid grid-cols-3 gap-x-2 px-1 pb-1 font-mono text-[10px] uppercase tracking-[0.1em]"
+          style={{ color: "var(--color-page-text-muted)" }}
+        >
+          {HEADERS.map((h) => (
+            <span key={h}>{h}</span>
+          ))}
+        </div>
+        <div class="flex flex-col">
+          {ROWS.map((row, idx) => (
+            <div
+              key={row[0]}
+              class="grid grid-cols-3 gap-x-2 px-1 py-1 font-mono text-[10.5px]"
+              style={{
+                color: "var(--color-page-text)",
+                borderTop:
+                  idx === 0 ? undefined : "1px solid var(--color-page-border)",
+              }}
+            >
+              {row.map((cell, i) => (
+                <span
+                  key={`${row[0]}-${i}`}
+                  style={{
+                    color:
+                      i === row.length - 1
+                        ? "var(--color-page-text-muted)"
+                        : "var(--color-page-text)",
+                  }}
+                >
+                  {cell}
+                </span>
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DerivationArrow() {
+  return (
+    <div class="flex items-center justify-between gap-2 py-1.5 pl-3">
+      <svg width="10" height="20" viewBox="0 0 10 20" aria-hidden="true">
+        <title>derive</title>
+        <path
+          d="M5 0 V14 M2 11 L5 15 L8 11"
+          stroke="var(--color-tg-accent)"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          fill="none"
+        />
+      </svg>
+      <span
+        class="ml-auto rounded-lg px-2 py-0.5 font-mono text-[10.5px]"
         style={{
           backgroundColor: "var(--color-page-bg)",
+          color: "var(--color-page-text-muted)",
           border: "1px solid var(--color-page-border)",
         }}
       >
-        <div
-          class="text-sm font-semibold"
-          style={{ color: "var(--color-page-text)" }}
-        >
-          {gatewayLayer.label}
-        </div>
-        <div
-          class="text-[10px] mt-0.5"
-          style={{ color: "var(--color-page-text-muted)" }}
-        >
-          {gatewayLayer.sublabel}
-        </div>
-        <div class="flex flex-row flex-wrap justify-center gap-1 mt-2.5">
-          {gatewayBadges.map((badge) => {
-            const cls =
-              "inline-flex items-center gap-1 rounded-full px-2 py-0.5 transition-colors";
-            const style = {
-              backgroundColor: "var(--color-page-surface-dim)",
-              border: "1px solid var(--color-page-border)",
-              color: "var(--color-page-text)",
-            };
-            const inner = (
-              <>
-                {badge.icon}
-                <span class="text-[9px] font-medium tracking-wide uppercase">
-                  {badge.label}
-                </span>
-              </>
-            );
-            return badge.href ? (
-              <a key={badge.label} href={badge.href} class={cls} style={style}>
-                {inner}
-              </a>
-            ) : (
-              <div key={badge.label} class={cls} style={style}>
-                {inner}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      <FeatureList features={gatewayLayer.features} accent />
+        cron · LLM
+      </span>
     </div>
   );
 }
 
-function RuntimeColumn() {
+/**
+ * Inline horizontal arrow between desktop columns. With `split` the arrow
+ * branches into two labelled stubs (top: `chat`, bottom: `read`) for the
+ * watcher → agents transition.
+ */
+function ColumnArrow({
+  label,
+  sublabel,
+  split = false,
+}: {
+  label: string;
+  sublabel?: string;
+  split?: boolean;
+}) {
+  if (split) {
+    return (
+      <div class="flex flex-col items-center justify-center gap-3 px-2">
+        <div class="flex items-center gap-1.5">
+          <span
+            class="font-mono text-[10.5px]"
+            style={{ color: "var(--color-page-text-muted)" }}
+          >
+            {label}
+          </span>
+          <Arrow />
+        </div>
+        <div class="flex items-center gap-1.5">
+          <span
+            class="font-mono text-[10.5px]"
+            style={{ color: "var(--color-page-text-muted)" }}
+          >
+            {sublabel}
+          </span>
+          <Arrow />
+        </div>
+      </div>
+    );
+  }
   return (
-    <div class="flex flex-col items-center flex-1 min-w-0">
-      <div
-        class="text-[9px] uppercase tracking-wider mb-1 text-center"
+    <div class="flex flex-col items-center justify-center gap-1 px-2">
+      <span
+        class="font-mono text-[10.5px]"
         style={{ color: "var(--color-page-text-muted)" }}
       >
-        Equip your agent
-      </div>
-      <AttachmentPill
-        label="Lobu Skills"
-        href="/getting-started/skills/"
-        icon={<SkillsIcon size={11} />}
-      />
-      <DashedConnector />
-      <div class="w-full max-w-[200px] space-y-1.5">
-        {["User A", "User B", "User C"].map((user, i) => (
-          <div
-            key={user}
-            class="rounded-lg px-4 py-2 flex items-center justify-between"
-            style={{
-              backgroundColor: "var(--color-page-surface-dim)",
-              border: "1px solid var(--color-page-border)",
-              opacity: i === 0 ? 1 : i === 1 ? 0.6 : 0.35,
-            }}
-          >
-            <div class="text-left">
-              <div
-                class="text-xs font-semibold"
-                style={{ color: "var(--color-page-text)" }}
-              >
-                {runtimeLayer.label}
-              </div>
-              <div
-                class="text-[9px]"
-                style={{ color: "var(--color-page-text-muted)" }}
-              >
-                {user}
-              </div>
-            </div>
-            <span
-              class="text-[8px] font-medium px-1.5 py-0.5 rounded-full"
-              style={{
-                backgroundColor: "rgba(16, 185, 129, 0.15)",
-                color: "#10b981",
-                border: "1px solid rgba(16, 185, 129, 0.3)",
-              }}
-            >
-              isolated
-            </span>
-          </div>
-        ))}
-      </div>
-      <FeatureList features={runtimeLayer.features} />
-    </div>
-  );
-}
-
-function MemoryIcon({ size = 12 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <ellipse cx="12" cy="5" rx="9" ry="3" />
-      <path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5" />
-      <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3" />
-    </svg>
-  );
-}
-
-function SkillsIcon({ size = 12 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-    </svg>
-  );
-}
-
-function AttachmentPill({
-  label,
-  href,
-  icon,
-}: {
-  label: string;
-  href: string;
-  icon: JSX.Element;
-}) {
-  return (
-    <a
-      href={href}
-      class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 transition-colors"
-      style={{
-        backgroundColor: "var(--color-page-bg)",
-        border: "1px solid var(--color-page-border)",
-        color: "var(--color-page-text)",
-      }}
-    >
-      {icon}
-      <span class="text-[10px] font-medium tracking-wide uppercase">
         {label}
       </span>
-    </a>
+      <Arrow />
+    </div>
   );
 }
 
-function DashedConnector() {
+function Arrow() {
   return (
-    <svg width="2" height="14" class="my-1 hidden md:block" aria-hidden="true">
-      <line
-        x1="1"
-        y1="0"
-        x2="1"
-        y2="14"
-        stroke="var(--color-page-text-muted)"
-        stroke-width="1"
-        stroke-dasharray="2 2"
+    <svg width="36" height="10" viewBox="0 0 36 10" aria-hidden="true">
+      <title>flow</title>
+      <path
+        d="M0 5 H30 M26 2 L30 5 L26 8"
+        stroke="var(--color-tg-accent)"
+        stroke-width="1.5"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        fill="none"
       />
     </svg>
   );
 }
 
-function ChatGPTIcon({ size = 12 }: { size?: number }) {
+function VerticalArrow({ label }: { label: string }) {
   return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden="true"
-    >
-      <path d="M22.282 9.821a5.985 5.985 0 0 0-.516-4.91 6.046 6.046 0 0 0-6.51-2.9A6.065 6.065 0 0 0 4.981 4.18a5.985 5.985 0 0 0-3.998 2.9 6.046 6.046 0 0 0 .743 7.097 5.98 5.98 0 0 0 .51 4.911 6.051 6.051 0 0 0 6.515 2.9A5.985 5.985 0 0 0 13.26 24a6.056 6.056 0 0 0 5.772-4.206 5.99 5.99 0 0 0 3.997-2.9 6.056 6.056 0 0 0-.747-7.073zM13.26 22.43a4.476 4.476 0 0 1-2.876-1.04l.141-.081 4.779-2.758a.795.795 0 0 0 .392-.681v-6.737l2.02 1.168a.071.071 0 0 1 .038.052v5.583a4.504 4.504 0 0 1-4.494 4.494zM3.6 18.304a4.47 4.47 0 0 1-.535-3.014l.142.085 4.783 2.759a.771.771 0 0 0 .78 0l5.843-3.369v2.332a.08.08 0 0 1-.033.062L9.74 19.95a4.5 4.5 0 0 1-6.14-1.646zM2.34 7.896a4.485 4.485 0 0 1 2.366-1.973V11.6a.766.766 0 0 0 .388.677l5.815 3.355-2.02 1.168a.076.076 0 0 1-.071 0l-4.83-2.786A4.504 4.504 0 0 1 2.34 7.872zm16.597 3.855l-5.833-3.387L15.119 7.2a.076.076 0 0 1 .071 0l4.83 2.791a4.494 4.494 0 0 1-.676 8.105v-5.678a.79.79 0 0 0-.407-.667zm2.01-3.023l-.141-.085-4.774-2.782a.776.776 0 0 0-.785 0L9.409 9.23V6.897a.066.066 0 0 1 .028-.061l4.83-2.787a4.5 4.5 0 0 1 6.68 4.66zm-12.64 4.135l-2.02-1.164a.08.08 0 0 1-.038-.057V6.075a4.5 4.5 0 0 1 7.375-3.453l-.142.08L8.704 5.46a.795.795 0 0 0-.393.681zm1.097-2.365l2.602-1.5 2.607 1.5v2.999l-2.597 1.5-2.607-1.5Z" />
-    </svg>
-  );
-}
-
-function ClaudeIcon({ size = 12 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden="true"
-    >
-      <path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z" />
-    </svg>
-  );
-}
-
-function OpenClawIcon({ size = 12 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 120 120"
-      fill="currentColor"
-      aria-hidden="true"
-    >
-      <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" />
-      <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" />
-      <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" />
-    </svg>
-  );
-}
-
-function McpClientIcon({ size = 12 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M9 2v6" />
-      <path d="M15 2v6" />
-      <path d="M7 8h10v4a5 5 0 0 1-10 0z" />
-      <path d="M12 17v5" />
-    </svg>
-  );
-}
-
-const agents: {
-  id: "chatgpt" | "claude" | "openclaw" | "mcp-client";
-  label: string;
-  detail: string;
-  href: string;
-  renderIcon: (size?: number) => JSX.Element;
-  useCaseSuffix: boolean;
-}[] = [
-  {
-    id: "chatgpt",
-    label: "ChatGPT",
-    detail: "MCP connector",
-    href: "/connect-from/chatgpt/",
-    renderIcon: (size) => <ChatGPTIcon size={size} />,
-    useCaseSuffix: true,
-  },
-  {
-    id: "claude",
-    label: "Claude",
-    detail: "MCP connector",
-    href: "/connect-from/claude/",
-    renderIcon: (size) => <ClaudeIcon size={size} />,
-    useCaseSuffix: true,
-  },
-  {
-    id: "openclaw",
-    label: "OpenClaw",
-    detail: "plugin",
-    href: "/connect-from/openclaw/",
-    renderIcon: (size) => <OpenClawIcon size={size} />,
-    useCaseSuffix: true,
-  },
-  {
-    id: "mcp-client",
-    label: "Your MCP client",
-    detail: "any MCP-capable agent",
-    href: "/getting-started/memory/",
-    renderIcon: (size) => <McpClientIcon size={size} />,
-    useCaseSuffix: false,
-  },
-];
-
-function AgentStack({ useCaseId }: { useCaseId?: LandingUseCaseId }) {
-  const suffix = useCaseId ? `for/${useCaseId}/` : "";
-  return (
-    <div class="w-full max-w-[180px] space-y-1.5 mb-2">
-      {agents.map((agent) => (
-        <a
-          key={agent.id}
-          href={`${agent.href}${agent.useCaseSuffix ? suffix : ""}`}
-          class="rounded-lg px-3 py-1.5 flex items-center gap-2 transition-colors"
-          style={{
-            backgroundColor: "var(--color-page-surface-dim)",
-            border: "1px solid var(--color-page-border)",
-          }}
-        >
-          <span style={{ color: "var(--color-page-text-muted)" }}>
-            {agent.renderIcon(12)}
-          </span>
-          <div>
-            <div
-              class="text-[11px] font-semibold leading-tight"
-              style={{ color: "var(--color-page-text)" }}
-            >
-              {agent.label}
-            </div>
-            <div
-              class="text-[9px] leading-tight"
-              style={{ color: "var(--color-page-text-muted)" }}
-            >
-              {agent.detail}
-            </div>
-          </div>
-        </a>
-      ))}
+    <div class="flex flex-col items-center justify-center gap-1" aria-hidden="true">
+      <span
+        class="font-mono text-[10.5px]"
+        style={{ color: "var(--color-page-text-muted)" }}
+      >
+        {label}
+      </span>
+      <svg width="12" height="22" viewBox="0 0 12 22">
+        <title>flow</title>
+        <path
+          d="M6 0 V16 M2.5 13 L6 17 L9.5 13"
+          stroke="var(--color-tg-accent)"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          fill="none"
+        />
+      </svg>
     </div>
   );
 }
 
-export function ArchitectureDiagram({
-  useCaseId,
-}: {
-  useCaseId?: LandingUseCaseId;
-} = {}) {
+/**
+ * Pure-CSS pulse animation. Three small dots in the `events` box pulse on
+ * a stagger to telegraph "live stream". Reduced motion drops the keyframes
+ * and leaves the dots at a static rest opacity.
+ */
+function PulseStyles() {
   return (
-    <div class="flex flex-col md:flex-row items-start justify-center gap-6 md:gap-0">
-      <PlatformColumn />
-      <Arrow />
-      <GatewayColumn useCaseId={useCaseId} />
-      <Arrow />
-      <RuntimeColumn />
-    </div>
+    <style>{`
+      .lobu-pulse-dot {
+        width: 4px;
+        height: 4px;
+        border-radius: 9999px;
+        background: var(--color-tg-accent);
+        display: inline-block;
+        opacity: 0.35;
+      }
+      @media (prefers-reduced-motion: no-preference) {
+        .lobu-pulse-dot--a { animation: lobu-pulse 1.8s ease-in-out infinite; animation-delay: 0s; }
+        .lobu-pulse-dot--b { animation: lobu-pulse 1.8s ease-in-out infinite; animation-delay: 0.3s; }
+        .lobu-pulse-dot--c { animation: lobu-pulse 1.8s ease-in-out infinite; animation-delay: 0.6s; }
+      }
+      @keyframes lobu-pulse {
+        0%, 100% { opacity: 0.2; transform: scale(0.9); }
+        50%       { opacity: 1;   transform: scale(1.15); }
+      }
+    `}</style>
   );
 }
