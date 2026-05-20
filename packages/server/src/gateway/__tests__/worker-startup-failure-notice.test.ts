@@ -88,30 +88,42 @@ describe("worker-startup-failure notice reaches direct-API clients (lobu-ai/lobu
     expect(notice?.data.processedMessageIds).toEqual(["m1"]);
   });
 
-  test("unexpected worker exit (crash after spawn) notifies the conversation via `error`", async () => {
+  function crashConsumer(stats: {
+    waiting: number;
+    active: number;
+  }): { consumer: any; sends: Array<{ queue: string; data: any }> } {
     const consumer = new MessageConsumer({} as any, {
       setWorkerExitNotifier: () => undefined,
     } as any) as any;
-    const sends: Array<{ queue: string; data: Record<string, unknown> }> = [];
+    const sends: Array<{ queue: string; data: any }> = [];
     consumer.queue = {
       createQueue: mock(async () => undefined),
-      send: mock(async (queue: string, data: Record<string, unknown>) => {
+      getQueueStats: mock(async () => ({ ...stats, completed: 0, failed: 0 })),
+      send: mock(async (queue: string, data: any) => {
         sends.push({ queue, data });
       }),
     };
+    return { consumer, sends };
+  }
 
-    await consumer.notifyWorkerCrash({
-      deploymentName: "lobu-worker-api-abc",
-      messageData: {
-        messageId: "m1",
-        userId: "u1",
-        channelId: "api_u1",
-        conversationId: "conv-1",
-        platform: "api",
-        platformMetadata: {},
-      },
-      reason: "exit code 1",
-    });
+  const crashInfo = {
+    deploymentName: "lobu-worker-api-abc",
+    messageData: {
+      messageId: "m1",
+      userId: "u1",
+      channelId: "api_u1",
+      conversationId: "conv-1",
+      platform: "api",
+      platformMetadata: {},
+    },
+    reason: "exit code 1",
+  };
+
+  test("unexpected worker exit with an outstanding turn notifies via `error`", async () => {
+    // A claimed-but-incomplete message shows as active>0 at crash time.
+    const { consumer, sends } = crashConsumer({ waiting: 0, active: 1 });
+
+    await consumer.notifyWorkerCrash(crashInfo);
 
     const notice = sends.find((s) => s.queue === "thread_response");
     expect(notice).toBeDefined();
@@ -119,6 +131,14 @@ describe("worker-startup-failure notice reaches direct-API clients (lobu-ai/lobu
     expect(notice?.data.content).toBeUndefined();
     expect(notice?.data.conversationId).toBe("conv-1");
     expect(notice?.data.processedMessageIds).toEqual(["m1"]);
+  });
+
+  test("worker exit with NO outstanding turn (idle / already replied) sends nothing", async () => {
+    const { consumer, sends } = crashConsumer({ waiting: 0, active: 0 });
+
+    await consumer.notifyWorkerCrash(crashInfo);
+
+    expect(sends.find((s) => s.queue === "thread_response")).toBeUndefined();
   });
 
   test("an `error` notice is surfaced to the API renderer (handleError + completion)", async () => {

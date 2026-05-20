@@ -144,6 +144,12 @@ interface EmbeddedWorkerEntry {
    * notify the user. Closure setter, same pattern as `releaseConvLock`.
    */
   markIntentionalExit?: () => void;
+  /**
+   * Advance the worker's in-flight message to the latest dispatched turn, so a
+   * crash notifies for the message actually being served. Closure setter, same
+   * pattern as `releaseConvLock` / `markIntentionalExit`.
+   */
+  setCurrentMessage?: (m: MessagePayload) => void;
 }
 
 /** Stable namespace id for `pg_advisory_lock(key1, key2)` per-conversation locks. */
@@ -787,20 +793,43 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     };
 
     // Flipped by `killWorker` (via the entry's `markIntentionalExit`) before a
-    // deliberate SIGTERM, so the `exit` handler only notifies the user on a
+    // deliberate SIGTERM, so the death handlers only notify the user on a
     // genuine crash / external kill, never on an operator-driven stop.
     let intentionalExit = false;
 
+    // The message whose turn this worker is currently serving. Seeded with the
+    // deployment's originating message and advanced by `recordInFlightMessage`
+    // on each subsequent dispatch, so a crash on turn N notifies for turn N's
+    // message — not the deployment's first message (a long-lived worker serves
+    // many turns). The orchestrator additionally gates on outstanding queue
+    // work, so a crash while idle (turn already completed) sends nothing.
+    let currentMessage: MessagePayload | undefined = messageData;
+
+    // `error` and `exit` can both fire for one death; notify at most once.
+    let deathNotified = false;
+    const notifyUnexpectedDeath = (reason: string): void => {
+      if (deathNotified || intentionalExit || !currentMessage) return;
+      deathNotified = true;
+      void this.workerExitNotifier?.({
+        deploymentName,
+        messageData: currentMessage,
+        reason,
+      });
+    };
+
     // Spawn errors (binary missing, EACCES, fork failure) fire on the child
-    // *after* spawn() returns, so without an "error" listener Node would
-    // throw an unhandled exception and crash the gateway. Drop the entry
-    // and log so the next ensureDeployment can retry cleanly.
+    // *after* spawn() returns, so spawnDeployment has already resolved and
+    // trackFailedDeployment is never reached. Node may emit `error` WITHOUT a
+    // following `exit`, so the queued turn would otherwise strand with no
+    // terminal event (lobu-ai/lobu#946). Notify here too; the one-shot guard
+    // dedups if `exit` also fires.
     child.once("error", (err) => {
       logger.error(
         `Embedded worker ${deploymentName} spawn error: ${err.message}`
       );
       this.workers.delete(deploymentName);
       releaseLockOnce();
+      notifyUnexpectedDeath(`spawn error: ${err.message}`);
     });
 
     child.stdout?.on("data", (data: Buffer) => {
@@ -835,17 +864,15 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
 
       // Surface an unexpected worker death to the user. A worker that spawns
       // and then dies never rejects createWorkerDeployment (it resolved on
-      // spawn) and so never reaches trackFailedDeployment; its queued message
+      // spawn) and so never reaches trackFailedDeployment; its queued turn
       // would otherwise strand with no terminal event and the run hangs
       // (lobu-ai/lobu#946). Deliberate stops go through killWorker, which sets
-      // `intentionalExit`, so only genuine crashes / external kills notify.
-      // Note: a long-lived worker handles later turns too, so messageData is
-      // the deployment's originating message; the notifier keys delivery on
-      // its conversationId, which is stable across the conversation's turns.
+      // `intentionalExit`. A clean (code 0) exit owes the user nothing. The
+      // orchestrator's notifier additionally drops the notice when no turn is
+      // outstanding, so an idle worker that exits non-zero stays silent.
       const cleanExit = code === 0 && !signal;
-      if (!intentionalExit && !cleanExit && messageData) {
-        const reason = signal ? `signal ${signal}` : `exit code ${code}`;
-        void this.workerExitNotifier?.({ deploymentName, messageData, reason });
+      if (!cleanExit) {
+        notifyUnexpectedDeath(signal ? `signal ${signal}` : `exit code ${code}`);
       }
     });
 
@@ -860,6 +887,9 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       ...(convLock ? { releaseConvLock: releaseLockOnce } : {}),
       markIntentionalExit: () => {
         intentionalExit = true;
+      },
+      setCurrentMessage: (m: MessagePayload) => {
+        currentMessage = m;
       },
     });
 
@@ -923,6 +953,13 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     if (entry) {
       entry.lastActivity = new Date();
     }
+  }
+
+  override recordInFlightMessage(
+    deploymentName: string,
+    messageData: MessagePayload
+  ): void {
+    this.workers.get(deploymentName)?.setCurrentMessage?.(messageData);
   }
 
   /** Send SIGTERM, then SIGKILL after timeout. Resolves on child exit.

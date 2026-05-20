@@ -214,6 +214,18 @@ export abstract class BaseDeploymentManager {
     this.workerExitNotifier = notifier;
   }
 
+  /**
+   * Advance a live worker's in-flight message to the latest dispatched turn, so
+   * `workerExitNotifier` reports the message actually being served rather than
+   * the deployment's first. No-op default (no running-worker registry to
+   * update); the embedded manager overrides it. Safe to call when no worker is
+   * tracked yet — the spawn path seeds the originating message.
+   */
+  recordInFlightMessage(
+    _deploymentName: string,
+    _messageData: MessagePayload
+  ): void {}
+
   constructor(
     config: OrchestratorConfig,
     moduleEnvVarsBuilder?: ModuleEnvVarsBuilder,

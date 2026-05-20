@@ -77,6 +77,29 @@ export class MessageConsumer {
   }): Promise<void> {
     const { messageData, reason } = info;
     if (!messageData.conversationId) return;
+
+    // Only notify when a turn is actually outstanding. A long-lived worker that
+    // already replied and then dies (idle crash, or reaped) has no pending or
+    // claimed message in its thread queue, so notifying would be a false
+    // "before it could reply". `active` counts claimed/running rows, so a
+    // worker that crashed mid-turn (its row still claimed) is correctly caught.
+    // Fail open: if the stats lookup throws, notify rather than risk a silent
+    // strand.
+    try {
+      const stats = await this.queue.getQueueStats(
+        `thread_message_${info.deploymentName}`
+      );
+      if (stats.waiting + stats.active === 0) {
+        logger.info(
+          { deploymentName: info.deploymentName },
+          "Worker exited with no outstanding turn — skipping crash notice"
+        );
+        return;
+      }
+    } catch {
+      // ignore — fall through and notify
+    }
+
     const userMessage = `The worker handling your request stopped unexpectedly (${reason}) before it could reply. Please retry in a moment.`;
     try {
       const responseQueue = "thread_response";
@@ -495,6 +518,12 @@ export class MessageConsumer {
       logger.info(
         `✅ Sent message to thread queue ${threadQueueName} for conversation ${data.conversationId}, jobId: ${jobId}`
       );
+
+      // Advance the worker's in-flight message to this turn so an unexpected
+      // worker death notifies for the message actually being served, not the
+      // deployment's first. No-op until the worker entry exists (the spawn
+      // path seeds the originating message for a brand-new deployment).
+      this.deploymentManager.recordInFlightMessage(deploymentName, data);
     } catch (error) {
       logger.error(`❌ [ERROR] sendToWorkerQueue failed:`, error);
       throw new OrchestratorError(
