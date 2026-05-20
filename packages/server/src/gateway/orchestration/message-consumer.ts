@@ -640,7 +640,14 @@ export class MessageConsumer {
       const userMessage =
         "Worker startup failed and your request could not be processed. Please retry in a moment.";
 
-      // Notify user that their message could not be processed
+      // Notify user that their message could not be processed.
+      // This MUST go through the `error` field, not `content`: `content` is
+      // only rendered by the ephemeral branch of the response router, so a
+      // non-ephemeral `content` notice is silently dropped on the API/CLI SSE
+      // path — the gateway returns a bare `complete` and `lobu chat` exits 0
+      // with no output (lobu-ai/lobu#946). `error` is surfaced end-to-end:
+      // an `error` SSE event for direct API clients (CLI prints it + exits 1)
+      // and an "Error: …" message on chat platforms.
       try {
         const responseQueue = "thread_response";
         await this.queue.createQueue(responseQueue);
@@ -651,7 +658,7 @@ export class MessageConsumer {
           conversationId: data.conversationId,
           platform: data.platform,
           platformMetadata: data.platformMetadata,
-          content: userMessage,
+          error: userMessage,
           processedMessageIds: [data.messageId],
         });
       } catch (notifyError) {
