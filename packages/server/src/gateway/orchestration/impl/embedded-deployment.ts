@@ -137,6 +137,13 @@ interface EmbeddedWorkerEntry {
    * taken on the legacy single-replica / RWO-PVC path).
    */
   releaseConvLock?: () => Promise<void>;
+  /**
+   * Mark this worker's pending exit as deliberate (set by `killWorker` before
+   * SIGTERM). The `exit` handler reads it to distinguish an operator-driven
+   * stop (scale-to-0, idle reap, delete) from a genuine crash, so only crashes
+   * notify the user. Closure setter, same pattern as `releaseConvLock`.
+   */
+  markIntentionalExit?: () => void;
 }
 
 /** Stable namespace id for `pg_advisory_lock(key1, key2)` per-conversation locks. */
@@ -779,6 +786,11 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       }
     };
 
+    // Flipped by `killWorker` (via the entry's `markIntentionalExit`) before a
+    // deliberate SIGTERM, so the `exit` handler only notifies the user on a
+    // genuine crash / external kill, never on an operator-driven stop.
+    let intentionalExit = false;
+
     // Spawn errors (binary missing, EACCES, fork failure) fire on the child
     // *after* spawn() returns, so without an "error" listener Node would
     // throw an unhandled exception and crash the gateway. Drop the entry
@@ -820,6 +832,21 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       } else {
         logger.info(`Embedded worker ${deploymentName} exited cleanly`);
       }
+
+      // Surface an unexpected worker death to the user. A worker that spawns
+      // and then dies never rejects createWorkerDeployment (it resolved on
+      // spawn) and so never reaches trackFailedDeployment; its queued message
+      // would otherwise strand with no terminal event and the run hangs
+      // (lobu-ai/lobu#946). Deliberate stops go through killWorker, which sets
+      // `intentionalExit`, so only genuine crashes / external kills notify.
+      // Note: a long-lived worker handles later turns too, so messageData is
+      // the deployment's originating message; the notifier keys delivery on
+      // its conversationId, which is stable across the conversation's turns.
+      const cleanExit = code === 0 && !signal;
+      if (!intentionalExit && !cleanExit && messageData) {
+        const reason = signal ? `signal ${signal}` : `exit code ${code}`;
+        void this.workerExitNotifier?.({ deploymentName, messageData, reason });
+      }
     });
 
     this.workers.set(deploymentName, {
@@ -831,6 +858,9 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       // tests. The exit handler is the authoritative release site;
       // killWorker no longer touches this field.
       ...(convLock ? { releaseConvLock: releaseLockOnce } : {}),
+      markIntentionalExit: () => {
+        intentionalExit = true;
+      },
     });
 
     logger.info(
@@ -908,6 +938,12 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
     deploymentName: string
   ): Promise<void> {
     const child = entry.process;
+
+    // Mark the imminent exit as deliberate so the spawn's `exit` handler
+    // doesn't mistake this operator-driven stop for a crash and notify the
+    // user. Safe to call after the map delete below — the entry reference (and
+    // its closure setter) outlives the map entry.
+    entry.markIntentionalExit?.();
 
     // Delete from the map up front so callers see an empty
     // listDeployments() the moment kill returns — the public contract

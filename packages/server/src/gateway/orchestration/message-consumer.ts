@@ -53,6 +53,50 @@ export class MessageConsumer {
     this.config = config;
     this.deploymentManager = deploymentManager;
     this.queue = new RunsQueue();
+    // Surface unexpected worker deaths (crash / external kill after a
+    // successful spawn) to the affected conversation. Without this the worker's
+    // queued message strands with no terminal event and the run hangs — the
+    // deployment manager only logs the exit (lobu-ai/lobu#946).
+    this.deploymentManager.setWorkerExitNotifier((info) =>
+      this.notifyWorkerCrash(info)
+    );
+  }
+
+  /**
+   * Emit a terminal error to the conversation whose worker died unexpectedly.
+   * Routed through the `error` field (not `content`, which only the ephemeral
+   * branch renders) so it surfaces end-to-end: an `error` SSE event for direct
+   * API clients (`lobu chat` prints it and exits 1) and an "Error: …" message
+   * on chat platforms. Best-effort — a notify failure must not crash the
+   * deployment manager's exit handler.
+   */
+  private async notifyWorkerCrash(info: {
+    deploymentName: string;
+    messageData: MessagePayload;
+    reason: string;
+  }): Promise<void> {
+    const { messageData, reason } = info;
+    if (!messageData.conversationId) return;
+    const userMessage = `The worker handling your request stopped unexpectedly (${reason}) before it could reply. Please retry in a moment.`;
+    try {
+      const responseQueue = "thread_response";
+      await this.queue.createQueue(responseQueue);
+      await this.queue.send(responseQueue, {
+        messageId: messageData.messageId,
+        userId: messageData.userId,
+        channelId: messageData.channelId,
+        conversationId: messageData.conversationId,
+        platform: messageData.platform,
+        platformMetadata: messageData.platformMetadata,
+        error: userMessage,
+        processedMessageIds: [messageData.messageId],
+      });
+    } catch (err) {
+      logger.error(
+        { deploymentName: info.deploymentName, err: String(err) },
+        "Failed to notify user of unexpected worker exit"
+      );
+    }
   }
 
   /**

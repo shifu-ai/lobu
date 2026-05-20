@@ -55,7 +55,9 @@ function createApiConsumer() {
 
 describe("worker-startup-failure notice reaches direct-API clients (lobu-ai/lobu#946)", () => {
   test("producer emits the failure notice via `error`, not the ephemeral-only `content` field", async () => {
-    const consumer = new MessageConsumer({} as any, {} as any) as any;
+    const consumer = new MessageConsumer({} as any, {
+      setWorkerExitNotifier: () => undefined,
+    } as any) as any;
     const sends: Array<{ queue: string; data: Record<string, unknown> }> = [];
     consumer.queue = {
       createQueue: mock(async () => undefined),
@@ -83,6 +85,39 @@ describe("worker-startup-failure notice reaches direct-API clients (lobu-ai/lobu
     // `content` (only the ephemeral branch renders content -> silently dropped).
     expect(notice?.data.error).toMatch(/Worker startup failed/);
     expect(notice?.data.content).toBeUndefined();
+    expect(notice?.data.processedMessageIds).toEqual(["m1"]);
+  });
+
+  test("unexpected worker exit (crash after spawn) notifies the conversation via `error`", async () => {
+    const consumer = new MessageConsumer({} as any, {
+      setWorkerExitNotifier: () => undefined,
+    } as any) as any;
+    const sends: Array<{ queue: string; data: Record<string, unknown> }> = [];
+    consumer.queue = {
+      createQueue: mock(async () => undefined),
+      send: mock(async (queue: string, data: Record<string, unknown>) => {
+        sends.push({ queue, data });
+      }),
+    };
+
+    await consumer.notifyWorkerCrash({
+      deploymentName: "lobu-worker-api-abc",
+      messageData: {
+        messageId: "m1",
+        userId: "u1",
+        channelId: "api_u1",
+        conversationId: "conv-1",
+        platform: "api",
+        platformMetadata: {},
+      },
+      reason: "exit code 1",
+    });
+
+    const notice = sends.find((s) => s.queue === "thread_response");
+    expect(notice).toBeDefined();
+    expect(notice?.data.error).toMatch(/stopped unexpectedly \(exit code 1\)/);
+    expect(notice?.data.content).toBeUndefined();
+    expect(notice?.data.conversationId).toBe("conv-1");
     expect(notice?.data.processedMessageIds).toEqual(["m1"]);
   });
 

@@ -188,6 +188,32 @@ export abstract class BaseDeploymentManager {
    */
   private inFlightCreates = new Map<string, Promise<void>>();
 
+  /**
+   * Notifier invoked when a worker subprocess dies unexpectedly (a crash or an
+   * external kill — NOT a deliberate scale-down / idle reap). A worker that
+   * spawns and then exits non-zero never reaches `trackFailedDeployment`
+   * (createWorkerDeployment already resolved on spawn), so without this hook
+   * its queued message strands with no terminal event and the run hangs
+   * (lobu-ai/lobu#946). The orchestrator wires this to surface an error to the
+   * affected conversation. Optional: unset = no notification (legacy behavior).
+   */
+  protected workerExitNotifier?: (info: {
+    deploymentName: string;
+    messageData: MessagePayload;
+    reason: string;
+  }) => void | Promise<void>;
+
+  /** Register the unexpected-worker-exit notifier (see `workerExitNotifier`). */
+  setWorkerExitNotifier(
+    notifier: (info: {
+      deploymentName: string;
+      messageData: MessagePayload;
+      reason: string;
+    }) => void | Promise<void>
+  ): void {
+    this.workerExitNotifier = notifier;
+  }
+
   constructor(
     config: OrchestratorConfig,
     moduleEnvVarsBuilder?: ModuleEnvVarsBuilder,
