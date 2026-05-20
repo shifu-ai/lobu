@@ -94,11 +94,19 @@ export async function closeTestDb(): Promise<void> {
 export async function setupTestDatabase(): Promise<void> {
   const db = getTestDb();
 
-  // Drop and recreate public schema
-  await db`DROP SCHEMA IF EXISTS public CASCADE`;
-  await db`CREATE SCHEMA public`;
+  // Reset the public schema to a clean slate before running migrations.
+  //
+  // Postgres 15+ removed the implicit CREATE privilege on schema `public` from
+  // the `public` role: only the schema OWNER can run DDL there (including
+  // DROP/CREATE SCHEMA). PGlite and superuser/owner connections can recreate
+  // the whole schema; a plain (non-owner) connection user against a real PG15+
+  // server cannot, and `DROP SCHEMA IF EXISTS public CASCADE` fails with
+  // `must be owner of schema public`. Reset gracefully across all three.
+  const ownsPublicSchema = await resetPublicSchema(db);
 
-  // Enable required extensions
+  // Enable required extensions. On a non-superuser connection these must already
+  // be installed by the DBA; the IF NOT EXISTS guards make that a no-op rather
+  // than a privilege error.
   await db`CREATE EXTENSION IF NOT EXISTS "vector"`;
   await db`CREATE EXTENSION IF NOT EXISTS "pg_trgm"`;
 
@@ -126,7 +134,17 @@ export async function setupTestDatabase(): Promise<void> {
 
     await ensureSeedUserIfPossible(db);
 
-    const normalizedUpSection = loadMigrationUpSection(migrationsDir, file);
+    let normalizedUpSection = loadMigrationUpSection(migrationsDir, file);
+
+    // When the connection user doesn't own schema `public` (PG15+ fresh
+    // `createdb` where the postgres superuser still owns it), the baseline's
+    // cosmetic `COMMENT ON SCHEMA public` / `COMMENT ON EXTENSION ...` lines
+    // throw `must be owner of schema/extension`. These comments carry no
+    // functional weight for tests, so drop them rather than require the test
+    // role to be the schema owner.
+    if (!ownsPublicSchema) {
+      normalizedUpSection = stripOwnerOnlyComments(normalizedUpSection);
+    }
 
     if (normalizedUpSection) {
       try {
@@ -137,6 +155,62 @@ export async function setupTestDatabase(): Promise<void> {
       }
     }
   }
+}
+
+/**
+ * Reset schema `public` to a clean slate, working whether the connection user
+ * owns the schema or not. Returns whether the connection user ends up owning
+ * `public` (true on PGlite / superuser / schema-owner connections).
+ *
+ * Preferred path (owner / superuser): take ownership of `public` if we can,
+ * then DROP/CREATE the whole schema — the historical behaviour, which also
+ * clears objects left by *other* roles.
+ *
+ * Fallback path (non-owner on PG15+): the user can't drop the schema, so drop
+ * everything the test role owns inside `public` via `DROP OWNED BY CURRENT_USER`
+ * (clears tables/types/sequences from prior runs) without touching the schema
+ * object itself. Migrations re-create everything as the same role, so the next
+ * run owns them again. Returns false so the caller strips the baseline's
+ * owner-only `COMMENT ON SCHEMA/EXTENSION` lines, which would otherwise throw.
+ */
+async function resetPublicSchema(db: postgres.Sql): Promise<boolean> {
+  // Best-effort: become the owner so the fast DROP/CREATE path works. Only the
+  // current owner or a superuser may run this; if we lack the right it errors,
+  // which is fine — we fall through to the non-owner path below.
+  try {
+    await db`ALTER SCHEMA public OWNER TO CURRENT_USER`;
+  } catch {
+    // not owner/superuser — handled by the fallback below
+  }
+
+  try {
+    await db`DROP SCHEMA IF EXISTS public CASCADE`;
+    await db`CREATE SCHEMA public`;
+    return true;
+  } catch (err) {
+    // 42501 = insufficient_privilege ("must be owner of schema public").
+    // Any other error is a real problem and should surface.
+    const code = (err as { code?: string } | null)?.code;
+    if (code !== '42501') throw err;
+  }
+
+  // Non-owner fallback: ensure the schema exists, then drop everything this
+  // role owns inside it. DROP OWNED BY only touches objects owned by the
+  // current role, so it never trips the schema-ownership check.
+  await db`CREATE SCHEMA IF NOT EXISTS public`;
+  await db`DROP OWNED BY CURRENT_USER`;
+  return false;
+}
+
+/**
+ * Remove `COMMENT ON SCHEMA`/`COMMENT ON EXTENSION` statements from a migration
+ * body. These are cosmetic metadata that require schema/extension ownership;
+ * stripping them lets a non-owner test role apply the baseline. Matches a
+ * statement-leading `COMMENT ON {SCHEMA,EXTENSION}` through its terminating
+ * semicolon (the comment text itself never contains a `;` in our baseline).
+ */
+function stripOwnerOnlyComments(sql: string): string {
+  return sql.replace(/^\s*COMMENT ON (?:SCHEMA|EXTENSION)\b[^;]*;\s*$/gim, '');
 }
 
 async function ensureSeedUserIfPossible(db: postgres.Sql): Promise<void> {
@@ -244,8 +318,13 @@ export async function cleanupTestDatabase(): Promise<void> {
     AND tablename NOT LIKE 'schema_migrations%'
   `;
 
-  // Disable triggers temporarily for faster truncation
-  await db`SET session_replication_role = 'replica'`;
+  // Disable triggers temporarily for faster truncation. `session_replication_role`
+  // is superuser-only, so on a non-superuser test role (the PG15+ fresh-`createdb`
+  // shape from #950, where DATABASE_URL points at a plain CREATE-granted user) this
+  // throws `permission denied to set parameter` (42501). Treat it as best-effort:
+  // `TRUNCATE ... CASCADE` already respects FK ordering on its own, so skipping the
+  // trigger-disable only forgoes the speedup, never correctness.
+  const triggersDisabled = await trySetReplicationRole(db, 'replica');
 
   if (tables.length > 0) {
     const quotedTables = tables.map(({ tablename }) => `"${tablename}"`).join(', ');
@@ -256,11 +335,33 @@ export async function cleanupTestDatabase(): Promise<void> {
     }
   }
 
-  // Re-enable triggers
-  await db`SET session_replication_role = 'origin'`;
+  // Re-enable triggers only if we managed to disable them.
+  if (triggersDisabled) {
+    await trySetReplicationRole(db, 'origin');
+  }
 
   // Fix check constraints that are out-of-date relative to the app code
   await fixSchemaConstraints(db);
+}
+
+/**
+ * Best-effort `SET session_replication_role`. Returns true if the role was set,
+ * false if the connection user lacks the superuser right (42501) — the caller
+ * then proceeds without trigger-disabling, which is safe for `TRUNCATE CASCADE`.
+ * Any other error is a real problem and surfaces.
+ */
+async function trySetReplicationRole(
+  db: postgres.Sql,
+  role: 'replica' | 'origin'
+): Promise<boolean> {
+  try {
+    await db.unsafe(`SET session_replication_role = '${role}'`);
+    return true;
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code;
+    if (code === '42501') return false;
+    throw err;
+  }
 }
 
 /**
