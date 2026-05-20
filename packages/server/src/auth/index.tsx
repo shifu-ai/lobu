@@ -69,6 +69,17 @@ function gravatarUrl(email: string): string {
 const authCache = new TtlCache<ReturnType<typeof betterAuth>>(60_000);
 
 /**
+ * Drop every cached betterAuth instance. Production never needs this (env is
+ * stable per-process), but integration tests that flip env vars like
+ * LOBU_SINGLE_USER between cases must bust the cache, or a stale instance
+ * built under the previous env serves the request and the hook closures
+ * read the wrong flag.
+ */
+export function clearAuthCacheForTests(): void {
+	authCache.clear();
+}
+
+/**
  * Create a better-auth instance with all plugins configured.
  *
  * OAuth providers are dynamically loaded from connector_definitions where login_enabled=true.
@@ -216,6 +227,22 @@ export async function createAuth(env: Env, request?: Request) {
 		// OAuth providers - dynamically loaded from connector_definitions
 		// Tokens are reusable for both login AND connectors
 		socialProviders,
+
+		user: {
+			additionalFields: {
+				// Declared so the where-clause in the single-user guard
+				// below resolves through BA's adapter. DB column has
+				// `NOT NULL DEFAULT 'human'` (db/migrations/...principal_kind.sql),
+				// so `input: false` lets the default fill in on signup.
+				principalKind: {
+					type: "string",
+					fieldName: "principal_kind",
+					input: false,
+					returned: false,
+					required: false,
+				},
+			},
+		},
 
 		account: {
 			accountLinking: {
@@ -592,38 +619,39 @@ export async function createAuth(env: Env, request?: Request) {
 		databaseHooks: {
 			user: {
 				create: {
-					before: async (user) => {
-						// Single-user-mode chokepoint. The /api/auth/* middleware
+					before: async (user, ctx) => {
+						// Single-user-mode chokepoint. The /api/auth/* URL filter
 						// in index.ts blocks /api/auth/sign-up/*, but Better Auth
-						// also creates users on magic-link verify and on OAuth
+						// also creates users on magic-link verify and OAuth
 						// callbacks — paths the URL guard never sees. This hook
-						// runs immediately before every user INSERT regardless of
-						// how the request arrived; if LOBU_SINGLE_USER is on and
-						// the deployment already has a user, refuse to create a
-						// second one. Closes the fork-via-magic-link / fork-via-
-						// social-login backdoor codex flagged.
+						// fires before every user INSERT, so it's the one place
+						// that closes the fork-via-magic-link / fork-via-OAuth
+						// backdoor.
+						//
+						// The count goes through ctx.internalAdapter so it joins
+						// the in-flight transaction connection. Calling getDb()
+						// here would request a second pool connection while
+						// sign-up's runWithTransaction holds the only one —
+						// deadlock in PGlite mode (pool max=1). See #947.
+						// Missing ctx (called outside the BA endpoint pipeline)
+						// throws via `ctx!` → BA returns FAILED_TO_CREATE_USER,
+						// which is the fail-closed posture we want.
 						if (env.LOBU_SINGLE_USER === "1") {
-							const { getDb } = await import("../db/client");
-							const sql = getDb();
 							// Exclude the synthetic install_operator row
-							// (auto-provisioned at boot in ensureInstallOperator)
-							// AND the legacy bootstrap-user row (pre-PR #902)
-							// from the "deployment already has a user" count, so
-							// the first human signup can still proceed in
-							// single-user mode against upgraded installs that
-							// still carry a bootstrap-user row. See
-							// docs/install-operator-bootstrap.md.
-							const rows = (await sql`
-								SELECT count(*)::int AS count
-									  FROM "user"
-									 WHERE principal_kind <> 'install_operator'
-									   AND id <> 'bootstrap-user'
-							`) as unknown as Array<{ count: number }>;
-							const existing = rows[0]?.count ?? 0;
+							// (auto-provisioned by ensureInstallOperator) AND the
+							// legacy bootstrap-user row (pre-PR #902) so the
+							// first human signup still proceeds on upgraded
+							// installs. See docs/install-operator-bootstrap.md.
+							const existing =
+								await ctx!.context.internalAdapter.countTotalUsers([
+									{
+										field: "principalKind",
+										operator: "ne",
+										value: "install_operator",
+									},
+									{ field: "id", operator: "ne", value: "bootstrap-user" },
+								]);
 							if (existing > 0) {
-								// APIError so Better Auth turns this into a structured
-								// JSON response with the right status code, not an
-								// unhandled 500 with an empty body.
 								throw new APIError("FORBIDDEN", {
 									code: "SIGN_UP_DISABLED_IN_SINGLE_USER_MODE",
 									message:
@@ -705,7 +733,7 @@ export async function createAuth(env: Env, request?: Request) {
 			},
 			account: {
 				create: {
-					before: async (account) => {
+					before: async (account, ctx) => {
 						// Carve-out: refuse OAuth account-linking onto the synthetic
 						// install_operator user. The operator authenticates via
 						// ENCRYPTION_KEY; admitting social-login linking would pin a
@@ -716,13 +744,19 @@ export async function createAuth(env: Env, request?: Request) {
 						// password-hash row at boot. See
 						// docs/install-operator-bootstrap.md.
 						if (account.providerId !== "credential") {
-							const { getDb } = await import("../db/client");
-							const sql = getDb();
-							const rows = (await sql`
-								SELECT principal_kind FROM "user"
-								 WHERE id = ${account.userId} LIMIT 1
-							`) as unknown as Array<{ principal_kind: string }>;
-							if (rows[0]?.principal_kind === "install_operator") {
+							// Route through ctx.internalAdapter so the lookup
+							// shares the in-flight transaction connection on the
+							// one path that wraps in runWithTransaction —
+							// createOAuthUser, called from OAuth callback for new
+							// users. Avoids the PGlite pool-max=1 deadlock; see
+							// #947. `/link-social` and existing-user callback
+							// links aren't transactional today but stay safe.
+							const linkedUser =
+								await ctx!.context.internalAdapter.findUserById(account.userId);
+							const principalKind = (
+								linkedUser as { principalKind?: string } | null
+							)?.principalKind;
+							if (principalKind === "install_operator") {
 								throw new APIError("FORBIDDEN", {
 									code: "ACCOUNT_LINKING_NOT_ALLOWED_FOR_INSTALL_OPERATOR",
 									message:
