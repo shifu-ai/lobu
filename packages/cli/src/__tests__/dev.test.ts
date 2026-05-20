@@ -14,6 +14,7 @@ import {
   findEnclosingMonorepoRoot,
   isSharedDatabaseUrl,
   resolveBackendBundle,
+  shouldAutoApplyLocalProject,
   shouldRefuseSharedDatabaseUrl,
 } from "../commands/dev";
 
@@ -166,6 +167,13 @@ describe("lobu run backend bundle resolution", () => {
 
     // Garbage URL → not "shared" (the boot path will fail elsewhere).
     expect(isSharedDatabaseUrl("not-a-url")).toBe(false);
+
+    // file:// embedded paths are LOCAL, never shared — even though their URL
+    // hostname parses as empty. The menubar app passes file://<abs path>, so a
+    // regression here refuses to boot the local embedded server.
+    expect(isSharedDatabaseUrl("file:///Users/me/lobu/data")).toBe(false);
+    expect(isSharedDatabaseUrl("file://.")).toBe(false);
+    expect(isSharedDatabaseUrl("file:/Users/me/lobu/data")).toBe(false);
   });
 
   describe("shouldRefuseSharedDatabaseUrl", () => {
@@ -249,5 +257,49 @@ describe("lobu run backend bundle resolution", () => {
     );
     expect(buildScript).toContain('copyDirIfExists("../../db/migrations"');
     expect(buildScript).toContain('"server.bundle.mjs"');
+  });
+});
+
+describe("shouldAutoApplyLocalProject", () => {
+  test("applies for an embedded run once the local context is ready", () => {
+    expect(
+      shouldAutoApplyLocalProject({
+        mode: "embedded",
+        localContextReady: true,
+        hasLobuToml: true,
+      })
+    ).toBe(true);
+  });
+
+  test("skips when sign-in did not establish the local context", () => {
+    // The guard that stops `lobu run` applying a local project to whatever
+    // cloud/prod context happened to be active.
+    expect(
+      shouldAutoApplyLocalProject({
+        mode: "embedded",
+        localContextReady: false,
+        hasLobuToml: true,
+      })
+    ).toBe(false);
+  });
+
+  test("never auto-applies against an external backend", () => {
+    expect(
+      shouldAutoApplyLocalProject({
+        mode: "external",
+        localContextReady: true,
+        hasLobuToml: true,
+      })
+    ).toBe(false);
+  });
+
+  test("skips when the project has no lobu.toml to apply", () => {
+    expect(
+      shouldAutoApplyLocalProject({
+        mode: "embedded",
+        localContextReady: true,
+        hasLobuToml: false,
+      })
+    ).toBe(false);
   });
 });

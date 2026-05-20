@@ -628,7 +628,11 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     const agentId = requestedAgentId?.trim() || randomUUID();
 
     // If the caller pinned a specific agentId, require ownership so a signed-in
-    // user cannot open a session against another tenant's agent.
+    // user cannot open a session against another tenant's agent. The denial is
+    // uniform on purpose: never reveal whether `agentId` exists (distinguishing
+    // "missing" from "exists-but-unauthorized" would be a cross-tenant
+    // enumeration oracle). The getting-started UX is carried by `lobu run`
+    // auto-applying the project, so a fresh local agent exists by chat time.
     if (!isEphemeral) {
       const denial = await requireAgentOwnership(c, agentId);
       if (denial) return denial;
