@@ -13,7 +13,7 @@ import {
 } from "../routes/public/settings-auth.js";
 import {
   ensureEncryptionKey,
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 
@@ -21,7 +21,7 @@ describe("RevokedTokenStore (PG-backed)", () => {
   let store: RevokedTokenStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -64,7 +64,7 @@ describe("RevokedTokenStore (PG-backed)", () => {
 
 describe("createApiAuthMiddleware — worker token revocation", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -128,7 +128,7 @@ describe("verifySettingsSession — jti revocation", () => {
   }
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -206,7 +206,7 @@ describe("verifySettingsSession — jti revocation", () => {
 // the singleton store; this test pins that contract.
 describe("authenticateWorker (internal middleware) — revocation reach", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

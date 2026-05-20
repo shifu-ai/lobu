@@ -5,7 +5,7 @@ import { getDb } from "../../db/client.js";
 import { storePendingTool, type PendingToolInvocation } from "../auth/mcp/pending-tool-store.js";
 import { registerActionHandlers } from "../connections/interaction-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
-import { ensurePgliteForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
+import { ensureDbForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import {
   blockActionsPayload,
@@ -88,7 +88,7 @@ async function waitFor(
 
 describe("Slack block_actions → registerActionHandlers (Tier B integration)", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

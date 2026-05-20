@@ -13,7 +13,7 @@
 
 import { beforeAll, beforeEach, describe, expect, mock, test } from 'bun:test';
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup.js';
 
@@ -143,7 +143,7 @@ const ORG_A = 'org-a';
 const ORG_B = 'org-b';
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 async function importAgentRoutes() {

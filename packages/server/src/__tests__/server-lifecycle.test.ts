@@ -2,7 +2,7 @@
  * Contract tests for the shared server lifecycle spine.
  *
  * The point of these tests is to lock the invariants that drift between
- * `server.ts` (Postgres) and `start-local.ts` (PGlite) used to break (issue
+ * `server.ts` (Postgres) and `start-local.ts` (embedded Postgres) used to break (issue
  * #948 + the #943 7-hygiene catch-up):
  *
  *   1. Middleware ordering on the Hono wrapper:

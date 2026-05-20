@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import chalk from "chalk";
@@ -54,6 +55,34 @@ export function isSharedDatabaseUrl(databaseUrl: string): boolean {
 }
 
 /**
+ * `DATABASE_URL` is the single backend selector:
+ *   - a `postgres://` / `postgresql://` URL → connect to an external Postgres
+ *   - anything else (a filesystem path, optionally `file:`-prefixed) → boot a
+ *     local embedded Postgres with its data under `<path>/.lobu/pgdata`
+ *
+ * `lobu run` defaults the path to the user's home dir when nothing is set, so a
+ * bare `lobu run` still works (data at `~/.lobu/pgdata`). The runtime itself
+ * always receives an explicit path — the default is injected here, at the CLI
+ * frontend, exactly like the menubar app supplies its own path.
+ */
+export function isExternalDatabaseUrl(databaseUrl: string): boolean {
+  return /^postgres(ql)?:\/\//i.test(databaseUrl.trim());
+}
+
+/**
+ * Resolve the embedded data ROOT from a path-form DATABASE_URL: strips a
+ * leading `file:` and expands a leading `~`. The Postgres cluster lives at
+ * `<root>/.lobu/pgdata` (see embedded-runtime.ts).
+ */
+export function resolveEmbeddedDataRoot(databaseUrl: string): string {
+  let p = databaseUrl.trim().replace(/^file:(\/\/)?/i, "");
+  if (p === "~" || p.startsWith("~/")) {
+    p = join(homedir(), p.slice(1));
+  }
+  return resolve(p);
+}
+
+/**
  * Decide whether `lobu run` must refuse to boot because the EFFECTIVE
  * DATABASE_URL points at a shared/non-local DB the project never opted into.
  *
@@ -81,15 +110,13 @@ export function shouldRefuseSharedDatabaseUrl(input: {
   return isSharedDatabaseUrl(effective);
 }
 
-type BackendBundleKind = "postgres" | "pglite";
-
 /**
  * `lobu run` — start the embedded Lobu stack.
  *
- * By default this uses the bundled local PGlite runtime, so a freshly
- * scaffolded project can boot without Docker or a separate Postgres. When
- * DATABASE_URL is set in .env or the shell, it instead starts the external
- * Postgres runtime against that database.
+ * `DATABASE_URL` selects the backend (see `isExternalDatabaseUrl`): a
+ * `postgres://` URL connects to an external Postgres; a filesystem path boots a
+ * local embedded Postgres rooted there. Unset defaults to an embedded DB at
+ * `~/.lobu/pgdata`.
  */
 export async function devCommand(
   cwd: string,
@@ -119,16 +146,24 @@ export async function devCommand(
     ...envVars,
     ...(process.env as Record<string, string>),
   };
-  const effectiveDatabaseUrl = mergedEnv.DATABASE_URL?.trim();
-  const hasDatabaseUrl = Boolean(effectiveDatabaseUrl);
+  // DATABASE_URL is the backend selector: a postgres:// URL → external; any
+  // other value (a path) → embedded PG rooted there; unset → embedded at the
+  // user's home dir. The CLI injects the path default so the runtime always
+  // receives an explicit DATABASE_URL.
+  const databaseUrlRaw = mergedEnv.DATABASE_URL?.trim() ?? "";
+  const mode: "external" | "embedded" =
+    databaseUrlRaw && isExternalDatabaseUrl(databaseUrlRaw)
+      ? "external"
+      : "embedded";
 
-  // Refuse to boot against a shared/non-local DATABASE_URL that came from the
-  // parent shell rather than the project's own .env. A common footgun:
+  // Refuse to boot against a shared/non-local external DATABASE_URL inherited
+  // from the parent shell rather than the project's own .env. A common footgun:
   // "local lobu run" silently writes into prod / a teammate's tailnet DB.
-  // Project pinning in .env is explicit consent.
+  // Embedded paths are always local (not URLs), so this only fires for external
+  // postgres:// URLs; project pinning in .env is explicit consent.
   if (
     shouldRefuseSharedDatabaseUrl({
-      effectiveDatabaseUrl,
+      effectiveDatabaseUrl: databaseUrlRaw,
       projectEnvDatabaseUrl: envVars.DATABASE_URL,
       unsafeSharedDb: options.unsafeSharedDb,
     })
@@ -136,7 +171,7 @@ export async function devCommand(
     spinner.fail("DATABASE_URL inherited from shell points at a shared DB");
     console.error(
       chalk.red(
-        `\n  Refusing to start: DATABASE_URL=${redactUrl(mergedEnv.DATABASE_URL!)}\n`
+        `\n  Refusing to start: DATABASE_URL=${redactUrl(databaseUrlRaw)}\n`
       )
     );
     console.error(
@@ -164,7 +199,9 @@ export async function devCommand(
       )
     );
     console.error(
-      chalk.dim("    • unset DATABASE_URL in this shell (PGlite will be used)")
+      chalk.dim(
+        "    • set DATABASE_URL to a directory path for a local embedded Postgres"
+      )
     );
     console.error(
       chalk.dim(
@@ -173,16 +210,23 @@ export async function devCommand(
     );
     process.exit(1);
   }
-  const bundleKind: BackendBundleKind = hasDatabaseUrl ? "postgres" : "pglite";
-  const bundlePath = resolveBackendBundle(undefined, bundleKind);
+
+  // Embedded: resolve the data root and pass it through as the explicit
+  // DATABASE_URL path the single server bundle reads. A path-form DATABASE_URL
+  // wins; otherwise default to the user's home dir. The bundle puts the cluster
+  // at <root>/.lobu/pgdata.
+  let embeddedDataRoot: string | null = null;
+  if (mode === "embedded") {
+    embeddedDataRoot = resolveEmbeddedDataRoot(databaseUrlRaw || "~");
+    mergedEnv.DATABASE_URL = embeddedDataRoot;
+  }
+
+  // One bundle for both backends — it self-selects on DATABASE_URL.
+  const bundlePath = resolveBackendBundle();
   if (!bundlePath) {
     spinner.fail("server bundle not found");
-    const bundleName =
-      bundleKind === "pglite" ? "start-local.bundle.mjs" : "server.bundle.mjs";
     console.error(
-      chalk.red(
-        `\n  Could not locate the embedded server bundle (${bundleName}).\n`
-      )
+      chalk.red("\n  Could not locate the server bundle (server.bundle.mjs).\n")
     );
     console.error(
       chalk.dim(
@@ -200,9 +244,9 @@ export async function devCommand(
   }
 
   spinner.succeed(
-    hasDatabaseUrl
+    mode === "external"
       ? "Environment ready"
-      : "Environment ready (using local PGlite)"
+      : "Environment ready (local embedded Postgres)"
   );
 
   const portRaw =
@@ -238,15 +282,15 @@ export async function devCommand(
     await printPreviewInstructions(cwd);
     console.log(chalk.cyan(`\n  Starting Lobu...\n`));
     console.log(chalk.dim(`  bundle:        ${bundlePath}`));
-    if (hasDatabaseUrl) {
+    if (mode === "external") {
       console.log(
         chalk.dim(`  database:      ${redactUrl(mergedEnv.DATABASE_URL!)}`)
       );
     } else {
-      console.log(chalk.dim("  database:      local PGlite"));
+      console.log(chalk.dim("  database:      local embedded Postgres"));
       console.log(
         chalk.dim(
-          `  data:          ${mergedEnv.LOBU_DATA_DIR || "~/.lobu/data"}`
+          `  data:          ${join(embeddedDataRoot!, ".lobu", "pgdata")}`
         )
       );
     }
@@ -307,7 +351,7 @@ export async function devCommand(
   // click the URL straight from their terminal and land logged in. Also
   // persists the session as the `local` CLI context so `lobu chat -c local`
   // works without a separate `lobu login`.
-  void announceLocalSignIn(gatewayUrl, !hasDatabaseUrl);
+  void announceLocalSignIn(gatewayUrl, mode === "embedded");
 
   // Forward Ctrl+C to the child so it can clean up its own subprocess workers
   // before the parent exits. SIGKILL after a timeout in case it wedges.
@@ -373,13 +417,11 @@ export function findEnclosingMonorepoRoot(startDir: string): string | null {
 }
 
 export function resolveBackendBundle(
-  startDir = dirname(fileURLToPath(import.meta.url)),
-  kind: BackendBundleKind = "postgres"
+  startDir = dirname(fileURLToPath(import.meta.url))
 ): string | null {
   const here = startDir;
   const require_ = createRequire(import.meta.url);
-  const bundleName =
-    kind === "pglite" ? "start-local.bundle.mjs" : "server.bundle.mjs";
+  const bundleName = "server.bundle.mjs";
 
   for (const bundled of [
     join(here, bundleName),
@@ -388,12 +430,10 @@ export function resolveBackendBundle(
     if (existsSync(bundled)) return bundled;
   }
 
-  if (kind === "postgres") {
-    try {
-      return require_.resolve("@lobu/server/dist/server.bundle.mjs");
-    } catch {
-      // not installed as a dep
-    }
+  try {
+    return require_.resolve("@lobu/server/dist/server.bundle.mjs");
+  } catch {
+    // not installed as a dep
   }
 
   let cur = here;
@@ -420,17 +460,17 @@ export function resolveBackendBundle(
  */
 async function announceLocalSignIn(
   gatewayUrl: string,
-  pgLite: boolean
+  embedded: boolean
 ): Promise<void> {
   // Poll briefly so the announce lands AFTER the server's own startup
   // banner without racing it.
   const reachable = await waitForServerReachable(gatewayUrl);
   if (!reachable) return;
 
-  // Only the embedded PGlite path seeds the bootstrap user → /local-init
-  // will refuse on a Postgres-backed deployment with real signups. Skip
-  // the network call entirely in that case to keep the banner quiet.
-  if (!pgLite) return;
+  // Only the embedded path seeds the bootstrap user → /local-init will refuse
+  // on an external-Postgres deployment with real signups. Skip the network
+  // call entirely in that case to keep the banner quiet.
+  if (!embedded) return;
 
   try {
     const res = await fetch(`${gatewayUrl}/api/local-init`, {

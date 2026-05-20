@@ -531,9 +531,9 @@ export async function getWatcher(
   //     edit refactor version chains live on the group root, not on each
   //     non-root assignment.
   //
-  // Tagged-template + sql.unsafe() inside the template breaks PGlite's
-  // simple-query mode (prepare=false), so we keep this path as a single
-  // unsafe call instead.
+  // Built as a single sql.unsafe() statement — composing sql.unsafe()
+  // fragments inside a tagged template alongside $N params is fragile, so the
+  // whole query is one unsafe call.
   const requestedVersion = args.template_version ?? null;
   const requestedVersionId = args.template_version_id ?? null;
   const namespacesLiteral = STANDARD_IDENTITY_NAMESPACES.map((n) => `'${n}'`).join(',');

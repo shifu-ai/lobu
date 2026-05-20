@@ -130,15 +130,17 @@ mkdir -p "$LOBU_WORKSPACE_ROOT"
 # --- Run -------------------------------------------------------------------
 
 if [ -z "${DATABASE_URL:-}" ]; then
-  # No external Postgres → boot the embedded PGlite backend (src/start-local.ts).
-  # First run mints a web login (dev@lobu.local / lobudev123, org "dev") and a
-  # bootstrap PAT under LOBU_DATA_DIR. Vite HMR still runs in-process.
-  export LOBU_DATA_DIR="${LOBU_DATA_DIR:-$REPO_ROOT/.lobu-dev}"
+  # No external Postgres → boot the embedded Postgres backend (src/server.ts).
+  # DATABASE_URL=file://<dir> is the single backend selector; the cluster lives
+  # at <dir>/.lobu/pgdata. First run mints a web login (dev@lobu.local /
+  # lobudev123, org "dev"). Vite HMR still runs in-process.
+  DEV_DATA_ROOT="$REPO_ROOT/.lobu-dev"
+  export DATABASE_URL="file://${DEV_DATA_ROOT}"
   export PGSSLMODE=disable
-  mkdir -p "$LOBU_DATA_DIR"
-  echo "→ no DATABASE_URL set — booting embedded PGlite"
+  mkdir -p "$DEV_DATA_ROOT"
+  echo "→ no DATABASE_URL set — booting embedded Postgres"
   echo "→ server on http://${HOST}:${PORT}   (Vite HMR in-process)"
-  echo "→ data dir: $LOBU_DATA_DIR"
+  echo "→ data dir: $DEV_DATA_ROOT/.lobu/pgdata"
   echo "→ first run seeds a web login: dev@lobu.local / lobudev123   (org 'dev')"
   echo "→ then run \`lobu apply\` from a project dir to sync its lobu.toml"
   echo ""

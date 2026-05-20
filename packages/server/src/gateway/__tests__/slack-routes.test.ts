@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, mock, test } from "
 import { Hono } from "hono";
 import { getDb } from "../../db/client.js";
 import { createSlackRoutes } from "../routes/public/slack.js";
-import { ensurePgliteForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
+import { ensureDbForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
 
 describe("slack routes", () => {
   const originalClientId = process.env.SLACK_CLIENT_ID;
@@ -19,7 +19,7 @@ describe("slack routes", () => {
   let sessionOrgId: string | null;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

@@ -1,8 +1,8 @@
 /**
  * Shared Vite dev-server middleware wiring.
  *
- * Both server entry points use this in development: `server.ts` (external
- * Postgres) and `start-local.ts` (embedded PGlite). It attaches a Vite dev
+ * `server.ts` uses this in development for both backends (external Postgres
+ * and embedded Postgres). It attaches a Vite dev
  * server in middleware mode to the given HTTP server so the SPA is served with
  * HMR, and falls unmatched requests through to the Hono listener.
  */

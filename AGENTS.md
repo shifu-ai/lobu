@@ -106,6 +106,8 @@ Rules for agents:
   - `packages/cli/src/commands/_lib/connector-run-cmd.ts` — `browser-mirror`, `devtools-active-port`, `executeCompiledConnector`.
   - `packages/cli/src/commands/_lib/apply/desired-state.ts` — `yaml` (loaded only on YAML inputs).
   - `packages/cli/src/commands/memory/_lib/browser-auth-cmd.ts` — `decryptChromeCookiesMacOS`, `playwright/chromium`.
+  - `packages/server/src/server.ts` — `./embedded-runtime` is statically imported, but `./server-lifecycle` is lazy: its transitive imports read env at module-eval, and the embedded branch only finalises DATABASE_URL during `main()`. Loading the lifecycle eagerly would snapshot a stale env.
+  - `packages/server/src/embedded-runtime.ts` — `embedded-postgres` + `@lobu/pgvector-embedded` (and `postgres`) are lazy so the external/prod path (postgres:// URL) never resolves or loads the ~145MB embedded-Postgres binary even though it sits in node_modules. Only reached when DATABASE_URL is a path/file://.
   - **Tests** — `await import(...)` inside `beforeAll` / `beforeEach` / `test()` is allowed (load after `vi.mock(...)`); this is the vitest pattern, not a production exemption.
 
 ## Scope discipline and branch hygiene

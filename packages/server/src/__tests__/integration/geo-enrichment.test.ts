@@ -1,8 +1,8 @@
 /**
- * Geo enrichment — integration coverage against a real PostGIS-enabled
- * PGlite. The pglite-backend test setup loads `@electric-sql/pglite-postgis`
- * so the migration's DO block falls through to the real path, and the
- * `geo_lookup(lat, lng)` SQL function runs against actual geography data.
+ * Geo enrichment — integration coverage for the `geo_lookup(lat, lng)` SQL
+ * function. It's created by the geo migration on cube + earthdistance (core
+ * contrib, no PostGIS), so it exists on every backend and this suite runs
+ * against the standard test database.
  *
  * The fixture is intentionally tiny (3 countries, 3 admin1 regions, 5
  * cities) — just enough to prove:
@@ -26,13 +26,10 @@ import { insertEvent } from '../../utils/insert-event';
 import { getTestDb } from '../setup/test-db';
 import { createTestOrganization } from '../setup/test-fixtures';
 
-// PostGIS isn't installable on every test backend — real-Postgres CI
-// runners run with a plain Postgres image, so the geo migration's DO
-// block bails out and `geo_lookup` never gets created. PGlite is
-// configured with @electric-sql/pglite-postgis (see pglite-backend.ts),
-// so the function IS available there. Probe once at module load and
-// gate the whole suite — unit tests in utils/__tests__/geo-enrichment
-// already cover the fail-open behaviour with stubs.
+// Probe once at module load that the geo migration created `geo_lookup`, and
+// gate the suite on it (defensive — a stripped-down DB without the geo
+// migration just skips, rather than erroring). Unit tests in
+// utils/__tests__/geo-enrichment cover the fail-open behaviour with stubs.
 //
 // The probe deliberately does NOT swallow query errors: a real DB
 // connection / setup failure should fail the run, not silently skip
@@ -130,7 +127,6 @@ async function seedFixture(): Promise<void> {
     `;
   }
   for (const p of FIXTURES.places) {
-    // `location` is a generated column — we never insert into it.
     await sql`
       INSERT INTO geo_places (
         geonameid, name, ascii_name, latitude, longitude,
@@ -146,13 +142,8 @@ async function seedFixture(): Promise<void> {
 }
 
 describe.runIf(hasGeoSchema)('geo enrichment (integration)', () => {
-  // Deliberately NOT calling cleanupTestDatabase(): that helper TRUNCATEs
-  // every table in public schema, including `spatial_ref_sys` — wiping the
-  // 8500 SRS rows pglite-postgis populates at CREATE EXTENSION time. Once
-  // SRID 4326 disappears, ST_Distance + every geography op throws
-  // "Cannot find SRID (4326) in spatial_ref_sys". Vitest gives each test
-  // file a fresh PGlite anyway, and seedFixture handles geo-table isolation
-  // per-test, so we don't need a broader cleanup.
+  // seedFixture TRUNCATEs the geo tables per-test, so we don't need a broader
+  // cleanupTestDatabase() here.
   beforeEach(async () => {
     _resetGeoEnrichmentProbeForTests();
     await seedFixture();

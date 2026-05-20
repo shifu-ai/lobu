@@ -1,8 +1,9 @@
 /**
  * Shared server lifecycle spine.
  *
- * Both entry points — `server.ts` (Postgres) and `start-local.ts` (PGlite) —
- * call into `createServerLifecycle()` so middleware ordering, route mounts,
+ * `server.ts` is the single entry for both backends (external Postgres and
+ * local embedded Postgres); it calls into `createServerLifecycle()` so
+ * middleware ordering, route mounts,
  * httpServer timeouts, shutdown sequence, and signal wiring stay identical
  * by construction. Drift between the two modes was the root cause of #948;
  * the only way to express a per-mode difference now is the four named hooks
@@ -33,7 +34,7 @@ import { isSentryReported, markSentryReported } from "./sentry";
 import logger from "./utils/logger";
 import { initWorkspaceProvider } from "./workspace";
 
-export type ServerMode = "postgres" | "pglite";
+export type ServerMode = "postgres" | "embedded-postgres";
 
 export interface ServerLifecycleConfig {
 	mode: ServerMode;
@@ -41,13 +42,14 @@ export interface ServerLifecycleConfig {
 	host: string;
 	port: number;
 	/**
-	 * Runs before workspace/gateway init. Postgres asserts the migrations
-	 * ledger matches the bundled migrations dir; PGlite runs them.
+	 * Runs before workspace/gateway init. External Postgres asserts the
+	 * migrations ledger matches the bundled migrations dir; the embedded
+	 * backend runs them.
 	 */
 	databaseReadiness: () => Promise<void>;
 	/**
 	 * Runs after gateway + scheduler boot, before `httpServer.listen()`.
-	 * PGlite uses this for `ensureInstallOperator` + `ensureDefaultAgent`.
+	 * The embedded backend uses this for `ensureInstallOperator` + `ensureDefaultAgent`.
 	 */
 	preListenHooks?: Array<() => Promise<void> | void>;
 	/**
@@ -58,8 +60,8 @@ export interface ServerLifecycleConfig {
 	postListenHooks?: Array<() => void>;
 	/**
 	 * Runs during shutdown AFTER `stopLobuGateway` + `closeDbSingleton`, in
-	 * declared order, before `httpServer.close()`. PGlite uses this for the
-	 * embeddings child kill, socket-server stop, and PGlite db close.
+	 * declared order, before `httpServer.close()`. The embedded backend uses
+	 * this to kill the embeddings child and stop the embedded Postgres.
 	 */
 	extraTeardown?: Array<() => Promise<void> | void>;
 }
@@ -67,19 +69,6 @@ export interface ServerLifecycleConfig {
 export interface ServerLifecycleHandles {
 	/** Starts the listener and registers signal handlers. Resolves once listening. */
 	start: () => Promise<void>;
-}
-
-/**
- * Apply the LOBU_DEV_PROJECT_PATH fallback so downstream
- * `buildGatewayConfig()` can derive worker paths even when the server is
- * invoked from a package subdir (`cd packages/server && bun run dev`) or
- * via `lobu run` from a project subdir. Both entries call this before
- * lifecycle construction.
- */
-export function applyDevProjectPathDefault(packageRepoRoot: string): void {
-	if (!process.env.LOBU_DEV_PROJECT_PATH) {
-		process.env.LOBU_DEV_PROJECT_PATH = packageRepoRoot;
-	}
 }
 
 /**
@@ -327,7 +316,7 @@ export function createServerLifecycle(
 	} = config;
 
 	const start = async (): Promise<void> => {
-		// 1. Database readiness — Postgres asserts schema; PGlite runs migrations.
+		// 1. Database readiness — external PG asserts schema; embedded runs migrations.
 		await databaseReadiness();
 
 		// 2. Workspace provider — required before gateway boot.
@@ -361,7 +350,7 @@ export function createServerLifecycle(
 			httpServer.on("request", honoListener);
 		}
 
-		// 8. Pre-listen hooks (PGlite: install-operator + default-agent).
+		// 8. Pre-listen hooks (embedded: install-operator + default-agent).
 		for (const hook of preListenHooks) {
 			await hook();
 		}
@@ -410,7 +399,7 @@ export function createServerLifecycle(
 			await safe("stopLobuGateway", () => stopLobuGateway());
 			//   f. Close the postgres.js singleton pool.
 			await safe("closeDbSingleton", () => closeDbSingleton());
-			//   g. Mode-specific teardown (PGlite kills embeddings child, stops
+			//   g. Mode-specific teardown (embedded kills embeddings child, stops
 			//      socket server, closes the in-process db).
 			for (let i = 0; i < extraTeardown.length; i++) {
 				await safe(`extraTeardown[${i}]`, extraTeardown[i]);

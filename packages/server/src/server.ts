@@ -1,108 +1,155 @@
 /**
- * Node.js Server Entry Point (Postgres mode).
+ * Lobu server entry point — single entry for both backends.
  *
- * Mode-specific bootstrap only. The shared spine
- * (Hono wrapper, middleware, route mounts, httpServer timeouts, Vite,
- * scheduler boot, signal handlers, shutdown ordering) lives in
- * `./server-lifecycle.ts`. DO NOT add `new Hono`, `app.use`, `app.route`,
- * `http.createServer`, or `process.on('SIGTERM' | 'SIGINT', …)` here — they
- * belong in the lifecycle.
+ * DATABASE_URL selects the mode:
+ *   - postgres:// URL     → connect to an external Postgres (prod, or a DB you run)
+ *   - a path / file://    → spawn a local embedded Postgres rooted there
+ *
+ * Embedded boot lives in `./embedded-runtime` (statically imported below); the
+ * heavy embedded deps — `embedded-postgres` + the pgvector injector — load via
+ * `await import(...)` *inside* that module, so the external/prod path never
+ * resolves or loads the embedded-postgres binary. Everything after the backend
+ * is chosen is identical — the shared spine (Hono wrapper, middleware, routes,
+ * httpServer timeouts, Vite, scheduler, signal handlers, shutdown ordering)
+ * lives in `./server-lifecycle.ts`. DO NOT add `new Hono`, `app.use`,
+ * `app.route`, `http.createServer`, or signal handlers here.
  */
 
-// Refuse to boot under an unsupported Node major (isolated-vm gate). The
-// module performs the check on load, so this side-effect import MUST be the
-// first one — ESM evaluates sibling imports in textual order, so anything
-// above this line would otherwise run first and could itself crash on the
-// unsupported runtime.
+// Refuse to boot under an unsupported Node major (isolated-vm gate). The module
+// asserts on load, so this side-effect import MUST be first.
 import "./utils/assert-node-version";
 
-// Sentry must init before any other imports for auto-instrumentation
+// Sentry must init before any other imports for auto-instrumentation.
 import "./instrument";
 
 import dotenv from "dotenv";
 
 dotenv.config();
 
+// Mac-app / `lobu context server ...` settings from ~/.config/lobu/config.json.
+// After dotenv (so project .env wins) and before main() reads DATABASE_URL / PORT.
+import { applyUserServerConfigToEnv } from "./utils/user-config";
+
+applyUserServerConfigToEnv();
+
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertExternalDepsResolvable } from "@lobu/connector-worker/compile";
 import { getDb, probeListenNotify } from "./db/client";
-import {
-	applyDevProjectPathDefault,
-	createServerLifecycle,
-	reportBootFailure,
-} from "./server-lifecycle";
+import { startEmbeddedRuntime } from "./embedded-runtime";
 import { getEnvFromProcess } from "./utils/env";
 import logger from "./utils/logger";
 import { assertSchemaUpToDate } from "./utils/schema-version-check";
 
-// Resolve repo root from this source file: …/packages/server/src/server.ts → repo root.
 const PACKAGE_REPO_ROOT = path.resolve(
 	fileURLToPath(new URL(".", import.meta.url)),
 	"../../..",
 );
 
-applyDevProjectPathDefault(PACKAGE_REPO_ROOT);
+/** DATABASE_URL is external iff it's a postgres:// URL; anything else → embedded. */
+function isExternal(databaseUrl: string | undefined): boolean {
+	return !!databaseUrl && /^postgres(ql)?:\/\//i.test(databaseUrl.trim());
+}
 
 async function main(): Promise<void> {
-	const databaseUrl = process.env.DATABASE_URL?.trim();
-	if (!databaseUrl) {
-		throw new Error(
-			"DATABASE_URL is required. Use a PostgreSQL connection string (for local dev run: pnpm dev:all).",
-		);
+	const raw = process.env.DATABASE_URL?.trim();
+	const external = isExternal(raw);
+
+	if (!process.env.LOBU_DEV_PROJECT_PATH) {
+		// Downstream buildGatewayConfig() derives worker paths from this; without
+		// it, running from a project subdir gets a wrong cwd-relative resolve.
+		process.env.LOBU_DEV_PROJECT_PATH = PACKAGE_REPO_ROOT;
 	}
-	process.env.DATABASE_URL = databaseUrl;
 
-	const env = getEnvFromProcess();
 	const port = parseInt(process.env.PORT || "8787", 10);
-	const host = process.env.HOST?.trim() || "0.0.0.0";
+	// External: bind all interfaces by default (containers). Embedded: loopback
+	// only — the local-init endpoint mints PATs with no auth challenge, so it
+	// must not be reachable from the LAN unless the operator sets HOST.
+	const host =
+		process.env.HOST?.trim() || (external ? "0.0.0.0" : "127.0.0.1");
 
-	const databaseReadiness = async (): Promise<void> => {
-		// Refuse to boot if the image expects a migration the database hasn't
-		// applied. Skippable via SKIP_SCHEMA_VERSION_CHECK=1 for emergency
-		// forward-flight (e.g. rolling back to an older image whose migrations
-		// dir is a strict prefix of what's already applied). See
-		// utils/schema-version-check.ts for the 2026-05-16 incident this guards.
-		if (process.env.SKIP_SCHEMA_VERSION_CHECK !== "1") {
-			const migrationsDir =
-				process.env.LOBU_MIGRATIONS_DIR?.trim() ||
-				path.join(PACKAGE_REPO_ROOT, "db", "migrations");
-			await assertSchemaUpToDate(getDb(), { migrationsDir });
-		} else {
-			logger.warn(
-				"[schema-check] SKIP_SCHEMA_VERSION_CHECK=1 — skipping boot-time assertion",
-			);
-		}
+	let databaseReadiness: () => Promise<void>;
+	let preListenHooks: Array<() => Promise<void> | void> = [];
+	let extraTeardown: Array<() => Promise<void> | void> = [];
 
-		// Verify LISTEN/NOTIFY actually delivers. This is a *detector*, not a
-		// gate: the runs-queue has a 200ms SKIP-LOCKED poll fallback that keeps
-		// the queue correct even when LISTEN is silently dropped (transaction-mode
-		// pgbouncer, RDS Proxy, etc.). Failing the probe just means wakeup
-		// latency degrades to the poll interval — not an outage.
-		if (process.env.SKIP_LISTEN_NOTIFY_PROBE !== "1") {
-			try {
-				await probeListenNotify();
-				logger.info("[DB] LISTEN/NOTIFY probe ok");
-			} catch (err) {
+	if (external) {
+		process.env.DATABASE_URL = raw;
+		databaseReadiness = async () => {
+			// Refuse to boot if the image expects a migration the DB hasn't applied.
+			// Skippable via SKIP_SCHEMA_VERSION_CHECK=1 for emergency forward-flight.
+			if (process.env.SKIP_SCHEMA_VERSION_CHECK !== "1") {
+				const migrationsDir =
+					process.env.LOBU_MIGRATIONS_DIR?.trim() ||
+					path.join(PACKAGE_REPO_ROOT, "db", "migrations");
+				await assertSchemaUpToDate(getDb(), { migrationsDir });
+			} else {
 				logger.warn(
-					{ err },
-					"[DB] LISTEN/NOTIFY probe failed — runs-queue will fall back to 200ms poll. Fix the pooler config to restore real-time wakeups.",
+					"[schema-check] SKIP_SCHEMA_VERSION_CHECK=1 — skipping boot-time assertion",
 				);
 			}
+			// Detector (not a gate): the runs-queue has a 200ms SKIP-LOCKED poll
+			// fallback, so a dropped LISTEN (transaction-mode pooler) just degrades
+			// wakeup latency rather than causing an outage.
+			if (process.env.SKIP_LISTEN_NOTIFY_PROBE !== "1") {
+				try {
+					await probeListenNotify();
+					logger.info("[DB] LISTEN/NOTIFY probe ok");
+				} catch (err) {
+					logger.warn(
+						{ err },
+						"[DB] LISTEN/NOTIFY probe failed — runs-queue will fall back to 200ms poll.",
+					);
+				}
+			}
+		};
+	} else {
+		// Embedded/local conveniences — ephemeral secrets + localhost URLs so a
+		// bare `lobu run` works. (In prod these are always already set, so the
+		// guards no-op; this branch only runs for path/file:// DATABASE_URLs.)
+		if (!process.env.BETTER_AUTH_SECRET) {
+			process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("base64");
+			logger.info(
+				"Generated ephemeral BETTER_AUTH_SECRET — set in .env to persist sessions",
+			);
 		}
-	};
+		if (!process.env.JWT_SECRET) {
+			process.env.JWT_SECRET = randomBytes(32).toString("base64");
+		}
+		if (!process.env.PUBLIC_WEB_URL) {
+			process.env.PUBLIC_WEB_URL = `http://localhost:${port}`;
+		}
+		if (!process.env.NODE_ENV) {
+			process.env.NODE_ENV = "development";
+		}
+
+		// Lazy: pulls embedded-postgres + the pgvector injector ONLY here, spawns
+		// the cluster, sets process.env.DATABASE_URL to its TCP URL.
+		const rt = await startEmbeddedRuntime();
+		databaseReadiness = rt.databaseReadiness;
+		preListenHooks = rt.preListenHooks;
+		extraTeardown = rt.extraTeardown;
+		logger.info(`Data: ${rt.dataDir}`);
+	}
+
+	// Imported AFTER env + DATABASE_URL are finalised: the lifecycle's transitive
+	// imports (gateway, scheduler, ./index) evaluate at module load and expect a
+	// hot DATABASE_URL, which the embedded branch only sets above.
+	const { createServerLifecycle, reportBootFailure } = await import(
+		"./server-lifecycle"
+	);
 
 	const lifecycle = createServerLifecycle({
-		mode: "postgres",
-		env,
+		mode: external ? "postgres" : "embedded-postgres",
+		env: getEnvFromProcess(),
 		host,
 		port,
 		databaseReadiness,
-		// Crash loud if the runtime image is missing any connector external dep,
-		// instead of letting every feed silently fail with "Missing npm
-		// dependency: X" hours later. Run after listen() so the synchronous
-		// require.resolve walk doesn't add to cold-boot/readiness latency.
+		preListenHooks,
+		// Crash loud if the runtime image is missing a connector external dep,
+		// instead of letting feeds silently fail later. After listen() so the
+		// sync require.resolve walk doesn't add to readiness latency.
 		postListenHooks: [
 			() => {
 				try {
@@ -113,9 +160,19 @@ async function main(): Promise<void> {
 				}
 			},
 		],
+		extraTeardown,
 	});
 
-	await lifecycle.start();
+	try {
+		await lifecycle.start();
+	} catch (err) {
+		reportBootFailure(err);
+	}
 }
 
-main().catch(reportBootFailure);
+main().catch(async (error) => {
+	// Lazy import so a crash in the env-setup block above (before the lifecycle
+	// import) still reaches stderr with the structured fallback logging.
+	const { reportBootFailure } = await import("./server-lifecycle");
+	reportBootFailure(error);
+});

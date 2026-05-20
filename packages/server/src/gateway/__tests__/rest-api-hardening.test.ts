@@ -39,7 +39,7 @@ import { createAgentRoutes } from "../routes/public/agents.js";
 import { createSlackRoutes } from "../routes/public/slack.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -84,7 +84,7 @@ describe("auth: missing and expired sessions", () => {
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -239,7 +239,7 @@ describe("cross-org isolation: agents cannot leak across organizations", () => {
   let agentMetadataStoreB: AgentMetadataStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -364,7 +364,7 @@ describe("agent CRUD: access control and input validation", () => {
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -591,7 +591,7 @@ describe("connection routes: access control", () => {
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -741,7 +741,7 @@ describe("slack routes: OAuth callback and replay protection", () => {
   let sessionOrgId: string | null;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -990,7 +990,7 @@ describe("input validation: agentId format and edge cases", () => {
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

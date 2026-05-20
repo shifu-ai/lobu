@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Bundle production and local PGlite server entrypoints into standalone ESM
- * files consumed by the published @lobu/cli package.
+ * Bundle the single server entrypoint into a standalone ESM file consumed by
+ * the published @lobu/cli package. One entry (server.ts) serves both backends.
  *
  * Why: prod runs under Node so isolated-vm (V8 native addon) loads. Running
  * the TS source through tsx exposes Node's CJS↔ESM lexer interop with
@@ -46,6 +46,11 @@ const commonOptions = {
           if (args.kind === 'entry-point') return null;
           const id = args.path;
           if (id.startsWith('.') || id.startsWith('/')) return null;
+          // @lobu/pgvector-embedded ships prebuilt binary assets under
+          // prebuilt/ that esbuild can't inline; keep it external so it loads
+          // from node_modules with its assets intact (like the npm externals).
+          if (id === '@lobu/pgvector-embedded' || id.startsWith('@lobu/pgvector-embedded/'))
+            return { external: true };
           if (id.startsWith('@lobu/')) return null;
           return { external: true };
         });
@@ -81,8 +86,10 @@ async function buildBundle(entryPoint, outfile) {
   console.log(`    warnings: ${result.warnings.length}, errors: ${result.errors.length}`);
 }
 
+// Single entry for both backends: server.ts branches on DATABASE_URL
+// (postgres:// = external; path/file:// = embedded, lazy-loading the embedded
+// Postgres runtime so the external/prod path never resolves that binary).
 await buildBundle('src/server.ts', 'dist/server.bundle.mjs');
-await buildBundle('src/start-local.ts', 'dist/start-local.bundle.mjs');
 
 const connectorsSrc = join(pkgDir, '..', 'connectors', 'src');
 const connectorsDest = join(pkgDir, 'dist', 'connectors');

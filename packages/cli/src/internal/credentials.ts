@@ -127,7 +127,7 @@ export async function clearCredentials(contextName?: string): Promise<void> {
  *
  * For loopback contexts with no stored creds, transparently POSTs
  * /api/local-init to mint a fresh Better Auth session for the
- * embedded-PGlite bootstrap user — `lobu chat -c local` works without a
+ * embedded bootstrap user — `lobu chat -c local` works without a
  * prior `lobu login`.
  */
 export async function getToken(contextName?: string): Promise<string | null> {

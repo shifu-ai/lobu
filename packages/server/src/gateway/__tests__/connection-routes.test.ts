@@ -13,7 +13,7 @@ import { UserAgentsStore } from "../auth/user-agents-store.js";
 import { createConnectionCrudRoutes } from "../routes/public/connections.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -25,7 +25,7 @@ describe("connection routes", () => {
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

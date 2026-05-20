@@ -142,6 +142,10 @@ export default class ApplePhotosConnector extends ConnectorRuntime {
                   type: ['string', 'null'],
                   description:
                     'Reverse-geocoded human-readable place from CLGeocoder when available offline.',
+                  // Device-populated (CLGeocoder/MKLocalSearch — Apple frameworks
+                  // the server can't call). The gateway only backfills
+                  // city/region/country via geo_lookup() when null; finer
+                  // address/venue tiers must be filled in here, on-device.
                 },
                 people: {
                   type: 'array',

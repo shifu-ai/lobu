@@ -44,7 +44,7 @@ copyDirIfExists("../../db/migrations", "dist/db/migrations");
 // what ships inside the CLI tarball. CI's publish flow builds the bundles
 // (`build:server`) before this script runs; if they're missing locally, run
 // `bun run --filter '@lobu/server' build:server` first.
-for (const bundleName of ["server.bundle.mjs", "start-local.bundle.mjs"]) {
+for (const bundleName of ["server.bundle.mjs"]) {
   const bundleSrc = `../server/dist/${bundleName}`;
   const bundleDest = `dist/${bundleName}`;
   if (fs.existsSync(bundleSrc)) {

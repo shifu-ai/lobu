@@ -31,6 +31,11 @@ COPY packages/openclaw-plugin/package.json packages/openclaw-plugin/
 COPY packages/connectors/package.json packages/connectors/
 COPY packages/embeddings/package.json packages/embeddings/
 COPY packages/connector-worker/package.json packages/connector-worker/
+# server depends on @lobu/pgvector-embedded (workspace:*); its manifest must be
+# present for bun install to resolve the workspace member and for tsc to find
+# its types. Prod never loads it at runtime (external Postgres) — it's pruned
+# from the runtime node_modules below.
+COPY packages/pgvector-embedded/package.json packages/pgvector-embedded/
 # packages/owletto is a private git submodule. The glob lets the copy succeed
 # when the submodule is not initialized (external contributors / backend-only builds).
 COPY packages/owletto/package.jso[n] packages/owletto/
@@ -64,6 +69,7 @@ COPY packages/openclaw-plugin/ packages/openclaw-plugin/
 COPY packages/connectors/ packages/connectors/
 COPY packages/embeddings/ packages/embeddings/
 COPY packages/connector-worker/ packages/connector-worker/
+COPY packages/pgvector-embedded/ packages/pgvector-embedded/
 COPY packages/server/ packages/server/
 # Copy the private frontend submodule when present.
 COPY packages/owletto packages/owletto
@@ -76,6 +82,7 @@ RUN cd packages/core && bunx tsc \
     && cd ../connector-sdk && bunx tsc \
     && cd ../embeddings && bunx tsc \
     && cd ../connector-worker && bunx tsc \
+    && cd ../pgvector-embedded && bunx tsc \
     && cd ../openclaw-plugin && bun run build
 
 # Type check
@@ -85,6 +92,13 @@ RUN cd packages/server && bunx tsc --noEmit
 # docker/app/start.sh and packages/server/scripts/build-server-bundle.mjs
 # for the full rationale.
 RUN cd packages/server && bun run build:server
+
+# Prune the embedded-Postgres runtime (~145MB platform binary) before it reaches
+# the runtime image. Prod always uses an external DATABASE_URL (postgres://), so
+# server.ts never loads embedded-postgres or the pgvector injector — both are
+# reached only via await import() on the file:// path. The builder needs them
+# for the type-check + bundle above, so we drop them only afterward.
+RUN rm -rf node_modules/embedded-postgres node_modules/@embedded-postgres
 
 # Build frontend static assets (production only)
 ARG VITE_API_URL=

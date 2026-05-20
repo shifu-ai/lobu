@@ -17,7 +17,7 @@
  */
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 import { getDb } from "../../db/client.js";
@@ -59,7 +59,7 @@ function buildQuestion(id: string, userId = USER_A): PostedQuestion {
 
 describe("pending-interaction-store", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
   beforeEach(async () => {
     await resetTestDatabase();

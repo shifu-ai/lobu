@@ -10,17 +10,14 @@
  *     refused with SIGN_UP_DISABLED_IN_SINGLE_USER_MODE.
  *
  *  2. The guard does not deadlock. Sign-up runs inside Better Auth's
- *     runWithTransaction, which reserves the only pooled connection in
- *     PGlite mode (LOBU_DISABLE_PREPARE=1 → pool max=1). The hook must
- *     reuse that transaction connection via ctx.internalAdapter rather
- *     than asking getDb() for a second one. Run under
- *     `bun run test:pglite` this test reproduces issue #947: a regression
- *     to a fresh getDb() query hangs the request and fails on timeout.
+ *     runWithTransaction, which reserves a pooled connection. The hook must
+ *     reuse that transaction connection via ctx.internalAdapter rather than
+ *     asking getDb() for a second one — issue #947, where a regression to a
+ *     fresh getDb() query hung the request and failed on timeout.
  *
  * The test is backend-agnostic — it talks to the auth handler over a
- * Request, reads DATABASE_URL like the rest of the suite, and so runs
- * unchanged against external Postgres (default) and PGlite
- * (LOBU_TEST_BACKEND=pglite).
+ * Request and reads DATABASE_URL like the rest of the suite, so it runs
+ * unchanged against any Postgres backend.
  */
 
 import { verifyPassword } from "better-auth/crypto";

@@ -1,5 +1,5 @@
 import { performance } from 'node:perf_hooks';
-import { type PgliteBackend, startPgliteBackend } from '../../../__tests__/setup/pglite-backend';
+import { type EmbeddedBackend, startEmbeddedBackend } from '../../../__tests__/setup/embedded-postgres-backend';
 import {
   cleanupTestDatabase,
   getTestDb,
@@ -119,10 +119,10 @@ function splitConversationSession(content: string): SplitConversation | null {
   return { header, turns };
 }
 
-let pgliteBackend: PgliteBackend | null = null;
+let embeddedBackend: EmbeddedBackend | null = null;
 let databaseReady = false;
 
-async function ensurePglite(): Promise<void> {
+async function ensureDatabase(): Promise<void> {
   const benchmarkDatabaseUrl = process.env.LOBU_BENCHMARK_DATABASE_URL?.trim();
 
   if (benchmarkDatabaseUrl) {
@@ -131,11 +131,10 @@ async function ensurePglite(): Promise<void> {
     process.env.ENCRYPTION_KEY =
       process.env.ENCRYPTION_KEY ??
       '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
-  } else if (!pgliteBackend) {
-    pgliteBackend = await startPgliteBackend();
-    process.env.DATABASE_URL = pgliteBackend.url;
+  } else if (!embeddedBackend) {
+    embeddedBackend = await startEmbeddedBackend();
+    process.env.DATABASE_URL = embeddedBackend.url;
     process.env.PGSSLMODE = 'disable';
-    process.env.LOBU_DISABLE_PREPARE = '1';
     process.env.ENCRYPTION_KEY =
       process.env.ENCRYPTION_KEY ??
       '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
@@ -188,7 +187,7 @@ export class LobuInprocessBenchmarkAdapter implements BenchmarkAdapter {
   }
 
   async reset(_ctx: TrialContext): Promise<void> {
-    await ensurePglite();
+    await ensureDatabase();
     await cleanupTestDatabase();
     clearMcpSessions();
     this.entityIds.clear();
@@ -339,13 +338,13 @@ export class LobuInprocessBenchmarkAdapter implements BenchmarkAdapter {
   }
 
   async dispose(): Promise<void> {
-    if (!pgliteBackend) return;
-    // Close the postgres.js singleton pool BEFORE shutting down pglite's socket
-    // server. Otherwise idle connections in the pool outlive the socket and
+    if (!embeddedBackend) return;
+    // Close the postgres.js singleton pool BEFORE stopping the embedded
+    // Postgres. Otherwise idle connections in the pool outlive the server and
     // any follow-up query rejects with ECONNREFUSED as an unhandled rejection.
     await closeDbSingleton();
-    await pgliteBackend.stop();
-    pgliteBackend = null;
+    await embeddedBackend.stop();
+    embeddedBackend = null;
     databaseReady = false;
   }
 

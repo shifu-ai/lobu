@@ -7,7 +7,7 @@ import { UserAgentsStore } from "../auth/user-agents-store.js";
 import { createAgentRoutes } from "../routes/public/agents.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -20,7 +20,7 @@ describe("agent routes", () => {
   let userAgentsStore: UserAgentsStore;
 
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

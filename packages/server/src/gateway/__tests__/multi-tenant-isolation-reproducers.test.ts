@@ -39,7 +39,7 @@ import {
 } from "../proxy/secret-proxy.js";
 import type { SecretStore } from "../secrets/index.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
   seedAgentRow,
 } from "./helpers/db-setup.js";
@@ -293,7 +293,7 @@ describe("[finding 1] lookupPlaceholderMapping enforces caller's expected org", 
 
 describe("[finding 2] GrantStore queries scope to caller's organization id", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -474,7 +474,7 @@ describe("[finding 2] GrantStore queries scope to caller's organization id", () 
 
 describe("[finding 4] ChatInstanceManager.initialize refuses Telegram polling rows in cloud", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {

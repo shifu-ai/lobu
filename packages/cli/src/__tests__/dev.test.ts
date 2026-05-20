@@ -40,22 +40,18 @@ describe("lobu run backend bundle resolution", () => {
     }
   });
 
-  test("finds backend bundles copied to the CLI dist root", () => {
+  test("finds the server bundle copied to the CLI dist root", () => {
     const root = mkdtempSync(join(tmpdir(), "lobu-cli-dist-"));
     tempDirs.push(root);
 
     const commandsDir = join(root, "dist", "commands");
     mkdirSync(commandsDir, { recursive: true });
 
-    const postgresBundlePath = join(root, "dist", "server.bundle.mjs");
-    const pgliteBundlePath = join(root, "dist", "start-local.bundle.mjs");
-    writeFileSync(postgresBundlePath, "// bundle placeholder\n");
-    writeFileSync(pgliteBundlePath, "// bundle placeholder\n");
+    // Single bundle for both backends — it self-selects on DATABASE_URL.
+    const bundlePath = join(root, "dist", "server.bundle.mjs");
+    writeFileSync(bundlePath, "// bundle placeholder\n");
 
-    expect(resolveBackendBundle(commandsDir, "postgres")).toBe(
-      postgresBundlePath
-    );
-    expect(resolveBackendBundle(commandsDir, "pglite")).toBe(pgliteBundlePath);
+    expect(resolveBackendBundle(commandsDir)).toBe(bundlePath);
   });
 
   test("CLI package declares runtime deps for the embedded server bundle", () => {
@@ -97,16 +93,15 @@ describe("lobu run backend bundle resolution", () => {
 
     // These are server build/dev deps today, but the embedded runtime imports
     // them at startup, while compiling bundled connector code, or while running
-    // local PGlite.
-    for (const name of [
-      "dotenv",
-      "esbuild",
-      "vite",
-      "@electric-sql/pglite",
-      "@electric-sql/pglite-socket",
-    ]) {
+    // the local embedded Postgres.
+    for (const name of ["dotenv", "esbuild", "vite", "embedded-postgres"]) {
       expect(cliRuntimeDeps[name]).toBeDefined();
     }
+
+    // @lobu/pgvector-embedded is the one @lobu/* dep the bundle keeps EXTERNAL
+    // (it ships prebuilt binary assets esbuild can't inline), so the published
+    // CLI must declare it explicitly.
+    expect(cliRuntimeDeps["@lobu/pgvector-embedded"]).toBeDefined();
 
     // Compiled connector code deliberately leaves these native/browser deps
     // external, so npx-installed CLIs must provide them too.
@@ -253,6 +248,6 @@ describe("lobu run backend bundle resolution", () => {
       "utf8"
     );
     expect(buildScript).toContain('copyDirIfExists("../../db/migrations"');
-    expect(buildScript).toContain('"start-local.bundle.mjs"');
+    expect(buildScript).toContain('"server.bundle.mjs"');
   });
 });

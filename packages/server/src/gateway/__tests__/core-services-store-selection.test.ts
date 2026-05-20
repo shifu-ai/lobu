@@ -10,7 +10,7 @@ import {
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
 import {
   ensureEncryptionKey,
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 import { MockMessageQueue } from "./setup.js";
@@ -120,7 +120,7 @@ class InMemoryWritableStore implements WritableSecretStore {
 }
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
 });
 
 afterEach(() => {

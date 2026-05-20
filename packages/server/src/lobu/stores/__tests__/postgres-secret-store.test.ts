@@ -1,6 +1,6 @@
 /**
  * PostgresSecretStore tests — runs against whichever backend globalSetup
- * selected. With `pnpm test` the backend is ephemeral PGlite; with
+ * selected. With `pnpm test` the backend is ephemeral embedded Postgres; with
  * `pnpm test:pg` (or when DATABASE_URL is set explicitly) it's real
  * Postgres. Tests are written once and verified under both paths.
  */

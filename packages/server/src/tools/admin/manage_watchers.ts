@@ -2297,8 +2297,9 @@ async function handleList(
       i.scheduler_client_id,
       i.model_config,
       i.sources,
-      -- text[] is returned as the Postgres array literal "{a,b}" by PGlite's
-      -- TCP socket; wrap in to_jsonb so clients get a real JSON array.
+      -- With fetch_types:false (see db/client.ts) postgres.js does not parse
+      -- arrays, so text[] arrives as the literal "{a,b}"; wrap in to_jsonb so
+      -- clients get a real JSON array.
       to_jsonb(i.tags) AS tags,
       i.notification_channel,
       i.notification_priority,

@@ -3,7 +3,7 @@
  *
  * Covers UC1 / UC4 / UC5 / UC6 / UC8 / UC10 from the F1 design plan plus
  * basic schema-validation guards. Each test runs against a freshly-cleaned
- * test DB; the pglite backend is fast enough that the per-test setup cost
+ * test DB; the embedded backend is fast enough that the per-test setup cost
  * is acceptable.
  *
  * The engine's job is narrow: given a `$member` and a batch of facts,

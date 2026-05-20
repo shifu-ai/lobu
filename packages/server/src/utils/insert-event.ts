@@ -320,10 +320,9 @@ export async function insertEvent(
   if (!inserted) {
     // INSERT ... RETURNING should always yield a row for a successful insert.
     // An empty result means either (a) a BEFORE INSERT trigger silently
-    // RETURNed NULL (none in our schema today), (b) a PGlite quirk around
-    // GENERATED STORED columns failing without surfacing an error, or
-    // (c) postgres.js dropping the rows for an obscure reason. None of these
-    // should drop events on the floor — convert the cryptic `Cannot read
+    // RETURNed NULL (none in our schema today), or (b) postgres.js dropping
+    // the rows for an obscure reason. Neither should drop events on the
+    // floor — convert the cryptic `Cannot read
     // properties of undefined (reading 'id')` into a real error with
     // diagnostic context so we can root-cause when it next happens.
     logger.error(

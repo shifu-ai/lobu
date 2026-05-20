@@ -25,7 +25,7 @@ import {
 } from "../connections/pending-interaction-store.js";
 import { InteractionService, type PostedQuestion } from "../interactions.js";
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
 
@@ -57,7 +57,7 @@ function buildQuestion(id: string, userId = USER_A): PostedQuestion {
 
 describe("pending-interaction-store cleanup paths", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
   beforeEach(async () => {
     await resetTestDatabase();

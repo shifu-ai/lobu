@@ -2,9 +2,9 @@
 #
 # End-to-end harness for `lobu apply` v1.
 #
-# Boots `start-local.ts` (auto-bootstraps an admin PAT on empty data dir),
+# Boots the embedded server (auto-bootstraps an admin PAT on empty data dir),
 # drives the CLI through create → noop → update → drift, and asserts the
-# round-trip against PGlite.
+# round-trip against the local embedded Postgres.
 #
 # Idempotent: cleans up its own server, data dir, and project dir on exit.
 
@@ -65,18 +65,15 @@ fi
 LOBU="node ${CLI_BIN}"
 
 # ─── 2. start server ───────────────────────────────────────────────────
-echo "==> step 2: start start-local.ts on :${PORT}"
+echo "==> step 2: start the embedded server on :${PORT}"
 
-# Unset DATABASE_URL — start-local.ts boots PGlite and writes its own
-# socket URL into process.env. A pre-set DATABASE_URL would race with the
-# socket bind.
+# DATABASE_URL=file://<dir> → server.ts boots an embedded Postgres rooted there
+# (cluster at <dir>/.lobu/pgdata) and rewrites DATABASE_URL to the TCP URL.
 env \
-  -u DATABASE_URL \
-  LOBU_DATA_DIR="${DATA_DIR}" \
+  DATABASE_URL="file://${DATA_DIR}" \
   PORT="${PORT}" \
   HOST=127.0.0.1 \
-  PG_SOCKET_PORT=0 \
-  bun run "${REPO_ROOT}/packages/server/src/start-local.ts" \
+  bun run "${REPO_ROOT}/packages/server/src/server.ts" \
     >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 

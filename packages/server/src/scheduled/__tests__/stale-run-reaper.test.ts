@@ -1,6 +1,6 @@
 /**
  * Integration test for the connector-lane stale-run reaper. Seeds three
- * connector runs into PGlite and asserts the reaper only fails the one that
+ * connector runs into the test database and asserts the reaper only fails the one that
  * is in-progress with a stale `last_heartbeat_at`. Also exercises the
  * advisory-lock contention path: a second concurrent caller while the lock
  * is held no-ops instead of double-failing the row.
@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { getDb } from '../../db/client';
 import {
-  ensurePgliteForGatewayTests,
+  ensureDbForGatewayTests,
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup';
 import { reapStaleRuns } from '../check-stalled-executions';
@@ -18,7 +18,7 @@ const ORG_ID = 'reaper-org';
 const STALE_THRESHOLD_SECONDS = 60;
 
 beforeAll(async () => {
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
   process.env.RUNS_REAPER_STALE_AFTER_SECONDS = String(STALE_THRESHOLD_SECONDS);
 });
 
@@ -159,12 +159,10 @@ describe('reapStaleRuns — connector lanes', () => {
   });
 
   test('back-to-back calls do not double-fail the same row', async () => {
-    // The advisory-lock guards cross-pod contention. Under PGlite the
-    // single-connection pool serializes everything, so we can't simulate
-    // two pods literally racing the SELECT-then-UPDATE. What we CAN prove
-    // here is the function-level invariant the lock enforces: a row that's
-    // already been reaped doesn't get reaped a second time even if the
-    // sweeper fires again.
+    // The advisory-lock guards cross-pod contention. Rather than simulate two
+    // pods literally racing the SELECT-then-UPDATE, this proves the
+    // function-level invariant the lock enforces: a row that's already been
+    // reaped doesn't get reaped a second time even if the sweeper fires again.
     const staleId = await seedRun({
       status: 'running',
       lastHeartbeatAgoSeconds: STALE_THRESHOLD_SECONDS * 3,

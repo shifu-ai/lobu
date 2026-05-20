@@ -2,7 +2,7 @@ import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { storePendingTool, type PendingToolInvocation } from "../auth/mcp/pending-tool-store.js";
 import { registerActionHandlers } from "../connections/interaction-bridge.js";
 import type { PlatformConnection } from "../connections/types.js";
-import { ensurePgliteForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
+import { ensureDbForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
 
 type ActionHandler = (event: any) => Promise<void>;
 
@@ -89,7 +89,7 @@ async function seedPending(requestId: string): Promise<void> {
 
 describe("registerActionHandlers — tool approval", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -252,7 +252,7 @@ describe("registerActionHandlers — tool approval", () => {
 
 describe("registerActionHandlers — question (no callback)", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -282,7 +282,7 @@ describe("registerActionHandlers — question (no callback)", () => {
 
 describe("registerActionHandlers — question (with onQuestionClick)", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   beforeEach(async () => {
@@ -365,7 +365,7 @@ describe("registerActionHandlers — question (with onQuestionClick)", () => {
 
 describe("registerActionHandlers — guards", () => {
   beforeAll(async () => {
-    await ensurePgliteForGatewayTests();
+    await ensureDbForGatewayTests();
   });
 
   let h: Harness;

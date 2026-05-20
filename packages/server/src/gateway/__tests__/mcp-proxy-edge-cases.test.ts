@@ -120,10 +120,10 @@ let agent1Token: string;
 let agent2Token: string;
 
 beforeAll(async () => {
-  const { ensurePgliteForGatewayTests, seedAgentRow } = await import(
+  const { ensureDbForGatewayTests, seedAgentRow } = await import(
     "./helpers/db-setup.js"
   );
-  await ensurePgliteForGatewayTests();
+  await ensureDbForGatewayTests();
   await seedAgentRow("agent1");
   await seedAgentRow("agent2");
 
