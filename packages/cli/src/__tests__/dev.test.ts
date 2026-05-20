@@ -39,24 +39,18 @@ describe("lobu run backend bundle resolution", () => {
     }
   });
 
-  test("finds backend bundles copied to the CLI dist root", () => {
+  test("finds the server bundle copied to the CLI dist root", () => {
     const root = mkdtempSync(join(tmpdir(), "lobu-cli-dist-"));
     tempDirs.push(root);
 
     const commandsDir = join(root, "dist", "commands");
     mkdirSync(commandsDir, { recursive: true });
 
-    const postgresBundlePath = join(root, "dist", "server.bundle.mjs");
-    const embeddedBundlePath = join(root, "dist", "start-local.bundle.mjs");
-    writeFileSync(postgresBundlePath, "// bundle placeholder\n");
-    writeFileSync(embeddedBundlePath, "// bundle placeholder\n");
+    // Single bundle for both backends — it self-selects on DATABASE_URL.
+    const bundlePath = join(root, "dist", "server.bundle.mjs");
+    writeFileSync(bundlePath, "// bundle placeholder\n");
 
-    expect(resolveBackendBundle(commandsDir, "postgres")).toBe(
-      postgresBundlePath
-    );
-    expect(resolveBackendBundle(commandsDir, "embedded")).toBe(
-      embeddedBundlePath
-    );
+    expect(resolveBackendBundle(commandsDir)).toBe(bundlePath);
   });
 
   test("CLI package declares runtime deps for the embedded server bundle", () => {
@@ -184,6 +178,6 @@ describe("lobu run backend bundle resolution", () => {
       "utf8"
     );
     expect(buildScript).toContain('copyDirIfExists("../../db/migrations"');
-    expect(buildScript).toContain('"start-local.bundle.mjs"');
+    expect(buildScript).toContain('"server.bundle.mjs"');
   });
 });

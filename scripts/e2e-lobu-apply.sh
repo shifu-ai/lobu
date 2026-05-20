@@ -2,7 +2,7 @@
 #
 # End-to-end harness for `lobu apply` v1.
 #
-# Boots `start-local.ts` (auto-bootstraps an admin PAT on empty data dir),
+# Boots the embedded server (auto-bootstraps an admin PAT on empty data dir),
 # drives the CLI through create → noop → update → drift, and asserts the
 # round-trip against the local embedded Postgres.
 #
@@ -65,16 +65,16 @@ fi
 LOBU="node ${CLI_BIN}"
 
 # ─── 2. start server ───────────────────────────────────────────────────
-echo "==> step 2: start start-local.ts on :${PORT}"
+echo "==> step 2: start the embedded server on :${PORT}"
 
-# Unset DATABASE_URL — start-local.ts boots an embedded Postgres rooted at
-# LOBU_DATA_DIR and writes its own DATABASE_URL into process.env.
+# Unset DATABASE_URL — with only LOBU_DATA_DIR set, server.ts boots an embedded
+# Postgres rooted there and writes its own DATABASE_URL into process.env.
 env \
   -u DATABASE_URL \
   LOBU_DATA_DIR="${DATA_DIR}" \
   PORT="${PORT}" \
   HOST=127.0.0.1 \
-  bun run "${REPO_ROOT}/packages/server/src/start-local.ts" \
+  bun run "${REPO_ROOT}/packages/server/src/server.ts" \
     >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 

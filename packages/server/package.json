@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
-    "dev:local": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/start-local.ts",
+    "dev:local": "tsx watch --ignore=../web/** --ignore=../owletto/** --ignore=../../node_modules/** src/server.ts",
     "start": "tsx src/server.ts",
     "build:server": "node ./scripts/build-server-bundle.mjs",
     "test": "vitest",

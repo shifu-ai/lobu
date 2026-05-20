@@ -54,8 +54,6 @@ export function isSharedDatabaseUrl(databaseUrl: string): boolean {
   }
 }
 
-type BackendBundleKind = "postgres" | "embedded";
-
 /**
  * `DATABASE_URL` is the single backend selector:
  *   - a `postgres://` / `postgresql://` URL → connect to an external Postgres
@@ -74,7 +72,7 @@ export function isExternalDatabaseUrl(databaseUrl: string): boolean {
 /**
  * Resolve the embedded data ROOT from a path-form DATABASE_URL: strips a
  * leading `file:` and expands a leading `~`. The Postgres cluster lives at
- * `<root>/.lobu/pgdata` (see start-local.ts).
+ * `<root>/.lobu/pgdata` (see embedded-runtime.ts).
  */
 export function resolveEmbeddedDataRoot(databaseUrl: string): string {
   let p = databaseUrl.trim().replace(/^file:(\/\/)?/i, "");
@@ -189,27 +187,24 @@ export async function devCommand(
     process.exit(1);
   }
 
-  // Embedded: resolve the data root (default: home dir) and pass it through as
-  // the explicit DATABASE_URL path the runtime reads.
+  // Embedded: resolve the data root and pass it through as the explicit
+  // DATABASE_URL path the single server bundle reads. Precedence: an explicit
+  // path-form DATABASE_URL > LOBU_DATA_DIR (set by the Mac app / dev-native) >
+  // the user's home dir. The bundle puts the cluster at <root>/.lobu/pgdata.
   let embeddedDataRoot: string | null = null;
   if (mode === "embedded") {
-    embeddedDataRoot = resolveEmbeddedDataRoot(databaseUrlRaw || "~");
+    embeddedDataRoot = resolveEmbeddedDataRoot(
+      databaseUrlRaw || mergedEnv.LOBU_DATA_DIR || "~"
+    );
     mergedEnv.DATABASE_URL = embeddedDataRoot;
   }
 
-  const bundleKind: BackendBundleKind =
-    mode === "external" ? "postgres" : "embedded";
-  const bundlePath = resolveBackendBundle(undefined, bundleKind);
+  // One bundle for both backends — it self-selects on DATABASE_URL.
+  const bundlePath = resolveBackendBundle();
   if (!bundlePath) {
     spinner.fail("server bundle not found");
-    const bundleName =
-      bundleKind === "embedded"
-        ? "start-local.bundle.mjs"
-        : "server.bundle.mjs";
     console.error(
-      chalk.red(
-        `\n  Could not locate the embedded server bundle (${bundleName}).\n`
-      )
+      chalk.red("\n  Could not locate the server bundle (server.bundle.mjs).\n")
     );
     console.error(
       chalk.dim(
@@ -400,13 +395,11 @@ export function findEnclosingMonorepoRoot(startDir: string): string | null {
 }
 
 export function resolveBackendBundle(
-  startDir = dirname(fileURLToPath(import.meta.url)),
-  kind: BackendBundleKind = "postgres"
+  startDir = dirname(fileURLToPath(import.meta.url))
 ): string | null {
   const here = startDir;
   const require_ = createRequire(import.meta.url);
-  const bundleName =
-    kind === "embedded" ? "start-local.bundle.mjs" : "server.bundle.mjs";
+  const bundleName = "server.bundle.mjs";
 
   for (const bundled of [
     join(here, bundleName),
@@ -415,12 +408,10 @@ export function resolveBackendBundle(
     if (existsSync(bundled)) return bundled;
   }
 
-  if (kind === "postgres") {
-    try {
-      return require_.resolve("@lobu/server/dist/server.bundle.mjs");
-    } catch {
-      // not installed as a dep
-    }
+  try {
+    return require_.resolve("@lobu/server/dist/server.bundle.mjs");
+  } catch {
+    // not installed as a dep
   }
 
   let cur = here;
