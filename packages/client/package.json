@@ -34,10 +34,8 @@
     "url": "git+https://github.com/lobu-ai/lobu.git",
     "directory": "packages/client"
   },
-  "dependencies": {
-    "@hey-api/client-fetch": "^0.13.1"
-  },
   "devDependencies": {
+    "@hey-api/client-fetch": "^0.13.1",
     "@hey-api/openapi-ts": "^0.86.5",
     "typescript": "^5.8.3"
   }
