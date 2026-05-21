@@ -25,7 +25,10 @@ import {
   isLoadError,
   loadConfig,
 } from "../../../config/loader.js";
-import { mapProjectToDesiredState } from "./map-config.js";
+import {
+  mapProjectToDesiredState,
+  mergeAgentDirArtifacts,
+} from "./map-config.js";
 import { CronExpressionParser } from "cron-parser";
 
 // ── Connector slug / schedule validators (round-2) ─────────────────────────
@@ -2119,7 +2122,34 @@ export async function loadDesiredStateFromConfig(
         "lobu.config.ts must `export default defineConfig({ ... })`"
       );
     }
-    const state = mapProjectToDesiredState(project as Project, env, opts.only);
+    const typedProject = project as Project;
+    const state = mapProjectToDesiredState(typedProject, env, opts.only);
+
+    // Agent-directory artifacts: SOUL/IDENTITY/USER.md + local skills. The
+    // mapper stays pure (no file IO); we read the files here and merge them into
+    // each agent's settings, mirroring the TOML loader (project `./skills` +
+    // per-agent `<dir>/skills`; default dir `./agents/<id>`).
+    await Promise.all(
+      typedProject.agents.map(async (agent, i) => {
+        const settings = state.agents[i]?.settings;
+        if (!settings) return;
+        const agentDir = resolve(
+          opts.cwd,
+          agent.dir ?? join("agents", agent.id)
+        );
+        const markdown = await readMarkdown(agentDir);
+        const skillFiles = await loadSkillFiles([
+          join(opts.cwd, "skills"),
+          join(agentDir, "skills"),
+        ]);
+        mergeAgentDirArtifacts(
+          settings,
+          markdown,
+          buildLocalSkills(skillFiles)
+        );
+      })
+    );
+
     // `--only agents|memory` skips connectors (matching the mapper), so don't
     // ship local connector source for those runs either.
     if (!opts.only) {

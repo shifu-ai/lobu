@@ -10,7 +10,11 @@ import {
   defineWatcher,
   secret,
 } from "@lobu/sdk";
-import { mapProjectToDesiredState } from "../map-config.js";
+import {
+  mapProjectToDesiredState,
+  mergeAgentDirArtifacts,
+} from "../map-config.js";
+import type { AgentSettings } from "@lobu/core";
 
 const env: NodeJS.ProcessEnv = {
   ANTHROPIC_API_KEY: "sk-test",
@@ -440,5 +444,96 @@ describe("mapProjectToDesiredState", () => {
     expect(settings).not.toHaveProperty("guardrails");
     expect(settings).not.toHaveProperty("nixConfig");
     expect(settings).not.toHaveProperty("mcpServers");
+  });
+});
+
+describe("mergeAgentDirArtifacts", () => {
+  test("sets prompt markdown and skillsConfig", () => {
+    const settings: Partial<AgentSettings> = {};
+    mergeAgentDirArtifacts(
+      settings,
+      { soulMd: "soul", identityMd: "id", userMd: "user" },
+      [{ repo: "local/s", name: "s", content: "body", enabled: true }]
+    );
+    expect(settings.soulMd).toBe("soul");
+    expect(settings.identityMd).toBe("id");
+    expect(settings.userMd).toBe("user");
+    expect(settings.skillsConfig?.skills).toHaveLength(1);
+    expect(settings.skillsConfig?.skills[0]?.name).toBe("s");
+  });
+
+  test("unions network allowed/denied/nix; agent wins on judged + judges", () => {
+    const settings: Partial<AgentSettings> = {
+      networkConfig: {
+        allowedDomains: ["agent.com"],
+        judgedDomains: [{ domain: "shared.com", judge: "agent-policy" }],
+        judges: { p: "agent prompt" },
+      },
+      nixConfig: { packages: ["ffmpeg"] },
+    };
+    mergeAgentDirArtifacts(settings, {}, [
+      {
+        repo: "local/s",
+        name: "s",
+        content: "b",
+        enabled: true,
+        nixPackages: ["python311", "ffmpeg"],
+        networkConfig: {
+          allowedDomains: ["skill.com", "*"],
+          deniedDomains: ["bad.com"],
+          judgedDomains: [
+            { domain: "shared.com", judge: "skill-policy" },
+            { domain: "skill-only.com" },
+          ],
+          judges: { p: "skill prompt", q: "skill q" },
+        },
+      },
+    ]);
+    // "*" from a skill is dropped; agent + skill domains unioned + deduped.
+    expect(settings.networkConfig?.allowedDomains).toEqual([
+      "agent.com",
+      "skill.com",
+    ]);
+    expect(settings.networkConfig?.deniedDomains).toEqual(["bad.com"]);
+    // Agent wins on the shared judged domain; skill-only domain kept.
+    expect(settings.networkConfig?.judgedDomains).toEqual([
+      { domain: "shared.com", judge: "agent-policy" },
+      { domain: "skill-only.com" },
+    ]);
+    // Agent wins on the shared judge key; skill-only key kept.
+    expect(settings.networkConfig?.judges).toEqual({
+      p: "agent prompt",
+      q: "skill q",
+    });
+    expect(settings.nixConfig?.packages).toEqual(["ffmpeg", "python311"]);
+  });
+
+  test("agent MCP servers win; skills add only new ids", () => {
+    const settings: Partial<AgentSettings> = {
+      mcpServers: { gmail: { url: "https://agent" } },
+    };
+    mergeAgentDirArtifacts(settings, {}, [
+      {
+        repo: "local/s",
+        name: "s",
+        content: "b",
+        enabled: true,
+        mcpServers: [
+          { id: "gmail", url: "https://skill-should-not-win" },
+          { id: "linear", url: "https://skill", type: "sse" },
+        ],
+      },
+    ]);
+    expect(settings.mcpServers?.gmail).toEqual({ url: "https://agent" });
+    expect(settings.mcpServers?.linear).toEqual({
+      url: "https://skill",
+      type: "sse",
+    });
+  });
+
+  test("no markdown / no skills leaves settings untouched", () => {
+    const settings: Partial<AgentSettings> = {};
+    mergeAgentDirArtifacts(settings, {}, []);
+    expect(settings).toEqual({});
   });
 });

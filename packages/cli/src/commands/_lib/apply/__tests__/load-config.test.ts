@@ -155,6 +155,120 @@ describe("loadDesiredStateFromConfig", () => {
     ]);
   });
 
+  test("loads agent-dir markdown + skills and merges skill network config", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "agentdir-"));
+    const agentDir = join(dir, "agents", "crm");
+    mkdirSync(join(agentDir, "skills", "crm-ops"), { recursive: true });
+    writeFileSync(join(agentDir, "SOUL.md"), "You are the CRM agent.\n");
+    writeFileSync(join(agentDir, "IDENTITY.md"), "CRM identity.\n");
+    writeFileSync(
+      join(agentDir, "skills", "crm-ops", "SKILL.md"),
+      [
+        `---`,
+        `name: crm-ops`,
+        `network:`,
+        `  allow: ["api.crm.com"]`,
+        `nixPackages: ["jq"]`,
+        `---`,
+        `Use the CRM API.`,
+        ``,
+      ].join("\n")
+    );
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig } from "@lobu/sdk";`,
+        `export default defineConfig({`,
+        `  agents: [defineAgent({ id: "crm", network: { allowed: ["github.com"] } })],`,
+        `});`,
+        ``,
+      ].join("\n")
+    );
+
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    const settings = state.agents[0]?.settings;
+    expect(settings?.soulMd).toBe("You are the CRM agent.");
+    expect(settings?.identityMd).toBe("CRM identity.");
+    expect(settings?.skillsConfig?.skills[0]?.name).toBe("crm-ops");
+    // Agent + skill network domains are unioned.
+    expect(settings?.networkConfig?.allowedDomains).toEqual([
+      "github.com",
+      "api.crm.com",
+    ]);
+    expect(settings?.nixConfig?.packages).toEqual(["jq"]);
+  });
+
+  test("two agents: custom + default dirs keep index alignment; project ./skills applies to all", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "multiagent-"));
+    // Agent "a" uses a custom dir; agent "b" uses the default ./agents/b.
+    mkdirSync(join(dir, "custom-a"), { recursive: true });
+    mkdirSync(join(dir, "agents", "b"), { recursive: true });
+    writeFileSync(join(dir, "custom-a", "SOUL.md"), "Agent A soul.\n");
+    writeFileSync(join(dir, "agents", "b", "SOUL.md"), "Agent B soul.\n");
+    // Project-level shared skill (applies to every agent).
+    mkdirSync(join(dir, "skills", "shared"), { recursive: true });
+    writeFileSync(
+      join(dir, "skills", "shared", "SKILL.md"),
+      "---\nname: shared\n---\nShared.\n"
+    );
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig } from "@lobu/sdk";`,
+        `export default defineConfig({`,
+        `  agents: [`,
+        `    defineAgent({ id: "a", dir: "./custom-a" }),`,
+        `    defineAgent({ id: "b" }),`,
+        `  ],`,
+        `});`,
+        ``,
+      ].join("\n")
+    );
+
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    // Index alignment: agents[0]=a (custom dir), agents[1]=b (default dir).
+    expect(state.agents[0]?.metadata.agentId).toBe("a");
+    expect(state.agents[0]?.settings.soulMd).toBe("Agent A soul.");
+    expect(state.agents[1]?.metadata.agentId).toBe("b");
+    expect(state.agents[1]?.settings.soulMd).toBe("Agent B soul.");
+    // The project-level skill is merged into both agents.
+    expect(state.agents[0]?.settings.skillsConfig?.skills[0]?.name).toBe(
+      "shared"
+    );
+    expect(state.agents[1]?.settings.skillsConfig?.skills[0]?.name).toBe(
+      "shared"
+    );
+  });
+
+  test("agent-dir skill overrides a project skill of the same name", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "skilloverride-"));
+    mkdirSync(join(dir, "skills", "ops"), { recursive: true });
+    mkdirSync(join(dir, "agents", "a", "skills", "ops"), { recursive: true });
+    writeFileSync(
+      join(dir, "skills", "ops", "SKILL.md"),
+      "---\nname: ops\n---\nProject ops.\n"
+    );
+    writeFileSync(
+      join(dir, "agents", "a", "skills", "ops", "SKILL.md"),
+      "---\nname: ops\n---\nAgent ops.\n"
+    );
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig } from "@lobu/sdk";`,
+        `export default defineConfig({ agents: [defineAgent({ id: "a" })] });`,
+        ``,
+      ].join("\n")
+    );
+
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    const skills = state.agents[0]?.settings.skillsConfig?.skills;
+    // loadSkillFiles reads [./skills, <agentDir>/skills] in order, deduping by
+    // name — the agent-dir skill (read last) wins.
+    expect(skills).toHaveLength(1);
+    expect(skills?.[0]?.content).toBe("Agent ops.");
+  });
+
   test("no connectors/ dir → no definitions", async () => {
     dir = mkdtempSync(join(import.meta.dir, "nodir-"));
     writeFileSync(
