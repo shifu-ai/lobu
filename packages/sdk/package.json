@@ -23,7 +23,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@lobu/connector-sdk": "workspace:*"
+    "@lobu/connector-sdk": "workspace:*",
+    "@sinclair/typebox": "^0.34.41"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

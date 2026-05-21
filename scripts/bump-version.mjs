@@ -9,6 +9,7 @@ const PACKAGES = [
   "packages/cli",
   "packages/connector-sdk",
   "packages/client",
+  "packages/sdk",
   "packages/openclaw-plugin",
   "packages/connectors",
   "packages/connector-worker",

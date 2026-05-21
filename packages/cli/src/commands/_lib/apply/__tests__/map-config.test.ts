@@ -152,4 +152,83 @@ describe("mapProjectToDesiredState", () => {
     expect(dc?.authProfileSlug).toBe("gh-app");
     expect(dc?.feeds).toEqual([{ feedKey: "stars", schedule: "0 */6 * * *" }]);
   });
+
+  test("rejects an invalid connection slug", () => {
+    const conn = defineConnection({ slug: "Bad_Slug", connector: "github" });
+    expect(() =>
+      mapProjectToDesiredState(
+        defineConfig({ agents: [], connections: [conn] })
+      )
+    ).toThrow(/connection slug/);
+  });
+
+  test("rejects an invalid cron schedule", () => {
+    const crm = defineAgent({ id: "crm" });
+    const watcher = defineWatcher({
+      agent: crm,
+      slug: "w",
+      prompt: "p",
+      extractionSchema: {},
+      schedule: "not-a-cron",
+    });
+    expect(() =>
+      mapProjectToDesiredState(
+        defineConfig({ agents: [crm], watchers: [watcher] })
+      )
+    ).toThrow(/invalid schedule/);
+  });
+
+  test("rejects credentials on an interactive auth profile", () => {
+    const auth = defineAuthProfile({
+      slug: "gh-acct",
+      connector: "github",
+      authKind: "oauth_account",
+      credentials: { token: secret("X") },
+    });
+    expect(() =>
+      mapProjectToDesiredState(
+        defineConfig({ agents: [], authProfiles: [auth] })
+      )
+    ).toThrow(/credentials must not be set/);
+  });
+
+  test("rejects duplicate feed keys in a connection", () => {
+    const conn = defineConnection({
+      slug: "gh",
+      connector: "github",
+      feeds: [{ feed: "stars" }, { feed: "stars" }],
+    });
+    expect(() =>
+      mapProjectToDesiredState(
+        defineConfig({ agents: [], connections: [conn] })
+      )
+    ).toThrow(/more than once/);
+  });
+
+  test("--only skips connectors and their secrets", () => {
+    const auth = defineAuthProfile({
+      slug: "gh-app",
+      connector: "github",
+      authKind: "oauth_app",
+      credentials: { clientSecret: secret("GH_SECRET") },
+    });
+    const conn = defineConnection({
+      slug: "gh",
+      connector: "github",
+      authProfile: auth,
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({
+        agents: [defineAgent({ id: "crm" })],
+        authProfiles: [auth],
+        connections: [conn],
+      }),
+      env,
+      "agents"
+    );
+    expect(state.connectors.authProfiles).toEqual([]);
+    expect(state.connectors.connections).toEqual([]);
+    expect(state.requiredSecrets).not.toContain("GH_SECRET");
+    expect(state.agents).toHaveLength(1);
+  });
 });

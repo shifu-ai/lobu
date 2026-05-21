@@ -2060,7 +2060,7 @@ export async function loadDesiredStateFromConfig(
       );
     }
     return {
-      state: mapProjectToDesiredState(project as Project, env),
+      state: mapProjectToDesiredState(project as Project, env, opts.only),
       configPath,
     };
   } finally {

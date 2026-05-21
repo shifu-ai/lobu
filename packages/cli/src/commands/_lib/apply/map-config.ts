@@ -21,6 +21,7 @@ import type {
   Watcher,
 } from "@lobu/sdk";
 import { isSecretRef } from "@lobu/sdk";
+import { CronExpressionParser } from "cron-parser";
 import { ValidationError } from "../../memory/_lib/errors.js";
 import type {
   DesiredAgent,
@@ -36,6 +37,21 @@ import type {
 
 /** Source label recorded on connector docs (mirrors the YAML manifest path). */
 const CONFIG_SOURCE = "lobu.config.ts";
+
+// Mirror the TOML loader's structural validators so a malformed TS config fails
+// loud in the CLI before any remote mutation, not with a confusing server 4xx.
+const CONNECTION_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
+const AUTH_PROFILE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
+
+/** Returns an error message if the cron schedule is invalid, else null. */
+function cronError(schedule: string): string | null {
+  try {
+    CronExpressionParser.parse(schedule);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
 
 /** `"$NAME"` → `"NAME"`, else null. Mirrors the TOML loader's env-ref detection. */
 function envRefName(value: string): string | null {
@@ -175,6 +191,14 @@ function mapRelationshipType(rel: RelationshipType): DesiredRelationshipType {
 }
 
 function mapWatcher(watcher: Watcher): DesiredWatcher {
+  if (watcher.schedule) {
+    const err = cronError(watcher.schedule);
+    if (err) {
+      throw new ValidationError(
+        `watcher "${watcher.slug}" has an invalid schedule "${watcher.schedule}": ${err}`
+      );
+    }
+  }
   const sources = watcher.sources
     ? Object.entries(watcher.sources).map(([name, query]) => ({ name, query }))
     : undefined;
@@ -204,14 +228,32 @@ function mapAuthProfile(
   profile: AuthProfile,
   required: Set<string>
 ): DesiredAuthProfile {
-  const credentials = profile.credentials
-    ? Object.fromEntries(
-        Object.entries(profile.credentials).map(([key, value]) => [
-          key,
-          credentialString(value, required),
-        ])
-      )
-    : undefined;
+  if (!AUTH_PROFILE_SLUG_PATTERN.test(profile.slug)) {
+    throw new ValidationError(
+      `auth profile slug "${profile.slug}" must match /^[a-z0-9][a-z0-9-]{0,79}$/ (lowercase letters/digits/hyphens, no leading hyphen, ≤80 chars)`
+    );
+  }
+  const interactive =
+    profile.authKind === "oauth_account" ||
+    profile.authKind === "browser_session";
+  if (
+    interactive &&
+    profile.credentials &&
+    Object.keys(profile.credentials).length > 0
+  ) {
+    throw new ValidationError(
+      `auth profile "${profile.slug}" has kind "${profile.authKind}" — credentials must not be set; lobu apply never writes interactive-auth tokens (complete auth via the connect URL)`
+    );
+  }
+  const credentials =
+    profile.credentials && !interactive
+      ? Object.fromEntries(
+          Object.entries(profile.credentials).map(([key, value]) => [
+            key,
+            credentialString(value, required),
+          ])
+        )
+      : undefined;
   return {
     slug: profile.slug,
     connector: connectorKey(profile.connector),
@@ -223,12 +265,34 @@ function mapAuthProfile(
 }
 
 function mapConnection(connection: Connection): DesiredConnection {
-  const feeds: DesiredFeed[] = (connection.feeds ?? []).map((feed) => ({
-    feedKey: feed.feed,
-    ...(feed.name ? { name: feed.name } : {}),
-    ...(feed.schedule ? { schedule: feed.schedule } : {}),
-    ...(feed.config ? { config: feed.config } : {}),
-  }));
+  if (!CONNECTION_SLUG_PATTERN.test(connection.slug)) {
+    throw new ValidationError(
+      `connection slug "${connection.slug}" must match /^[a-z0-9][a-z0-9-]{0,62}$/ (lowercase letters/digits/hyphens, no leading hyphen, ≤63 chars)`
+    );
+  }
+  const seenFeeds = new Set<string>();
+  const feeds: DesiredFeed[] = (connection.feeds ?? []).map((feed) => {
+    if (seenFeeds.has(feed.feed)) {
+      throw new ValidationError(
+        `connection "${connection.slug}" declares feed "${feed.feed}" more than once`
+      );
+    }
+    seenFeeds.add(feed.feed);
+    if (feed.schedule) {
+      const err = cronError(feed.schedule);
+      if (err) {
+        throw new ValidationError(
+          `connection "${connection.slug}" feed "${feed.feed}" has an invalid schedule "${feed.schedule}": ${err}`
+        );
+      }
+    }
+    return {
+      feedKey: feed.feed,
+      ...(feed.name ? { name: feed.name } : {}),
+      ...(feed.schedule ? { schedule: feed.schedule } : {}),
+      ...(feed.config ? { config: feed.config } : {}),
+    };
+  });
   const authSlug = authProfileSlug(connection.authProfile);
   const appAuthSlug = authProfileSlug(connection.appAuthProfile);
   return {
@@ -246,10 +310,16 @@ function mapConnection(connection: Connection): DesiredConnection {
   };
 }
 
-/** Translate a `@lobu/sdk` project into the apply `DesiredState`. */
+/**
+ * Translate a `@lobu/sdk` project into the apply `DesiredState`. When `only` is
+ * set, connector definitions/connections/auth-profiles are skipped (and their
+ * secrets not collected), matching the TOML loader's `--only` behavior so
+ * `lobu apply --only agents` doesn't demand connector secrets.
+ */
 export function mapProjectToDesiredState(
   project: Project,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  only?: "agents" | "memory"
 ): DesiredState {
   const required = new Set<string>();
 
@@ -259,10 +329,14 @@ export function mapProjectToDesiredState(
     mapRelationshipType
   );
   const watchers = (project.watchers ?? []).map(mapWatcher);
-  const authProfiles = (project.authProfiles ?? []).map((profile) =>
-    mapAuthProfile(profile, required)
-  );
-  const connections = (project.connections ?? []).map(mapConnection);
+  const authProfiles = only
+    ? []
+    : (project.authProfiles ?? []).map((profile) =>
+        mapAuthProfile(profile, required)
+      );
+  const connections = only
+    ? []
+    : (project.connections ?? []).map(mapConnection);
 
   const agentIds = new Set(project.agents.map((agent) => agent.id));
   for (const watcher of watchers) {
