@@ -2013,6 +2013,66 @@ export async function loadDesiredState(
 }
 
 /**
+ * Discover local connector definitions for the TypeScript config path.
+ *
+ * A `lobu.config.ts` references connectors by key (or via the class returned by
+ * `defineConnector`); the source the server compiles lives in
+ * `./connectors/*.connector.ts`. We ship each file's source with `key: null` —
+ * the server compiles it and resolves the real key, the same contract the YAML
+ * loader used for auto-discovered `.connector.ts` files. `apply-cmd` then
+ * compiles each `sourcePath` on the CLI (where the project's node_modules is
+ * available) and uploads it via `install_connector`.
+ *
+ * We intentionally do NOT compile/instantiate the connector here to resolve its
+ * key eagerly: that would force a full esbuild + module load (and installed
+ * project deps, and any module-load side effects) on every load — including
+ * `--dry-run` — for no benefit, since the server is the source of truth for the
+ * compiled key. The cost is deferred to post-confirmation install in apply-cmd.
+ *
+ * Caveat (shared with YAML auto-discovery, see `locallyDeclaredConnectorKeys`):
+ * because the shipped key is `null`, a connection's config is validated against
+ * the *fresh* catalog only after install, and a connection that references a
+ * connector by a bare *string* key relies on that string matching the file's
+ * compiled `definition.key`. Reference the connector by its `defineConnector`
+ * class instead (`connector: myConnector`) to make that match exact — the
+ * mapper resolves the key from `definition.key`, so a typo can't silently bind
+ * the connection to a different (bundled/remote) connector.
+ */
+async function discoverLocalConnectorDefinitions(
+  cwd: string
+): Promise<DesiredConnectorDefinition[]> {
+  const dirPath = resolve(cwd, "connectors");
+  let entries: string[];
+  try {
+    entries = (await readdir(dirPath)).sort();
+  } catch {
+    // No `./connectors` dir — a project may declare no local connectors.
+    return [];
+  }
+
+  const defs: DesiredConnectorDefinition[] = [];
+  for (const entry of entries) {
+    if (!entry.endsWith(".connector.ts")) continue;
+    const entryPath = join(dirPath, entry);
+    let entryStat;
+    try {
+      entryStat = await stat(entryPath);
+    } catch {
+      continue;
+    }
+    if (!entryStat.isFile()) continue;
+    const sourceCode = await readFile(entryPath, "utf-8");
+    defs.push({
+      key: null,
+      sourcePath: entryPath,
+      sourceCode,
+      sourceFile: `connectors/${entry}`,
+    });
+  }
+  return defs.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
+}
+
+/**
  * Load desired state from a TypeScript entrypoint (`lobu.config.ts`) instead of
  * `lobu.toml`. Bundles the entrypoint with esbuild (relative imports inlined;
  * node_modules — including `@lobu/sdk` / `@lobu/connector-sdk` — externalized so
@@ -2059,10 +2119,15 @@ export async function loadDesiredStateFromConfig(
         "lobu.config.ts must `export default defineConfig({ ... })`"
       );
     }
-    return {
-      state: mapProjectToDesiredState(project as Project, env, opts.only),
-      configPath,
-    };
+    const state = mapProjectToDesiredState(project as Project, env, opts.only);
+    // `--only agents|memory` skips connectors (matching the mapper), so don't
+    // ship local connector source for those runs either.
+    if (!opts.only) {
+      state.connectors.definitions = await discoverLocalConnectorDefinitions(
+        opts.cwd
+      );
+    }
+    return { state, configPath };
   } finally {
     rmSync(outFile, { force: true });
   }
