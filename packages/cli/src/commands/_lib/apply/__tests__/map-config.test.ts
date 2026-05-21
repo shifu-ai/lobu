@@ -104,6 +104,23 @@ describe("mapProjectToDesiredState", () => {
     expect(dw?.minCooldownSeconds).toBe(1800);
   });
 
+  test("maps watcher reactionsGuidance + agentKind", () => {
+    const crm = defineAgent({ id: "crm" });
+    const watcher = defineWatcher({
+      agent: crm,
+      slug: "w",
+      prompt: "p",
+      extractionSchema: {},
+      reactionsGuidance: "Notify the account owner.",
+      agentKind: "notifier",
+    });
+    const dw = mapProjectToDesiredState(
+      defineConfig({ agents: [crm], watchers: [watcher] })
+    ).watchers[0];
+    expect(dw?.reactionsGuidance).toBe("Notify the account owner.");
+    expect(dw?.agentKind).toBe("notifier");
+  });
+
   test("throws when a watcher names an unknown agent", () => {
     const watcher = defineWatcher({
       agent: "ghost",

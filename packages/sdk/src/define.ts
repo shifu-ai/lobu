@@ -138,6 +138,11 @@ export interface Watcher {
   notification?: WatcherNotification;
   minCooldownSeconds?: number;
   tags?: string[];
+  /** LLM guidance for the watcher's downstream reaction agent. */
+  reactionsGuidance?: string;
+  /** Agent-kind override for firings (e.g. "background", "notifier"). */
+  agentKind?: string;
+  // NOTE: the executable `reaction` (TS module) lands in the reactions slice.
 }
 
 export function defineWatcher(config: Omit<Watcher, "kind">): Watcher {

@@ -451,6 +451,10 @@ function mapWatcher(watcher: Watcher): DesiredWatcher {
       ? { minCooldownSeconds: watcher.minCooldownSeconds }
       : {}),
     ...(watcher.tags ? { tags: watcher.tags } : {}),
+    ...(watcher.reactionsGuidance
+      ? { reactionsGuidance: watcher.reactionsGuidance }
+      : {}),
+    ...(watcher.agentKind ? { agentKind: watcher.agentKind } : {}),
   };
 }
 
