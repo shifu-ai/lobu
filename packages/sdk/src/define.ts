@@ -255,12 +255,10 @@ export interface Agent {
    * Consumed by `lobu run` (dev-time only) — not part of cloud apply.
    */
   preview?: Record<string, PreviewConfig>;
-  /** Connections this agent uses (handle or slug). */
-  connections?: Array<Connection | string>;
-  schema?: {
-    entities?: EntityType[];
-    relationships?: RelationshipType[];
-  };
+  // NOTE: connections and the memory schema are declared at the project level
+  // (`defineConfig({ connections, entities, relationships })`), matching the
+  // apply model — there is no agent-scoped association in DesiredState. Agent
+  // fields for them were removed rather than left silently ignored.
 }
 
 export function defineAgent(config: Omit<Agent, "kind">): Agent {
