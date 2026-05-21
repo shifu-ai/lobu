@@ -15,6 +15,7 @@ import type {
   Connection,
   ConnectorRef,
   EntityType,
+  McpServer,
   ProviderConfig,
   Project,
   RelationshipType,
@@ -105,6 +106,68 @@ function credentialString(
   return value;
 }
 
+/**
+ * Map SDK MCP server config to the agent-settings shape. Mirrors the TOML
+ * loader, including the loose cast: `authScope`/`oauth` aren't on the typed
+ * `McpServerConfig`, but the server accepts them. `$VAR` refs in headers/env and
+ * a `secret()` (or `$VAR`) `clientSecret` are collected into `required` so the
+ * apply secrets gate fails loud, and passed through verbatim (the server/secret
+ * proxy resolves them) — matching `buildAgentSettings`.
+ */
+function mapMcpServers(
+  servers: Record<string, McpServer>,
+  required: Set<string>
+): NonNullable<AgentSettings["mcpServers"]> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [id, mcp] of Object.entries(servers)) {
+    const mapped: Record<string, unknown> = {};
+    if (mcp.url) mapped.url = mcp.url;
+    // We DO map `type` (an intentional, more-correct improvement over the
+    // legacy agent-level TOML loader, which dropped it even though its
+    // skill-merge path kept it — and `McpServerConfig.type` is a real field).
+    if (mcp.type) mapped.type = mcp.type;
+    if (mcp.command) mapped.command = mcp.command;
+    if (mcp.args) mapped.args = mcp.args;
+    if (mcp.headers) {
+      for (const v of Object.values(mcp.headers)) {
+        const ref = envRefName(v);
+        if (ref) required.add(ref);
+      }
+      mapped.headers = { ...mcp.headers };
+    }
+    if (mcp.env) {
+      for (const v of Object.values(mcp.env)) {
+        const ref = envRefName(v);
+        if (ref) required.add(ref);
+      }
+      mapped.env = { ...mcp.env };
+    }
+    if (mcp.authScope) mapped.authScope = mcp.authScope;
+    if (mcp.oauth) {
+      // `client_id` may itself be a `$VAR` ref — collect it like the TOML
+      // loader's collectEnvRefs does (it's passed through verbatim).
+      if (mcp.oauth.clientId) {
+        const ref = envRefName(mcp.oauth.clientId);
+        if (ref) required.add(ref);
+      }
+      mapped.oauth = {
+        authUrl: mcp.oauth.authUrl,
+        tokenUrl: mcp.oauth.tokenUrl,
+        ...(mcp.oauth.clientId ? { clientId: mcp.oauth.clientId } : {}),
+        ...(mcp.oauth.clientSecret
+          ? { clientSecret: credentialString(mcp.oauth.clientSecret, required) }
+          : {}),
+        ...(mcp.oauth.scopes ? { scopes: mcp.oauth.scopes } : {}),
+        ...(mcp.oauth.tokenEndpointAuthMethod
+          ? { tokenEndpointAuthMethod: mcp.oauth.tokenEndpointAuthMethod }
+          : {}),
+      };
+    }
+    out[id] = mapped;
+  }
+  return out as NonNullable<AgentSettings["mcpServers"]>;
+}
+
 function mapAgent(
   agent: Agent,
   env: NodeJS.ProcessEnv,
@@ -130,11 +193,68 @@ function mapAgent(
 
   const allowed = agent.network?.allowed ?? [];
   const denied = agent.network?.denied ?? [];
-  if (allowed.length > 0 || denied.length > 0) {
+  const judges = agent.network?.judges ?? {};
+  const hasJudges = Object.keys(judges).length > 0;
+  // Dedup judged rules by domain (last wins), matching buildAgentSettings.
+  const judgedByDomain = new Map<string, { domain: string; judge?: string }>();
+  for (const rule of agent.network?.judged ?? []) {
+    judgedByDomain.set(rule.domain, {
+      domain: rule.domain,
+      ...(rule.judge ? { judge: rule.judge } : {}),
+    });
+  }
+  const judgedDomains = [...judgedByDomain.values()];
+  if (
+    allowed.length > 0 ||
+    denied.length > 0 ||
+    judgedDomains.length > 0 ||
+    hasJudges
+  ) {
     settings.networkConfig = {
       ...(allowed.length > 0 ? { allowedDomains: [...new Set(allowed)] } : {}),
       ...(denied.length > 0 ? { deniedDomains: [...new Set(denied)] } : {}),
+      ...(judgedDomains.length > 0 ? { judgedDomains } : {}),
+      ...(hasJudges ? { judges } : {}),
     };
+  }
+
+  if (agent.egress) {
+    const egressConfig: NonNullable<AgentSettings["egressConfig"]> = {};
+    if (agent.egress.extraPolicy) {
+      egressConfig.extraPolicy = agent.egress.extraPolicy;
+    }
+    if (agent.egress.judgeModel)
+      egressConfig.judgeModel = agent.egress.judgeModel;
+    if (Object.keys(egressConfig).length > 0)
+      settings.egressConfig = egressConfig;
+  }
+
+  if (agent.tools) {
+    if (agent.tools.preApproved?.length) {
+      settings.preApprovedTools = [...new Set(agent.tools.preApproved)];
+    }
+    const toolsConfig: NonNullable<AgentSettings["toolsConfig"]> = {};
+    if (agent.tools.allowed?.length) {
+      toolsConfig.allowedTools = [...new Set(agent.tools.allowed)];
+    }
+    if (agent.tools.denied?.length) {
+      toolsConfig.deniedTools = [...new Set(agent.tools.denied)];
+    }
+    if (agent.tools.strict !== undefined)
+      toolsConfig.strictMode = agent.tools.strict;
+    if (Object.keys(toolsConfig).length > 0) settings.toolsConfig = toolsConfig;
+  }
+
+  if (agent.guardrails?.length) {
+    settings.guardrails = [...new Set(agent.guardrails)];
+  }
+
+  if (agent.nixPackages?.length) {
+    settings.nixConfig = { packages: [...new Set(agent.nixPackages)] };
+  }
+
+  if (agent.mcpServers && Object.keys(agent.mcpServers).length > 0) {
+    settings.mcpServers = mapMcpServers(agent.mcpServers, required);
   }
 
   const providerKeys: { providerId: string; value: string }[] = [];
@@ -353,9 +473,15 @@ export function mapProjectToDesiredState(
     }
   }
 
+  const memory: NonNullable<DesiredState["memory"]> = {};
+  if (project.org) memory.org = project.org;
+  if (project.orgName) memory.name = project.orgName;
+  if (project.orgDescription) memory.description = project.orgDescription;
+  if (project.organizationId) memory.organizationId = project.organizationId;
+
   return {
     agents,
-    ...(project.org ? { memory: { org: project.org } } : {}),
+    ...(Object.keys(memory).length > 0 ? { memory } : {}),
     memorySchema: { entityTypes, relationshipTypes },
     watchers,
     connectors: { definitions: [], authProfiles, connections },

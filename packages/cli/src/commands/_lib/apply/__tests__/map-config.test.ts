@@ -247,4 +247,198 @@ describe("mapProjectToDesiredState", () => {
     expect(state.requiredSecrets).not.toContain("GH_SECRET");
     expect(state.agents).toHaveLength(1);
   });
+
+  test("maps network judged domains + named judge policies", () => {
+    const agent = defineAgent({
+      id: "ofc",
+      network: {
+        allowed: ["api.z.ai"],
+        judged: [
+          { domain: "deliveroo.co.uk", judge: "deliveroo" },
+          { domain: ".deliveroo.co.uk", judge: "deliveroo" },
+        ],
+        judges: { deliveroo: "Allow reads; deny checkout." },
+      },
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [agent] }),
+      env
+    );
+    const net = state.agents[0]?.settings.networkConfig;
+    expect(net?.allowedDomains).toEqual(["api.z.ai"]);
+    expect(net?.judgedDomains).toEqual([
+      { domain: "deliveroo.co.uk", judge: "deliveroo" },
+      { domain: ".deliveroo.co.uk", judge: "deliveroo" },
+    ]);
+    expect(net?.judges).toEqual({ deliveroo: "Allow reads; deny checkout." });
+  });
+
+  test("maps egress, tools, guardrails, nix packages", () => {
+    const agent = defineAgent({
+      id: "a",
+      egress: { extraPolicy: "no payments", judgeModel: "haiku" },
+      tools: {
+        preApproved: ["/mcp/gmail/tools/send_email"],
+        allowed: ["Bash", "Bash"],
+        denied: ["Delete"],
+        strict: true,
+      },
+      guardrails: ["secret-scan", "secret-scan", "pii-scan"],
+      nixPackages: ["ffmpeg", "ffmpeg", "python311"],
+    });
+    const settings = mapProjectToDesiredState(
+      defineConfig({ agents: [agent] }),
+      env
+    ).agents[0]?.settings;
+    expect(settings?.egressConfig).toEqual({
+      extraPolicy: "no payments",
+      judgeModel: "haiku",
+    });
+    expect(settings?.preApprovedTools).toEqual(["/mcp/gmail/tools/send_email"]);
+    expect(settings?.toolsConfig).toEqual({
+      allowedTools: ["Bash"],
+      deniedTools: ["Delete"],
+      strictMode: true,
+    });
+    expect(settings?.guardrails).toEqual(["secret-scan", "pii-scan"]);
+    expect(settings?.nixConfig).toEqual({ packages: ["ffmpeg", "python311"] });
+  });
+
+  test("maps custom MCP servers and collects oauth/header secret refs", () => {
+    const agent = defineAgent({
+      id: "a",
+      mcpServers: {
+        linear: {
+          url: "https://mcp.linear.app/sse",
+          type: "sse",
+          headers: { Authorization: "$LINEAR_TOKEN" },
+          oauth: {
+            authUrl: "https://linear.app/oauth/authorize",
+            tokenUrl: "https://api.linear.app/oauth/token",
+            clientId: "cid",
+            clientSecret: secret("LINEAR_CLIENT_SECRET"),
+            scopes: ["read"],
+          },
+        },
+      },
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [agent] }),
+      env
+    );
+    const linear = state.agents[0]?.settings.mcpServers?.linear as
+      | Record<string, unknown>
+      | undefined;
+    expect(linear?.url).toBe("https://mcp.linear.app/sse");
+    expect(linear?.headers).toEqual({ Authorization: "$LINEAR_TOKEN" });
+    expect(linear?.oauth).toEqual({
+      authUrl: "https://linear.app/oauth/authorize",
+      tokenUrl: "https://api.linear.app/oauth/token",
+      clientId: "cid",
+      clientSecret: "$LINEAR_CLIENT_SECRET",
+      scopes: ["read"],
+    });
+    expect(state.requiredSecrets).toEqual(
+      expect.arrayContaining(["LINEAR_TOKEN", "LINEAR_CLIENT_SECRET"])
+    );
+  });
+
+  test("maps org metadata into memory", () => {
+    const state = mapProjectToDesiredState(
+      defineConfig({
+        org: "lobu-team",
+        orgName: "Lobu Team",
+        orgDescription: "Office-ops agents",
+        organizationId: "org_123",
+        agents: [defineAgent({ id: "a" })],
+      })
+    );
+    expect(state.memory).toEqual({
+      org: "lobu-team",
+      name: "Lobu Team",
+      description: "Office-ops agents",
+      organizationId: "org_123",
+    });
+  });
+
+  test("preview is authoring-only and not mapped into agent settings", () => {
+    const agent = defineAgent({
+      id: "a",
+      preview: { slack: { enabled: true, surfaces: ["dm", "channel"] } },
+    });
+    const settings = mapProjectToDesiredState(
+      defineConfig({ agents: [agent] }),
+      env
+    ).agents[0]?.settings;
+    // preview drives `lobu run` only — it must not leak into cloud settings.
+    expect(settings).not.toHaveProperty("preview");
+  });
+
+  test("dedups judged domains by domain (last wins), matching buildAgentSettings", () => {
+    const agent = defineAgent({
+      id: "a",
+      network: {
+        judged: [
+          { domain: "x.com", judge: "first" },
+          { domain: "x.com", judge: "second" },
+          { domain: "y.com" },
+        ],
+      },
+    });
+    const net = mapProjectToDesiredState(defineConfig({ agents: [agent] }), env)
+      .agents[0]?.settings.networkConfig;
+    expect(net?.judgedDomains).toEqual([
+      { domain: "x.com", judge: "second" },
+      { domain: "y.com" },
+    ]);
+  });
+
+  test("collects mcp env + oauth clientId/clientSecret $VAR refs (parity with collectEnvRefs)", () => {
+    const agent = defineAgent({
+      id: "a",
+      mcpServers: {
+        svc: {
+          command: "node",
+          args: ["server.js"],
+          env: { TOKEN: "$SVC_TOKEN" },
+          oauth: {
+            authUrl: "https://a",
+            tokenUrl: "https://t",
+            clientId: "$SVC_CLIENT_ID",
+            clientSecret: "$SVC_CLIENT_SECRET",
+          },
+        },
+      },
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [agent] }),
+      env
+    );
+    expect(state.requiredSecrets).toEqual(
+      expect.arrayContaining([
+        "SVC_TOKEN",
+        "SVC_CLIENT_ID",
+        "SVC_CLIENT_SECRET",
+      ])
+    );
+    // A `$VAR`-string clientSecret is passed through verbatim.
+    const oauth = (
+      state.agents[0]?.settings.mcpServers?.svc as Record<string, unknown>
+    ).oauth as Record<string, unknown>;
+    expect(oauth.clientSecret).toBe("$SVC_CLIENT_SECRET");
+  });
+
+  test("omits absent agent settings (no empty config objects)", () => {
+    const settings = mapProjectToDesiredState(
+      defineConfig({ agents: [defineAgent({ id: "a" })] }),
+      env
+    ).agents[0]?.settings;
+    expect(settings).not.toHaveProperty("networkConfig");
+    expect(settings).not.toHaveProperty("egressConfig");
+    expect(settings).not.toHaveProperty("toolsConfig");
+    expect(settings).not.toHaveProperty("preApprovedTools");
+    expect(settings).not.toHaveProperty("guardrails");
+    expect(settings).not.toHaveProperty("nixConfig");
+    expect(settings).not.toHaveProperty("mcpServers");
+  });
 });

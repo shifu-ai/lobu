@@ -154,9 +154,74 @@ export interface ProviderConfig {
   key?: string | SecretRef;
 }
 
+/** Per-domain egress-judge rule: route `domain` through the named judge policy. */
+export interface JudgedDomain {
+  domain: string;
+  /** Name of a policy declared in {@link NetworkConfig.judges}. */
+  judge?: string;
+}
+
 export interface NetworkConfig {
+  /** Domains the worker may reach (exact or `.wildcard`). */
+  allowed?: string[];
+  /** Domains explicitly blocked (takes precedence over `allowed`). */
+  denied?: string[];
+  /** Domains routed through the LLM egress judge. */
+  judged?: JudgedDomain[];
+  /** Named judge policies (prompt text), referenced by `judged[].judge`. */
+  judges?: Record<string, string>;
+}
+
+/** Operator-level overrides for the LLM egress judge. */
+export interface EgressConfig {
+  /** Extra instructions appended to the egress judge prompt. */
+  extraPolicy?: string;
+  /** Override the model the egress judge runs on. */
+  judgeModel?: string;
+}
+
+/** Worker-side tool permissions. */
+export interface ToolsConfig {
+  /**
+   * MCP tool grant patterns pre-approved by the operator (e.g.
+   * `/mcp/gmail/tools/send_email`), bypassing the in-chat approval card.
+   */
+  preApproved?: string[];
   allowed?: string[];
   denied?: string[];
+  /** Reject tool calls that aren't in `allowed`. */
+  strict?: boolean;
+}
+
+/** OAuth flow for a custom MCP server. */
+export interface McpServerOAuth {
+  authUrl: string;
+  tokenUrl: string;
+  clientId?: string;
+  clientSecret?: string | SecretRef;
+  scopes?: string[];
+  tokenEndpointAuthMethod?: string;
+}
+
+/** A custom MCP server made available to the agent's worker. */
+export interface McpServer {
+  url?: string;
+  command?: string;
+  args?: string[];
+  headers?: Record<string, string>;
+  type?: "sse" | "streamable-http" | "stdio";
+  authScope?: "user" | "channel";
+  oauth?: McpServerOAuth;
+  env?: Record<string, string>;
+}
+
+/** Hosted "Lobu Developer" preview-bot config for one chat platform. */
+export interface PreviewConfig {
+  enabled?: boolean;
+  /** Surfaces a preview code can bind: a DM with the bot, or a channel. */
+  surfaces?: Array<"dm" | "channel">;
+  /** Short-lived claim-code TTL (capped by the hosted preview API). */
+  codeTtlMinutes?: number;
 }
 
 export interface Agent {
@@ -164,8 +229,27 @@ export interface Agent {
   id: string;
   name?: string;
   description?: string;
+  /**
+   * Agent directory holding `SOUL.md` / `IDENTITY.md` / `USER.md` and a
+   * `skills/` folder. Relative to the config file; defaults to
+   * `./agents/<id>`.
+   */
+  dir?: string;
   providers?: ProviderConfig[];
   network?: NetworkConfig;
+  egress?: EgressConfig;
+  tools?: ToolsConfig;
+  /** Guardrails enabled for this agent, by registered name. */
+  guardrails?: string[];
+  /** Nix packages provisioned into the worker environment. */
+  nixPackages?: string[];
+  /** Custom MCP servers, keyed by id. */
+  mcpServers?: Record<string, McpServer>;
+  /**
+   * Hosted preview-bot config, keyed by chat platform (`slack`/`telegram`).
+   * Consumed by `lobu run` (dev-time only) — not part of cloud apply.
+   */
+  preview?: Record<string, PreviewConfig>;
   /** Connections this agent uses (handle or slug). */
   connections?: Array<Connection | string>;
   schema?: {
@@ -186,6 +270,12 @@ export interface Project {
   readonly kind: "project";
   /** Lobu Cloud org slug this project applies to. */
   org?: string;
+  /** Display name used if `lobu apply` offers to provision the org. */
+  orgName?: string;
+  /** Org description. */
+  orgDescription?: string;
+  /** Resolved Lobu Cloud org id — `lobu apply` matches against it. */
+  organizationId?: string;
   agents: Agent[];
   entities?: EntityType[];
   relationships?: RelationshipType[];
