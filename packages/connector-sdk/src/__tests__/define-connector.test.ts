@@ -128,4 +128,33 @@ describe("defineConnector", () => {
 		expect(isConnectorRuntimeClass(ReadOnly)).toBe(true);
 		expect(new ReadOnly().definition.actions).toBeUndefined();
 	});
+
+	const authCtx = () => ({
+		config: {},
+		previousCredentials: null,
+		emit: async () => {},
+		awaitSignal: async () => ({}),
+		signal: new AbortController().signal,
+	});
+
+	test("authenticate dispatches to the spec handler when provided", async () => {
+		const WithAuth = defineConnector({
+			key: "wa",
+			name: "WithAuth",
+			version: "0.0.1",
+			feeds: {
+				f: { name: "F", sync: async () => ({ events: [], checkpoint: null }) },
+			},
+			authenticate: async () => ({ credentials: { token: "t" } }),
+		});
+		await expect(new WithAuth().authenticate(authCtx())).resolves.toEqual({
+			credentials: { token: "t" },
+		});
+	});
+
+	test("authenticate throws by default when no handler is provided", () => {
+		expect(new Github().authenticate(authCtx())).rejects.toThrow(
+			/interactive authentication/,
+		);
+	});
 });
