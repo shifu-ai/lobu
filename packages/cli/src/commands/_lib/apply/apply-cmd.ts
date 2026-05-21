@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
@@ -25,6 +26,7 @@ import {
   type DesiredConnectorDefinition,
   type DesiredState,
   loadDesiredState,
+  loadDesiredStateFromConfig,
   resolveConnectorSchemas,
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
@@ -1007,10 +1009,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // `lobu dev` does. Existing process.env values win (don't clobber the shell).
   await loadProjectEnvFile(cwd);
 
-  const { state, configPath } = await loadDesiredState({
-    cwd,
-    ...(opts.only ? { only: opts.only } : {}),
-  });
+  // Prefer the TypeScript entrypoint (lobu.config.ts); fall back to lobu.toml.
+  const loadArgs = { cwd, ...(opts.only ? { only: opts.only } : {}) };
+  const { state, configPath } = existsSync(join(cwd, "lobu.config.ts"))
+    ? await loadDesiredStateFromConfig(loadArgs)
+    : await loadDesiredState(loadArgs);
 
   printText(chalk.dim(`Config: ${configPath}`));
 
