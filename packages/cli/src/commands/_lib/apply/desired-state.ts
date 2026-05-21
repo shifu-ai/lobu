@@ -1,6 +1,9 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import type { Project } from "@lobu/sdk";
 import type {
   ConnectorAuthSchema,
   ConnectorDefinition,
@@ -22,6 +25,7 @@ import {
   isLoadError,
   loadConfig,
 } from "../../../config/loader.js";
+import { mapProjectToDesiredState } from "./map-config.js";
 import { CronExpressionParser } from "cron-parser";
 
 // ── Connector slug / schedule validators (round-2) ─────────────────────────
@@ -2006,4 +2010,60 @@ export async function loadDesiredState(
     },
     configPath,
   };
+}
+
+/**
+ * Load desired state from a TypeScript entrypoint (`lobu.config.ts`) instead of
+ * `lobu.toml`. Bundles the entrypoint with esbuild (relative imports inlined;
+ * node_modules — including `@lobu/sdk` / `@lobu/connector-sdk` — externalized so
+ * they resolve from the project at import time), imports the bundle to read the
+ * `defineConfig()` default export, and maps it to `DesiredState`.
+ *
+ * The dynamic imports here are intentional and allow-listed (AGENTS.md): esbuild
+ * is loaded lazily so the TOML path doesn't pay for it, and the bundled config
+ * is a generated file imported by URL.
+ */
+export async function loadDesiredStateFromConfig(
+  opts: LoadDesiredStateOptions
+): Promise<{ state: DesiredState; configPath: string }> {
+  const configPath = resolve(opts.cwd, "lobu.config.ts");
+  if (!existsSync(configPath)) {
+    throw new ValidationError(`No lobu.config.ts found in ${opts.cwd}`);
+  }
+  const env = opts.env ?? process.env;
+  const { build } = await import("esbuild");
+  const outFile = resolve(
+    opts.cwd,
+    `.lobu-config.${randomBytes(6).toString("hex")}.mjs`
+  );
+  try {
+    await build({
+      entryPoints: [configPath],
+      outfile: outFile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      packages: "external",
+      logLevel: "silent",
+    });
+    const mod = (await import(pathToFileURL(outFile).href)) as {
+      default?: unknown;
+    };
+    const project = mod.default;
+    if (
+      !project ||
+      typeof project !== "object" ||
+      (project as { kind?: unknown }).kind !== "project"
+    ) {
+      throw new ValidationError(
+        "lobu.config.ts must `export default defineConfig({ ... })`"
+      );
+    }
+    return {
+      state: mapProjectToDesiredState(project as Project, env),
+      configPath,
+    };
+  } finally {
+    rmSync(outFile, { force: true });
+  }
 }
