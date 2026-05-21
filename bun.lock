@@ -351,6 +351,17 @@
         "typescript": "^5.3.3",
       },
     },
+    "packages/sdk": {
+      "name": "@lobu/sdk",
+      "version": "9.1.1",
+      "dependencies": {
+        "@lobu/connector-sdk": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^20.10.0",
+        "typescript": "^5.3.3",
+      },
+    },
     "packages/server": {
       "name": "@lobu/server",
       "version": "1.6.0",
@@ -1108,6 +1119,8 @@
     "@lobu/pgvector-embedded": ["@lobu/pgvector-embedded@workspace:packages/pgvector-embedded"],
 
     "@lobu/promptfoo-provider": ["@lobu/promptfoo-provider@workspace:packages/promptfoo-provider"],
+
+    "@lobu/sdk": ["@lobu/sdk@workspace:packages/sdk"],
 
     "@lobu/server": ["@lobu/server@workspace:packages/server"],
 

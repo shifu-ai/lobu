@@ -53,6 +53,7 @@
     "packages/landing/**/*",
     "packages/server/**/*",
     "packages/connector-sdk/**/*",
+    "packages/sdk/**/*",
     "packages/openclaw-plugin/**/*",
     "packages/connector-worker/**/*",
     "packages/connectors/**/*",
