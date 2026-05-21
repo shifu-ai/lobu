@@ -42,14 +42,20 @@ const CONFIG_SOURCE = "lobu.config.ts";
 // loud in the CLI before any remote mutation, not with a confusing server 4xx.
 const CONNECTION_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const AUTH_PROFILE_SLUG_PATTERN = /^[a-z0-9][a-z0-9-]{0,79}$/;
+const MIN_CRON_INTERVAL_MS = 60_000;
 
-/** Returns an error message if the cron schedule is invalid, else null. */
+/** Error message if the cron is invalid or fires more than once a minute, else null. */
 function cronError(schedule: string): string | null {
   try {
-    CronExpressionParser.parse(schedule);
+    const it = CronExpressionParser.parse(schedule);
+    const first = it.next().toDate();
+    const second = it.next().toDate();
+    if (second.getTime() - first.getTime() < MIN_CRON_INTERVAL_MS) {
+      return `schedule "${schedule}" is too frequent (minimum interval is 1 minute)`;
+    }
     return null;
   } catch (err) {
-    return err instanceof Error ? err.message : String(err);
+    return `invalid cron expression "${schedule}" — ${err instanceof Error ? err.message : String(err)}`;
   }
 }
 

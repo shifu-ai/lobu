@@ -178,6 +178,22 @@ describe("mapProjectToDesiredState", () => {
     ).toThrow(/invalid schedule/);
   });
 
+  test("rejects a sub-minute cron schedule (parity with TOML/server)", () => {
+    const crm = defineAgent({ id: "crm" });
+    const watcher = defineWatcher({
+      agent: crm,
+      slug: "w",
+      prompt: "p",
+      extractionSchema: {},
+      schedule: "*/30 * * * * *",
+    });
+    expect(() =>
+      mapProjectToDesiredState(
+        defineConfig({ agents: [crm], watchers: [watcher] })
+      )
+    ).toThrow(/too frequent/);
+  });
+
   test("rejects credentials on an interactive auth profile", () => {
     const auth = defineAuthProfile({
       slug: "gh-acct",
