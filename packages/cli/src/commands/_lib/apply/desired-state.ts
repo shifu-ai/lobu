@@ -2075,6 +2075,64 @@ async function discoverLocalConnectorDefinitions(
   return defs.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
 }
 
+const REACTION_SCRIPT_MAX_BYTES = 256 * 1024;
+
+/**
+ * Resolve + read a watcher reaction script (`defineWatcher({ reaction })`) for
+ * the TS config path. Mirrors the TOML loader's `parseWatcher` validation:
+ * relative POSIX path under the config directory, ends in `.ts`, no `..` /
+ * absolute / backslash segments, ≤256KB. Ships RAW source — the server compiles
+ * it — exactly as the TOML path does via `set_reaction_script`.
+ */
+function resolveReactionScript(
+  cwd: string,
+  watcherSlug: string,
+  rel: string
+): { sourcePath: string; sourceCode: string } {
+  const trimmed = rel.trim();
+  if (!trimmed) {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` must be a path to a sibling .ts file (e.g. \`reaction: "./reactions/foo.reaction.ts"\`)`
+    );
+  }
+  if (trimmed.startsWith("/") || trimmed.includes("\\")) {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` must be a relative POSIX path (./foo.reaction.ts) — absolute paths and backslashes are not allowed`
+    );
+  }
+  if (trimmed.split("/").some((seg) => seg === "..")) {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` must not contain \`..\` segments — keep the script under the config directory`
+    );
+  }
+  if (!trimmed.endsWith(".ts")) {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` must end in \`.ts\` (got ${JSON.stringify(trimmed)})`
+    );
+  }
+  const baseDir = resolve(cwd);
+  const abs = resolve(baseDir, trimmed);
+  if (!abs.startsWith(`${baseDir}/`) && abs !== baseDir) {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` resolves outside the config directory (${abs})`
+    );
+  }
+  let sourceCode: string;
+  try {
+    sourceCode = readFileSync(abs, "utf-8");
+  } catch {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` ${trimmed} does not exist (resolved to ${abs})`
+    );
+  }
+  if (Buffer.byteLength(sourceCode, "utf8") > REACTION_SCRIPT_MAX_BYTES) {
+    throw new ValidationError(
+      `watcher "${watcherSlug}" \`reaction\` exceeds the ${REACTION_SCRIPT_MAX_BYTES}-byte cap — reaction scripts should be a few hundred lines, not a vendored library`
+    );
+  }
+  return { sourcePath: abs, sourceCode };
+}
+
 /**
  * Load desired state from a TypeScript entrypoint (`lobu.config.ts`) instead of
  * `lobu.toml`. Bundles the entrypoint with esbuild (relative imports inlined;
@@ -2149,6 +2207,23 @@ export async function loadDesiredStateFromConfig(
         );
       })
     );
+
+    // Watcher reaction scripts: a sibling `.ts` file referenced by path. The
+    // mapper stays pure; resolve + read the source here (raw, server compiles
+    // it) and attach it. state.watchers[i] aligns with typedProject.watchers[i]
+    // (the mapper maps them in order).
+    (typedProject.watchers ?? []).forEach((watcher, i) => {
+      // Gate on absence, not truthiness — a present-but-empty `reaction: ""`
+      // must reach the validator (which rejects it), matching parseWatcher.
+      if (watcher.reaction === undefined) return;
+      const dw = state.watchers[i];
+      if (!dw) return;
+      dw.reactionScript = resolveReactionScript(
+        opts.cwd,
+        watcher.slug,
+        watcher.reaction
+      );
+    });
 
     // `--only agents|memory` skips connectors (matching the mapper), so don't
     // ship local connector source for those runs either.

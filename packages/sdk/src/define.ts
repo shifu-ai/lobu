@@ -142,7 +142,14 @@ export interface Watcher {
   reactionsGuidance?: string;
   /** Agent-kind override for firings (e.g. "background", "notifier"). */
   agentKind?: string;
-  // NOTE: the executable `reaction` (TS module) lands in the reactions slice.
+  /**
+   * Relative POSIX path to a sibling `.ts` reaction script
+   * (`./reactions/foo.reaction.ts`), compiled + run in a sandboxed isolate when
+   * the watcher fires. The script must `export default async (ctx, client) =>
+   * …`. Kept in its own file (not inline) so your IDE type-checks it; the path
+   * must stay under the config directory.
+   */
+  reaction?: string;
 }
 
 export function defineWatcher(config: Omit<Watcher, "kind">): Watcher {

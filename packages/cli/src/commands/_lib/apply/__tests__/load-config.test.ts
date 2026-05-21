@@ -269,6 +269,103 @@ describe("loadDesiredStateFromConfig", () => {
     expect(skills?.[0]?.content).toBe("Agent ops.");
   });
 
+  test("loads a watcher reaction script (raw source) referenced by path", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "reaction-"));
+    mkdirSync(join(dir, "reactions"));
+    writeFileSync(
+      join(dir, "reactions", "health.reaction.ts"),
+      [
+        `import type { ReactionContext, ReactionClient } from "@lobu/connector-sdk";`,
+        `export default async (ctx: ReactionContext, client: ReactionClient) => {`,
+        `  await client.knowledge.save({ content: "ok", semantic_type: "digest" });`,
+        `};`,
+        ``,
+      ].join("\n")
+    );
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig, defineWatcher } from "@lobu/sdk";`,
+        `const crm = defineAgent({ id: "crm" });`,
+        `export default defineConfig({`,
+        `  agents: [crm],`,
+        `  watchers: [defineWatcher({`,
+        `    agent: crm, slug: "health", prompt: "p", extractionSchema: { type: "object" },`,
+        `    reaction: "./reactions/health.reaction.ts",`,
+        `  })],`,
+        `});`,
+        ``,
+      ].join("\n")
+    );
+
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    const rs = state.watchers[0]?.reactionScript;
+    expect(rs?.sourcePath).toContain("health.reaction.ts");
+    expect(rs?.sourceCode).toContain("client.knowledge.save");
+  });
+
+  test("rejects a reaction path that escapes the config dir or is missing", async () => {
+    const write = (reaction: string) => {
+      dir = mkdtempSync(join(import.meta.dir, "badreaction-"));
+      writeFileSync(
+        join(dir, "lobu.config.ts"),
+        [
+          `import { defineAgent, defineConfig, defineWatcher } from "@lobu/sdk";`,
+          `const crm = defineAgent({ id: "crm" });`,
+          `export default defineConfig({ agents: [crm], watchers: [defineWatcher({`,
+          `  agent: crm, slug: "w", prompt: "p", extractionSchema: {}, reaction: ${JSON.stringify(reaction)},`,
+          `})] });`,
+          ``,
+        ].join("\n")
+      );
+      return loadDesiredStateFromConfig({ cwd: dir });
+    };
+    await expect(write("../escape.reaction.ts")).rejects.toThrow(/\.\./);
+    rmSync(dir, { recursive: true, force: true });
+    await expect(write("/abs/path.reaction.ts")).rejects.toThrow(
+      /relative POSIX path/
+    );
+    rmSync(dir, { recursive: true, force: true });
+    await expect(write("./missing.reaction.ts")).rejects.toThrow(
+      /does not exist/
+    );
+    rmSync(dir, { recursive: true, force: true });
+    // Present-but-empty must be rejected (not silently skipped) — parity with
+    // parseWatcher, which validates whenever the field is present.
+    await expect(write("")).rejects.toThrow(/sibling \.ts file/);
+    rmSync(dir, { recursive: true, force: true });
+    await expect(write("./notes.md")).rejects.toThrow(/must end in `\.ts`/);
+  });
+
+  test("attaches the reaction to the right watcher when only one of several has one", async () => {
+    dir = mkdtempSync(join(import.meta.dir, "reactionidx-"));
+    mkdirSync(join(dir, "reactions"));
+    writeFileSync(
+      join(dir, "reactions", "second.reaction.ts"),
+      `export default async () => {};\n`
+    );
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig, defineWatcher } from "@lobu/sdk";`,
+        `const a = defineAgent({ id: "a" });`,
+        `export default defineConfig({ agents: [a], watchers: [`,
+        `  defineWatcher({ agent: a, slug: "first", prompt: "p", extractionSchema: {} }),`,
+        `  defineWatcher({ agent: a, slug: "second", prompt: "p", extractionSchema: {}, reaction: "./reactions/second.reaction.ts" }),`,
+        `] });`,
+        ``,
+      ].join("\n")
+    );
+
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+    expect(state.watchers[0]?.slug).toBe("first");
+    expect(state.watchers[0]?.reactionScript).toBeUndefined();
+    expect(state.watchers[1]?.slug).toBe("second");
+    expect(state.watchers[1]?.reactionScript?.sourcePath).toContain(
+      "second.reaction.ts"
+    );
+  });
+
   test("no connectors/ dir → no definitions", async () => {
     dir = mkdtempSync(join(import.meta.dir, "nodir-"));
     writeFileSync(
