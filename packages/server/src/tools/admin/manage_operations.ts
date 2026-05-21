@@ -639,7 +639,11 @@ async function handleExecute(
     ORDER BY updated_at DESC, id DESC
     LIMIT 1
   `) as Array<{ runtime: Record<string, unknown> | null }>;
-  const isDeviceBound = defRows[0]?.runtime != null;
+  const runtime = defRows[0]?.runtime;
+  const isDeviceBound = runtime != null;
+  const isAppHosted = runtime?.mode === 'app_hosted';
+  // App-hosted connectors also use the device lane: their code lives in the
+  // SDK process polling /api/workers/*, not in gateway compiled_code.
 
   const approvalMode: 'inline' | 'queued' | 'device' = shouldQueue
     ? 'queued'
@@ -654,7 +658,7 @@ async function handleExecute(
     operationKey: operation.operation_key,
     operationInput: input,
     approvalMode,
-    requireCompiledCode: operation.backend === 'local_action',
+    requireCompiledCode: operation.backend === 'local_action' && !isAppHosted,
   });
 
   if (args.watcher_source) {

@@ -8,9 +8,11 @@ export type LobuHeaders =
 
 export interface LobuClientOptions {
   baseUrl: string;
+  apiBaseUrl?: string;
   token: TokenProvider;
   fetch?: LobuFetch;
   headers?: LobuHeaders;
+  org?: string;
 }
 
 export interface CreateSessionRequest {
@@ -76,4 +78,8 @@ export interface LobuSseEvent<TData = unknown> {
 export interface StreamEventsOptions {
   signal?: AbortSignal;
   headers?: LobuHeaders;
+}
+
+export interface LobuInternalRequestOptions {
+  signal?: AbortSignal;
 }

@@ -48,6 +48,7 @@ import {
   resolveNewConnectionSlug,
 } from '../../utils/connections';
 import { ensureConnectorInstalled } from '../../utils/ensure-connector-installed';
+import type { ConnectorMetadata } from '../../utils/connector-compiler';
 import { applyEntityLinkOverrides } from '../../utils/entity-link-overrides';
 import { recordChangeEvent, recordLifecycleEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
@@ -63,6 +64,7 @@ import {
   getScopedConnectorDefinition,
   installConnectorDefinitionFromSource,
   installConnectorFromMcpUrl,
+  installHostedConnectorDefinition,
   listScopedConnectorDefinitions,
   type ScopedConnectorDefinitionRow,
   toggleConnectorLoginEnabled,
@@ -235,6 +237,12 @@ const InstallConnectorAction = Type.Object({
     Type.String({
       description:
         'URL to a remote MCP server (Streamable HTTP). Probes the server directly, no compilation needed.',
+    })
+  ),
+  connector_definition: Type.Optional(
+    Type.Record(Type.String(), Type.Any(), {
+      description:
+        'Metadata-only connector definition for SDK-hosted functions. Stores schemas only; code runs in the polling SDK worker.',
     })
   ),
   auth_values: Type.Optional(
@@ -2264,18 +2272,23 @@ async function handleInstallConnector(
   ctx: ToolContext
 ): Promise<ManageConnectionsResult> {
   try {
-    const installed = args.mcp_url
-      ? await installConnectorFromMcpUrl({
+    const installed = args.connector_definition
+      ? await installHostedConnectorDefinition({
           organizationId: ctx.organizationId,
-          mcpUrl: args.mcp_url,
+          metadata: args.connector_definition as ConnectorMetadata,
         })
-      : await installConnectorDefinitionFromSource({
-          organizationId: ctx.organizationId,
-          sourceUrl: args.source_url,
-          sourceUri: args.source_uri,
-          sourceCode: args.source_code,
-          compiled: args.compiled,
-        });
+      : args.mcp_url
+        ? await installConnectorFromMcpUrl({
+            organizationId: ctx.organizationId,
+            mcpUrl: args.mcp_url,
+          })
+        : await installConnectorDefinitionFromSource({
+            organizationId: ctx.organizationId,
+            sourceUrl: args.source_url,
+            sourceUri: args.source_uri,
+            sourceCode: args.source_code,
+            compiled: args.compiled,
+          });
 
     await maybeUpsertAuthAfterInstall(installed, args.auth_values, ctx);
 

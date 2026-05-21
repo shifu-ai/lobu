@@ -143,6 +143,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   let platform: string | null = null;
   let app_version: string | null = null;
   let label: string | null = null;
+  let connectorKeys: string[] = [];
   try {
     const body = await c.req.json<{
       worker_id: string;
@@ -150,12 +151,16 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
       platform?: string;
       app_version?: string;
       label?: string;
+      connector_keys?: string[];
     }>();
     worker_id = body.worker_id;
     capabilities = body.capabilities ?? {};
     platform = body.platform ?? null;
     app_version = body.app_version ?? null;
     label = body.label ?? null;
+    connectorKeys = Array.isArray(body.connector_keys)
+      ? body.connector_keys.filter((key): key is string => typeof key === 'string' && key.length > 0)
+      : [];
   } catch {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
   }
@@ -371,7 +376,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         FROM runs r
         LEFT JOIN connections con ON con.id = r.connection_id
         LEFT JOIN LATERAL (
-          SELECT cd.api_type, cd.required_capability
+          SELECT cd.api_type, cd.required_capability, cd.runtime
           FROM connector_definitions cd
           WHERE cd.key = r.connector_key
             AND cd.organization_id = r.organization_id
@@ -381,6 +386,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
         ) cd ON true
         WHERE r.status = 'pending'
           AND (r.approval_status = 'auto' OR r.approval_status = 'approved')
+          AND (${connectorKeys.length === 0} OR r.connector_key = ANY(${pgTextArray(connectorKeys)}::text[]))
           AND (
             -- (1) Connector-worker lanes: sync / action / embed_backfill / auth.
             --     Browser-only connectors require the browser capability.
@@ -407,6 +413,15 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                   AND cd.required_capability IS NOT NULL
                   AND cd.required_capability = ANY(${pgTextArray(authorizedCapabilities)}::text[])
                   AND con.device_worker_id IS NULL
+                  AND r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
+                )
+                -- App-hosted SDK workers execute user functions in-process. They
+                -- advertise the connector_keys they serve; no compiled_code or
+                -- device pin is required.
+                OR (
+                  ${isUserScopedWorker}
+                  AND cd.runtime->>'mode' = 'app_hosted'
+                  AND r.connector_key = ANY(${pgTextArray(connectorKeys)}::text[])
                   AND r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
                 )
                 -- ... or any connection explicitly pinned to THIS device (this is
@@ -559,7 +574,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     connection_config: Record<string, unknown> | null;
     connection_device_worker_id: string | null;
     compiled_code: string | null;
-    connector_runtime: { nix?: { packages?: string[] } | null } | null;
+    connector_runtime: { nix?: { packages?: string[] } | null; mode?: string } | null;
     run_created_at: string | Date | null;
     // Watcher run fields (populated via LEFT JOINs)
     watcher_id: number | null;
@@ -646,7 +661,8 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
     ? findBundledConnectorFile(row.connector_key) !== null
     : false;
   const workerWillResolveLocally = !isUserScopedWorker && gatewayHasLocalSource;
-  if (row.connector_key && !workerWillResolveLocally) {
+  const isAppHostedConnector = row.connector_runtime?.mode === 'app_hosted';
+  if (row.connector_key && !workerWillResolveLocally && !isAppHostedConnector) {
     try {
       compiledCode = await resolveConnectorCode(row.connector_key, row.compiled_code);
     } catch (err) {

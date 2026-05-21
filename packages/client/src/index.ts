@@ -8,6 +8,7 @@ export type {
   LobuClientOptions,
   LobuFetch,
   LobuHeaders,
+  LobuInternalRequestOptions,
   LobuSseEvent,
   SendMessageOptions,
   SendMessageResponse,

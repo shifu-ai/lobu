@@ -11,9 +11,11 @@ export class Lobu {
   constructor(options: LobuClientOptions) {
     this.rest = new LobuRestClient({
       baseUrl: options.baseUrl,
+      apiBaseUrl: options.apiBaseUrl,
       token: options.token,
       fetch: options.fetch ?? globalThis.fetch.bind(globalThis),
       headers: options.headers,
+      org: options.org,
     });
     this.sessions = {
       create: (input) => this.createSession(input),

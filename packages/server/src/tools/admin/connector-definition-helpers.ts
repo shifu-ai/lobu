@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { getLoginProviderScopes } from '../../auth/config';
+import type { ConnectorMetadata } from '../../utils/connector-compiler';
 import { type DbClient, type DbQuery, getDb } from '../../db/client';
 import { probeMcpServer } from '../../mcp-proxy/client';
 import {
@@ -172,6 +173,81 @@ export async function installConnectorDefinitionFromSource(params: {
     authSchema: resolved.metadata.authSchema ?? null,
     mcpConfig: resolved.metadata.mcpConfig ?? null,
     openapiConfig: resolved.metadata.openapiConfig ?? null,
+  };
+}
+
+export async function installHostedConnectorDefinition(params: {
+  organizationId: string;
+  metadata: ConnectorMetadata;
+}): Promise<ConnectorInstallResult> {
+  const sql = getDb();
+  const metadata = normalizeHostedConnectorMetadata(params.metadata);
+
+  const { updated } = await upsertConnectorDefinitionRecords({
+    sql,
+    organizationId: params.organizationId,
+    metadata,
+    versionRecord: {
+      compiledCode: null,
+      compiledCodeHash: null,
+      sourceCode: null,
+      sourcePath: null,
+    },
+  });
+
+  const codeHash = createHash('sha256')
+    .update(JSON.stringify(metadata))
+    .digest('hex')
+    .slice(0, 16);
+
+  return {
+    connectorKey: metadata.key,
+    name: metadata.name,
+    version: metadata.version,
+    codeHash,
+    updated,
+    authSchema: metadata.authSchema,
+    mcpConfig: metadata.mcpConfig,
+    openapiConfig: metadata.openapiConfig,
+  };
+}
+
+function normalizeHostedConnectorMetadata(raw: ConnectorMetadata): ConnectorMetadata {
+  if (!raw || typeof raw !== 'object') throw new Error('connector_definition must be an object.');
+  if (typeof raw.key !== 'string' || !raw.key.trim()) throw new Error('connector_definition.key is required.');
+  if (typeof raw.name !== 'string' || !raw.name.trim()) throw new Error('connector_definition.name is required.');
+  if (typeof raw.version !== 'string' || !raw.version.trim()) {
+    throw new Error('connector_definition.version is required.');
+  }
+
+  for (const [kind, entries] of [
+    ['feeds', raw.feeds],
+    ['actions', raw.actions],
+  ] as const) {
+    if (entries === null || entries === undefined) continue;
+    if (typeof entries !== 'object' || Array.isArray(entries)) {
+      throw new Error(`connector_definition.${kind} must be an object.`);
+    }
+    for (const [key, value] of Object.entries(entries)) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`connector_definition.${kind}.${key} must be an object.`);
+      }
+      const item = value as Record<string, unknown>;
+      if (typeof item.key !== 'string' || typeof item.name !== 'string') {
+        throw new Error(`connector_definition.${kind}.${key} must include key and name.`);
+      }
+    }
+  }
+
+  return {
+    ...raw,
+    authSchema: raw.authSchema ?? null,
+    feeds: raw.feeds ?? null,
+    actions: raw.actions ?? null,
+    optionsSchema: raw.optionsSchema ?? null,
+    mcpConfig: raw.mcpConfig ?? null,
+    openapiConfig: raw.openapiConfig ?? null,
+    runtime: { ...(raw.runtime ?? {}), mode: 'app_hosted' },
   };
 }
 

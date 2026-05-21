@@ -10,6 +10,7 @@ import type {
   CreateSessionResponse,
   LobuFetch,
   LobuHeaders,
+  LobuInternalRequestOptions,
   LobuSseEvent,
   SendMessageOptions,
   SendMessageResponse,
@@ -22,18 +23,28 @@ export class LobuRestClient {
   private readonly fetchImpl: LobuFetch;
   private readonly headers: LobuHeaders | undefined;
   private readonly client: Client;
+  readonly baseUrl: string;
+  readonly apiBaseUrl: string;
+  readonly org: string | undefined;
 
   constructor(options: {
     baseUrl: string;
     token: TokenProvider;
     fetch: LobuFetch;
     headers?: LobuHeaders;
+    org?: string;
+    apiBaseUrl?: string;
   }) {
     this.token = options.token;
     this.fetchImpl = options.fetch;
     this.headers = options.headers;
+    this.baseUrl = normalizeBaseUrl(options.baseUrl);
+    this.apiBaseUrl = options.apiBaseUrl
+      ? normalizeBaseUrl(options.apiBaseUrl)
+      : this.baseUrl.replace(/\/lobu$/, "");
+    this.org = options.org;
     this.client = createClient({
-      baseUrl: normalizeBaseUrl(options.baseUrl),
+      baseUrl: this.baseUrl,
       fetch: options.fetch,
     });
   }
@@ -139,8 +150,49 @@ export class LobuRestClient {
     }
   }
 
+  async tool<T = unknown>(
+    toolName: string,
+    args: Record<string, unknown>,
+    options: LobuInternalRequestOptions = {}
+  ): Promise<T> {
+    if (!this.org) throw new Error("Lobu org is required for connector APIs");
+    return this.request<T>(`/api/${encodeURIComponent(this.org)}/${toolName}`, {
+      method: "POST",
+      body: JSON.stringify(args),
+      signal: options.signal,
+    });
+  }
+
+  async worker<T = unknown>(
+    path: string,
+    body: Record<string, unknown>,
+    options: LobuInternalRequestOptions = {}
+  ): Promise<T> {
+    return this.request<T>(`/api/workers${path}`, {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: options.signal,
+    });
+  }
+
   getFetch(): LobuFetch {
     return this.fetchImpl;
+  }
+
+  private async request<T>(path: string, init: RequestInit): Promise<T> {
+    const response = await this.fetchImpl(`${this.apiBaseUrl}${path}`, {
+      ...init,
+      headers: {
+        ...headersToRecord(this.headers),
+        ...headersToRecord(init.headers),
+        ...(await this.authHeaders()),
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+    });
+    const body = await readBody(response);
+    if (!response.ok) throw new LobuApiError(response, body);
+    return body as T;
   }
 
   private async authHeaders(): Promise<Record<string, string>> {
@@ -163,6 +215,16 @@ function normalizeBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
   if (!trimmed) throw new Error("Lobu baseUrl is required");
   return trimmed;
+}
+
+async function readBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 function headersToRecord(
