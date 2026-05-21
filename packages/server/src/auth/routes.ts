@@ -220,6 +220,56 @@ function isLoopbackAddress(addr: string): boolean {
 }
 
 /**
+ * Loopback trust boundary for /local-init. Returns an error payload when the
+ * caller isn't a trusted loopback client, or null when it passes. Layered
+ * checks: the TCP peer must be loopback (primary
+ * boundary), no forwarded-* headers (a proxy fronting the bind isn't local),
+ * and an X-Lobu-Client header (CSRF gate — a foreign web page can't add it
+ * without a preflight, which CORS rejects).
+ */
+function assertLoopbackClient(
+  c: Context<{ Bindings: Env }>
+): { error: string; error_description: string } | null {
+  const peer = c.var.peerRemoteAddress;
+  const allowMissingPeer = c.env.LOBU_LOCAL_INIT_ALLOW_MISSING_PEER === '1';
+  if (!peer && !allowMissingPeer) {
+    return {
+      error: 'missing_peer',
+      error_description:
+        'This endpoint requires a TCP peer address to enforce loopback. Set LOBU_LOCAL_INIT_ALLOW_MISSING_PEER=1 only in tests.',
+    };
+  }
+  if (peer && !isLoopbackAddress(peer)) {
+    return {
+      error: 'non_loopback_peer',
+      error_description:
+        'This endpoint refuses non-loopback connections. The embedded runner should bind to 127.0.0.1; check HOST.',
+    };
+  }
+  const proxied =
+    c.req.header('x-forwarded-for') ||
+    c.req.header('x-forwarded-host') ||
+    c.req.header('x-forwarded-proto') ||
+    c.req.header('x-real-ip') ||
+    c.req.header('forwarded');
+  if (proxied) {
+    return {
+      error: 'proxied_request_refused',
+      error_description:
+        'This endpoint is for loopback callers only. Forwarded-* headers are not allowed.',
+    };
+  }
+  if (!c.req.header('x-lobu-client')) {
+    return {
+      error: 'missing_client_header',
+      error_description:
+        'This endpoint requires the X-Lobu-Client header (CSRF mitigation). Native clients and the SPA set it; foreign web pages can\'t.',
+    };
+  }
+  return null;
+}
+
+/**
  * Mint a Better Auth session for a user and return the Set-Cookie value.
  * Centralised so /exchange-token and /local-init produce identical cookies.
  */
@@ -353,78 +403,14 @@ credentialRoutes.get('/exchange-token', async (c) => {
  */
 
 credentialRoutes.post('/local-init', async (c) => {
-  // Defense-in-depth: the embedded runner defaults to a loopback bind,
-  // but an operator may override HOST=0.0.0.0 and accidentally expose
-  // /local-init to the LAN. Refuse any request whose actual TCP peer
-  // isn't loopback. This is the *primary* trust boundary; the
-  // forwarded-* + X-Lobu-Client checks below are extra layers.
-  //
-  // `peerRemoteAddress` is set by the env-swap middleware in server.ts /
-  // start-local.ts before c.env is replaced with the app config object.
-  //
-  // Now that install-operator bootstrap means this route reliably mints
-  // a high-privilege worker PAT on every fresh install, we fail CLOSED
-  // when peer metadata is absent instead of letting the request through.
-  // The only path that lacks peerRemoteAddress is in-process `app.fetch`
-  // from unit tests, which should opt in explicitly via the test-only
-  // env override below.
-  const peer = c.var.peerRemoteAddress;
-  const allowMissingPeer = c.env.LOBU_LOCAL_INIT_ALLOW_MISSING_PEER === '1';
-  if (!peer && !allowMissingPeer) {
-    return c.json(
-      {
-        error: 'missing_peer',
-        error_description:
-          '/api/local-init requires a TCP peer address to enforce loopback. The adapter did not populate one. Set LOBU_LOCAL_INIT_ALLOW_MISSING_PEER=1 only in tests.',
-      },
-      403
-    );
-  }
-  if (peer && !isLoopbackAddress(peer)) {
-    return c.json(
-      {
-        error: 'non_loopback_peer',
-        error_description:
-          '/api/local-init refuses non-loopback connections. The embedded runner should bind to 127.0.0.1; check HOST.',
-      },
-      403
-    );
-  }
-
-  const proxied =
-    c.req.header('x-forwarded-for') ||
-    c.req.header('x-forwarded-host') ||
-    c.req.header('x-forwarded-proto') ||
-    c.req.header('x-real-ip') ||
-    c.req.header('forwarded');
-  if (proxied) {
-    return c.json(
-      {
-        error: 'proxied_request_refused',
-        error_description:
-          '/api/local-init is for loopback callers only (Mac menu bar, local CLI). Forwarded-* headers are not allowed.',
-      },
-      403
-    );
-  }
-
-  // CSRF gate: require a custom header so the only callers that can hit
-  // this endpoint are ones that can mint custom headers AND survive a
-  // CORS preflight — i.e. native clients (menubar, CLI) and browser
-  // extensions with host_permissions (the Chrome extension). A random
-  // malicious web page firing a no-preflight simple POST against
-  // localhost:8787 from a victim's browser can't add this header, so the
-  // browser would issue a preflight, which we don't allow for foreign
-  // origins → request rejected before this handler runs.
-  if (!c.req.header('x-lobu-client')) {
-    return c.json(
-      {
-        error: 'missing_client_header',
-        error_description:
-          '/api/local-init requires the X-Lobu-Client header (CSRF mitigation). Native clients and browser extensions set it; plain web pages can\'t.',
-      },
-      403
-    );
+  // Loopback trust boundary (TCP peer + forwarded-* + X-Lobu-Client). The
+  // embedded runner binds 127.0.0.1, but an operator may override HOST=0.0.0.0
+  // and expose this to the LAN — the peer check is the primary boundary, and
+  // we fail CLOSED when peer metadata is absent (only in-process test fetches
+  // lack it, which opt in via LOBU_LOCAL_INIT_ALLOW_MISSING_PEER).
+  const guardError = assertLoopbackClient(c);
+  if (guardError) {
+    return c.json(guardError, 403);
   }
 
   const sql = createDbClientFromEnv(c.env);
