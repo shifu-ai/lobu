@@ -97,6 +97,16 @@ describe("lobu init --yes", () => {
     );
     const env = readFileSync(join(proj, ".env"), "utf-8");
     expect(env.includes("SENTRY_DSN=")).toBe(false);
+    // The generated lobu.config.ts imports @lobu/sdk, so the scaffolded
+    // package.json MUST declare it — else `lobu apply` (jiti) can't resolve it
+    // outside this monorepo. Regression guard for that blocker.
+    const pkg = JSON.parse(readFileSync(join(proj, "package.json"), "utf-8"));
+    expect(pkg.devDependencies["@lobu/sdk"]).toBeDefined();
+    expect(pkg.devDependencies["@lobu/connector-sdk"]).toBeDefined();
+    const tsconfig = JSON.parse(
+      readFileSync(join(proj, "tsconfig.json"), "utf-8")
+    );
+    expect(tsconfig.include).toContain("lobu.config.ts");
   });
 
   test("scaffolded lobu.config.ts loads into desired state", async () => {

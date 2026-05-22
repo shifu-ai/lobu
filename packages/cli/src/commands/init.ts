@@ -158,6 +158,71 @@ function printProviderList(): void {
   );
 }
 
+/**
+ * Write the project's package.json + tsconfig.json so `lobu apply` (jiti) and
+ * the editor can resolve the SDK imports outside this monorepo. Shared by the
+ * blank scaffold and `--from-org`. Merges into an existing package.json
+ * (preserving the user's fields) and never overwrites an existing tsconfig.
+ */
+export async function scaffoldProjectPackaging(
+  projectDir: string,
+  projectName: string,
+  cliVersion: string
+): Promise<void> {
+  const pkgJsonPath = join(projectDir, "package.json");
+  let pkgJson: Record<string, unknown>;
+  try {
+    pkgJson = JSON.parse(await readFile(pkgJsonPath, "utf-8")) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    pkgJson = {
+      name: projectName,
+      version: "0.0.0",
+      private: true,
+      type: "module",
+    };
+  }
+  pkgJson.devDependencies = {
+    ...((pkgJson.devDependencies as Record<string, string> | undefined) ?? {}),
+    // lobu.config.ts imports @lobu/sdk; connectors import @lobu/connector-sdk.
+    // Both must be declared so `lobu apply` (jiti) + the editor resolve them.
+    "@lobu/sdk": `^${cliVersion}`,
+    "@lobu/connector-sdk": `^${cliVersion}`,
+  };
+  await writeFile(pkgJsonPath, `${JSON.stringify(pkgJson, null, 2)}\n`);
+
+  const tsconfigPath = join(projectDir, "tsconfig.json");
+  try {
+    await readFile(tsconfigPath, "utf-8"); // exists — leave the user's config untouched
+  } catch {
+    await writeFile(
+      tsconfigPath,
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            target: "ES2022",
+            module: "Preserve",
+            moduleResolution: "bundler",
+            strict: true,
+            skipLibCheck: true,
+            noEmit: true,
+          },
+          include: [
+            "lobu.config.ts",
+            "connectors/**/*.ts",
+            "reactions/**/*.ts",
+            "agents/**/*.ts",
+          ],
+        },
+        null,
+        2
+      )}\n`
+    );
+  }
+}
+
 export async function initCommand(
   cwd: string = process.cwd(),
   projectNameArg?: string,
@@ -268,6 +333,9 @@ export async function initCommand(
       org: options.fromOrg || undefined,
       url: options.url,
     });
+    // Same package.json/tsconfig the blank scaffold writes, so the bootstrapped
+    // lobu.config.ts can resolve @lobu/sdk + re-apply outside this monorepo.
+    await scaffoldProjectPackaging(projectDir, projectName, cliVersion);
     if (!here) {
       console.log(chalk.cyan(`\n  Next: cd ${projectName}\n`));
     }
@@ -720,51 +788,7 @@ export async function initCommand(
     // `--here` can target a directory that already has a package.json /
     // tsconfig.json — merge into package.json (preserve the user's fields, just
     // add the SDK devDependency) and never overwrite an existing tsconfig.
-    const pkgJsonPath = join(projectDir, "package.json");
-    let pkgJson: Record<string, unknown>;
-    try {
-      pkgJson = JSON.parse(await readFile(pkgJsonPath, "utf-8")) as Record<
-        string,
-        unknown
-      >;
-    } catch {
-      pkgJson = {
-        name: projectName,
-        version: "0.0.0",
-        private: true,
-        type: "module",
-      };
-    }
-    pkgJson.devDependencies = {
-      ...((pkgJson.devDependencies as Record<string, string> | undefined) ??
-        {}),
-      "@lobu/connector-sdk": `^${cliVersion}`,
-    };
-    await writeFile(pkgJsonPath, `${JSON.stringify(pkgJson, null, 2)}\n`);
-
-    const tsconfigPath = join(projectDir, "tsconfig.json");
-    try {
-      await readFile(tsconfigPath, "utf-8"); // exists — leave the user's config untouched
-    } catch {
-      await writeFile(
-        tsconfigPath,
-        `${JSON.stringify(
-          {
-            compilerOptions: {
-              target: "ES2022",
-              module: "Preserve",
-              moduleResolution: "bundler",
-              strict: true,
-              skipLibCheck: true,
-              noEmit: true,
-            },
-            include: ["connectors/**/*.ts"],
-          },
-          null,
-          2
-        )}\n`
-      );
-    }
+    await scaffoldProjectPackaging(projectDir, projectName, cliVersion);
     await mkdir(join(projectDir, "connectors"), { recursive: true });
     await writeFile(join(projectDir, "connectors", ".gitkeep"), "");
 
