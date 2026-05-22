@@ -436,16 +436,31 @@ function mapAgent(
     stableId: platformStableId(agent.id, p.type, p.name),
     type: p.type,
     ...(p.name ? { name: p.name } : {}),
-    // Keep `$VAR` placeholders in the stored config (resolved at egress); the
-    // referenced secrets are collected into `required` for the secrets gate.
+    // Resolve `secret()`/`$VAR` to the REAL value — the platform-write path
+    // stores the incoming plaintext as the secret (server-side
+    // `normalizeConfigForStorage` swaps it for a `secret://` ref + encrypts it),
+    // so sending the `$VAR` placeholder would persist a broken token. Mirrors
+    // provider keys + auth-profile credentials. The config row never holds
+    // cleartext at rest; the secret name is collected for the secrets gate.
     config: Object.fromEntries(
       Object.entries(p.config).map(([k, v]) => [
         k,
-        credentialString(v, required),
+        resolveCredentialValue(v, required, env),
       ])
     ),
     ...(p.channels?.length ? { channels: p.channels } : {}),
   }));
+  // Distinct platforms must not collapse to the same stable id (e.g. names that
+  // slugify equal), or apply would clobber one with the other.
+  const seenStableIds = new Set<string>();
+  for (const p of platforms) {
+    if (seenStableIds.has(p.stableId)) {
+      throw new ValidationError(
+        `agent "${agent.id}" has two platforms that resolve to the same id "${p.stableId}" — give them distinct names`
+      );
+    }
+    seenStableIds.add(p.stableId);
+  }
 
   const metadata: DesiredAgentMetadata = {
     agentId: agent.id,

@@ -427,7 +427,9 @@ describe("lobu init --from-org", () => {
       const { state } = await loadDesiredStateFromConfig({ cwd: dir });
       const platform = state.agents[0]?.platforms[0];
       expect(platform?.type).toBe("telegram");
-      expect(platform?.config.botToken).toBe("$BOT_TELEGRAM_BOTTOKEN");
+      // The secret() ref resolves to the real env value (the server stores the
+      // incoming plaintext as the secret), not the `$VAR` placeholder.
+      expect(platform?.config.botToken).toBe("dummy-token-value");
       expect(platform?.config.mode).toBe("webhook");
     } finally {
       process.env.BOT_TELEGRAM_BOTTOKEN = undefined;
