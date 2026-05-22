@@ -1116,6 +1116,32 @@ describe("apply diff — code-managed prune", () => {
     expect(deletedIds.some((id) => id.includes("other"))).toBe(false);
   });
 
+  test("matching prefers the org's own type over a foreign public type with the same slug", () => {
+    // Server returns the org's own row first, then a public row with the same
+    // slug. Matching must compare desired against the org-owned row (noop), not
+    // the foreign public one (which would falsely look like an update).
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "lead", properties: {}, organization_id: "org_self" },
+        {
+          slug: "lead",
+          properties: { foreign: { type: "string" } },
+          organization_id: "org_other",
+        },
+      ],
+    };
+    const plan = computeDiff(desiredKeepingLead(), remote, {
+      codeManaged: true,
+      orgId: "org_self",
+    });
+    const leadRow = plan.rows.find(
+      (r) => r.kind === "entity-type" && r.id === "lead"
+    );
+    expect(leadRow?.verb).toBe("noop");
+    expect(plan.rows.some((r) => r.verb === "delete")).toBe(false);
+  });
+
   test("connector prune suppressed when a local def has an unresolved (null) key", () => {
     const desired = buildState([], {
       connectors: {
