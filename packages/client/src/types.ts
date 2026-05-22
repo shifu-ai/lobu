@@ -76,4 +76,11 @@ export interface LobuSseEvent<TData = unknown> {
 export interface StreamEventsOptions {
   signal?: AbortSignal;
   headers?: LobuHeaders;
+  /**
+   * Maximum SSE connection attempts before the stream gives up and the async
+   * iterator rejects. Defaults to 1 (no auto-reconnect): a non-OK response
+   * (401/404/5xx) or network failure surfaces immediately instead of retrying
+   * forever. Raise it to opt into reconnects for transient failures.
+   */
+  maxRetryAttempts?: number;
 }
