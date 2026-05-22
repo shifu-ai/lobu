@@ -8,7 +8,7 @@ import { resolveServerUrl } from "./memory/_lib/openclaw-auth.js";
 import { isPortFree } from "./dev.js";
 import { parseEnvContent } from "../internal/env-file.js";
 import { loadProviderRegistry } from "./providers/registry.js";
-import { isLoadError, loadConfig } from "../config/loader.js";
+import { loadProjectConfig } from "./_lib/apply/desired-state.js";
 
 interface Check {
   name: string;
@@ -136,16 +136,24 @@ async function checkProviderKeys(
   cwd: string,
   env: Record<string, string>
 ): Promise<Check[]> {
-  const result = await loadConfig(cwd);
-  if (isLoadError(result)) return [];
+  let agents: Awaited<
+    ReturnType<typeof loadProjectConfig>
+  >["project"]["agents"];
+  try {
+    agents = (await loadProjectConfig(cwd)).project.agents;
+  } catch {
+    return [];
+  }
 
   const registry = loadProviderRegistry();
   const checks: Check[] = [];
   const seen = new Set<string>();
 
-  for (const agent of Object.values(result.config.agents)) {
+  for (const agent of agents) {
     for (const provider of agent.providers ?? []) {
-      const reg = registry.find((r) => r.id === provider.id);
+      const reg = registry.find(
+        (r) => r.id === (provider.id ?? provider.model)
+      );
       const envVar = reg?.providers?.[0]?.envVarName;
       if (!envVar || seen.has(envVar)) continue;
       seen.add(envVar);

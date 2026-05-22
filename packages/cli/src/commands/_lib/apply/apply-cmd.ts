@@ -1,11 +1,9 @@
-import { existsSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
 import { resolveContext } from "../../../internal/context.js";
 import { parseEnvContent } from "../../../internal/env-file.js";
 import { loadProjectLink } from "../../../internal/project-link.js";
-import { CONFIG_FILENAME } from "../../../config/loader.js";
 import { ApiError, ValidationError } from "../../memory/_lib/errors.js";
 import { printError, printText } from "../../memory/_lib/output.js";
 import {
@@ -25,7 +23,6 @@ import {
 import {
   type DesiredConnectorDefinition,
   type DesiredState,
-  loadDesiredState,
   loadDesiredStateFromConfig,
   resolveConnectorSchemas,
   validateAuthProfileAgainstConnector,
@@ -38,31 +35,6 @@ import {
   renderPostApplyPunchList,
   renderProgress,
 } from "./render.js";
-
-/**
- * Write `organization_id = "<id>"` into the `[memory]` section of lobu.toml —
- * replacing an existing value or inserting it just under the `[memory]` header.
- * Surgical text edit; preserves comments and the rest of the file.
- */
-async function writeMemoryOrganizationId(
-  cwd: string,
-  organizationId: string
-): Promise<void> {
-  const path = join(cwd, CONFIG_FILENAME);
-  const raw = await readFile(path, "utf-8");
-  const line = `organization_id = "${organizationId}"`;
-
-  if (/^\s*organization_id\s*=.*$/m.test(raw)) {
-    const next = raw.replace(/^\s*organization_id\s*=.*$/m, line);
-    if (next !== raw) await writeFile(path, next);
-    return;
-  }
-
-  const header = raw.match(/^\[memory\][^\n]*$/m);
-  if (!header || header.index === undefined) return;
-  const at = header.index + header[0].length;
-  await writeFile(path, `${raw.slice(0, at)}\n${line}${raw.slice(at)}`);
-}
 
 export interface ApplyOptions {
   cwd?: string;
@@ -1009,11 +981,9 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // `lobu dev` does. Existing process.env values win (don't clobber the shell).
   await loadProjectEnvFile(cwd);
 
-  // Prefer the TypeScript entrypoint (lobu.config.ts); fall back to lobu.toml.
+  // Load desired state from the TypeScript entrypoint (lobu.config.ts).
   const loadArgs = { cwd, ...(opts.only ? { only: opts.only } : {}) };
-  const { state, configPath } = existsSync(join(cwd, "lobu.config.ts"))
-    ? await loadDesiredStateFromConfig(loadArgs)
-    : await loadDesiredState(loadArgs);
+  const { state, configPath } = await loadDesiredStateFromConfig(loadArgs);
 
   printText(chalk.dim(`Config: ${configPath}`));
 
@@ -1094,16 +1064,9 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     throw new ValidationError(`organization "${orgSlug}" not found`);
   }
 
-  // Persist the resolved org id back into lobu.toml so the whole team applies
-  // to the same org. Best-effort — a read-only lobu.toml must not fail apply.
-  // Skipped on `--dry-run`: that flag promises no mutation, local files included.
-  if (
-    !opts.dryRun &&
-    resolvedOrg &&
-    state.memory?.organizationId !== resolvedOrg.id
-  ) {
-    await writeMemoryOrganizationId(cwd, resolvedOrg.id).catch(() => undefined);
-  }
+  // Team org consistency comes from `defineConfig({ org, organizationId })` in
+  // lobu.config.ts (committed) plus the `.lobu/project.json` link — apply does
+  // not rewrite the config file.
 
   // SECURITY (#4): confirm BEFORE fetching any `source_url` or uploading custom
   // connector source — `lobu apply --dry-run` should never hit a manifest URL.

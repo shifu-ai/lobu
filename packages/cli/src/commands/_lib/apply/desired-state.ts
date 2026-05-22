@@ -2134,27 +2134,28 @@ function resolveReactionScript(
 }
 
 /**
- * Load desired state from a TypeScript entrypoint (`lobu.config.ts`) instead of
- * `lobu.toml`. Bundles the entrypoint with esbuild (relative imports inlined;
- * node_modules — including `@lobu/sdk` / `@lobu/connector-sdk` — externalized so
- * they resolve from the project at import time), imports the bundle to read the
- * `defineConfig()` default export, and maps it to `DesiredState`.
+ * Bundle + import a `lobu.config.ts` and return its `defineConfig` default
+ * export (the SDK {@link Project}). Shared by {@link loadDesiredStateFromConfig}
+ * (apply) and the commands that read the authored config directly (`lobu run`
+ * preview registration, `lobu doctor`, `lobu chat`, `lobu validate`).
+ *
+ * esbuild bundles relative imports inline and externalizes node_modules
+ * (`@lobu/sdk` / `@lobu/connector-sdk` resolve from the project at import time).
+ * The temp `.mjs` is deleted after import — the module is already in memory.
  *
  * The dynamic imports here are intentional and allow-listed (AGENTS.md): esbuild
- * is loaded lazily so the TOML path doesn't pay for it, and the bundled config
- * is a generated file imported by URL.
+ * is loaded lazily, and the bundled config is a generated file imported by URL.
  */
-export async function loadDesiredStateFromConfig(
-  opts: LoadDesiredStateOptions
-): Promise<{ state: DesiredState; configPath: string }> {
-  const configPath = resolve(opts.cwd, "lobu.config.ts");
+export async function loadProjectConfig(
+  cwd: string
+): Promise<{ project: Project; configPath: string }> {
+  const configPath = resolve(cwd, "lobu.config.ts");
   if (!existsSync(configPath)) {
-    throw new ValidationError(`No lobu.config.ts found in ${opts.cwd}`);
+    throw new ValidationError(`No lobu.config.ts found in ${cwd}`);
   }
-  const env = opts.env ?? process.env;
   const { build } = await import("esbuild");
   const outFile = resolve(
-    opts.cwd,
+    cwd,
     `.lobu-config.${randomBytes(6).toString("hex")}.mjs`
   );
   try {
@@ -2180,60 +2181,68 @@ export async function loadDesiredStateFromConfig(
         "lobu.config.ts must `export default defineConfig({ ... })`"
       );
     }
-    const typedProject = project as Project;
-    const state = mapProjectToDesiredState(typedProject, env, opts.only);
-
-    // Agent-directory artifacts: SOUL/IDENTITY/USER.md + local skills. The
-    // mapper stays pure (no file IO); we read the files here and merge them into
-    // each agent's settings, mirroring the TOML loader (project `./skills` +
-    // per-agent `<dir>/skills`; default dir `./agents/<id>`).
-    await Promise.all(
-      typedProject.agents.map(async (agent, i) => {
-        const settings = state.agents[i]?.settings;
-        if (!settings) return;
-        const agentDir = resolve(
-          opts.cwd,
-          agent.dir ?? join("agents", agent.id)
-        );
-        const markdown = await readMarkdown(agentDir);
-        const skillFiles = await loadSkillFiles([
-          join(opts.cwd, "skills"),
-          join(agentDir, "skills"),
-        ]);
-        mergeAgentDirArtifacts(
-          settings,
-          markdown,
-          buildLocalSkills(skillFiles)
-        );
-      })
-    );
-
-    // Watcher reaction scripts: a sibling `.ts` file referenced by path. The
-    // mapper stays pure; resolve + read the source here (raw, server compiles
-    // it) and attach it. state.watchers[i] aligns with typedProject.watchers[i]
-    // (the mapper maps them in order).
-    (typedProject.watchers ?? []).forEach((watcher, i) => {
-      // Gate on absence, not truthiness — a present-but-empty `reaction: ""`
-      // must reach the validator (which rejects it), matching parseWatcher.
-      if (watcher.reaction === undefined) return;
-      const dw = state.watchers[i];
-      if (!dw) return;
-      dw.reactionScript = resolveReactionScript(
-        opts.cwd,
-        watcher.slug,
-        watcher.reaction
-      );
-    });
-
-    // `--only agents|memory` skips connectors (matching the mapper), so don't
-    // ship local connector source for those runs either.
-    if (!opts.only) {
-      state.connectors.definitions = await discoverLocalConnectorDefinitions(
-        opts.cwd
-      );
-    }
-    return { state, configPath };
+    return { project: project as Project, configPath };
   } finally {
     rmSync(outFile, { force: true });
   }
+}
+
+/**
+ * Load desired state from a TypeScript entrypoint (`lobu.config.ts`): import the
+ * `defineConfig()` project, map it to `DesiredState`, then attach the
+ * file-based artifacts (agent-dir markdown + skills, watcher reaction scripts,
+ * local connector source).
+ */
+export async function loadDesiredStateFromConfig(
+  opts: LoadDesiredStateOptions
+): Promise<{ state: DesiredState; configPath: string }> {
+  const env = opts.env ?? process.env;
+  const { project: typedProject, configPath } = await loadProjectConfig(
+    opts.cwd
+  );
+  const state = mapProjectToDesiredState(typedProject, env, opts.only);
+
+  // Agent-directory artifacts: SOUL/IDENTITY/USER.md + local skills. The
+  // mapper stays pure (no file IO); we read the files here and merge them into
+  // each agent's settings, mirroring the TOML loader (project `./skills` +
+  // per-agent `<dir>/skills`; default dir `./agents/<id>`).
+  await Promise.all(
+    typedProject.agents.map(async (agent, i) => {
+      const settings = state.agents[i]?.settings;
+      if (!settings) return;
+      const agentDir = resolve(opts.cwd, agent.dir ?? join("agents", agent.id));
+      const markdown = await readMarkdown(agentDir);
+      const skillFiles = await loadSkillFiles([
+        join(opts.cwd, "skills"),
+        join(agentDir, "skills"),
+      ]);
+      mergeAgentDirArtifacts(settings, markdown, buildLocalSkills(skillFiles));
+    })
+  );
+
+  // Watcher reaction scripts: a sibling `.ts` file referenced by path. The
+  // mapper stays pure; resolve + read the source here (raw, server compiles
+  // it) and attach it. state.watchers[i] aligns with typedProject.watchers[i]
+  // (the mapper maps them in order).
+  (typedProject.watchers ?? []).forEach((watcher, i) => {
+    // Gate on absence, not truthiness — a present-but-empty `reaction: ""`
+    // must reach the validator (which rejects it), matching parseWatcher.
+    if (watcher.reaction === undefined) return;
+    const dw = state.watchers[i];
+    if (!dw) return;
+    dw.reactionScript = resolveReactionScript(
+      opts.cwd,
+      watcher.slug,
+      watcher.reaction
+    );
+  });
+
+  // `--only agents|memory` skips connectors (matching the mapper), so don't
+  // ship local connector source for those runs either.
+  if (!opts.only) {
+    state.connectors.definitions = await discoverLocalConnectorDefinitions(
+      opts.cwd
+    );
+  }
+  return { state, configPath };
 }

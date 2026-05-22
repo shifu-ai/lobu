@@ -8,7 +8,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import chalk from "chalk";
 import ora from "ora";
-import { isLoadError, loadConfig } from "../config/loader.js";
+import { loadProjectConfig } from "./_lib/apply/desired-state.js";
 import { resolveApiClient } from "../internal/api-client.js";
 import {
   addContext,
@@ -381,7 +381,7 @@ export async function devCommand(
         shouldAutoApplyLocalProject({
           mode,
           localContextReady,
-          hasLobuToml: existsSync(join(cwd, "lobu.toml")),
+          hasLobuConfig: existsSync(join(cwd, "lobu.config.ts")),
         })
       ) {
         return autoApplyLocalProject(cwd, gatewayUrl);
@@ -418,14 +418,16 @@ export async function devCommand(
  *  - the backend is embedded (never auto-mutate an external/prod DB), AND
  *  - the `local` context was registered + made active (so the apply targets the
  *    embedded server, not whatever cloud context was active before), AND
- *  - the project actually has a `lobu.toml` to apply.
+ *  - the project actually has a `lobu.config.ts` to apply.
  */
 export function shouldAutoApplyLocalProject(opts: {
   mode: "external" | "embedded";
   localContextReady: boolean;
-  hasLobuToml: boolean;
+  hasLobuConfig: boolean;
 }): boolean {
-  return opts.mode === "embedded" && opts.localContextReady && opts.hasLobuToml;
+  return (
+    opts.mode === "embedded" && opts.localContextReady && opts.hasLobuConfig
+  );
 }
 
 /**
@@ -670,18 +672,25 @@ export function isPortFree(port: number): Promise<boolean> {
 }
 
 async function printPreviewInstructions(cwd: string): Promise<void> {
-  const loaded = await loadConfig(cwd);
-  if (isLoadError(loaded)) return;
+  let agents: Awaited<
+    ReturnType<typeof loadProjectConfig>
+  >["project"]["agents"];
+  try {
+    agents = (await loadProjectConfig(cwd)).project.agents;
+  } catch {
+    return;
+  }
 
   // `agent.preview` is a record keyed by chat platform (`slack`, `telegram`, …).
   const enabled: Array<{
     agentId: string;
     platform: string;
-    cfg: { surfaces?: string[]; code_ttl_minutes?: number };
+    cfg: { surfaces?: Array<"dm" | "channel">; codeTtlMinutes?: number };
   }> = [];
-  for (const [agentId, agent] of Object.entries(loaded.config.agents)) {
+  for (const agent of agents) {
     for (const [platform, cfg] of Object.entries(agent.preview ?? {})) {
-      if (cfg?.enabled === true) enabled.push({ agentId, platform, cfg });
+      if (cfg?.enabled === true)
+        enabled.push({ agentId: agent.id, platform, cfg });
     }
   }
   if (enabled.length === 0) return;
@@ -720,7 +729,7 @@ async function printPreviewInstructions(cwd: string): Promise<void> {
         agent_id: agentId,
         platform,
         surfaces: cfg.surfaces ?? ["dm"],
-        ttl_minutes: cfg.code_ttl_minutes ?? 15,
+        ttl_minutes: cfg.codeTtlMinutes ?? 15,
       });
       console.log(chalk.dim(`  agent:        ${agentId}`));
       console.log(chalk.dim(`  platform:     ${platform}`));
