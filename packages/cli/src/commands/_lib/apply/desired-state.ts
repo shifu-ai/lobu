@@ -31,7 +31,7 @@ export interface DesiredPlatform {
   stableId: string;
   type: string;
   name?: string;
-  /** Raw config from lobu.toml — values may still contain `$VAR` references. */
+  /** Platform config — values may still contain `$VAR` references. */
   config: Record<string, string>;
   /** Declarative channel bindings (`"<teamId>/<channelId>"`); Slack only. */
   channels?: string[];
@@ -68,10 +68,9 @@ export interface DesiredWatcher {
   sources?: Array<{ name: string; query: string }>;
   /**
    * Reaction script — TypeScript source compiled + executed in an isolate at
-   * watcher-firing time. Authored as a sibling `.ts` file (`reaction_script:
-   * ./funnel-digest.ts` in the YAML), the CLI reads it and pushes raw source
-   * via `set_reaction_script`. Inline strings are rejected so the IDE can
-   * type-check the script.
+   * watcher-firing time. Authored as a sibling `.ts` file referenced by
+   * `defineWatcher({ reaction: "./reactions/foo.reaction.ts" })`; the CLI reads
+   * it and pushes raw source via `set_reaction_script`.
    */
   reactionScript?: { sourcePath: string; sourceCode: string };
   /** LLM guidance for the watcher's downstream reaction agent. */
@@ -128,7 +127,7 @@ export interface DesiredConnection {
    */
   deviceWorkerId?: string;
   feeds: DesiredFeed[];
-  /** Relative path of the YAML file the doc came from (for error messages). */
+  /** Source label for error messages (the config the connection came from). */
   sourceFile: string;
 }
 
@@ -173,21 +172,19 @@ export interface DesiredConnectorDefinition {
 export interface DesiredAgent {
   metadata: DesiredAgentMetadata;
   /**
-   * Settings payload destined for `PATCH /:agentId/config`. Built from the
-   * lobu.toml fields the file-loader currently lifts: networkConfig,
-   * skillsConfig, egressConfig, preApprovedTools, guardrails, toolsConfig,
-   * nixConfig, mcpServers, modelSelection, providerModelPreferences,
-   * installedProviders, identityMd/soulMd/userMd.
-   *
-   * Persistence of egressConfig/preApprovedTools/guardrails depends on PR-1.
+   * Settings payload destined for `PATCH /:agentId/config`. Built by the mapper
+   * + agent-dir loader: networkConfig, skillsConfig, egressConfig,
+   * preApprovedTools, guardrails, toolsConfig, nixConfig, mcpServers,
+   * modelSelection, providerModelPreferences, installedProviders,
+   * identityMd/soulMd/userMd.
    */
   settings: Partial<AgentSettings>;
   platforms: DesiredPlatform[];
   /**
-   * Provider API keys resolved from `[[providers]] key = "$VAR"` in lobu.toml
-   * that need to be pushed into `agent_secrets` after the settings PATCH.
-   * Empty when no provider declared a `key` (or all keys are empty/unset).
-   * The actual secret value lives only in process memory; never serialized.
+   * Provider API keys resolved from `secret()` / `$VAR` provider keys, pushed
+   * into `agent_secrets` after the settings PATCH. Empty when no provider
+   * declared a `key` (or all are unset). The value lives only in process
+   * memory; never serialized.
    */
   providerKeys: { providerId: string; value: string }[];
 }
@@ -195,9 +192,9 @@ export interface DesiredAgent {
 export interface DesiredState {
   agents: DesiredAgent[];
   /**
-   * `[memory]` metadata from lobu.toml — the org slug `lobu apply` defaults to,
-   * the resolved `organization_id` (written back once known), and the
-   * name/description shown when telling the operator to create the org.
+   * Org metadata from `defineConfig` — the org slug `lobu apply` defaults to,
+   * the `organizationId` it matches against, and the name/description shown
+   * when telling the operator to create the org.
    */
   memory?: {
     org?: string;
@@ -209,12 +206,11 @@ export interface DesiredState {
     entityTypes: DesiredEntityType[];
     relationshipTypes: DesiredRelationshipType[];
   };
-  /** Watchers declared under `[memory].models` YAML files. */
+  /** Watchers declared via `defineWatcher`. */
   watchers: DesiredWatcher[];
   /**
-   * Data-source connectors declared in `[memory].connectors` dir:
-   * `*.connector.ts` files (+ `type: connector` manifests), `type: connection`
-   * docs, and `type: auth_profile` docs.
+   * Connectors: local `*.connector.ts` definitions (discovered under
+   * `./connectors`), `defineConnection`s, and `defineAuthProfile`s.
    */
   connectors: {
     definitions: DesiredConnectorDefinition[];
@@ -222,10 +218,9 @@ export interface DesiredState {
     connections: DesiredConnection[];
   };
   /**
-   * Names of env vars referenced as `$NAME` anywhere in lobu.toml or in
-   * connector auth-profile credentials. The CLI surfaces these to the user
-   * before mutating remote state so missing secrets fail loud instead of
-   * expanding to empty strings.
+   * Names of env vars referenced via `secret()` / `$VAR` (provider keys,
+   * auth-profile + mcp credentials). The CLI surfaces these before mutating
+   * remote state so missing secrets fail loud instead of expanding to empty.
    */
   requiredSecrets: string[];
 }
@@ -710,11 +705,10 @@ async function discoverLocalConnectorDefinitions(
 const REACTION_SCRIPT_MAX_BYTES = 256 * 1024;
 
 /**
- * Resolve + read a watcher reaction script (`defineWatcher({ reaction })`) for
- * the TS config path. Mirrors the TOML loader's `parseWatcher` validation:
+ * Resolve + read a watcher reaction script (`defineWatcher({ reaction })`):
  * relative POSIX path under the config directory, ends in `.ts`, no `..` /
  * absolute / backslash segments, ≤256KB. Ships RAW source — the server compiles
- * it — exactly as the TOML path does via `set_reaction_script`.
+ * it on receipt via `set_reaction_script`.
  */
 function resolveReactionScript(
   cwd: string,
