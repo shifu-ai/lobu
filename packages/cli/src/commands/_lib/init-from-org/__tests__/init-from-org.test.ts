@@ -126,14 +126,20 @@ function fullOrgRoutes(): Record<string, () => unknown> {
       // The mapper uses a single endpoint for both entity_type and
       // relationship_type list actions; return a body carrying both keys.
       return {
+        // Real server shape: per-type fields live inside `metadata_schema`
+        // (a JSON Schema), not top-level `properties`/`required`. The client
+        // hoists them back out for the diff/bootstrap.
         entity_types: [
           {
             slug: "lead",
             name: "Lead",
             description: "A sales lead",
-            required: ["stage"],
-            properties: {
-              stage: { type: "string", "x-table-label": "Stage" },
+            metadata_schema: {
+              type: "object",
+              required: ["stage"],
+              properties: {
+                stage: { type: "string", "x-table-label": "Stage" },
+              },
             },
           },
           { slug: "pilot", name: "Pilot" },
