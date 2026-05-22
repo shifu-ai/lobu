@@ -132,7 +132,7 @@ Memory:
   program
     .command("init [name]")
     .description(
-      "Scaffold a new agent project (lobu.config.ts + agent files + .env)"
+      "Scaffold a new agent project (lobu.config.ts + agent files + .env), or bootstrap one from an existing org with --from-org"
     )
     .option("-y, --yes", "Skip prompts; use defaults / flag values")
     .option(
@@ -171,6 +171,11 @@ Memory:
       "--list-providers",
       "Print available provider ids from config/providers.json and exit"
     )
+    .option(
+      "--from-org [slug]",
+      "Bootstrap a re-appliable project from an existing org (defaults to active session)"
+    )
+    .option("--url <url>", "Server URL override (with --from-org)")
     .action(
       async (
         name: string | undefined,
@@ -189,12 +194,21 @@ Memory:
           sentry?: boolean;
           slackPreview?: boolean;
           listProviders?: boolean;
+          fromOrg?: string | boolean;
+          url?: string;
         }
       ) => {
         try {
           const { initCommand } = await import("./commands/init.js");
           // Commander gives a tristate: true for --sentry, false for
           // --no-sentry, undefined for neither.
+          // `--from-org` with no value is `true`; normalize to "" (active org).
+          const fromOrg =
+            options.fromOrg === undefined
+              ? undefined
+              : options.fromOrg === true
+                ? ""
+                : (options.fromOrg as string);
           await initCommand(process.cwd(), name, {
             yes: options.yes,
             here: options.here,
@@ -211,6 +225,8 @@ Memory:
             noSentry: options.sentry === false,
             slackPreview: options.slackPreview,
             listProviders: options.listProviders,
+            fromOrg,
+            url: options.url,
           });
         } catch (error) {
           console.error(chalk.red("\n  Error:"), error);
@@ -329,55 +345,6 @@ Memory:
           org: options.org,
           url: options.url,
           force: options.force,
-        });
-      }
-    );
-
-  // ─── export ─────────────────────────────────────────────────────────
-  program
-    .command("export")
-    .description(
-      "Pull memory schema + connectors from the org into apply-compatible files"
-    )
-    .option(
-      "--out <dir>",
-      "Destination directory (defaults to cwd; creates models/, connectors/)"
-    )
-    .option("--force", "Overwrite existing models/connectors files")
-    .option("--org <slug>", "Org slug override (defaults to active session)")
-    .option("--url <url>", "Server URL override")
-    .option(
-      "--only <kind>",
-      "Restrict to one resource family: 'models' | 'connectors'"
-    )
-    .action(
-      async (options: {
-        out?: string;
-        force?: boolean;
-        org?: string;
-        url?: string;
-        only?: string;
-      }) => {
-        if (
-          options.only !== undefined &&
-          options.only !== "models" &&
-          options.only !== "connectors"
-        ) {
-          console.error(
-            chalk.red("\n  Error:"),
-            `--only must be 'models' or 'connectors' (got: ${options.only})`
-          );
-          process.exit(2);
-        }
-        const { exportCommand } = await import(
-          "./commands/_lib/export/export-cmd.js"
-        );
-        await exportCommand({
-          out: options.out,
-          force: options.force,
-          org: options.org,
-          url: options.url,
-          only: options.only as "models" | "connectors" | undefined,
         });
       }
     );

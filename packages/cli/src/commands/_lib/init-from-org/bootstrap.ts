@@ -1,0 +1,952 @@
+/**
+ * `lobu init --from-org <slug>` — bootstrap a complete, re-appliable project
+ * from an existing Lobu Cloud org. The inverse of `lobu apply`: it reads the
+ * org's full declared state through the apply client and writes a runnable
+ * `lobu.config.ts` (plus the file-convention artifacts it references) that
+ * round-trips back through `loadDesiredStateFromConfig`.
+ *
+ * Contract: `load(initFromOrg(org)) ≈ org`, modulo write-only secrets — provider
+ * keys, auth-profile credentials, and MCP client secrets become `secret("ENV")`
+ * placeholders (listed in `.env.example`), never real values.
+ *
+ * This is the inverse of `map-config.ts`'s `mapAgent` / `mapEntityType` / etc:
+ * server → SDK authoring objects → emitted TypeScript source.
+ */
+
+import { mkdir, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import type { AgentSettings } from "@lobu/core";
+import chalk from "chalk";
+import { resolveApplyClient } from "../apply/client.js";
+import type {
+  ApplyClient,
+  RemoteAgent,
+  RemoteAuthProfile,
+  RemoteConnection,
+  RemoteEntityType,
+  RemoteFeed,
+  RemoteRelationshipType,
+  RemoteWatcher,
+} from "../apply/client.js";
+import { printText } from "../../memory/_lib/output.js";
+
+export interface InitFromOrgOptions {
+  /** Target directory to scaffold into (must be empty / not a Lobu project). */
+  targetDir: string;
+  /** Org slug to bootstrap from (defaults to active session). */
+  org?: string;
+  /** Server URL override. */
+  url?: string;
+  /** Test seam — inject fetch. */
+  fetchImpl?: typeof fetch;
+}
+
+// ── TS literal emission ──────────────────────────────────────────────────────
+
+/** A `const <name> = <expr>;` handle plus the identifier to reference it by. */
+interface Handle {
+  name: string;
+  decl: string;
+}
+
+/** Quote a string as a TS string literal (double quotes, JSON-escaped). */
+function str(value: string): string {
+  return JSON.stringify(value);
+}
+
+/**
+ * Emit a JS value as pretty TS source. Handles the JSON-Schema objects in
+ * entity `properties` / watcher `extractionSchema` and arbitrary connection
+ * `config` blobs as real object/array literals (not `JSON.stringify` blobs),
+ * with object keys unquoted where they're valid identifiers.
+ */
+function emitValue(value: unknown, indent: number): string {
+  const pad = "  ".repeat(indent);
+  const padInner = "  ".repeat(indent + 1);
+  if (value === null) return "null";
+  if (typeof value === "string") return str(value);
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "[]";
+    // Inline short arrays of primitives (mirrors Prettier output) so e.g.
+    // `required: ["stage"]` and `tags: ["a", "b"]` don't sprawl over many lines.
+    const allPrimitive = value.every(
+      (v) =>
+        v === null ||
+        typeof v === "string" ||
+        typeof v === "number" ||
+        typeof v === "boolean"
+    );
+    if (allPrimitive) {
+      const inline = `[${value.map((v) => emitValue(v, 0)).join(", ")}]`;
+      if (inline.length <= 72) return inline;
+    }
+    const items = value.map((v) => `${padInner}${emitValue(v, indent + 1)}`);
+    return `[\n${items.join(",\n")},\n${pad}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 0) return "{}";
+    const lines = entries.map(
+      ([k, v]) => `${padInner}${emitKey(k)}: ${emitValue(v, indent + 1)}`
+    );
+    return `{\n${lines.join(",\n")},\n${pad}}`;
+  }
+  // undefined / function — should never reach here for declared state.
+  return "undefined";
+}
+
+const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+function emitKey(key: string): string {
+  return IDENT.test(key) ? key : str(key);
+}
+
+/**
+ * Render an object's fields as the body of an object literal (one field per
+ * line at `indent`+1). `fields` are pre-rendered `key: value` strings; empty
+ * entries are dropped so omitted/default fields never appear.
+ */
+function objectLiteral(fields: string[], indent = 0): string {
+  const pad = "  ".repeat(indent);
+  const padInner = "  ".repeat(indent + 1);
+  const present = fields.filter((f) => f.length > 0);
+  if (present.length === 0) return "{}";
+  return `{\n${present.map((f) => `${padInner}${f}`).join(",\n")},\n${pad}}`;
+}
+
+// ── Identifier minting ───────────────────────────────────────────────────────
+
+/** Turn a slug/id into a safe, unique camelCase const identifier. */
+class IdentMinter {
+  private readonly used = new Set<string>();
+
+  mint(base: string, suffix = ""): string {
+    let camel = base
+      .replace(/[^A-Za-z0-9]+(.)?/g, (_, c: string | undefined) =>
+        c ? c.toUpperCase() : ""
+      )
+      .replace(/^[0-9]+/, "");
+    if (!camel) camel = "item";
+    if (!/^[A-Za-z_$]/.test(camel)) camel = `_${camel}`;
+    let candidate = `${camel}${suffix}`;
+    let n = 2;
+    while (this.used.has(candidate)) {
+      candidate = `${camel}${suffix}${n++}`;
+    }
+    this.used.add(candidate);
+    return candidate;
+  }
+}
+
+// ── Secret placeholders ──────────────────────────────────────────────────────
+
+/**
+ * Collects env-var names emitted as `secret("NAME")` placeholders so we can
+ * write a `.env.example`. Credentials are write-only on the server; we never
+ * read or emit real values.
+ */
+class SecretCollector {
+  readonly names = new Set<string>();
+
+  /** Register a var name and return the `secret("NAME")` TS expression. */
+  ref(name: string): string {
+    this.names.add(name);
+    return `secret(${str(name)})`;
+  }
+}
+
+/** Uppercase env-var name from a slug/key (e.g. `gh-token` → `GH_TOKEN_API_KEY`). */
+function envVarFor(slug: string, suffix: string): string {
+  const base = slug.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
+  return `${base}_${suffix}`;
+}
+
+// ── Imports tracking ─────────────────────────────────────────────────────────
+
+const IMPORTABLE = [
+  "defineAgent",
+  "defineConfig",
+  "defineEntityType",
+  "defineRelationshipType",
+  "defineWatcher",
+  "defineConnection",
+  "defineAuthProfile",
+  "secret",
+] as const;
+type Importable = (typeof IMPORTABLE)[number];
+
+class ImportTracker {
+  private readonly used = new Set<Importable>();
+  use(name: Importable): void {
+    this.used.add(name);
+  }
+  render(): string {
+    const names = IMPORTABLE.filter((n) => this.used.has(n)).sort();
+    return `import {\n${names.map((n) => `  ${n}`).join(",\n")},\n} from "@lobu/sdk";`;
+  }
+}
+
+// ── Agent settings → SDK agent (inverse of mapAgent) ────────────────────────
+
+interface EmittedAgent {
+  handle: Handle;
+  /** Markdown + skill files to write under the agent dir. */
+  files: Array<{ relPath: string; body: string }>;
+}
+
+function emitAgent(
+  agent: RemoteAgent,
+  settings: AgentSettings | null,
+  imports: ImportTracker,
+  secrets: SecretCollector,
+  minter: IdentMinter
+): EmittedAgent {
+  imports.use("defineAgent");
+  const fields: string[] = [`id: ${str(agent.agentId)}`];
+  fields.push(`name: ${str(agent.name || agent.agentId)}`);
+  if (agent.description) fields.push(`description: ${str(agent.description)}`);
+  fields.push(`dir: ${str(`./agents/${agent.agentId}`)}`);
+
+  const files: Array<{ relPath: string; body: string }> = [];
+  const dir = `agents/${agent.agentId}`;
+
+  // providers ← installedProviders + providerModelPreferences (+ secret key).
+  const providers = settings?.installedProviders ?? [];
+  if (providers.length > 0) {
+    const prefs = settings?.providerModelPreferences ?? {};
+    imports.use("secret");
+    const items = providers.map((p) => {
+      const id = p.providerId;
+      const model = prefs[id];
+      const envVar = envVarFor(id, "API_KEY");
+      const provFields = [
+        `id: ${str(id)}`,
+        ...(model ? [`model: ${str(model)}`] : []),
+        `key: ${secrets.ref(envVar)}`,
+      ];
+      return objectLiteral(provFields, 2);
+    });
+    fields.push(`providers: [\n    ${items.join(",\n    ")},\n  ]`);
+  }
+
+  // network ← networkConfig (allowed/denied/judged/judges).
+  const net = settings?.networkConfig;
+  if (net) {
+    const netFields: string[] = [];
+    if (net.allowedDomains?.length) {
+      netFields.push(`allowed: ${emitValue(net.allowedDomains, 2)}`);
+    }
+    if (net.deniedDomains?.length) {
+      netFields.push(`denied: ${emitValue(net.deniedDomains, 2)}`);
+    }
+    if (net.judgedDomains?.length) {
+      netFields.push(
+        `judged: ${emitValue(
+          net.judgedDomains.map((r) => ({
+            domain: r.domain,
+            ...(r.judge ? { judge: r.judge } : {}),
+          })),
+          2
+        )}`
+      );
+    }
+    if (net.judges && Object.keys(net.judges).length > 0) {
+      netFields.push(`judges: ${emitValue(net.judges, 2)}`);
+    }
+    if (netFields.length > 0) {
+      fields.push(`network: ${objectLiteral(netFields, 1)}`);
+    }
+  }
+
+  // egress ← egressConfig.
+  const egress = settings?.egressConfig;
+  if (egress && (egress.extraPolicy || egress.judgeModel)) {
+    const egFields: string[] = [];
+    if (egress.extraPolicy) {
+      egFields.push(`extraPolicy: ${str(egress.extraPolicy)}`);
+    }
+    if (egress.judgeModel)
+      egFields.push(`judgeModel: ${str(egress.judgeModel)}`);
+    fields.push(`egress: ${objectLiteral(egFields, 1)}`);
+  }
+
+  // tools ← toolsConfig + preApprovedTools.
+  const tools = settings?.toolsConfig;
+  const preApproved = settings?.preApprovedTools;
+  if (
+    preApproved?.length ||
+    tools?.allowedTools?.length ||
+    tools?.deniedTools?.length ||
+    tools?.strictMode !== undefined
+  ) {
+    const toolFields: string[] = [];
+    if (preApproved?.length) {
+      toolFields.push(`preApproved: ${emitValue(preApproved, 2)}`);
+    }
+    if (tools?.allowedTools?.length) {
+      toolFields.push(`allowed: ${emitValue(tools.allowedTools, 2)}`);
+    }
+    if (tools?.deniedTools?.length) {
+      toolFields.push(`denied: ${emitValue(tools.deniedTools, 2)}`);
+    }
+    if (tools?.strictMode !== undefined) {
+      toolFields.push(`strict: ${tools.strictMode}`);
+    }
+    fields.push(`tools: ${objectLiteral(toolFields, 1)}`);
+  }
+
+  // guardrails ← guardrails[].
+  if (settings?.guardrails?.length) {
+    fields.push(`guardrails: ${emitValue(settings.guardrails, 1)}`);
+  }
+
+  // nixPackages ← nixConfig.packages.
+  if (settings?.nixConfig?.packages?.length) {
+    fields.push(`nixPackages: ${emitValue(settings.nixConfig.packages, 1)}`);
+  }
+
+  // mcpServers ← mcpServers (client secrets → secret placeholders).
+  const mcp = settings?.mcpServers;
+  if (mcp && Object.keys(mcp).length > 0) {
+    fields.push(`mcpServers: ${emitMcpServers(mcp, secrets)}`);
+  }
+
+  // Agent-dir markdown.
+  if (settings?.soulMd) {
+    files.push({
+      relPath: `${dir}/SOUL.md`,
+      body: ensureTrailingNewline(settings.soulMd),
+    });
+  }
+  if (settings?.identityMd) {
+    files.push({
+      relPath: `${dir}/IDENTITY.md`,
+      body: ensureTrailingNewline(settings.identityMd),
+    });
+  }
+  if (settings?.userMd) {
+    files.push({
+      relPath: `${dir}/USER.md`,
+      body: ensureTrailingNewline(settings.userMd),
+    });
+  }
+
+  // Local skills → skills/<name>/SKILL.md (with frontmatter for net/nix/mcp).
+  for (const skill of settings?.skillsConfig?.skills ?? []) {
+    if (skill.repo && !skill.repo.startsWith("local/")) continue;
+    files.push({
+      relPath: `${dir}/skills/${skill.name}/SKILL.md`,
+      body: emitSkillFile(skill),
+    });
+  }
+
+  const handleName = minter.mint(agent.agentId, "Agent");
+  const decl = `const ${handleName} = defineAgent(${objectLiteral(fields, 0)});`;
+  return { handle: { name: handleName, decl }, files };
+}
+
+function emitMcpServers(
+  mcp: NonNullable<AgentSettings["mcpServers"]>,
+  secrets: SecretCollector
+): string {
+  const entries = Object.entries(mcp).sort(([a], [b]) => a.localeCompare(b));
+  const lines = entries.map(([id, server]) => {
+    const sFields: string[] = [];
+    if (server.url) sFields.push(`url: ${str(server.url)}`);
+    if (server.type) sFields.push(`type: ${str(server.type)}`);
+    if (server.command) sFields.push(`command: ${str(server.command)}`);
+    if (server.args?.length) sFields.push(`args: ${emitValue(server.args, 3)}`);
+    if (server.headers && Object.keys(server.headers).length > 0) {
+      sFields.push(`headers: ${emitValue(server.headers, 3)}`);
+    }
+    if (server.env && Object.keys(server.env).length > 0) {
+      sFields.push(`env: ${emitValue(server.env, 3)}`);
+    }
+    // oauth + authScope live on the stored config under a loose cast.
+    const loose = server as Record<string, unknown>;
+    if (typeof loose.authScope === "string") {
+      sFields.push(`authScope: ${str(loose.authScope)}`);
+    }
+    if (loose.oauth && typeof loose.oauth === "object") {
+      sFields.push(
+        `oauth: ${emitMcpOAuth(loose.oauth as Record<string, unknown>, secrets, id)}`
+      );
+    }
+    return `${str(id)}: ${objectLiteral(sFields, 2)}`;
+  });
+  return `{\n    ${lines.join(",\n    ")},\n  }`;
+}
+
+function emitMcpOAuth(
+  oauth: Record<string, unknown>,
+  secrets: SecretCollector,
+  serverId: string
+): string {
+  const fields: string[] = [];
+  if (typeof oauth.authUrl === "string")
+    fields.push(`authUrl: ${str(oauth.authUrl)}`);
+  if (typeof oauth.tokenUrl === "string") {
+    fields.push(`tokenUrl: ${str(oauth.tokenUrl)}`);
+  }
+  if (typeof oauth.clientId === "string") {
+    fields.push(`clientId: ${str(oauth.clientId)}`);
+  }
+  if (oauth.clientSecret !== undefined) {
+    // Write-only — never emit the stored value.
+    fields.push(
+      `clientSecret: ${secrets.ref(envVarFor(serverId, "MCP_CLIENT_SECRET"))}`
+    );
+  }
+  if (Array.isArray(oauth.scopes)) {
+    fields.push(`scopes: ${emitValue(oauth.scopes, 3)}`);
+  }
+  if (typeof oauth.tokenEndpointAuthMethod === "string") {
+    fields.push(
+      `tokenEndpointAuthMethod: ${str(oauth.tokenEndpointAuthMethod)}`
+    );
+  }
+  return objectLiteral(fields, 3);
+}
+
+function emitSkillFile(
+  skill: NonNullable<AgentSettings["skillsConfig"]>["skills"][number]
+): string {
+  const fm: string[] = [`name: ${skill.name}`];
+  if (skill.description) fm.push(`description: ${skill.description}`);
+  const net = skill.networkConfig;
+  if (
+    net?.allowedDomains?.length ||
+    net?.deniedDomains?.length ||
+    net?.judgedDomains?.length
+  ) {
+    fm.push("network:");
+    if (net?.allowedDomains?.length) {
+      fm.push(`  allow: [${net.allowedDomains.map((d) => str(d)).join(", ")}]`);
+    }
+    if (net?.deniedDomains?.length) {
+      fm.push(`  deny: [${net.deniedDomains.map((d) => str(d)).join(", ")}]`);
+    }
+  }
+  if (skill.nixPackages?.length) {
+    fm.push(
+      `nixPackages: [${skill.nixPackages.map((p) => str(p)).join(", ")}]`
+    );
+  }
+  const body = skill.content ?? "";
+  return `---\n${fm.join("\n")}\n---\n${body}\n`;
+}
+
+function ensureTrailingNewline(s: string): string {
+  return s.endsWith("\n") ? s : `${s}\n`;
+}
+
+// ── Entity / relationship / watcher / connection / auth (inverse maps) ──────
+
+function emitEntityType(
+  e: RemoteEntityType,
+  imports: ImportTracker,
+  minter: IdentMinter
+): Handle {
+  imports.use("defineEntityType");
+  const fields: string[] = [`key: ${str(e.slug)}`];
+  if (e.name) fields.push(`name: ${str(e.name)}`);
+  if (e.description) fields.push(`description: ${str(e.description)}`);
+  if (e.required?.length) fields.push(`required: ${emitValue(e.required, 1)}`);
+  if (e.properties && Object.keys(e.properties).length > 0) {
+    fields.push(`properties: ${emitValue(e.properties, 1)}`);
+  }
+  const name = minter.mint(e.slug, "Entity");
+  return {
+    name,
+    decl: `const ${name} = defineEntityType(${objectLiteral(fields, 0)});`,
+  };
+}
+
+function emitRelationshipType(
+  r: RemoteRelationshipType,
+  entityHandles: Map<string, string>,
+  imports: ImportTracker,
+  minter: IdentMinter
+): Handle {
+  imports.use("defineRelationshipType");
+  const fields: string[] = [`key: ${str(r.slug)}`];
+  if (r.name) fields.push(`name: ${str(r.name)}`);
+  if (r.description) fields.push(`description: ${str(r.description)}`);
+  if (r.rules?.length) {
+    const rules = r.rules.map((rule) => {
+      const source = entityHandles.get(rule.source) ?? str(rule.source);
+      const target = entityHandles.get(rule.target) ?? str(rule.target);
+      return `{ source: ${source}, target: ${target} }`;
+    });
+    fields.push(`rules: [\n    ${rules.join(",\n    ")},\n  ]`);
+  }
+  const name = minter.mint(r.slug, "Rel");
+  return {
+    name,
+    decl: `const ${name} = defineRelationshipType(${objectLiteral(fields, 0)});`,
+  };
+}
+
+function emitWatcher(
+  w: RemoteWatcher,
+  reactionScript: string | null,
+  agentHandles: Map<string, string>,
+  imports: ImportTracker,
+  minter: IdentMinter
+): { handle: Handle; reactionFile?: { relPath: string; body: string } } {
+  imports.use("defineWatcher");
+  const agentRef = w.agent_id ? agentHandles.get(w.agent_id) : undefined;
+  const fields: string[] = [
+    `agent: ${agentRef ?? str(w.agent_id ?? "")}`,
+    `slug: ${str(w.slug)}`,
+  ];
+  if (w.name) fields.push(`name: ${str(w.name)}`);
+  if (w.description) fields.push(`description: ${str(w.description)}`);
+  if (w.schedule) fields.push(`schedule: ${str(w.schedule)}`);
+  fields.push(`prompt: ${str(w.prompt ?? "")}`);
+  fields.push(
+    `extractionSchema: ${emitValue(w.extraction_schema ?? { type: "object" }, 1)}`
+  );
+  if (w.sources?.length) {
+    const sourceObj = Object.fromEntries(
+      w.sources.map((s) => [s.name, s.query])
+    );
+    fields.push(`sources: ${emitValue(sourceObj, 1)}`);
+  }
+  // notification — omit canvas/normal defaults.
+  const channel =
+    w.notification_channel && w.notification_channel !== "canvas"
+      ? w.notification_channel
+      : undefined;
+  const priority =
+    w.notification_priority && w.notification_priority !== "normal"
+      ? w.notification_priority
+      : undefined;
+  if (channel || priority) {
+    const notif: string[] = [];
+    if (channel) notif.push(`channel: ${str(channel)}`);
+    if (priority) notif.push(`priority: ${str(priority)}`);
+    fields.push(`notification: ${objectLiteral(notif, 1)}`);
+  }
+  if (
+    w.min_cooldown_seconds !== undefined &&
+    w.min_cooldown_seconds !== null &&
+    w.min_cooldown_seconds !== 0
+  ) {
+    fields.push(`minCooldownSeconds: ${w.min_cooldown_seconds}`);
+  }
+  if (w.tags?.length) fields.push(`tags: ${emitValue(w.tags, 1)}`);
+  if (w.reactions_guidance) {
+    fields.push(`reactionsGuidance: ${str(w.reactions_guidance)}`);
+  }
+  if (w.agent_kind) fields.push(`agentKind: ${str(w.agent_kind)}`);
+
+  let reactionFile: { relPath: string; body: string } | undefined;
+  if (reactionScript) {
+    const rel = `reactions/${w.slug}.reaction.ts`;
+    fields.push(`reaction: ${str(`./${rel}`)}`);
+    reactionFile = {
+      relPath: rel,
+      body: ensureTrailingNewline(reactionScript),
+    };
+  }
+
+  const name = minter.mint(w.slug, "Watcher");
+  const handle: Handle = {
+    name,
+    decl: `const ${name} = defineWatcher(${objectLiteral(fields, 0)});`,
+  };
+  return reactionFile ? { handle, reactionFile } : { handle };
+}
+
+function emitAuthProfile(
+  p: RemoteAuthProfile,
+  secrets: SecretCollector,
+  connectorHandles: Map<string, string>,
+  imports: ImportTracker,
+  minter: IdentMinter
+): Handle {
+  imports.use("defineAuthProfile");
+  const interactive =
+    p.profile_kind === "oauth_account" || p.profile_kind === "browser_session";
+  const connectorRef =
+    connectorHandles.get(p.connector_key) ?? str(p.connector_key);
+  const fields: string[] = [
+    `slug: ${str(p.slug)}`,
+    `connector: ${connectorRef}`,
+    `authKind: ${str(p.profile_kind)}`,
+  ];
+  if (p.display_name) fields.push(`name: ${str(p.display_name)}`);
+  // Credentials are write-only on the server. For credentialed kinds, emit a
+  // single secret placeholder so the operator wires it back in; interactive
+  // kinds (oauth_account / browser_session) take no credentials (auth via UI).
+  if (
+    !interactive &&
+    (p.profile_kind === "env" || p.profile_kind === "oauth_app")
+  ) {
+    imports.use("secret");
+    const credKey = p.profile_kind === "oauth_app" ? "CLIENT_SECRET" : "VALUE";
+    fields.push(
+      `credentials: {\n    ${envVarFor(p.slug, credKey)}: ${secrets.ref(envVarFor(p.slug, credKey))},\n  }`
+    );
+  }
+  const name = minter.mint(p.slug, "Auth");
+  return {
+    name,
+    decl: `const ${name} = defineAuthProfile(${objectLiteral(fields, 0)});`,
+  };
+}
+
+function emitConnection(
+  c: RemoteConnection,
+  feeds: RemoteFeed[],
+  authHandles: Map<string, string>,
+  connectorHandles: Map<string, string>,
+  imports: ImportTracker,
+  minter: IdentMinter
+): Handle {
+  imports.use("defineConnection");
+  const connectorRef =
+    connectorHandles.get(c.connector_key) ?? str(c.connector_key);
+  const fields: string[] = [
+    `slug: ${str(c.slug)}`,
+    `connector: ${connectorRef}`,
+  ];
+  if (c.display_name) fields.push(`name: ${str(c.display_name)}`);
+  if (c.auth_profile_slug) {
+    const ref =
+      authHandles.get(c.auth_profile_slug) ?? str(c.auth_profile_slug);
+    fields.push(`authProfile: ${ref}`);
+  }
+  if (c.app_auth_profile_slug) {
+    const ref =
+      authHandles.get(c.app_auth_profile_slug) ?? str(c.app_auth_profile_slug);
+    fields.push(`appAuthProfile: ${ref}`);
+  }
+  if (c.config && Object.keys(c.config).length > 0) {
+    fields.push(`config: ${emitValue(c.config, 1)}`);
+  }
+  if (c.device_worker_id) {
+    fields.push(`deviceWorkerId: ${str(c.device_worker_id)}`);
+  }
+  if (feeds.length > 0) {
+    const items = feeds
+      .slice()
+      .sort((a, b) => a.feed_key.localeCompare(b.feed_key))
+      .map((f) => {
+        const fFields: string[] = [`feed: ${str(f.feed_key)}`];
+        if (f.display_name) fFields.push(`name: ${str(f.display_name)}`);
+        if (f.schedule) fFields.push(`schedule: ${str(f.schedule)}`);
+        if (f.config && Object.keys(f.config).length > 0) {
+          fFields.push(`config: ${emitValue(f.config, 3)}`);
+        }
+        return objectLiteral(fFields, 2);
+      });
+    fields.push(`feeds: [\n    ${items.join(",\n    ")},\n  ]`);
+  }
+  const name = minter.mint(c.slug, "Conn");
+  return {
+    name,
+    decl: `const ${name} = defineConnection(${objectLiteral(fields, 0)});`,
+  };
+}
+
+// ── Fetch the org's full declared state ─────────────────────────────────────
+
+interface FetchedState {
+  agents: Array<{ agent: RemoteAgent; settings: AgentSettings | null }>;
+  entityTypes: RemoteEntityType[];
+  relationshipTypes: RemoteRelationshipType[];
+  watchers: Array<{ watcher: RemoteWatcher; reactionScript: string | null }>;
+  authProfiles: RemoteAuthProfile[];
+  connections: Array<{ connection: RemoteConnection; feeds: RemoteFeed[] }>;
+}
+
+async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
+  const [
+    agentList,
+    entityTypes,
+    relationshipTypes,
+    watcherList,
+    authProfiles,
+    connectionList,
+  ] = await Promise.all([
+    client.listAgents(),
+    client.listEntityTypes(),
+    client.listRelationshipTypes(),
+    client.listWatchers(),
+    client.listAuthProfiles(),
+    client.listConnections(),
+  ]);
+
+  const agents = await Promise.all(
+    agentList
+      .slice()
+      .sort((a, b) => a.agentId.localeCompare(b.agentId))
+      .map(async (agent) => ({
+        agent,
+        settings: await client.getAgentSettings(agent.agentId),
+      }))
+  );
+
+  // reaction_script isn't on the list response — fetch each watcher's detail.
+  const watchers = await Promise.all(
+    watcherList
+      .slice()
+      .sort((a, b) => a.slug.localeCompare(b.slug))
+      .map(async (watcher) => {
+        let reactionScript: string | null = null;
+        if (watcher.watcher_id) {
+          const detail = await client.getWatcherDetail(watcher.watcher_id);
+          reactionScript = detail?.reaction_script ?? null;
+          if (detail?.description && !watcher.description) {
+            watcher.description = detail.description;
+          }
+        }
+        return { watcher, reactionScript };
+      })
+  );
+
+  const connections = await Promise.all(
+    connectionList
+      .slice()
+      .sort((a, b) => a.slug.localeCompare(b.slug))
+      .map(async (connection) => ({
+        connection,
+        feeds: await client.listFeeds(connection.id),
+      }))
+  );
+
+  return {
+    agents,
+    entityTypes: entityTypes
+      .slice()
+      .sort((a, b) => a.slug.localeCompare(b.slug)),
+    relationshipTypes: relationshipTypes
+      .slice()
+      .sort((a, b) => a.slug.localeCompare(b.slug)),
+    watchers,
+    authProfiles: authProfiles
+      .slice()
+      .sort((a, b) => a.slug.localeCompare(b.slug)),
+    connections,
+  };
+}
+
+// ── Assemble lobu.config.ts ─────────────────────────────────────────────────
+
+interface GeneratedProject {
+  configSource: string;
+  files: Array<{ relPath: string; body: string }>;
+  envVars: string[];
+}
+
+export function generateProject(
+  orgSlug: string,
+  orgName: string | undefined,
+  state: FetchedState
+): GeneratedProject {
+  const imports = new ImportTracker();
+  imports.use("defineConfig");
+  const secrets = new SecretCollector();
+  const minter = new IdentMinter();
+  const files: Array<{ relPath: string; body: string }> = [];
+
+  // Agents first (watchers reference their handles).
+  const agentHandles = new Map<string, string>();
+  const agentDecls: string[] = [];
+  for (const { agent, settings } of state.agents) {
+    const emitted = emitAgent(agent, settings, imports, secrets, minter);
+    agentHandles.set(agent.agentId, emitted.handle.name);
+    agentDecls.push(emitted.handle.decl);
+    files.push(...emitted.files);
+  }
+
+  // Entities (relationships reference their handles).
+  const entityHandles = new Map<string, string>();
+  const entityDecls: string[] = [];
+  for (const e of state.entityTypes) {
+    const h = emitEntityType(e, imports, minter);
+    entityHandles.set(e.slug, h.name);
+    entityDecls.push(h.decl);
+  }
+
+  const relDecls: string[] = [];
+  const relHandles: string[] = [];
+  for (const r of state.relationshipTypes) {
+    const h = emitRelationshipType(r, entityHandles, imports, minter);
+    relDecls.push(h.decl);
+    relHandles.push(h.name);
+  }
+
+  // Auth profiles + connections (connector key referenced by string — no local
+  // connector source is exported, so connectors stay bare string refs).
+  const connectorHandles = new Map<string, string>();
+  const authHandles = new Map<string, string>();
+  const authDecls: string[] = [];
+  for (const p of state.authProfiles) {
+    const h = emitAuthProfile(p, secrets, connectorHandles, imports, minter);
+    authHandles.set(p.slug, h.name);
+    authDecls.push(h.decl);
+  }
+
+  const connDecls: string[] = [];
+  const connHandles: string[] = [];
+  for (const { connection, feeds } of state.connections) {
+    const h = emitConnection(
+      connection,
+      feeds,
+      authHandles,
+      connectorHandles,
+      imports,
+      minter
+    );
+    connDecls.push(h.decl);
+    connHandles.push(h.name);
+  }
+
+  // Watchers last.
+  const watcherDecls: string[] = [];
+  const watcherHandles: string[] = [];
+  for (const { watcher, reactionScript } of state.watchers) {
+    const { handle, reactionFile } = emitWatcher(
+      watcher,
+      reactionScript,
+      agentHandles,
+      imports,
+      minter
+    );
+    watcherDecls.push(handle.decl);
+    watcherHandles.push(handle.name);
+    if (reactionFile) files.push(reactionFile);
+  }
+
+  // defineConfig({ ... }).
+  const configFields: string[] = [`org: ${str(orgSlug)}`];
+  if (orgName) configFields.push(`orgName: ${str(orgName)}`);
+  configFields.push(`agents: [${[...agentHandles.values()].join(", ")}]`);
+  if (entityHandles.size > 0) {
+    configFields.push(`entities: [${[...entityHandles.values()].join(", ")}]`);
+  }
+  if (relHandles.length > 0) {
+    configFields.push(`relationships: [${relHandles.join(", ")}]`);
+  }
+  if (connHandles.length > 0) {
+    configFields.push(`connections: [${connHandles.join(", ")}]`);
+  }
+  if (authHandles.size > 0) {
+    configFields.push(
+      `authProfiles: [${[...authHandles.values()].join(", ")}]`
+    );
+  }
+  if (watcherHandles.length > 0) {
+    configFields.push(`watchers: [${watcherHandles.join(", ")}]`);
+  }
+
+  const blocks: string[] = [];
+  const pushBlock = (decls: string[]) => {
+    if (decls.length > 0) blocks.push(decls.join("\n\n"));
+  };
+  pushBlock(agentDecls);
+  pushBlock(entityDecls);
+  pushBlock(relDecls);
+  pushBlock(authDecls);
+  pushBlock(connDecls);
+  pushBlock(watcherDecls);
+
+  const header = [
+    "// lobu.config.ts — bootstrapped by `lobu init --from-org`",
+    "// Docs: https://lobu.ai/docs/getting-started",
+    "//",
+    "// Secrets are write-only on the server, so provider keys, auth-profile",
+    '// credentials, and MCP client secrets are emitted as secret("ENV_VAR")',
+    "// placeholders. Fill them into .env (see .env.example) before `lobu apply`.",
+  ].join("\n");
+
+  const configSource = `${[
+    header,
+    "",
+    imports.render(),
+    "",
+    blocks.join("\n\n"),
+    "",
+    `export default defineConfig(${objectLiteral(configFields, 0)});`,
+    "",
+  ].join("\n")}`;
+
+  return {
+    configSource,
+    files,
+    envVars: [...secrets.names].sort(),
+  };
+}
+
+// ── Top-level ────────────────────────────────────────────────────────────────
+
+export async function initFromOrg(opts: InitFromOrgOptions): Promise<void> {
+  const targetDir = resolve(opts.targetDir);
+
+  const { client, orgSlug } = await resolveApplyClient({
+    url: opts.url,
+    org: opts.org,
+    fetchImpl: opts.fetchImpl,
+  });
+  printText(chalk.dim(`Bootstrapping from org: ${orgSlug}`));
+  printText(chalk.dim(`Destination: ${targetDir}`));
+
+  // Org display name from the userinfo orgs list (no description endpoint).
+  const orgs = await client.listOrgs().catch(() => []);
+  const orgName = orgs.find((o) => o.slug === orgSlug)?.name;
+
+  const state = await fetchOrgState(client);
+  const project = generateProject(orgSlug, orgName, state);
+
+  // Write lobu.config.ts.
+  await writeFile(
+    join(targetDir, "lobu.config.ts"),
+    project.configSource,
+    "utf-8"
+  );
+
+  // Write file-convention artifacts (agent dirs, skills, reactions).
+  for (const file of project.files) {
+    const abs = join(targetDir, file.relPath);
+    await mkdir(resolve(abs, ".."), { recursive: true });
+    await writeFile(abs, file.body, "utf-8");
+  }
+
+  // .env.example listing the write-only secret var names.
+  if (project.envVars.length > 0) {
+    const body = `${[
+      "# Secrets referenced by lobu.config.ts (write-only on the server, not exported).",
+      "# Fill these in before running `lobu apply`.",
+      "",
+      ...project.envVars.map((v) => `${v}=`),
+      "",
+    ].join("\n")}`;
+    await writeFile(join(targetDir, ".env.example"), body, "utf-8");
+  }
+
+  // ── Report ──────────────────────────────────────────────────────────────
+  printText(chalk.bold("\nWrote:"));
+  printText(`  ${chalk.green("+")} lobu.config.ts`);
+  for (const file of project.files) {
+    printText(`  ${chalk.green("+")} ${file.relPath}`);
+  }
+  if (project.envVars.length > 0) {
+    printText(`  ${chalk.green("+")} .env.example`);
+    printText(
+      chalk.bold("\nWrite-only secrets to fill into .env before applying:")
+    );
+    for (const v of project.envVars) {
+      printText(`  ${chalk.yellow("·")} ${v}`);
+    }
+  }
+  printText(
+    chalk.dim(
+      "\nReview lobu.config.ts, fill .env, then `lobu apply` to re-sync.\n"
+    )
+  );
+}

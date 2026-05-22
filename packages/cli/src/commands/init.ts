@@ -20,6 +20,7 @@ import {
 } from "../commands/providers/registry.js";
 import { setLocalEnvValue } from "../internal/local-env.js";
 import { renderTemplate } from "../utils/template.js";
+import { initFromOrg } from "./_lib/init-from-org/bootstrap.js";
 import { isPortFree } from "./dev.js";
 
 const DEFAULT_LOBU_MCP_URL = "https://lobu.ai/mcp";
@@ -55,6 +56,14 @@ export interface InitOptions {
   noSentry?: boolean;
   slackPreview?: boolean;
   listProviders?: boolean;
+  /**
+   * Bootstrap a complete, re-appliable project from an existing Lobu Cloud org
+   * (the inverse of `lobu apply`) instead of scaffolding a blank project. Never
+   * overwrites an existing project — scaffolds into a new/empty dir.
+   */
+  fromOrg?: string;
+  /** Server URL override (used with `--from-org`). */
+  url?: string;
 }
 
 async function pickFreePort(
@@ -248,6 +257,21 @@ export async function initCommand(
         chalk.dim(`\nCreating project in: ${chalk.cyan(projectDir)}\n`)
       );
     }
+  }
+
+  // `--from-org`: bootstrap a complete, re-appliable project from an existing
+  // cloud org (the inverse of `lobu apply`) instead of the blank scaffold. The
+  // empty-dir / project-exists guard above already ran, so we never overwrite.
+  if (options.fromOrg !== undefined) {
+    await initFromOrg({
+      targetDir: projectDir,
+      org: options.fromOrg || undefined,
+      url: options.url,
+    });
+    if (!here) {
+      console.log(chalk.cyan(`\n  Next: cd ${projectName}\n`));
+    }
+    return;
   }
 
   // Pick free ports at scaffold time so two `lobu run`s on the same machine

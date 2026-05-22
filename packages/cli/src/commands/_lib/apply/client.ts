@@ -553,8 +553,9 @@ export class ApplyClient {
 
   /**
    * Fetch a single watcher's full payload — `getWatcher` server-side, which
-   * returns reaction_script (not in the list response). Used by `lobu export`
-   * to round-trip reaction scripts back to sibling `.ts` files.
+   * returns reaction_script (not in the list response). Used by
+   * `lobu init --from-org` to round-trip reaction scripts back to sibling
+   * `.ts` files.
    */
   async getWatcherDetail(watcherId: string): Promise<{
     reaction_script?: string | null;
