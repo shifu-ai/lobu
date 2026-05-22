@@ -151,6 +151,33 @@ describe('code-managed prune (server gate)', () => {
       ).rejects.toThrow(/relationships of this type exist|cannot delete/i);
     });
 
+    it('a foreign public rel-type with the same slug does not block the org owning/managing its own', async () => {
+      const sql = getTestDb();
+      // A different org, public, with a relationship type sharing the slug.
+      const other = await createTestOrganization({
+        name: 'Public Other',
+        visibility: 'public',
+      });
+      await sql`
+        INSERT INTO entity_relationship_types (organization_id, slug, name, status, created_at, updated_at)
+        VALUES (${other.id}, ${'shared-rel'}, 'Foreign Shared', 'active', NOW(), NOW())
+      `;
+      // This org can still CREATE its own same-slug type (org-scoped dup check).
+      await owner.entity_schema.createRelType({
+        slug: 'shared-rel',
+        name: 'My Shared',
+      });
+      // ...and DELETE resolves THIS org's own row (tenant-first), not the
+      // foreign public one (which would otherwise raise access-denied).
+      await owner.entity_schema.deleteRelType('shared-rel');
+      // The foreign public row is untouched.
+      const [foreign] = await sql<{ deleted_at: string | null }[]>`
+        SELECT deleted_at FROM entity_relationship_types
+        WHERE organization_id = ${other.id} AND slug = ${'shared-rel'}
+      `;
+      expect(foreign?.deleted_at).toBeNull();
+    });
+
     it('deletes a watcher', async () => {
       const agent = await createTestAgent({ organizationId: orgId });
       const created = (await owner.watchers.create({

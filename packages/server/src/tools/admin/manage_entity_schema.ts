@@ -754,9 +754,15 @@ async function requireRelationshipType(
     return { typeId: Number(rows[0].id), sql };
   }
 
+  // Tenant-first ordering: when the caller's org owns a relationship type AND a
+  // public type from another org shares the slug, resolve the caller's OWN row.
+  // Without this, `LIMIT 1` could grab the foreign public row and the
+  // access-denied guard below would wrongly block the caller from
+  // updating/deleting its own type (and break code-managed prune).
   const existing = await sql`
     SELECT id, organization_id FROM entity_relationship_types
     WHERE slug = ${slug} AND deleted_at IS NULL
+    ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
     LIMIT 1
   `;
   if (existing.length === 0) throw new Error(`Relationship type "${slug}" not found`);
@@ -893,9 +899,13 @@ async function rtHandleCreate(
 
   const sql = getDb();
 
+  // Org-scoped duplicate check — the unique index is (organization_id, slug),
+  // so a same-slug PUBLIC type from another org must NOT block this org from
+  // creating its own (matches entity-type create).
   const existing = await sql`
     SELECT id FROM entity_relationship_types
     WHERE slug = ${args.slug} AND deleted_at IS NULL
+      AND organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
   if (existing.length > 0) {
