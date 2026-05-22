@@ -267,6 +267,83 @@ describe("apply diff — platforms", () => {
     }
     expect(renderPlan(plan)).toMatchSnapshot();
   });
+
+  // A `$VAR` secret placeholder never round-trips: the server returns the secret
+  // redacted (`***`) or as an internal `secret://…` reference. Either form must
+  // be treated as unchanged so the platform isn't needlessly restarted.
+  test.each([
+    ["redacted (***)", "***oken"],
+    ["secret:// reference", "secret://connections%2Ftriage-telegram%2FbotToken"],
+  ])("noop when desired $VAR matches remote %s", (_label, remoteValue) => {
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        platforms: [
+          {
+            stableId: "triage-telegram",
+            type: "telegram",
+            config: { botToken: "$TELEGRAM_BOT_TOKEN" },
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      platformsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-telegram",
+              platform: "telegram",
+              // GET round-trip carries the `platform` key + the opaque secret.
+              config: { platform: "telegram", botToken: remoteValue },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("noop");
+  });
+
+  test("update when a non-secret config field changes (secret still opaque)", () => {
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        platforms: [
+          {
+            stableId: "triage-telegram",
+            type: "telegram",
+            config: { botToken: "$TELEGRAM_BOT_TOKEN", mode: "webhook" },
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      platformsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-telegram",
+              platform: "telegram",
+              config: { platform: "telegram", botToken: "***oken", mode: "polling" },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("update");
+  });
 });
 
 describe("apply diff — memory schema", () => {
