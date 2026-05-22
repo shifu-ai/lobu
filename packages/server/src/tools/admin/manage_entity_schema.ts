@@ -754,27 +754,21 @@ async function requireRelationshipType(
     return { typeId: Number(rows[0].id), sql };
   }
 
-  // Tenant-first ordering: when the caller's org owns a relationship type AND a
-  // public type from another org shares the slug, resolve the caller's OWN row.
-  // Without this, `LIMIT 1` could grab the foreign public row and the
-  // access-denied guard below would wrongly block the caller from
-  // updating/deleting its own type (and break code-managed prune).
+  // Write mode (update/delete/add_rule/…) only ever touches the caller's OWN
+  // type, so scope the lookup to ctx.organizationId. A public type from another
+  // org shares the slug but is read-only to this tenant (referenceable as an
+  // inverse, never mutable), and a PRIVATE foreign row must stay invisible — an
+  // unscoped lookup that fell back to a foreign row and threw 'Access denied'
+  // leaked the slug's existence in another org. Absent an own row → 'not found'.
   const existing = await sql`
-    SELECT id, organization_id FROM entity_relationship_types
+    SELECT id FROM entity_relationship_types
     WHERE slug = ${slug} AND deleted_at IS NULL
-    ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
+      AND organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
   if (existing.length === 0) throw new Error(`Relationship type "${slug}" not found`);
 
-  const typeId = Number(existing[0].id);
-  const typeOrgId = String(existing[0].organization_id ?? '');
-
-  if (typeOrgId && typeOrgId !== ctx.organizationId) {
-    throw new Error('Access denied: relationship type belongs to another organization');
-  }
-
-  return { typeId, sql };
+  return { typeId: Number(existing[0].id), sql };
 }
 
 /**

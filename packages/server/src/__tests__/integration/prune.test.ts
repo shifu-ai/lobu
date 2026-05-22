@@ -132,6 +132,31 @@ describe('prune (server gate)', () => {
       expect(foreign?.deleted_at).toBeNull();
     });
 
+    it("update/delete of a slug owned only by another PRIVATE org reports 'not found' (no existence leak)", async () => {
+      const sql = getTestDb();
+      const other = await createTestOrganization({ name: 'Private Owner Org' });
+      await sql`
+        INSERT INTO entity_relationship_types (organization_id, slug, name, status, created_at, updated_at)
+        VALUES (${other.id}, ${'foreign-only'}, 'Foreign Only', 'active', NOW(), NOW())
+      `;
+      // The caller has no own 'foreign-only'. Write-mode lookup is org-scoped,
+      // so it must report 'not found' — never 'access denied', which would leak
+      // that the slug exists in another org.
+      await expect(
+        owner.entity_schema.deleteRelType('foreign-only')
+      ).rejects.toThrow(/not found/i);
+      await expect(
+        owner.entity_schema.updateRelType({ slug: 'foreign-only', name: 'x' })
+      ).rejects.toThrow(/not found/i);
+      // Foreign row untouched.
+      const [foreign] = await sql<{ deleted_at: string | null; name: string }[]>`
+        SELECT deleted_at, name FROM entity_relationship_types
+        WHERE organization_id = ${other.id} AND slug = ${'foreign-only'}
+      `;
+      expect(foreign?.deleted_at).toBeNull();
+      expect(foreign?.name).toBe('Foreign Only');
+    });
+
     it('deletes a watcher', async () => {
       const agent = await createTestAgent({ organizationId: orgId });
       const created = (await owner.watchers.create({

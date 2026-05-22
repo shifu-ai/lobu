@@ -286,17 +286,17 @@ async function fetchRemoteSnapshot(
     only === "agents" ? [] : await client.listRelationshipTypes();
   // The relationship-type `list` action omits rules, so the diff would compare
   // desired rules against an always-empty remote and churn a perpetual "rules
-  // changed" update. Hydrate rules for the types the config also declares with
-  // rules (bounded fetch — skip types with no desired rules to compare).
+  // changed" update. Hydrate rules for every type the config also declares —
+  // including those the config declares with NO rules, so dropping all rules is
+  // detected as a change (and reconciled away) rather than a silent noop.
   if (relationshipTypes.length > 0) {
-    const desiredRuleSlugs = new Set(
-      state.memorySchema.relationshipTypes
-        .filter((r) => (r.rules?.length ?? 0) > 0)
-        .map((r) => r.slug)
+    const desiredRelSlugs = new Set(
+      state.memorySchema.relationshipTypes.map((r) => r.slug)
     );
     for (const remote of relationshipTypes) {
-      if (!desiredRuleSlugs.has(remote.slug)) continue;
-      remote.rules = await client.listRelationshipTypeRules(remote.slug);
+      if (!desiredRelSlugs.has(remote.slug)) continue;
+      const rules = await client.listRelationshipTypeRules(remote.slug);
+      remote.rules = rules.map((r) => ({ source: r.source, target: r.target }));
     }
   }
   const watchers = only === "agents" ? [] : await client.listWatchers();

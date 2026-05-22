@@ -578,13 +578,14 @@ export class ApplyClient {
    * Fetch a relationship type's rules (the `list` action omits them, so the
    * apply diff can't otherwise see remote rules and would churn a perpetual
    * "rules changed" update). Maps the server's `*_entity_type_slug` columns to
-   * the `{ source, target }` shape the diff compares against desired.
+   * `{ source, target }`; `id` is carried for reconcile (remove_rule by id).
    */
   async listRelationshipTypeRules(
     slug: string
-  ): Promise<Array<{ source: string; target: string }>> {
+  ): Promise<Array<{ id: number; source: string; target: string }>> {
     const { body } = await this.request<{
       rules?: Array<{
+        id?: number;
         source_entity_type_slug?: string;
         target_entity_type_slug?: string;
       }>;
@@ -594,8 +595,12 @@ export class ApplyClient {
       slug,
     });
     return (body.rules ?? [])
-      .filter((r) => r.source_entity_type_slug && r.target_entity_type_slug)
+      .filter(
+        (r) =>
+          r.id != null && r.source_entity_type_slug && r.target_entity_type_slug
+      )
       .map((r) => ({
+        id: r.id as number,
         source: r.source_entity_type_slug as string,
         target: r.target_entity_type_slug as string,
       }));
@@ -613,27 +618,44 @@ export class ApplyClient {
       payload
     );
 
-    // Register rules separately via add_rule. Backend treats add_rule as
-    // idempotent; duplicate-add surfaces a structured error we can swallow.
-    if (rules?.length) {
-      for (const rule of rules) {
-        try {
-          await this.request(
-            "POST",
-            `/api/${this.orgSlug}/manage_entity_schema`,
-            {
-              schema_type: "relationship_type",
-              action: "add_rule",
-              slug: rel.slug,
-              source_entity_type_slug: rule.source,
-              target_entity_type_slug: rule.target,
-            }
-          );
-        } catch (err) {
-          if (err instanceof ApiError && isDuplicateError(err)) continue;
-          throw err;
-        }
+    // Reconcile rules to exactly the desired set so config is the source of
+    // truth (declarative). Without removing extras, dropping a rule from config
+    // would never take effect AND would churn a perpetual "rules changed"
+    // update on every apply. add_rule is idempotent; remove_rule takes a id.
+    const desired = rules ?? [];
+    const ruleKey = (r: { source: string; target: string }) =>
+      `${r.source} ${r.target}`;
+    const desiredKeys = new Set(desired.map(ruleKey));
+    const remote = await this.listRelationshipTypeRules(rel.slug);
+    const remoteKeys = new Set(remote.map(ruleKey));
+
+    for (const rule of desired) {
+      if (remoteKeys.has(ruleKey(rule))) continue;
+      try {
+        await this.request(
+          "POST",
+          `/api/${this.orgSlug}/manage_entity_schema`,
+          {
+            schema_type: "relationship_type",
+            action: "add_rule",
+            slug: rel.slug,
+            source_entity_type_slug: rule.source,
+            target_entity_type_slug: rule.target,
+          }
+        );
+      } catch (err) {
+        if (err instanceof ApiError && isDuplicateError(err)) continue;
+        throw err;
       }
+    }
+    for (const rule of remote) {
+      if (desiredKeys.has(ruleKey(rule))) continue;
+      await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+        schema_type: "relationship_type",
+        action: "remove_rule",
+        slug: rel.slug,
+        rule_id: rule.id,
+      });
     }
     return result;
   }

@@ -412,19 +412,22 @@ function emitAgent(
       const cfg: Record<string, unknown> = { ...(p.config ?? {}) };
       delete cfg.platform;
       const cfgLines = Object.entries(cfg).map(([k, v]) => {
+        // emitKey quotes keys that aren't valid TS identifiers (e.g. hyphenated
+        // platform config keys) so the generated config always parses.
+        const key = emitKey(k);
         if (typeof v === "string") {
           const explicitVar = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
           if (explicitVar?.[1]) {
-            return `${k}: ${secrets.ref(explicitVar[1])}`;
+            return `${key}: ${secrets.ref(explicitVar[1])}`;
           }
           // Opaque secret (redacted `***…` or internal `secret://…`): derive a
           // deterministic env-var name from the agent + config key.
           if (v.startsWith("***") || v.startsWith("secret://")) {
-            return `${k}: ${secrets.ref(envVarFor(agent.agentId, `${p.platform}_${k}`.toUpperCase()))}`;
+            return `${key}: ${secrets.ref(envVarFor(agent.agentId, `${p.platform}_${k}`.toUpperCase()))}`;
           }
-          return `${k}: ${str(v)}`;
+          return `${key}: ${str(v)}`;
         }
-        return `${k}: ${emitValue(v, 3)}`;
+        return `${key}: ${emitValue(v, 3)}`;
       });
       // Recover the name from the stable id (`<agentId>-<type>[-<name>]`) so a
       // NAMED platform re-derives the same id on apply (no drift/duplicate).
