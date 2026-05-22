@@ -361,6 +361,60 @@ function diffSettings(
   };
 }
 
+/**
+ * A platform-config value the CLI can't read back, so it must not drive a diff:
+ *   - the server redacts secrets in the GET response (`***`-suffixed), and
+ *   - it rewrites a `$VAR` placeholder into an internal `secret://…` reference.
+ * Either form is opaque — the cleartext never round-trips.
+ */
+function isOpaqueRemoteConfigValue(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    (value.startsWith("***") || value.startsWith("secret://"))
+  );
+}
+
+/** A desired value that resolves to a secret at egress (a `$VAR` placeholder). */
+function isSecretPlaceholder(value: unknown): boolean {
+  return typeof value === "string" && value.startsWith("$");
+}
+
+/**
+ * Compare a desired platform config against the remote one for drift.
+ *
+ * Two adjustments keep an unchanged platform a noop instead of restarting it on
+ * every apply:
+ *   - the route handler stores `platform` inside `config` for stable-id
+ *     matching, so the GET round-trip carries an extra `platform` key the CLI
+ *     never wrote — strip it before diffing;
+ *   - secret-bearing keys (`botToken`, app secrets, …) come back redacted or as
+ *     a `secret://` reference, never the cleartext the CLI sent as `$VAR`. When
+ *     the desired value is a `$VAR` placeholder and the remote value is opaque,
+ *     treat them as equal (the credential write path is idempotent and re-pushes
+ *     rotated secrets on its own, mirroring the auth-profile credentials rule).
+ */
+function platformConfigChanged(
+  desired: Record<string, unknown>,
+  remote: Record<string, unknown> | undefined
+): boolean {
+  const remoteConfig: Record<string, unknown> = { ...(remote ?? {}) };
+  delete remoteConfig.platform;
+  const desiredConfig: Record<string, unknown> = { ...desired };
+  delete desiredConfig.platform;
+
+  const keys = new Set([
+    ...Object.keys(desiredConfig),
+    ...Object.keys(remoteConfig),
+  ]);
+  for (const key of keys) {
+    const d = desiredConfig[key];
+    const r = remoteConfig[key];
+    if (isSecretPlaceholder(d) && isOpaqueRemoteConfigValue(r)) continue;
+    if (!deepEqual(d, r)) return true;
+  }
+  return false;
+}
+
 function diffPlatform(
   agentId: string,
   desired: DesiredPlatform,
@@ -376,15 +430,7 @@ function diffPlatform(
       { name: "type", changed: (d, r) => d.type !== r.platform },
       {
         name: "config",
-        changed: (d, r) => {
-          // The route handler stores `platform` inside `config` for stable-id
-          // matching, so a noop round-trip from GET will have an extra
-          // `platform` key the CLI never wrote. Strip it before diffing so an
-          // unchanged platform doesn't show as drift on every plan.
-          const remoteConfig: Record<string, unknown> = { ...(r.config ?? {}) };
-          delete remoteConfig.platform;
-          return !deepEqual(d.config, remoteConfig);
-        },
+        changed: (d, r) => platformConfigChanged(d.config, r.config),
       },
     ],
     updateExtras: (changed) => ({
