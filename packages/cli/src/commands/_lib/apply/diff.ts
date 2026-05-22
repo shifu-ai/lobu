@@ -903,6 +903,13 @@ export function computeDiff(
     orgId === undefined ||
     definitionOrgId === undefined ||
     definitionOrgId === orgId;
+  // `$`-prefixed definitions (e.g. the per-org `$member` entity type) are
+  // SYSTEM-managed — the server provisions them and rejects `$` slugs in
+  // create, so they can never appear in a user's config. They must NEVER be
+  // pruned (deleting `$member` corrupts the org; and because the delete is
+  // refused while member rows exist, an un-exempted prune HALTS every apply).
+  // They only ever surface as ignorable drift, in both prune and non-prune.
+  const isSystemSlug = (slug: string): boolean => slug.startsWith("$");
 
   if (only !== "memory") {
     const remoteByAgent = new Map(remote.agents.map((a) => [a.agentId, a]));
@@ -994,9 +1001,10 @@ export function computeDiff(
       if (!desiredEntitySlugs.has(remoteEntity.slug)) {
         // Code-managed: delete. The server refuses an entity-type delete while
         // instances exist (the data is exempt), surfacing a clear error.
+        // System (`$`) types are never user-declared → never pruned.
         rows.push({
           kind: "entity-type",
-          verb: prune ? "delete" : "drift",
+          verb: prune && !isSystemSlug(remoteEntity.slug) ? "delete" : "drift",
           id: remoteEntity.slug,
           remote: remoteEntity,
         });
@@ -1017,7 +1025,7 @@ export function computeDiff(
       if (!desiredRelSlugs.has(remoteRel.slug)) {
         rows.push({
           kind: "relationship-type",
-          verb: prune ? "delete" : "drift",
+          verb: prune && !isSystemSlug(remoteRel.slug) ? "delete" : "drift",
           id: remoteRel.slug,
           remote: remoteRel,
         });
@@ -1035,7 +1043,7 @@ export function computeDiff(
       if (!desiredWatcherSlugs.has(remoteWatcher.slug)) {
         rows.push({
           kind: "watcher",
-          verb: prune ? "delete" : "drift",
+          verb: prune && !isSystemSlug(remoteWatcher.slug) ? "delete" : "drift",
           id: remoteWatcher.slug,
           remote: remoteWatcher,
         });

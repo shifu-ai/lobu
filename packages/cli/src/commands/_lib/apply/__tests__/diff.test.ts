@@ -1302,6 +1302,35 @@ describe("apply diff — prune", () => {
     expect(deletedIds.some((id) => id.includes("other"))).toBe(false);
   });
 
+  test("prune never deletes system ($-prefixed) definitions (e.g. $member)", () => {
+    // Regression: $member is a per-org SYSTEM entity type the server provisions;
+    // it can't be declared in config, so prune would mark it deleted and then
+    // HALT every apply (the delete is refused while member rows exist). System
+    // definitions must stay ignorable drift, never delete.
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "lead", properties: {}, organization_id: "org_self" },
+        { slug: "$member", organization_id: "org_self" },
+      ],
+      relationshipTypes: [{ slug: "$system-rel", organization_id: "org_self" }],
+      watchers: [{ slug: "$system-watcher" }],
+    };
+    const plan = computeDiff(desiredKeepingLead(), remote, {
+      prune: true,
+      orgId: "org_self",
+    });
+    const verbOf = (kind: string, id: string) =>
+      plan.rows.find((r) => r.kind === kind && r.id === id)?.verb;
+    expect(verbOf("entity-type", "$member")).toBe("drift");
+    expect(verbOf("relationship-type", "$system-rel")).toBe("drift");
+    expect(verbOf("watcher", "$system-watcher")).toBe("drift");
+    // No system definition is ever in the delete set.
+    expect(
+      plan.rows.some((r) => r.verb === "delete" && r.id.startsWith("$"))
+    ).toBe(false);
+  });
+
   test("matching prefers the org's own type over a foreign public type with the same slug", () => {
     // Server returns the org's own row first, then a public row with the same
     // slug. Matching must compare desired against the org-owned row (noop), not
