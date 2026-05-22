@@ -524,7 +524,7 @@ export abstract class BaseDeploymentManager {
    *   - patterns in the new set but not the previous are `grant()`-ed
    *   - patterns in the previous set but not the new are `revoke()`-d
    * This means clearing `networkConfig.allowedDomains` or
-   * `preApprovedTools` in lobu.toml actually drops access, instead of
+   * `preApprovedTools` in lobu.config.ts actually drops access, instead of
    * leaving stale grants in the store.
    */
   async syncNetworkConfigGrants(messageData: MessagePayload): Promise<void> {

@@ -28,7 +28,7 @@ interface HttpMcpServerConfig {
    * - "channel": credential is shared across all users in a conversation/channel
    *   (keyed by channelId). For shared-data integrations where per-user identity
    *   isn't required. Must be explicitly opted in via `auth_scope = "channel"`
-   *   in lobu.toml.
+   *   in lobu.config.ts.
    */
   authScope?: "user" | "channel";
   /**

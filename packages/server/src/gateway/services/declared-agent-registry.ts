@@ -13,7 +13,7 @@ interface DeclaredAgentEntry {
  * In-memory registry of agents declared by `GatewayConfig.agents` when the
  * gateway is embedded as a library (SDK-mode).
  *
- * `lobu.toml` is no longer read at gateway boot — file-declared agents
+ * `lobu.config.ts` is no longer read at gateway boot — file-declared agents
  * enter Postgres via `lobu apply` and are read through `AgentConfigStore`.
  *
  * Declared agents own their settings and credentials at runtime — there is

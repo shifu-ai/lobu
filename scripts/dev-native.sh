@@ -142,7 +142,7 @@ if [ -z "${DATABASE_URL:-}" ]; then
   echo "→ server on http://${HOST}:${PORT}   (Vite HMR in-process)"
   echo "→ data dir: $DEV_DATA_ROOT/.lobu/pgdata"
   echo "→ first run seeds a web login: dev@lobu.local / lobudev123   (org 'dev')"
-  echo "→ then run \`lobu apply\` from a project dir to sync its lobu.toml"
+  echo "→ then run \`lobu apply\` from a project dir to sync its lobu.config.ts"
   echo ""
   exec bun run --filter '@lobu/server' dev:local
 fi

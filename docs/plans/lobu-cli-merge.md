@@ -5,7 +5,7 @@ Kills the standalone `lobu` bin and folds its 13 commands into `lobu memory <ver
 ## Why
 
 - `lobu run` already embeds the Lobu backend in-process (`packages/server` boots inside `lobu run`). Two CLIs, one runtime is the worst of both worlds for lobu users.
-- `lobu memory seed` reads `[memory]` from `lobu.toml` — the cross-config coupling exists.
+- `lobu memory seed` reads `[memory]` from `lobu.config.ts` — the cross-config coupling exists.
 - `lobu dev` (docker-compose) contradicts CLAUDE.md ("embedded-only, no Docker"). `docker-compose.dev.yml` does not exist at the repo root. The command is dead code (see PR-2).
 - Three near-duplicate health commands (`lobu status`, `lobu doctor`, `lobu health`) is one job.
 - Two `init`s with overlapping intent confuses onboarding.
@@ -69,7 +69,7 @@ Health surface:
 
 ### 4. Consolidate `init`
 
-- `packages/cli/src/commands/init.ts` scaffold flow gains a final wizard stage: "Enable Lobu memory for this project? [Y/n]" → on yes, call `runInitWizard` with `http://localhost:8787/mcp` default; writes OpenClaw plugin config alongside `lobu.toml` and `.env`.
+- `packages/cli/src/commands/init.ts` scaffold flow gains a final wizard stage: "Enable Lobu memory for this project? [Y/n]" → on yes, call `runInitWizard` with `http://localhost:8787/mcp` default; writes OpenClaw plugin config alongside `lobu.config.ts` and `.env`.
 - Delete `packages/lobu-cli/src/commands/init.ts`.
 
 ### 5. Delete the `lobu` bin

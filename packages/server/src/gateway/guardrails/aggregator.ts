@@ -15,7 +15,7 @@ import {
 const logger = createLogger("guardrail-aggregator");
 
 /**
- * Inline guardrail entry declared by the agent in lobu.toml (see
+ * Inline guardrail entry declared by the agent in lobu.config.ts (see
  * `guardrails_inline` in the agent config). We accept the parsed shape
  * here so callers can pass either the toml-parsed entries or the in-memory
  * agent representation.

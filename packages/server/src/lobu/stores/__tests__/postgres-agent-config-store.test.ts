@@ -2,7 +2,7 @@
  * PostgresAgentConfigStore round-trip tests.
  *
  * Pins the persistence of three settings fields the file-loader produces from
- * lobu.toml — egressConfig, preApprovedTools, guardrails — that previously
+ * lobu.config.ts — egressConfig, preApprovedTools, guardrails — that previously
  * had no columns in the agents table and were silently dropped on every
  * saveSettings(). PR-1 of `docs/plans/lobu-apply.md`.
  */

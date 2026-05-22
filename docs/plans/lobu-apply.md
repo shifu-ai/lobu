@@ -4,14 +4,14 @@ Status: **planning** · Owner: @buremba · Reviewed against pi second-opinion 20
 
 ## Goal
 
-Provide a one-way `lobu.toml` → Lobu Cloud org converger. Mental model: `terraform apply` lite. Files declare desired state, the CLI shows a plan, the user confirms, the CLI calls existing server endpoints (which are idempotent) in dependency order. Re-running converges.
+Provide a one-way `lobu.config.ts` → Lobu Cloud org converger. Mental model: `terraform apply` lite. Files declare desired state, the CLI shows a plan, the user confirms, the CLI calls existing server endpoints (which are idempotent) in dependency order. Re-running converges.
 
 **Reuse-first**: deliberately *not* building a new server-side apply API or state substrate. Every existing endpoint is already idempotent or near-idempotent — the gap is one connection upsert route. Total v1: 3 PRs, ~600 LOC.
 
 ## Mental model
 
 ```
-desired state (lobu.toml + agent dirs)
+desired state (lobu.config.ts + agent dirs)
         │
         ▼
    CLI: parse with cli/config/loader.ts
@@ -39,10 +39,10 @@ desired state (lobu.toml + agent dirs)
 1. **Verb is `lobu apply`** (not `sync`). One-way semantics, terraform-flavored. Leaves room for `lobu pull` in v2 without naming collision.
 2. **No new server-side apply API.** CLI loops over existing endpoints in dependency order. Every endpoint is or becomes idempotent in v1.
 3. **No new state table.** Drift detection is "live state vs desired state" computed client-side at plan time. No `managed_by` marker → no safe `--prune` in v1; drift is reported, never deleted.
-4. **CLI parses `lobu.toml`, not server.** Reuses existing `cli/src/config/loader.ts:loadConfig`. Server reuses its existing route handlers — no parser duplication, no multipart upload.
+4. **CLI parses `lobu.config.ts`, not server.** Reuses existing `cli/src/config/loader.ts:loadConfig`. Server reuses its existing route handlers — no parser duplication, no multipart upload.
 5. **Same base host for `/api` and `/mcp`.** `deriveApiBaseUrl(mcpUrl)` (already in `_lib/openclaw-cmd.ts`) gives the API root; apply hits `/api/:orgSlug/agents/...`, MCP commands hit `/mcp/:orgSlug` — same server, different paths.
 6. **Skills**: normalized via the existing file-loader transformation into `agents.skills_config` (already a JSON column). Sent through `PATCH /:agentId/config`. Raw `SKILL.md` round-trip is v2.
-7. **Secrets**: deferred to v3. v1 reads `$VAR` references in `lobu.toml`, queries the org's existing-secrets list, fails the plan loudly if any are missing. v1 never reads `.env` and never uploads values.
+7. **Secrets**: deferred to v3. v1 reads `$VAR` references in `lobu.config.ts`, queries the org's existing-secrets list, fails the plan loudly if any are missing. v1 never reads `.env` and never uploads values.
 8. **Memory data deferred to v3**. v1 ships memory **schema** only (entity + relationship types via existing admin tools). Watchers, entities, relationships, knowledge are out.
 9. **Agent ID collision (PR B in old plan)** — explicitly out of scope. Document the constraint in `lobu apply` error messages: "agent IDs must currently be globally unique across cloud orgs; this will change with [link to issue]." Don't block apply on this.
 10. **Default flow**: GET current state → render diff → prompt to confirm. `--dry-run` shows diff and exits. `--yes` skips prompt for CI use. No `--prune`, no `--force` in v1.
@@ -79,7 +79,7 @@ Each PR is a draft branch off `feat/lobu-cli-merge` (PR #459). Subagents work in
 
 **Branch**: `feat/agent-settings-persistence` · **Risk**: Low · **LOC**: ~50
 
-Today `packages/server/src/lobu/stores/postgres-stores.ts` `rowToSettings()`, `saveSettings()`, and `deleteSettings()` do not persist `egressConfig`, `preApprovedTools`, or `guardrails`. The `agents` table doesn't have columns for them either. The file-loader (`packages/server/src/gateway/config/file-loader.ts:432-447, 507-517`) produces all three from `lobu.toml`; cloud silently drops them.
+Today `packages/server/src/lobu/stores/postgres-stores.ts` `rowToSettings()`, `saveSettings()`, and `deleteSettings()` do not persist `egressConfig`, `preApprovedTools`, or `guardrails`. The `agents` table doesn't have columns for them either. The file-loader (`packages/server/src/gateway/config/file-loader.ts:432-447, 507-517`) produces all three from `lobu.config.ts`; cloud silently drops them.
 
 Scope:
 - New migration `db/migrations/<timestamp>_agents_apply_fields.sql` adding three columns to `public.agents`:
@@ -172,7 +172,7 @@ The script:
 5. `lobu apply --dry-run` → asserts `+ agent`, `+ connection`, `+ entity-type` rows.
 6. `lobu apply --yes` → asserts "Apply complete".
 7. Re-runs `--dry-run` → asserts no `+`/`~` rows (full noop round-trip).
-8. Mutates `chatId` in `lobu.toml`, re-runs apply → asserts `~ connection` + "will restart" marker.
+8. Mutates `chatId` in `lobu.config.ts`, re-runs apply → asserts `~ connection` + "will restart" marker.
 9. Curls REST endpoints with the bootstrap PAT to verify rows landed in Postgres.
 10. Cleans up the server, data dir, and project dir.
 

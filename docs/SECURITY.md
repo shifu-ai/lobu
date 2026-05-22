@@ -90,7 +90,7 @@ Skills are executable, security-sensitive input:
 - Use curated skill lists by default.
 - Review skill `nixPackages` declarations: each binary on the allowlist is a capability, treat them as such.
 - Skills declare `networkConfig.allowedDomains`; gateway egress controls apply on top.
-- Destructive MCP tool calls require in-thread approval unless pre-approved in `[agents.<id>.tools]` in `lobu.toml`.
+- Destructive MCP tool calls require in-thread approval unless pre-approved via `defineAgent({ tools: { preApproved } })` in `lobu.config.ts`.
 
 ## What changed from earlier docs
 

@@ -12,7 +12,7 @@
  *   - `pre-tool` — tool call authorization (agent → gateway MCP proxy)
  *
  * Register guardrails in a {@link GuardrailRegistry} and enable them per-agent
- * via `[agents.<id>] guardrails = ["name-a", "name-b"]` in `lobu.toml`.
+ * via `defineAgent({ guardrails: ["name-a", "name-b"] })` in `lobu.config.ts`.
  */
 
 export type GuardrailStage = "input" | "output" | "pre-tool";

@@ -72,7 +72,7 @@ export function buildBinaryInvocation(
  * just-bash allowlist, the depth/loop caps are moot — the agent can run
  * arbitrary code through them. They are excluded by default; an agent that
  * genuinely needs them must opt in via
- * `LOBU_ALLOW_UNSANDBOXED_EXEC=1` (set per-agent in lobu.toml).
+ * `LOBU_ALLOW_UNSANDBOXED_EXEC=1` (set per-agent in lobu.config.ts).
  */
 const UNSANDBOXED_INTERPRETERS = new Set<string>([
   "node",

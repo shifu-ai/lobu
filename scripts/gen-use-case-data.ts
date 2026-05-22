@@ -3,6 +3,13 @@
  * Reads all examples/ directories and generates
  * packages/landing/src/generated/use-case-models.ts
  *
+ * Each example ships a `lobu.config.ts` (a `defineConfig(...)` default export
+ * from `@lobu/sdk`). We load it the same way the CLI does — via jiti, the
+ * runtime TypeScript loader (see
+ * `packages/cli/src/commands/_lib/apply/desired-state.ts` `loadProjectConfig`)
+ * — and project the SDK `Project` shape down to the minimal model the landing
+ * use-case page consumes.
+ *
  * Run: bun scripts/gen-use-case-data.ts
  */
 
@@ -15,8 +22,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
-import { parse as parseToml } from "smol-toml";
-import { parse as parseYaml } from "yaml";
+import { pathToFileURL } from "node:url";
+import type { Project, ProviderConfig, Watcher } from "@lobu/sdk";
+import { isSecretRef } from "@lobu/sdk";
 
 const ROOT = resolve(import.meta.dir, "..");
 const EXAMPLES_DIR = join(ROOT, "examples");
@@ -25,7 +33,35 @@ const OUTPUT_PATH = join(
   "packages/landing/src/generated/use-case-models.ts"
 );
 
-// ── Helpers ──────────────────────────────────────────────────────────
+// ── Config loading ───────────────────────────────────────────────────
+
+/**
+ * Import an example's `lobu.config.ts` and return its `defineConfig` default
+ * export. Mirrors `loadProjectConfig` in the CLI: jiti transpiles the config on
+ * import and resolves its `@lobu/sdk` import from the monorepo. Returns null
+ * when the example has no config (skipped, not an error).
+ */
+async function loadExampleConfig(exampleDir: string): Promise<Project | null> {
+  const configPath = join(exampleDir, "lobu.config.ts");
+  if (!existsSync(configPath)) return null;
+
+  const { createJiti } = await import("jiti");
+  const jiti = createJiti(pathToFileURL(configPath).href);
+  const project = (await jiti.import(configPath, { default: true })) as unknown;
+
+  if (
+    !project ||
+    typeof project !== "object" ||
+    (project as { kind?: unknown }).kind !== "project"
+  ) {
+    throw new Error(
+      `${configPath} must \`export default defineConfig({ ... })\``
+    );
+  }
+  return project as Project;
+}
+
+// ── Markdown reading ─────────────────────────────────────────────────
 
 function readLines(filePath: string, skipHeaders: string[]): string[] {
   if (!existsSync(filePath)) return [];
@@ -40,72 +76,26 @@ function readLines(filePath: string, skipHeaders: string[]): string[] {
   });
 }
 
-function readYamlFile<T = Record<string, unknown>>(filePath: string): T | null {
-  if (!existsSync(filePath)) return null;
-  return parseYaml(readFileSync(filePath, "utf-8")) as T;
+// ── Field extraction ─────────────────────────────────────────────────
+
+/** Resolve a provider key (`secret("X")` ref or literal `$X`/`X`) to its env name. */
+function envNameFromKey(key: ProviderConfig["key"]): string {
+  if (key == null) return "";
+  if (isSecretRef(key)) return key.$secret;
+  if (typeof key === "string") return key.replace(/^\$/, "");
+  return "";
 }
 
-function readYamlDir<T = Record<string, unknown>>(dirPath: string): T[] {
-  if (!existsSync(dirPath)) return [];
-  return readdirSync(dirPath)
-    .filter((f) => f.endsWith(".yaml") || f.endsWith(".yml"))
-    .sort()
-    .map((f) => readYamlFile<T>(join(dirPath, f))!)
-    .filter(Boolean);
-}
-
-interface ExampleLobuLayout {
-  org: string;
-  modelsPath: string;
-}
-
-function resolveLobuLayout(exampleDir: string): ExampleLobuLayout | null {
-  const tomlPath = join(exampleDir, "lobu.toml");
-  if (!existsSync(tomlPath)) return null;
-
-  const toml = parseToml(readFileSync(tomlPath, "utf-8")) as {
-    memory?: { enabled?: boolean; org?: string; models?: string };
+function buildWatcher(watcher: Watcher | undefined) {
+  if (!watcher) return undefined;
+  return {
+    name: watcher.name ?? watcher.slug,
+    schedule: watcher.schedule ?? "",
+    prompt: watcher.prompt.trim(),
+    extractionSchema: watcher.extractionSchema
+      ? JSON.stringify(watcher.extractionSchema)
+      : "",
   };
-  const memory = toml.memory;
-  if (!memory || memory.enabled === false) return null;
-  const org = memory.org?.trim();
-  if (!org) return null;
-
-  const modelsRel = memory.models?.trim() || "./models";
-  const modelsPath = resolve(exampleDir, modelsRel);
-  return { org, modelsPath };
-}
-
-// ── Types — minimal subset of the Lobu schema ─────────────────────
-
-// We previously type-imported `EntitySchema`/`WatcherSchema` from a sibling
-// `../../lobu` checkout. That path doesn't exist on most machines (fresh
-// clones, CI), so the script wouldn't typecheck. Inline only the fields this
-// script actually reads — keeps the script self-contained without making the
-// whole monorepo depend on a sibling repo.
-interface EntityYaml {
-  type: "entity";
-  name: string;
-}
-
-interface WatcherYaml {
-  type: "watcher";
-  name: string;
-  schedule: string;
-  prompt: string;
-  extraction_schema?: unknown;
-}
-
-// ── TOML types ───────────────────────────────────────────────────────
-
-interface TomlAgent {
-  name: string;
-  description?: string;
-  dir?: string;
-  providers?: Array<{ id: string; model: string; key: string }>;
-  skills?: { enabled?: string[] };
-  network?: { allowed?: string[] };
-  worker?: { nix_packages?: string[] };
 }
 
 // ── Build one use case ───────────────────────────────────────────────
@@ -138,75 +128,36 @@ interface UseCaseModel {
   };
 }
 
-function buildModel(exampleName: string): UseCaseModel | null {
+async function buildModel(exampleName: string): Promise<UseCaseModel | null> {
   const exampleDir = join(EXAMPLES_DIR, exampleName);
-  const layout = resolveLobuLayout(exampleDir);
-  if (!layout) return null;
+  const project = await loadExampleConfig(exampleDir);
+  if (!project) return null;
 
-  const lobuOrg = layout.org;
+  const lobuOrg = project.org?.trim();
+  if (!lobuOrg) return null;
 
-  type AnyModel = EntityYaml | WatcherYaml;
-  const allModels = readYamlDir<AnyModel>(layout.modelsPath);
-  const entities = allModels.filter(
-    (m): m is EntityYaml => (m as Record<string, unknown>).type === "entity"
+  const entityNames = (project.entities ?? []).map((e) => e.name ?? e.key);
+  const watcher = buildWatcher(project.watchers?.[0]);
+
+  const agent = project.agents[0];
+  const agentId = agent?.id ?? exampleName;
+  const description = agent?.description ?? "";
+
+  const provider = agent?.providers?.[0];
+  const providerId = provider?.id ?? "";
+  const model = provider?.model ?? "";
+  const apiKeyEnv = envNameFromKey(provider?.key);
+
+  const allowedDomains = agent?.network?.allowed ?? [];
+  const nixPackages = agent?.nixPackages ?? [];
+
+  // Agent directory holding SOUL/IDENTITY/USER.md — `dir` or `./agents/<id>`,
+  // matching the CLI loader (desired-state.ts loadDesiredStateFromConfig).
+  const agentDirRel = (agent?.dir ?? join("agents", agentId)).replace(
+    /^\.\//,
+    ""
   );
-  const entityNames = entities.map((e) => e.name);
-  const watchers = allModels.filter(
-    (m): m is WatcherYaml => (m as Record<string, unknown>).type === "watcher"
-  );
-  const firstWatcher = watchers[0];
-  const watcher = firstWatcher
-    ? {
-        name: firstWatcher.name,
-        schedule: firstWatcher.schedule,
-        prompt: firstWatcher.prompt.trim(),
-        extractionSchema: firstWatcher.extraction_schema
-          ? JSON.stringify(firstWatcher.extraction_schema)
-          : "",
-      }
-    : undefined;
-
-  const tomlPath = join(exampleDir, "lobu.toml");
-  let agentId = exampleName;
-  let description = "";
-  let enabledSkills: string[] = [];
-  let allowedDomains: string[] = [];
-  let nixPackages: string[] = [];
-  let providerId = "";
-  let model = "";
-  let apiKeyEnv = "";
-  let agentDirRel = "";
-
-  if (existsSync(tomlPath)) {
-    const tomlRaw = readFileSync(tomlPath, "utf-8");
-    const toml = parseToml(tomlRaw) as { agents?: Record<string, TomlAgent> };
-
-    if (toml.agents) {
-      const firstKey = Object.keys(toml.agents)[0];
-      const agent = toml.agents[firstKey];
-      agentId = firstKey;
-      description = agent.description || "";
-
-      if (agent.dir) {
-        agentDirRel = agent.dir.replace(/^\.\//, "");
-      }
-
-      if (agent.providers && agent.providers.length > 0) {
-        const prov = agent.providers[0];
-        providerId = prov.id;
-        model = prov.model;
-        apiKeyEnv = prov.key.replace(/^\$/, "");
-      }
-
-      enabledSkills = agent.skills?.enabled || [];
-      allowedDomains = agent.network?.allowed || [];
-      nixPackages = agent.worker?.nix_packages || [];
-    }
-  }
-
-  const agentMdDir = agentDirRel
-    ? join(exampleDir, agentDirRel)
-    : join(exampleDir, "agents", exampleName);
+  const agentMdDir = join(exampleDir, agentDirRel);
 
   const identity = readLines(join(agentMdDir, "IDENTITY.md"), ["# Identity"]);
   const soul = readLines(join(agentMdDir, "SOUL.md"), [
@@ -216,7 +167,6 @@ function buildModel(exampleName: string): UseCaseModel | null {
   const user = readLines(join(agentMdDir, "USER.md"), ["# User Context"]);
 
   const skillInstructions = soul.filter((l) => l.trim().startsWith("- "));
-  const mcpServer = enabledSkills.length > 0 ? enabledSkills[0] : "";
 
   return {
     id: exampleName,
@@ -227,10 +177,13 @@ function buildModel(exampleName: string): UseCaseModel | null {
       agentId,
       skillId: agentId,
       description,
-      skills: enabledSkills,
+      // The SDK config declares MCP/local skills via the agent dir + mcpServers,
+      // not a flat enabled-skills list; the landing page only renders an empty
+      // skills list today, so leave these unset.
+      skills: [],
       nixPackages,
       allowedDomains,
-      mcpServer,
+      mcpServer: "",
       providerId,
       model,
       apiKeyEnv,
@@ -242,16 +195,16 @@ function buildModel(exampleName: string): UseCaseModel | null {
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-const exampleDirs = readdirSync(EXAMPLES_DIR, { withFileTypes: true })
+const exampleNames = readdirSync(EXAMPLES_DIR, { withFileTypes: true })
   .filter((d) => d.isDirectory())
   .map((d) => d.name)
-  .filter((name) => resolveLobuLayout(join(EXAMPLES_DIR, name)) !== null)
+  .filter((name) => existsSync(join(EXAMPLES_DIR, name, "lobu.config.ts")))
   .sort();
 
 const models: Record<string, UseCaseModel> = {};
 
-for (const name of exampleDirs) {
-  const m = buildModel(name);
+for (const name of exampleNames) {
+  const m = await buildModel(name);
   if (m) {
     models[name] = m;
   }

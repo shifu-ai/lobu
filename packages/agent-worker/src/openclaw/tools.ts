@@ -258,7 +258,7 @@ function wrapBashWithProxyHint(tool: AgentTool<any>): AgentTool<any> {
       }
       if (isDirectPackageInstallCommand(command)) {
         throw new Error(
-          "DIRECT PACKAGE INSTALL BLOCKED. Install system packages with nixPackages in lobu.toml or agent settings instead of using package managers inside the worker."
+          "DIRECT PACKAGE INSTALL BLOCKED. Install system packages with nixPackages in lobu.config.ts or agent settings instead of using package managers inside the worker."
         );
       }
       try {
@@ -267,7 +267,7 @@ function wrapBashWithProxyHint(tool: AgentTool<any>): AgentTool<any> {
         const msg = err?.message ?? String(err);
         if (PROXY_403_PATTERN.test(msg)) {
           throw new Error(
-            `DOMAIN BLOCKED BY PROXY. The domain is blocked at the network level. Network access is configured via lobu.toml or the gateway configuration APIs — do NOT retry the request.\n\n${msg}`
+            `DOMAIN BLOCKED BY PROXY. The domain is blocked at the network level. Network access is configured via lobu.config.ts or the gateway configuration APIs — do NOT retry the request.\n\n${msg}`
           );
         }
         throw err;

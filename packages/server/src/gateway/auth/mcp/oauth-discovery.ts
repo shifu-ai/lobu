@@ -317,7 +317,7 @@ interface DiscoverOptions {
   redirectUri: string;
   secretStore: WritableSecretStore;
   /**
-   * Pre-registered static client from lobu.toml. Short-circuits dynamic
+   * Pre-registered static client from lobu.config.ts. Short-circuits dynamic
    * registration when present.
    */
   staticClientId?: string;
