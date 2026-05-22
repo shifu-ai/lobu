@@ -1,7 +1,11 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import { parse as parseToml } from "smol-toml";
+import { basename, dirname, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import type {
+  DesiredEntityType,
+  DesiredRelationshipType,
+} from "../../_lib/apply/desired-state.js";
+import { loadDesiredStateFromConfig } from "../../_lib/apply/desired-state.js";
 import { ApiError, ValidationError } from "./errors.js";
 import {
   getSessionForOrg,
@@ -14,14 +18,10 @@ import {
 import { printError, printText } from "./output.js";
 import {
   type DataRecordType,
-  type ModelType,
   type ValidationError as SchemaError,
   type SeedEntitySchema,
   type SeedRelationshipSchema,
-  expandModelDefinition,
-  parseModelYamlFile,
   validateDataRecord,
-  validateModel,
 } from "./schema.js";
 
 interface SeedContext {
@@ -31,50 +31,22 @@ interface SeedContext {
   dryRun: boolean;
 }
 
-interface ParsedModel {
-  data: Record<string, unknown>;
-  file: string;
-  modelType: ModelType;
-}
-
 interface ParsedDataRecord {
   data: Record<string, unknown>;
   file: string;
   recordType: DataRecordType;
 }
 
+/**
+ * Where seed reads from: the project's `lobu.config.ts` (schema + org) plus an
+ * optional `./data` directory of YAML data records to instantiate.
+ */
 interface ProjectLayout {
-  projectRoot: string;
-  projectPath: string;
-  modelsPath: string;
+  cwd: string;
+  configPath: string;
   dataPath: string;
   org: string;
   name: string;
-  description?: string;
-}
-
-function readYamlModelFilesRecursive(
-  dir: string,
-  prefix = ""
-): Array<{ raw: string; file: string }> {
-  if (!existsSync(dir)) return [];
-
-  return readdirSync(dir, { withFileTypes: true })
-    .sort((a, b) => a.name.localeCompare(b.name))
-    .flatMap((entry) => {
-      const relPath = prefix ? join(prefix, entry.name) : entry.name;
-      const fullPath = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        return readYamlModelFilesRecursive(fullPath, relPath);
-      }
-      if (
-        !entry.isFile() ||
-        (!entry.name.endsWith(".yaml") && !entry.name.endsWith(".yml"))
-      ) {
-        return [];
-      }
-      return [{ raw: readFileSync(fullPath, "utf8"), file: relPath }];
-    });
 }
 
 function readYamlFilesRecursive(
@@ -120,114 +92,38 @@ function checkErrors(errors: SchemaError[]): void {
   }
 }
 
-function resolveProjectLayout(inputPath?: string): ProjectLayout {
-  const requestedPath = resolve(inputPath || ".");
-
-  let projectPath: string;
-  let projectRoot: string;
-  if (existsSync(requestedPath) && statSync(requestedPath).isFile()) {
-    if (basename(requestedPath) !== "lobu.toml") {
+/**
+ * Resolve the project + its desired state from `lobu.config.ts`. Entity types,
+ * relationship types, and org metadata come from the config (the same source
+ * `lobu apply` uses); `./data` holds the YAML data records to instantiate.
+ */
+async function resolveProjectLayout(inputPath?: string): Promise<{
+  layout: ProjectLayout;
+  state: Awaited<ReturnType<typeof loadDesiredStateFromConfig>>["state"];
+}> {
+  const requested = resolve(inputPath || ".");
+  let cwd: string;
+  if (existsSync(requested) && statSync(requested).isFile()) {
+    if (basename(requested) !== "lobu.config.ts") {
       throw new ValidationError(
-        `Expected a lobu.toml file, got ${basename(requestedPath)}`
+        `Expected a lobu.config.ts file, got ${basename(requested)}`
       );
     }
-    projectPath = requestedPath;
-    projectRoot = dirname(requestedPath);
+    cwd = dirname(requested);
   } else {
-    projectPath = join(requestedPath, "lobu.toml");
-    projectRoot = requestedPath;
-    if (!existsSync(projectPath)) {
-      throw new ValidationError(`Could not find lobu.toml at ${projectPath}`);
-    }
+    cwd = requested;
   }
 
-  const toml = parseToml(readFileSync(projectPath, "utf8")) as Record<
-    string,
-    unknown
-  >;
-  const memory = toml.memory as Record<string, unknown> | undefined;
-
-  if (!memory) {
-    throw new ValidationError(
-      `lobu.toml at ${projectPath} is missing a [memory] section`
-    );
-  }
-  if (memory.enabled === false) {
-    throw new ValidationError(
-      `[memory] in ${projectPath} is disabled (enabled = false)`
-    );
-  }
-
-  const org = typeof memory.org === "string" ? memory.org.trim() : "";
-  const name = typeof memory.name === "string" ? memory.name.trim() : "";
+  const { state, configPath } = await loadDesiredStateFromConfig({ cwd });
+  const org = state.memory?.org?.trim() ?? "";
   if (!org) {
     throw new ValidationError(
-      `[memory] in ${projectPath} is missing required field "org"`
+      "lobu.config.ts must set `org` in defineConfig({ org: ... }) to seed memory"
     );
   }
-  if (!name) {
-    throw new ValidationError(
-      `[memory] in ${projectPath} is missing required field "name"`
-    );
-  }
-
-  const description =
-    typeof memory.description === "string" ? memory.description : undefined;
-  const modelsRel =
-    typeof memory.models === "string" && memory.models.trim()
-      ? memory.models
-      : "./models";
-  const dataRel =
-    typeof memory.data === "string" && memory.data.trim()
-      ? memory.data
-      : "./data";
-
-  const modelsPath = isAbsolute(modelsRel)
-    ? modelsRel
-    : resolve(projectRoot, modelsRel);
-  const dataPath = isAbsolute(dataRel)
-    ? dataRel
-    : resolve(projectRoot, dataRel);
-
-  return {
-    projectRoot,
-    projectPath,
-    modelsPath,
-    dataPath,
-    org,
-    name,
-    description,
-  };
-}
-
-/**
- * Load models from every YAML file under the `models/` directory.
- */
-function loadModels(modelsPath: string): ParsedModel[] {
-  const models: ParsedModel[] = [];
-  const errors: SchemaError[] = [];
-  for (const { raw, file } of readYamlModelFilesRecursive(modelsPath)) {
-    const { documents, errors: parseErrors } = parseModelYamlFile(raw, file);
-    errors.push(...parseErrors);
-    for (const { data: document, file: documentFile } of documents) {
-      const expanded = expandModelDefinition(document, documentFile);
-      errors.push(...expanded.errors);
-      for (const model of expanded.models) {
-        const modelErrors = validateModel(model.data, model.file);
-        if (modelErrors.length > 0) {
-          errors.push(...modelErrors);
-        } else {
-          models.push({
-            data: model.data,
-            file: model.file,
-            modelType: model.modelType,
-          });
-        }
-      }
-    }
-  }
-  checkErrors(errors);
-  return models;
+  const name = state.memory?.name?.trim() || org;
+  const dataPath = resolve(cwd, "data");
+  return { layout: { cwd, configPath, dataPath, org, name }, state };
 }
 
 function loadDataRecords(dataPath: string): ParsedDataRecord[] {
@@ -283,20 +179,26 @@ async function callTool(
 }
 
 async function seedEntity(
-  entity: Record<string, unknown>,
+  entity: DesiredEntityType,
   ctx: SeedContext
 ): Promise<void> {
-  const slug = entity.slug as string;
+  const slug = entity.slug;
   if (ctx.dryRun) {
     printText(`  [dry-run] would create entity_type: ${slug}`);
     return;
   }
+  // Same payload `lobu apply` sends to manage_entity_schema (upsertEntityType).
+  const payload = {
+    schema_type: "entity_type",
+    action: "create",
+    slug: entity.slug,
+    ...(entity.name ? { name: entity.name } : {}),
+    ...(entity.description ? { description: entity.description } : {}),
+    ...(entity.required ? { required: entity.required } : {}),
+    ...(entity.properties ? { properties: entity.properties } : {}),
+  };
   try {
-    await callTool(ctx, "manage_entity_schema", {
-      schema_type: "entity_type",
-      action: "create",
-      ...entity,
-    });
+    await callTool(ctx, "manage_entity_schema", payload);
     printText(`  + entity_type: ${slug}`);
   } catch (e) {
     if (e instanceof Error && e.message?.includes("already exists")) {
@@ -308,17 +210,19 @@ async function seedEntity(
 }
 
 async function seedRelationshipType(
-  rel: Record<string, unknown>,
+  rel: DesiredRelationshipType,
   ctx: SeedContext
 ): Promise<void> {
-  const slug = rel.slug as string;
-  const rules = Array.isArray(rel.rules)
-    ? (rel.rules as Array<Record<string, unknown>>)
-    : [];
-  // Strip `rules` from the create payload — the backend's manage_entity_schema
-  // create handler doesn't accept it; rules are registered via separate
-  // add_rule calls below.
-  const { rules: _unused, ...createPayload } = rel as Record<string, unknown>;
+  const slug = rel.slug;
+  const rules = rel.rules ?? [];
+  // Rules are registered via separate add_rule calls — the create handler
+  // doesn't accept them inline.
+  const createPayload = {
+    schema_type: "relationship_type",
+    slug: rel.slug,
+    ...(rel.name ? { name: rel.name } : {}),
+    ...(rel.description ? { description: rel.description } : {}),
+  };
 
   if (ctx.dryRun) {
     printText(`  [dry-run] would create relationship_type: ${slug}`);
@@ -329,17 +233,15 @@ async function seedRelationshipType(
   }
   try {
     await callTool(ctx, "manage_entity_schema", {
-      schema_type: "relationship_type",
-      action: "create",
       ...createPayload,
+      action: "create",
     });
     printText(`  + relationship_type: ${slug}`);
   } catch (e) {
     if (e instanceof Error && e.message?.includes("already exists")) {
       await callTool(ctx, "manage_entity_schema", {
-        schema_type: "relationship_type",
-        action: "update",
         ...createPayload,
+        action: "update",
       });
       printText(`  = relationship_type: ${slug} (updated)`);
     } else {
@@ -528,64 +430,6 @@ async function seedDataRelationship(
   }
 }
 
-async function seedWatcher(
-  watcher: Record<string, unknown>,
-  entityMap: Map<string, number>,
-  ctx: SeedContext
-): Promise<void> {
-  const payload = { ...watcher };
-  const slug = payload.slug as string;
-
-  if (typeof payload.entity === "string") {
-    const entityId = resolveEntityRef(entityMap, payload.entity);
-    if (entityId) {
-      payload.entity_id = entityId;
-    } else {
-      printError(
-        `  ! watcher: ${slug} - unknown entity ref "${payload.entity}", skipping`
-      );
-      return;
-    }
-    delete payload.entity;
-  }
-
-  if (!payload.entity_id) {
-    const fallbackEntityId = entityMap.values().next().value as
-      | number
-      | undefined;
-    if (fallbackEntityId) {
-      payload.entity_id = fallbackEntityId;
-      printText(
-        `  ~ watcher: ${slug} - no entity specified, using first seeded entity (${fallbackEntityId})`
-      );
-    }
-  }
-
-  if (!payload.entity_id) {
-    printError(`  ! watcher: ${slug} - no entity_id available, skipping`);
-    return;
-  }
-
-  if (ctx.dryRun) {
-    printText(`  [dry-run] would create watcher: ${slug}`);
-    return;
-  }
-
-  try {
-    await callTool(ctx, "manage_watchers", {
-      action: "create",
-      ...payload,
-    });
-    printText(`  + watcher: ${slug}`);
-  } catch (e) {
-    if (e instanceof Error && e.message?.includes("already exists")) {
-      printText(`  = watcher: ${slug} (exists)`);
-    } else {
-      throw e;
-    }
-  }
-}
-
 async function resolveAuth(
   urlFlag?: string,
   orgFlag?: string,
@@ -644,7 +488,7 @@ export interface SeedOptions {
 export async function seedMemoryWorkspace(
   opts: SeedOptions = {}
 ): Promise<void> {
-  const layout = resolveProjectLayout(opts.path);
+  const { layout, state } = await resolveProjectLayout(opts.path);
 
   const orgOverride = opts.org || layout.org;
   const { token, mcpUrl, orgSlug } = await resolveAuth(
@@ -657,16 +501,16 @@ export async function seedMemoryWorkspace(
   const ctx: SeedContext = { apiBaseUrl, orgSlug, token, dryRun };
 
   printText(`Seeding org: ${orgSlug}${dryRun ? " (dry-run)" : ""}`);
-  printText(`Config: ${layout.projectPath}`);
+  printText(`Config: ${layout.configPath}`);
   printText(`Project: ${layout.name}`);
-  const models = loadModels(layout.modelsPath);
+
+  // Schema (entity types / relationship types) comes from lobu.config.ts — the
+  // same source `lobu apply` provisions from; seeding here is idempotent.
+  // Watchers are agent-scoped and provisioned by `lobu apply`, not seeded.
+  const entityTypes = state.memorySchema.entityTypes;
+  const relationshipTypes = state.memorySchema.relationshipTypes;
   const dataRecords = loadDataRecords(layout.dataPath);
 
-  const entityTypes = models.filter((m) => m.modelType === "entity");
-  const relationshipTypes = models.filter(
-    (m) => m.modelType === "relationship"
-  );
-  const watchers = models.filter((m) => m.modelType === "watcher");
   const dataEntities = dataRecords.filter(
     (record): record is ParsedDataRecord & { data: SeedEntitySchema } =>
       record.recordType === "entity"
@@ -678,21 +522,21 @@ export async function seedMemoryWorkspace(
 
   if (entityTypes.length > 0) {
     printText(`\nEntity types (${entityTypes.length}):`);
-    for (const { data } of entityTypes) {
-      await seedEntity(data, ctx);
+    for (const entity of entityTypes) {
+      await seedEntity(entity, ctx);
     }
   }
 
   if (relationshipTypes.length > 0) {
     printText(`\nRelationship types (${relationshipTypes.length}):`);
-    for (const { data } of relationshipTypes) {
-      await seedRelationshipType(data, ctx);
+    for (const rel of relationshipTypes) {
+      await seedRelationshipType(rel, ctx);
     }
   }
 
   const entityTypesForLookup = Array.from(
     new Set([
-      ...entityTypes.map((entry) => String(entry.data.slug || "")),
+      ...entityTypes.map((entry) => entry.slug),
       ...dataEntities.map((entry) => entry.data.entity_type),
     ])
   );
@@ -726,13 +570,6 @@ export async function seedMemoryWorkspace(
     printText(`\nData relationships (${dataRelationships.length}):`);
     for (const entry of dataRelationships) {
       await seedDataRelationship(entry.data, entityMap, ctx);
-    }
-  }
-
-  if (watchers.length > 0) {
-    printText(`\nWatchers (${watchers.length}):`);
-    for (const { data } of watchers) {
-      await seedWatcher(data, entityMap, ctx);
     }
   }
 
