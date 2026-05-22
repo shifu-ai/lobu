@@ -525,6 +525,55 @@ describe("lobu init --from-org", () => {
     }
   });
 
+  test("non-identifier platform config key → quoted key + valid POSIX env var", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        "/agents/bot/platforms": () => ({
+          platforms: [
+            {
+              id: "bot-telegram",
+              platform: "telegram",
+              // A hyphenated config key: the emitted TS key must be quoted, and
+              // the derived secret env var must be a valid POSIX name (no `-`).
+              config: { platform: "telegram", "bot-token": "***oken" },
+            },
+          ],
+        }),
+        "/agents/bot/config": () => ({ updatedAt: 0 }),
+        "/agents": () => ({ agents: [{ agentId: "bot", name: "Bot" }] }),
+        "watchers?include_details": () => ({ watchers: [] }),
+        manage_entity_schema: () => ({
+          entity_types: [],
+          relationship_types: [],
+        }),
+        manage_auth_profiles: () => ({ auth_profiles: [] }),
+        manage_connections: () => ({ connections: [] }),
+      }),
+    });
+
+    const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
+    const envExample = readFileSync(join(dir, ".env.example"), "utf-8");
+    // Key quoted, env var sanitized (hyphen → underscore), no invalid POSIX key.
+    expect(source).toContain('"bot-token": secret("BOT_TELEGRAM_BOT_TOKEN")');
+    expect(source).not.toContain("BOT-TOKEN");
+    expect(envExample).toContain("BOT_TELEGRAM_BOT_TOKEN=");
+    expect(envExample).not.toMatch(/^[A-Z0-9_]*-/m);
+
+    // Round-trips: the regenerated config loads (proves the .env key is valid).
+    process.env.BOT_TELEGRAM_BOT_TOKEN = "dummy";
+    try {
+      const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+      expect(state.agents[0]?.platforms[0]?.config["bot-token"]).toBe("dummy");
+    } finally {
+      process.env.BOT_TELEGRAM_BOT_TOKEN = undefined;
+    }
+  });
+
   test("MCP oauth clientSecret → emits secret() AND imports it (no missing-import)", async () => {
     const dir = mkFixtureDir();
     await initFromOrg({

@@ -624,7 +624,7 @@ export class ApplyClient {
     // update on every apply. add_rule is idempotent; remove_rule takes a id.
     const desired = rules ?? [];
     const ruleKey = (r: { source: string; target: string }) =>
-      `${r.source} ${r.target}`;
+      `${r.source}	${r.target}`;
     const desiredKeys = new Set(desired.map(ruleKey));
     const remote = await this.listRelationshipTypeRules(rel.slug);
     const remoteKeys = new Set(remote.map(ruleKey));

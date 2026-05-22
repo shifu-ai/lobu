@@ -168,8 +168,12 @@ class SecretCollector {
 
 /** Uppercase env-var name from a slug/key (e.g. `gh-token` → `GH_TOKEN_API_KEY`). */
 function envVarFor(slug: string, suffix: string): string {
-  const base = slug.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
-  return `${base}_${suffix}`;
+  // Normalize BOTH parts to a valid POSIX env-var name. The suffix can carry a
+  // non-identifier platform config key (e.g. `bot-token` → `..._BOT_TOKEN`); an
+  // un-normalized hyphen would make the `.env` key invalid and fail apply's
+  // required-secret check.
+  const norm = (s: string) => s.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
+  return `${norm(slug)}_${norm(suffix)}`;
 }
 
 /**
