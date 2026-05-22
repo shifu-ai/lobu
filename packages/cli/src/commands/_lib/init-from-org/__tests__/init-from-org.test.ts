@@ -379,4 +379,58 @@ describe("lobu init --from-org", () => {
     expect(state.watchers).toHaveLength(0);
     expect(state.connectors.connections).toHaveLength(0);
   });
+
+  test("platform secret config → secret() placeholder, never the redacted literal", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        "/agents/bot/platforms": () => ({
+          platforms: [
+            {
+              id: "bot-telegram",
+              platform: "telegram",
+              // GET round-trip: `platform` key + redacted secret + a literal.
+              config: {
+                platform: "telegram",
+                botToken: "***oken",
+                mode: "webhook",
+              },
+            },
+          ],
+        }),
+        "/agents/bot/config": () => ({ updatedAt: 0 }),
+        "/agents": () => ({ agents: [{ agentId: "bot", name: "Bot" }] }),
+        "watchers?include_details": () => ({ watchers: [] }),
+        manage_entity_schema: () => ({
+          entity_types: [],
+          relationship_types: [],
+        }),
+        manage_auth_profiles: () => ({ auth_profiles: [] }),
+        manage_connections: () => ({ connections: [] }),
+      }),
+    });
+
+    const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
+    // The secret is emitted as a secret() ref (env name derived from agent+key),
+    // never the opaque `***oken` literal; the non-secret `mode` stays a literal.
+    expect(source).toContain('botToken: secret("BOT_TELEGRAM_BOTTOKEN")');
+    expect(source).not.toContain("***oken");
+    expect(source).toContain('mode: "webhook"');
+
+    // Round-trips: the regenerated config loads back into DesiredState.
+    process.env.BOT_TELEGRAM_BOTTOKEN = "dummy-token-value";
+    try {
+      const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+      const platform = state.agents[0]?.platforms[0];
+      expect(platform?.type).toBe("telegram");
+      expect(platform?.config.botToken).toBe("$BOT_TELEGRAM_BOTTOKEN");
+      expect(platform?.config.mode).toBe("webhook");
+    } finally {
+      process.env.BOT_TELEGRAM_BOTTOKEN = undefined;
+    }
+  });
 });

@@ -345,18 +345,28 @@ function emitAgent(
   }
 
   // platforms ← live platform bindings. The route stores `platform` inside
-  // `config` for stable-id matching; strip it. `$VAR` config values round-trip
-  // as secret() refs (the stored config keeps placeholders, not raw secrets).
+  // `config` for stable-id matching; strip it. Secret-bearing config values
+  // never round-trip in the clear: the server rewrites a `$VAR` into a
+  // `secret://…` reference and the GET masks it (`***`-suffixed). Both forms,
+  // plus a bare `$VAR`, become `secret("<ENV>")` placeholders the operator
+  // fills in `.env` before re-applying — emitting the redacted/ref literal
+  // would push a broken token on the next apply.
   if (platforms.length > 0) {
     const items = platforms.map((p) => {
       const cfg: Record<string, unknown> = { ...(p.config ?? {}) };
       delete cfg.platform;
       const cfgLines = Object.entries(cfg).map(([k, v]) => {
         if (typeof v === "string") {
-          const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
-          if (m?.[1]) {
+          const explicitVar = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
+          if (explicitVar?.[1]) {
             imports.use("secret");
-            return `${k}: ${secrets.ref(m[1])}`;
+            return `${k}: ${secrets.ref(explicitVar[1])}`;
+          }
+          // Opaque secret (redacted `***…` or internal `secret://…`): derive a
+          // deterministic env-var name from the agent + config key.
+          if (v.startsWith("***") || v.startsWith("secret://")) {
+            imports.use("secret");
+            return `${k}: ${secrets.ref(envVarFor(agent.agentId, `${p.platform}_${k}`.toUpperCase()))}`;
           }
           return `${k}: ${str(v)}`;
         }
