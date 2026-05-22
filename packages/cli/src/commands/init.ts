@@ -12,15 +12,15 @@ import { basename, join, resolve } from "node:path";
 import { confirm, input, password, select } from "@inquirer/prompts";
 import chalk from "chalk";
 import ora from "ora";
-import { isPortFree } from "./dev.js";
 import { promptPlatformConfig } from "../commands/platforms/platform-prompts.js";
-import { setLocalEnvValue } from "../internal/local-env.js";
 import {
   getProviderById,
   loadProviderRegistry,
   type RegistryProvider,
 } from "../commands/providers/registry.js";
+import { setLocalEnvValue } from "../internal/local-env.js";
 import { renderTemplate } from "../utils/template.js";
+import { isPortFree } from "./dev.js";
 
 const DEFAULT_LOBU_MCP_URL = "https://lobu.ai/mcp";
 
@@ -196,12 +196,12 @@ export async function initCommand(
     }
     const entries = await readdir(projectDir).catch(() => [] as string[]);
     const conflict = entries.some(
-      (n) => n === "lobu.toml" || n === "agents" || n === ".env"
+      (n) => n === "lobu.config.ts" || n === "agents" || n === ".env"
     );
     if (conflict) {
       console.log(
         chalk.red(
-          `\n✗ ${projectDir} already contains a Lobu project (lobu.toml / agents/ / .env).\n  Remove them or pick another directory.\n`
+          `\n✗ ${projectDir} already contains a Lobu project (lobu.config.ts / agents/ / .env).\n  Remove them or pick another directory.\n`
         )
       );
       process.exit(1);
@@ -401,7 +401,7 @@ export async function initCommand(
       }),
   });
   // Resolve aliases (e.g. `--provider anthropic` → "claude") before any
-  // downstream use so the synthesized lobu.toml references the real id.
+  // downstream use so the synthesized lobu.config.ts references the real id.
   const providerId = providerIdRaw ? resolveProviderAlias(providerIdRaw) : "";
 
   let providerApiKey = "";
@@ -450,8 +450,8 @@ export async function initCommand(
       }),
   });
 
-  // Interactive: prompt for real secrets. --yes: write placeholder env-var
-  // refs into lobu.toml; the user fills .env afterwards.
+  // Interactive: prompt for real secrets. --yes: collect placeholder env-var
+  // refs so we seed empty .env entries; the user fills them in afterwards.
   let platformConfig: Record<string, string> = {};
   let platformSecrets: Array<{ envVar: string; value: string }> = [];
   if (platformType) {
@@ -584,33 +584,14 @@ export async function initCommand(
   const spinner = ora("Creating Lobu project...").start();
 
   try {
-    await mkdir(join(projectDir, "data"), { recursive: true });
-
-    if (includeLobuMemory) {
-      await mkdir(join(projectDir, "models"), { recursive: true });
-      await mkdir(join(projectDir, "data", "entities"), { recursive: true });
-      await mkdir(join(projectDir, "data", "relationships"), {
-        recursive: true,
-      });
-      await writeFile(join(projectDir, "models", ".gitkeep"), "");
-      await writeFile(join(projectDir, "data", "entities", ".gitkeep"), "");
-      await writeFile(
-        join(projectDir, "data", "relationships", ".gitkeep"),
-        ""
-      );
-    }
-
-    await generateLobuToml(projectDir, {
+    await generateLobuConfig(projectDir, {
       agentName: projectName,
       allowedDomains: answers.allowedDomains,
       providerId: providerId || undefined,
       providerEnvVar: selectedProvider?.providers?.[0]?.envVarName,
       providerModel: selectedProvider?.providers?.[0]?.defaultModel,
-      platformType: platformType || undefined,
-      platformConfig:
-        Object.keys(platformConfig).length > 0 ? platformConfig : undefined,
-      includeLobuMemory,
       enableSlackPreview,
+      includeLobuMemory,
       lobuOrg: includeLobuMemory ? projectName : undefined,
       lobuName: includeLobuMemory ? humanizeSlug(projectName) : undefined,
     });
@@ -928,7 +909,15 @@ function humanizeSlug(slug: string): string {
     .join(" ");
 }
 
-export async function generateLobuToml(
+/**
+ * Scaffold the project's `lobu.config.ts` — the single TypeScript entrypoint
+ * `lobu apply` (and `lobu run`) read. Emits a `defineAgent` (providers,
+ * network, optional Slack preview) and a `defineConfig` default export with the
+ * org metadata. Chat platforms and the memory schema are NOT authored here:
+ * connections are created via the `/agents` UI / CRUD API, and entity /
+ * relationship types are added later with `defineEntityType` / `defineConfig`.
+ */
+export async function generateLobuConfig(
   projectDir: string,
   options: {
     agentName: string;
@@ -936,127 +925,100 @@ export async function generateLobuToml(
     providerId?: string;
     providerEnvVar?: string;
     providerModel?: string;
-    platformType?: string;
-    platformConfig?: Record<string, string>;
+    enableSlackPreview?: boolean;
     includeLobuMemory?: boolean;
     lobuOrg?: string;
     lobuName?: string;
     lobuDescription?: string;
-    enableSlackPreview?: boolean;
   }
 ): Promise<void> {
   const id = options.agentName;
-  const lines: string[] = [
-    "# lobu.toml — Agent configuration",
-    "# Docs: https://lobu.ai/docs/getting-started",
-    "#",
-    "# Each [agents.{id}] defines an agent. The dir field points to a directory",
-    "# containing IDENTITY.md, SOUL.md, USER.md, and optionally skills/.",
-    "# Shared skills in the root skills/ directory are available to all agents.",
-    "",
-    `[agents.${id}]`,
-    `name = "${id}"`,
-    `description = ""`,
-    `dir = "./agents/${id}"`,
-    "",
-    "# LLM providers (order = priority, key = API key or $ENV_VAR)",
+
+  const agentFields: string[] = [
+    `  id: ${JSON.stringify(id)},`,
+    `  name: ${JSON.stringify(id)},`,
+    `  description: "",`,
+    `  dir: ${JSON.stringify(`./agents/${id}`)},`,
   ];
 
   if (options.providerId && options.providerEnvVar) {
-    lines.push(
-      `[[agents.${id}.providers]]`,
-      `id = "${options.providerId}"`,
-      ...(options.providerModel ? [`model = "${options.providerModel}"`] : []),
-      `key = "$${options.providerEnvVar}"`
+    agentFields.push(
+      "  providers: [",
+      "    {",
+      `      id: ${JSON.stringify(options.providerId)},`,
+      ...(options.providerModel
+        ? [`      model: ${JSON.stringify(options.providerModel)},`]
+        : []),
+      `      key: secret(${JSON.stringify(options.providerEnvVar)}),`,
+      "    },",
+      "  ],"
     );
   } else {
-    lines.push(
-      "# Add providers via the gateway configuration APIs or uncomment below:",
-      `# [[agents.${id}.providers]]`,
-      '# id = "openrouter"',
-      '# key = "$OPENROUTER_API_KEY"'
+    agentFields.push(
+      "  // Add a provider, e.g.:",
+      '  // providers: [{ id: "openrouter", key: secret("OPENROUTER_API_KEY") }],'
     );
   }
 
-  lines.push("");
-
-  if (options.platformType && options.platformConfig) {
-    lines.push(
-      `[[agents.${id}.platforms]]`,
-      `type = "${options.platformType}"`
-    );
-    lines.push(`[agents.${id}.platforms.config]`);
-    for (const [key, value] of Object.entries(options.platformConfig)) {
-      lines.push(`${key} = "${value}"`);
-    }
-  } else {
-    lines.push(
-      "# Chat platform (add via the gateway configuration APIs or uncomment below):",
-      `# [[agents.${id}.platforms]]`,
-      '# type = "telegram"',
-      `# [agents.${id}.platforms.config]`,
-      '# botToken = "$TELEGRAM_BOT_TOKEN"'
-    );
-  }
-
-  lines.push(
-    "",
-    "# Local skills live in skills/<name>/SKILL.md or agents/<id>/skills/<name>/SKILL.md",
-    `[agents.${id}.skills]`,
-    "",
-    "# MCP servers (add custom tool servers with optional OAuth):",
-    `# [agents.${id}.skills.mcp.my-mcp]`,
-    '# url = "https://my-mcp.example.com"',
-    `# [agents.${id}.skills.mcp.my-mcp.oauth]`,
-    '# auth_url = "https://auth.example.com/authorize"',
-    '# token_url = "https://auth.example.com/token"',
-    '# client_id = "$MY_MCP_CLIENT_ID"'
+  const domains = options.allowedDomains
+    ? options.allowedDomains
+        .split(",")
+        .map((d) => d.trim())
+        .filter(Boolean)
+    : [];
+  agentFields.push(
+    "  network: {",
+    domains.length > 0
+      ? `    allowed: [${domains.map((d) => JSON.stringify(d)).join(", ")}],`
+      : "    allowed: [],",
+    "  },"
   );
 
   if (options.enableSlackPreview) {
-    lines.push(
-      "",
-      "# Hosted preview — `lobu run` prints a `/lobu link <code>` you redeem by",
-      "# DMing the hosted Lobu Slack bot. The block key is the chat platform;",
-      "# `[agents.<id>.preview.telegram]` works the same way (redeem with `/link <code>`).",
-      `[agents.${id}.preview.slack]`,
-      "enabled = true",
-      'surfaces = ["dm"]',
-      "code_ttl_minutes = 15"
+    agentFields.push(
+      "  // Hosted preview — `lobu run` prints a `/lobu link <code>` you redeem",
+      "  // by DMing the hosted Lobu Slack bot.",
+      "  preview: {",
+      '    slack: { enabled: true, surfaces: ["dm"], codeTtlMinutes: 15 },',
+      "  }"
     );
   }
 
-  lines.push("", `[agents.${id}.network]`);
-  if (options.allowedDomains) {
-    const domains = options.allowedDomains
-      .split(",")
-      .map((d) => `"${d.trim()}"`)
-      .join(", ");
-    lines.push(`allowed = [${domains}]`);
-  } else {
-    lines.push("allowed = []");
-  }
-
+  const configFields: string[] = [];
   if (options.includeLobuMemory) {
     const org = options.lobuOrg ?? options.agentName;
     const name = options.lobuName ?? humanizeSlug(options.agentName);
-    lines.push(
-      "",
-      "# Project-scoped Lobu memory",
-      `[memory]`,
-      "enabled = true",
-      `org = ${JSON.stringify(org)}`,
-      `name = ${JSON.stringify(name)}`,
+    configFields.push(
+      `  org: ${JSON.stringify(org)},`,
+      `  orgName: ${JSON.stringify(name)},`,
       ...(options.lobuDescription
-        ? [`description = ${JSON.stringify(options.lobuDescription)}`]
-        : []),
-      'models = "./models"',
-      'data = "./data"'
+        ? [`  orgDescription: ${JSON.stringify(options.lobuDescription)},`]
+        : [])
     );
   }
+  configFields.push("  agents: [agent],");
 
-  lines.push("");
-  await writeFile(join(projectDir, "lobu.toml"), lines.join("\n"));
+  const lines = [
+    "// lobu.config.ts — Lobu project configuration",
+    "// Docs: https://lobu.ai/docs/getting-started",
+    "//",
+    "// `dir` points to a folder with IDENTITY.md, SOUL.md, USER.md, and an",
+    "// optional skills/ directory. Shared skills in the root skills/ directory",
+    "// are available to every agent. Run `lobu apply` to sync this to your org.",
+    "",
+    'import { defineAgent, defineConfig, secret } from "@lobu/sdk";',
+    "",
+    "const agent = defineAgent({",
+    ...agentFields,
+    "});",
+    "",
+    "export default defineConfig({",
+    ...configFields,
+    "});",
+    "",
+  ];
+
+  await writeFile(join(projectDir, "lobu.config.ts"), lines.join("\n"));
 }
 
 async function getCliVersion(): Promise<string> {

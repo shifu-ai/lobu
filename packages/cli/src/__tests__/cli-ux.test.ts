@@ -1,20 +1,19 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   existsSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-
-import { isPortFree } from "../commands/dev";
+import { loadDesiredStateFromConfig } from "../commands/_lib/apply/desired-state";
 import { agentScaffoldCommand } from "../commands/agent";
-import { loadProjectLink, saveProjectLink } from "../internal/project-link";
+import { isPortFree } from "../commands/dev";
 import { initCommand } from "../commands/init";
+import { loadProjectLink, saveProjectLink } from "../internal/project-link";
 
 describe("isPortFree", () => {
   test("returns true for a port nothing is holding", async () => {
@@ -90,7 +89,7 @@ describe("lobu init --yes", () => {
   test("scaffolds a non-interactive project with defaults", async () => {
     await initCommand(cwd, "demo", { yes: true });
     const proj = join(cwd, "demo");
-    expect(existsSync(join(proj, "lobu.toml"))).toBe(true);
+    expect(existsSync(join(proj, "lobu.config.ts"))).toBe(true);
     expect(existsSync(join(proj, ".env"))).toBe(true);
     expect(existsSync(join(proj, "agents", "demo", "IDENTITY.md"))).toBe(true);
     expect(existsSync(join(proj, "agents", "demo", "evals", "ping.yaml"))).toBe(
@@ -100,9 +99,27 @@ describe("lobu init --yes", () => {
     expect(env.includes("SENTRY_DSN=")).toBe(false);
   });
 
+  test("scaffolded lobu.config.ts loads into desired state", async () => {
+    // jiti resolves the externalized `@lobu/sdk` import relative to the config
+    // file, so scaffold inside the package tree (where node_modules is
+    // reachable), not the tmpdir() used by the other init tests.
+    const fixtureRoot = mkdtempSync(join(import.meta.dir, "init-load-"));
+    try {
+      await initCommand(fixtureRoot, "loadable", { yes: true });
+      const proj = join(fixtureRoot, "loadable");
+      const { state } = await loadDesiredStateFromConfig({ cwd: proj });
+      expect(state.agents).toHaveLength(1);
+      expect(state.agents[0]?.metadata.agentId).toBe("loadable");
+      // SOUL/IDENTITY/USER.md from the agent dir are merged into settings.
+      expect(state.agents[0]?.settings.identityMd).toContain("loadable");
+    } finally {
+      rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
   test("--here scaffolds into the current directory", async () => {
     await initCommand(cwd, undefined, { yes: true, here: true });
-    expect(existsSync(join(cwd, "lobu.toml"))).toBe(true);
+    expect(existsSync(join(cwd, "lobu.config.ts"))).toBe(true);
     expect(existsSync(join(cwd, "agents"))).toBe(true);
   });
 
@@ -114,10 +131,14 @@ describe("lobu init --yes", () => {
 
   test("--slack-preview writes agent preview config", async () => {
     await initCommand(cwd, "preview-on", { yes: true, slackPreview: true });
-    const toml = readFileSync(join(cwd, "preview-on", "lobu.toml"), "utf-8");
-    expect(toml).toContain("[agents.preview-on.preview.slack]");
-    expect(toml).toContain("enabled = true");
-    expect(toml).toContain('surfaces = ["dm"]');
+    const config = readFileSync(
+      join(cwd, "preview-on", "lobu.config.ts"),
+      "utf-8"
+    );
+    expect(config).toContain("preview:");
+    expect(config).toContain("slack:");
+    expect(config).toContain("enabled: true");
+    expect(config).toContain('surfaces: ["dm"]');
   });
 
   test("--provider with bad id throws before writing files", async () => {
@@ -139,30 +160,46 @@ describe("agent scaffold", () => {
     rmSync(cwd, { recursive: true, force: true });
   });
 
-  test("appends a new agent block to lobu.toml", async () => {
+  test("scaffolds the agent dir and prints a defineAgent block", async () => {
     writeFileSync(
-      join(cwd, "lobu.toml"),
-      ["[agents.first]", 'name = "first"', 'dir = "./agents/first"', ""].join(
-        "\n"
-      )
+      join(cwd, "lobu.config.ts"),
+      'import { defineConfig } from "@lobu/sdk";\nexport default defineConfig({ agents: [] });\n'
     );
-    await agentScaffoldCommand("second", { cwd, name: "Second" });
-    const toml = readFileSync(join(cwd, "lobu.toml"), "utf-8");
-    expect(toml).toContain("[agents.second]");
-    expect(toml).toContain('name = "Second"');
-    expect(toml).toContain('dir = "./agents/second"');
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    try {
+      await agentScaffoldCommand("second", { cwd, name: "Second" });
+    } finally {
+      console.log = original;
+    }
+    const output = logs.join("\n");
+    expect(output).toContain("const second = defineAgent({");
+    expect(output).toContain('id: "second"');
+    expect(output).toContain('name: "Second"');
+    expect(output).toContain('dir: "./agents/second"');
     expect(existsSync(join(cwd, "agents", "second", "IDENTITY.md"))).toBe(true);
     expect(existsSync(join(cwd, "agents", "second", "SOUL.md"))).toBe(true);
     expect(existsSync(join(cwd, "agents", "second", "USER.md"))).toBe(true);
   });
 
-  test("escapes quotes in --name so the TOML stays parseable", async () => {
-    writeFileSync(join(cwd, "lobu.toml"), "");
-    await agentScaffoldCommand("quoty", {
-      cwd,
-      name: 'Sales "Bot" v2',
-    });
-    const toml = readFileSync(join(cwd, "lobu.toml"), "utf-8");
-    expect(toml).toContain('name = "Sales \\"Bot\\" v2"');
+  test("escapes quotes in --name so the printed snippet stays valid TS", async () => {
+    writeFileSync(
+      join(cwd, "lobu.config.ts"),
+      'import { defineConfig } from "@lobu/sdk";\nexport default defineConfig({ agents: [] });\n'
+    );
+    const logs: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      logs.push(args.join(" "));
+    };
+    try {
+      await agentScaffoldCommand("quoty", { cwd, name: 'Sales "Bot" v2' });
+    } finally {
+      console.log = original;
+    }
+    expect(logs.join("\n")).toContain('name: "Sales \\"Bot\\" v2"');
   });
 });

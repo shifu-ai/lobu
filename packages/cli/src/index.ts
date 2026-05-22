@@ -103,7 +103,7 @@ Local dev:
   init [name]              Scaffold a new agent project
   run | dev | start        Boot the embedded Lobu stack
   chat <prompt>            Send a prompt to an agent and stream the response
-  validate                 Validate lobu.toml
+  validate                 Validate lobu.config.ts
   doctor                   Health checks (deps, DB, pgvector, ports, keys)
   telemetry                Show / toggle anonymous error reporting
 
@@ -113,7 +113,7 @@ Cloud:
   context <subcmd>         Manage API contexts
   org <subcmd>             Manage active org slug
   link | unlink            Bind this directory to a (context, org)
-  apply | deploy           Sync lobu.toml to cloud (idempotent)
+  apply | deploy           Sync lobu.config.ts to cloud (idempotent)
   agent <subcmd>           CRUD agents via REST
   call [tool]              Invoke an admin REST tool by name (--list to discover)
   token [create]           Print or mint personal access tokens
@@ -132,7 +132,7 @@ Memory:
   program
     .command("init [name]")
     .description(
-      "Scaffold a new agent project (lobu.toml + agent files + .env)"
+      "Scaffold a new agent project (lobu.config.ts + agent files + .env)"
     )
     .option("-y, --yes", "Skip prompts; use defaults / flag values")
     .option(
@@ -164,7 +164,7 @@ Memory:
     .option("--no-sentry", "Disable Sentry without prompting")
     .option(
       "--slack-preview",
-      "Enable public Lobu Developer Slack Preview in lobu.toml"
+      "Enable public Lobu Developer Slack Preview in lobu.config.ts"
     )
     .option("--no-slack-preview", "Disable Slack Preview without prompting")
     .option(
@@ -225,7 +225,10 @@ Memory:
     .description(
       "Send a prompt to an agent and stream the response. With --user, routes through Telegram/Slack."
     )
-    .option("-a, --agent <id>", "Agent ID (defaults to first in lobu.toml)")
+    .option(
+      "-a, --agent <id>",
+      "Agent ID (defaults to first in lobu.config.ts)"
+    )
     .option("-u, --user <id>", "User ID to impersonate (e.g. telegram:12345)")
     .option("-t, --thread <id>", "Thread/conversation ID for multi-turn")
     .option(
@@ -268,7 +271,9 @@ Memory:
   // ─── validate ───────────────────────────────────────────────────────
   program
     .command("validate")
-    .description("Validate lobu.toml schema, skill IDs, and provider config")
+    .description(
+      "Validate lobu.config.ts schema, skill IDs, and provider config"
+    )
     .action(async () => {
       const { validateCommand } = await import("./commands/validate.js");
       const valid = await validateCommand(process.cwd());
@@ -280,7 +285,7 @@ Memory:
     .command("apply")
     .alias("deploy")
     .description(
-      "Sync lobu.toml + agent dirs to your Lobu Cloud org (idempotent)"
+      "Sync lobu.config.ts + agent dirs to your Lobu Cloud org (idempotent)"
     )
     .option("--dry-run", "Show the plan and exit without mutating")
     .option("--yes", "Skip the confirmation prompt (CI mode)")
@@ -704,7 +709,7 @@ Memory:
   agent
     .command("scaffold <agentId>")
     .description(
-      "Add a new local agent (agents/<id>/* + lobu.toml entry) without overwriting existing ones"
+      "Add a new local agent (agents/<id>/* + lobu.config.ts entry) without overwriting existing ones"
     )
     .option("--name <name>", "Display name")
     .option("--description <text>", "Description")
@@ -1038,7 +1043,7 @@ Memory:
   memory
     .command("seed [path]")
     .description(
-      "Provision a Lobu memory workspace from [memory] in lobu.toml + ./models + optional ./data"
+      "Provision a Lobu memory workspace from lobu.config.ts + optional ./data records"
     )
     .option("--dry-run", "Log what would be created without mutating")
     .option("--org <slug>", "Org slug override (defaults to [memory].org)")

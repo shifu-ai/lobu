@@ -206,7 +206,7 @@ export interface AgentScaffoldOptions {
 
 const AGENT_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 
-/** Add a new local agent + a `[agents.<id>]` block to an existing lobu.toml. */
+/** Scaffold a new local agent dir + print the `defineAgent` block to add. */
 export async function agentScaffoldCommand(
   agentId: string,
   options: AgentScaffoldOptions = {}
@@ -221,11 +221,11 @@ export async function agentScaffoldCommand(
   }
 
   const cwd = options.cwd ?? process.cwd();
-  const lobuTomlPath = join(cwd, "lobu.toml");
-  if (!(await pathExists(lobuTomlPath))) {
+  const lobuConfigPath = join(cwd, "lobu.config.ts");
+  if (!(await pathExists(lobuConfigPath))) {
     console.error(
       chalk.red(
-        "\n  No lobu.toml in the current directory. Run `lobu init` first or `cd` into a Lobu project.\n"
+        "\n  No lobu.config.ts in the current directory. Run `lobu init` first or `cd` into a Lobu project.\n"
       )
     );
     process.exit(1);
@@ -260,23 +260,19 @@ export async function agentScaffoldCommand(
   await mkdir(join(agentDir, "evals"), { recursive: true });
 
   const description = options.description ?? "";
-  const tomlBlock = [
-    "",
-    `[agents.${agentId}]`,
-    `name = ${JSON.stringify(displayName)}`,
-    `description = ${JSON.stringify(description)}`,
-    `dir = "./agents/${agentId}"`,
-    "",
-    `[agents.${agentId}.skills]`,
-    "",
-    `[agents.${agentId}.network]`,
-    "allowed = []",
-    "",
+  // The config is typed TypeScript, so we don't mutate it for the user — print
+  // the `defineAgent` block to paste (with editor autocomplete + type-checking).
+  const constName = agentId.replace(/-([a-z0-9])/g, (_, c: string) =>
+    c.toUpperCase()
+  );
+  const snippet = [
+    `const ${constName} = defineAgent({`,
+    `  id: ${JSON.stringify(agentId)},`,
+    `  name: ${JSON.stringify(displayName)},`,
+    ...(description ? [`  description: ${JSON.stringify(description)},`] : []),
+    `  dir: "./agents/${agentId}",`,
+    `});`,
   ].join("\n");
-
-  const existing = await readFile(lobuTomlPath, "utf-8");
-  const sep = existing.endsWith("\n") ? "" : "\n";
-  await writeFile(lobuTomlPath, `${existing}${sep}${tomlBlock}`);
 
   console.log(chalk.green(`\n  Scaffolded agent "${agentId}".`));
   console.log(chalk.dim(`  - agents/${agentId}/IDENTITY.md`));
@@ -284,5 +280,11 @@ export async function agentScaffoldCommand(
   console.log(chalk.dim(`  - agents/${agentId}/USER.md`));
   console.log(chalk.dim(`  - agents/${agentId}/skills/`));
   console.log(chalk.dim(`  - agents/${agentId}/evals/`));
-  console.log(chalk.dim(`  - lobu.toml: appended [agents.${agentId}]\n`));
+  console.log(chalk.cyan("\n  Add it to your lobu.config.ts:\n"));
+  console.log(`${snippet}\n`);
+  console.log(
+    chalk.dim(
+      `  ...then add \`${constName}\` to \`defineConfig({ agents: [...] })\`.\n`
+    )
+  );
 }
