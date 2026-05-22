@@ -325,7 +325,7 @@ export class ApplyClient {
   ): Promise<void> {
     await this.request(
       "PATCH",
-      `/api/${encodeURIComponent(orgSlug)}/organization`,
+      `/api/${encodeURIComponent(orgSlug)}/organization/managed-by`,
       { managed_by: managedBy }
     );
   }

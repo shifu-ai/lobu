@@ -413,7 +413,12 @@ export class OAuthProvider {
     name: string | null;
     picture: string | null;
     organization_slug: string | null;
-    organizations: { id: string; slug: string; name: string }[];
+    organizations: {
+      id: string;
+      slug: string;
+      name: string;
+      managed_by: 'ui' | 'code';
+    }[];
   } | null> {
     const authInfo = await this.verifyAccessToken(token);
     if (!authInfo) return null;
@@ -449,7 +454,7 @@ export class OAuthProvider {
     }
 
     const orgs = await this.sql`
-      SELECT o.id, o.slug, o.name
+      SELECT o.id, o.slug, o.name, o.managed_by
       FROM "member" m
       JOIN "organization" o ON o.id = m."organizationId"
       WHERE m."userId" = ${authInfo.userId}
@@ -472,6 +477,7 @@ export class OAuthProvider {
         id: o.id as string,
         slug: o.slug as string,
         name: o.name as string,
+        managed_by: o.managed_by === 'code' ? 'code' : 'ui',
       })),
     };
   }
