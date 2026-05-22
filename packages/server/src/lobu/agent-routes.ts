@@ -1479,6 +1479,15 @@ routes.post('/:agentId/platforms/:platformId/sync-channels', async (c) => {
   }
 
   // Parse "<teamId>/<channelId>" → canonical `slack:<channelId>` keyed by team.
+  //
+  // The `desired` Map is keyed by `${teamId} ${channelId}` (a single space as
+  // the composite delimiter). A space is collision-safe here because the
+  // validation regex below (`[^/\s]+`) rejects any teamId/channelId containing
+  // whitespace or `/`, so neither component can ever contain the separator —
+  // distinct (team, channel) pairs always produce distinct keys. The Map is
+  // also purely in-memory and request-scoped (it never persists; the DB stores
+  // team_id/channel_id as separate columns), so there are no stored keys to
+  // migrate. Do NOT relax the regex without re-checking this invariant.
   const desired = new Map<string, { teamId: string; channelId: string }>();
   for (const entry of body.channels) {
     if (typeof entry !== 'string') {
