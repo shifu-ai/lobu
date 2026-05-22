@@ -273,7 +273,10 @@ describe("apply diff — platforms", () => {
   // be treated as unchanged so the platform isn't needlessly restarted.
   test.each([
     ["redacted (***)", "***oken"],
-    ["secret:// reference", "secret://connections%2Ftriage-telegram%2FbotToken"],
+    [
+      "secret:// reference",
+      "secret://connections%2Ftriage-telegram%2FbotToken",
+    ],
   ])("noop when desired $VAR matches remote %s", (_label, remoteValue) => {
     const desired = buildState([
       buildDesiredAgent("triage", {
@@ -334,7 +337,11 @@ describe("apply diff — platforms", () => {
             {
               id: "triage-telegram",
               platform: "telegram",
-              config: { platform: "telegram", botToken: "***oken", mode: "polling" },
+              config: {
+                platform: "telegram",
+                botToken: "***oken",
+                mode: "polling",
+              },
             },
           ],
         ],
