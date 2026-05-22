@@ -58,6 +58,43 @@ describe("mapProjectToDesiredState", () => {
     expect(state.memory).toEqual({ org: "o" });
   });
 
+  test("maps agent platforms: stable id + $VAR config kept as placeholder + secret collected", () => {
+    const bot = defineAgent({
+      id: "support-bot",
+      platforms: [
+        {
+          type: "telegram",
+          config: { botToken: secret("TELEGRAM_BOT_TOKEN") },
+        },
+        {
+          type: "slack",
+          name: "ops",
+          config: { botToken: "$SLACK_BOT_TOKEN", appType: "MultiTenant" },
+          channels: ["T1/C1"],
+        },
+      ],
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ org: "o", agents: [bot] }),
+      env
+    );
+    const platforms = state.agents[0]?.platforms ?? [];
+    expect(platforms).toHaveLength(2);
+    // Stable id is deterministic from (agentId, type, name?).
+    expect(platforms[0]?.stableId).toBe("support-bot-telegram");
+    expect(platforms[1]?.stableId).toBe("support-bot-slack-ops");
+    // `$VAR`/secret() placeholders are kept in config (resolved at egress),
+    // literals pass through, and the referenced secrets are collected.
+    expect(platforms[0]?.config).toEqual({ botToken: "$TELEGRAM_BOT_TOKEN" });
+    expect(platforms[1]?.config).toEqual({
+      botToken: "$SLACK_BOT_TOKEN",
+      appType: "MultiTenant",
+    });
+    expect(platforms[1]?.channels).toEqual(["T1/C1"]);
+    expect(state.requiredSecrets).toContain("TELEGRAM_BOT_TOKEN");
+    expect(state.requiredSecrets).toContain("SLACK_BOT_TOKEN");
+  });
+
   test("maps entities + relationships with typed-handle slugs", () => {
     const person = defineEntityType({ key: "person", name: "Person" });
     const org = defineEntityType({ key: "org" });

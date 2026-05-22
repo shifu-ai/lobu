@@ -342,6 +342,21 @@ async function getEntityCountForType(typeId: number, organizationId: string): Pr
   return Number(rows[0]?.count || 0);
 }
 
+async function getRelationshipCountForType(
+  typeId: number,
+  organizationId: string
+): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT COUNT(*)::int as count
+    FROM entity_relationships r
+    WHERE r.relationship_type_id = ${typeId}
+      AND r.organization_id = ${organizationId}
+      AND r.deleted_at IS NULL
+  `;
+  return Number(rows[0]?.count || 0);
+}
+
 async function recordAudit(
   sql: DbClient,
   entityTypeId: number,
@@ -739,9 +754,15 @@ async function requireRelationshipType(
     return { typeId: Number(rows[0].id), sql };
   }
 
+  // Tenant-first ordering: when the caller's org owns a relationship type AND a
+  // public type from another org shares the slug, resolve the caller's OWN row.
+  // Without this, `LIMIT 1` could grab the foreign public row and the
+  // access-denied guard below would wrongly block the caller from
+  // updating/deleting its own type (and break code-managed prune).
   const existing = await sql`
     SELECT id, organization_id FROM entity_relationship_types
     WHERE slug = ${slug} AND deleted_at IS NULL
+    ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
     LIMIT 1
   `;
   if (existing.length === 0) throw new Error(`Relationship type "${slug}" not found`);
@@ -878,9 +899,13 @@ async function rtHandleCreate(
 
   const sql = getDb();
 
+  // Org-scoped duplicate check — the unique index is (organization_id, slug),
+  // so a same-slug PUBLIC type from another org must NOT block this org from
+  // creating its own (matches entity-type create).
   const existing = await sql`
     SELECT id FROM entity_relationship_types
     WHERE slug = ${args.slug} AND deleted_at IS NULL
+      AND organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
   if (existing.length > 0) {
@@ -892,6 +917,7 @@ async function rtHandleCreate(
     const inverseRows = await sql`
       SELECT id FROM entity_relationship_types
       WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
+      ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
       LIMIT 1
     `;
     if (inverseRows.length === 0) {
@@ -965,6 +991,7 @@ async function rtHandleUpdate(
       const inverseRows = await sql`
         SELECT id FROM entity_relationship_types
         WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
+        ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
         LIMIT 1
       `;
       if (inverseRows.length === 0) {
@@ -1031,6 +1058,16 @@ async function rtHandleDelete(
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
   const { typeId, sql } = await requireRelationshipType(args.slug, 'delete', ctx);
+
+  // Refuse while relationship instances exist — mirrors entity-type delete so
+  // `lobu apply` prune (and the UI) can never orphan live relationship data
+  // under a deleted definition.
+  const relationshipCount = await getRelationshipCountForType(typeId, ctx.organizationId);
+  if (relationshipCount > 0) {
+    throw new Error(
+      `Cannot delete relationship type '${args.slug}': ${relationshipCount} relationships of this type exist. Remove or reassign them first.`
+    );
+  }
 
   await sql`
     UPDATE entity_relationship_types

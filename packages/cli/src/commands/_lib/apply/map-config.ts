@@ -31,6 +31,7 @@ import type {
   DesiredConnection,
   DesiredEntityType,
   DesiredFeed,
+  DesiredPlatform,
   DesiredRelationshipType,
   DesiredState,
   DesiredWatcher,
@@ -90,6 +91,29 @@ function authProfileSlug(
 ): string | undefined {
   if (ref === undefined) return undefined;
   return typeof ref === "string" ? ref : ref.slug;
+}
+
+/**
+ * Deterministic, human-readable stable id for a platform binding, derived from
+ * `(agentId, type, name?)`. Must stay stable across applies so the same
+ * platform matches (noop) instead of being recreated — `apply` PUTs it to
+ * `/platforms/by-stable-id/:stableId`.
+ */
+function platformStableId(
+  agentId: string,
+  type: string,
+  name?: string
+): string {
+  const slug = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "");
+  return [agentId, type, name]
+    .filter((p): p is string => !!p)
+    .map(slug)
+    .filter(Boolean)
+    .join("-");
 }
 
 /** Credential value → `$VAR` string; collects the referenced secret name. */
@@ -408,13 +432,28 @@ function mapAgent(
     });
   }
 
+  const platforms: DesiredPlatform[] = (agent.platforms ?? []).map((p) => ({
+    stableId: platformStableId(agent.id, p.type, p.name),
+    type: p.type,
+    ...(p.name ? { name: p.name } : {}),
+    // Keep `$VAR` placeholders in the stored config (resolved at egress); the
+    // referenced secrets are collected into `required` for the secrets gate.
+    config: Object.fromEntries(
+      Object.entries(p.config).map(([k, v]) => [
+        k,
+        credentialString(v, required),
+      ])
+    ),
+    ...(p.channels?.length ? { channels: p.channels } : {}),
+  }));
+
   const metadata: DesiredAgentMetadata = {
     agentId: agent.id,
     name: agent.name ?? agent.id,
   };
   if (agent.description) metadata.description = agent.description;
 
-  return { metadata, settings, platforms: [], providerKeys };
+  return { metadata, settings, platforms, providerKeys };
 }
 
 function mapEntityType(entity: EntityType): DesiredEntityType {

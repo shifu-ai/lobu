@@ -25,6 +25,7 @@ import type {
   RemoteConnection,
   RemoteEntityType,
   RemoteFeed,
+  RemotePlatform,
   RemoteRelationshipType,
   RemoteWatcher,
 } from "../apply/client.js";
@@ -199,6 +200,7 @@ interface EmittedAgent {
 function emitAgent(
   agent: RemoteAgent,
   settings: AgentSettings | null,
+  platforms: RemotePlatform[],
   imports: ImportTracker,
   secrets: SecretCollector,
   minter: IdentMinter
@@ -340,6 +342,32 @@ function emitAgent(
       relPath: `${dir}/skills/${skill.name}/SKILL.md`,
       body: emitSkillFile(skill),
     });
+  }
+
+  // platforms ← live platform bindings. The route stores `platform` inside
+  // `config` for stable-id matching; strip it. `$VAR` config values round-trip
+  // as secret() refs (the stored config keeps placeholders, not raw secrets).
+  if (platforms.length > 0) {
+    const items = platforms.map((p) => {
+      const cfg: Record<string, unknown> = { ...(p.config ?? {}) };
+      delete cfg.platform;
+      const cfgLines = Object.entries(cfg).map(([k, v]) => {
+        if (typeof v === "string") {
+          const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
+          if (m?.[1]) {
+            imports.use("secret");
+            return `${k}: ${secrets.ref(m[1])}`;
+          }
+          return `${k}: ${str(v)}`;
+        }
+        return `${k}: ${emitValue(v, 3)}`;
+      });
+      return objectLiteral(
+        [`type: ${str(p.platform)}`, `config: ${objectLiteral(cfgLines, 3)}`],
+        2
+      );
+    });
+    fields.push(`platforms: [\n    ${items.join(",\n    ")},\n  ]`);
   }
 
   const handleName = minter.mint(agent.agentId, "Agent");
@@ -567,7 +595,11 @@ function emitAuthProfile(
   connectorHandles: Map<string, string>,
   imports: ImportTracker,
   minter: IdentMinter
-): Handle {
+): Handle | null {
+  // An auth profile with no connector can't be expressed as defineAuthProfile
+  // (connector is required), and emitting `connector: null` would crash on the
+  // next `lobu apply` (connectorKey(null)). Skip it — the caller warns.
+  if (!p.connector_key) return null;
   imports.use("defineAuthProfile");
   const interactive =
     p.profile_kind === "oauth_account" || p.profile_kind === "browser_session";
@@ -579,9 +611,11 @@ function emitAuthProfile(
     `authKind: ${str(p.profile_kind)}`,
   ];
   if (p.display_name) fields.push(`name: ${str(p.display_name)}`);
-  // Credentials are write-only on the server. For credentialed kinds, emit a
-  // single secret placeholder so the operator wires it back in; interactive
-  // kinds (oauth_account / browser_session) take no credentials (auth via UI).
+  // Credentials are write-only on the server, so we can't recover the real
+  // values or the connector's exact field names here. Emit secret placeholders
+  // the operator wires in via .env; the credential KEYS must be renamed to the
+  // connector's auth-schema fields before applying (see the connector docs).
+  // Interactive kinds (oauth_account / browser_session) take no credentials.
   if (
     !interactive &&
     (p.profile_kind === "env" || p.profile_kind === "oauth_app")
@@ -589,7 +623,7 @@ function emitAuthProfile(
     imports.use("secret");
     const credKey = p.profile_kind === "oauth_app" ? "CLIENT_SECRET" : "VALUE";
     fields.push(
-      `credentials: {\n    ${envVarFor(p.slug, credKey)}: ${secrets.ref(envVarFor(p.slug, credKey))},\n  }`
+      `// TODO: rename credential keys to this connector's auth-schema fields\n  credentials: {\n    ${envVarFor(p.slug, credKey)}: ${secrets.ref(envVarFor(p.slug, credKey))},\n  }`
     );
   }
   const name = minter.mint(p.slug, "Auth");
@@ -656,7 +690,11 @@ function emitConnection(
 // ── Fetch the org's full declared state ─────────────────────────────────────
 
 interface FetchedState {
-  agents: Array<{ agent: RemoteAgent; settings: AgentSettings | null }>;
+  agents: Array<{
+    agent: RemoteAgent;
+    settings: AgentSettings | null;
+    platforms: RemotePlatform[];
+  }>;
   entityTypes: RemoteEntityType[];
   relationshipTypes: RemoteRelationshipType[];
   watchers: Array<{ watcher: RemoteWatcher; reactionScript: string | null }>;
@@ -688,6 +726,7 @@ async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
       .map(async (agent) => ({
         agent,
         settings: await client.getAgentSettings(agent.agentId),
+        platforms: await client.listPlatforms(agent.agentId),
       }))
   );
 
@@ -741,6 +780,8 @@ interface GeneratedProject {
   configSource: string;
   files: Array<{ relPath: string; body: string }>;
   envVars: string[];
+  /** Non-fatal issues (e.g. a skipped malformed auth profile) to surface. */
+  warnings: string[];
 }
 
 export function generateProject(
@@ -753,12 +794,20 @@ export function generateProject(
   const secrets = new SecretCollector();
   const minter = new IdentMinter();
   const files: Array<{ relPath: string; body: string }> = [];
+  const warnings: string[] = [];
 
   // Agents first (watchers reference their handles).
   const agentHandles = new Map<string, string>();
   const agentDecls: string[] = [];
-  for (const { agent, settings } of state.agents) {
-    const emitted = emitAgent(agent, settings, imports, secrets, minter);
+  for (const { agent, settings, platforms } of state.agents) {
+    const emitted = emitAgent(
+      agent,
+      settings,
+      platforms,
+      imports,
+      secrets,
+      minter
+    );
     agentHandles.set(agent.agentId, emitted.handle.name);
     agentDecls.push(emitted.handle.decl);
     files.push(...emitted.files);
@@ -788,6 +837,12 @@ export function generateProject(
   const authDecls: string[] = [];
   for (const p of state.authProfiles) {
     const h = emitAuthProfile(p, secrets, connectorHandles, imports, minter);
+    if (!h) {
+      warnings.push(
+        `auth profile "${p.slug}" has no connector — skipped (set its connector and re-add it to lobu.config.ts).`
+      );
+      continue;
+    }
     authHandles.set(p.slug, h.name);
     authDecls.push(h.decl);
   }
@@ -880,6 +935,7 @@ export function generateProject(
     configSource,
     files,
     envVars: [...secrets.names].sort(),
+    warnings,
   };
 }
 
@@ -942,6 +998,12 @@ export async function initFromOrg(opts: InitFromOrgOptions): Promise<void> {
     );
     for (const v of project.envVars) {
       printText(`  ${chalk.yellow("·")} ${v}`);
+    }
+  }
+  if (project.warnings.length > 0) {
+    printText(chalk.bold("\nWarnings:"));
+    for (const w of project.warnings) {
+      printText(`  ${chalk.yellow("⚠")} ${w}`);
     }
   }
   printText(

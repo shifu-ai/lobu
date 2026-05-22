@@ -686,6 +686,7 @@ export async function initCommand(
       includeLobuMemory,
       lobuOrg: includeLobuMemory ? projectName : undefined,
       lobuName: includeLobuMemory ? humanizeSlug(projectName) : undefined,
+      ...(platformType ? { platformType, platformConfig } : {}),
     });
 
     const variables = {
@@ -978,6 +979,10 @@ export async function generateLobuConfig(
     lobuOrg?: string;
     lobuName?: string;
     lobuDescription?: string;
+    /** Chat platform to author (e.g. "telegram"); omit to scaffold none. */
+    platformType?: string;
+    /** Platform config; `$VAR` values are emitted as `secret("VAR")`. */
+    platformConfig?: Record<string, string>;
   }
 ): Promise<void> {
   const id = options.agentName;
@@ -1021,6 +1026,25 @@ export async function generateLobuConfig(
       : "    allowed: [],",
     "  },"
   );
+
+  if (options.platformType && options.platformConfig) {
+    const configLines = Object.entries(options.platformConfig).map(([k, v]) => {
+      const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
+      return m
+        ? `      ${k}: secret(${JSON.stringify(m[1])}),`
+        : `      ${k}: ${JSON.stringify(v)},`;
+    });
+    agentFields.push(
+      "  platforms: [",
+      "    {",
+      `      type: ${JSON.stringify(options.platformType)},`,
+      "      config: {",
+      ...configLines,
+      "      },",
+      "    },",
+      "  ],"
+    );
+  }
 
   if (options.enableSlackPreview) {
     agentFields.push(

@@ -265,7 +265,8 @@ async function confirmCustomConnectorSource(
 async function fetchRemoteSnapshot(
   client: ApplyClient,
   state: DesiredState,
-  only?: "agents" | "memory"
+  only?: "agents" | "memory",
+  codeManaged = false
 ): Promise<RemoteSnapshot> {
   const agents: RemoteAgent[] =
     only === "memory" ? [] : await client.listAgents();
@@ -292,17 +293,20 @@ async function fetchRemoteSnapshot(
     only === "agents" ? [] : await client.listRelationshipTypes();
   const watchers = only === "agents" ? [] : await client.listWatchers();
 
-  // Connectors run only on a full apply (`--only` skips them).
+  // Connectors run only on a full apply (`--only` skips them). A code-managed
+  // org also fetches them even when the config declares none, so prune can
+  // delete a connector definition whose last config reference was removed
+  // (otherwise an empty desired-connectors set would skip the fetch entirely).
   const hasConnectors =
     state.connectors.definitions.length > 0 ||
     state.connectors.authProfiles.length > 0 ||
     state.connectors.connections.length > 0;
-  const connectorDefinitions =
-    only || !hasConnectors ? [] : await client.listConnectorDefinitions(true);
-  const authProfiles =
-    only || !hasConnectors ? [] : await client.listAuthProfiles();
-  const connections =
-    only || !hasConnectors ? [] : await client.listConnections();
+  const fetchConnectors = !only && (hasConnectors || codeManaged);
+  const connectorDefinitions = fetchConnectors
+    ? await client.listConnectorDefinitions(true)
+    : [];
+  const authProfiles = fetchConnectors ? await client.listAuthProfiles() : [];
+  const connections = fetchConnectors ? await client.listConnections() : [];
   const feedsByConnectionId = new Map<number, RemoteFeed[]>();
   if (!only && hasConnectors) {
     const desiredConnSlugs = new Set(
@@ -1102,11 +1106,31 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // (old server, or a token the userinfo endpoint rejects) → null → skip the
   // check and let the normal flow surface any org error.
   const myOrgs = await client.listOrgs().catch(() => null);
-  const resolvedOrg =
-    myOrgs?.find((o) => o.slug === orgSlug) ??
-    (state.memory?.organizationId
-      ? myOrgs?.find((o) => o.id === state.memory?.organizationId)
-      : undefined);
+  // Resolve strictly by the slug we will actually mutate (the client targets
+  // `orgSlug` in every URL). Do NOT fall back to organizationId as an alternate
+  // org — that could read provenance (managed_by) from a different org than the
+  // one being applied/pruned.
+  const resolvedOrg = myOrgs?.find((o) => o.slug === orgSlug);
+  // If the config pins `organizationId`, the slug must resolve to that exact
+  // org — otherwise it's a stale/copied config pointed at someone else's org,
+  // and (under --manage) could prune the wrong org. Hard-stop.
+  if (
+    resolvedOrg &&
+    state.memory?.organizationId &&
+    resolvedOrg.id !== state.memory.organizationId
+  ) {
+    printError(
+      [
+        "",
+        `Org slug "${orgSlug}" resolves to org id ${resolvedOrg.id}, but lobu.config.ts pins organizationId ${state.memory.organizationId}.`,
+        "This usually means the config was copied from another project or the slug was reused.",
+        "Fix `org`/`organizationId` in defineConfig (or pass the right --org) before applying.",
+      ].join("\n")
+    );
+    throw new ValidationError(
+      `org "${orgSlug}" (id ${resolvedOrg.id}) does not match pinned organizationId ${state.memory.organizationId}`
+    );
+  }
   if (myOrgs !== null && !resolvedOrg) {
     const orgName = state.memory?.name ?? slugToTitle(orgSlug);
     const createUrl = `${apiBaseUrl}/orgs/new?slug=${encodeURIComponent(orgSlug)}&name=${encodeURIComponent(orgName)}`;
@@ -1168,7 +1192,12 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // this (current/stale) catalog — "create" when the key isn't installed,
   // "update" when it is. Connector defs are NOT installed here; that happens in
   // `executePlan`, AFTER plan confirmation.
-  const remote = await fetchRemoteSnapshot(client, state, opts.only);
+  const remote = await fetchRemoteSnapshot(
+    client,
+    state,
+    opts.only,
+    codeManaged
+  );
 
   // Validate connection/auth-profile config against the catalog we have now,
   // but SKIP schema validation for connector keys declared locally — those
@@ -1180,7 +1209,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     skipSchemaForConnectorKeys: locallyDeclaredConnectorKeys(state),
   });
 
-  const plan = computeDiff(state, remote, { only: opts.only, codeManaged });
+  const plan = computeDiff(state, remote, {
+    only: opts.only,
+    codeManaged,
+    ...(resolvedOrg?.id ? { orgId: resolvedOrg.id } : {}),
+  });
   printText(renderPlan(plan));
 
   if (opts.dryRun) {

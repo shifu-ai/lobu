@@ -227,6 +227,25 @@ export interface McpServer {
   env?: Record<string, string>;
 }
 
+/** A chat-platform binding for an agent (Telegram/Slack/Discord/…). */
+export interface Platform {
+  /** Platform type: `telegram`, `slack`, `discord`, `whatsapp`, `teams`, `google_chat`, `rest`, … */
+  type: string;
+  /**
+   * Optional display name. Also disambiguates multiple platforms of the same
+   * type on one agent (it feeds the stable id `apply` matches on).
+   */
+  name?: string;
+  /**
+   * Platform config (e.g. `{ botToken: secret("TELEGRAM_BOT_TOKEN") }`). Values
+   * are `secret(...)` refs or literal `$VAR` strings; `lobu apply` keeps the
+   * `$VAR` placeholder in the stored config and resolves it at egress.
+   */
+  config: Record<string, string | SecretRef>;
+  /** Declarative channel bindings (`"<teamId>/<channelId>"`); Slack only. */
+  channels?: string[];
+}
+
 /** Hosted "Lobu Developer" preview-bot config for one chat platform. */
 export interface PreviewConfig {
   enabled?: boolean;
@@ -257,15 +276,17 @@ export interface Agent {
   nixPackages?: string[];
   /** Custom MCP servers, keyed by id. */
   mcpServers?: Record<string, McpServer>;
+  /** Chat-platform bindings (`lobu apply` upserts each by a stable id). */
+  platforms?: Platform[];
   /**
    * Hosted preview-bot config, keyed by chat platform (`slack`/`telegram`).
    * Consumed by `lobu run` (dev-time only) — not part of cloud apply.
    */
   preview?: Record<string, PreviewConfig>;
-  // NOTE: connections and the memory schema are declared at the project level
-  // (`defineConfig({ connections, entities, relationships })`), matching the
-  // apply model — there is no agent-scoped association in DesiredState. Agent
-  // fields for them were removed rather than left silently ignored.
+  // NOTE: the memory schema (entity/relationship types) and connections are
+  // declared at the PROJECT level (`defineConfig({ entities, relationships,
+  // connections })`), matching the apply model. Chat platforms, however, ARE
+  // agent-scoped (each agent owns its bindings) and map to DesiredAgent.platforms.
 }
 
 export function defineAgent(config: Omit<Agent, "kind">): Agent {
