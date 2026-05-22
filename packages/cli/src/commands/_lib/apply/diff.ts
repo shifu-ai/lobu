@@ -374,11 +374,6 @@ function isOpaqueRemoteConfigValue(value: unknown): boolean {
   );
 }
 
-/** A desired value that resolves to a secret at egress (a `$VAR` placeholder). */
-function isSecretPlaceholder(value: unknown): boolean {
-  return typeof value === "string" && value.startsWith("$");
-}
-
 /**
  * Compare a desired platform config against the remote one for drift.
  *
@@ -409,7 +404,13 @@ function platformConfigChanged(
   for (const key of keys) {
     const d = desiredConfig[key];
     const r = remoteConfig[key];
-    if (isSecretPlaceholder(d) && isOpaqueRemoteConfigValue(r)) continue;
+    // Secret-bearing keys come back opaque (redacted `***` or a `secret://`
+    // ref), so the resolved cleartext the CLI sent can never round-trip-match.
+    // Treat an opaque remote value as unchanged (write-only secret, like
+    // auth-profile credentials) so the platform isn't needlessly restarted;
+    // non-secret fields still diff normally. (A rotated secret isn't
+    // auto-detected here — re-push it explicitly if needed.)
+    if (isOpaqueRemoteConfigValue(r)) continue;
     if (!deepEqual(d, r)) return true;
   }
   return false;

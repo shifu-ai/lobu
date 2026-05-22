@@ -372,10 +372,22 @@ function emitAgent(
         }
         return `${k}: ${emitValue(v, 3)}`;
       });
-      return objectLiteral(
-        [`type: ${str(p.platform)}`, `config: ${objectLiteral(cfgLines, 3)}`],
-        2
-      );
+      // Recover the name from the stable id (`<agentId>-<type>[-<name>]`) so a
+      // NAMED platform re-derives the same id on apply (no drift/duplicate).
+      const slug = (s: string) =>
+        s
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "");
+      const prefix = `${slug(agent.agentId)}-${slug(p.platform)}`;
+      const nameSlug =
+        p.id && p.id.startsWith(`${prefix}-`)
+          ? p.id.slice(prefix.length + 1)
+          : undefined;
+      const platformFields = [`type: ${str(p.platform)}`];
+      if (nameSlug) platformFields.push(`name: ${str(nameSlug)}`);
+      platformFields.push(`config: ${objectLiteral(cfgLines, 3)}`);
+      return objectLiteral(platformFields, 2);
     });
     fields.push(`platforms: [\n    ${items.join(",\n    ")},\n  ]`);
   }

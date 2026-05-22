@@ -58,7 +58,7 @@ describe("mapProjectToDesiredState", () => {
     expect(state.memory).toEqual({ org: "o" });
   });
 
-  test("maps agent platforms: stable id + $VAR config kept as placeholder + secret collected", () => {
+  test("maps agent platforms: stable id + RESOLVED secret values + literals + collected secrets", () => {
     const bot = defineAgent({
       id: "support-bot",
       platforms: [
@@ -74,25 +74,44 @@ describe("mapProjectToDesiredState", () => {
         },
       ],
     });
+    // The server stores the incoming plaintext as the secret, so the mapper
+    // must send the RESOLVED env value (not the `$VAR` placeholder).
+    const platformEnv: NodeJS.ProcessEnv = {
+      ...env,
+      TELEGRAM_BOT_TOKEN: "tg-real-token",
+      SLACK_BOT_TOKEN: "sk-real-token",
+    };
     const state = mapProjectToDesiredState(
       defineConfig({ org: "o", agents: [bot] }),
-      env
+      platformEnv
     );
     const platforms = state.agents[0]?.platforms ?? [];
     expect(platforms).toHaveLength(2);
     // Stable id is deterministic from (agentId, type, name?).
     expect(platforms[0]?.stableId).toBe("support-bot-telegram");
     expect(platforms[1]?.stableId).toBe("support-bot-slack-ops");
-    // `$VAR`/secret() placeholders are kept in config (resolved at egress),
-    // literals pass through, and the referenced secrets are collected.
-    expect(platforms[0]?.config).toEqual({ botToken: "$TELEGRAM_BOT_TOKEN" });
+    // secret()/$VAR resolve to the real value; literals pass through.
+    expect(platforms[0]?.config).toEqual({ botToken: "tg-real-token" });
     expect(platforms[1]?.config).toEqual({
-      botToken: "$SLACK_BOT_TOKEN",
+      botToken: "sk-real-token",
       appType: "MultiTenant",
     });
     expect(platforms[1]?.channels).toEqual(["T1/C1"]);
     expect(state.requiredSecrets).toContain("TELEGRAM_BOT_TOKEN");
     expect(state.requiredSecrets).toContain("SLACK_BOT_TOKEN");
+  });
+
+  test("rejects two platforms whose names collapse to the same stable id", () => {
+    const bot = defineAgent({
+      id: "bot",
+      platforms: [
+        { type: "slack", name: "ops", config: {} },
+        { type: "slack", name: "ops!", config: {} },
+      ],
+    });
+    expect(() =>
+      mapProjectToDesiredState(defineConfig({ org: "o", agents: [bot] }), env)
+    ).toThrow(/same id|distinct names/i);
   });
 
   test("maps entities + relationships with typed-handle slugs", () => {
