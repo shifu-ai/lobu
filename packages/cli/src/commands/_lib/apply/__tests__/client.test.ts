@@ -123,7 +123,7 @@ describe("ApplyClient", () => {
   });
 });
 
-describe("ApplyClient — code-managed prune", () => {
+describe("ApplyClient — prune", () => {
   function recordingClient(responseBody: unknown = { success: true }) {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const client = new ApplyClient(
@@ -168,30 +168,5 @@ describe("ApplyClient — code-managed prune", () => {
       action: "delete",
       watcher_ids: ["42"],
     });
-  });
-
-  test("setOrgManagedBy PATCHes the org managed-by endpoint", async () => {
-    const { calls, client } = recordingClient({ organization: {} });
-    await client.setOrgManagedBy("acme", "code");
-    expect(calls[0]?.url).toBe(
-      "https://example.test/api/acme/organization/managed-by"
-    );
-    expect(calls[0]?.init?.method).toBe("PATCH");
-    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
-      managed_by: "code",
-    });
-  });
-
-  test("listOrgs surfaces managed_by from userinfo", async () => {
-    const { client } = recordingClient({
-      organizations: [
-        { id: "o1", slug: "acme", name: "Acme", managed_by: "code" },
-        { id: "o2", slug: "beta", name: "Beta" },
-      ],
-    });
-    const orgs = await client.listOrgs();
-    expect(orgs.find((o) => o.slug === "acme")?.managed_by).toBe("code");
-    // Absent managed_by (older server) → undefined, never assumed code.
-    expect(orgs.find((o) => o.slug === "beta")?.managed_by).toBeUndefined();
   });
 });

@@ -315,10 +315,6 @@ Memory:
       "--force",
       "Bypass the project-link guard if context/org don't match"
     )
-    .option(
-      "--manage",
-      "Make the org code-managed (lobu.config.ts owns + prunes its definitions)"
-    )
     .action(
       async (options: {
         dryRun?: boolean;
@@ -327,7 +323,6 @@ Memory:
         org?: string;
         url?: string;
         force?: boolean;
-        manage?: boolean;
       }) => {
         if (
           options.only !== undefined &&
@@ -350,7 +345,6 @@ Memory:
           org: options.org,
           url: options.url,
           force: options.force,
-          manage: options.manage,
         });
       }
     );

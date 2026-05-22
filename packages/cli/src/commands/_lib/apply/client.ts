@@ -49,12 +49,6 @@ export interface RemoteOrg {
   id: string;
   slug: string;
   name?: string;
-  /**
-   * Provenance: `"code"` means the org's definitions are owned by a
-   * `lobu.config.ts` and `lobu apply` prunes definitions removed from it;
-   * `"ui"` (default) means apply never deletes. Absent on older servers.
-   */
-  managed_by?: "ui" | "code";
 }
 
 export interface RemoteWatcher {
@@ -346,27 +340,9 @@ export class ApplyClient {
         id,
         slug,
         ...(typeof entry.name === "string" ? { name: entry.name } : {}),
-        ...(entry.managed_by === "code" || entry.managed_by === "ui"
-          ? { managed_by: entry.managed_by }
-          : {}),
       });
     }
     return out;
-  }
-
-  /**
-   * Flip an org's provenance to code-managed (the one-time opt-in `lobu apply`
-   * offers when applying a `lobu.config.ts` to a UI-managed org). Idempotent.
-   */
-  async setOrgManagedBy(
-    orgSlug: string,
-    managedBy: "ui" | "code"
-  ): Promise<void> {
-    await this.request(
-      "PATCH",
-      `/api/${encodeURIComponent(orgSlug)}/organization/managed-by`,
-      { managed_by: managedBy }
-    );
   }
 
   // ── Agents ────────────────────────────────────────────────────────────────
