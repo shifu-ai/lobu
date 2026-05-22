@@ -123,18 +123,29 @@ In your Lobu project, drop the reaction next to the watcher it pairs with:
 
 ```
 my-agent/
-├── lobu.toml
-├── models/
-│   ├── watchers/
-│   │   └── critical-detection.yaml
-│   └── reactions/
-│       └── critical-detection.reaction.ts
+├── lobu.config.ts
+├── reactions/
+│   └── critical-detection.reaction.ts
 └── agents/my-agent/...
 ```
 
-**The filename is the pairing.** `critical-detection.reaction.ts` runs after the `critical-detection` watcher. No registry, no config block — the slug match is the wiring.
+**The watcher names its reaction.** Point a watcher at a reaction with the `reaction` field in `defineWatcher`:
 
-If you don't want a reaction, don't create the file. The watcher's extraction still gets persisted; the reaction just doesn't fire.
+```ts
+import { defineWatcher } from "@lobu/sdk";
+
+const criticalDetection = defineWatcher({
+  agent: myAgent,
+  slug: "critical-detection",
+  prompt: "Flag any critical incidents.",
+  extractionSchema: { type: "object", properties: {} },
+  reaction: "./reactions/critical-detection.reaction.ts",
+});
+```
+
+The path is relative to the config file and must stay under the project directory. Keeping the reaction in its own `.ts` file (not inline) means your editor type-checks it.
+
+If you don't want a reaction, omit the `reaction` field. The watcher's extraction still gets persisted; the reaction just doesn't fire.
 
 ## When to reach for a reaction
 

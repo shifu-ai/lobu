@@ -10,7 +10,7 @@ Agent settings control behavior of each worker session.
 Two surfaces feed an agent's effective config:
 
 - **Runtime config** — the camelCase keys below, stored per agent and edited through the web UI or the settings API.
-- **`lobu.toml` operator config** — file-first declarations (e.g. `[agents.<id>.tools]`, `[agents.<id>.egress]`, guardrails) applied with `lobu apply`.
+- **`lobu.config.ts` operator config** — code-as-config declarations on `defineAgent` (e.g. `tools`, `egress`, `guardrails`) applied with `lobu apply`.
 
 Runtime config keys:
 
@@ -23,7 +23,7 @@ Runtime config keys:
 - **Verbose logging** — `verboseLogging` to show tool calls and reasoning
 - **Template inheritance** — `templateAgentId` for settings fallback from a template agent
 
-Allowed/disallowed tools are part of the `lobu.toml` operator surface — `[agents.<id>.tools]`.
+Allowed/disallowed tools are part of the `lobu.config.ts` operator surface — the agent `tools` field.
 
 ## How Settings Apply
 
@@ -31,7 +31,7 @@ Allowed/disallowed tools are part of the `lobu.toml` operator surface — `[agen
 - Worker fetches session context from gateway before execution.
 - Tool policy is applied before tools are exposed to the model.
 
-See [Tool Policy](/guides/tool-policy/) for the operator-facing config, and [`lobu.toml` reference](/reference/lobu-toml/) for the exact schema.
+See [Tool Policy](/guides/tool-policy/) for the operator-facing config, and [`lobu.config.ts` reference](/reference/lobu-config/) for the exact schema.
 
 ## Practical Guidance
 
@@ -41,20 +41,20 @@ See [Tool Policy](/guides/tool-policy/) for the operator-facing config, and [`lo
 
 ## Memory Plugins
 
-Memory is pluggable. In file-first projects, the gateway first checks `[memory]` in `lobu.toml`; any agent can still override the default via `pluginsConfig`.
+Memory is pluggable. The gateway resolves the org from `defineConfig({ org })` in `lobu.config.ts`; any agent can still override the default via `pluginsConfig`.
 
 ### Defaults
 
 | Effective config | Plugin used |
 |---|---|
-| `[memory]` disabled or unresolved, and no `MEMORY_URL` override | `@openclaw/native-memory` — files under the worker workspace. Not shared across threads. |
-| `[memory]` enabled | `@lobu/openclaw-plugin` — the OpenClaw memory plugin for Lobu. It translates OpenClaw memory calls into Lobu MCP requests via the gateway's `/mcp/lobu` proxy. Cross-session, shareable across agents. |
-| `MEMORY_URL` set | Used as the base Lobu MCP endpoint before Lobu scopes it to the org from `[memory]` in `lobu.toml`. Useful for local or custom Lobu deployments. |
+| No `org` set and no `MEMORY_URL` override | `@openclaw/native-memory` — files under the worker workspace. Not shared across threads. |
+| `org` set | `@lobu/openclaw-plugin` — the OpenClaw memory plugin for Lobu. It translates OpenClaw memory calls into Lobu MCP requests via the gateway's `/mcp/lobu` proxy. Cross-session, shareable across agents. |
+| `MEMORY_URL` set | Used as the base Lobu MCP endpoint before Lobu scopes it to the org from `defineConfig({ org })`. Useful for local or custom Lobu deployments. |
 
-`lobu init` scaffolds the file-first Lobu memory layout for memory-enabled projects:
+`lobu init` scaffolds the Lobu memory wiring for memory-enabled projects:
 
-- `[memory]` in `lobu.toml` (org, name, description, models, data)
-- `models/`
+- `org` / `orgName` in `defineConfig` (`lobu.config.ts`)
+- the entity, relationship, and watcher types declared with `defineEntityType` / `defineRelationshipType` / `defineWatcher`
 - `data/`
 
 For **Lobu Cloud**, Lobu can use the hosted default automatically. For **Lobu Local** and **Custom URL**, `MEMORY_URL` remains the base-endpoint override.

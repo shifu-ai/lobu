@@ -28,7 +28,7 @@ Store under `/workspace/incoming/` (the session workspace; persists per thread).
 
 ## Step 2 — extract text
 
-- **PDF** → `pdftotext -layout /workspace/incoming/$NAME -` (poppler, declared in lobu.toml nix_packages).
+- **PDF** → `pdftotext -layout /workspace/incoming/$NAME -` (poppler, declared in lobu.config.ts via `defineAgent({ nixPackages })`).
 - **CSV** → read directly, or normalise with `csvtk headers $FILE` and `csvtk csv2tab $FILE` if columns need inspection.
 - **OFX / QIF / TXT** → read directly.
 - **Image of a receipt** → describe the file back to the user and ask them to re-send as PDF if possible (v1 does not OCR images).

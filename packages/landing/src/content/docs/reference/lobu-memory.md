@@ -134,21 +134,36 @@ Accepts the same `--url`, `--org`, and `-c/--context` flags as `lobu memory run`
 
 ### `lobu memory seed`
 
-Provisions a memory workspace from `[memory]` in `lobu.toml`, `version: 2` model bundle YAML files under `./models`, and optional `./data`.
+Provisions a memory workspace from `lobu.config.ts`. The schema (entity types, relationship types, watchers) and the org come from `defineConfig`; optional seed data records come from YAML files under `./data`.
 
-```yaml
-version: 2
-entities:
-  - slug: account
-    name: Account
-relationships:
-  - slug: owns
-    name: Owns
-watchers:
-  - slug: account-digest
-    name: Account digest
-    schedule: "0 9 * * 1"
-    prompt: Summarize account changes.
+Declare the schema in `lobu.config.ts`:
+
+```ts
+import {
+  defineConfig,
+  defineEntityType,
+  defineRelationshipType,
+  defineWatcher,
+} from "@lobu/sdk";
+
+const account = defineEntityType({ key: "account", name: "Account" });
+const owns = defineRelationshipType({ key: "owns", name: "Owns" });
+const digest = defineWatcher({
+  agent: "sales",
+  slug: "account-digest",
+  name: "Account digest",
+  schedule: "0 9 * * 1",
+  prompt: "Summarize account changes.",
+  extractionSchema: { type: "object", properties: {} },
+});
+
+export default defineConfig({
+  org: "my-org",
+  agents: [/* ... */],
+  entities: [account],
+  relationships: [owns],
+  watchers: [digest],
+});
 ```
 
 ```bash

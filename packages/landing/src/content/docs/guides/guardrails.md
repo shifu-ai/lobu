@@ -27,7 +27,7 @@ The `pre-tool` block message is intentionally generic. The real reason is hidden
 
 ## Built-in guardrails
 
-Three primitives ship from the gateway and are registered at boot. Reference them by name in `lobu.toml`.
+Three primitives ship from the gateway and are registered at boot. Reference them by name in `lobu.config.ts`.
 
 | Name | Stage(s) | Catches |
 |---|---|---|
@@ -39,35 +39,30 @@ Three primitives ship from the gateway and are registered at boot. Reference the
 
 ## Enabling guardrails
 
-List built-in (or globally-registered) guardrail names on the agent in [`lobu.toml`](/reference/lobu-toml/):
+List built-in (or globally-registered) guardrail names on the agent in [`lobu.config.ts`](/reference/lobu-config/):
 
-```toml
-[agents.assistant]
-name = "assistant"
-dir = "./agents/assistant"
-guardrails = ["secret-scan", "pii-scan", "forbidden-tools"]
+```ts
+import { defineAgent } from "@lobu/sdk";
+
+const assistant = defineAgent({
+  id: "assistant",
+  name: "assistant",
+  dir: "./agents/assistant",
+  guardrails: ["secret-scan", "pii-scan", "forbidden-tools"],
+});
 ```
 
 Names that don't resolve to a guardrail registered in the gateway's `GuardrailRegistry` at startup are logged and skipped. A typo silently disables protection rather than failing the boot, so check the startup logs after changing this list.
 
 ## Inline LLM judges
 
-When a regex won't express the policy, attach an ad-hoc LLM-judge guardrail with `[[agents.<id>.guardrails_inline]]`. Each entry names a stage and a judge prompt; the gateway materializes it into a guardrail at resolve time.
+When a regex won't express the policy, attach an ad-hoc LLM-judge guardrail in the agent's settings (via the `/agents` admin UI or the agent settings API). Each entry names a stage and a judge prompt; the gateway materializes it into a guardrail at resolve time.
 
-```toml
-[[agents.assistant.guardrails_inline]]
-stage = "output"
-judge = "Never mention competitor product names."
+Each inline judge has:
 
-[[agents.assistant.guardrails_inline]]
-stage = "pre-tool"
-tools = ["github.delete_repo"]
-judge = "Only allow when the issue reference matches the active sprint."
-```
-
-- `stage` is one of `input`, `output`, `pre-tool`.
-- `tools` narrows a `pre-tool` judge to specific tool names; it is ignored for other stages.
-- `judge` is the policy text the LLM evaluates the stage context against.
+- `stage`, one of `input`, `output`, `pre-tool`.
+- `tools`, which narrows a `pre-tool` judge to specific tool names (e.g. `github.delete_repo`); it is ignored for other stages.
+- `judge`, the policy text the LLM evaluates the stage context against (e.g. "Never mention competitor product names.").
 
 Inline judges run through a shared judge client with a verdict cache and a circuit breaker that fails closed after repeated failures (the same machinery as the [egress judge](/guides/egress-judge/)). Each inline entry materializes into a guardrail named `inline:<stage>:<hash8>`, so operators can target it for disabling.
 
@@ -79,17 +74,9 @@ Skills can only add `pre-tool` guardrails. They cannot weaken input/output polic
 
 ## Operator overrides
 
-The full set for an agent is the union of enabled built-ins, skill-provided guardrails, and inline judges, deduplicated by name within each stage. The operator's exclude list is applied **last** and wins:
+The full set for an agent is the union of enabled built-ins, skill-provided guardrails, and inline judges, deduplicated by name within each stage. The operator's exclude list, set in the agent's settings, is applied **last** and wins. For example, disabling a built-in like `pii-scan` and a skill's judge like `skill:github:inline:pre-tool:1a2b3c4d`.
 
-```toml
-[agents.assistant]
-guardrails_disabled = [
-  "pii-scan",                              # turn off a built-in
-  "skill:github:inline:pre-tool:1a2b3c4d", # turn off a skill's judge
-]
-```
-
-`guardrails_disabled` matches against each guardrail's resolved `.name`, including the synthesized `inline:<stage>:<hash8>` and `skill:<name>:inline:pre-tool:<hash8>` names. Because it is operator-only and applied last, it is the single override point: a skill cannot re-enable something an operator disabled.
+The disabled list matches against each guardrail's resolved `.name`, including the synthesized `inline:<stage>:<hash8>` and `skill:<name>:inline:pre-tool:<hash8>` names. Because it is operator-only and applied last, it is the single override point: a skill cannot re-enable something an operator disabled.
 
 The merge happens in `resolveAgentGuardrails()`; see `packages/server/src/gateway/guardrails/aggregator.ts` and `judge-factory.ts` for the resolution order, judge cache, and circuit breaker.
 
@@ -102,4 +89,4 @@ Every trip, at any stage, built-in or judge, writes an event with `semantic_type
 - [Egress judge](/guides/egress-judge/), the per-request LLM judge for outbound network access. Shares the judge cache and circuit-breaker machinery.
 - [Tool Policy](/guides/tool-policy/), MCP tool approval and `pre_approved` overrides, the layer that sits alongside `pre-tool` guardrails.
 - [Secret proxy](/guides/secret-proxy/), how `secret-scan` complements credential isolation at egress.
-- [`lobu.toml` reference](/reference/lobu-toml/), the `guardrails`, `guardrails_inline`, and `guardrails_disabled` keys.
+- [`lobu.config.ts` reference](/reference/lobu-config/), the `guardrails` field on `defineAgent`. Inline judges and the disabled list are set in the agent's settings.

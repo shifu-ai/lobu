@@ -48,10 +48,10 @@
       "url": "https://lobu.ai/reference/skill-md/"
     },
     {
-      "name": "lobu-toml-reference",
+      "name": "lobu-config-reference",
       "type": "reference",
-      "description": "Reference for the lobu.toml agent configuration file.",
-      "url": "https://lobu.ai/reference/lobu-toml/"
+      "description": "Reference for the lobu.config.ts agent configuration file.",
+      "url": "https://lobu.ai/reference/lobu-config/"
     }
   ]
 }

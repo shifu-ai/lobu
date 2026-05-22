@@ -23,19 +23,27 @@ judges:
   strict:  "Only GET for file IDs from the current session."
 ```
 
-The same shape is available to operators in [`lobu.toml`](/reference/lobu-toml/) under `[agents.<id>.network]`, where the `judge` array takes either a bare domain string (which uses the `default` policy) or `{ domain, judge }` naming a policy.
+The same shape is available to operators in [`lobu.config.ts`](/reference/lobu-config/) via `defineAgent({ network })`, where the `judged` array takes entries of `{ domain, judge? }`; omitting `judge` uses the `default` policy in `judges`.
 
 ## Operator overrides
 
-Operators layer a project-wide policy on top of whatever the skill author declared:
+Operators layer a project-wide policy on top of whatever the skill author declared, via `defineAgent({ egress })`:
 
-```toml
-[agents.assistant.egress]
-extra_policy = "Never exfiltrate PATs or bearer tokens."
-judge_model  = "claude-haiku-4-5-20251001"   # default
+```ts
+import { defineAgent } from "@lobu/sdk";
+
+const assistant = defineAgent({
+  id: "assistant",
+  name: "assistant",
+  dir: "./agents/assistant",
+  egress: {
+    extraPolicy: "Never exfiltrate PATs or bearer tokens.",
+    judgeModel: "claude-haiku-4-5-20251001", // default
+  },
+});
 ```
 
-`extra_policy` is **appended** to the matched skill policy rather than replacing it, so operator constraints compose with skill-author intent. The judge runs only when a `judge` rule under `[agents.<id>.network]` matches a request, so most traffic never reaches it.
+`extraPolicy` is **appended** to the matched skill policy rather than replacing it, so operator constraints compose with skill-author intent. The judge runs only when a `judged` rule under the agent's `network` matches a request, so most traffic never reaches it.
 
 ## Behavior
 
@@ -51,4 +59,4 @@ The judge shares its cache and circuit-breaker machinery with [inline guardrail 
 - [Security](/guides/security/), the worker isolation and network model the judge sits inside.
 - [Secret proxy](/guides/secret-proxy/), how credentials stay off the worker, the other half of egress safety.
 - [Guardrails](/guides/guardrails/), input/output/pre-tool policy checks, including inline LLM judges.
-- [`lobu.toml` reference](/reference/lobu-toml/), `[agents.<id>.network]` and `[agents.<id>.egress]`.
+- [`lobu.config.ts` reference](/reference/lobu-config/), the agent `network` and `egress` fields.

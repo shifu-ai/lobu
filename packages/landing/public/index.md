@@ -52,7 +52,7 @@ The canonical MCP endpoint at [https://lobu.ai/mcp](https://lobu.ai/mcp) lets MC
 ## Reference
 
 - [API reference](https://lobu.ai/reference/api-reference/)
-- [lobu.toml](https://lobu.ai/reference/lobu-toml/)
+- [lobu.config.ts](https://lobu.ai/reference/lobu-config/)
 - [SKILL.md](https://lobu.ai/reference/skill-md/)
 - [Providers](https://lobu.ai/reference/providers/)
 - [CLI](https://lobu.ai/reference/cli/)

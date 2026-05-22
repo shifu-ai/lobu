@@ -95,7 +95,7 @@ export default defineConfig({
         {
           label: "Reference",
           items: [
-            { label: "lobu.toml", link: "/reference/lobu-toml/" },
+            { label: "lobu.config.ts", link: "/reference/lobu-config/" },
             { label: "SKILL.md", link: "/reference/skill-md/" },
             { label: "Providers", link: "/reference/providers/" },
             { label: "CLI", link: "/reference/cli/" },

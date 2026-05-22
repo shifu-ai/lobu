@@ -66,11 +66,11 @@ By default, destructive MCP tool calls require in-thread user approval. Lobu use
 
 This is the conservative default from the MCP spec — tools are presumed destructive unless they say otherwise.
 
-### Operator override (`[agents.<id>.tools]`)
+### Operator override (the agent `tools` field)
 
-If you want specific MCP tools to skip the approval prompt, configure `pre_approved` under `[agents.<id>.tools]` in `lobu.toml`.
+If you want specific MCP tools to skip the approval prompt, configure `preApproved` under the agent `tools` field in `lobu.config.ts`.
 
-See [Tool Policy](/guides/tool-policy/) for the behavior and [`lobu.toml` reference](/reference/lobu-toml/) for the schema.
+See [Tool Policy](/guides/tool-policy/) for the behavior and [`lobu.config.ts` reference](/reference/lobu-config/) for the schema.
 
 ## Typical Use Cases
 

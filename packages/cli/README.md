@@ -28,7 +28,7 @@ docker run -d --name lobu-pg -p 5432:5432 \
 - `lobu chat <prompt>` — send one prompt and stream the response. `-C/--continue` resumes the last thread (per context+agent); `--auto-approve` skips tool prompts in trusted runs; `--json` emits raw SSE events for piping.
 - `lobu doctor` — Postgres connectivity, pgvector extension, port availability, provider API keys, workspace dir.
 - `lobu link` / `lobu unlink` — bind this directory to a (context, org) at `.lobu/project.json`. `lobu apply` refuses to push mismatched targets unless `--force` is set.
-- `lobu apply` (alias: `lobu deploy`) — idempotent sync of `lobu.toml` to Lobu Cloud.
+- `lobu apply` (alias: `lobu deploy`) — idempotent sync of `lobu.config.ts` to Lobu Cloud.
 - `lobu agent scaffold <id>` — add a second/third agent to an existing project.
 - `lobu telemetry {status,on,off}` — Sentry is off by default; toggle here.
 

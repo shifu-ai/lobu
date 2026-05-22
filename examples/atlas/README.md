@@ -37,13 +37,14 @@ being duplicated per catalog.
 | `technology` | Tool, framework, library, platform                       |
 | `university` | Higher-education institution                             |
 
-Schemas live in `models/`. Field definitions follow the same TypeBox-/
-JSON-Schema-style shape as the other `examples/<org>/models/` catalogs.
+Entity types are declared in `lobu.config.ts` with `defineEntityType`. Field
+definitions follow the same TypeBox-/JSON-Schema-style shape as the other
+`examples/<org>/lobu.config.ts` catalogs.
 
 ## What ships in this PR
 
-- The entity-type YAML in `models/`.
-- `lobu.toml` declaring the `atlas` org name + a curator agent stub.
+- The entity types declared with `defineEntityType` in `lobu.config.ts`.
+- `lobu.config.ts` declaring the `atlas` org name + a curator agent stub.
 - The `scripts/migrate/create-atlas-org.sql` migration that inserts the
   `atlas` row (`visibility='public'`).
 
