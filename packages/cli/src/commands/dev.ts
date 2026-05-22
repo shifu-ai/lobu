@@ -372,7 +372,7 @@ export async function devCommand(
   void announceLocalSignIn(gatewayUrl, mode === "embedded").then(
     (localContextReady) => {
       // Once the `local` context is confirmed registered + active, push the
-      // project's lobu.toml into the embedded DB so the scaffolded agent is
+      // project's lobu.config.ts into the embedded DB so the scaffolded agent is
       // usable via `lobu chat -c local …` with no separate `lobu apply`.
       // Gated (see shouldAutoApplyLocalProject) AND pinned to the local URL so
       // a failed sign-in can never apply this local project to whatever
@@ -431,7 +431,7 @@ export function shouldAutoApplyLocalProject(opts: {
 }
 
 /**
- * After `lobu run` boots an embedded backend, push the project's `lobu.toml`
+ * After `lobu run` boots an embedded backend, push the project's `lobu.config.ts`
  * into the local DB so the agent the user just scaffolded is immediately usable
  * (`lobu chat -c local …`) without a separate `lobu apply`. Uses the `local`
  * context that `announceLocalSignIn` just registered.

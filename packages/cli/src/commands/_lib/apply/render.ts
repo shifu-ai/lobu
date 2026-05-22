@@ -209,7 +209,7 @@ export function renderMissingSecrets(missing: string[]): string {
   for (const name of missing) lines.push(chalk.red(`    - $${name}`));
   lines.push(
     chalk.dim(
-      "\n  These env vars are referenced in lobu.toml but are not set in the current environment."
+      "\n  These env vars are referenced in lobu.config.ts but are not set in the current environment."
     )
   );
   lines.push(

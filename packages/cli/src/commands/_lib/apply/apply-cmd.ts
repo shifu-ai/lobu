@@ -976,9 +976,9 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
   const fetchImpl = opts.fetchImpl ?? fetch;
 
-  // Auto-load `.env` from the project dir so $VAR refs in lobu.toml resolve
-  // without the user having to `set -a; source .env; set +a`. Mirrors what
-  // `lobu dev` does. Existing process.env values win (don't clobber the shell).
+  // Auto-load `.env` from the project dir so secret()/$VAR refs in
+  // lobu.config.ts resolve without the user having to `set -a; source .env`.
+  // Mirrors `lobu dev`. Existing process.env values win (don't clobber shell).
   await loadProjectEnvFile(cwd);
 
   // Load desired state from the TypeScript entrypoint (lobu.config.ts).
@@ -996,8 +996,8 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     );
   }
 
-  // Org slug resolution: explicit --org ▸ active-session org ▸ `[memory].org`
-  // from lobu.toml. The toml slug is the declarative default — if no org with
+  // Org slug resolution: explicit --org ▸ active-session org ▸ `org` from
+  // defineConfig. The config slug is the declarative default — if no org with
   // that slug exists yet, `lobu apply` offers to provision it (below).
   const { client, orgSlug, apiBaseUrl } = await resolveApplyClient({
     url: opts.url,
