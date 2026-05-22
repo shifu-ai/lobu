@@ -1,6 +1,6 @@
 # Development Makefile for Lobu
 
-.PHONY: help setup build test clean dev build-packages ensure-submodule clean-workers test-unit test-integration test-e2e typecheck task-setup task-clean e2e-browser bump review
+.PHONY: help setup build test clean dev build-packages ensure-submodule clean-workers test-unit test-integration test-e2e test-e2e-sdk typecheck task-setup task-clean e2e-browser bump review
 
 # Default target
 help:
@@ -140,6 +140,13 @@ test-integration:
 test-e2e:
 	@: $${DATABASE_URL?Set DATABASE_URL=postgres://… (with pgvector) before running}
 	@./scripts/run-e2e.sh
+
+# SDK lifecycle e2e: boots `lobu run` (embedded Postgres), auto-applies a
+# prune:true fixture, and drives a real agent turn through a spawned worker
+# against a deterministic mock provider (no key needed). Self-contained. This is
+# the CI `sdk-e2e` gate; run it locally the same way.
+test-e2e-sdk:
+	@./scripts/sdk-e2e.sh
 
 # Stop any embedded worker subprocesses left over from a crashed gateway.
 # Workers are normally cleaned up when the gateway exits; this target is a

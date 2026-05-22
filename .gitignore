@@ -95,3 +95,4 @@ packages/*/~/
 
 # Embedded PGlite dev data (make dev without DATABASE_URL)
 .lobu-dev/
+.sdk-e2e-run/
