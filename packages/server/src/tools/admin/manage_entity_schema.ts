@@ -342,6 +342,21 @@ async function getEntityCountForType(typeId: number, organizationId: string): Pr
   return Number(rows[0]?.count || 0);
 }
 
+async function getRelationshipCountForType(
+  typeId: number,
+  organizationId: string
+): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT COUNT(*)::int as count
+    FROM entity_relationships r
+    WHERE r.relationship_type_id = ${typeId}
+      AND r.organization_id = ${organizationId}
+      AND r.deleted_at IS NULL
+  `;
+  return Number(rows[0]?.count || 0);
+}
+
 async function recordAudit(
   sql: DbClient,
   entityTypeId: number,
@@ -1031,6 +1046,16 @@ async function rtHandleDelete(
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
   const { typeId, sql } = await requireRelationshipType(args.slug, 'delete', ctx);
+
+  // Refuse while relationship instances exist — mirrors entity-type delete so
+  // `lobu apply` prune (and the UI) can never orphan live relationship data
+  // under a deleted definition.
+  const relationshipCount = await getRelationshipCountForType(typeId, ctx.organizationId);
+  if (relationshipCount > 0) {
+    throw new Error(
+      `Cannot delete relationship type '${args.slug}': ${relationshipCount} relationships of this type exist. Remove or reassign them first.`
+    );
+  }
 
   await sql`
     UPDATE entity_relationship_types

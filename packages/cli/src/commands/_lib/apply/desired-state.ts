@@ -783,9 +783,19 @@ export async function loadProjectConfig(
   try {
     project = await jiti.import(configPath, { default: true });
   } catch (err) {
-    throw new ValidationError(
-      `Failed to load lobu.config.ts — ${err instanceof Error ? err.message : String(err)}`
-    );
+    const message = err instanceof Error ? err.message : String(err);
+    // A fresh `lobu init` writes package.json declaring @lobu/sdk but doesn't
+    // install — jiti then can't resolve the import. Point the user at the fix
+    // instead of surfacing a raw module-resolution error.
+    if (
+      /@lobu\/(sdk|connector-sdk)/.test(message) &&
+      !existsSync(resolve(cwd, "node_modules"))
+    ) {
+      throw new ValidationError(
+        `Failed to load lobu.config.ts — its @lobu/sdk import can't be resolved because dependencies aren't installed. Run \`bun install\` (or npm/pnpm install) in ${cwd} first.`
+      );
+    }
+    throw new ValidationError(`Failed to load lobu.config.ts — ${message}`);
   }
   if (
     !project ||

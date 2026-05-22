@@ -273,18 +273,19 @@ describe("applyCommand org resolution", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("org can also be matched by organizationId in the config when slug differs", async () => {
+  test("refuses when the slug doesn't resolve, even if a renamed org shares the organizationId", async () => {
     const dir = mkProject(
       minimalConfig("triage", { org: "acme", organizationId: "org_id_42" })
     );
     mkdirSync(join(dir, "agents", "triage"), { recursive: true });
 
-    // The slug doesn't match ("acme" vs "wrong-slug") but the id matches.
+    // The pinned id matches a renamed org, but its slug differs from the one we
+    // apply to. The client targets the SLUG in every URL, so resolving by id
+    // would read provenance from / mutate the wrong org (or 404 mid-apply).
     const { fetchStub } = makeAuthFetch([
       { id: "org_id_42", slug: "acme-renamed", name: "Acme Renamed" },
     ]);
 
-    // Should NOT throw because the id matches.
     await expect(
       applyCommand({
         cwd: dir,
@@ -294,7 +295,31 @@ describe("applyCommand org resolution", () => {
         org: "acme",
         fetchImpl: fetchStub,
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/not found/i);
+  });
+
+  test("refuses when the resolved slug's org id mismatches the pinned organizationId", async () => {
+    const dir = mkProject(
+      minimalConfig("triage", { org: "acme", organizationId: "org_id_42" })
+    );
+    mkdirSync(join(dir, "agents", "triage"), { recursive: true });
+
+    // Slug "acme" resolves, but to a DIFFERENT org id than pinned — a stale or
+    // copied config pointed at someone else's org. Must hard-stop before apply.
+    const { fetchStub } = makeAuthFetch([
+      { id: "org_different", slug: "acme", name: "Acme" },
+    ]);
+
+    await expect(
+      applyCommand({
+        cwd: dir,
+        dryRun: true,
+        yes: true,
+        url: "https://app.lobu.ai",
+        org: "acme",
+        fetchImpl: fetchStub,
+      })
+    ).rejects.toThrow(/organizationId/i);
   });
 });
 

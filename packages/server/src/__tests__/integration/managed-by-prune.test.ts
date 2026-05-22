@@ -108,7 +108,7 @@ describe('code-managed prune (server gate)', () => {
       ).rejects.toThrow(/entities of this type exist|cannot delete/i);
     });
 
-    it('deletes a relationship type', async () => {
+    it('deletes a relationship type with no instances', async () => {
       await owner.entity_schema.createRelType({ slug: 'prune-rel', name: 'Rel' });
       await owner.entity_schema.deleteRelType('prune-rel');
       const list = (await owner.entity_schema.listTypes()) as {
@@ -117,6 +117,38 @@ describe('code-managed prune (server gate)', () => {
       expect(
         (list.relationship_types ?? []).some((r) => r.slug === 'prune-rel')
       ).toBe(false);
+    });
+
+    it('refuses to delete a relationship type while instances exist (data is exempt)', async () => {
+      const sql = getTestDb();
+      await owner.entity_schema.createRelType({
+        slug: 'prune-rel-busy',
+        name: 'Busy Rel',
+      });
+      const [rt] = await sql<{ id: number }[]>`
+        SELECT id FROM entity_relationship_types
+        WHERE slug = ${'prune-rel-busy'} AND organization_id = ${orgId}
+          AND deleted_at IS NULL
+        LIMIT 1
+      `;
+      const a = await createTestEntity({
+        name: 'Rel Source',
+        entity_type: 'prune-rel-from',
+        organization_id: orgId,
+      });
+      const b = await createTestEntity({
+        name: 'Rel Target',
+        entity_type: 'prune-rel-to',
+        organization_id: orgId,
+      });
+      await sql`
+        INSERT INTO entity_relationships
+          (organization_id, from_entity_id, to_entity_id, relationship_type_id, created_by)
+        VALUES (${orgId}, ${a.id}, ${b.id}, ${rt?.id}, ${userId})
+      `;
+      await expect(
+        owner.entity_schema.deleteRelType('prune-rel-busy')
+      ).rejects.toThrow(/relationships of this type exist|cannot delete/i);
     });
 
     it('deletes a watcher', async () => {
