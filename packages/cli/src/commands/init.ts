@@ -961,10 +961,10 @@ function humanizeSlug(slug: string): string {
 /**
  * Scaffold the project's `lobu.config.ts` — the single TypeScript entrypoint
  * `lobu apply` (and `lobu run`) read. Emits a `defineAgent` (providers,
- * network, optional Slack preview) and a `defineConfig` default export with the
- * org metadata. Chat platforms and the memory schema are NOT authored here:
- * connections are created via the `/agents` UI / CRUD API, and entity /
- * relationship types are added later with `defineEntityType` / `defineConfig`.
+ * network, the chosen chat platform, optional Slack preview) and a
+ * `defineConfig` default export with the org metadata. Memory-schema types
+ * (entity / relationship) are added later with `defineEntityType` etc.; chat
+ * platforms can also still be wired up in the `/agents` UI after apply.
  */
 export async function generateLobuConfig(
   projectDir: string,
