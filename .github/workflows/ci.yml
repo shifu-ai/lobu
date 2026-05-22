@@ -140,23 +140,15 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           bwrap --version
 
-      # `lobu run`'s embedded Postgres ships a PG18 binary dynamically linked
-      # against ICU 60 (libicuuc.so.60); ubuntu-latest carries a newer ICU, so
-      # initdb can't load without the 18.04-era lib. Prod doesn't hit this (it
-      # uses an external Postgres and prunes embedded-postgres), but the local
-      # `lobu run` path this gate exercises does. Install it from the Ubuntu
-      # archive (mirror fallback) and surface any remaining missing libs.
-      - name: Install libicu60 (embedded-postgres links against ICU 60)
-        run: |
-          set -euo pipefail
-          deb=libicu60_60.2-3ubuntu3.2_amd64.deb
-          curl -fsSL -o "/tmp/$deb" "http://archive.ubuntu.com/ubuntu/pool/main/i/icu/$deb" \
-            || curl -fsSL -o "/tmp/$deb" "http://security.ubuntu.com/ubuntu/pool/main/i/icu/$deb"
-          sudo dpkg -i "/tmp/$deb"
-          ldconfig -p | grep -i libicuuc
-          echo "::group::ldd of embedded-postgres initdb"
-          ldd node_modules/@embedded-postgres/linux-x64/native/bin/initdb || true
-          echo "::endgroup::"
+      # NOTE: `lobu run`'s embedded Postgres (PG18) is NEEDED-linked against
+      # ICU 60, which ubuntu-latest no longer carries. We do NOT install a
+      # system libicu60 (the old archive .deb was fragile and didn't help local
+      # Linux devs) — instead scripts/sdk-e2e.sh runs
+      # scripts/sdk-e2e/fix-embedded-pg-icu.mjs, which creates the missing
+      # `.so.60` SONAME symlinks in the embedded-postgres native/lib dir (it
+      # already ships libicu*.so.60.2). The binaries' `$ORIGIN/../lib` rpath then
+      # resolves their bundled ICU with zero system deps. Prod is unaffected
+      # (external Postgres; embedded-postgres pruned from the app image).
 
       - name: Build all packages (CLI + server bundle + sdk + pgvector-embedded)
         run: make build-packages

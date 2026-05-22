@@ -52,6 +52,18 @@ echo "▶ node $(node --version), gateway :$GW_PORT, mock :$MOCK_PORT"
 rm -rf "$RUN_DIR"; mkdir -p "$RUN_DIR"
 cleanup  # free ports from any prior run
 
+# 0) Make embedded Postgres self-contained on Linux. The @embedded-postgres PG18
+# binaries are NEEDED-linked against ICU 60 with an rpath of `$ORIGIN/../lib`,
+# and that lib dir already SHIPS libicu{uc,i18n,data}.so.60.2 — it's only missing
+# the `.so.60` SONAME symlinks the loader looks for. We create them (idempotent),
+# so initdb loads its bundled ICU with NO system install, NO LD_LIBRARY_PATH and
+# NO archive .deb download — identical in CI and on a local Linux dev box. No-op
+# on macOS (its bundled .dylibs resolve already). Embedded PG only matters when
+# DATABASE_URL is unset (the `lobu run` path); prod uses external Postgres.
+if [ -z "${DATABASE_URL:-}" ]; then
+  node "$HARNESS/fix-embedded-pg-icu.mjs" || fail "could not prepare embedded-postgres ICU symlinks"
+fi
+
 # 1) Mock OpenAI-compatible provider.
 MOCK_PORT="$MOCK_PORT" MOCK_REPLY="$MOCK_REPLY" node "$HARNESS/mock-openai.mjs" > "$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
@@ -68,7 +80,7 @@ PROJ="$RUN_DIR/proj"; mkdir -p "$PROJ"
 ( cd "$PROJ" && $LOBU init . -y --here --provider gemini >/dev/null 2>&1 )
 rm -f "$PROJ/package.json"
 cat > "$PROJ/lobu.config.ts" <<'TS'
-import { defineAgent, defineConfig, defineEntityType, defineRelationshipType, defineWatcher, secret } from "@lobu/sdk";
+import { defineAgent, defineConfig, defineConnection, defineEntityType, defineRelationshipType, defineWatcher, secret } from "@lobu/sdk";
 
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
@@ -77,14 +89,103 @@ const agent = defineAgent({
 const company = defineEntityType({ key: "company", name: "Company" });
 const contact = defineEntityType({ key: "contact", name: "Contact" });
 const worksAt = defineRelationshipType({ key: "works-at", name: "Works at", rules: [{ source: contact, target: company }] });
+
+// A local connector (./connectors/pulse.connector.ts) + a connection that wires
+// its single feed. The gate triggers a sync via the API and asserts the
+// connector's compiled code actually RAN and emitted ≥1 event — proving the
+// whole compile→install→spawn→sync→persist path, not just that apply mapped it.
+const pulseConn = defineConnection({
+  slug: "pulse", connector: "sdke2e-pulse", name: "SDK e2e pulse",
+  feeds: [{ feed: "pulse", name: "Pulse" }],
+});
+
+// The watcher runs an LLM extraction then a reaction script
+// (./reactions/digest.reaction.ts) that writes an assertable knowledge event.
+// `sources` selects the connector-emitted events by connector_key so the
+// watcher's window has linked content — the reaction only fires on a non-empty
+// window. The gate drives read_knowledge → complete_window deterministically
+// (the agentic LLM turn never produces the complete_window tool-call against a
+// fixed-reply mock) and asserts the reaction's side effect.
 const digest = defineWatcher({
   slug: "digest", agent, name: "Digest", prompt: "summarize",
   extractionSchema: { type: "object", properties: { s: { type: "string" } } },
+  reaction: "./reactions/digest.reaction.ts",
+  sources: {
+    content:
+      "SELECT id, title, payload_text, author_name, occurred_at, origin_type FROM events WHERE connector_key = 'sdke2e-pulse' ORDER BY occurred_at DESC LIMIT 100",
+  },
 });
 
 // prune:true so the gate exercises the destructive path on every run (this is
 // what catches the system-type $member halt class of bug).
-export default defineConfig({ prune: true, agents: [agent], entities: [company, contact], relationships: [worksAt], watchers: [digest] });
+export default defineConfig({ prune: true, agents: [agent], entities: [company, contact], relationships: [worksAt], connections: [pulseConn], watchers: [digest] });
+TS
+
+# Local connector: deterministic, zero-dep, no network. `sync()` returns one
+# fresh event per run (a monotonic origin_id off the checkpoint so re-syncs add
+# rows rather than dedup to nothing). Proves the compiled ConnectorRuntime runs.
+mkdir -p "$PROJ/connectors"
+cat > "$PROJ/connectors/pulse.connector.ts" <<'TS'
+import { ConnectorRuntime, type SyncContext, type SyncResult } from "@lobu/connector-sdk";
+
+interface Checkpoint {
+  seq: number;
+}
+
+/**
+ * SDK e2e pulse connector — emits one deterministic event per sync. No fetch,
+ * no auth, no deps: the gate is testing that a compiled local connector RUNS
+ * and persists events, not any external integration.
+ */
+export default class PulseConnector extends ConnectorRuntime<Checkpoint> {
+  readonly definition = {
+    key: "sdke2e-pulse",
+    name: "SDK e2e pulse",
+    version: "1.0.0",
+    authSchema: { methods: [{ type: "none" as const }] },
+    feeds: { pulse: { key: "pulse", name: "Pulse" } },
+  };
+
+  async sync(ctx: SyncContext<Checkpoint>): Promise<SyncResult<Checkpoint>> {
+    const seq = (ctx.checkpoint?.seq ?? 0) + 1;
+    return {
+      events: [
+        {
+          origin_id: `sdke2e-pulse-${seq}`,
+          origin_type: "pulse",
+          title: "SDK e2e pulse",
+          payload_text: `SDKE2E_PULSE_EVENT seq=${seq}`,
+          occurred_at: new Date(),
+          metadata: { seq },
+        },
+      ],
+      checkpoint: { seq },
+    };
+  }
+
+  async execute() {
+    return { success: false, error: "no actions" };
+  }
+}
+TS
+
+# Watcher reaction: writes a deterministic, assertable knowledge event when the
+# window completes. Kept in its own file so the SDK type-checks it.
+mkdir -p "$PROJ/reactions"
+cat > "$PROJ/reactions/digest.reaction.ts" <<'TS'
+import type { ReactionClient, ReactionContext } from "@lobu/connector-sdk";
+
+export default async (ctx: ReactionContext, client: ReactionClient): Promise<void> => {
+  await client.knowledge.save({
+    content: "SDKE2E_REACTION_OK",
+    semantic_type: "summary",
+    metadata: {
+      watcher_slug: ctx.watcher.slug,
+      window_id: ctx.window.id,
+      content_analyzed: ctx.window.content_analyzed,
+    },
+  });
+};
 TS
 
 # Project env: mock key, allow loopback egress (mock provider), embedded PG unless
@@ -128,6 +229,130 @@ echo "✓ all definitions created; \$member not pruned"
 grep -qF "$MOCK_REPLY" "$CHAT_OUT" || fail "agent turn did not return the mock reply '$MOCK_REPLY' (got: $(tr -d '\n' < "$CHAT_OUT" | tail -c 200))"
 grep -qiE "Forwarding to upstream: POST http://127.0.0.1:$MOCK_PORT" "$RUN_LOG" || fail "worker never called the mock provider upstream"
 echo "✓ agent completed a real turn through the worker (reply: $MOCK_REPLY)"
+
+# ── API setup for the connector/watcher assertions ────────────────────────────
+# Mint a personal access token bound to the loopback `local` context, and
+# resolve the org slug the bootstrap auto-provisioned (don't hardcode it).
+# trigger_feed / watcher trigger / complete_window / query_sql are owner-admin
+# tools (tool-access.ts), so mint with mcp:admin — the local-install user is the
+# org owner.
+GW="http://localhost:$GW_PORT"
+TOKEN="$( ( cd "$PROJ" && $LOBU token create -c local --scope "mcp:read mcp:write mcp:admin" --json 2>/dev/null ) | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).token||"")}catch{}})' )"
+[ -n "$TOKEN" ] || fail "could not mint a local API token (lobu token create -c local --json)"
+ORG="$( ( cd "$PROJ" && $LOBU org current -c local 2>/dev/null ) | grep -oE '[a-z0-9][a-z0-9-]*' | grep -v '^local$' | tail -1 )"
+[ -n "$ORG" ] || fail "could not resolve the local org slug (lobu org current -c local)"
+echo "▶ API: org=$ORG token=…${TOKEN: -6}"
+
+# POST a tool call through the generic /api/:org/:tool proxy. Args = $2 (JSON).
+api() {
+  curl -fsS -X POST "$GW/api/$ORG/$1" \
+    -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
+    -d "$2"
+}
+# Extract a JSON field from stdin with node (no jq dependency).
+jget() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let v;try{v=JSON.parse(s)}catch{process.exit(2)};for(const k of process.argv[1].split("."))v=v?.[k];process.stdout.write(v==null?"":String(v))})' "$1"; }
+
+# 6) Connector sync — prove the COMPILED connector actually RUNS and emits events.
+#    Find the feed manage_feeds created from the `pulse` connection, trigger an
+#    immediate sync, wait for the run to complete, then assert ≥1 event landed.
+FEEDS="$RUN_DIR/feeds.json"
+api manage_feeds '{"action":"list_feeds"}' > "$FEEDS" || fail "manage_feeds list_feeds failed"
+FEED_ID="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const f=(j.feeds||[]).find(x=>x.feed_key==="pulse");process.stdout.write(f?String(f.id):"")})' < "$FEEDS")"
+[ -n "$FEED_ID" ] || { cat "$FEEDS" >&2; fail "no 'pulse' feed found after apply (connection/feed not created?)"; }
+echo "✓ apply created the pulse feed (id=$FEED_ID)"
+
+api manage_feeds "{\"action\":\"trigger_feed\",\"feed_id\":$FEED_ID}" > "$RUN_DIR/trigger-feed.json" || { cat "$RUN_DIR/trigger-feed.json" >&2; fail "trigger_feed failed"; }
+
+# Poll get_feed until the most recent sync run reaches a terminal state. Parse
+# status/items with separate guarded node calls (process substitution + `read`
+# trips `set -e` on a newline-less EOF), so the loop survives transient misses.
+SYNC_OK=""; RUN_ITEMS=0
+for _ in $(seq 1 90); do
+  api manage_feeds "{\"action\":\"get_feed\",\"feed_id\":$FEED_ID}" > "$RUN_DIR/get-feed.json" 2>/dev/null || { sleep 1; continue; }
+  RUN_STATUS="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.stdout.write("none");return}const r=(j.recent_runs||[])[0]||{};process.stdout.write(String(r.status||"none"))})' < "$RUN_DIR/get-feed.json" || echo none)"
+  RUN_ITEMS="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.stdout.write("0");return}const r=(j.recent_runs||[])[0]||{};process.stdout.write(String(r.items_collected??0))})' < "$RUN_DIR/get-feed.json" || echo 0)"
+  case "$RUN_STATUS" in
+    completed) SYNC_OK=1; break ;;
+    failed|error) cat "$RUN_DIR/get-feed.json" >&2; fail "connector sync run ended in status '$RUN_STATUS'" ;;
+  esac
+  sleep 1
+done
+[ -n "$SYNC_OK" ] || { cat "$RUN_DIR/get-feed.json" >&2; fail "connector sync run did not complete within timeout"; }
+
+# Assert the connector emitted ≥1 event (items_collected on the run AND the
+# feed-level event_count from list_feeds).
+[ "${RUN_ITEMS:-0}" -ge 1 ] 2>/dev/null || fail "sync run completed but collected 0 items"
+api manage_feeds '{"action":"list_feeds"}' > "$FEEDS" || fail "manage_feeds list_feeds (post-sync) failed"
+EVENT_COUNT="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const f=(j.feeds||[]).find(x=>x.feed_key==="pulse");process.stdout.write(f?String(f.event_count??0):"0")})' < "$FEEDS")"
+[ "${EVENT_COUNT:-0}" -ge 1 ] 2>/dev/null || fail "connector sync persisted 0 events (event_count=$EVENT_COUNT)"
+echo "✓ connector sync ran the compiled connector and emitted events (items=$RUN_ITEMS, event_count=$EVENT_COUNT)"
+
+# 7) Watcher reaction — prove the reaction script RUNS and produces a side
+#    effect. Trigger the watcher (proves the dispatch path doesn't error), then
+#    deterministically drive read_knowledge → complete_window so the reaction
+#    fires regardless of the fixed-reply mock (the agentic turn would never
+#    produce a complete_window tool-call). The reaction saves SDKE2E_REACTION_OK.
+WATCHERS="$RUN_DIR/watchers.json"
+api list_watchers '{}' > "$WATCHERS" 2>/dev/null || fail "could not list watchers"
+WATCHER_ID="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const j=JSON.parse(s);const arr=j.watchers||j.items||(Array.isArray(j)?j:[]);const w=arr.find(x=>x.slug==="digest")||arr[0];const id=w?(w.watcher_id??w.id):null;process.stdout.write(id!=null?String(id):"")})' < "$WATCHERS")"
+[ -n "$WATCHER_ID" ] || { cat "$WATCHERS" >&2; fail "no 'digest' watcher found after apply"; }
+echo "✓ apply created the digest watcher (id=$WATCHER_ID)"
+
+# Trigger the watcher (the dispatch path). This enqueues a watcher run; the
+# worker turn that would normally call complete_window is NOT relied upon (a
+# fixed-reply mock never produces the complete_window tool-call, and `lobu run`'s
+# embedded bootstrap doesn't seed the `lobu-internal` oauth_client the dispatcher
+# needs to mint a worker service token — a known dev-only limitation). So we
+# assert only the reliably-observable part: the trigger created a watcher run
+# row. The reaction's actual side effect is asserted deterministically below via
+# read_knowledge → complete_window.
+TW="$RUN_DIR/trigger-watcher.json"
+api manage_watchers "{\"action\":\"trigger\",\"watcher_id\":\"$WATCHER_ID\"}" > "$TW" 2>/dev/null || true
+TRIG_RUN_ID="$(jget run_id < "$TW" 2>/dev/null || echo)"
+if [ -n "$TRIG_RUN_ID" ]; then
+  echo "✓ watcher trigger dispatched a run (run_id=$TRIG_RUN_ID)"
+else
+  # Trigger errored (embedded service-token limitation) — confirm the run row was
+  # still created so we know the dispatch path reached the queue.
+  api list_watchers '{}' > "$RUN_DIR/watchers-after-trigger.json" 2>/dev/null || true
+  HAS_RUN="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.stdout.write("");return}const arr=j.watchers||[];const w=arr.find(x=>x.slug==="digest")||arr[0];process.stdout.write(w&&w.watcher_run_id!=null?"1":"")})' < "$RUN_DIR/watchers-after-trigger.json" || echo)"
+  [ -n "$HAS_RUN" ] || { cat "$TW" >&2; fail "watcher trigger neither returned a run_id nor created a watcher run row"; }
+  echo "✓ watcher trigger enqueued a run (worker dispatch skipped: embedded service-token limitation)"
+fi
+
+# Deterministic reaction drive: read_knowledge over the window holding the
+# connector events → window_token → complete_window with extracted_data. The
+# window has linked content (the synced pulse event), so the reaction fires.
+SINCE="$(node -e 'process.stdout.write("2000-01-01")')"
+UNTIL="$(node -e 'const d=new Date(Date.now()+86400000);process.stdout.write(d.toISOString().slice(0,10))')"
+RK="$RUN_DIR/read-knowledge.json"
+api read_knowledge "{\"watcher_id\":$WATCHER_ID,\"since\":\"$SINCE\",\"until\":\"$UNTIL\"}" > "$RK" 2>/dev/null \
+  || { cat "$RK" >&2; fail "read_knowledge (watcher-mode) failed"; }
+WINDOW_TOKEN="$(jget window_token < "$RK")"
+[ -n "$WINDOW_TOKEN" ] || { cat "$RK" >&2; fail "read_knowledge returned no window_token (no content in window — connector events missing?)"; }
+
+CW="$RUN_DIR/complete-window.json"
+api manage_watchers "$(node -e 'const t=process.argv[1],w=process.argv[2];process.stdout.write(JSON.stringify({action:"complete_window",watcher_id:w,window_token:t,extracted_data:{s:"SDKE2E_OK"},run_metadata:{executor:"sdk-e2e"}}))' "$WINDOW_TOKEN" "$WATCHER_ID")" > "$CW" 2>/dev/null \
+  || { cat "$CW" >&2; fail "complete_window failed"; }
+grep -q '"action":"complete_window"\|"action": "complete_window"' "$CW" || { cat "$CW" >&2; fail "complete_window did not return the expected action"; }
+
+# Assert the reaction's side effect: a SDKE2E_REACTION_OK knowledge event exists.
+# query_sql auto-scopes to the org and auto-adds ORDER BY/LIMIT, so we pass a
+# bare SELECT (no ORDER BY/LIMIT) plus the required sort_by, and count rows
+# script-side.
+# query_sql validates against the data-source table allowlist where `events`
+# maps to current_event_records (the superseded-masking view); use `events`.
+REACT="$RUN_DIR/reaction-check.json"
+REACT_QUERY="$(node -e 'process.stdout.write(JSON.stringify({sql:"SELECT id FROM events WHERE payload_text = '"'"'SDKE2E_REACTION_OK'"'"'",sort_by:"id"}))')"
+REACT_OK=""
+for _ in $(seq 1 30); do
+  api query_sql "$REACT_QUERY" > "$REACT" 2>/dev/null || { sleep 1; continue; }
+  N="$(node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j;try{j=JSON.parse(s)}catch{process.stdout.write("0");return}const rows=j.rows||j.result||j.data||(Array.isArray(j)?j:[]);process.stdout.write(String(Array.isArray(rows)?rows.length:0))})' < "$REACT")"
+  if [ "${N:-0}" -ge 1 ] 2>/dev/null; then REACT_OK=1; break; fi
+  sleep 1
+done
+[ -n "$REACT_OK" ] || { cat "$CW" >&2; cat "$REACT" >&2; fail "watcher reaction did not produce its SDKE2E_REACTION_OK knowledge event"; }
+echo "✓ watcher reaction ran and saved its assertable side effect (SDKE2E_REACTION_OK)"
 
 # 5) Idempotent re-apply (stable config → 0 deletes). Unlike `lobu run`, `lobu
 # apply` does not auto-load the project .env, so pass the secret it resolves for
