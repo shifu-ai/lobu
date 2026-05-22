@@ -188,15 +188,24 @@ async function seedEntity(
     return;
   }
   // Same payload `lobu apply` sends to manage_entity_schema (upsertEntityType).
-  const payload = {
+  // The server stores per-type fields as a single `metadata_schema` JSON Schema
+  // and ignores top-level `properties`/`required`, so fold them in here too.
+  const payload: Record<string, unknown> = {
     schema_type: "entity_type",
     action: "create",
     slug: entity.slug,
     ...(entity.name ? { name: entity.name } : {}),
     ...(entity.description ? { description: entity.description } : {}),
-    ...(entity.required ? { required: entity.required } : {}),
-    ...(entity.properties ? { properties: entity.properties } : {}),
   };
+  if (entity.properties !== undefined || entity.required !== undefined) {
+    payload.metadata_schema = {
+      type: "object",
+      properties: entity.properties ?? {},
+      ...(entity.required && entity.required.length > 0
+        ? { required: entity.required }
+        : {}),
+    };
+  }
   try {
     await callTool(ctx, "manage_entity_schema", payload);
     printText(`  + entity_type: ${slug}`);

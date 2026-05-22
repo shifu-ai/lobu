@@ -178,6 +178,33 @@ function pickArray<T>(body: Record<string, unknown>, ...keys: string[]): T[] {
   return [];
 }
 
+/**
+ * The server stores entity-type per-field config as a single `metadata_schema`
+ * JSON Schema. The diff compares the desired config's flat `properties`/
+ * `required` against the remote snapshot, so hoist them out of the returned
+ * `metadata_schema` to the row's top level. Mirrors `upsertEntityType`, which
+ * folds the flat fields back into `metadata_schema` when writing.
+ */
+function hoistEntityTypeSchema(
+  row: RemoteEntityType & { metadata_schema?: unknown }
+): RemoteEntityType {
+  const schema = row.metadata_schema;
+  const out: RemoteEntityType = {
+    slug: row.slug,
+    ...(row.name !== undefined ? { name: row.name } : {}),
+    ...(row.description !== undefined ? { description: row.description } : {}),
+  };
+  if (isRecord(schema)) {
+    if (isRecord(schema.properties)) out.properties = schema.properties;
+    if (Array.isArray(schema.required)) {
+      out.required = schema.required.filter(
+        (v): v is string => typeof v === "string"
+      );
+    }
+  }
+  return out;
+}
+
 function extractApiError(
   parsed: Record<string, unknown>,
   status: number,
@@ -475,13 +502,20 @@ export class ApplyClient {
 
   async listEntityTypes(): Promise<RemoteEntityType[]> {
     const { body } = await this.request<{
-      entity_types?: RemoteEntityType[];
-      entityTypes?: RemoteEntityType[];
+      entity_types?: Array<RemoteEntityType & { metadata_schema?: unknown }>;
+      entityTypes?: Array<RemoteEntityType & { metadata_schema?: unknown }>;
     }>("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
       schema_type: "entity_type",
       action: "list",
     });
-    return pickArray(body, "entity_types", "entityTypes");
+    // The server returns the type's fields inside a single `metadata_schema`
+    // JSON Schema. Surface its `properties`/`required` at top level so the diff
+    // compares them against the desired config (which carries them flat).
+    return pickArray<RemoteEntityType & { metadata_schema?: unknown }>(
+      body,
+      "entity_types",
+      "entityTypes"
+    ).map(hoistEntityTypeSchema);
   }
 
   /**
@@ -522,7 +556,23 @@ export class ApplyClient {
     required?: string[];
     properties?: Record<string, unknown>;
   }): Promise<UpsertEntityTypeResult> {
-    return this.upsertSchemaResource("entity_type", entity);
+    // The server stores per-type fields as a single `metadata_schema` JSON
+    // Schema (`{ type, properties, required }`) — it does NOT read top-level
+    // `properties`/`required`. Fold them into `metadata_schema` so the schema
+    // actually persists (otherwise every apply re-reports a `properties`
+    // update because the stored schema stays empty).
+    const { slug, name, description, required, properties } = entity;
+    const payload: Record<string, unknown> = { slug };
+    if (name !== undefined) payload.name = name;
+    if (description !== undefined) payload.description = description;
+    if (properties !== undefined || required !== undefined) {
+      payload.metadata_schema = {
+        type: "object",
+        properties: properties ?? {},
+        ...(required && required.length > 0 ? { required } : {}),
+      };
+    }
+    return this.upsertSchemaResource("entity_type", payload);
   }
 
   async listRelationshipTypes(): Promise<RemoteRelationshipType[]> {
