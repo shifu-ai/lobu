@@ -106,6 +106,31 @@ function credentialString(
   return value;
 }
 
+/**
+ * Resolve a credential to its actual secret value, mirroring the TOML loader's
+ * connector-credential handling (`loadConnectors` in desired-state.ts): a
+ * `secret()` / `$VAR` ref resolves to its env value — apply pushes the REAL
+ * value to the DB, never the `$VAR` placeholder — and a literal passes through.
+ * The ref is collected so the apply secrets gate fails loud when it is unset
+ * (the placeholder is only returned as a safe fallback the gate then rejects).
+ */
+function resolveCredentialValue(
+  value: string | { readonly $secret: string },
+  required: Set<string>,
+  env: NodeJS.ProcessEnv
+): string {
+  if (isSecretRef(value)) {
+    required.add(value.$secret);
+    return env[value.$secret] ?? `$${value.$secret}`;
+  }
+  const ref = envRefName(value);
+  if (ref) {
+    required.add(ref);
+    return env[ref] ?? value;
+  }
+  return value;
+}
+
 /** Skill entries produced by `buildLocalSkills` (agent-dir + project `skills/`). */
 type LocalSkills = NonNullable<AgentSettings["skillsConfig"]>["skills"];
 
@@ -460,7 +485,8 @@ function mapWatcher(watcher: Watcher): DesiredWatcher {
 
 function mapAuthProfile(
   profile: AuthProfile,
-  required: Set<string>
+  required: Set<string>,
+  env: NodeJS.ProcessEnv
 ): DesiredAuthProfile {
   if (!AUTH_PROFILE_SLUG_PATTERN.test(profile.slug)) {
     throw new ValidationError(
@@ -484,7 +510,7 @@ function mapAuthProfile(
       ? Object.fromEntries(
           Object.entries(profile.credentials).map(([key, value]) => [
             key,
-            credentialString(value, required),
+            resolveCredentialValue(value, required, env),
           ])
         )
       : undefined;
@@ -566,7 +592,7 @@ export function mapProjectToDesiredState(
   const authProfiles = only
     ? []
     : (project.authProfiles ?? []).map((profile) =>
-        mapAuthProfile(profile, required)
+        mapAuthProfile(profile, required, env)
       );
   const connections = only
     ? []

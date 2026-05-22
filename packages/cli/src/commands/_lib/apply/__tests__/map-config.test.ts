@@ -166,7 +166,9 @@ describe("mapProjectToDesiredState", () => {
     const ap = state.connectors.authProfiles[0];
     expect(ap?.connector).toBe("github"); // class resolved to its key
     expect(ap?.kind).toBe("oauth_app");
-    expect(ap?.credentials).toEqual({ clientSecret: "$GH_SECRET" });
+    // Non-interactive auth-profile creds resolve to the REAL env value (apply
+    // pushes the value to the DB), matching the TOML loader — not the $VAR.
+    expect(ap?.credentials).toEqual({ clientSecret: "ghs_test" });
     expect(state.requiredSecrets).toContain("GH_SECRET");
     const dc = state.connectors.connections[0];
     expect(dc?.connector).toBe("github");
