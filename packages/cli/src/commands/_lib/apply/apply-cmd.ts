@@ -28,7 +28,11 @@ import {
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
 } from "./desired-state.js";
-import { confirmCustomConnectors, confirmPlan } from "./prompt.js";
+import {
+  confirmCustomConnectors,
+  confirmDeletions,
+  confirmPlan,
+} from "./prompt.js";
 import {
   renderMissingSecrets,
   renderPlan,
@@ -45,6 +49,13 @@ export interface ApplyOptions {
   url?: string;
   /** Bypass the project-link guard. */
   force?: boolean;
+  /**
+   * Opt the target org into code-managed provenance (one-time). Once set, the
+   * org's `lobu.config.ts` owns its definitions and apply prunes the ones
+   * removed from it. Persists server-side; subsequent applies prune without
+   * the flag. `--dry-run` previews the prune without flipping the org.
+   */
+  manage?: boolean;
   /** Test seam — inject a stubbed fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -54,6 +65,9 @@ interface PendingAuthEntry {
   kind: string;
   connectUrl?: string;
 }
+
+/** Deletes beyond this in one code-managed apply trigger a second confirm. */
+const BLAST_RADIUS_DELETE_THRESHOLD = 3;
 
 // ── Required-secrets check ─────────────────────────────────────────────────
 
@@ -920,6 +934,52 @@ async function executePlan(
     }
     printText(renderProgress(row.verb, "feed", row.id));
   }
+
+  // 11) Prune — delete definitions removed from a code-managed config. Runs
+  //     LAST and in reverse-dependency order so a rel-type that references an
+  //     entity type is gone before the entity type. Connections + data
+  //     instances are never in the delete set (computeDiff only emits delete
+  //     rows for definitions). The server refuses an entity-type delete while
+  //     instances exist, so the data stays safe.
+  await deleteRemovedDefinitions(ctx);
+}
+
+/**
+ * Execute the plan's `delete` rows (code-managed prune). Steps run in
+ * reverse-dependency order — a rel-type rule references entity types, so
+ * rel-types delete before entity types; connectors uninstall last. Halts apply
+ * on first failure (idempotent re-run).
+ */
+async function deleteRemovedDefinitions(ctx: ApplyContext): Promise<void> {
+  const deletes = ctx.plan.rows.filter((r) => r.verb === "delete");
+  if (deletes.length === 0) return;
+  const watcherIdBySlug = new Map(
+    ctx.remote.watchers.map((w) => [w.slug, w.watcher_id])
+  );
+  const steps: Array<[DiffRow["kind"], (id: string) => Promise<void>]> = [
+    [
+      "watcher",
+      async (id) => {
+        const wid = watcherIdBySlug.get(id);
+        if (!wid) {
+          throw new ApiError(
+            `delete watcher "${id}": remote watcher_id missing`
+          );
+        }
+        await ctx.client.deleteWatcher(wid);
+      },
+    ],
+    ["relationship-type", (id) => ctx.client.deleteRelationshipType(id)],
+    ["entity-type", (id) => ctx.client.deleteEntityType(id)],
+    ["connector-definition", (id) => ctx.client.uninstallConnector(id)],
+  ];
+  for (const [kind, run] of steps) {
+    for (const row of deletes) {
+      if (row.kind !== kind) continue;
+      await run(row.id);
+      printText(renderProgress("delete", kind, row.id));
+    }
+  }
 }
 
 // Collect pending interactive-auth profiles from a (no-op) plan and re-issue a
@@ -1064,6 +1124,29 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     throw new ValidationError(`organization "${orgSlug}" not found`);
   }
 
+  // A code-managed org's lobu.config.ts owns its definitions, so apply prunes
+  // the ones removed from it (data/connections/agents are never pruned).
+  // `--manage` is the one-time opt-in flipping ui→code server-side; older
+  // servers omit `managed_by` → stays UI-managed (safe, no prune).
+  let codeManaged = resolvedOrg?.managed_by === "code";
+  if (opts.manage && resolvedOrg && !codeManaged) {
+    if (opts.dryRun) {
+      printText(
+        chalk.dim(
+          `(dry-run) Org "${orgSlug}" would become code-managed — showing the prune plan without flipping it.`
+        )
+      );
+    } else {
+      await client.setOrgManagedBy(orgSlug, "code");
+      printText(
+        chalk.yellow(
+          `Org "${orgSlug}" is now code-managed — apply will delete definitions removed from lobu.config.ts.`
+        )
+      );
+    }
+    codeManaged = true;
+  }
+
   // Team org consistency comes from `defineConfig({ org, organizationId })` in
   // lobu.config.ts (committed) plus the `.lobu/project.json` link — apply does
   // not rewrite the config file.
@@ -1094,7 +1177,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     skipSchemaForConnectorKeys: locallyDeclaredConnectorKeys(state),
   });
 
-  const plan = computeDiff(state, remote, { only: opts.only });
+  const plan = computeDiff(state, remote, { only: opts.only, codeManaged });
   printText(renderPlan(plan));
 
   if (opts.dryRun) {
@@ -1110,13 +1193,19 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     (r) => r.kind === "auth-profile" && "needsAuth" in r && r.needsAuth
   );
 
-  if (plan.counts.create === 0 && plan.counts.update === 0 && !hasPendingAuth) {
+  if (
+    plan.counts.create === 0 &&
+    plan.counts.update === 0 &&
+    plan.counts.delete === 0 &&
+    !hasPendingAuth
+  ) {
     printText(chalk.green("\nNothing to apply."));
     return;
   }
 
-  const { create, update, noop, drift } = plan.counts;
-  const summaryLine = `${create} create, ${update} update, ${noop} noop, ${drift} drift${hasPendingAuth ? " + pending auth" : ""}`;
+  const { create, update, noop, drift, delete: del } = plan.counts;
+  const deletePart = del > 0 ? `, ${del} delete` : "";
+  const summaryLine = `${create} create, ${update} update, ${noop} noop, ${drift} drift${deletePart}${hasPendingAuth ? " + pending auth" : ""}`;
   const approved = await confirmPlan({
     yes: opts.yes ?? false,
     summaryLine,
@@ -1126,9 +1215,23 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     return;
   }
 
+  // Blast-radius gate: a large code-managed prune gets a second explicit
+  // confirm beyond the plan approval above.
+  if (del > BLAST_RADIUS_DELETE_THRESHOLD) {
+    const okToDelete = await confirmDeletions(del, opts.yes ?? false);
+    if (!okToDelete) {
+      printText(chalk.dim("\nCancelled."));
+      return;
+    }
+  }
+
   const pendingAuth: PendingAuthEntry[] = [];
   let applyErr: unknown;
-  if (plan.counts.create > 0 || plan.counts.update > 0) {
+  if (
+    plan.counts.create > 0 ||
+    plan.counts.update > 0 ||
+    plan.counts.delete > 0
+  ) {
     printText(chalk.bold("\nApplying:"));
     try {
       await executePlan({ client, state, plan, remote }, pendingAuth);

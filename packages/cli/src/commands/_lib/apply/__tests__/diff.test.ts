@@ -63,7 +63,13 @@ describe("apply diff — agents", () => {
     ]);
     const plan = computeDiff(desired, emptyRemote());
 
-    expect(plan.counts).toEqual({ create: 2, update: 0, noop: 0, drift: 0 });
+    expect(plan.counts).toEqual({
+      create: 2,
+      update: 0,
+      noop: 0,
+      drift: 0,
+      delete: 0,
+    });
     expect(renderPlan(plan)).toMatchSnapshot();
   });
 
@@ -988,5 +994,131 @@ describe("apply diff — connectors", () => {
     );
     // Exactly one row — the locally-declared def — never a bundled duplicate.
     expect(acmeRows).toHaveLength(1);
+  });
+});
+
+describe("apply diff — code-managed prune", () => {
+  // Remote state that has definitions + a connection the desired config drops.
+  function remoteWithExtras(): RemoteSnapshot {
+    return {
+      ...emptyRemote(),
+      entityTypes: [{ slug: "lead", properties: {} }, { slug: "stale-entity" }],
+      relationshipTypes: [{ slug: "stale-rel" }],
+      watchers: [{ slug: "stale-watcher", watcher_id: "42" }],
+      // stale-conn is dropped from config but exempt (drift); the connector "x"
+      // it still uses must therefore be spared from prune.
+      connections: [
+        { id: 7, slug: "stale-conn", connector_key: "x", status: "ok" },
+      ],
+      connectorDefinitions: [
+        { key: "x", installed: true },
+        { key: "orphan-connector", installed: true },
+      ],
+    };
+  }
+
+  function desiredKeepingLead(): DesiredState {
+    return buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "lead", properties: {} }],
+        relationshipTypes: [],
+      },
+    });
+  }
+
+  test("UI-managed (default) reports removed definitions as drift, never delete", () => {
+    const plan = computeDiff(desiredKeepingLead(), remoteWithExtras());
+    expect(plan.counts.delete).toBe(0);
+    expect(plan.rows.some((r) => r.verb === "delete")).toBe(false);
+    expect(
+      plan.rows.find((r) => r.kind === "entity-type" && r.id === "stale-entity")
+        ?.verb
+    ).toBe("drift");
+  });
+
+  test("code-managed deletes removed entity/relationship/watcher/connector definitions", () => {
+    const plan = computeDiff(desiredKeepingLead(), remoteWithExtras(), {
+      codeManaged: true,
+    });
+    const deletes = plan.rows.filter((r) => r.verb === "delete");
+    const deletedIds = deletes.map((r) => `${r.kind}:${r.id}`).sort();
+    expect(deletedIds).toEqual([
+      "connector-definition:orphan-connector",
+      "entity-type:stale-entity",
+      "relationship-type:stale-rel",
+      "watcher:stale-watcher",
+    ]);
+    expect(plan.counts.delete).toBe(4);
+    // The kept entity type is a noop, not a delete.
+    expect(
+      plan.rows.find((r) => r.kind === "entity-type" && r.id === "lead")?.verb
+    ).toBe("noop");
+  });
+
+  test("code-managed never deletes data, connections, or agents", () => {
+    const desired = buildState(
+      [
+        buildDesiredAgent("kept", {
+          metadata: { agentId: "kept", name: "Kept" },
+        }),
+      ],
+      {
+        memorySchema: { entityTypes: [], relationshipTypes: [] },
+      }
+    );
+    const remote: RemoteSnapshot = {
+      ...remoteWithExtras(),
+      agents: [{ agentId: "gone-agent", name: "Gone" }],
+      agentSettings: new Map([["kept", null]]),
+      platformsByAgent: new Map([["kept", []]]),
+    };
+    const plan = computeDiff(desired, remote, { codeManaged: true });
+    // Connection removed from config is drift (exempt), not delete.
+    expect(
+      plan.rows.find((r) => r.kind === "connection" && r.id === "stale-conn")
+        ?.verb
+    ).toBe("drift");
+    // Remote agent absent from desired is drift (exempt), not delete.
+    expect(
+      plan.rows.find((r) => r.kind === "agent" && r.id === "gone-agent")?.verb
+    ).toBe("drift");
+  });
+
+  test("connector prune suppressed when a local def has an unresolved (null) key", () => {
+    const desired = buildState([], {
+      connectors: {
+        definitions: [
+          {
+            key: null,
+            sourcePath: "/proj/connectors/local.connector.ts",
+            sourceCode: "export default class {}",
+            sourceFile: "connectors/local.connector.ts",
+          },
+        ],
+        authProfiles: [],
+        connections: [],
+      },
+    });
+    const plan = computeDiff(desired, remoteWithExtras(), {
+      codeManaged: true,
+    });
+    // Can't map remote connectors to the unnamed local def → never delete them.
+    expect(
+      plan.rows.some(
+        (r) => r.kind === "connector-definition" && r.verb === "delete"
+      )
+    ).toBe(false);
+  });
+
+  test("delete rows render with a removed-from-config note + summary count", () => {
+    const plan = computeDiff(desiredKeepingLead(), remoteWithExtras(), {
+      codeManaged: true,
+    });
+    expect(renderPlan(plan)).toContain("will be deleted");
+    expect(renderSummary(plan)).toContain("4 delete");
+    // UI-managed summary stays clean (no delete part).
+    expect(
+      renderSummary(computeDiff(desiredKeepingLead(), emptyRemote()))
+    ).not.toContain("delete");
   });
 });

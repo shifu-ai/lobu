@@ -25,7 +25,7 @@ import type {
 
 // ── Diff verbs ──────────────────────────────────────────────────────────────
 
-export type DiffVerb = "create" | "update" | "noop" | "drift";
+export type DiffVerb = "create" | "update" | "noop" | "drift" | "delete";
 
 interface BaseRow {
   verb: DiffVerb;
@@ -142,7 +142,18 @@ export type DiffRow =
 export interface DiffPlan {
   rows: DiffRow[];
   /** Aggregate counters for the summary line. */
-  counts: { create: number; update: number; noop: number; drift: number };
+  counts: {
+    create: number;
+    update: number;
+    noop: number;
+    drift: number;
+    /**
+     * Definitions removed from the config that apply will delete. Always 0
+     * unless the org is code-managed (`computeDiff({ codeManaged: true })`);
+     * a UI-managed org reports those remote-only definitions as `drift`.
+     */
+    delete: number;
+  };
   /**
    * Informational, non-actionable notes — e.g. "connector X is installed
    * remotely but not declared locally". Rendered after the plan; never block
@@ -791,6 +802,15 @@ export interface DesiredStateForDiff {
 export interface ComputeDiffOptions {
   /** Limit the diff to a subset of resource kinds. */
   only?: "agents" | "memory";
+  /**
+   * When true, the org is code-managed: its `lobu.config.ts` is the source of
+   * truth for *definitions*, so a remote definition (entity type, relationship
+   * type, watcher, connector definition) absent from desired is emitted as a
+   * `delete` row instead of an ignored `drift`. Data (entity/relationship
+   * instances), connections, auth profiles, feeds, agents, and platforms are
+   * never pruned. Default (false / UI-managed) reports those as `drift`.
+   */
+  codeManaged?: boolean;
 }
 
 export function computeDiff(
@@ -800,6 +820,7 @@ export function computeDiff(
 ): DiffPlan {
   const rows: DiffRow[] = [];
   const only = opts.only;
+  const codeManaged = opts.codeManaged ?? false;
 
   if (only !== "memory") {
     const remoteByAgent = new Map(remote.agents.map((a) => [a.agentId, a]));
@@ -881,9 +902,11 @@ export function computeDiff(
     }
     for (const remoteEntity of remote.entityTypes) {
       if (!desiredEntitySlugs.has(remoteEntity.slug)) {
+        // Code-managed: delete. The server refuses an entity-type delete while
+        // instances exist (the data is exempt), surfacing a clear error.
         rows.push({
           kind: "entity-type",
-          verb: "drift",
+          verb: codeManaged ? "delete" : "drift",
           id: remoteEntity.slug,
           remote: remoteEntity,
         });
@@ -903,7 +926,7 @@ export function computeDiff(
       if (!desiredRelSlugs.has(remoteRel.slug)) {
         rows.push({
           kind: "relationship-type",
-          verb: "drift",
+          verb: codeManaged ? "delete" : "drift",
           id: remoteRel.slug,
           remote: remoteRel,
         });
@@ -921,7 +944,7 @@ export function computeDiff(
       if (!desiredWatcherSlugs.has(remoteWatcher.slug)) {
         rows.push({
           kind: "watcher",
-          verb: "drift",
+          verb: codeManaged ? "delete" : "drift",
           id: remoteWatcher.slug,
           remote: remoteWatcher,
         });
@@ -1000,15 +1023,30 @@ export function computeDiff(
         // plan-row loop. The render falls back to `id` (the connector key).
       });
     }
-    // Conservative: never auto-uninstall remote connector definitions that
-    // aren't declared/referenced locally — just note them.
+    // Connector keys still wired to a surviving remote connection / auth profile.
+    // Those are exempt from prune, so their connector must not be deleted —
+    // uninstalling it would orphan the connection.
+    const liveConnectorKeys = new Set<string>([
+      ...remoteConnections.map((c) => c.connector_key),
+      ...remoteAuthProfiles.map((p) => p.connector_key),
+    ]);
+    // Remote connector definitions not declared/referenced locally. Code-managed
+    // orgs delete them; UI-managed orgs just get a note (never auto-uninstall).
+    // Suppressed entirely when any local `*.connector.ts` has an unresolved key
+    // (`null`) — we can't tell which remote def corresponds to which local file.
     if (!hasUnnamedLocalDefs) {
       for (const def of remoteConnectorDefinitions) {
-        if (
-          def.installed &&
-          !declaredKeys.has(def.key) &&
-          !referencedConnectorKeys.has(def.key)
-        ) {
+        if (!def.installed) continue;
+        if (declaredKeys.has(def.key) || referencedConnectorKeys.has(def.key)) {
+          continue;
+        }
+        if (codeManaged && !liveConnectorKeys.has(def.key)) {
+          rows.push({
+            kind: "connector-definition",
+            verb: "delete",
+            id: def.key,
+          });
+        } else {
           notes.push(
             `connector "${def.key}" is installed remotely but not declared in connectors/ — uninstall it manually if it's no longer wanted (lobu apply never auto-uninstalls connectors).`
           );
@@ -1080,7 +1118,7 @@ export function computeDiff(
     }
   }
 
-  const counts = { create: 0, update: 0, noop: 0, drift: 0 };
+  const counts = { create: 0, update: 0, noop: 0, drift: 0, delete: 0 };
   for (const row of rows) counts[row.verb]++;
 
   notes.sort();

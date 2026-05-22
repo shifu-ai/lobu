@@ -6,6 +6,7 @@ const VERB_PREFIX = {
   update: chalk.yellow("~"),
   noop: chalk.dim("="),
   drift: chalk.cyan("?"),
+  delete: chalk.red("-"),
 } as const;
 
 const KIND_LABEL: Record<DiffRow["kind"], string> = {
@@ -108,6 +109,11 @@ function renderRow(row: DiffRow): string[] {
         `  ${prefix} ${label} ${id} ${chalk.cyan("(drift — ignored in v1, not deleted)")}`
       );
       break;
+    case "delete":
+      lines.push(
+        `  ${prefix} ${label} ${id} ${chalk.red("(removed from config — will be deleted)")}`
+      );
+      break;
   }
 
   return lines;
@@ -180,9 +186,12 @@ export function renderPostApplyPunchList(items: {
 }
 
 export function renderSummary(plan: DiffPlan): string {
-  const { create, update, noop, drift } = plan.counts;
+  const { create, update, noop, drift, delete: del } = plan.counts;
+  // `delete` only appears for code-managed orgs; omit it otherwise so the
+  // common UI-managed summary stays unchanged.
+  const deletePart = del > 0 ? `, ${chalk.red(`${del} delete`)}` : "";
   return chalk.bold(
-    `Summary: ${chalk.green(`${create} create`)}, ${chalk.yellow(`${update} update`)}, ${chalk.dim(`${noop} noop`)}, ${chalk.cyan(`${drift} drift`)}`
+    `Summary: ${chalk.green(`${create} create`)}, ${chalk.yellow(`${update} update`)}, ${chalk.dim(`${noop} noop`)}, ${chalk.cyan(`${drift} drift`)}${deletePart}`
   );
 }
 

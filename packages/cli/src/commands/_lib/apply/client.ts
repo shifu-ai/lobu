@@ -41,6 +41,12 @@ export interface RemoteOrg {
   id: string;
   slug: string;
   name?: string;
+  /**
+   * Provenance: `"code"` means the org's definitions are owned by a
+   * `lobu.config.ts` and `lobu apply` prunes definitions removed from it;
+   * `"ui"` (default) means apply never deletes. Absent on older servers.
+   */
+  managed_by?: "ui" | "code";
 }
 
 export interface RemoteWatcher {
@@ -301,9 +307,27 @@ export class ApplyClient {
         id,
         slug,
         ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+        ...(entry.managed_by === "code" || entry.managed_by === "ui"
+          ? { managed_by: entry.managed_by }
+          : {}),
       });
     }
     return out;
+  }
+
+  /**
+   * Flip an org's provenance to code-managed (the one-time opt-in `lobu apply`
+   * offers when applying a `lobu.config.ts` to a UI-managed org). Idempotent.
+   */
+  async setOrgManagedBy(
+    orgSlug: string,
+    managedBy: "ui" | "code"
+  ): Promise<void> {
+    await this.request(
+      "PATCH",
+      `/api/${encodeURIComponent(orgSlug)}/organization`,
+      { managed_by: managedBy }
+    );
   }
 
   // ── Agents ────────────────────────────────────────────────────────────────
@@ -547,6 +571,28 @@ export class ApplyClient {
       }
     }
     return result;
+  }
+
+  /**
+   * Delete an entity type (code-managed prune). The server soft-deletes and
+   * REFUSES if instances of the type still exist — the data is exempt from
+   * prune, so that surfaces as a clear error rather than cascading.
+   */
+  async deleteEntityType(slug: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+      schema_type: "entity_type",
+      action: "delete",
+      slug,
+    });
+  }
+
+  /** Delete a relationship type (code-managed prune). */
+  async deleteRelationshipType(slug: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+      schema_type: "relationship_type",
+      action: "delete",
+      slug,
+    });
   }
 
   // ── Watchers ──────────────────────────────────────────────────────────────
@@ -796,6 +842,18 @@ export class ApplyClient {
       action: "set_reaction_script",
       watcher_id: watcherId,
       reaction_script: reactionScript,
+    });
+  }
+
+  /**
+   * Delete a watcher by its numeric `watcher_id` (code-managed prune). The
+   * admin tool takes an array; we delete one slug's watcher at a time so a
+   * failure is attributable.
+   */
+  async deleteWatcher(watcherId: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_watchers`, {
+      action: "delete",
+      watcher_ids: [watcherId],
     });
   }
 
