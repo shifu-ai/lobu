@@ -131,6 +131,15 @@ jobs:
       - name: Install dependencies
         run: bun install
 
+      # The worker's exec-sandbox uses bwrap on Linux; ubuntu-latest blocks
+      # unprivileged user namespaces via AppArmor, so flip the sysctl too.
+      - name: Install bubblewrap (worker exec-sandbox)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap coreutils
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --version
+
       # `lobu run`'s embedded Postgres ships a PG18 binary dynamically linked
       # against ICU 60 (libicuuc.so.60); ubuntu-latest carries a newer ICU, so
       # initdb can't load without the 18.04-era lib. Prod doesn't hit this (it

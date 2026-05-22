@@ -94,6 +94,11 @@ TS
   printf '\n'
   echo "MOCK_API_KEY=mock-key-e2e"
   echo "WORKER_ALLOWED_DOMAINS=127.0.0.1,localhost"
+  # The orchestrator wraps Linux workers in `systemd-run --user --scope` for
+  # cgroup/network limits; CI runners have no user systemd session, so that
+  # spawn fails. Disable it here — the worker only talks to the loopback mock,
+  # and this gate isn't testing the prod network sandbox. No-op on macOS.
+  echo "LOBU_DISABLE_SYSTEMD_RUN=1"
   [ -n "${DATABASE_URL:-}" ] && echo "DATABASE_URL=$DATABASE_URL"
 } >> "$PROJ/.env"
 
