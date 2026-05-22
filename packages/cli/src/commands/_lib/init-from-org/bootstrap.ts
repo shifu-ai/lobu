@@ -25,6 +25,7 @@ import type {
   RemoteConnection,
   RemoteEntityType,
   RemoteFeed,
+  RemotePlatform,
   RemoteRelationshipType,
   RemoteWatcher,
 } from "../apply/client.js";
@@ -199,6 +200,7 @@ interface EmittedAgent {
 function emitAgent(
   agent: RemoteAgent,
   settings: AgentSettings | null,
+  platforms: RemotePlatform[],
   imports: ImportTracker,
   secrets: SecretCollector,
   minter: IdentMinter
@@ -340,6 +342,32 @@ function emitAgent(
       relPath: `${dir}/skills/${skill.name}/SKILL.md`,
       body: emitSkillFile(skill),
     });
+  }
+
+  // platforms ← live platform bindings. The route stores `platform` inside
+  // `config` for stable-id matching; strip it. `$VAR` config values round-trip
+  // as secret() refs (the stored config keeps placeholders, not raw secrets).
+  if (platforms.length > 0) {
+    const items = platforms.map((p) => {
+      const cfg: Record<string, unknown> = { ...(p.config ?? {}) };
+      delete cfg.platform;
+      const cfgLines = Object.entries(cfg).map(([k, v]) => {
+        if (typeof v === "string") {
+          const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
+          if (m?.[1]) {
+            imports.use("secret");
+            return `${k}: ${secrets.ref(m[1])}`;
+          }
+          return `${k}: ${str(v)}`;
+        }
+        return `${k}: ${emitValue(v, 3)}`;
+      });
+      return objectLiteral(
+        [`type: ${str(p.platform)}`, `config: ${objectLiteral(cfgLines, 3)}`],
+        2
+      );
+    });
+    fields.push(`platforms: [\n    ${items.join(",\n    ")},\n  ]`);
   }
 
   const handleName = minter.mint(agent.agentId, "Agent");
@@ -662,7 +690,11 @@ function emitConnection(
 // ── Fetch the org's full declared state ─────────────────────────────────────
 
 interface FetchedState {
-  agents: Array<{ agent: RemoteAgent; settings: AgentSettings | null }>;
+  agents: Array<{
+    agent: RemoteAgent;
+    settings: AgentSettings | null;
+    platforms: RemotePlatform[];
+  }>;
   entityTypes: RemoteEntityType[];
   relationshipTypes: RemoteRelationshipType[];
   watchers: Array<{ watcher: RemoteWatcher; reactionScript: string | null }>;
@@ -694,6 +726,7 @@ async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
       .map(async (agent) => ({
         agent,
         settings: await client.getAgentSettings(agent.agentId),
+        platforms: await client.listPlatforms(agent.agentId),
       }))
   );
 
@@ -766,8 +799,15 @@ export function generateProject(
   // Agents first (watchers reference their handles).
   const agentHandles = new Map<string, string>();
   const agentDecls: string[] = [];
-  for (const { agent, settings } of state.agents) {
-    const emitted = emitAgent(agent, settings, imports, secrets, minter);
+  for (const { agent, settings, platforms } of state.agents) {
+    const emitted = emitAgent(
+      agent,
+      settings,
+      platforms,
+      imports,
+      secrets,
+      minter
+    );
     agentHandles.set(agent.agentId, emitted.handle.name);
     agentDecls.push(emitted.handle.decl);
     files.push(...emitted.files);
