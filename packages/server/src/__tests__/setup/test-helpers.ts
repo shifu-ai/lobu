@@ -108,6 +108,9 @@ export const get = (path: string, options?: Omit<Parameters<typeof testRequest>[
 export const post = (path: string, options?: Parameters<typeof testRequest>[2]) =>
   testRequest('POST', path, options);
 
+export const patch = (path: string, options?: Parameters<typeof testRequest>[2]) =>
+  testRequest('PATCH', path, options);
+
 export const del = (path: string, options?: Omit<Parameters<typeof testRequest>[2], 'body'>) =>
   testRequest('DELETE', path, options);
 
