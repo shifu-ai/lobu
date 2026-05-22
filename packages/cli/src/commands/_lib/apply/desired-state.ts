@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -760,17 +759,16 @@ function resolveReactionScript(
 }
 
 /**
- * Bundle + import a `lobu.config.ts` and return its `defineConfig` default
- * export (the SDK {@link Project}). Shared by {@link loadDesiredStateFromConfig}
- * (apply) and the commands that read the authored config directly (`lobu run`
- * preview registration, `lobu doctor`, `lobu chat`, `lobu validate`).
+ * Import a `lobu.config.ts` and return its `defineConfig` default export (the
+ * SDK {@link Project}). Shared by {@link loadDesiredStateFromConfig} (apply) and
+ * the commands that read the authored config directly (`lobu run` preview
+ * registration, `lobu doctor`, `lobu chat`, `lobu validate`, `lobu memory seed`).
  *
- * esbuild bundles relative imports inline and externalizes node_modules
- * (`@lobu/sdk` / `@lobu/connector-sdk` resolve from the project at import time).
- * The temp `.mjs` is deleted after import — the module is already in memory.
- *
- * The dynamic imports here are intentional and allow-listed (AGENTS.md): esbuild
- * is loaded lazily, and the bundled config is a generated file imported by URL.
+ * Uses jiti — the same runtime TypeScript loader Next.js/Nuxt use for their
+ * `*.config.ts` — which transpiles on import and resolves the config's imports
+ * (`@lobu/sdk`, `@lobu/connector-sdk`, relative reaction/connector files) from
+ * the project. No bundling, no temp file. The dynamic `import("jiti")` is lazy
+ * + allow-listed (AGENTS.md).
  */
 export async function loadProjectConfig(
   cwd: string
@@ -779,38 +777,26 @@ export async function loadProjectConfig(
   if (!existsSync(configPath)) {
     throw new ValidationError(`No lobu.config.ts found in ${cwd}`);
   }
-  const { build } = await import("esbuild");
-  const outFile = resolve(
-    cwd,
-    `.lobu-config.${randomBytes(6).toString("hex")}.mjs`
-  );
+  const { createJiti } = await import("jiti");
+  const jiti = createJiti(pathToFileURL(configPath).href);
+  let project: unknown;
   try {
-    await build({
-      entryPoints: [configPath],
-      outfile: outFile,
-      bundle: true,
-      format: "esm",
-      platform: "node",
-      packages: "external",
-      logLevel: "silent",
-    });
-    const mod = (await import(pathToFileURL(outFile).href)) as {
-      default?: unknown;
-    };
-    const project = mod.default;
-    if (
-      !project ||
-      typeof project !== "object" ||
-      (project as { kind?: unknown }).kind !== "project"
-    ) {
-      throw new ValidationError(
-        "lobu.config.ts must `export default defineConfig({ ... })`"
-      );
-    }
-    return { project: project as Project, configPath };
-  } finally {
-    rmSync(outFile, { force: true });
+    project = await jiti.import(configPath, { default: true });
+  } catch (err) {
+    throw new ValidationError(
+      `Failed to load lobu.config.ts — ${err instanceof Error ? err.message : String(err)}`
+    );
   }
+  if (
+    !project ||
+    typeof project !== "object" ||
+    (project as { kind?: unknown }).kind !== "project"
+  ) {
+    throw new ValidationError(
+      "lobu.config.ts must `export default defineConfig({ ... })`"
+    );
+  }
+  return { project: project as Project, configPath };
 }
 
 /**
