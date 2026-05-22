@@ -1040,9 +1040,13 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
 
   // Load desired state from the TypeScript entrypoint (lobu.config.ts).
   const loadArgs = { cwd, ...(opts.only ? { only: opts.only } : {}) };
-  const { state, configPath } = await loadDesiredStateFromConfig(loadArgs);
+  const { state, configPath, warnings } =
+    await loadDesiredStateFromConfig(loadArgs);
 
   printText(chalk.dim(`Config: ${configPath}`));
+  for (const warning of warnings) {
+    printText(chalk.yellow(`Warning: ${warning}`));
+  }
 
   // Required secrets gate: fail before any network mutation.
   const { missing } = checkRequiredSecrets(state);
