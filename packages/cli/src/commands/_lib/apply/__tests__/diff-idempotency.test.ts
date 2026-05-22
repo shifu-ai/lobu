@@ -33,6 +33,7 @@ function buildState(
 ): DesiredState {
   return {
     agents,
+    prune: false,
     memorySchema: { entityTypes: [], relationshipTypes: [] },
     watchers: [],
     connectors: { definitions: [], authProfiles: [], connections: [] },

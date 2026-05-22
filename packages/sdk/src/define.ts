@@ -301,6 +301,13 @@ export interface Project {
   readonly kind: "project";
   /** Lobu Cloud org slug this project applies to. */
   org?: string;
+  /**
+   * When true, `lobu apply` deletes definitions (entity/relationship types,
+   * watchers, connector definitions) that are absent from this config —
+   * INCLUDING ones created via the dashboard/API. Data, connections, auth
+   * profiles, and agents are never pruned. Default false.
+   */
+  prune?: boolean;
   /** Display name used if `lobu apply` offers to provision the org. */
   orgName?: string;
   /** Org description. */

@@ -148,9 +148,9 @@ export interface DiffPlan {
     noop: number;
     drift: number;
     /**
-     * Definitions removed from the config that apply will delete. Always 0
-     * unless the org is code-managed (`computeDiff({ codeManaged: true })`);
-     * a UI-managed org reports those remote-only definitions as `drift`.
+     * Definitions absent from the config that apply will delete. Always 0
+     * unless the config declares prune (`computeDiff({ prune: true })`);
+     * otherwise those remote-only definitions are reported as `drift`.
      */
     delete: number;
   };
@@ -850,14 +850,15 @@ export interface ComputeDiffOptions {
   /** Limit the diff to a subset of resource kinds. */
   only?: "agents" | "memory";
   /**
-   * When true, the org is code-managed: its `lobu.config.ts` is the source of
-   * truth for *definitions*, so a remote definition (entity type, relationship
-   * type, watcher, connector definition) absent from desired is emitted as a
-   * `delete` row instead of an ignored `drift`. Data (entity/relationship
-   * instances), connections, auth profiles, feeds, agents, and platforms are
-   * never pruned. Default (false / UI-managed) reports those as `drift`.
+   * When true, the config declares `prune: true`: it's the source of truth for
+   * *definitions*, so a remote definition (entity type, relationship type,
+   * watcher, connector definition) absent from desired is emitted as a `delete`
+   * row instead of an ignored `drift` — INCLUDING definitions created via the
+   * dashboard/API. Data (entity/relationship instances), connections, auth
+   * profiles, feeds, agents, and platforms are never pruned. Default (false)
+   * reports those remote-only definitions as `drift`.
    */
-  codeManaged?: boolean;
+  prune?: boolean;
   /**
    * Target org id. The entity/relationship-type list endpoints also return
    * *public* definitions owned by OTHER orgs, which this org neither manages
@@ -874,7 +875,7 @@ export function computeDiff(
 ): DiffPlan {
   const rows: DiffRow[] = [];
   const only = opts.only;
-  const codeManaged = opts.codeManaged ?? false;
+  const prune = opts.prune ?? false;
   // A remote entity/relationship type is this org's to manage (drift/prune)
   // only when it's org-owned. The list endpoints also surface public types
   // from other orgs (`organization_id` differs) — never drift or delete those.
@@ -976,7 +977,7 @@ export function computeDiff(
         // instances exist (the data is exempt), surfacing a clear error.
         rows.push({
           kind: "entity-type",
-          verb: codeManaged ? "delete" : "drift",
+          verb: prune ? "delete" : "drift",
           id: remoteEntity.slug,
           remote: remoteEntity,
         });
@@ -997,7 +998,7 @@ export function computeDiff(
       if (!desiredRelSlugs.has(remoteRel.slug)) {
         rows.push({
           kind: "relationship-type",
-          verb: codeManaged ? "delete" : "drift",
+          verb: prune ? "delete" : "drift",
           id: remoteRel.slug,
           remote: remoteRel,
         });
@@ -1015,7 +1016,7 @@ export function computeDiff(
       if (!desiredWatcherSlugs.has(remoteWatcher.slug)) {
         rows.push({
           kind: "watcher",
-          verb: codeManaged ? "delete" : "drift",
+          verb: prune ? "delete" : "drift",
           id: remoteWatcher.slug,
           remote: remoteWatcher,
         });
@@ -1111,7 +1112,7 @@ export function computeDiff(
         if (declaredKeys.has(def.key) || referencedConnectorKeys.has(def.key)) {
           continue;
         }
-        if (codeManaged && !liveConnectorKeys.has(def.key)) {
+        if (prune && !liveConnectorKeys.has(def.key)) {
           rows.push({
             kind: "connector-definition",
             verb: "delete",

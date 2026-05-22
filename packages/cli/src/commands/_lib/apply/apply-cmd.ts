@@ -49,13 +49,6 @@ export interface ApplyOptions {
   url?: string;
   /** Bypass the project-link guard. */
   force?: boolean;
-  /**
-   * Opt the target org into code-managed provenance (one-time). Once set, the
-   * org's `lobu.config.ts` owns its definitions and apply prunes the ones
-   * removed from it. Persists server-side; subsequent applies prune without
-   * the flag. `--dry-run` previews the prune without flipping the org.
-   */
-  manage?: boolean;
   /** Test seam — inject a stubbed fetch. */
   fetchImpl?: typeof fetch;
 }
@@ -66,7 +59,7 @@ interface PendingAuthEntry {
   connectUrl?: string;
 }
 
-/** Deletes beyond this in one code-managed apply trigger a second confirm. */
+/** Deletes beyond this in one pruning apply trigger a second confirm. */
 const BLAST_RADIUS_DELETE_THRESHOLD = 3;
 
 // ── Required-secrets check ─────────────────────────────────────────────────
@@ -266,7 +259,7 @@ async function fetchRemoteSnapshot(
   client: ApplyClient,
   state: DesiredState,
   only?: "agents" | "memory",
-  codeManaged = false
+  prune = false
 ): Promise<RemoteSnapshot> {
   const agents: RemoteAgent[] =
     only === "memory" ? [] : await client.listAgents();
@@ -293,15 +286,15 @@ async function fetchRemoteSnapshot(
     only === "agents" ? [] : await client.listRelationshipTypes();
   const watchers = only === "agents" ? [] : await client.listWatchers();
 
-  // Connectors run only on a full apply (`--only` skips them). A code-managed
-  // org also fetches them even when the config declares none, so prune can
-  // delete a connector definition whose last config reference was removed
-  // (otherwise an empty desired-connectors set would skip the fetch entirely).
+  // Connectors run only on a full apply (`--only` skips them). A pruning config
+  // also fetches them even when it declares none, so prune can delete a
+  // connector definition whose last config reference was removed (otherwise an
+  // empty desired-connectors set would skip the fetch entirely).
   const hasConnectors =
     state.connectors.definitions.length > 0 ||
     state.connectors.authProfiles.length > 0 ||
     state.connectors.connections.length > 0;
-  const fetchConnectors = !only && (hasConnectors || codeManaged);
+  const fetchConnectors = !only && (hasConnectors || prune);
   const connectorDefinitions = fetchConnectors
     ? await client.listConnectorDefinitions(true)
     : [];
@@ -939,7 +932,7 @@ async function executePlan(
     printText(renderProgress(row.verb, "feed", row.id));
   }
 
-  // 11) Prune — delete definitions removed from a code-managed config. Runs
+  // 11) Prune — delete definitions absent from a pruning config. Runs
   //     LAST and in reverse-dependency order so a rel-type that references an
   //     entity type is gone before the entity type. Connections + data
   //     instances are never in the delete set (computeDiff only emits delete
@@ -949,7 +942,7 @@ async function executePlan(
 }
 
 /**
- * Execute the plan's `delete` rows (code-managed prune). Steps run in
+ * Execute the plan's `delete` rows (prune). Steps run in
  * reverse-dependency order — a rel-type rule references entity types, so
  * rel-types delete before entity types; connectors uninstall last. Halts apply
  * on first failure (idempotent re-run).
@@ -1108,12 +1101,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   const myOrgs = await client.listOrgs().catch(() => null);
   // Resolve strictly by the slug we will actually mutate (the client targets
   // `orgSlug` in every URL). Do NOT fall back to organizationId as an alternate
-  // org — that could read provenance (managed_by) from a different org than the
-  // one being applied/pruned.
+  // org — that could prune a different org than the one being applied.
   const resolvedOrg = myOrgs?.find((o) => o.slug === orgSlug);
   // If the config pins `organizationId`, the slug must resolve to that exact
   // org — otherwise it's a stale/copied config pointed at someone else's org,
-  // and (under --manage) could prune the wrong org. Hard-stop.
+  // and (with prune on) could prune the wrong org. Hard-stop.
   if (
     resolvedOrg &&
     state.memory?.organizationId &&
@@ -1148,31 +1140,19 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     throw new ValidationError(`organization "${orgSlug}" not found`);
   }
 
-  // A code-managed org's lobu.config.ts owns its definitions, so apply prunes
-  // the ones removed from it (data/connections/agents are never pruned).
-  // `--manage` opts a UI-managed org into this. The plan is computed as
-  // code-managed so the prune is shown, but the org is flipped server-side only
-  // AFTER the plan + deletions are confirmed (`flipToCodeManaged`, below) — a
-  // cancelled apply must never leave the org flipped. Older servers omit
-  // `managed_by` → stays UI-managed (safe, no prune).
-  const orgIsCodeManaged = resolvedOrg?.managed_by === "code";
-  const willManage = opts.manage === true && !!resolvedOrg && !orgIsCodeManaged;
-  const codeManaged = orgIsCodeManaged || willManage;
-  if (willManage) {
+  // Prune is config-declared (`defineConfig({ prune: true })`): when on, apply
+  // deletes any org-owned definition (entity/relationship type, watcher,
+  // connector definition) that's absent from the config — INCLUDING ones added
+  // via the dashboard/API. Data, connections, auth profiles, and agents are
+  // never pruned. The blast-radius confirm below is the safety net.
+  const prune = state.prune;
+  if (prune) {
     printText(
       chalk.yellow(
-        opts.dryRun
-          ? `(dry-run) Org "${orgSlug}" would become code-managed — previewing the prune plan without flipping it.`
-          : `Org "${orgSlug}" will become code-managed after you confirm — future applies prune definitions removed from lobu.config.ts.`
+        "Prune is on: apply will DELETE any org-owned definition (entity/relationship type, watcher, connector) that is not in this config — including ones created in the UI."
       )
     );
   }
-  // Idempotent flip, invoked only on a confirmed (non-dry-run) apply.
-  const flipToCodeManaged = async (): Promise<void> => {
-    if (!willManage) return;
-    await client.setOrgManagedBy(orgSlug, "code");
-    printText(chalk.yellow(`Org "${orgSlug}" is now code-managed.`));
-  };
 
   // Team org consistency comes from `defineConfig({ org, organizationId })` in
   // lobu.config.ts (committed) plus the `.lobu/project.json` link — apply does
@@ -1192,12 +1172,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // this (current/stale) catalog — "create" when the key isn't installed,
   // "update" when it is. Connector defs are NOT installed here; that happens in
   // `executePlan`, AFTER plan confirmation.
-  const remote = await fetchRemoteSnapshot(
-    client,
-    state,
-    opts.only,
-    codeManaged
-  );
+  const remote = await fetchRemoteSnapshot(client, state, opts.only, prune);
 
   // Validate connection/auth-profile config against the catalog we have now,
   // but SKIP schema validation for connector keys declared locally — those
@@ -1211,7 +1186,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
 
   const plan = computeDiff(state, remote, {
     only: opts.only,
-    codeManaged,
+    prune,
     ...(resolvedOrg?.id ? { orgId: resolvedOrg.id } : {}),
   });
   printText(renderPlan(plan));
@@ -1235,8 +1210,6 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     plan.counts.delete === 0 &&
     !hasPendingAuth
   ) {
-    // Honor --manage even with an empty plan (no deletes occur this run).
-    await flipToCodeManaged();
     printText(chalk.green("\nNothing to apply."));
     return;
   }
@@ -1253,8 +1226,8 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     return;
   }
 
-  // Blast-radius gate: a large code-managed prune gets a second explicit
-  // confirm beyond the plan approval above.
+  // Blast-radius gate: a large prune gets a second explicit confirm beyond the
+  // plan approval above.
   if (del > BLAST_RADIUS_DELETE_THRESHOLD) {
     const okToDelete = await confirmDeletions(del, opts.yes ?? false);
     if (!okToDelete) {
@@ -1262,10 +1235,6 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
       return;
     }
   }
-
-  // Plan + deletions confirmed — now it's safe to flip the org to code-managed
-  // (before executePlan, so the deletes run against a code-managed org).
-  await flipToCodeManaged();
 
   const pendingAuth: PendingAuthEntry[] = [];
   let applyErr: unknown;
