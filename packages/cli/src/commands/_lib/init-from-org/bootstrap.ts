@@ -441,10 +441,9 @@ function emitAgent(
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-+|-+$/g, "");
       const prefix = `${slug(agent.agentId)}-${slug(p.platform)}`;
-      const nameSlug =
-        p.id && p.id.startsWith(`${prefix}-`)
-          ? p.id.slice(prefix.length + 1)
-          : undefined;
+      const nameSlug = p.id?.startsWith(`${prefix}-`)
+        ? p.id.slice(prefix.length + 1)
+        : undefined;
       const platformFields = [`type: ${str(p.platform)}`];
       if (nameSlug) platformFields.push(`name: ${str(nameSlug)}`);
       platformFields.push(`config: ${objectLiteral(cfgLines, 3)}`);
