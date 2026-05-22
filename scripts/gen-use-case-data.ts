@@ -25,6 +25,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Project, ProviderConfig, Watcher } from "@lobu/sdk";
 import { isSecretRef } from "@lobu/sdk";
+import { createJiti } from "jiti";
 
 const ROOT = resolve(import.meta.dir, "..");
 const EXAMPLES_DIR = join(ROOT, "examples");
@@ -45,7 +46,6 @@ async function loadExampleConfig(exampleDir: string): Promise<Project | null> {
   const configPath = join(exampleDir, "lobu.config.ts");
   if (!existsSync(configPath)) return null;
 
-  const { createJiti } = await import("jiti");
   const jiti = createJiti(pathToFileURL(configPath).href);
   const project = (await jiti.import(configPath, { default: true })) as unknown;
 

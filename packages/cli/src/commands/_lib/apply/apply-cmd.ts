@@ -1126,26 +1126,29 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
 
   // A code-managed org's lobu.config.ts owns its definitions, so apply prunes
   // the ones removed from it (data/connections/agents are never pruned).
-  // `--manage` is the one-time opt-in flipping ui→code server-side; older
-  // servers omit `managed_by` → stays UI-managed (safe, no prune).
-  let codeManaged = resolvedOrg?.managed_by === "code";
-  if (opts.manage && resolvedOrg && !codeManaged) {
-    if (opts.dryRun) {
-      printText(
-        chalk.dim(
-          `(dry-run) Org "${orgSlug}" would become code-managed — showing the prune plan without flipping it.`
-        )
-      );
-    } else {
-      await client.setOrgManagedBy(orgSlug, "code");
-      printText(
-        chalk.yellow(
-          `Org "${orgSlug}" is now code-managed — apply will delete definitions removed from lobu.config.ts.`
-        )
-      );
-    }
-    codeManaged = true;
+  // `--manage` opts a UI-managed org into this. The plan is computed as
+  // code-managed so the prune is shown, but the org is flipped server-side only
+  // AFTER the plan + deletions are confirmed (`flipToCodeManaged`, below) — a
+  // cancelled apply must never leave the org flipped. Older servers omit
+  // `managed_by` → stays UI-managed (safe, no prune).
+  const orgIsCodeManaged = resolvedOrg?.managed_by === "code";
+  const willManage = opts.manage === true && !!resolvedOrg && !orgIsCodeManaged;
+  const codeManaged = orgIsCodeManaged || willManage;
+  if (willManage) {
+    printText(
+      chalk.yellow(
+        opts.dryRun
+          ? `(dry-run) Org "${orgSlug}" would become code-managed — previewing the prune plan without flipping it.`
+          : `Org "${orgSlug}" will become code-managed after you confirm — future applies prune definitions removed from lobu.config.ts.`
+      )
+    );
   }
+  // Idempotent flip, invoked only on a confirmed (non-dry-run) apply.
+  const flipToCodeManaged = async (): Promise<void> => {
+    if (!willManage) return;
+    await client.setOrgManagedBy(orgSlug, "code");
+    printText(chalk.yellow(`Org "${orgSlug}" is now code-managed.`));
+  };
 
   // Team org consistency comes from `defineConfig({ org, organizationId })` in
   // lobu.config.ts (committed) plus the `.lobu/project.json` link — apply does
@@ -1199,6 +1202,8 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     plan.counts.delete === 0 &&
     !hasPendingAuth
   ) {
+    // Honor --manage even with an empty plan (no deletes occur this run).
+    await flipToCodeManaged();
     printText(chalk.green("\nNothing to apply."));
     return;
   }
@@ -1224,6 +1229,10 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
       return;
     }
   }
+
+  // Plan + deletions confirmed — now it's safe to flip the org to code-managed
+  // (before executePlan, so the deletes run against a code-managed org).
+  await flipToCodeManaged();
 
   const pendingAuth: PendingAuthEntry[] = [];
   let applyErr: unknown;
