@@ -811,6 +811,13 @@ export interface ComputeDiffOptions {
    * never pruned. Default (false / UI-managed) reports those as `drift`.
    */
   codeManaged?: boolean;
+  /**
+   * Target org id. The entity/relationship-type list endpoints also return
+   * *public* definitions owned by OTHER orgs, which this org neither manages
+   * nor can delete — so a remote type whose `organization_id` differs is
+   * excluded from drift/delete entirely. Omit to disable the filter (tests).
+   */
+  orgId?: string;
 }
 
 export function computeDiff(
@@ -821,6 +828,14 @@ export function computeDiff(
   const rows: DiffRow[] = [];
   const only = opts.only;
   const codeManaged = opts.codeManaged ?? false;
+  // A remote entity/relationship type is this org's to manage (drift/prune)
+  // only when it's org-owned. The list endpoints also surface public types
+  // from other orgs (`organization_id` differs) — never drift or delete those.
+  const orgId = opts.orgId;
+  const ownsDefinition = (definitionOrgId: string | undefined): boolean =>
+    orgId === undefined ||
+    definitionOrgId === undefined ||
+    definitionOrgId === orgId;
 
   if (only !== "memory") {
     const remoteByAgent = new Map(remote.agents.map((a) => [a.agentId, a]));
@@ -901,6 +916,7 @@ export function computeDiff(
       rows.push(diffEntityType(entity, remoteEntityBySlug.get(entity.slug)));
     }
     for (const remoteEntity of remote.entityTypes) {
+      if (!ownsDefinition(remoteEntity.organization_id)) continue;
       if (!desiredEntitySlugs.has(remoteEntity.slug)) {
         // Code-managed: delete. The server refuses an entity-type delete while
         // instances exist (the data is exempt), surfacing a clear error.
@@ -923,6 +939,7 @@ export function computeDiff(
       rows.push(diffRelationshipType(rel, remoteRelBySlug.get(rel.slug)));
     }
     for (const remoteRel of remote.relationshipTypes) {
+      if (!ownsDefinition(remoteRel.organization_id)) continue;
       if (!desiredRelSlugs.has(remoteRel.slug)) {
         rows.push({
           kind: "relationship-type",

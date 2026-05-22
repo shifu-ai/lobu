@@ -28,6 +28,12 @@ export interface RemoteEntityType {
   description?: string;
   required?: string[];
   properties?: Record<string, unknown>;
+  /**
+   * Owning org id. The list endpoint also returns *public* types from OTHER
+   * orgs (`o.visibility = 'public'`), so prune must compare this against the
+   * target org and never delete a type this org doesn't own.
+   */
+  organization_id?: string;
 }
 
 export interface RemoteRelationshipType {
@@ -35,6 +41,8 @@ export interface RemoteRelationshipType {
   name?: string;
   description?: string;
   rules?: Array<{ source: string; target: string }>;
+  /** Owning org id — see RemoteEntityType.organization_id (public-type guard). */
+  organization_id?: string;
 }
 
 export interface RemoteOrg {
@@ -193,6 +201,10 @@ function hoistEntityTypeSchema(
     slug: row.slug,
     ...(row.name !== undefined ? { name: row.name } : {}),
     ...(row.description !== undefined ? { description: row.description } : {}),
+    // Preserve owning org so prune can skip public types from other orgs.
+    ...(row.organization_id !== undefined
+      ? { organization_id: row.organization_id }
+      : {}),
   };
   if (isRecord(schema)) {
     if (isRecord(schema.properties)) out.properties = schema.properties;

@@ -1209,7 +1209,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     skipSchemaForConnectorKeys: locallyDeclaredConnectorKeys(state),
   });
 
-  const plan = computeDiff(state, remote, { only: opts.only, codeManaged });
+  const plan = computeDiff(state, remote, {
+    only: opts.only,
+    codeManaged,
+    ...(resolvedOrg?.id ? { orgId: resolvedOrg.id } : {}),
+  });
   printText(renderPlan(plan));
 
   if (opts.dryRun) {
