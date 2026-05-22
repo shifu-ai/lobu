@@ -404,13 +404,17 @@ function platformConfigChanged(
   for (const key of keys) {
     const d = desiredConfig[key];
     const r = remoteConfig[key];
-    // Secret-bearing keys come back opaque (redacted `***` or a `secret://`
-    // ref), so the resolved cleartext the CLI sent can never round-trip-match.
-    // Treat an opaque remote value as unchanged (write-only secret, like
-    // auth-profile credentials) so the platform isn't needlessly restarted;
-    // non-secret fields still diff normally. (A rotated secret isn't
-    // auto-detected here — re-push it explicitly if needed.)
-    if (isOpaqueRemoteConfigValue(r)) continue;
+    if (isOpaqueRemoteConfigValue(r)) {
+      // Opaque remote (redacted `***` or a `secret://` ref): the resolved
+      // cleartext the CLI sent can never round-trip-match, so we can't tell a
+      // rotation from a no-op here. Treat as unchanged ONLY while the key is
+      // still declared — apply re-pushes every desired platform idempotently
+      // (like provider keys), so a rotated secret still reaches the server
+      // without a false "config changed" plan row. A key ABSENT from desired
+      // is a real removal → changed.
+      if (!(key in desiredConfig)) return true;
+      continue;
+    }
     if (!deepEqual(d, r)) return true;
   }
   return false;

@@ -18,6 +18,7 @@ import {
   computeDiff,
   type DiffPlan,
   type DiffRow,
+  type DiffVerb,
   type RemoteSnapshot,
 } from "./diff.js";
 import {
@@ -621,28 +622,45 @@ async function executePlan(
     }
   }
 
-  // 3) Platforms
+  // 3) Platforms — upsert EVERY desired platform idempotently, mirroring the
+  // provider-key push (2b), not just the non-noop diff rows. Platform secrets
+  // (botToken, signingSecret, …) come back from the server opaque (redacted or
+  // `secret://`), so the CLI can never diff a rotated/removed secret — those
+  // changes would otherwise be silent noops the plan skips. The server's PUT is
+  // idempotent: unchanged config → `noop` (no restart), changed → `willRestart`.
+  // We surface the planned verb when the diff produced a row, and still report a
+  // server-side restart for a secret rotation the diff couldn't see.
+  const platformVerbByStableId = new Map<string, DiffVerb>();
   for (const row of rowsByKind("platform")) {
-    if (row.kind !== "platform") continue;
-    const desired = row.desired;
-    if (!desired) continue;
-    const result = await ctx.client.upsertPlatform(
-      row.agentId,
-      desired.stableId,
-      {
-        platform: desired.type,
-        ...(desired.name ? { name: desired.name } : {}),
-        config: desired.config,
+    if (row.kind === "platform") platformVerbByStableId.set(row.id, row.verb);
+  }
+  for (const agent of ctx.state.agents) {
+    for (const platform of agent.platforms) {
+      const result = await ctx.client.upsertPlatform(
+        agent.metadata.agentId,
+        platform.stableId,
+        {
+          platform: platform.type,
+          ...(platform.name ? { name: platform.name } : {}),
+          config: platform.config,
+        }
+      );
+      const verb = platformVerbByStableId.get(platform.stableId);
+      const id = `${agent.metadata.agentId}/${platform.stableId}`;
+      if (verb) {
+        const detail = result.willRestart
+          ? "(restarted)"
+          : result.noop
+            ? "(noop on server)"
+            : undefined;
+        printText(renderProgress(verb, "platform", id, detail));
+      } else if (result.willRestart) {
+        // No plan row (the diff couldn't see the opaque secret change) but the
+        // server applied a different config — surface the rotation.
+        printText(renderProgress("update", "platform", id, "(rotated secret)"));
       }
-    );
-    const detail = result.willRestart
-      ? "(restarted)"
-      : result.noop
-        ? "(noop on server)"
-        : undefined;
-    printText(
-      renderProgress(row.verb, "platform", `${row.agentId}/${row.id}`, detail)
-    );
+      // else: truly unchanged (no plan row, server noop) → stay silent.
+    }
   }
 
   // 3b) Declarative channel bindings — reconcile after the platform upserts

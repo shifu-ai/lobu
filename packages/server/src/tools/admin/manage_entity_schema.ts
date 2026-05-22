@@ -777,6 +777,37 @@ async function requireRelationshipType(
   return { typeId, sql };
 }
 
+/**
+ * Resolve an inverse relationship type by slug, scoped to the caller's own org
+ * or a PUBLIC type from another org (same visibility filter as read mode). A
+ * PRIVATE type owned by another org is invisible here — without this scoping
+ * the lookup matched any org's row by slug, letting one tenant link to (and,
+ * via the reciprocal back-link, mutate) another tenant's relationship type.
+ * Returns the row id plus whether the caller owns it; the reciprocal back-link
+ * is only written when the caller owns the inverse, never onto a foreign public
+ * type.
+ */
+async function resolveInverseType(
+  sql: DbClient,
+  inverseSlug: string,
+  ctx: ToolContext
+): Promise<{ id: number; ownedByCaller: boolean }> {
+  const rows = await sql`
+    SELECT rt.id, (rt.organization_id = ${ctx.organizationId}) AS owned
+    FROM entity_relationship_types rt
+    LEFT JOIN organization o ON o.id = rt.organization_id
+    WHERE rt.slug = ${inverseSlug}
+      AND rt.deleted_at IS NULL
+      AND (rt.organization_id = ${ctx.organizationId} OR o.visibility = 'public')
+    ORDER BY (rt.organization_id = ${ctx.organizationId}) DESC, rt.id ASC
+    LIMIT 1
+  `;
+  if (rows.length === 0) {
+    throw new Error(`Inverse relationship type "${inverseSlug}" not found`);
+  }
+  return { id: Number(rows[0].id), ownedByCaller: Boolean(rows[0].owned) };
+}
+
 function buildRelationshipIdentityMetadata(
   rules: AutoCreateWhenRule[] | undefined,
   existingMetadata: unknown,
@@ -913,17 +944,11 @@ async function rtHandleCreate(
   }
 
   let inverseTypeId: number | null = null;
+  let inverseOwnedByCaller = false;
   if (args.inverse_type_slug) {
-    const inverseRows = await sql`
-      SELECT id FROM entity_relationship_types
-      WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
-      ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
-      LIMIT 1
-    `;
-    if (inverseRows.length === 0) {
-      throw new Error(`Inverse relationship type "${args.inverse_type_slug}" not found`);
-    }
-    inverseTypeId = Number(inverseRows[0].id);
+    const inverse = await resolveInverseType(sql, args.inverse_type_slug, ctx);
+    inverseTypeId = inverse.id;
+    inverseOwnedByCaller = inverse.ownedByCaller;
   }
 
   const identityMetadata = buildRelationshipIdentityMetadata(args.auto_create_when, null);
@@ -951,7 +976,9 @@ async function rtHandleCreate(
   `;
   const typeId = Number((inserted[0] as { id: unknown }).id);
 
-  if (inverseTypeId !== null) {
+  // Only write the reciprocal back-link when the caller owns the inverse type.
+  // A public inverse from another org must never be mutated by this tenant.
+  if (inverseTypeId !== null && inverseOwnedByCaller) {
     await sql`
       UPDATE entity_relationship_types
       SET inverse_type_id = ${typeId}, updated_at = current_timestamp
@@ -988,18 +1015,9 @@ async function rtHandleUpdate(
     if (args.inverse_type_slug === null || args.inverse_type_slug === '') {
       inverseTypeId = null;
     } else {
-      const inverseRows = await sql`
-        SELECT id FROM entity_relationship_types
-        WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
-        ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
-        LIMIT 1
-      `;
-      if (inverseRows.length === 0) {
-        throw new Error(`Inverse relationship type "${args.inverse_type_slug}" not found`);
-      }
-      const resolvedId = Number(inverseRows[0].id);
-      if (resolvedId === typeId) throw new Error('inverse_type_id cannot point to self');
-      inverseTypeId = resolvedId;
+      const inverse = await resolveInverseType(sql, args.inverse_type_slug, ctx);
+      if (inverse.id === typeId) throw new Error('inverse_type_id cannot point to self');
+      inverseTypeId = inverse.id;
     }
   }
 
@@ -1069,9 +1087,16 @@ async function rtHandleDelete(
     );
   }
 
+  // Set status='archived' alongside deleted_at: the org/slug uniqueness index
+  // is partial on `WHERE status = 'active'` (NOT `deleted_at IS NULL`, unlike
+  // entity_types), so leaving status='active' keeps the tombstoned row in the
+  // index and a later re-create of the same slug (e.g. `lobu apply` prune then
+  // re-add) hits a unique violation. 'archived' is the only other status the
+  // check constraint allows; it vacates the index. The create dedup filters on
+  // deleted_at IS NULL, so the archived tombstone never blocks the re-create.
   await sql`
     UPDATE entity_relationship_types
-    SET deleted_at = current_timestamp, updated_at = current_timestamp
+    SET deleted_at = current_timestamp, status = 'archived', updated_at = current_timestamp
     WHERE id = ${typeId}
   `;
 

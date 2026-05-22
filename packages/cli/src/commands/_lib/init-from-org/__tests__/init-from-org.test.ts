@@ -430,10 +430,18 @@ describe("lobu init --from-org", () => {
                   {
                     key: "stripe",
                     name: "Stripe",
+                    // Real connector auth_schema: a `methods` array (env_keys
+                    // method with `fields[].key`), NOT a JSON Schema. The
+                    // credential KEY comes from `fields[].key` (`api_key`).
                     auth_schema: {
-                      type: "object",
-                      properties: { api_key: { type: "string" } },
-                      required: ["api_key"],
+                      methods: [
+                        {
+                          type: "env_keys",
+                          fields: [
+                            { key: "api_key", required: true, secret: true },
+                          ],
+                        },
+                      ],
                     },
                   },
                 ],
@@ -515,5 +523,175 @@ describe("lobu init --from-org", () => {
     } finally {
       process.env.BOT_TELEGRAM_BOTTOKEN = undefined;
     }
+  });
+
+  test("MCP oauth clientSecret → emits secret() AND imports it (no missing-import)", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        // Agent config whose ONLY secret-bearing field is an MCP oauth
+        // clientSecret — no providers/platforms/auth profiles — so a dropped
+        // `secret` import would produce a config that references `secret`
+        // without importing it (the B1 regression).
+        "/agents/mcpbot/config": () => ({
+          updatedAt: 0,
+          mcpServers: {
+            notion: {
+              url: "https://mcp.notion.test",
+              type: "streamable-http",
+              oauth: {
+                authUrl: "https://notion.test/oauth/authorize",
+                tokenUrl: "https://notion.test/oauth/token",
+                clientId: "public-id",
+                clientSecret: "super-secret",
+              },
+            },
+          },
+        }),
+        "/agents": () => ({ agents: [{ agentId: "mcpbot", name: "MCP Bot" }] }),
+        "watchers?include_details": () => ({ watchers: [] }),
+        manage_entity_schema: () => ({
+          entity_types: [],
+          relationship_types: [],
+        }),
+        manage_auth_profiles: () => ({ auth_profiles: [] }),
+        manage_connections: () => ({ connections: [] }),
+      }),
+    });
+
+    const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
+    // clientSecret is a write-only secret() placeholder, never the stored value.
+    expect(source).toContain("clientSecret: secret(");
+    expect(source).not.toContain("super-secret");
+    // ...AND the `secret` import is present so the file compiles.
+    expect(source).toMatch(
+      /import\s*\{[^}]*\bsecret\b[^}]*\}\s*from\s*"@lobu\/sdk"/s
+    );
+
+    // Round-trips: jiti loads the regenerated config without a missing-import
+    // ReferenceError, proving the import is wired.
+    process.env.NOTION_MCP_CLIENT_SECRET = "filled-in";
+    try {
+      const { state } = await loadDesiredStateFromConfig({ cwd: dir });
+      expect(state.agents[0]?.metadata.agentId).toBe("mcpbot");
+    } finally {
+      process.env.NOTION_MCP_CLIENT_SECRET = undefined;
+    }
+  });
+
+  test("oauth_app profile → credentials keyed by the connector's oauth method (clientIdKey/clientSecretKey)", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        "/agents/lone/config": () => ({ updatedAt: 0 }),
+        "/agents": () => ({ agents: [{ agentId: "lone", name: "Lone" }] }),
+        "watchers?include_details": () => ({ watchers: [] }),
+        manage_entity_schema: () => ({
+          entity_types: [],
+          relationship_types: [],
+        }),
+        manage_auth_profiles: () => ({
+          auth_profiles: [
+            {
+              slug: "slack-app",
+              display_name: "Slack OAuth app",
+              connector_key: "slack",
+              profile_kind: "oauth_app",
+              status: "active",
+            },
+          ],
+        }),
+        manage_connections: (body) =>
+          body.action === "list_connector_definitions"
+            ? {
+                connector_definitions: [
+                  {
+                    key: "slack",
+                    name: "Slack",
+                    // oauth method declares explicit credential key names.
+                    auth_schema: {
+                      methods: [
+                        {
+                          type: "oauth",
+                          provider: "slack",
+                          requiredScopes: ["chat:write"],
+                          clientIdKey: "SLACK_OAUTH_CLIENT_ID",
+                          clientSecretKey: "SLACK_OAUTH_CLIENT_SECRET",
+                        },
+                      ],
+                    },
+                  },
+                ],
+              }
+            : { connections: [] },
+      }),
+    });
+
+    const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
+    // Both oauth credential keys come from the method (NOT the SLACK_APP_CLIENT_SECRET
+    // placeholder), and the stale rename-TODO is gone.
+    expect(source).toContain("SLACK_OAUTH_CLIENT_ID: secret(");
+    expect(source).toContain("SLACK_OAUTH_CLIENT_SECRET: secret(");
+    expect(source).not.toContain("rename credential keys");
+  });
+
+  test("local skill judged domains + judges round-trip into SKILL.md frontmatter", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        "/agents/skiller/config": () => ({
+          updatedAt: 0,
+          skillsConfig: {
+            skills: [
+              {
+                name: "research",
+                description: "web research",
+                enabled: true,
+                content: "Do research.",
+                networkConfig: {
+                  allowedDomains: ["wikipedia.org"],
+                  judgedDomains: [{ domain: "reddit.com", judge: "careful" }],
+                  judges: { careful: "Block anything risky." },
+                },
+              },
+            ],
+          },
+        }),
+        "/agents": () => ({
+          agents: [{ agentId: "skiller", name: "Skiller" }],
+        }),
+        "watchers?include_details": () => ({ watchers: [] }),
+        manage_entity_schema: () => ({
+          entity_types: [],
+          relationship_types: [],
+        }),
+        manage_auth_profiles: () => ({ auth_profiles: [] }),
+        manage_connections: () => ({ connections: [] }),
+      }),
+    });
+
+    const skillMd = readFileSync(
+      join(dir, "agents/skiller/skills/research/SKILL.md"),
+      "utf-8"
+    );
+    // Judged domains emit as a `network.judge` list; named judge policies as a
+    // top-level `judges:` map — exactly what parseSkillFrontmatter reads back.
+    expect(skillMd).toContain("judge:");
+    expect(skillMd).toContain('domain: "reddit.com"');
+    expect(skillMd).toContain('judge: "careful"');
+    expect(skillMd).toContain("judges:");
+    expect(skillMd).toContain('careful: "Block anything risky."');
   });
 });

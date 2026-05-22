@@ -153,5 +153,71 @@ describe('prune (server gate)', () => {
         false
       );
     });
+
+    it('re-creates a relationship type with the same slug after delete (prune → re-add)', async () => {
+      // The org/slug uniqueness index is partial on `status = 'active'`, so a
+      // delete that only set deleted_at left the tombstone in the index and a
+      // re-create of the same slug hit a unique violation. delete now also sets
+      // status='archived' to vacate the index — `lobu apply` prune then re-add
+      // must round-trip.
+      await owner.entity_schema.createRelType({ slug: 'prune-readd', name: 'First' });
+      await owner.entity_schema.deleteRelType('prune-readd');
+      await owner.entity_schema.createRelType({ slug: 'prune-readd', name: 'Second' });
+      const got = (await owner.entity_schema.getRelType('prune-readd')) as {
+        relationship_type: { name: string; status: string } | null;
+      };
+      expect(got.relationship_type?.name).toBe('Second');
+      expect(got.relationship_type?.status).toBe('active');
+    });
+  });
+
+  describe('relationship-type inverse scoping (tenant isolation)', () => {
+    it("rejects inverse_type_slug that resolves to another org's PRIVATE type and never mutates it", async () => {
+      const sql = getTestDb();
+      const other = await createTestOrganization({ name: 'Private Inverse Org' });
+      await sql`
+        INSERT INTO entity_relationship_types (organization_id, slug, name, status, created_at, updated_at)
+        VALUES (${other.id}, ${'foreign-private-inv'}, 'Foreign Private', 'active', NOW(), NOW())
+      `;
+      // A foreign PRIVATE type is invisible: referencing it as an inverse must
+      // fail rather than silently linking across tenants.
+      await expect(
+        owner.entity_schema.createRelType({
+          slug: 'mine-with-priv-inverse',
+          name: 'Mine',
+          inverse_type_slug: 'foreign-private-inv',
+        })
+      ).rejects.toThrow(/not found/i);
+      // ...and the foreign row's inverse_type_id is untouched.
+      const [foreign] = await sql<{ inverse_type_id: number | null }[]>`
+        SELECT inverse_type_id FROM entity_relationship_types
+        WHERE organization_id = ${other.id} AND slug = ${'foreign-private-inv'}
+      `;
+      expect(foreign?.inverse_type_id).toBeNull();
+    });
+
+    it('references a PUBLIC foreign inverse type but never writes the reciprocal back-link onto it', async () => {
+      const sql = getTestDb();
+      const other = await createTestOrganization({
+        name: 'Public Inverse Org',
+        visibility: 'public',
+      });
+      await sql`
+        INSERT INTO entity_relationship_types (organization_id, slug, name, status, created_at, updated_at)
+        VALUES (${other.id}, ${'foreign-public-inv'}, 'Foreign Public', 'active', NOW(), NOW())
+      `;
+      await owner.entity_schema.createRelType({
+        slug: 'mine-with-pub-inverse',
+        name: 'Mine',
+        inverse_type_slug: 'foreign-public-inv',
+      });
+      // The reciprocal back-link must NOT be written onto the foreign public row
+      // (only own-org inverses get the bidirectional link).
+      const [foreign] = await sql<{ inverse_type_id: number | null }[]>`
+        SELECT inverse_type_id FROM entity_relationship_types
+        WHERE organization_id = ${other.id} AND slug = ${'foreign-public-inv'}
+      `;
+      expect(foreign?.inverse_type_id).toBeNull();
+    });
   });
 });

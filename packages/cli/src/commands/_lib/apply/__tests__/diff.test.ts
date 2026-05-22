@@ -352,6 +352,48 @@ describe("apply diff — platforms", () => {
     const platformRow = plan.rows.find((r) => r.kind === "platform");
     expect(platformRow?.verb).toBe("update");
   });
+
+  test("update when a secret-bearing config key is removed (opaque remote, absent in desired)", () => {
+    // The remote still carries `signingSecret` as an opaque value, but the
+    // desired config dropped it. A removal must surface as `update`, not be
+    // swallowed by the opaque-secret = unchanged rule.
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        platforms: [
+          {
+            stableId: "triage-slack",
+            type: "slack",
+            config: { botToken: "$SLACK_BOT_TOKEN" },
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      platformsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-slack",
+              platform: "slack",
+              config: {
+                platform: "slack",
+                botToken: "***oken",
+                signingSecret: "***cret",
+              },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("update");
+  });
 });
 
 describe("apply diff — memory schema", () => {

@@ -152,9 +152,16 @@ class IdentMinter {
 class SecretCollector {
   readonly names = new Set<string>();
 
+  // Coupled to the ImportTracker so every `secret("…")` we emit also registers
+  // the `secret` import. Decoupling them (caller calls `imports.use("secret")`
+  // separately) silently dropped the import on the MCP-oauth `clientSecret`
+  // path, producing a config that referenced `secret` without importing it.
+  constructor(private readonly imports: ImportTracker) {}
+
   /** Register a var name and return the `secret("NAME")` TS expression. */
   ref(name: string): string {
     this.names.add(name);
+    this.imports.use("secret");
     return `secret(${str(name)})`;
   }
 }
@@ -168,25 +175,50 @@ function envVarFor(slug: string, suffix: string): string {
 /**
  * The credential field names a connector's auth schema expects. `lobu apply`
  * sends `credentials: { <field>: <value> }` and the server validates `<field>`
- * against the connector's `auth_schema`, so the emitted credential KEY must be a
- * real auth-schema field — not an env-var-derived name. We return the required
- * fields (or all `properties` keys when nothing is explicitly required), or
- * `null` when the schema has no usable field list (caller falls back).
+ * against the connector's `auth_schema.methods` (see the server's
+ * connection-helpers `getOAuthCredentialKeys` / env-key extraction), so the
+ * emitted credential KEY must be a real auth-schema field — not an
+ * env-var-derived name.
+ *
+ * `auth_schema` is the connector's `ConnectorAuthSchema` (`{ methods: [...] }`),
+ * NOT a JSON Schema. We pick the keys for the profile kind being emitted:
+ *   - `env`       → the `env_keys` method's `fields[].key`
+ *   - `oauth_app` → the `oauth` method's `clientIdKey`/`clientSecretKey`
+ *     (defaulting to `${PROVIDER}_CLIENT_ID` / `_CLIENT_SECRET`, mirroring the
+ *     server default)
+ * Returns `null` when the schema has no matching method (caller falls back to a
+ * TODO placeholder).
  */
 function authSchemaFields(
-  schema: Record<string, unknown> | null | undefined
+  schema: Record<string, unknown> | null | undefined,
+  profileKind: "env" | "oauth_app"
 ): string[] | null {
   if (!schema || typeof schema !== "object") return null;
-  const props = schema.properties;
-  if (!props || typeof props !== "object") return null;
-  const allFields = Object.keys(props as Record<string, unknown>);
-  if (allFields.length === 0) return null;
-  const required = Array.isArray(schema.required)
-    ? (schema.required as unknown[]).filter(
-        (r): r is string => typeof r === "string" && allFields.includes(r)
-      )
+  const methods = Array.isArray(schema.methods)
+    ? (schema.methods as Array<Record<string, unknown>>)
     : [];
-  return required.length > 0 ? required : allFields;
+
+  if (profileKind === "oauth_app") {
+    const oauth = methods.find((m) => m.type === "oauth");
+    if (!oauth || typeof oauth.provider !== "string") return null;
+    const providerUpper = oauth.provider.toUpperCase();
+    const clientIdKey =
+      typeof oauth.clientIdKey === "string" && oauth.clientIdKey.trim()
+        ? oauth.clientIdKey
+        : `${providerUpper}_CLIENT_ID`;
+    const clientSecretKey =
+      typeof oauth.clientSecretKey === "string" && oauth.clientSecretKey.trim()
+        ? oauth.clientSecretKey
+        : `${providerUpper}_CLIENT_SECRET`;
+    return [clientIdKey, clientSecretKey];
+  }
+
+  const envMethod = methods.find((m) => m.type === "env_keys");
+  const fields = Array.isArray(envMethod?.fields) ? envMethod.fields : [];
+  const keys = (fields as Array<Record<string, unknown>>)
+    .map((f) => f.key)
+    .filter((k): k is string => typeof k === "string" && k.length > 0);
+  return keys.length > 0 ? keys : null;
 }
 
 // ── Imports tracking ─────────────────────────────────────────────────────────
@@ -243,7 +275,6 @@ function emitAgent(
   const providers = settings?.installedProviders ?? [];
   if (providers.length > 0) {
     const prefs = settings?.providerModelPreferences ?? {};
-    imports.use("secret");
     const items = providers.map((p) => {
       const id = p.providerId;
       const model = prefs[id];
@@ -384,13 +415,11 @@ function emitAgent(
         if (typeof v === "string") {
           const explicitVar = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
           if (explicitVar?.[1]) {
-            imports.use("secret");
             return `${k}: ${secrets.ref(explicitVar[1])}`;
           }
           // Opaque secret (redacted `***…` or internal `secret://…`): derive a
           // deterministic env-var name from the agent + config key.
           if (v.startsWith("***") || v.startsWith("secret://")) {
-            imports.use("secret");
             return `${k}: ${secrets.ref(envVarFor(agent.agentId, `${p.platform}_${k}`.toUpperCase()))}`;
           }
           return `${k}: ${str(v)}`;
@@ -503,12 +532,36 @@ function emitSkillFile(
     if (net?.deniedDomains?.length) {
       fm.push(`  deny: [${net.deniedDomains.map((d) => str(d)).join(", ")}]`);
     }
+    // Judged domains round-trip as a `network.judge` YAML list of
+    // `{ domain, judge? }` — the exact shape the SKILL.md frontmatter loader
+    // reads back (parseSkillFrontmatter → `fm.network.judge`). Omitting these
+    // (the prior behaviour) silently dropped per-skill egress-judge rules.
+    if (net?.judgedDomains?.length) {
+      fm.push("  judge:");
+      for (const rule of net.judgedDomains) {
+        fm.push(`    - domain: ${str(rule.domain)}`);
+        if (rule.judge) fm.push(`      judge: ${str(rule.judge)}`);
+      }
+    }
+  }
+  // Named judge policies (referenced by `network.judge[].judge`) live at the
+  // frontmatter top level under `judges:` (str() emits a JSON-quoted scalar,
+  // which is valid YAML even for multi-line policy text).
+  if (net?.judges && Object.keys(net.judges).length > 0) {
+    fm.push("judges:");
+    for (const [name, policy] of Object.entries(net.judges)) {
+      fm.push(`  ${name}: ${str(policy)}`);
+    }
   }
   if (skill.nixPackages?.length) {
     fm.push(
       `nixPackages: [${skill.nixPackages.map((p) => str(p)).join(", ")}]`
     );
   }
+  // NOTE: skill-level `mcpServers` (rare) are not emitted yet — the stored
+  // shape is SkillMcpServer[] while the frontmatter loader expects a YAML
+  // record, and secret-bearing fields would need `$VAR` placeholders. Agent
+  // mcpServers DO round-trip (emitMcpServers). Tracked as a follow-up.
   const body = skill.content ?? "";
   return `---\n${fm.join("\n")}\n---\n${body}\n`;
 }
@@ -669,9 +722,8 @@ function emitAuthProfile(
     !interactive &&
     (p.profile_kind === "env" || p.profile_kind === "oauth_app")
   ) {
-    imports.use("secret");
     const fieldKeys = authSchemas.has(p.connector_key)
-      ? authSchemaFields(authSchemas.get(p.connector_key))
+      ? authSchemaFields(authSchemas.get(p.connector_key), p.profile_kind)
       : null;
     if (fieldKeys && fieldKeys.length > 0) {
       // Emit `credentials: { <field>: secret("<SLUG>_<FIELD>") }` for each real
@@ -870,7 +922,7 @@ export function generateProject(
 ): GeneratedProject {
   const imports = new ImportTracker();
   imports.use("defineConfig");
-  const secrets = new SecretCollector();
+  const secrets = new SecretCollector(imports);
   const minter = new IdentMinter();
   const files: Array<{ relPath: string; body: string }> = [];
   const warnings: string[] = [];
