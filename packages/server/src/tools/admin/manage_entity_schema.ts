@@ -917,6 +917,7 @@ async function rtHandleCreate(
     const inverseRows = await sql`
       SELECT id FROM entity_relationship_types
       WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
+      ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
       LIMIT 1
     `;
     if (inverseRows.length === 0) {
@@ -990,6 +991,7 @@ async function rtHandleUpdate(
       const inverseRows = await sql`
         SELECT id FROM entity_relationship_types
         WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
+        ORDER BY (organization_id = ${ctx.organizationId}) DESC, id ASC
         LIMIT 1
       `;
       if (inverseRows.length === 0) {
