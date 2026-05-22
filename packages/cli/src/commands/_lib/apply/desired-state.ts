@@ -824,7 +824,7 @@ export async function loadProjectConfig(
  */
 export async function loadDesiredStateFromConfig(
   opts: LoadDesiredStateOptions
-): Promise<{ state: DesiredState; configPath: string }> {
+): Promise<{ state: DesiredState; configPath: string; warnings: string[] }> {
   const env = opts.env ?? process.env;
   const { project: typedProject, configPath } = await loadProjectConfig(
     opts.cwd
@@ -873,5 +873,10 @@ export async function loadDesiredStateFromConfig(
       opts.cwd
     );
   }
-  return { state, configPath };
+  // Surface load-time warnings to `lobu apply` (which prints them). #1010's
+  // "ignored connectors because [memory] is disabled" case is obsolete here —
+  // lobu.config.ts has no `[memory].enabled` gate, so connectors always load —
+  // but the channel is kept so future TS-loader warnings flow to the operator.
+  const warnings: string[] = [];
+  return { state, configPath, warnings };
 }
