@@ -27,6 +27,7 @@ function buildState(
 ): DesiredState {
   return {
     agents,
+    prune: false,
     memorySchema: { entityTypes: [], relationshipTypes: [] },
     watchers: [],
     connectors: { definitions: [], authProfiles: [], connections: [] },
@@ -1081,7 +1082,7 @@ describe("apply diff — connectors", () => {
   });
 });
 
-describe("apply diff — code-managed prune", () => {
+describe("apply diff — prune", () => {
   // Remote state that has definitions + a connection the desired config drops.
   function remoteWithExtras(): RemoteSnapshot {
     return {
@@ -1110,7 +1111,7 @@ describe("apply diff — code-managed prune", () => {
     });
   }
 
-  test("UI-managed (default) reports removed definitions as drift, never delete", () => {
+  test("default (prune off) reports removed definitions as drift, never delete", () => {
     const plan = computeDiff(desiredKeepingLead(), remoteWithExtras());
     expect(plan.counts.delete).toBe(0);
     expect(plan.rows.some((r) => r.verb === "delete")).toBe(false);
@@ -1120,9 +1121,9 @@ describe("apply diff — code-managed prune", () => {
     ).toBe("drift");
   });
 
-  test("code-managed deletes removed entity/relationship/watcher/connector definitions", () => {
+  test("prune deletes removed entity/relationship/watcher/connector definitions", () => {
     const plan = computeDiff(desiredKeepingLead(), remoteWithExtras(), {
-      codeManaged: true,
+      prune: true,
     });
     const deletes = plan.rows.filter((r) => r.verb === "delete");
     const deletedIds = deletes.map((r) => `${r.kind}:${r.id}`).sort();
@@ -1139,7 +1140,7 @@ describe("apply diff — code-managed prune", () => {
     ).toBe("noop");
   });
 
-  test("code-managed never deletes data, connections, or agents", () => {
+  test("prune never deletes data, connections, or agents", () => {
     const desired = buildState(
       [
         buildDesiredAgent("kept", {
@@ -1156,7 +1157,7 @@ describe("apply diff — code-managed prune", () => {
       agentSettings: new Map([["kept", null]]),
       platformsByAgent: new Map([["kept", []]]),
     };
-    const plan = computeDiff(desired, remote, { codeManaged: true });
+    const plan = computeDiff(desired, remote, { prune: true });
     // Connection removed from config is drift (exempt), not delete.
     expect(
       plan.rows.find((r) => r.kind === "connection" && r.id === "stale-conn")
@@ -1168,7 +1169,7 @@ describe("apply diff — code-managed prune", () => {
     ).toBe("drift");
   });
 
-  test("code-managed prune never deletes public types owned by another org", () => {
+  test("prune never deletes public types owned by another org", () => {
     // The list endpoint returns this org's types PLUS public types from other
     // orgs. With orgId set, a foreign-org type must not be pruned even if it's
     // absent from the config.
@@ -1185,7 +1186,7 @@ describe("apply diff — code-managed prune", () => {
       ],
     };
     const plan = computeDiff(desiredKeepingLead(), remote, {
-      codeManaged: true,
+      prune: true,
       orgId: "org_self",
     });
     const deletedIds = plan.rows
@@ -1216,7 +1217,7 @@ describe("apply diff — code-managed prune", () => {
       ],
     };
     const plan = computeDiff(desiredKeepingLead(), remote, {
-      codeManaged: true,
+      prune: true,
       orgId: "org_self",
     });
     const leadRow = plan.rows.find(
@@ -1242,7 +1243,7 @@ describe("apply diff — code-managed prune", () => {
       },
     });
     const plan = computeDiff(desired, remoteWithExtras(), {
-      codeManaged: true,
+      prune: true,
     });
     // Can't map remote connectors to the unnamed local def → never delete them.
     expect(
@@ -1254,11 +1255,11 @@ describe("apply diff — code-managed prune", () => {
 
   test("delete rows render with a removed-from-config note + summary count", () => {
     const plan = computeDiff(desiredKeepingLead(), remoteWithExtras(), {
-      codeManaged: true,
+      prune: true,
     });
     expect(renderPlan(plan)).toContain("will be deleted");
     expect(renderSummary(plan)).toContain("4 delete");
-    // UI-managed summary stays clean (no delete part).
+    // Prune-off summary stays clean (no delete part).
     expect(
       renderSummary(computeDiff(desiredKeepingLead(), emptyRemote()))
     ).not.toContain("delete");

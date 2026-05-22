@@ -191,6 +191,13 @@ export interface DesiredAgent {
 export interface DesiredState {
   agents: DesiredAgent[];
   /**
+   * When true (`defineConfig({ prune: true })`), `lobu apply` deletes org-owned
+   * definitions (entity/relationship types, watchers, connector definitions)
+   * absent from this config — including ones created in the UI. Data,
+   * connections, auth profiles, and agents are never pruned. Default false.
+   */
+  prune: boolean;
+  /**
    * Org metadata from `defineConfig` — the org slug `lobu apply` defaults to,
    * the `organizationId` it matches against, and the name/description shown
    * when telling the operator to create the org.

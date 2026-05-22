@@ -669,6 +669,7 @@ export function mapProjectToDesiredState(
 
   return {
     agents,
+    prune: project.prune ?? false,
     ...(Object.keys(memory).length > 0 ? { memory } : {}),
     memorySchema: { entityTypes, relationshipTypes },
     watchers,

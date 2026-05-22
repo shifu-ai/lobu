@@ -94,6 +94,20 @@ export class LobuRestClient {
         ...headersToRecord(options.headers),
       },
       signal: controller.signal,
+      // The generated SSE client retries forever by default: a non-OK response
+      // (401/404/5xx) or a network failure throws inside its read loop, fires
+      // onSseError, then sleeps and reconnects with no attempt cap — so a
+      // failed stream NEVER terminates and the async iterator below hangs
+      // indefinitely. Cap the attempts and surface the error so callers reject
+      // instead of hanging. An aborted signal already breaks the loop cleanly.
+      sseMaxRetryAttempts: options.maxRetryAttempts ?? 1,
+      onSseError: (error) => {
+        // Don't treat a caller-initiated abort as a stream failure — that path
+        // is a clean shutdown, not an error to propagate.
+        if (controller.signal.aborted) return;
+        if (pumpError === undefined) pumpError = error;
+        wakeReader();
+      },
       onSseEvent: (event) => {
         queue.push({
           event: event.event ?? "message",
@@ -112,7 +126,7 @@ export class LobuRestClient {
           // only data payloads, so the queue is the public SDK surface.
         }
       } catch (error) {
-        pumpError = error;
+        if (pumpError === undefined) pumpError = error;
       } finally {
         done = true;
         wakeReader();

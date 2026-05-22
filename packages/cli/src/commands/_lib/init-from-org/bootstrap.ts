@@ -23,6 +23,7 @@ import type {
   RemoteAgent,
   RemoteAuthProfile,
   RemoteConnection,
+  RemoteConnectorDefinition,
   RemoteEntityType,
   RemoteFeed,
   RemotePlatform,
@@ -162,6 +163,30 @@ class SecretCollector {
 function envVarFor(slug: string, suffix: string): string {
   const base = slug.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase();
   return `${base}_${suffix}`;
+}
+
+/**
+ * The credential field names a connector's auth schema expects. `lobu apply`
+ * sends `credentials: { <field>: <value> }` and the server validates `<field>`
+ * against the connector's `auth_schema`, so the emitted credential KEY must be a
+ * real auth-schema field — not an env-var-derived name. We return the required
+ * fields (or all `properties` keys when nothing is explicitly required), or
+ * `null` when the schema has no usable field list (caller falls back).
+ */
+function authSchemaFields(
+  schema: Record<string, unknown> | null | undefined
+): string[] | null {
+  if (!schema || typeof schema !== "object") return null;
+  const props = schema.properties;
+  if (!props || typeof props !== "object") return null;
+  const allFields = Object.keys(props as Record<string, unknown>);
+  if (allFields.length === 0) return null;
+  const required = Array.isArray(schema.required)
+    ? (schema.required as unknown[]).filter(
+        (r): r is string => typeof r === "string" && allFields.includes(r)
+      )
+    : [];
+  return required.length > 0 ? required : allFields;
 }
 
 // ── Imports tracking ─────────────────────────────────────────────────────────
@@ -615,6 +640,7 @@ function emitAuthProfile(
   p: RemoteAuthProfile,
   secrets: SecretCollector,
   connectorHandles: Map<string, string>,
+  authSchemas: Map<string, Record<string, unknown> | null | undefined>,
   imports: ImportTracker,
   minter: IdentMinter
 ): Handle | null {
@@ -634,19 +660,42 @@ function emitAuthProfile(
   ];
   if (p.display_name) fields.push(`name: ${str(p.display_name)}`);
   // Credentials are write-only on the server, so we can't recover the real
-  // values or the connector's exact field names here. Emit secret placeholders
-  // the operator wires in via .env; the credential KEYS must be renamed to the
-  // connector's auth-schema fields before applying (see the connector docs).
-  // Interactive kinds (oauth_account / browser_session) take no credentials.
+  // values. Emit secret placeholders the operator wires in via .env, keyed by
+  // the connector's real auth-schema fields — `lobu apply` validates each
+  // credential KEY against the connector's auth_schema, so an env-var-derived
+  // key would be rejected. Interactive kinds (oauth_account / browser_session)
+  // take no credentials.
   if (
     !interactive &&
     (p.profile_kind === "env" || p.profile_kind === "oauth_app")
   ) {
     imports.use("secret");
-    const credKey = p.profile_kind === "oauth_app" ? "CLIENT_SECRET" : "VALUE";
-    fields.push(
-      `// TODO: rename credential keys to this connector's auth-schema fields\n  credentials: {\n    ${envVarFor(p.slug, credKey)}: ${secrets.ref(envVarFor(p.slug, credKey))},\n  }`
-    );
+    const fieldKeys = authSchemas.has(p.connector_key)
+      ? authSchemaFields(authSchemas.get(p.connector_key))
+      : null;
+    if (fieldKeys && fieldKeys.length > 0) {
+      // Emit `credentials: { <field>: secret("<SLUG>_<FIELD>") }` for each real
+      // auth-schema field, with a deterministic env-var name per field.
+      const credLines = fieldKeys.map(
+        (field) =>
+          `${emitKey(field)}: ${secrets.ref(
+            envVarFor(
+              p.slug,
+              field.replace(/[^A-Za-z0-9]+/g, "_").toUpperCase()
+            )
+          )}`
+      );
+      fields.push(`credentials: {\n    ${credLines.join(",\n    ")},\n  }`);
+    } else {
+      // No connector def / auth_schema found — fall back to a single
+      // placeholder. The operator must rename the credential key to the
+      // connector's auth-schema field before applying.
+      const credKey =
+        p.profile_kind === "oauth_app" ? "CLIENT_SECRET" : "VALUE";
+      fields.push(
+        `// TODO: rename credential keys to this connector's auth-schema fields\n  credentials: {\n    ${envVarFor(p.slug, credKey)}: ${secrets.ref(envVarFor(p.slug, credKey))},\n  }`
+      );
+    }
   }
   const name = minter.mint(p.slug, "Auth");
   return {
@@ -722,6 +771,8 @@ interface FetchedState {
   watchers: Array<{ watcher: RemoteWatcher; reactionScript: string | null }>;
   authProfiles: RemoteAuthProfile[];
   connections: Array<{ connection: RemoteConnection; feeds: RemoteFeed[] }>;
+  /** connector_key → auth_schema (for emitting real credential field keys). */
+  connectorDefinitions: RemoteConnectorDefinition[];
 }
 
 async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
@@ -732,6 +783,7 @@ async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
     watcherList,
     authProfiles,
     connectionList,
+    connectorDefinitions,
   ] = await Promise.all([
     client.listAgents(),
     client.listEntityTypes(),
@@ -739,6 +791,10 @@ async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
     client.listWatchers(),
     client.listAuthProfiles(),
     client.listConnections(),
+    // Connector defs carry each connector's auth_schema, so init-from-org can
+    // emit auth-profile credentials keyed by the real schema fields. Best-effort
+    // — a fetch failure falls back to placeholder credential keys.
+    client.listConnectorDefinitions(true).catch(() => []),
   ]);
 
   const agents = await Promise.all(
@@ -793,6 +849,7 @@ async function fetchOrgState(client: ApplyClient): Promise<FetchedState> {
       .slice()
       .sort((a, b) => a.slug.localeCompare(b.slug)),
     connections,
+    connectorDefinitions,
   };
 }
 
@@ -855,10 +912,26 @@ export function generateProject(
   // Auth profiles + connections (connector key referenced by string — no local
   // connector source is exported, so connectors stay bare string refs).
   const connectorHandles = new Map<string, string>();
+  // connector_key → auth_schema, so auth profiles emit credentials keyed by the
+  // connector's real schema fields (validated by `lobu apply`).
+  const authSchemas = new Map<
+    string,
+    Record<string, unknown> | null | undefined
+  >();
+  for (const def of state.connectorDefinitions) {
+    if (def.key) authSchemas.set(def.key, def.auth_schema);
+  }
   const authHandles = new Map<string, string>();
   const authDecls: string[] = [];
   for (const p of state.authProfiles) {
-    const h = emitAuthProfile(p, secrets, connectorHandles, imports, minter);
+    const h = emitAuthProfile(
+      p,
+      secrets,
+      connectorHandles,
+      authSchemas,
+      imports,
+      minter
+    );
     if (!h) {
       warnings.push(
         `auth profile "${p.slug}" has no connector — skipped (set its connector and re-add it to lobu.config.ts).`

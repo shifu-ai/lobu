@@ -25,13 +25,28 @@ function mkFixtureDir(): string {
   return dir;
 }
 
-function buildFetch(routes: Record<string, () => unknown>): typeof fetch {
-  return (async (input: RequestInfo | URL, _init?: RequestInit) => {
+/**
+ * Route by URL substring. A handler receives the parsed request body so routes
+ * sharing a URL (e.g. `manage_connections` carries both `list_connections` and
+ * `list_connector_definitions` actions) can branch on the body `action`.
+ */
+function buildFetch(
+  routes: Record<string, (body: Record<string, unknown>) => unknown>
+): typeof fetch {
+  return (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    let body: Record<string, unknown> = {};
+    if (typeof init?.body === "string") {
+      try {
+        body = JSON.parse(init.body) as Record<string, unknown>;
+      } catch {
+        body = {};
+      }
+    }
     // Order matters — match the most specific patterns first.
     for (const [pattern, handler] of Object.entries(routes)) {
       if (url.includes(pattern)) {
-        return new Response(JSON.stringify(handler()), { status: 200 });
+        return new Response(JSON.stringify(handler(body)), { status: 200 });
       }
     }
     throw new Error(`unexpected fetch: ${url}`);
@@ -378,6 +393,72 @@ describe("lobu init --from-org", () => {
     expect(state.memorySchema.entityTypes).toHaveLength(0);
     expect(state.watchers).toHaveLength(0);
     expect(state.connectors.connections).toHaveLength(0);
+  });
+
+  test("env auth profile → credentials keyed by the connector's auth-schema field, not <SLUG>_VALUE", async () => {
+    const dir = mkFixtureDir();
+    await initFromOrg({
+      targetDir: dir,
+      fetchImpl: buildFetch({
+        "/oauth/userinfo": () => ({
+          organizations: [{ id: "org-1", slug: "acme", name: "Acme Inc" }],
+        }),
+        "/agents/lone/config": () => ({ updatedAt: 0 }),
+        "/agents": () => ({ agents: [{ agentId: "lone", name: "Lone" }] }),
+        "watchers?include_details": () => ({ watchers: [] }),
+        manage_entity_schema: () => ({
+          entity_types: [],
+          relationship_types: [],
+        }),
+        manage_auth_profiles: () => ({
+          auth_profiles: [
+            {
+              slug: "stripe-key",
+              display_name: "Stripe API key",
+              connector_key: "stripe",
+              profile_kind: "env",
+              status: "active",
+            },
+          ],
+        }),
+        // Both `list_connections` and `list_connector_definitions` POST here —
+        // branch on the body action.
+        manage_connections: (body) =>
+          body.action === "list_connector_definitions"
+            ? {
+                connector_definitions: [
+                  {
+                    key: "stripe",
+                    name: "Stripe",
+                    auth_schema: {
+                      type: "object",
+                      properties: { api_key: { type: "string" } },
+                      required: ["api_key"],
+                    },
+                  },
+                ],
+              }
+            : { connections: [] },
+      }),
+    });
+
+    const source = readFileSync(join(dir, "lobu.config.ts"), "utf-8");
+    // The credential KEY is the connector's real auth-schema field (`api_key`),
+    // env var derived from slug+field — NOT `STRIPE_KEY_VALUE` as the KEY.
+    expect(source).toContain("api_key: secret(");
+    expect(source).toContain('secret("STRIPE_KEY_API_KEY")');
+    expect(source).not.toContain("STRIPE_KEY_VALUE");
+    // The stale "rename credential keys" TODO is gone once real keys are emitted.
+    expect(source).not.toContain("rename credential keys");
+
+    // Round-trips: the credential field survives back through DesiredState.
+    const env = { STRIPE_KEY_API_KEY: "sk_live_x" } as NodeJS.ProcessEnv;
+    const { state } = await loadDesiredStateFromConfig({ cwd: dir, env });
+    const profile = state.connectors.authProfiles.find(
+      (p) => p.slug === "stripe-key"
+    );
+    expect(Object.keys(profile?.credentials ?? {})).toEqual(["api_key"]);
+    expect(profile?.credentials?.api_key).toBe("sk_live_x");
   });
 
   test("platform secret config → secret() placeholder, never the redacted literal", async () => {

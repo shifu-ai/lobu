@@ -137,6 +137,18 @@ describe("mapProjectToDesiredState", () => {
     ]);
   });
 
+  test("carries prune into DesiredState (defaults false when unset)", () => {
+    expect(mapProjectToDesiredState(defineConfig({ agents: [] })).prune).toBe(
+      false
+    );
+    expect(
+      mapProjectToDesiredState(defineConfig({ agents: [], prune: true })).prune
+    ).toBe(true);
+    expect(
+      mapProjectToDesiredState(defineConfig({ agents: [], prune: false })).prune
+    ).toBe(false);
+  });
+
   test("maps watchers: agent handle, sources record, notification", () => {
     const crm = defineAgent({ id: "crm" });
     const watcher = defineWatcher({
