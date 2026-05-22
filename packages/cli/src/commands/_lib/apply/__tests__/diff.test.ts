@@ -436,6 +436,65 @@ describe("apply diff — memory schema", () => {
     expect(plan.counts.noop).toBe(1);
     expect(plan.counts.update).toBe(0);
   });
+
+  test("relationship-type rules are a noop when remote rules match (idempotency)", () => {
+    // Regression: the rel-type `list` action omits rules, so apply hydrates
+    // them (listRelationshipTypeRules) into the snapshot. When the hydrated
+    // remote rules equal desired, the diff must be a noop — otherwise every
+    // re-apply churns a perpetual "rules changed" update.
+    const desired: DesiredState = {
+      agents: [],
+      memorySchema: {
+        entityTypes: [],
+        relationshipTypes: [
+          {
+            slug: "works-at",
+            name: "Works at",
+            rules: [{ source: "contact", target: "company" }],
+          },
+        ],
+      },
+      watchers: [],
+      requiredSecrets: [],
+    };
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      relationshipTypes: [
+        {
+          slug: "works-at",
+          name: "Works at",
+          rules: [{ source: "contact", target: "company" }],
+        },
+      ],
+    };
+    const plan = computeDiff(desired, remote);
+    expect(plan.counts.noop).toBe(1);
+    expect(plan.counts.update).toBe(0);
+  });
+
+  test("relationship-type rules update when remote rules differ", () => {
+    const desired: DesiredState = {
+      agents: [],
+      memorySchema: {
+        entityTypes: [],
+        relationshipTypes: [
+          {
+            slug: "works-at",
+            name: "Works at",
+            rules: [{ source: "contact", target: "company" }],
+          },
+        ],
+      },
+      watchers: [],
+      requiredSecrets: [],
+    };
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      relationshipTypes: [{ slug: "works-at", name: "Works at", rules: [] }],
+    };
+    const plan = computeDiff(desired, remote);
+    expect(plan.counts.update).toBe(1);
+  });
 });
 
 describe("apply diff — empty container preservation", () => {

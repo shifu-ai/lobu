@@ -574,6 +574,33 @@ export class ApplyClient {
     return pickArray(body, "relationship_types", "relationshipTypes");
   }
 
+  /**
+   * Fetch a relationship type's rules (the `list` action omits them, so the
+   * apply diff can't otherwise see remote rules and would churn a perpetual
+   * "rules changed" update). Maps the server's `*_entity_type_slug` columns to
+   * the `{ source, target }` shape the diff compares against desired.
+   */
+  async listRelationshipTypeRules(
+    slug: string
+  ): Promise<Array<{ source: string; target: string }>> {
+    const { body } = await this.request<{
+      rules?: Array<{
+        source_entity_type_slug?: string;
+        target_entity_type_slug?: string;
+      }>;
+    }>("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+      schema_type: "relationship_type",
+      action: "list_rules",
+      slug,
+    });
+    return (body.rules ?? [])
+      .filter((r) => r.source_entity_type_slug && r.target_entity_type_slug)
+      .map((r) => ({
+        source: r.source_entity_type_slug as string,
+        target: r.target_entity_type_slug as string,
+      }));
+  }
+
   async upsertRelationshipType(rel: {
     slug: string;
     name?: string;

@@ -208,6 +208,21 @@ function stringChanged(
 }
 
 /**
+ * Compare an OPTIONAL display name. When the config omits it (undefined/empty),
+ * the operator has no opinion — the server keeps its derived/stored name (e.g.
+ * a feed `display_name` defaulted from the feed key), so an omitted name must
+ * NOT churn the plan into a perpetual "name changed" update. Only a name the
+ * operator explicitly set, and that differs, is a real change.
+ */
+function optionalNameChanged(
+  desired: string | null | undefined,
+  remote: string | null | undefined
+): boolean {
+  if (desired == null || desired === "") return false;
+  return stringChanged(desired, remote);
+}
+
+/**
  * The shared create / noop / update shape behind most `diffX` functions.
  * `extras` is merged into every row (create/noop/update); `updateExtras`
  * adds verb-specific props derived from the changed-field list (e.g.
@@ -765,7 +780,7 @@ function diffConnection(
     fields: [
       {
         name: "name",
-        changed: (d, r) => stringChanged(d.name, r.display_name),
+        changed: (d, r) => optionalNameChanged(d.name, r.display_name),
       },
       {
         name: "auth",
@@ -804,7 +819,7 @@ function diffFeed(
     fields: [
       {
         name: "name",
-        changed: (d, r) => stringChanged(d.name, r.display_name),
+        changed: (d, r) => optionalNameChanged(d.name, r.display_name),
       },
       {
         name: "schedule",
