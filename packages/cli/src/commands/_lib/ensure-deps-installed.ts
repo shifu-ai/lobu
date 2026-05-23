@@ -16,15 +16,15 @@ import { dirname, join } from "node:path";
 const ensuredRoots = new Set<string>();
 
 /**
- * Find the connector's project root — the nearest ancestor with `lobu.toml`.
- * Anchoring on `lobu.toml` (not any ancestor `package.json`) is what stops a
- * connector inside a monorepo from resolving to the monorepo's root
- * package.json and triggering a wrong-directory install.
+ * Find the connector's project root — the nearest ancestor with
+ * `lobu.config.ts`. Anchoring on `lobu.config.ts` (not any ancestor
+ * `package.json`) is what stops a connector inside a monorepo from resolving to
+ * the monorepo's root package.json and triggering a wrong-directory install.
  */
 export function findProjectRoot(fromFile: string): string | null {
   let dir = dirname(fromFile);
   for (let i = 0; i < 40; i++) {
-    if (existsSync(join(dir, "lobu.toml"))) return dir;
+    if (existsSync(join(dir, "lobu.config.ts"))) return dir;
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;

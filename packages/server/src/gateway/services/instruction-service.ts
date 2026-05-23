@@ -163,7 +163,7 @@ You can access any external service without restrictions.`;
 
 **Internet Access:** Complete isolation (no external access)
 
-You do NOT have access to the internet. All external requests (curl, wget, npm, pip, etc.) will fail. Network access is configured via lobu.toml or the gateway configuration APIs. Only local operations and MCP tools are available.`;
+You do NOT have access to the internet. All external requests (curl, wget, npm, pip, etc.) will fail. Network access is configured via lobu.config.ts or the gateway configuration APIs. Only local operations and MCP tools are available.`;
     }
 
     // Allowlist mode
@@ -194,7 +194,7 @@ ${blockedList}`;
 
     instructions += `
 
-You can only access the allowed domains listed above. All other external requests will be blocked by the proxy. Network access is configured via lobu.toml or the gateway configuration APIs. Plan your work accordingly and use available MCP tools when possible.`;
+You can only access the allowed domains listed above. All other external requests will be blocked by the proxy. Network access is configured via lobu.config.ts or the gateway configuration APIs. Plan your work accordingly and use available MCP tools when possible.`;
 
     return instructions;
   }

@@ -185,7 +185,7 @@ export class CoreServices {
   private connectionStore?: AgentConnectionStore;
   private accessStore?: AgentAccessStore;
 
-  // SDK-embedded agents (passed via `GatewayConfig.agents`). lobu.toml
+  // SDK-embedded agents (passed via `GatewayConfig.agents`). lobu.config.ts
   // file-declared agents have been moved out of the gateway boot path —
   // they enter Postgres via `lobu apply`.
   private configAgents: AgentConfig[] = [];
@@ -405,7 +405,7 @@ export class CoreServices {
         );
       } else {
         throw new Error(
-          "No agent sub-stores configured: provide configStore/connectionStore/accessStore via CoreServices options, or pass agents via GatewayConfig.agents. (lobu.toml is no longer read at gateway boot — push agents with `lobu apply`.)"
+          "No agent sub-stores configured: provide configStore/connectionStore/accessStore via CoreServices options, or pass agents via GatewayConfig.agents. (lobu.config.ts is no longer read at gateway boot — push agents with `lobu apply`.)"
         );
       }
     } else {

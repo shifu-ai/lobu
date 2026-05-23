@@ -44,7 +44,7 @@
 ## Reference
 
 - [CLI](https://lobu.ai/reference/cli/)
-- [lobu.toml](https://lobu.ai/reference/lobu-toml/)
+- [lobu.config.ts](https://lobu.ai/reference/lobu-config/)
 - [SKILL.md](https://lobu.ai/reference/skill-md/)
 - [Providers](https://lobu.ai/reference/providers/)
 - [REST API reference](https://lobu.ai/reference/api-reference/)

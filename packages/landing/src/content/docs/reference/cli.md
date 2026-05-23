@@ -22,7 +22,7 @@ lobu <command>
 
 ### `init [name]`
 
-Scaffold a local agent project with `lobu.toml`, `.env`, and an agent directory.
+Scaffold a local agent project with `lobu.config.ts`, `.env`, and an agent directory.
 
 ```bash
 npx @lobu/cli@latest init my-agent
@@ -30,10 +30,12 @@ npx @lobu/cli@latest init my-agent
 
 Generates:
 
-- `lobu.toml` — local project/apply/validate configuration
+- `lobu.config.ts`: the TypeScript project entrypoint (`defineConfig` from `@lobu/sdk`)
+- `package.json` + `tsconfig.json`: declare `@lobu/sdk` / `@lobu/connector-sdk` and give the editor type resolution
 - `.env` — local environment variables (API keys, optional external `DATABASE_URL`)
 - `agents/{name}/` — `IDENTITY.md`, `SOUL.md`, `USER.md`, local skills, and evals
 - `skills/` — shared local skills directory
+- `connectors/`: custom `*.connector.ts` files
 - `AGENTS.md`, `TESTING.md`, `README.md`, `.gitignore`
 
 Interactive prompts guide you through provider, platform, network access policy, gateway port, public URL, and memory configuration. Local runs use bundled PGlite by default; set `DATABASE_URL` when you want to use external Postgres with pgvector.
@@ -42,7 +44,7 @@ Interactive prompts guide you through provider, platform, network access policy,
 
 ### `run` (aliases: `dev`, `start`)
 
-Run the embedded Lobu stack. `lobu.toml` is not required. With no `DATABASE_URL`, the command starts bundled local PGlite and stores data under `~/.lobu/data` (override with `LOBU_DATA_DIR`). If `DATABASE_URL` is set in the environment or `.env`, Lobu uses that external Postgres instead.
+Run the embedded Lobu stack. `lobu.config.ts` is not required. With no `DATABASE_URL`, the command starts bundled local PGlite and stores data under `~/.lobu/data` (override with `LOBU_DATA_DIR`). If `DATABASE_URL` is set in the environment or `.env`, Lobu uses that external Postgres instead.
 
 ```bash
 npx @lobu/cli@latest run
@@ -121,7 +123,7 @@ npx @lobu/cli@latest agent update my-agent --description "Handles support"
 npx @lobu/cli@latest agent delete my-agent --yes
 ```
 
-`agent scaffold <agentId>` adds a new local agent (`agents/<id>/*` plus an entry in `lobu.toml`) without touching existing agents — the local-files counterpart of `agent create`:
+`agent scaffold <agentId>` adds a new local agent (`agents/<id>/*` plus a `defineAgent` entry in `lobu.config.ts`) without touching existing agents, the local-files counterpart of `agent create`:
 
 ```bash
 npx @lobu/cli@latest agent scaffold support-bot --name "Support Bot" --description "Handles tickets"
@@ -154,7 +156,7 @@ npx @lobu/cli@latest chat "Status update" -c staging
 
 | Flag | Description |
 |------|-------------|
-| `-a, --agent <id>` | Agent ID (defaults to first agent in local `lobu.toml` when present) |
+| `-a, --agent <id>` | Agent ID (defaults to first agent in local `lobu.config.ts` when present) |
 | `-u, --user <id>` | User ID to impersonate, e.g. `telegram:12345`. With this flag the message routes through the user's platform (Telegram/Slack) |
 | `-t, --thread <id>` | Thread/conversation ID for multi-turn conversations |
 | `-g, --gateway <url>` | Gateway URL (default: `http://localhost:8787` or from `.env`) |
@@ -181,7 +183,7 @@ LOBU_TOKEN=$(npx @lobu/cli@latest token) \
 
 ### `validate`
 
-Validate local `lobu.toml` schema, skill IDs, and provider configuration.
+Validate that local `lobu.config.ts` loads and conforms to the schema, plus skill IDs and provider configuration.
 
 ```bash
 npx @lobu/cli@latest validate
@@ -193,7 +195,7 @@ Returns exit code `1` if validation fails.
 
 ### `apply` (alias: `deploy`)
 
-Sync local `lobu.toml` and agent directories to a Lobu Cloud org. Idempotent, prompt-confirmed, one-way (files are the source of truth).
+Sync local `lobu.config.ts` and agent directories to a Lobu Cloud org. Idempotent, prompt-confirmed, one-way (files are the source of truth).
 
 ```bash
 npx @lobu/cli@latest apply                  # plan + prompt + apply

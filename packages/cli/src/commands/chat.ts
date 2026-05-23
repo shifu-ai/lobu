@@ -11,7 +11,7 @@ import {
   resolveGatewayUrl,
 } from "../internal/index.js";
 import { LOBU_CONFIG_DIR } from "../internal/context.js";
-import { isLoadError, loadConfig } from "../config/loader.js";
+import { loadProjectConfig } from "./_lib/apply/desired-state.js";
 import { renderMarkdown } from "../utils/markdown.js";
 
 const THREADS_FILE = join(LOBU_CONFIG_DIR, "threads.json");
@@ -339,10 +339,12 @@ async function sendViaApi(
 }
 
 async function resolveAgentId(cwd: string): Promise<string | undefined> {
-  const result = await loadConfig(cwd);
-  if (isLoadError(result)) return undefined;
-  const ids = Object.keys(result.config.agents);
-  return ids[0];
+  try {
+    const { project } = await loadProjectConfig(cwd);
+    return project.agents[0]?.id;
+  } catch {
+    return undefined;
+  }
 }
 
 async function writeStdout(text: string): Promise<void> {

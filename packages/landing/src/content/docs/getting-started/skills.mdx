@@ -16,7 +16,7 @@ Lobu discovers local `SKILL.md` files at runtime. Bundled skills are enabled fro
 
 ## Lobu Starter Skill
 
-The bundled Lobu skill teaches an agent the project layout, `lobu.toml`, prompt files, evals, memory tools, watchers, and client setup. Two places to install it:
+The bundled Lobu skill teaches an agent the project layout, `lobu.config.ts`, prompt files, evals, memory tools, watchers, and client setup. Two places to install it:
 
 ### In your coding agent
 
@@ -71,21 +71,21 @@ For instruction-only skills, omit frontmatter and keep only the markdown body.
 
 ## What Does Not Belong In A Skill
 
-- Tool visibility and MCP approval bypasses belong in [`lobu.toml`](/reference/lobu-toml/), not in `SKILL.md`
-- Destructive MCP tools still follow the normal approval flow unless the operator configures `[agents.<id>.tools].pre_approved`
+- Tool visibility and MCP approval bypasses belong in [`lobu.config.ts`](/reference/lobu-config/), not in `SKILL.md`
+- Destructive MCP tools still follow the normal approval flow unless the operator configures the agent `tools.preApproved` list
 
 See [Tool Policy](/guides/tool-policy/) for that split.
 
 ## Skills Vs Memory
 
 - **Skills** teach the agent how to work and what capabilities to request.
-- **Memory** is the long-term, shared knowledge surface — enabled per-project via `[memory]` in [`lobu.toml`](/reference/lobu-toml/).
+- **Memory** is the long-term, shared knowledge surface, enabled per-project via `defineConfig({ org })` in [`lobu.config.ts`](/reference/lobu-config/).
 
-Installing the Lobu starter skill teaches the workflow; the memory wiring itself lives in `lobu.toml`. See [Memory](/getting-started/memory/).
+Installing the Lobu starter skill teaches the workflow; the memory wiring itself lives in `lobu.config.ts`. See [Memory](/getting-started/memory/).
 
 ## Read Next
 
 - [SKILL.md Reference](/reference/skill-md/)
 - [Memory](/getting-started/memory/)
-- [`lobu.toml` Reference](/reference/lobu-toml/)
+- [`lobu.config.ts` Reference](/reference/lobu-config/)
 - [Lobu Memory CLI Reference](/reference/lobu-memory/)

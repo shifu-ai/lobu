@@ -60,22 +60,6 @@ export {
   renderFallbackSystemContext,
   renderSkillMemorySection,
 } from "./lobu-guidance";
-// lobu.toml zod schema (canonical — used by CLI and gateway)
-export {
-  type AgentEntry as TomlAgentEntry,
-  type EgressEntry as TomlEgressEntry,
-  type LobuTomlConfig,
-  lobuConfigSchema,
-  type McpServerEntry as TomlMcpServerEntry,
-  type MemoryEntry as TomlMemoryEntry,
-  type NetworkEntry as TomlNetworkEntry,
-  type PlatformEntry as TomlPlatformEntry,
-  type ProviderEntry as TomlProviderEntry,
-  type SkillsEntry as TomlSkillsEntry,
-  type ToolsEntry,
-  type ToolsEntry as TomlToolsEntry,
-  type WorkerEntry as TomlWorkerEntry,
-} from "./lobu-toml-schema";
 export * from "./logger";
 // Module system
 export * from "./modules";

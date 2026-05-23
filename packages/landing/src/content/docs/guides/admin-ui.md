@@ -9,7 +9,7 @@ Lobu exposes a settings API at `/api/v1/agents` for managing agents at runtime. 
 
 ### Create an agent
 
-Agents are created via `lobu.toml` (at startup) or the API (at runtime):
+Agents are created via `lobu.config.ts` (with `lobu apply`) or the API (at runtime):
 
 ```bash
 # Via API

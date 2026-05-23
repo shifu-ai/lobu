@@ -16,7 +16,6 @@ import {
   test,
 } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyCommand } from "../apply-cmd.js";
 import * as context from "../../../../internal/context.js";
@@ -46,17 +45,31 @@ function silenceOutput() {
   spyOn(process.stdout, "write").mockImplementation(silentWrite);
 }
 
-function mkProject(toml: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "lobu-apply-dry-"));
+// Fixtures live under the worktree (next to this test) so the externalized
+// `@lobu/sdk` import in the generated config bundle resolves from node_modules.
+function mkProject(config: string): string {
+  const dir = mkdtempSync(join(import.meta.dir, "fixture-"));
   tempDirs.push(dir);
-  writeFileSync(join(dir, "lobu.toml"), toml);
+  writeFileSync(join(dir, "lobu.config.ts"), config);
   return dir;
 }
 
-function minimalToml(agentId = "triage") {
-  return `[agents.${agentId}]
-name = "Triage"
-dir = "./agents/${agentId}"
+function minimalConfig(
+  agentId = "triage",
+  opts: { org?: string; organizationId?: string } = {}
+) {
+  const extra = [
+    opts.org ? `  org: ${JSON.stringify(opts.org)},` : "",
+    opts.organizationId
+      ? `  organizationId: ${JSON.stringify(opts.organizationId)},`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return `import { defineAgent, defineConfig } from "@lobu/sdk";
+export default defineConfig({
+${extra ? `${extra}\n` : ""}  agents: [defineAgent({ id: ${JSON.stringify(agentId)}, name: "Triage", dir: "./agents/${agentId}" })],
+});
 `;
 }
 
@@ -138,7 +151,7 @@ describe("applyCommand --dry-run", () => {
   });
 
   test("dry-run with one agent: no resource-creating/mutating API calls are made", async () => {
-    const dir = mkProject(minimalToml());
+    const dir = mkProject(minimalConfig());
     mkdirSync(join(dir, "agents", "triage"), { recursive: true });
 
     const { fetchStub, mutateCalls } = makeAuthFetch([
@@ -180,36 +193,6 @@ describe("applyCommand --dry-run", () => {
 
     expect(writingCalls).toEqual([]);
   });
-
-  test("dry-run does NOT write organization_id back to lobu.toml", async () => {
-    const toml = `[agents.triage]
-name = "Triage"
-dir = "./agents/triage"
-
-[memory]
-org = "acme"
-`;
-    const dir = mkProject(toml);
-    mkdirSync(join(dir, "agents", "triage"), { recursive: true });
-
-    const { fetchStub } = makeAuthFetch([
-      { id: "org_99", slug: "acme", name: "Acme" },
-    ]);
-
-    await applyCommand({
-      cwd: dir,
-      dryRun: true,
-      yes: true,
-      url: "https://app.lobu.ai",
-      org: "acme",
-      fetchImpl: fetchStub,
-    });
-
-    // lobu.toml must NOT have been modified: organization_id should be absent.
-    const { readFileSync } = await import("node:fs");
-    const contents = readFileSync(join(dir, "lobu.toml"), "utf-8");
-    expect(contents).not.toContain("organization_id");
-  });
 });
 
 // ── Test: org not found → ValidationError with create-url ───────────────────
@@ -231,7 +214,7 @@ describe("applyCommand org resolution", () => {
   });
 
   test("throws ValidationError when the target org is not in the user's org list", async () => {
-    const dir = mkProject(minimalToml());
+    const dir = mkProject(minimalConfig());
     mkdirSync(join(dir, "agents", "triage"), { recursive: true });
 
     // User belongs to a different org
@@ -252,7 +235,7 @@ describe("applyCommand org resolution", () => {
   });
 
   test("throws ValidationError when user belongs to 0 orgs", async () => {
-    const dir = mkProject(minimalToml());
+    const dir = mkProject(minimalConfig());
     mkdirSync(join(dir, "agents", "triage"), { recursive: true });
 
     const { fetchStub } = makeAuthFetch([]);
@@ -270,7 +253,7 @@ describe("applyCommand org resolution", () => {
   });
 
   test("succeeds (dry-run) when the user belongs to exactly 1 org that matches", async () => {
-    const dir = mkProject(minimalToml());
+    const dir = mkProject(minimalConfig());
     mkdirSync(join(dir, "agents", "triage"), { recursive: true });
 
     const { fetchStub } = makeAuthFetch([
@@ -290,24 +273,19 @@ describe("applyCommand org resolution", () => {
     ).resolves.toBeUndefined();
   });
 
-  test("org can also be matched by organizationId in lobu.toml when slug differs", async () => {
-    const toml = `[agents.triage]
-name = "Triage"
-dir = "./agents/triage"
-
-[memory]
-org = "acme"
-organization_id = "org_id_42"
-`;
-    const dir = mkProject(toml);
+  test("refuses when the slug doesn't resolve, even if a renamed org shares the organizationId", async () => {
+    const dir = mkProject(
+      minimalConfig("triage", { org: "acme", organizationId: "org_id_42" })
+    );
     mkdirSync(join(dir, "agents", "triage"), { recursive: true });
 
-    // The slug doesn't match ("acme" vs "wrong-slug") but the id matches.
+    // The pinned id matches a renamed org, but its slug differs from the one we
+    // apply to. The client targets the SLUG in every URL, so resolving by id
+    // would read provenance from / mutate the wrong org (or 404 mid-apply).
     const { fetchStub } = makeAuthFetch([
       { id: "org_id_42", slug: "acme-renamed", name: "Acme Renamed" },
     ]);
 
-    // Should NOT throw because the id matches.
     await expect(
       applyCommand({
         cwd: dir,
@@ -317,13 +295,37 @@ organization_id = "org_id_42"
         org: "acme",
         fetchImpl: fetchStub,
       })
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/not found/i);
+  });
+
+  test("refuses when the resolved slug's org id mismatches the pinned organizationId", async () => {
+    const dir = mkProject(
+      minimalConfig("triage", { org: "acme", organizationId: "org_id_42" })
+    );
+    mkdirSync(join(dir, "agents", "triage"), { recursive: true });
+
+    // Slug "acme" resolves, but to a DIFFERENT org id than pinned — a stale or
+    // copied config pointed at someone else's org. Must hard-stop before apply.
+    const { fetchStub } = makeAuthFetch([
+      { id: "org_different", slug: "acme", name: "Acme" },
+    ]);
+
+    await expect(
+      applyCommand({
+        cwd: dir,
+        dryRun: true,
+        yes: true,
+        url: "https://app.lobu.ai",
+        org: "acme",
+        fetchImpl: fetchStub,
+      })
+    ).rejects.toThrow(/organizationId/i);
   });
 });
 
-// ── Test: missing lobu.toml ──────────────────────────────────────────────────
+// ── Test: missing lobu.config.ts ─────────────────────────────────────────────
 
-describe("applyCommand — missing lobu.toml", () => {
+describe("applyCommand — missing lobu.config.ts", () => {
   beforeEach(() => {
     silenceOutput();
     spyOn(context, "resolveContext").mockResolvedValue({
@@ -339,10 +341,10 @@ describe("applyCommand — missing lobu.toml", () => {
     });
   });
 
-  test("throws a ValidationError when lobu.toml is absent", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "lobu-no-toml-"));
+  test("throws a ValidationError when lobu.config.ts is absent", async () => {
+    const dir = mkdtempSync(join(import.meta.dir, "no-config-"));
     tempDirs.push(dir);
-    // No lobu.toml created
+    // No lobu.config.ts created
 
     const { fetchStub } = makeAuthFetch([{ id: "o1", slug: "acme" }]);
 

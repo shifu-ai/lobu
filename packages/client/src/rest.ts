@@ -1,0 +1,195 @@
+import { LobuApiError } from "./errors.js";
+import {
+  getApiV1AgentsByAgentIdEvents,
+  postApiV1Agents,
+  postApiV1AgentsByAgentIdMessages,
+} from "./generated/sdk.gen.js";
+import { createClient, type Client } from "./generated/client/index.js";
+import type {
+  CreateSessionRequest,
+  CreateSessionResponse,
+  LobuFetch,
+  LobuHeaders,
+  LobuSseEvent,
+  SendMessageOptions,
+  SendMessageResponse,
+  StreamEventsOptions,
+  TokenProvider,
+} from "./types.js";
+
+export class LobuRestClient {
+  private readonly token: TokenProvider;
+  private readonly fetchImpl: LobuFetch;
+  private readonly headers: LobuHeaders | undefined;
+  private readonly client: Client;
+
+  constructor(options: {
+    baseUrl: string;
+    token: TokenProvider;
+    fetch: LobuFetch;
+    headers?: LobuHeaders;
+  }) {
+    this.token = options.token;
+    this.fetchImpl = options.fetch;
+    this.headers = options.headers;
+    this.client = createClient({
+      baseUrl: normalizeBaseUrl(options.baseUrl),
+      fetch: options.fetch,
+    });
+  }
+
+  async createSession(
+    input: CreateSessionRequest
+  ): Promise<CreateSessionResponse> {
+    const result = await postApiV1Agents({
+      client: this.client,
+      body: input,
+      headers: await this.authHeaders(),
+    });
+    if (result.error) throw new LobuApiError(result.response, result.error);
+    return result.data;
+  }
+
+  async sendMessage(
+    sessionId: string,
+    sessionToken: string,
+    content: string,
+    options: SendMessageOptions = {}
+  ): Promise<SendMessageResponse> {
+    const result = await postApiV1AgentsByAgentIdMessages({
+      client: this.client,
+      path: { agentId: sessionId },
+      body: { content, messageId: options.messageId },
+      headers: this.authHeadersFor(sessionToken),
+    });
+    if (result.error) throw new LobuApiError(result.response, result.error);
+    return result.data;
+  }
+
+  async *streamEvents<TData = unknown>(
+    sessionId: string,
+    sessionToken: string,
+    options: StreamEventsOptions = {}
+  ): AsyncIterable<LobuSseEvent<TData>> {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
+
+    const queue: Array<LobuSseEvent<TData>> = [];
+    let done = false;
+    let pumpError: unknown;
+    let wake: (() => void) | undefined;
+
+    const wakeReader = () => {
+      wake?.();
+      wake = undefined;
+    };
+
+    const result = await getApiV1AgentsByAgentIdEvents({
+      client: this.client,
+      path: { agentId: sessionId },
+      headers: {
+        ...this.authHeadersFor(sessionToken),
+        ...headersToRecord(options.headers),
+      },
+      signal: controller.signal,
+      // The generated SSE client retries forever by default: a non-OK response
+      // (401/404/5xx) or a network failure throws inside its read loop, fires
+      // onSseError, then sleeps and reconnects with no attempt cap — so a
+      // failed stream NEVER terminates and the async iterator below hangs
+      // indefinitely. Cap the attempts and surface the error so callers reject
+      // instead of hanging. An aborted signal already breaks the loop cleanly.
+      sseMaxRetryAttempts: options.maxRetryAttempts ?? 1,
+      onSseError: (error) => {
+        // Don't treat a caller-initiated abort as a stream failure — that path
+        // is a clean shutdown, not an error to propagate.
+        if (controller.signal.aborted) return;
+        if (pumpError === undefined) pumpError = error;
+        wakeReader();
+      },
+      onSseEvent: (event) => {
+        queue.push({
+          event: event.event ?? "message",
+          data: event.data as TData,
+          id: event.id,
+          retry: event.retry,
+        });
+        wakeReader();
+      },
+    });
+
+    const pump = (async () => {
+      try {
+        for await (const _data of result.stream) {
+          // onSseEvent above preserves event names. The generated stream yields
+          // only data payloads, so the queue is the public SDK surface.
+        }
+      } catch (error) {
+        if (pumpError === undefined) pumpError = error;
+      } finally {
+        done = true;
+        wakeReader();
+      }
+    })();
+
+    try {
+      while (!done || queue.length > 0) {
+        const event = queue.shift();
+        if (event) {
+          yield event;
+          continue;
+        }
+        if (pumpError) throw pumpError;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+      if (pumpError) throw pumpError;
+    } finally {
+      controller.abort();
+      options.signal?.removeEventListener("abort", abort);
+      await pump;
+    }
+  }
+
+  getFetch(): LobuFetch {
+    return this.fetchImpl;
+  }
+
+  private async authHeaders(): Promise<Record<string, string>> {
+    return this.authHeadersFor(await resolveToken(this.token));
+  }
+
+  private authHeadersFor(token: string): Record<string, string> {
+    return {
+      ...headersToRecord(this.headers),
+      Authorization: `Bearer ${token}`,
+    };
+  }
+}
+
+async function resolveToken(provider: TokenProvider): Promise<string> {
+  return typeof provider === "function" ? provider() : provider;
+}
+
+function normalizeBaseUrl(baseUrl: string): string {
+  // Strip trailing slashes without a regex — `/\/+$/` trips CodeQL's
+  // polynomial-ReDoS check on a long run of slashes, and a plain slice is both
+  // safe and clearer.
+  let trimmed = baseUrl.trim();
+  while (trimmed.endsWith("/")) trimmed = trimmed.slice(0, -1);
+  if (!trimmed) throw new Error("Lobu baseUrl is required");
+  return trimmed;
+}
+
+function headersToRecord(
+  headers: LobuHeaders | RequestInit["headers"] | undefined
+): Record<string, string> {
+  if (!headers) return {};
+  if (headers instanceof Headers) return Object.fromEntries(headers.entries());
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers as Iterable<readonly [string, string]>);
+  }
+  return headers as Record<string, string>;
+}

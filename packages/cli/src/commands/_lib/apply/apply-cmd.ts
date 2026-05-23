@@ -1,10 +1,9 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import chalk from "chalk";
 import { resolveContext } from "../../../internal/context.js";
 import { parseEnvContent } from "../../../internal/env-file.js";
 import { loadProjectLink } from "../../../internal/project-link.js";
-import { CONFIG_FILENAME } from "../../../config/loader.js";
 import { ApiError, ValidationError } from "../../memory/_lib/errors.js";
 import { printError, printText } from "../../memory/_lib/output.js";
 import {
@@ -24,43 +23,22 @@ import {
 import {
   type DesiredConnectorDefinition,
   type DesiredState,
-  loadDesiredState,
+  loadDesiredStateFromConfig,
   resolveConnectorSchemas,
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
 } from "./desired-state.js";
-import { confirmCustomConnectors, confirmPlan } from "./prompt.js";
+import {
+  confirmCustomConnectors,
+  confirmDeletions,
+  confirmPlan,
+} from "./prompt.js";
 import {
   renderMissingSecrets,
   renderPlan,
   renderPostApplyPunchList,
   renderProgress,
 } from "./render.js";
-
-/**
- * Write `organization_id = "<id>"` into the `[memory]` section of lobu.toml —
- * replacing an existing value or inserting it just under the `[memory]` header.
- * Surgical text edit; preserves comments and the rest of the file.
- */
-async function writeMemoryOrganizationId(
-  cwd: string,
-  organizationId: string
-): Promise<void> {
-  const path = join(cwd, CONFIG_FILENAME);
-  const raw = await readFile(path, "utf-8");
-  const line = `organization_id = "${organizationId}"`;
-
-  if (/^\s*organization_id\s*=.*$/m.test(raw)) {
-    const next = raw.replace(/^\s*organization_id\s*=.*$/m, line);
-    if (next !== raw) await writeFile(path, next);
-    return;
-  }
-
-  const header = raw.match(/^\[memory\][^\n]*$/m);
-  if (!header || header.index === undefined) return;
-  const at = header.index + header[0].length;
-  await writeFile(path, `${raw.slice(0, at)}\n${line}${raw.slice(at)}`);
-}
 
 export interface ApplyOptions {
   cwd?: string;
@@ -80,6 +58,9 @@ interface PendingAuthEntry {
   kind: string;
   connectUrl?: string;
 }
+
+/** Deletes beyond this in one pruning apply trigger a second confirm. */
+const BLAST_RADIUS_DELETE_THRESHOLD = 3;
 
 // ── Required-secrets check ─────────────────────────────────────────────────
 
@@ -277,7 +258,8 @@ async function confirmCustomConnectorSource(
 async function fetchRemoteSnapshot(
   client: ApplyClient,
   state: DesiredState,
-  only?: "agents" | "memory"
+  only?: "agents" | "memory",
+  prune = false
 ): Promise<RemoteSnapshot> {
   const agents: RemoteAgent[] =
     only === "memory" ? [] : await client.listAgents();
@@ -302,19 +284,37 @@ async function fetchRemoteSnapshot(
   const entityTypes = only === "agents" ? [] : await client.listEntityTypes();
   const relationshipTypes =
     only === "agents" ? [] : await client.listRelationshipTypes();
+  // The relationship-type `list` action omits rules, so the diff would compare
+  // desired rules against an always-empty remote and churn a perpetual "rules
+  // changed" update. Hydrate rules for every type the config also declares —
+  // including those the config declares with NO rules, so dropping all rules is
+  // detected as a change (and reconciled away) rather than a silent noop.
+  if (relationshipTypes.length > 0) {
+    const desiredRelSlugs = new Set(
+      state.memorySchema.relationshipTypes.map((r) => r.slug)
+    );
+    for (const remote of relationshipTypes) {
+      if (!desiredRelSlugs.has(remote.slug)) continue;
+      const rules = await client.listRelationshipTypeRules(remote.slug);
+      remote.rules = rules.map((r) => ({ source: r.source, target: r.target }));
+    }
+  }
   const watchers = only === "agents" ? [] : await client.listWatchers();
 
-  // Connectors run only on a full apply (`--only` skips them).
+  // Connectors run only on a full apply (`--only` skips them). A pruning config
+  // also fetches them even when it declares none, so prune can delete a
+  // connector definition whose last config reference was removed (otherwise an
+  // empty desired-connectors set would skip the fetch entirely).
   const hasConnectors =
     state.connectors.definitions.length > 0 ||
     state.connectors.authProfiles.length > 0 ||
     state.connectors.connections.length > 0;
-  const connectorDefinitions =
-    only || !hasConnectors ? [] : await client.listConnectorDefinitions(true);
-  const authProfiles =
-    only || !hasConnectors ? [] : await client.listAuthProfiles();
-  const connections =
-    only || !hasConnectors ? [] : await client.listConnections();
+  const fetchConnectors = !only && (hasConnectors || prune);
+  const connectorDefinitions = fetchConnectors
+    ? await client.listConnectorDefinitions(true)
+    : [];
+  const authProfiles = fetchConnectors ? await client.listAuthProfiles() : [];
+  const connections = fetchConnectors ? await client.listConnections() : [];
   const feedsByConnectionId = new Map<number, RemoteFeed[]>();
   if (!only && hasConnectors) {
     const desiredConnSlugs = new Set(
@@ -636,7 +636,15 @@ async function executePlan(
     }
   }
 
-  // 3) Platforms
+  // 3) Platforms — upsert only the platforms the diff flagged (create / config
+  // change / key removal). The diff treats an opaque remote secret (`***` /
+  // `secret://`) as unchanged while the key is still declared (see
+  // platformConfigChanged), so a stable config is a true noop and the live
+  // worker is NOT restarted on every apply. The flip side — rotating a secret
+  // VALUE in place can't be detected from the opaque round-trip and so isn't
+  // auto-pushed here; that needs a secret-aware compare on the server's upsert
+  // (owletto) and is tracked as a follow-up. A REMOVED key IS detected (it's
+  // absent from desired) and applied.
   for (const row of rowsByKind("platform")) {
     if (row.kind !== "platform") continue;
     const desired = row.desired;
@@ -946,6 +954,52 @@ async function executePlan(
     }
     printText(renderProgress(row.verb, "feed", row.id));
   }
+
+  // 11) Prune — delete definitions absent from a pruning config. Runs
+  //     LAST and in reverse-dependency order so a rel-type that references an
+  //     entity type is gone before the entity type. Connections + data
+  //     instances are never in the delete set (computeDiff only emits delete
+  //     rows for definitions). The server refuses an entity-type delete while
+  //     instances exist, so the data stays safe.
+  await deleteRemovedDefinitions(ctx);
+}
+
+/**
+ * Execute the plan's `delete` rows (prune). Steps run in
+ * reverse-dependency order — a rel-type rule references entity types, so
+ * rel-types delete before entity types; connectors uninstall last. Halts apply
+ * on first failure (idempotent re-run).
+ */
+async function deleteRemovedDefinitions(ctx: ApplyContext): Promise<void> {
+  const deletes = ctx.plan.rows.filter((r) => r.verb === "delete");
+  if (deletes.length === 0) return;
+  const watcherIdBySlug = new Map(
+    ctx.remote.watchers.map((w) => [w.slug, w.watcher_id])
+  );
+  const steps: Array<[DiffRow["kind"], (id: string) => Promise<void>]> = [
+    [
+      "watcher",
+      async (id) => {
+        const wid = watcherIdBySlug.get(id);
+        if (!wid) {
+          throw new ApiError(
+            `delete watcher "${id}": remote watcher_id missing`
+          );
+        }
+        await ctx.client.deleteWatcher(wid);
+      },
+    ],
+    ["relationship-type", (id) => ctx.client.deleteRelationshipType(id)],
+    ["entity-type", (id) => ctx.client.deleteEntityType(id)],
+    ["connector-definition", (id) => ctx.client.uninstallConnector(id)],
+  ];
+  for (const [kind, run] of steps) {
+    for (const row of deletes) {
+      if (row.kind !== kind) continue;
+      await run(row.id);
+      printText(renderProgress("delete", kind, row.id));
+    }
+  }
 }
 
 // Collect pending interactive-auth profiles from a (no-op) plan and re-issue a
@@ -1002,15 +1056,15 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   const cwd = opts.cwd ?? process.cwd();
   const fetchImpl = opts.fetchImpl ?? fetch;
 
-  // Auto-load `.env` from the project dir so $VAR refs in lobu.toml resolve
-  // without the user having to `set -a; source .env; set +a`. Mirrors what
-  // `lobu dev` does. Existing process.env values win (don't clobber the shell).
+  // Auto-load `.env` from the project dir so secret()/$VAR refs in
+  // lobu.config.ts resolve without the user having to `set -a; source .env`.
+  // Mirrors `lobu dev`. Existing process.env values win (don't clobber shell).
   await loadProjectEnvFile(cwd);
 
-  const { state, configPath, warnings } = await loadDesiredState({
-    cwd,
-    ...(opts.only ? { only: opts.only } : {}),
-  });
+  // Load desired state from the TypeScript entrypoint (lobu.config.ts).
+  const loadArgs = { cwd, ...(opts.only ? { only: opts.only } : {}) };
+  const { state, configPath, warnings } =
+    await loadDesiredStateFromConfig(loadArgs);
 
   printText(chalk.dim(`Config: ${configPath}`));
   for (const warning of warnings) {
@@ -1026,8 +1080,8 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     );
   }
 
-  // Org slug resolution: explicit --org ▸ active-session org ▸ `[memory].org`
-  // from lobu.toml. The toml slug is the declarative default — if no org with
+  // Org slug resolution: explicit --org ▸ active-session org ▸ `org` from
+  // defineConfig. The config slug is the declarative default — if no org with
   // that slug exists yet, `lobu apply` offers to provision it (below).
   const { client, orgSlug, apiBaseUrl } = await resolveApplyClient({
     url: opts.url,
@@ -1072,11 +1126,30 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // (old server, or a token the userinfo endpoint rejects) → null → skip the
   // check and let the normal flow surface any org error.
   const myOrgs = await client.listOrgs().catch(() => null);
-  const resolvedOrg =
-    myOrgs?.find((o) => o.slug === orgSlug) ??
-    (state.memory?.organizationId
-      ? myOrgs?.find((o) => o.id === state.memory?.organizationId)
-      : undefined);
+  // Resolve strictly by the slug we will actually mutate (the client targets
+  // `orgSlug` in every URL). Do NOT fall back to organizationId as an alternate
+  // org — that could prune a different org than the one being applied.
+  const resolvedOrg = myOrgs?.find((o) => o.slug === orgSlug);
+  // If the config pins `organizationId`, the slug must resolve to that exact
+  // org — otherwise it's a stale/copied config pointed at someone else's org,
+  // and (with prune on) could prune the wrong org. Hard-stop.
+  if (
+    resolvedOrg &&
+    state.memory?.organizationId &&
+    resolvedOrg.id !== state.memory.organizationId
+  ) {
+    printError(
+      [
+        "",
+        `Org slug "${orgSlug}" resolves to org id ${resolvedOrg.id}, but lobu.config.ts pins organizationId ${state.memory.organizationId}.`,
+        "This usually means the config was copied from another project or the slug was reused.",
+        "Fix `org`/`organizationId` in defineConfig (or pass the right --org) before applying.",
+      ].join("\n")
+    );
+    throw new ValidationError(
+      `org "${orgSlug}" (id ${resolvedOrg.id}) does not match pinned organizationId ${state.memory.organizationId}`
+    );
+  }
   if (myOrgs !== null && !resolvedOrg) {
     const orgName = state.memory?.name ?? slugToTitle(orgSlug);
     const createUrl = `${apiBaseUrl}/orgs/new?slug=${encodeURIComponent(orgSlug)}&name=${encodeURIComponent(orgName)}`;
@@ -1094,16 +1167,23 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     throw new ValidationError(`organization "${orgSlug}" not found`);
   }
 
-  // Persist the resolved org id back into lobu.toml so the whole team applies
-  // to the same org. Best-effort — a read-only lobu.toml must not fail apply.
-  // Skipped on `--dry-run`: that flag promises no mutation, local files included.
-  if (
-    !opts.dryRun &&
-    resolvedOrg &&
-    state.memory?.organizationId !== resolvedOrg.id
-  ) {
-    await writeMemoryOrganizationId(cwd, resolvedOrg.id).catch(() => undefined);
+  // Prune is config-declared (`defineConfig({ prune: true })`): when on, apply
+  // deletes any org-owned definition (entity/relationship type, watcher,
+  // connector definition) that's absent from the config — INCLUDING ones added
+  // via the dashboard/API. Data, connections, auth profiles, and agents are
+  // never pruned. The blast-radius confirm below is the safety net.
+  const prune = state.prune;
+  if (prune) {
+    printText(
+      chalk.yellow(
+        "Prune is on: apply will DELETE any org-owned definition (entity/relationship type, watcher, connector) that is not in this config — including ones created in the UI."
+      )
+    );
   }
+
+  // Team org consistency comes from `defineConfig({ org, organizationId })` in
+  // lobu.config.ts (committed) plus the `.lobu/project.json` link — apply does
+  // not rewrite the config file.
 
   // SECURITY (#4): confirm BEFORE fetching any `source_url` or uploading custom
   // connector source — `lobu apply --dry-run` should never hit a manifest URL.
@@ -1119,7 +1199,7 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // this (current/stale) catalog — "create" when the key isn't installed,
   // "update" when it is. Connector defs are NOT installed here; that happens in
   // `executePlan`, AFTER plan confirmation.
-  const remote = await fetchRemoteSnapshot(client, state, opts.only);
+  const remote = await fetchRemoteSnapshot(client, state, opts.only, prune);
 
   // Validate connection/auth-profile config against the catalog we have now,
   // but SKIP schema validation for connector keys declared locally — those
@@ -1131,7 +1211,11 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     skipSchemaForConnectorKeys: locallyDeclaredConnectorKeys(state),
   });
 
-  const plan = computeDiff(state, remote, { only: opts.only });
+  const plan = computeDiff(state, remote, {
+    only: opts.only,
+    prune,
+    ...(resolvedOrg?.id ? { orgId: resolvedOrg.id } : {}),
+  });
   printText(renderPlan(plan));
 
   if (opts.dryRun) {
@@ -1147,13 +1231,19 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     (r) => r.kind === "auth-profile" && "needsAuth" in r && r.needsAuth
   );
 
-  if (plan.counts.create === 0 && plan.counts.update === 0 && !hasPendingAuth) {
+  if (
+    plan.counts.create === 0 &&
+    plan.counts.update === 0 &&
+    plan.counts.delete === 0 &&
+    !hasPendingAuth
+  ) {
     printText(chalk.green("\nNothing to apply."));
     return;
   }
 
-  const { create, update, noop, drift } = plan.counts;
-  const summaryLine = `${create} create, ${update} update, ${noop} noop, ${drift} drift${hasPendingAuth ? " + pending auth" : ""}`;
+  const { create, update, noop, drift, delete: del } = plan.counts;
+  const deletePart = del > 0 ? `, ${del} delete` : "";
+  const summaryLine = `${create} create, ${update} update, ${noop} noop, ${drift} drift${deletePart}${hasPendingAuth ? " + pending auth" : ""}`;
   const approved = await confirmPlan({
     yes: opts.yes ?? false,
     summaryLine,
@@ -1163,9 +1253,23 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
     return;
   }
 
+  // Blast-radius gate: a large prune gets a second explicit confirm beyond the
+  // plan approval above.
+  if (del > BLAST_RADIUS_DELETE_THRESHOLD) {
+    const okToDelete = await confirmDeletions(del, opts.yes ?? false);
+    if (!okToDelete) {
+      printText(chalk.dim("\nCancelled."));
+      return;
+    }
+  }
+
   const pendingAuth: PendingAuthEntry[] = [];
   let applyErr: unknown;
-  if (plan.counts.create > 0 || plan.counts.update > 0) {
+  if (
+    plan.counts.create > 0 ||
+    plan.counts.update > 0 ||
+    plan.counts.delete > 0
+  ) {
     printText(chalk.bold("\nApplying:"));
     try {
       await executePlan({ client, state, plan, remote }, pendingAuth);

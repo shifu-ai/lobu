@@ -11,6 +11,7 @@ import type { DesiredState } from "../desired-state.js";
 function stateWith(connectors: DesiredState["connectors"]): DesiredState {
   return {
     agents: [],
+    prune: false,
     memorySchema: { entityTypes: [], relationshipTypes: [] },
     watchers: [],
     connectors,

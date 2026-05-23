@@ -30,7 +30,7 @@ type LandingSnippets = {
   memorySchema: CodeSnippet;
   watcher: CodeSnippet;
   reaction: CodeSnippet;
-  agentToml: CodeSnippet;
+  agentConfig: CodeSnippet;
   skill: CodeSnippet;
   examples: ExampleEntry[];
   useCases: Record<string, UseCaseSnippets>;
@@ -47,7 +47,7 @@ const SETUP_PROMPT = `I want to build a Lobu agent.
 
 2. Walk me through the skill's onboarding interview (it asks what the agent should do, who uses it, where data comes from, where I'll talk to it, what should run on a schedule). Pause at every real decision and ask me, don't fake credentials, don't guess.
 
-3. Scaffold the project per my answers (lobu.toml, models/schema.yaml, connectors/, models/reactions/), boot it locally, send a test message via the chosen channel, and show me the memory event that was written.
+3. Scaffold the project per my answers (lobu.config.ts, connectors/, models/reactions/), boot it locally, send a test message via the chosen channel, and show me the memory event that was written.
 
 Lobu is an open-source event-sourced backend for AI agents: connectors emit events, memory keeps the structured record, agents react in real time and dream on cron. Repo: https://github.com/lobu-ai/lobu. Docs: https://lobu.ai/docs/`;
 
@@ -582,9 +582,9 @@ function MemorySection({
               class="mt-4 max-w-[28rem] text-[16px] leading-[1.6]"
               style={{ color: "var(--color-page-text-muted)" }}
             >
-              Declare entity types in YAML. Lobu stores them as append-only
-              events with full audit. Multi-tenant by default, agents see only
-              their scope.
+              Declare entity types in TypeScript. Lobu stores them as
+              append-only events with full audit. Multi-tenant by default,
+              agents see only their scope.
             </p>
             <FeatureList
               items={[
@@ -599,7 +599,7 @@ function MemorySection({
                 <>
                   <b>Agent-assisted modeling</b>: paste the setup prompt into
                   Claude Code or Cursor; it interviews you and drafts{" "}
-                  <code class="font-mono text-[13px]">schema.yaml</code>.
+                  <code class="font-mono text-[13px]">lobu.config.ts</code>.
                 </>,
                 <>
                   <b>Per-user / per-org isolation</b>: your agents only see the
@@ -796,8 +796,8 @@ function AgentsSection() {
               style={{ color: "var(--color-page-text-muted)" }}
             >
               Declare your agent in{" "}
-              <code class="font-mono text-[14px]">lobu.toml</code>: provider,
-              model, skills. One config, every surface below.
+              <code class="font-mono text-[14px]">lobu.config.ts</code>:
+              provider, model, skills. One config, every surface below.
             </p>
             <FeatureList
               items={[
@@ -838,7 +838,7 @@ function AgentsSection() {
                     WhatsApp
                   </a>
                   , HTTP, MCP. Same{" "}
-                  <code class="font-mono text-[13px]">lobu.toml</code>.
+                  <code class="font-mono text-[13px]">lobu.config.ts</code>.
                 </>,
                 <>
                   <b>BYO model</b>: Anthropic, OpenAI, Z.ai, OpenRouter, your
@@ -861,8 +861,8 @@ function AgentsSection() {
         }
         code={
           <div>
-            <CodeBlock badge="agent" snippet={snippets.agentToml} />
-            <ExampleFooterLink slug="lobu-crm" />
+            <CodeBlock badge="agent" snippet={snippets.agentConfig} />
+            <ExampleFooterLink slug="sales" />
           </div>
         }
       />
@@ -997,8 +997,7 @@ function RunAnywhereSection() {
           class="mx-auto mt-3 max-w-[34rem] text-[15px]"
           style={{ color: "var(--color-page-text-muted)" }}
         >
-          Same <code class="font-mono text-[13px]">lobu.toml</code> +{" "}
-          <code class="font-mono text-[13px]">models/</code> +{" "}
+          Same <code class="font-mono text-[13px]">lobu.config.ts</code> +{" "}
           <code class="font-mono text-[13px]">connectors/</code> +{" "}
           <code class="font-mono text-[13px]">agents/</code>. One command to
           boot embedded; Docker + Helm for self-hosting; Lobu Cloud when you

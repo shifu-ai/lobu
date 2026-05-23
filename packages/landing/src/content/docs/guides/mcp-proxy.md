@@ -36,7 +36,7 @@ There are three ways an MCP server can authenticate:
 | **Device-code OAuth** | `oauth` on the MCP server | Per-user OAuth — each user authenticates in their browser |
 | **Lobu-managed** | N/A (Lobu handles internally) | Third-party APIs (GitHub, Google, Linear, etc.) |
 
-Each MCP server is configured under `[agents.<id>.skills.mcp.<name>]` in [`lobu.toml`](/reference/lobu-toml/), under `mcpServers.<name>` in a skill's [`SKILL.md`](/reference/skill-md/) frontmatter, or in the agent's settings. The JSON snippets below show the fields a single server config accepts:
+Each MCP server is configured under `mcpServers.<name>` on `defineAgent` in [`lobu.config.ts`](/reference/lobu-config/), under `mcpServers.<name>` in a skill's [`SKILL.md`](/reference/skill-md/) frontmatter, or in the agent's settings. The JSON snippets below show the fields a single server config accepts:
 
 ### No auth
 

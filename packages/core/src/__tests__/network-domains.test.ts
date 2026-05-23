@@ -2,7 +2,7 @@
  * Tests for utils/network-domains.ts.
  *
  * normalizeDomainPattern and normalizeDomainPatterns are called by
- * the lobu.toml network config transformer. These tests harden the
+ * the lobu.config.ts network config transformer. These tests harden the
  * contract so regressions in normalization are caught immediately.
  */
 

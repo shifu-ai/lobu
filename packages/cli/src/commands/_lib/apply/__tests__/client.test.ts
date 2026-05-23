@@ -122,3 +122,51 @@ describe("ApplyClient", () => {
     expect(await client.listOrgs()).toEqual([]);
   });
 });
+
+describe("ApplyClient — prune", () => {
+  function recordingClient(responseBody: unknown = { success: true }) {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new ApplyClient(
+      { apiBaseUrl: "https://example.test", orgSlug: "acme", token: "tok" },
+      (async (url, init) => {
+        calls.push({ url: String(url), init });
+        return new Response(JSON.stringify(responseBody), { status: 200 });
+      }) as typeof fetch
+    );
+    return { calls, client };
+  }
+
+  test("deleteEntityType POSTs manage_entity_schema delete by slug", async () => {
+    const { calls, client } = recordingClient();
+    await client.deleteEntityType("lead");
+    expect(calls[0]?.url).toBe(
+      "https://example.test/api/acme/manage_entity_schema"
+    );
+    expect(calls[0]?.init?.method).toBe("POST");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      schema_type: "entity_type",
+      action: "delete",
+      slug: "lead",
+    });
+  });
+
+  test("deleteRelationshipType POSTs manage_entity_schema delete by slug", async () => {
+    const { calls, client } = recordingClient();
+    await client.deleteRelationshipType("works-with");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      schema_type: "relationship_type",
+      action: "delete",
+      slug: "works-with",
+    });
+  });
+
+  test("deleteWatcher POSTs manage_watchers delete with watcher_ids array", async () => {
+    const { calls, client } = recordingClient();
+    await client.deleteWatcher("42");
+    expect(calls[0]?.url).toBe("https://example.test/api/acme/manage_watchers");
+    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+      action: "delete",
+      watcher_ids: ["42"],
+    });
+  });
+});

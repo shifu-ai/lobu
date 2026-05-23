@@ -6,16 +6,16 @@
     "language": "typescript"
   },
   "memorySchema": {
-    "code": "entities:\n  - slug: organization\n    name: Organization\n    metadata_schema:\n      type: object\n      properties:\n        company_name: { type: string }\n        stage: { type: string }\n        arr: { type: string }\n        # 1 more…",
-    "path": "models/schema.yaml",
-    "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/models/schema.yaml",
-    "language": "yaml"
+    "code": "const organization = defineEntityType({\n  key: \"organization\",\n  name: \"Organization\",\n  description:\n    \"A customer account or prospect being tracked by the revenue team\",\n  properties: {\n    company_name: {\n      type: \"string\",\n      \"x-table-label\": \"Company\",\n      \"x-table-column\": true,\n    },\n    stage: { type: \"string\", \"x-table-label\": \"Stage\", \"x-table-column\": true },\n    arr: { type: \"string\", \"x-table-label\": \"ARR\", \"x-table-column\": true },\n    renewal_date: {\n      type: \"string\",\n      \"x-table-label\": \"Renewal Date\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+    "path": "lobu.config.ts",
+    "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/lobu.config.ts",
+    "language": "typescript"
   },
   "watcher": {
-    "code": "watchers:\n  - slug: board-action-tracker\n    agent: leadership\n    schedule: 0 8 * * *\n    prompt: \"Track board action items: check task delivery status, blocker resolution progress, and approaching deadlines for the next board packet.\"\n    extraction_schema:\n      type: object\n      required: [action_items, blocked_items, deadlines_approaching, completion_status]",
-    "path": "models/schema.yaml",
-    "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/leadership/models/schema.yaml",
-    "language": "yaml"
+    "code": "const accountHealthMonitor = defineWatcher({\n  agent: sales,\n  slug: \"account-health-monitor\",\n  name: \"Account health monitor\",\n  schedule: \"0 */12 * * *\",\n  notification: { priority: \"high\", channel: \"both\" },\n  tags: [\"sales\", \"health\", \"renewals\"],\n  minCooldownSeconds: 1800,\n  reaction: \"./models/reactions/account-health-monitor.reaction.ts\",\n  prompt:\n    \"Poll CRM data for tracked accounts. Track expansion progress, risk level changes, and renewal timeline.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\n      \"risk_level\",\n      \"expansion_status\",\n      \"renewal_blockers\",\n      \"activity_delta\",\n    ],\n    properties: {\n      risk_level: { type: \"string\" },\n      expansion_status: { type: \"string\" },\n      renewal_blockers: { type: \"array\", items: { type: \"string\" } },\n      activity_delta: { type: \"string\" },\n    },\n  },\n});",
+    "path": "lobu.config.ts",
+    "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/lobu.config.ts",
+    "language": "typescript"
   },
   "reaction": {
     "code": "/**\n * Reaction for the `reconciliation-monitor` watcher.\n *\n * Persists variance events when unreconciled transactions or new anomalies\n * are detected during the daily reconciliation pass.\n */\nimport type { ReactionClient, ReactionContext } from \"@lobu/connector-sdk\";\n\ninterface ReconciliationData {\n  unreconciled_count: number;\n  new_variances: string[];\n  approaching_deadlines: string[];\n  payment_risks?: string[];\n}\n\nexport default async (\n  ctx: ReactionContext,\n  client: ReactionClient\n): Promise<void> => {\n  const data = ctx.extracted_data as ReconciliationData;\n\n  const hasIssues =\n    data.unreconciled_count > 0 ||\n    (data.new_variances?.length ?? 0) > 0 ||\n    (data.approaching_deadlines?.length ?? 0) > 0;\n\n  if (!hasIssues) return;\n\n  const parts: string[] = [];\n  if (data.unreconciled_count > 0) {\n    parts.push(`${data.unreconciled_count} unreconciled transactions`);\n  }\n  if (data.new_variances?.length) {\n    parts.push(`Variances: ${data.new_variances.join(\"; \")}`);\n  }\n  if (data.approaching_deadlines?.length) {\n    parts.push(`Deadlines: ${data.approaching_deadlines.join(\"; \")}`);\n  }\n\n  await client.knowledge.save({\n    entity_ids: ctx.entities.map((e) => e.id),\n    content: parts.join(\"\\n\"),\n    semantic_type: \"reconciliation_alert\",\n    metadata: {\n      window_id: ctx.window.id,\n      unreconciled_count: data.unreconciled_count,\n      variance_count: data.new_variances?.length ?? 0,\n    },\n  });\n};",
@@ -23,11 +23,11 @@
     "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/finance/models/reactions/reconciliation-monitor.reaction.ts",
     "language": "typescript"
   },
-  "agentToml": {
-    "code": "[agents.crm]\nname = \"crm\"\n[[agents.crm.providers]]\nid = \"z-ai\"\nmodel = \"z-ai/glm-4.7\"\nkey = \"$Z_AI_API_KEY\"\n[memory]\nenabled = true\norg = \"lobu-crm\"\nmodels = \"./models\"\ndata = \"./data\"",
-    "path": "lobu.toml",
-    "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/lobu-crm/lobu.toml",
-    "language": "toml"
+  "agentConfig": {
+    "code": "import {\n  defineAgent,\n  defineConfig,\n  defineEntityType,\n  defineRelationshipType,\n  defineWatcher,\n  secret,\n} from \"@lobu/sdk\";\n\nconst sales = defineAgent({\n  id: \"sales\",\n  name: \"sales\",\n  description:\n    \"Help revenue teams track account health, rollout progress, and renewal signals\",\n  dir: \"./agents/sales\",\n  providers: [\n    {\n      id: \"anthropic\",\n      model: \"claude/sonnet-4-5\",\n      key: secret(\"ANTHROPIC_API_KEY\"),\n    },\n  ],\n  network: {\n    allowed: [\n      \"github.com\",\n      \".github.com\",\n      \".githubusercontent.com\",\n      \"registry.npmjs.org\",\n      \".npmjs.org\",\n    ],\n  },\n});",
+    "path": "lobu.config.ts",
+    "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/lobu.config.ts",
+    "language": "typescript"
   },
   "skill": {
     "code": "---\nname: deliveroo-order\ndescription: Read a restaurant's Deliveroo menu and assemble a group-order basket for the office lunch. Use in step 2 of the lunch run, after orders are collected. Reading menus and building a basket is allowed; completing checkout or touching payment is NOT.\nnixPackages:\n  - chromium\nnetwork:\n  allow:\n    - registry.npmjs.org\n    - .npmjs.org\n  judge:\n    - domain: deliveroo.co.uk\n      judge: deliveroo\n    - domain: .deliveroo.co.uk\n      judge: deliveroo\njudges:\n  deliveroo: >\n    Allow reads and basket changes. Deny checkout, payment,\n    saved cards, address, or profile changes. Fail closed if unclear.\n---",
@@ -38,73 +38,73 @@
   "examples": [
     {
       "slug": "agent-community",
-      "label": "agent-community",
+      "label": "Agent Community",
       "description": "Discover aligned members, explain why they should meet, and draft warm introductions",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/agent-community"
     },
     {
       "slug": "atlas",
-      "label": "atlas-curator",
+      "label": "Atlas",
       "description": "Public reference catalog — places, taxonomies, institutions",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/atlas"
     },
     {
       "slug": "delivery",
-      "label": "delivery",
+      "label": "Delivery",
       "description": "Help delivery teams keep milestones, blockers, owners, and artifacts aligned",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/delivery"
     },
     {
       "slug": "ecommerce",
-      "label": "ecommerce-ops",
+      "label": "Ecommerce",
       "description": "Manage subscriptions, process order changes, and resolve customer requests",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/ecommerce"
     },
     {
       "slug": "finance",
-      "label": "finance",
+      "label": "Finance",
       "description": "Help finance teams reconcile data, explain variance, and prepare reporting runs",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/finance"
     },
     {
       "slug": "leadership",
-      "label": "leadership",
+      "label": "Leadership",
       "description": "Turn memos, decisions, and board materials into reusable operating context",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/leadership"
     },
     {
       "slug": "legal",
-      "label": "legal-review",
+      "label": "Legal",
       "description": "Review contracts, summarize risk, and surface missing protections",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/legal"
     },
     {
       "slug": "lobu-crm",
-      "label": "crm",
+      "label": "Lobu CRM",
       "description": "Funnel CRM for Lobu — leads, pilots, conversations, launch signals",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/lobu-crm"
     },
     {
       "slug": "market",
-      "label": "vc-tracking",
+      "label": "Market",
       "description": "Track companies, founders, and investment opportunities for venture firms",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/market"
     },
     {
       "slug": "office-bot",
-      "label": "food-ordering",
+      "label": "Lobu Team",
       "description": "Office-ops agents — first up: the weekday lunch order",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/office-bot"
     },
     {
       "slug": "personal-finance",
-      "label": "personal-finance",
+      "label": "Personal Finance",
       "description": "UK Self Assessment helper — captures financial activity across the tax year and assembles SA100 + supplementary pages.",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/personal-finance"
     },
     {
       "slug": "sales",
-      "label": "sales",
+      "label": "Sales",
       "description": "Help revenue teams track account health, rollout progress, and renewal signals",
       "githubUrl": "https://github.com/lobu-ai/lobu/tree/main/examples/sales"
     }
@@ -118,16 +118,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: clause\n    name: Clause\n    metadata_schema:\n      type: object\n      properties:\n        clause_type: { type: string }\n        section: { type: string }\n        risk_level: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/legal/models/schema.yaml",
-        "language": "yaml"
+        "code": "const clause = defineEntityType({\n  key: \"clause\",\n  name: \"Clause\",\n  description:\n    \"A specific provision or section within a contract that defines terms or obligations\",\n  properties: {\n    clause_type: {\n      type: \"string\",\n      \"x-table-label\": \"Type\",\n      \"x-table-column\": true,\n    },\n    section: {\n      type: \"string\",\n      \"x-table-label\": \"Section\",\n      \"x-table-column\": true,\n    },\n    risk_level: {\n      type: \"string\",\n      \"x-table-label\": \"Risk Level\",\n      \"x-table-column\": true,\n    },\n    language_summary: {\n      type: \"string\",\n      \"x-table-label\": \"Summary\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/legal/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: contract-review-tracker\n    agent: legal-review\n    schedule: 0 8 * * 1-5\n    prompt: \"Review active contracts for approaching deadlines, unsigned agreements, and unresolved risk items. Flag any clauses that still need counsel approval.\"\n    extraction_schema:\n      type: object\n      required: [pending_contracts, unresolved_risks, approaching_deadlines]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/legal/models/schema.yaml",
-        "language": "yaml"
+        "code": "const contractReviewTracker = defineWatcher({\n  agent: legalReview,\n  slug: \"contract-review-tracker\",\n  name: \"Contract review tracker\",\n  schedule: \"0 8 * * 1-5\",\n  notification: { priority: \"high\" },\n  tags: [\"legal\", \"contract\", \"daily\"],\n  minCooldownSeconds: 1800,\n  reactionsGuidance:\n    \"For any contract with `status: needs_counsel`, route an entity-scoped event\\nto the assigned reviewer. For contracts >90 days unsigned, escalate to the\\ncounterparty owner; never auto-resolve risk items.\\n\",\n  prompt:\n    \"Review active contracts for approaching deadlines, unsigned agreements, and unresolved risk items. Flag any clauses that still need counsel approval.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\n      \"pending_contracts\",\n      \"unresolved_risks\",\n      \"approaching_deadlines\",\n    ],\n    properties: {\n      pending_contracts: { type: \"array\", items: { type: \"string\" } },\n      unresolved_risks: { type: \"array\", items: { type: \"string\" } },\n      approaching_deadlines: { type: \"array\", items: { type: \"string\" } },\n      flagged_clauses: { type: \"array\", items: { type: \"string\" } },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/legal/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "finance": {
@@ -138,16 +138,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: account\n    name: Account\n    metadata_schema:\n      type: object\n      properties:\n        account_name: { type: string }\n        account_type: { type: string }\n        balance: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/finance/models/schema.yaml",
-        "language": "yaml"
+        "code": "const account = defineEntityType({\n  key: \"account\",\n  name: \"Account\",\n  description:\n    \"A financial account that holds balances, transactions, and reconciliation state\",\n  properties: {\n    account_name: {\n      type: \"string\",\n      \"x-table-label\": \"Account\",\n      \"x-table-column\": true,\n    },\n    account_type: {\n      type: \"string\",\n      \"x-table-label\": \"Type\",\n      \"x-table-column\": true,\n    },\n    balance: {\n      type: \"string\",\n      \"x-table-label\": \"Balance\",\n      \"x-table-column\": true,\n    },\n    reconciliation_status: {\n      type: \"string\",\n      \"x-table-label\": \"Reconciliation\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/finance/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: reconciliation-monitor\n    agent: finance\n    schedule: 0 6 * * 1-5\n    prompt: \"Check accounts for unreconciled transactions, new variances, and approaching reporting deadlines. Lead with exceptions that need review.\"\n    extraction_schema:\n      type: object\n      required: [unreconciled_count, new_variances, approaching_deadlines]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/finance/models/schema.yaml",
-        "language": "yaml"
+        "code": "const reconciliationMonitor = defineWatcher({\n  agent: finance,\n  slug: \"reconciliation-monitor\",\n  name: \"Reconciliation monitor\",\n  schedule: \"0 6 * * 1-5\",\n  notification: { priority: \"high\", channel: \"both\" },\n  tags: [\"finance\", \"reconciliation\", \"daily\"],\n  minCooldownSeconds: 3600,\n  reaction: \"./models/reactions/reconciliation-monitor.reaction.ts\",\n  prompt:\n    \"Check accounts for unreconciled transactions, new variances, and approaching reporting deadlines. Lead with exceptions that need review.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\"unreconciled_count\", \"new_variances\", \"approaching_deadlines\"],\n    properties: {\n      unreconciled_count: { type: \"integer\" },\n      new_variances: { type: \"array\", items: { type: \"string\" } },\n      approaching_deadlines: { type: \"array\", items: { type: \"string\" } },\n      payment_risks: { type: \"array\", items: { type: \"string\" } },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/finance/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "sales": {
@@ -158,16 +158,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: organization\n    name: Organization\n    metadata_schema:\n      type: object\n      properties:\n        company_name: { type: string }\n        stage: { type: string }\n        arr: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/models/schema.yaml",
-        "language": "yaml"
+        "code": "const organization = defineEntityType({\n  key: \"organization\",\n  name: \"Organization\",\n  description:\n    \"A customer account or prospect being tracked by the revenue team\",\n  properties: {\n    company_name: {\n      type: \"string\",\n      \"x-table-label\": \"Company\",\n      \"x-table-column\": true,\n    },\n    stage: { type: \"string\", \"x-table-label\": \"Stage\", \"x-table-column\": true },\n    arr: { type: \"string\", \"x-table-label\": \"ARR\", \"x-table-column\": true },\n    renewal_date: {\n      type: \"string\",\n      \"x-table-label\": \"Renewal Date\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: account-health-monitor\n    agent: sales\n    schedule: 0 */12 * * *\n    prompt: \"Poll CRM data for tracked accounts. Track expansion progress, risk level changes, and renewal timeline.\"\n    extraction_schema:\n      type: object\n      required: [risk_level, expansion_status, renewal_blockers, activity_delta]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/models/schema.yaml",
-        "language": "yaml"
+        "code": "const accountHealthMonitor = defineWatcher({\n  agent: sales,\n  slug: \"account-health-monitor\",\n  name: \"Account health monitor\",\n  schedule: \"0 */12 * * *\",\n  notification: { priority: \"high\", channel: \"both\" },\n  tags: [\"sales\", \"health\", \"renewals\"],\n  minCooldownSeconds: 1800,\n  reaction: \"./models/reactions/account-health-monitor.reaction.ts\",\n  prompt:\n    \"Poll CRM data for tracked accounts. Track expansion progress, risk level changes, and renewal timeline.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\n      \"risk_level\",\n      \"expansion_status\",\n      \"renewal_blockers\",\n      \"activity_delta\",\n    ],\n    properties: {\n      risk_level: { type: \"string\" },\n      expansion_status: { type: \"string\" },\n      renewal_blockers: { type: \"array\", items: { type: \"string\" } },\n      activity_delta: { type: \"string\" },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/sales/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "delivery": {
@@ -178,16 +178,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: blocker\n    name: Blocker\n    metadata_schema:\n      type: object\n      properties:\n        blocker_description: { type: string }\n        owned_by: { type: string }\n        impact: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/delivery/models/schema.yaml",
-        "language": "yaml"
+        "code": "const blocker = defineEntityType({\n  key: \"blocker\",\n  name: \"Blocker\",\n  description: \"A dependency or issue that is blocking project progress\",\n  properties: {\n    blocker_description: {\n      type: \"string\",\n      \"x-table-label\": \"Blocker\",\n      \"x-table-column\": true,\n    },\n    owned_by: {\n      type: \"string\",\n      \"x-table-label\": \"Owner\",\n      \"x-table-column\": true,\n    },\n    impact: {\n      type: \"string\",\n      \"x-table-label\": \"Impact\",\n      \"x-table-column\": true,\n    },\n    status: {\n      type: \"string\",\n      \"x-table-label\": \"Status\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/delivery/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: phoenix-rollout-tracker\n    agent: delivery\n    schedule: 0 9 * * 1\n    prompt: \"Check project blockers, milestone progress, and generate the weekly risk summary for leadership.\"\n    extraction_schema:\n      type: object\n      required: [blockers_resolved, milestone_state, new_risks, risk_summary]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/delivery/models/schema.yaml",
-        "language": "yaml"
+        "code": "const phoenixRolloutTracker = defineWatcher({\n  agent: delivery,\n  slug: \"phoenix-rollout-tracker\",\n  name: \"Phoenix rollout tracker\",\n  schedule: \"0 9 * * 1\",\n  notification: { priority: \"high\", channel: \"both\" },\n  tags: [\"delivery\", \"weekly\", \"rollout\"],\n  minCooldownSeconds: 3600,\n  prompt:\n    \"Check project blockers, milestone progress, and generate the weekly risk summary for leadership.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\n      \"blockers_resolved\",\n      \"milestone_state\",\n      \"new_risks\",\n      \"risk_summary\",\n    ],\n    properties: {\n      blockers_resolved: { type: \"array\", items: { type: \"string\" } },\n      milestone_state: { type: \"string\" },\n      new_risks: { type: \"array\", items: { type: \"string\" } },\n      risk_summary: { type: \"string\" },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/delivery/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "market": {
@@ -198,16 +198,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: company\n    name: Company\n    metadata_schema:\n      type: object\n      properties:\n        market: { type: string }\n        sector: { type: string }\n        category: { type: string }\n        # 17 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/market/models/schema.yaml",
-        "language": "yaml"
+        "code": "const company = defineEntityType({\n  key: \"company\",\n  name: \"Company\",\n  description: \"Portfolio company or deal pipeline company\",\n  properties: {\n    market: {\n      type: \"string\",\n      \"x-table-column\": true,\n      \"x-table-label\": \"Market\",\n    },\n    sector: {\n      type: \"string\",\n      enum: SECTOR_ENUM,\n      \"x-table-column\": true,\n      \"x-table-label\": \"Sector\",\n    },\n    category: {\n      type: \"string\",\n      enum: [\"portfolio\", \"recruiter\", \"prospect\"],\n      \"x-table-column\": true,\n      \"x-table-label\": \"Category\",\n    },\n    location: {\n      type: \"string\",\n      \"x-table-column\": true,\n      \"x-table-label\": \"Location\",\n    },\n    domain: {\n      type: \"string\",\n      description:\n        \"Normalized company domain used by identity-engine hosted_domain facts\",\n      \"x-identity-namespace\": {\n        namespace: \"hosted_domain\",\n        normalize: \"lowercase\",\n      },\n      \"x-table-column\": true,\n      \"x-table-label\": \"Domain\",\n    },\n    one_liner: { type: \"string\" },\n    team_size: { type: \"integer\" },\n    founding_year: { type: \"integer\" },\n    funding_raised: { type: \"string\" },\n    valuation: { type: \"string\" },\n    revenue: { type: \"string\" },\n    growth_rate: { type: \"string\" },\n    traction_score: { type: \"number\" },\n    thesis: { type: \"string\" },\n    stage: {\n      type: \"string\",\n      enum: [\n        \"idea\",\n        \"pre-seed\",\n        \"seed\",\n        \"series-a\",\n        \"series-b\",\n        \"series-c\",\n        \"growth\",\n        \"public\",\n      ],\n    },\n    linkedin_url: { type: \"string\", format: \"uri\" },\n    logo_url: { type: \"string\", format: \"uri\", description: \"Brand logo URL\" },\n    tagline: { type: \"string\", description: \"One-line brand tagline\" },\n    brand_voice: {\n      type: \"string\",\n      description: \"Brand voice / tone-of-voice notes\",\n    },\n    social_handles: {\n      type: \"object\",\n      description:\n        \"Brand social handles by platform (twitter, linkedin, github, …)\",\n      properties: {\n        twitter: { type: \"string\" },\n        linkedin: { type: \"string\" },\n        github: { type: \"string\" },\n        youtube: { type: \"string\" },\n        instagram: { type: \"string\" },\n        tiktok: { type: \"string\" },\n      },\n      additionalProperties: { type: \"string\" },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/market/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: founder-activity-tracker\n    agent: vc-tracking\n    schedule: 0 10 * * *\n    prompt: \"You are a venture capital analyst tracking the public activity of startup founders in your portfolio.\"\n    extraction_schema:\n      type: object\n      required: [summary, founders, notable_signals]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/market/models/schema.yaml",
-        "language": "yaml"
+        "code": "const founderActivityTracker = defineWatcher({\n  agent: vcTracking,\n  slug: \"founder-activity-tracker\",\n  name: \"Founder Activity Tracker\",\n  schedule: \"0 10 * * *\",\n  notification: { priority: \"normal\" },\n  tags: [\"vc\", \"founders\", \"daily\"],\n  minCooldownSeconds: 600,\n  reaction: \"./models/reactions/founder-activity-tracker.reaction.ts\",\n  prompt:\n    \"You are a venture capital analyst tracking the public activity of startup founders in your portfolio.\\n\\n## Founders\\n{{#each entities}}\\n- {{name}} ({{entity_type}}, ID: {{id}})\\n{{/each}}\\n\\n## Recent Founder Activity\\n{{#if sources.founder_posts}}\\n{{sources.founder_posts}}\\n{{/if}}\\n\\n---\\n\\nProduce a structured founder activity report:\\n1. **Executive Summary**: 2-3 sentence overview of founder activity and signals.\\n2. **Per-Founder Analysis**: For each active founder, summarize their messaging themes, engagement level, and signals about company direction.\\n3. **Cross-Portfolio Patterns**: Themes multiple founders discuss.\\n4. **Notable Signals**: Flag potential announcements, strategic shifts, or concerns.\\n\\nBe specific and cite actual tweets/posts as evidence.\\n\",\n  sources: {\n    founder_posts:\n      \"SELECT id, title, payload_text, author_name, source_url, occurred_at, score, origin_type, connector_key FROM events WHERE connector_key IN ('x') AND origin_type IN ('tweet', 'reply') ORDER BY occurred_at DESC LIMIT 300\\n\",\n  },\n  reactionsGuidance:\n    \"When a founder signals hiring activity, fundraising, or pivots, flag for the investment team.\\nTrack founders going quiet as a potential concern.\\nAlert on any public statements about competitors or market conditions.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\"summary\", \"founders\", \"notable_signals\"],\n    properties: {\n      summary: { type: \"string\" },\n      founders: {\n        type: \"array\",\n        items: {\n          type: \"object\",\n          required: [\"name\", \"company\", \"activity_level\", \"themes\"],\n          properties: {\n            name: { type: \"string\" },\n            company: { type: \"string\" },\n            activity_level: {\n              type: \"string\",\n              enum: [\"high\", \"medium\", \"low\", \"inactive\"],\n            },\n            themes: { type: \"array\", items: { type: \"string\" } },\n            sentiment: {\n              type: \"string\",\n              enum: [\"bullish\", \"neutral\", \"cautious\", \"concerned\"],\n            },\n            signals: { type: \"array\", items: { type: \"string\" } },\n            notable_posts: { type: \"array\", items: { type: \"string\" } },\n          },\n        },\n      },\n      cross_patterns: {\n        type: \"array\",\n        items: {\n          type: \"object\",\n          properties: {\n            theme: { type: \"string\" },\n            founders_involved: { type: \"array\", items: { type: \"string\" } },\n          },\n        },\n      },\n      notable_signals: {\n        type: \"array\",\n        items: {\n          type: \"object\",\n          required: [\"signal\", \"founder\", \"impact\"],\n          properties: {\n            signal: { type: \"string\" },\n            founder: { type: \"string\" },\n            impact: { type: \"string\", enum: [\"high\", \"medium\", \"low\"] },\n          },\n        },\n      },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/market/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "agent-community": {
@@ -218,16 +218,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: match\n    name: Match\n    metadata_schema:\n      type: object\n      properties:\n        member_a: { type: string }\n        member_b: { type: string }\n        reason: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/agent-community/models/schema.yaml",
-        "language": "yaml"
+        "code": "const match = defineEntityType({\n  key: \"match\",\n  name: \"Match\",\n  description:\n    \"A suggested introduction between two members with reasons and confidence\",\n  properties: {\n    member_a: {\n      type: \"string\",\n      \"x-table-label\": \"Member A\",\n      \"x-table-column\": true,\n    },\n    member_b: {\n      type: \"string\",\n      \"x-table-label\": \"Member B\",\n      \"x-table-column\": true,\n    },\n    reason: {\n      type: \"string\",\n      \"x-table-label\": \"Reason\",\n      \"x-table-column\": true,\n    },\n    status: {\n      type: \"string\",\n      \"x-table-label\": \"Status\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/agent-community/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: opportunity-matcher\n    agent: agent-community\n    schedule: 0 */12 * * *\n    prompt: \"Monitor connected profiles, newsletters, websites, and member updates for new launches, posts, hiring signals, funding news, and project changes. Identify which members are likely to care, explain why, and queue approved intro or outreach drafts.\"\n    extraction_schema:\n      type: object\n      required: [signals]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/agent-community/models/schema.yaml",
-        "language": "yaml"
+        "code": "const opportunityMatcher = defineWatcher({\n  agent: agentCommunity,\n  slug: \"opportunity-matcher\",\n  name: \"Opportunity matcher\",\n  schedule: \"0 */12 * * *\",\n  notification: { priority: \"normal\" },\n  tags: [\"community\", \"matching\"],\n  minCooldownSeconds: 300,\n  reaction: \"./models/reactions/opportunity-matcher.reaction.ts\",\n  prompt:\n    \"Monitor connected profiles, newsletters, websites, and member updates for new launches, posts, hiring signals, funding news, and project changes. Identify which members are likely to care, explain why, and queue approved intro or outreach drafts.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\"signals\"],\n    properties: {\n      signals: {\n        type: \"array\",\n        items: {\n          type: \"object\",\n          properties: {\n            type: { type: \"string\" },\n            source: { type: \"string\" },\n            related_topics: { type: \"array\", items: { type: \"string\" } },\n            interested_members: { type: \"array\", items: { type: \"string\" } },\n            reason: { type: \"string\" },\n            suggested_action: { type: \"string\" },\n          },\n        },\n      },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/agent-community/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "ecommerce": {
@@ -238,16 +238,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: customer\n    name: Customer\n    metadata_schema:\n      type: object\n      properties:\n        full_name: { type: string }\n        status: { type: string }\n        plan: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/ecommerce/models/schema.yaml",
-        "language": "yaml"
+        "code": "const customer = defineEntityType({\n  key: \"customer\",\n  name: \"Customer\",\n  description:\n    \"A customer with subscriptions, orders, and communication preferences\",\n  properties: {\n    full_name: {\n      type: \"string\",\n      \"x-table-label\": \"Name\",\n      \"x-table-column\": true,\n    },\n    status: {\n      type: \"string\",\n      \"x-table-label\": \"Status\",\n      \"x-table-column\": true,\n    },\n    plan: { type: \"string\", \"x-table-label\": \"Plan\", \"x-table-column\": true },\n    communication_preference: {\n      type: \"string\",\n      \"x-table-label\": \"Preference\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/ecommerce/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: customer-activity-tracker\n    agent: ecommerce-ops\n    schedule: 0 */6 * * *\n    prompt: \"Monitor customers for new orders, subscription changes, delivery requests, and support interactions.\"\n    extraction_schema:\n      type: object\n      required: [subscription_status, pending_changes, recent_orders, communication_preferences, open_requests]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/ecommerce/models/schema.yaml",
-        "language": "yaml"
+        "code": "const customerActivityTracker = defineWatcher({\n  agent: ecommerceOps,\n  slug: \"customer-activity-tracker\",\n  name: \"Customer activity tracker\",\n  schedule: \"0 */6 * * *\",\n  notification: { priority: \"normal\" },\n  tags: [\"ecommerce\", \"customer-ops\"],\n  minCooldownSeconds: 300,\n  prompt:\n    \"Monitor customers for new orders, subscription changes, delivery requests, and support interactions.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\n      \"subscription_status\",\n      \"pending_changes\",\n      \"recent_orders\",\n      \"communication_preferences\",\n      \"open_requests\",\n    ],\n    properties: {\n      subscription_status: { type: \"string\" },\n      pending_changes: { type: \"array\", items: { type: \"string\" } },\n      recent_orders: { type: \"array\", items: { type: \"string\" } },\n      communication_preferences: { type: \"string\" },\n      open_requests: { type: \"array\", items: { type: \"string\" } },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/ecommerce/lobu.config.ts",
+        "language": "typescript"
       }
     },
     "leadership": {
@@ -258,16 +258,16 @@
         "language": "typescript"
       },
       "memorySchema": {
-        "code": "entities:\n  - slug: decision\n    name: Decision\n    metadata_schema:\n      type: object\n      properties:\n        subject: { type: string }\n        status: { type: string }\n        source_document: { type: string }\n        # 1 more…",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/leadership/models/schema.yaml",
-        "language": "yaml"
+        "code": "const decision = defineEntityType({\n  key: \"decision\",\n  name: \"Decision\",\n  description:\n    \"A leadership decision extracted from a document with its approval status\",\n  properties: {\n    subject: {\n      type: \"string\",\n      \"x-table-label\": \"Subject\",\n      \"x-table-column\": true,\n    },\n    status: {\n      type: \"string\",\n      \"x-table-label\": \"Status\",\n      \"x-table-column\": true,\n    },\n    source_document: {\n      type: \"string\",\n      \"x-table-label\": \"Source\",\n      \"x-table-column\": true,\n    },\n    decision_date: {\n      type: \"string\",\n      \"x-table-label\": \"Date\",\n      \"x-table-column\": true,\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/leadership/lobu.config.ts",
+        "language": "typescript"
       },
       "watcher": {
-        "code": "watchers:\n  - slug: board-action-tracker\n    agent: leadership\n    schedule: 0 8 * * *\n    prompt: \"Track board action items: check task delivery status, blocker resolution progress, and approaching deadlines for the next board packet.\"\n    extraction_schema:\n      type: object\n      required: [action_items, blocked_items, deadlines_approaching, completion_status]",
-        "path": "models/schema.yaml",
-        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/leadership/models/schema.yaml",
-        "language": "yaml"
+        "code": "const boardActionTracker = defineWatcher({\n  agent: leadership,\n  slug: \"board-action-tracker\",\n  name: \"Board action tracker\",\n  schedule: \"0 8 * * *\",\n  notification: { priority: \"high\", channel: \"both\" },\n  tags: [\"leadership\", \"daily\", \"board\"],\n  agentKind: \"notifier\",\n  prompt:\n    \"Track board action items: check task delivery status, blocker resolution progress, and approaching deadlines for the next board packet.\\n\",\n  extractionSchema: {\n    type: \"object\",\n    required: [\n      \"action_items\",\n      \"blocked_items\",\n      \"deadlines_approaching\",\n      \"completion_status\",\n    ],\n    properties: {\n      action_items: { type: \"array\", items: { type: \"string\" } },\n      blocked_items: { type: \"array\", items: { type: \"string\" } },\n      deadlines_approaching: { type: \"array\", items: { type: \"string\" } },\n      completion_status: { type: \"string\" },\n    },\n  },\n});",
+        "path": "lobu.config.ts",
+        "githubUrl": "https://github.com/lobu-ai/lobu/blob/main/examples/leadership/lobu.config.ts",
+        "language": "typescript"
       }
     }
   }

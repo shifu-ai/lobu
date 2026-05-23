@@ -10,6 +10,13 @@ export type { KyInstance, Options } from 'ky';
 export { default as ky, HTTPError } from 'ky';
 // Connector runtime & types (primary API)
 export { ConnectorRuntime } from './connector-runtime.js';
+export { defineConnector } from './define-connector.js';
+export type {
+  ConnectorActionSpec,
+  ConnectorClass,
+  ConnectorFeedSpec,
+  ConnectorSpec,
+} from './define-connector.js';
 export type {
   ActionContext,
   ActionDefinition,

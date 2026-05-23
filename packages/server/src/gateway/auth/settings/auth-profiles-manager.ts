@@ -79,7 +79,7 @@ interface AuthProfilesManagerOptions {
  * 2. **User-scoped profiles** — durable per-user profiles keyed by
  *    `(userId, agentId)` in `UserAuthProfileStore`.
  * 3. **Declared credentials** — read-only credentials shipped with the
- *    agent's declared config (lobu.toml / SDK GatewayConfig.agents),
+ *    agent's declared config (lobu.config.ts / SDK GatewayConfig.agents),
  *    surfaced via `DeclaredAgentRegistry`.
  *
  * Callers pass `ProviderCredentialContext.userId` when they have one

@@ -30,7 +30,7 @@ npx @lobu/cli@latest run                      # boots the stack and applies your
 npx @lobu/cli@latest chat -c local "hello"    # talk to it
 ```
 
-`lobu run` (embedded) auto-applies your `lobu.toml`, so the scaffolded agent is usable immediately. To use an external Postgres, set `DATABASE_URL` in `.env`; to push later config changes, run `lobu apply`.
+`lobu run` (embedded) auto-applies your `lobu.config.ts`, so the scaffolded agent is usable immediately. To use an external Postgres, set `DATABASE_URL` in `.env`; to push later config changes, run `lobu apply`.
 
 ## Agent configuration
 
@@ -42,7 +42,7 @@ npx @lobu/cli@latest org set my-org
 npx @lobu/cli@latest agent list
 ```
 
-Local `lobu.toml` projects are still useful for `lobu validate` and `lobu apply` workflows.
+Local `lobu.config.ts` projects are still useful for `lobu validate` and `lobu apply` workflows.
 
 ### Deployment
 
@@ -94,7 +94,7 @@ Every Lobu agent ships with tools for autonomous execution and persistence:
 | **Full Linux toolbox** — sandboxed shell, file edit, search | `bash`, `read`, `write`, `edit`, `grep`, `find`, `ls` |
 | **Conversation context** — pull earlier thread messages | `GetChannelHistory` |
 | **File & media delivery** — share reports, charts, audio | `UploadUserFile`, `GenerateAudio` |
-| **Skills** — extend via `lobu.toml` or admin settings | `lobu.toml`, Settings UI |
+| **Skills** — extend via `lobu.config.ts` or admin settings | `lobu.config.ts`, Settings UI |
 | **Connected APIs** — GitHub, Google, etc. with Lobu-managed OAuth | MCP tools via Lobu |
 | **Managed MCP proxy** — any MCP server with secret injection | [MCP Proxy](docs/SECURITY.md#credentials) |
 | **Nix + external MCP** — browsing, headless UI, custom tools | `bash` (Nix), MCP servers |

@@ -274,7 +274,7 @@ describe("shouldAutoApplyLocalProject", () => {
       shouldAutoApplyLocalProject({
         mode: "embedded",
         localContextReady: true,
-        hasLobuToml: true,
+        hasLobuConfig: true,
       })
     ).toBe(true);
   });
@@ -286,7 +286,7 @@ describe("shouldAutoApplyLocalProject", () => {
       shouldAutoApplyLocalProject({
         mode: "embedded",
         localContextReady: false,
-        hasLobuToml: true,
+        hasLobuConfig: true,
       })
     ).toBe(false);
   });
@@ -296,17 +296,17 @@ describe("shouldAutoApplyLocalProject", () => {
       shouldAutoApplyLocalProject({
         mode: "external",
         localContextReady: true,
-        hasLobuToml: true,
+        hasLobuConfig: true,
       })
     ).toBe(false);
   });
 
-  test("skips when the project has no lobu.toml to apply", () => {
+  test("skips when the project has no lobu.config.ts to apply", () => {
     expect(
       shouldAutoApplyLocalProject({
         mode: "embedded",
         localContextReady: true,
-        hasLobuToml: false,
+        hasLobuConfig: false,
       })
     ).toBe(false);
   });

@@ -28,6 +28,12 @@ export interface RemoteEntityType {
   description?: string;
   required?: string[];
   properties?: Record<string, unknown>;
+  /**
+   * Owning org id. The list endpoint also returns *public* types from OTHER
+   * orgs (`o.visibility = 'public'`), so prune must compare this against the
+   * target org and never delete a type this org doesn't own.
+   */
+  organization_id?: string;
 }
 
 export interface RemoteRelationshipType {
@@ -35,6 +41,8 @@ export interface RemoteRelationshipType {
   name?: string;
   description?: string;
   rules?: Array<{ source: string; target: string }>;
+  /** Owning org id — see RemoteEntityType.organization_id (public-type guard). */
+  organization_id?: string;
 }
 
 export interface RemoteOrg {
@@ -170,6 +178,37 @@ function pickArray<T>(body: Record<string, unknown>, ...keys: string[]): T[] {
     if (Array.isArray(value)) return value as T[];
   }
   return [];
+}
+
+/**
+ * The server stores entity-type per-field config as a single `metadata_schema`
+ * JSON Schema. The diff compares the desired config's flat `properties`/
+ * `required` against the remote snapshot, so hoist them out of the returned
+ * `metadata_schema` to the row's top level. Mirrors `upsertEntityType`, which
+ * folds the flat fields back into `metadata_schema` when writing.
+ */
+function hoistEntityTypeSchema(
+  row: RemoteEntityType & { metadata_schema?: unknown }
+): RemoteEntityType {
+  const schema = row.metadata_schema;
+  const out: RemoteEntityType = {
+    slug: row.slug,
+    ...(row.name !== undefined ? { name: row.name } : {}),
+    ...(row.description !== undefined ? { description: row.description } : {}),
+    // Preserve owning org so prune can skip public types from other orgs.
+    ...(row.organization_id !== undefined
+      ? { organization_id: row.organization_id }
+      : {}),
+  };
+  if (isRecord(schema)) {
+    if (isRecord(schema.properties)) out.properties = schema.properties;
+    if (Array.isArray(schema.required)) {
+      out.required = schema.required.filter(
+        (v): v is string => typeof v === "string"
+      );
+    }
+  }
+  return out;
 }
 
 function extractApiError(
@@ -451,13 +490,20 @@ export class ApplyClient {
 
   async listEntityTypes(): Promise<RemoteEntityType[]> {
     const { body } = await this.request<{
-      entity_types?: RemoteEntityType[];
-      entityTypes?: RemoteEntityType[];
+      entity_types?: Array<RemoteEntityType & { metadata_schema?: unknown }>;
+      entityTypes?: Array<RemoteEntityType & { metadata_schema?: unknown }>;
     }>("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
       schema_type: "entity_type",
       action: "list",
     });
-    return pickArray(body, "entity_types", "entityTypes");
+    // The server returns the type's fields inside a single `metadata_schema`
+    // JSON Schema. Surface its `properties`/`required` at top level so the diff
+    // compares them against the desired config (which carries them flat).
+    return pickArray<RemoteEntityType & { metadata_schema?: unknown }>(
+      body,
+      "entity_types",
+      "entityTypes"
+    ).map(hoistEntityTypeSchema);
   }
 
   /**
@@ -498,7 +544,23 @@ export class ApplyClient {
     required?: string[];
     properties?: Record<string, unknown>;
   }): Promise<UpsertEntityTypeResult> {
-    return this.upsertSchemaResource("entity_type", entity);
+    // The server stores per-type fields as a single `metadata_schema` JSON
+    // Schema (`{ type, properties, required }`) — it does NOT read top-level
+    // `properties`/`required`. Fold them into `metadata_schema` so the schema
+    // actually persists (otherwise every apply re-reports a `properties`
+    // update because the stored schema stays empty).
+    const { slug, name, description, required, properties } = entity;
+    const payload: Record<string, unknown> = { slug };
+    if (name !== undefined) payload.name = name;
+    if (description !== undefined) payload.description = description;
+    if (properties !== undefined || required !== undefined) {
+      payload.metadata_schema = {
+        type: "object",
+        properties: properties ?? {},
+        ...(required && required.length > 0 ? { required } : {}),
+      };
+    }
+    return this.upsertSchemaResource("entity_type", payload);
   }
 
   async listRelationshipTypes(): Promise<RemoteRelationshipType[]> {
@@ -510,6 +572,38 @@ export class ApplyClient {
       action: "list",
     });
     return pickArray(body, "relationship_types", "relationshipTypes");
+  }
+
+  /**
+   * Fetch a relationship type's rules (the `list` action omits them, so the
+   * apply diff can't otherwise see remote rules and would churn a perpetual
+   * "rules changed" update). Maps the server's `*_entity_type_slug` columns to
+   * `{ source, target }`; `id` is carried for reconcile (remove_rule by id).
+   */
+  async listRelationshipTypeRules(
+    slug: string
+  ): Promise<Array<{ id: number; source: string; target: string }>> {
+    const { body } = await this.request<{
+      rules?: Array<{
+        id?: number;
+        source_entity_type_slug?: string;
+        target_entity_type_slug?: string;
+      }>;
+    }>("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+      schema_type: "relationship_type",
+      action: "list_rules",
+      slug,
+    });
+    return (body.rules ?? [])
+      .filter(
+        (r) =>
+          r.id != null && r.source_entity_type_slug && r.target_entity_type_slug
+      )
+      .map((r) => ({
+        id: r.id as number,
+        source: r.source_entity_type_slug as string,
+        target: r.target_entity_type_slug as string,
+      }));
   }
 
   async upsertRelationshipType(rel: {
@@ -524,37 +618,77 @@ export class ApplyClient {
       payload
     );
 
-    // Register rules separately via add_rule. Backend treats add_rule as
-    // idempotent; duplicate-add surfaces a structured error we can swallow.
-    if (rules?.length) {
-      for (const rule of rules) {
-        try {
-          await this.request(
-            "POST",
-            `/api/${this.orgSlug}/manage_entity_schema`,
-            {
-              schema_type: "relationship_type",
-              action: "add_rule",
-              slug: rel.slug,
-              source_entity_type_slug: rule.source,
-              target_entity_type_slug: rule.target,
-            }
-          );
-        } catch (err) {
-          if (err instanceof ApiError && isDuplicateError(err)) continue;
-          throw err;
-        }
+    // Reconcile rules to exactly the desired set so config is the source of
+    // truth (declarative). Without removing extras, dropping a rule from config
+    // would never take effect AND would churn a perpetual "rules changed"
+    // update on every apply. add_rule is idempotent; remove_rule takes a id.
+    const desired = rules ?? [];
+    const ruleKey = (r: { source: string; target: string }) =>
+      `${r.source}	${r.target}`;
+    const desiredKeys = new Set(desired.map(ruleKey));
+    const remote = await this.listRelationshipTypeRules(rel.slug);
+    const remoteKeys = new Set(remote.map(ruleKey));
+
+    for (const rule of desired) {
+      if (remoteKeys.has(ruleKey(rule))) continue;
+      try {
+        await this.request(
+          "POST",
+          `/api/${this.orgSlug}/manage_entity_schema`,
+          {
+            schema_type: "relationship_type",
+            action: "add_rule",
+            slug: rel.slug,
+            source_entity_type_slug: rule.source,
+            target_entity_type_slug: rule.target,
+          }
+        );
+      } catch (err) {
+        if (err instanceof ApiError && isDuplicateError(err)) continue;
+        throw err;
       }
     }
+    for (const rule of remote) {
+      if (desiredKeys.has(ruleKey(rule))) continue;
+      await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+        schema_type: "relationship_type",
+        action: "remove_rule",
+        slug: rel.slug,
+        rule_id: rule.id,
+      });
+    }
     return result;
+  }
+
+  /**
+   * Delete an entity type (code-managed prune). The server soft-deletes and
+   * REFUSES if instances of the type still exist — the data is exempt from
+   * prune, so that surfaces as a clear error rather than cascading.
+   */
+  async deleteEntityType(slug: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+      schema_type: "entity_type",
+      action: "delete",
+      slug,
+    });
+  }
+
+  /** Delete a relationship type (code-managed prune). */
+  async deleteRelationshipType(slug: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_entity_schema`, {
+      schema_type: "relationship_type",
+      action: "delete",
+      slug,
+    });
   }
 
   // ── Watchers ──────────────────────────────────────────────────────────────
 
   /**
    * Fetch a single watcher's full payload — `getWatcher` server-side, which
-   * returns reaction_script (not in the list response). Used by `lobu export`
-   * to round-trip reaction scripts back to sibling `.ts` files.
+   * returns reaction_script (not in the list response). Used by
+   * `lobu init --from-org` to round-trip reaction scripts back to sibling
+   * `.ts` files.
    */
   async getWatcherDetail(watcherId: string): Promise<{
     reaction_script?: string | null;
@@ -795,6 +929,18 @@ export class ApplyClient {
       action: "set_reaction_script",
       watcher_id: watcherId,
       reaction_script: reactionScript,
+    });
+  }
+
+  /**
+   * Delete a watcher by its numeric `watcher_id` (code-managed prune). The
+   * admin tool takes an array; we delete one slug's watcher at a time so a
+   * failure is attributable.
+   */
+  async deleteWatcher(watcherId: string): Promise<void> {
+    await this.request("POST", `/api/${this.orgSlug}/manage_watchers`, {
+      action: "delete",
+      watcher_ids: [watcherId],
     });
   }
 

@@ -25,7 +25,7 @@ Lobu is embedded-only: the gateway, agent workers, the embeddings model, and the
 
 ## Persistent Memory
 
-Memory is pluggable per agent. In file-first projects the gateway resolves the default memory plugin from `[memory]` in `lobu.toml`: when enabled it wires `@lobu/openclaw-plugin` (OpenClaw memory calls become Lobu MCP requests through the gateway proxy — cross-session, shared across agents); otherwise it uses `@openclaw/native-memory` (files in the worker's local workspace — short-term, not shared). `MEMORY_URL` is an optional base-endpoint override for custom Lobu deployments.
+Memory is pluggable per agent. The gateway resolves the default memory plugin from `defineConfig({ org })` in `lobu.config.ts`: when an org is set it wires `@lobu/openclaw-plugin` (OpenClaw memory calls become Lobu MCP requests through the gateway proxy, cross-session, shared across agents); otherwise it uses `@openclaw/native-memory` (files in the worker's local workspace, short-term, not shared). `MEMORY_URL` is an optional base-endpoint override for custom Lobu deployments.
 
 See [Agent Settings → Memory Plugins](/guides/agent-settings/) for the full table, per-agent overrides, and the `pluginsConfig` schema.
 

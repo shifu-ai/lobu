@@ -25,7 +25,7 @@ This page compares Lobu against other ways to run agents for multiple users.
 | **Built-in evals** | YAML eval framework with model comparison | No | No | No |
 | **Memory** | Self-hosted Lobu plugin | Local | LangSmith APIs | Platform-managed |
 | **Worker lifecycle** | Persistent subprocess per channel; reaped on config change / shutdown | Always running | Managed by LangSmith | Managed |
-| **Config format** | `lobu.toml` + IDENTITY/SOUL/USER.md | CLI flags | `deepagents.toml` + AGENTS.md | Dashboard |
+| **Config format** | `lobu.config.ts` (TypeScript) + IDENTITY/SOUL/USER.md | CLI flags | `deepagents.toml` + AGENTS.md | Dashboard |
 | **License** | Open source | Open source | MIT (harness), proprietary (hosting) | Proprietary |
 
 ## Memory benchmarks
@@ -137,7 +137,7 @@ Inside each Lobu worker, the full OpenClaw runtime runs untouched. Lobu rewrites
 
 [DeepAgents Deploy](https://github.com/langchain-ai/deepagents) (LangChain) deploys a single agent to a hosted LangSmith server with 30+ API endpoints.
 
-**Where they overlap**: both use a TOML config file, support MCP, and offer model-agnostic provider selection.
+**Where they overlap**: both use a code-as-config file, support MCP, and offer model-agnostic provider selection.
 
 **Where they differ**:
 

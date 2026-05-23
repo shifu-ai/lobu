@@ -23,7 +23,7 @@ make clean-workers   # in the monorepo
 # - Port 8787 already in use → Change GATEWAY_PORT or PORT in .env
 # - DATABASE_URL set but not reachable → see "Agent not responding" below
 #   (with the default PGlite backend there's no DATABASE_URL to misconfigure)
-# - Invalid lobu.toml → npx @lobu/cli@latest validate
+# - Invalid lobu.config.ts → npx @lobu/cli@latest validate
 ```
 
 ## Agent not responding
@@ -118,8 +118,8 @@ rm -rf workspaces/*
 # Lobu runs in-process with the gateway. /health covers both.
 curl http://localhost:8787/health
 
-# Check file-first memory config
-# - lobu.toml should contain [memory] with enabled = true and an org
+# Check memory config
+# - lobu.config.ts should set defineConfig({ org }) so the memory endpoint resolves
 # - MEMORY_URL is optional; use it mainly for custom external Lobu URLs
 
 # Test connection

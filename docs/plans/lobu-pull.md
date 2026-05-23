@@ -4,7 +4,7 @@ Status: **planning** · Owner: @buremba · Stacks on `feat/lobu-cli-merge` · Bu
 
 ## Goal
 
-Provide a one-way Lobu Cloud org → `lobu.toml` converger. Mental model: `terraform import` lite — read live cloud state, write/update the project's `lobu.toml`, agent dirs, and `agents/<id>/skills/*/SKILL.md` so the local files match. Re-running converges. Use cases:
+Provide a one-way Lobu Cloud org → `lobu.config.ts` converger. Mental model: `terraform import` lite — read live cloud state, write/update the project's `lobu.config.ts`, agent dirs, and `agents/<id>/skills/*/SKILL.md` so the local files match. Re-running converges. Use cases:
 
 1. **Drift recovery** — someone edited the org via web UI, bring local files back in sync.
 2. **Bootstrap** — clone a project that exists only as a cloud org into a fresh dir.
@@ -36,7 +36,7 @@ Provide a one-way Lobu Cloud org → `lobu.toml` converger. Mental model: `terra
         │
         ▼
    CLI: confirm, then write:
-        │   lobu.toml                                  (merge or create)
+        │   lobu.config.ts                                  (merge or create)
         │   agents/<id>/IDENTITY.md, SOUL.md, USER.md  (from agent.dir contents)
         │   agents/<id>/skills/<name>/SKILL.md         (from cloud skill bodies)
         │   models/                                     (memory schema, if pulled)
@@ -48,7 +48,7 @@ Provide a one-way Lobu Cloud org → `lobu.toml` converger. Mental model: `terra
 ## Background — what already exists
 
 - **GETs**: `packages/cli/src/commands/_lib/apply/client.ts:230,285,318,359` — `listAgents`, `listConnections(agentId)`, `listEntityTypes`, `listRelationshipTypes`. No new server endpoints needed for v2.0.
-- **Loader**: `packages/cli/src/config/loader.ts:loadConfig` parses local `lobu.toml` + walks agent dirs. Pull reuses this to detect what's already on disk.
+- **Loader**: `packages/cli/src/config/loader.ts:loadConfig` parses local `lobu.config.ts` + walks agent dirs. Pull reuses this to detect what's already on disk.
 - **Stable connection IDs**: `packages/server/src/gateway/config/file-loader.ts:56:buildStableConnectionId(agentId, type, name)` — deterministic. As long as pull writes `[type, name]` pairs, applying again re-derives the same stable IDs.
 - **TOML writer**: `packages/cli/src/commands/init.ts:492:generateLobuToml` is the closest precedent — string-concatenation TOML emitter. v2.0 ships a more general version of the same function in `_lib/pull/render-toml.ts`.
 - **Frontmatter parser**: `packages/server/src/gateway/config/file-loader.ts:657` parses `SKILL.md` into `{ frontmatter, body }`. Pull inverts it: serialize frontmatter back, write body, append.
@@ -144,7 +144,7 @@ Validation:
 Pull **omits** volatile fields. Specifically:
 
 - `installedAt: Date.now()` (`file-loader.ts:231`) — omitted. The loader supplies it on next apply load.
-- Any `createdAt` / `updatedAt` on agents, connections, entity types — omitted. They are server-managed and have no representation in `lobu.toml` already; nothing to do.
+- Any `createdAt` / `updatedAt` on agents, connections, entity types — omitted. They are server-managed and have no representation in `lobu.config.ts` already; nothing to do.
 - `id` on a connection — derived from `[type, name]` via `buildStableConnectionId`, so pull writes `type` and `name` only; the explicit `id` field is never emitted.
 
 > [decision needed: any other field with churn that I'm missing? Cross-check during PR review against the file-loader's normalization output.]
@@ -155,7 +155,7 @@ Pull infers and writes a `[memory]` block with `org = "<orgSlug>"` and `mcp_url 
 
 ### No-local-project case
 
-`lobu pull --init <dir>` scaffolds a fresh tree (creates `<dir>/lobu.toml`, `<dir>/agents/`, etc.) and then pulls into it. Equivalent to `lobu init --bare && lobu pull` but in one command. Without `--init`, pull requires a pre-existing `lobu.toml` (or at least the working dir to be empty) — refuses to pull into a populated dir that lacks a `lobu.toml`, since that's almost certainly user error.
+`lobu pull --init <dir>` scaffolds a fresh tree (creates `<dir>/lobu.config.ts`, `<dir>/agents/`, etc.) and then pulls into it. Equivalent to `lobu init --bare && lobu pull` but in one command. Without `--init`, pull requires a pre-existing `lobu.config.ts` (or at least the working dir to be empty) — refuses to pull into a populated dir that lacks a `lobu.config.ts`, since that's almost certainly user error.
 
 ### `--dry-run`
 
@@ -189,7 +189,7 @@ Carrying forward the relevant ones from `lobu-apply.md`, plus pull-specific:
 
 After the PR merges, run against a real local cloud (DB-first `lobu run` per apply's E2E setup):
 
-1. `lobu apply` from a known-good `lobu.toml` (created in apply's E2E #6).
+1. `lobu apply` from a known-good `lobu.config.ts` (created in apply's E2E #6).
 2. `rm -rf` the local project.
 3. `lobu pull --init pulled-project/ --org <slug>` — verify directory tree created.
 4. `cd pulled-project && lobu apply --dry-run` — verify all noops.

@@ -309,7 +309,7 @@ In your Lobu project, drop `*.connector.ts` files under `connectors/`:
 
 ```
 my-agent/
-├── lobu.toml
+├── lobu.config.ts
 ├── connectors/
 │   ├── github-issues.connector.ts
 │   └── stripe-charges.connector.ts
@@ -322,7 +322,7 @@ my-agent/
 
 A connector can pull in two kinds of dependency, and they are provisioned differently.
 
-**npm packages are bundled at compile time.** Add them to the `package.json` next to your `lobu.toml` and import them normally:
+**npm packages are bundled at compile time.** Add them to the `package.json` next to your `lobu.config.ts` and import them normally:
 
 ```ts
 import { parse } from "csv-parse/sync";

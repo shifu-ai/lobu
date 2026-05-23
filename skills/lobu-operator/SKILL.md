@@ -10,7 +10,7 @@ description: Repo-specific operational skill for Lobu-managed agents working ins
 ## Before You Act
 
 1. Read `CLAUDE.md` and `AGENTS.md`.
-2. Read `lobu.toml` for workspace configuration.
+2. Read `lobu.config.ts` for workspace configuration.
 3. Inspect the agent directories and enabled `skills/` — the layout is data-driven, don't assume it.
 
 ## Dev Workflow

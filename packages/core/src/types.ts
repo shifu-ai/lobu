@@ -83,7 +83,7 @@ export function hasCredentialSource(profile: AuthProfile): boolean {
 
 /**
  * Declared provider credential — a credential that ships with the agent's
- * declared configuration (`lobu.toml` or SDK `GatewayConfig.agents`).
+ * declared configuration (`lobu.config.ts` or SDK `GatewayConfig.agents`).
  *
  * Declared credentials are read-only at runtime. They are merged into the
  * effective auth profile list when no user-scoped profile exists for the

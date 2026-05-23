@@ -3,15 +3,15 @@ title: Sync agents from GitHub
 description: Manage agent definitions in a git repo and have GitHub Actions apply them to your Lobu org on every push.
 ---
 
-`lobu apply` is the apply primitive — it diffs a local `lobu.toml` + agent dirs against a Lobu Cloud org and converges the org to match. Any CI runner can call it, and GitHub Actions is the path of least resistance: push to `main` triggers an apply, PRs preview a dry-run diff in the check output.
+`lobu apply` is the apply primitive. It diffs a local `lobu.config.ts` + agent dirs against a Lobu Cloud org and converges the org to match. Any CI runner can call it, and GitHub Actions is the path of least resistance: push to `main` triggers an apply, PRs preview a dry-run diff in the check output.
 
 There is no Lobu-side sync feature. The repo is the source of truth and CI is the cron. That keeps Lobu opinion-free about how you structure branches, reviews, multi-env promotion, secret stores — those are choices you already made for the rest of your stack.
 
 ## What you need
 
-1. A git repo with a `lobu.toml` at the root (or in a subdirectory).
+1. A git repo with a `lobu.config.ts` at the root (or in a subdirectory).
 2. A `LOBU_TOKEN` secret in the repo (`Settings → Secrets and variables → Actions`). Mint one with `lobu token create` from a logged-in shell (it defaults to the `mcp:read mcp:write` scope, which `lobu apply` uses).
-3. Any provider keys your agents reference (`ANTHROPIC_API_KEY`, etc.) added as repo secrets too — `lobu apply` reads them via `$VAR` interpolation in `lobu.toml`.
+3. Any provider keys your agents reference (`ANTHROPIC_API_KEY`, etc.) added as repo secrets too. `lobu apply` reads them via the `secret("VAR")` references in `lobu.config.ts`.
 
 ## Drop-in workflow
 
@@ -59,7 +59,8 @@ jobs:
 
 ```
 my-agents/
-├── lobu.toml
+├── lobu.config.ts
+├── package.json
 ├── agents/
 │   ├── support-bot/
 │   │   ├── IDENTITY.md
@@ -70,18 +71,26 @@ my-agents/
 └── .github/workflows/lobu-apply.yml
 ```
 
-`lobu.toml` references each agent's directory:
+`lobu.config.ts` references each agent's directory:
 
-```toml
-[agents.support-bot]
-name = "support-bot"
-description = "Customer support triage"
-dir = "./agents/support-bot"
+```ts
+import { defineAgent, defineConfig, secret } from "@lobu/sdk";
 
-[[agents.support-bot.providers]]
-id = "anthropic"
-model = "claude/sonnet-4-5"
-key = "$ANTHROPIC_API_KEY"
+const supportBot = defineAgent({
+  id: "support-bot",
+  name: "support-bot",
+  description: "Customer support triage",
+  dir: "./agents/support-bot",
+  providers: [
+    {
+      id: "anthropic",
+      model: "claude/sonnet-4-5",
+      key: secret("ANTHROPIC_API_KEY"),
+    },
+  ],
+});
+
+export default defineConfig({ agents: [supportBot] });
 ```
 
 See [`lobu apply`](/reference/lobu-apply/) for the full file format and the list of fields that get synced.
@@ -108,7 +117,7 @@ Stage on push-to-main, prod on tag, prod-on-approval — all standard Actions pa
 ## What `lobu apply` will not do
 
 - It will not edit secrets in your provider accounts. `$VAR` references are resolved at apply time from the runner's environment; the values never leave the runner.
-- It will not import existing cloud-side agents into your repo. If you've been editing in the admin UI and want to flip to git-managed, hand-write `lobu.toml` against the current state. (A `lobu pull` to scaffold this automatically is not yet implemented.)
+- It will not import existing cloud-side agents into your repo on a regular apply. If you've been editing in the admin UI and want to flip to git-managed, run `lobu init --from-org <slug>` to scaffold a re-appliable `lobu.config.ts` from the current cloud state.
 - It will not silently overwrite manual UI edits without showing the diff. Every apply prints the plan; `--dry-run` lets you preview without converging.
 
 ## Drift between UI and git

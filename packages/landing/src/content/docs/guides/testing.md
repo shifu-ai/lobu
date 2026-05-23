@@ -17,7 +17,7 @@ npx @lobu/cli@latest chat "Hello, what can you do?"
 npx @lobu/cli@latest chat "What's on my calendar?" --thread my-test
 npx @lobu/cli@latest chat "Cancel the 3pm meeting" --thread my-test
 
-# Target a specific agent (if you have multiple in lobu.toml)
+# Target a specific agent (if you have multiple in lobu.config.ts)
 npx @lobu/cli@latest chat "Hello" --agent support
 
 # Dry run (no history persisted)

@@ -13,7 +13,7 @@ Use it for:
 - Capability declarations such as MCP servers, packages, and network domains
 - Instruction text that is injected into the agent's system prompt when the skill is active
 
-Tool policy does **not** live in `SKILL.md`. Configure that in [`lobu.toml`](/reference/lobu-toml/) under `[agents.<id>.tools]`; see [Tool Policy](/guides/tool-policy/).
+Tool policy does **not** live in `SKILL.md`. Configure that in [`lobu.config.ts`](/reference/lobu-config/) via the agent `tools` field; see [Tool Policy](/guides/tool-policy/).
 
 ## Where Skills Live
 
@@ -92,7 +92,7 @@ The body acts as a system prompt extension.
 | `network.judge` | array | Domains routed through the LLM egress judge. Each entry is a bare domain string (uses the `default` judge policy) or an object `{ domain, judge }` naming a policy in the top-level `judges` map |
 | `judges` | object | Named judge policies (string → policy text) referenced by `network.judge[].judge`; the `default` key applies when an entry omits `judge` |
 
-Skill MCP entries support only `url` / `type` / `command` / `args` — for `headers`, `env`, `oauth`, or `auth_scope`, configure the MCP server on the agent in [`lobu.toml`](/reference/lobu-toml/) under `[agents.<id>.skills.mcp.<name>]`.
+Skill MCP entries support only `url` / `type` / `command` / `args` — for `headers`, `env`, `oauth`, or `authScope`, configure the MCP server on the agent in [`lobu.config.ts`](/reference/lobu-config/) via the agent `mcpServers` field.
 
 ## Markdown Body
 
@@ -100,13 +100,13 @@ The markdown body after the frontmatter is appended to the agent's prompt when t
 
 ## Notes
 
-- `SKILL.md` frontmatter does not configure tool approval or `pre_approved` MCP tools.
+- `SKILL.md` frontmatter does not configure tool approval or `preApproved` MCP tools.
 - `contracts.tools` belongs in an OpenClaw plugin manifest (`openclaw.plugin.json`), not in `SKILL.md` frontmatter — the skill parser ignores it.
-- When both a skill and the agent declare egress-judge rules, the `lobu.toml` policy wins on named judges and judged-domain rules.
-- For MCP servers that should live directly on the agent rather than inside a skill, configure them in [`lobu.toml`](/reference/lobu-toml/).
+- When both a skill and the agent declare egress-judge rules, the `lobu.config.ts` policy wins on named judges and judged-domain rules.
+- For MCP servers that should live directly on the agent rather than inside a skill, configure them in [`lobu.config.ts`](/reference/lobu-config/).
 
 ## Related Docs
 
 - [Skills](/getting-started/skills/)
 - [Tool Policy](/guides/tool-policy/)
-- [`lobu.toml` Reference](/reference/lobu-toml/)
+- [`lobu.config.ts` Reference](/reference/lobu-config/)

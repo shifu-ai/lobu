@@ -1,35 +1,33 @@
 import chalk from "chalk";
-import { isLoadError, loadConfig } from "../config/loader.js";
+import { loadDesiredStateFromConfig } from "./_lib/apply/desired-state.js";
 
 export async function validateCommand(cwd: string): Promise<boolean> {
-  const result = await loadConfig(cwd);
-
-  if (isLoadError(result)) {
-    console.error(chalk.red(`\n  ${result.error}`));
-    if (result.details) {
-      for (const detail of result.details) {
-        console.error(chalk.dim(`  ${detail}`));
-      }
-    }
+  let state: Awaited<ReturnType<typeof loadDesiredStateFromConfig>>["state"];
+  try {
+    // Loading runs the full structural validation: slug/cron checks, watcher
+    // agent refs, reaction-script paths, connector/auth shapes, etc. Secrets
+    // are not required here (the gate runs at `lobu apply`).
+    ({ state } = await loadDesiredStateFromConfig({ cwd }));
+  } catch (err) {
+    console.error(
+      chalk.red(`\n  ${err instanceof Error ? err.message : String(err)}`)
+    );
     console.log();
     return false;
   }
 
-  const { config } = result;
   const warnings: string[] = [];
-
-  for (const [agentId, agentEntry] of Object.entries(config.agents)) {
-    if (agentEntry.providers.length === 0) {
+  for (const agent of state.agents) {
+    if (!agent.settings.installedProviders?.length) {
       warnings.push(
-        `[agents.${agentId}] No providers configured. Agent will need provider keys at runtime.`
+        `agent "${agent.metadata.agentId}" has no providers configured. It will need provider keys at runtime.`
       );
     }
   }
 
-  const agentCount = Object.keys(config.agents).length;
   console.log();
-  console.log(chalk.green(`  lobu.toml is valid`));
-  console.log(chalk.dim(`  ${agentCount} agent(s) configured`));
+  console.log(chalk.green(`  lobu.config.ts is valid`));
+  console.log(chalk.dim(`  ${state.agents.length} agent(s) configured`));
   for (const warn of warnings) {
     console.log(chalk.yellow(`  ${warn}`));
   }

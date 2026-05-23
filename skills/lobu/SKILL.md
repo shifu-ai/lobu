@@ -1,13 +1,13 @@
 ---
 name: lobu
-description: Scaffold a new Lobu agent project from a user interview, then build, run, and maintain it — including lobu.toml, prompt files, local skills, evals, providers, connections, and Lobu memory workflows.
+description: Scaffold a new Lobu agent project from a user interview, then build, run, and maintain it, including lobu.config.ts, prompt files, local skills, evals, providers, connections, and Lobu memory workflows.
 ---
 
 # Lobu
 
 Use this skill when the user wants to scaffold a new Lobu agent (no existing project), or when they're working on an existing Lobu project — running, validating, evaluating, or connecting one. Also use it for persistent Lobu memory, MCP client setup, OpenClaw memory plugin configuration, knowledge search/save workflows, watchers, and browser-authenticated connectors.
 
-If no `lobu.toml` exists in the current working directory, treat the user as a first-time user and run the "First-Time Setup" flow below. Otherwise jump straight to "Core Model" + the relevant reference section.
+If no `lobu.config.ts` exists in the current working directory, treat the user as a first-time user and run the "First-Time Setup" flow below. Otherwise jump straight to "Core Model" + the relevant reference section.
 
 ## First-Time Setup
 
@@ -44,14 +44,14 @@ npx @lobu/cli@latest init <agent-name>
 cd <agent-name>
 ```
 
-The CLI generates the directory layout. Then edit:
+The CLI generates the directory layout, including `lobu.config.ts`, `package.json`, and `tsconfig.json`. All authoring is TypeScript: import `defineConfig`, `defineAgent`, `defineEntityType`, `defineRelationshipType`, `defineWatcher`, `defineConnection`, `defineAuthProfile`, and `secret` from `@lobu/sdk`. Read `examples/lobu-crm/lobu.config.ts` in the lobu repo for a complete, working reference before editing. Then edit:
 
-- **`lobu.toml`** — set the agent name + description from question 1; add the chosen provider; set `[memory] org` from a slug of the user's choice.
+- **`lobu.config.ts`** — set the agent name + description from question 1 on `defineAgent`; add the chosen provider with `providers: [{ id, model, key: secret("X_API_KEY") }]`; set `org` / `orgName` in `defineConfig` from a slug of the user's choice.
 - **`.env`** — fill in `DATABASE_URL` and the provider API key from Phase 1.
-- **`models/schema.yaml`** — declare the entity types from question 3. Each entity needs `slug`, `name`, and a `metadata_schema` (JSON Schema) describing the fields you will store.
+- **Entity types** — declare the entity types from question 3 with `defineEntityType({ key, name, properties })` and list them in `defineConfig({ entities: [...] })`. Each property is a JSON Schema fragment; add `"x-table-label"` / `"x-table-column": true` to surface a column in the admin UI.
 - **`connectors/<name>.connector.ts`** — only if the source from question 4 is not a bundled connector. Model it on `examples/lobu-crm/connectors/funnel-form.connector.ts` in the lobu repo.
-- **`models/schema.yaml`** (watchers section) — add one reactive watcher with `on: <event-type>`, `prompt`, and `extraction_schema`. Optionally add the cron `schedule:` watcher from question 6.
-- **`models/reactions/<name>.reaction.ts`** — only if the watcher needs to call actions after extracting (post to Slack, update an entity, etc.). Default path (no reaction) just writes the extracted data to memory.
+- **Watchers** — add one watcher with `defineWatcher({ agent, slug, prompt, extractionSchema, schedule? })` and list it in `defineConfig({ watchers: [...] })`. Use the cron `schedule` from question 6 if the user wants one.
+- **`reactions/<name>.reaction.ts`** — only if the watcher needs to call actions after extracting (post to Slack, update an entity, etc.). Point the watcher at it with `reaction: "./reactions/<name>.reaction.ts"`. Default path (no `reaction`) just writes the extracted data to memory.
 
 Then boot:
 
@@ -78,7 +78,7 @@ If anything fails, do not silently move on — surface the error, propose a fix,
 ## Core Model
 
 - **Lobu** is the agent framework, runtime, deployment layer, and memory surface.
-- Keep framework configuration in `lobu.toml`.
+- Keep framework configuration in `lobu.config.ts` (TypeScript, `defineConfig` from `@lobu/sdk`).
 - Keep agent identity and behavior in `IDENTITY.md`, `SOUL.md`, and `USER.md`.
 - Keep reusable capability bundles in `skills/<name>/SKILL.md` or `agents/<agent>/skills/<name>/SKILL.md`.
 - Use `lobu login` for CLI authentication. Do not use a separate memory login command.
@@ -86,7 +86,7 @@ If anything fails, do not silently move on — surface the error, propose a fix,
 
 ## Project Checklist
 
-1. Read `lobu.toml` first.
+1. Read `lobu.config.ts` first.
 2. Read the active agent files under `agents/<id>/`.
 3. Check local skills under `skills/` and `agents/<id>/skills/`.
 4. Use `lobu validate` after config changes.
@@ -114,18 +114,32 @@ Your long-term memory is powered by Lobu. Do NOT use local files (memory/, MEMOR
 
 ## Lobu Memory
 
-Configure project-scoped memory in `lobu.toml`:
+Configure project-scoped memory in `lobu.config.ts` by setting the org on `defineConfig` and declaring the schema with the `define*` helpers:
 
-```toml
-[memory]
-enabled = true
-org = "my-org"
-name = "My workspace"
-models = "./models"
-data = "./data"
+```ts
+import { defineConfig, defineEntityType } from "@lobu/sdk";
+
+const ticket = defineEntityType({
+  key: "ticket",
+  name: "Ticket",
+  properties: {
+    subject: {
+      type: "string",
+      "x-table-label": "Subject",
+      "x-table-column": true,
+    },
+  },
+});
+
+export default defineConfig({
+  org: "my-org",
+  orgName: "My workspace",
+  agents: [/* ... */],
+  entities: [ticket],
+});
 ```
 
-Then seed or operate the memory workspace with:
+Seed data records still live as YAML under `./data`. Then seed or operate the memory workspace with:
 
 ```bash
 lobu login

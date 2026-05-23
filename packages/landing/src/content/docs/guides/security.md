@@ -26,7 +26,7 @@ Domain format: exact (`api.example.com`) or wildcard (`.example.com` matches all
 
 ### LLM-judged egress
 
-For domains where flat allow/deny is too coarse, like Slack, GitHub user-content, or Notion, skills can route requests through an LLM judge that decides per request. Only domains that match a `judge` rule invoke it, so the cost stays bounded. Skills declare judged domains and named policies in `SKILL.md`; operators layer an `extra_policy` on top in `lobu.toml`.
+For domains where flat allow/deny is too coarse, like Slack, GitHub user-content, or Notion, skills can route requests through an LLM judge that decides per request. Only domains that match a `judge` rule invoke it, so the cost stays bounded. Skills declare judged domains and named policies in `SKILL.md`; operators layer an `extraPolicy` on top in `lobu.config.ts`.
 
 See [Egress judge](/guides/egress-judge/) for the policy schema, judge defaults (Haiku, verdict cache, fail-closed circuit breaker), and the `egress-decision` audit record.
 
@@ -42,14 +42,14 @@ Workers never receive raw provider credentials or OAuth tokens. The gateway reso
 - **AWS Secrets Manager refs are read-only**. `aws-sm://...` works well for durable provider secret references, but refreshed user tokens still need a writable secret store.
 - **Workers never touch third-party OAuth tokens directly**. They call integrations through Lobu MCP tools and the gateway proxy.
 
-For concrete config examples, see the [`lobu.toml` reference](/reference/lobu-toml/) and the [CLI reference](/reference/cli/).
+For concrete config examples, see the [`lobu.config.ts` reference](/reference/lobu-config/) and the [CLI reference](/reference/cli/).
 
 ## MCP Proxy
 
 - Workers discover MCP tools through the gateway and call them with their own JWT token scoped to the agent.
 - The proxy enforces **SSRF protection**: upstream MCP URLs that resolve to internal or private IP ranges are blocked.
 - **Destructive tool approval**: per the MCP spec, tools without `readOnlyHint: true` or `destructiveHint: false` require user approval in-thread (`Allow once / 1h / 24h / Always / Deny`). The user's choice is recorded in the grant store.
-- **Operator override**: `[agents.<id>.tools]` in `lobu.toml` accepts a `pre_approved` list of grant patterns (e.g. `/mcp/gmail/tools/list_messages`, `/mcp/linear/tools/*`) that bypass the approval card. This is operator-only — skills cannot set it — so the escape hatch is always visible in code review. See [Tool Policy](/guides/tool-policy/) and the [`lobu.toml` reference](/reference/lobu-toml/).
+- **Operator override**: the agent `tools` field in `lobu.config.ts` accepts a `preApproved` list of grant patterns (e.g. `/mcp/gmail/tools/list_messages`, `/mcp/linear/tools/*`) that bypass the approval card. This is operator-only — skills cannot set it — so the escape hatch is always visible in code review. See [Tool Policy](/guides/tool-policy/) and the [`lobu.config.ts` reference](/reference/lobu-config/).
 
 ## Further Reading
 

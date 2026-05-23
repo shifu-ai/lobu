@@ -30,7 +30,9 @@ LOBU_TOKEN=$(npx @lobu/cli@latest token) bunx promptfoo eval \
 
 ```
 my-agent/
-├── lobu.toml                  # agents, providers, skills, network
+├── lobu.config.ts             # agents, providers, network, memory schema (TypeScript)
+├── package.json               # declares @lobu/sdk + @lobu/connector-sdk
+├── tsconfig.json
 ├── .env                       # secrets (API keys, optional DATABASE_URL)
 ├── AGENTS.md                  # briefing for coding agents
 ├── README.md
@@ -42,50 +44,51 @@ my-agent/
 │   ├── skills/                # skills scoped to this agent only
 │   └── evals/
 │       └── promptfooconfig.yaml  # test cases for agent quality (promptfoo)
+├── connectors/                # custom *.connector.ts (optional)
 ├── data/                      # local runtime data; memory seeds when enabled
 └── skills/                    # skills shared across all agents
 ```
 
-If you enable Lobu memory during `init`, the scaffold also creates `models/` plus `data/entities/` and `data/relationships/`.
+The memory schema (entity types, relationship types, watchers) lives directly in `lobu.config.ts` via `defineEntityType` / `defineRelationshipType` / `defineWatcher`.
 
 | Path | Docs |
 |------|------|
-| `lobu.toml` | [lobu.toml reference](/reference/lobu-toml/) |
+| `lobu.config.ts` | [lobu.config.ts reference](/reference/lobu-config/) |
 | `agents/*/IDENTITY.md`, `SOUL.md`, `USER.md` | [Agent Workspace](/guides/agent-prompts/) |
 | `agents/*/skills/`, `skills/` | [SKILL.md reference](/reference/skill-md/), [Skills](/getting-started/skills/) |
 | `agents/*/evals/` | [Evaluations](/guides/evals/) |
-| `models/`, `data/entities/`, `data/relationships/` | [Memory](/getting-started/memory/) |
+| `connectors/` | [Connector SDK](/getting-started/connector-sdk/) |
 | `.env` | [CLI reference](/reference/cli/) |
 
 ## Develop your agent
 
-Install the Lobu skill into your coding agent so it already understands the project layout, `lobu.toml`, evals, memory wiring, and client setup:
+Install the Lobu skill into your coding agent so it already understands the project layout, `lobu.config.ts`, evals, memory wiring, and client setup:
 
 ```bash
 npx skills add lobu-ai/lobu --skill lobu
 ```
 
-See [Skills](/getting-started/skills/) for which coding agents this supports and how to scope it. With the skill installed, open your coding agent in the project and shape behavior by editing `agents/my-agent/{IDENTITY,SOUL,USER}.md`, `lobu.toml`, and `agents/my-agent/evals/promptfooconfig.yaml` — then re-run `npx @lobu/cli@latest chat "…"` and `bunx promptfoo eval -c agents/my-agent/evals/promptfooconfig.yaml` after each change.
+See [Skills](/getting-started/skills/) for which coding agents this supports and how to scope it. With the skill installed, open your coding agent in the project and shape behavior by editing `agents/my-agent/{IDENTITY,SOUL,USER}.md`, `lobu.config.ts`, and `agents/my-agent/evals/promptfooconfig.yaml`, then re-run `npx @lobu/cli@latest chat "…"` and `bunx promptfoo eval -c agents/my-agent/evals/promptfooconfig.yaml` after each change.
 
 | File | What to ask for |
 |------|----------------|
 | `agents/my-agent/IDENTITY.md` | "Make this a customer support agent for Acme Corp" |
 | `agents/my-agent/SOUL.md` | "Add rules: never share pricing, always confirm before cancellations" |
 | `agents/my-agent/USER.md` | "Set timezone to US/Pacific, company plan is Enterprise" |
-| `lobu.toml` | "Add GitHub and Linear skills, allow github.com and api.linear.app" |
+| `lobu.config.ts` | "Add a GitHub MCP server and allow github.com and api.linear.app" |
 | `agents/my-agent/evals/` | "Write an eval that tests the agent follows the cancellation rule" |
 | `agents/my-agent/skills/` | "Create a custom skill for our internal API" |
 
 ## Configuration
 
-`lobu.toml` plus the files under `agents/<id>/` are the source of truth — agents, providers, enabled skills, MCP servers, network policy, and (optionally) memory. Edit them locally and `lobu run` picks them up immediately.
+`lobu.config.ts` plus the files under `agents/<id>/` are the source of truth: agents, providers, network policy, tool policy, MCP servers, and (optionally) the memory schema. `lobu.config.ts` is a TypeScript module that default-exports `defineConfig({...})` and imports its authoring functions from `@lobu/sdk`. Edit it locally and `lobu run` picks it up immediately.
 
-To run an agent on **Lobu Cloud**, push the same files up with `lobu apply`:
+To run an agent on **Lobu Cloud**, push the same project up with `lobu apply`:
 
 ```bash
 npx @lobu/cli@latest login              # authenticate
-npx @lobu/cli@latest validate           # check lobu.toml + agent files
+npx @lobu/cli@latest validate           # check lobu.config.ts + agent files
 npx @lobu/cli@latest apply --org my-org # sync to your Cloud org
 ```
 
-The Cloud web app and the CLI talk to the same org-scoped REST API, so anything you do in the UI (add providers, connections, skills; view agent status) you can also drive from `lobu.toml` + `lobu apply`. See the [CLI Reference](/reference/cli/) and [`lobu apply`](/reference/lobu-apply/) for the full surface.
+The Cloud web app and the CLI talk to the same org-scoped REST API, so anything you do in the UI (add providers, connections, skills; view agent status) you can also drive from `lobu.config.ts` + `lobu apply`. See the [CLI Reference](/reference/cli/) and [`lobu apply`](/reference/lobu-apply/) for the full surface.

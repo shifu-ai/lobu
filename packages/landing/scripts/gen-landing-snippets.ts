@@ -3,16 +3,23 @@
  * Reads pinned files out of `examples/` and emits a flat JSON manifest the
  * landing page imports at build time.
  *
+ * The whole declarative project now lives in a single TypeScript file per
+ * example: `examples/<slug>/lobu.config.ts` (using `@lobu/sdk`:
+ * `defineConfig`, `defineAgent`, `defineEntityType`, `defineWatcher`, ...).
+ * The landing page shows SOURCE CODE, so we slice the raw `.ts` text into
+ * budget-sized sections; we never import/execute the config.
+ *
  * Each primitive section shows ONE canonical pinned example, used as the
  * generic fallback when no use case is selected:
  *
  *   connector    -> examples/ecommerce/connectors/stripe-charges.connector.ts
- *   memorySchema -> examples/sales/models/schema.yaml         (entities slice)
- *   watcher      -> examples/sales/models/schema.yaml         (watchers slice)
- *   reaction     -> examples/sales/models/reactions/account-health-monitor.reaction.ts
- *   agentToml    -> examples/sales/lobu.toml
+ *   memorySchema -> examples/sales/lobu.config.ts        (defineEntityType slice)
+ *   watcher      -> examples/sales/lobu.config.ts         (defineWatcher slice)
+ *   reaction     -> examples/finance/models/reactions/reconciliation-monitor.reaction.ts
+ *   agentConfig  -> examples/sales/lobu.config.ts         (imports + defineAgent slice)
+ *   skill        -> examples/office-bot/.../SKILL.md
  *
- * Plus a list of every `examples/*\/lobu.toml` for BrowseExamplesSection:
+ * Plus a list of every `examples/*\/lobu.config.ts` for BrowseExamplesSection:
  *
  *   examples     -> [{ slug, label, description, githubUrl }]
  *
@@ -20,8 +27,6 @@
  * snippets keyed by the example dir slug. The interactive use-case tab strip
  * on the landing page swaps these three sections; everything else stays
  * generic. Hero copy is not part of this manifest.
- *
- * The skill snippet stays inline in LandingPage.tsx (set in round 9).
  *
  * Output: packages/landing/src/generated/landing-snippets.json
  */
@@ -34,34 +39,27 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const examplesDir = resolve(__dirname, "../../../examples");
 const outFile = resolve(__dirname, "../src/generated/landing-snippets.json");
 
+const CONFIG_FILE = "lobu.config.ts";
+
 const PINNED = {
   connector: {
     slug: "ecommerce",
     path: "connectors/stripe-charges.connector.ts",
   },
-  memorySchema: { slug: "sales", path: "models/schema.yaml" },
-  watcher: { slug: "leadership", path: "models/schema.yaml" },
+  agentConfig: { slug: "sales" },
+  memorySchema: { slug: "sales" },
+  watcher: { slug: "sales" },
   reaction: {
     slug: "finance",
     path: "models/reactions/reconciliation-monitor.reaction.ts",
   },
-  agentToml: { slug: "lobu-crm", path: "lobu.toml" },
   skill: {
     slug: "office-bot",
     path: "agents/food-ordering/skills/deliveroo-order/SKILL.md",
   },
 } as const;
 
-const BUDGETS = {
-  agentToml: 12,
-  memorySchema: 22,
-  watcher: 16,
-  reaction: 50,
-  connector: 40,
-  skill: 26,
-};
-
-type Language = "toml" | "yaml" | "typescript" | "markdown";
+type Language = "typescript" | "markdown";
 
 type Snippet = {
   code: string;
@@ -88,7 +86,7 @@ type LandingSnippets = {
   memorySchema: Snippet;
   watcher: Snippet;
   reaction: Snippet;
-  agentToml: Snippet;
+  agentConfig: Snippet;
   skill: Snippet;
   examples: ExampleEntry[];
   useCases: Record<string, UseCaseSnippets>;
@@ -96,7 +94,7 @@ type LandingSnippets = {
 
 /** Slugs that get per-use-case connector / memory / watcher snippets. The id
  *  equals the example directory name. Each dir has exactly one
- *  connectors/*.connector.ts and a models/schema.yaml. */
+ *  connectors/*.connector.ts and a lobu.config.ts. */
 const USE_CASE_SLUGS = [
   "legal",
   "finance",
@@ -120,390 +118,169 @@ function githubTreeUrl(slug: string): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  TOML extraction                                                           */
+/*  TypeScript section slicing                                                */
 /* -------------------------------------------------------------------------- */
 
-const TOML_AGENT_KEEP_KEYS = new Set(["name"]);
-const TOML_PROVIDER_KEEP_KEYS = new Set(["id", "model", "key"]);
-const TOML_MEMORY_KEEP_KEYS = new Set(["enabled", "org", "models", "data"]);
-
-function trimAgentToml(raw: string): string {
+/**
+ * Slice the leading `import ... from "@lobu/sdk";` block out of a config file.
+ * Returns the import statement lines (the first `import` through its closing
+ * `from "...";`), or an empty array if none is found.
+ */
+function sliceImportBlock(raw: string): string[] {
   const lines = raw.split("\n");
-  const out: string[] = [];
-  type Mode = "skip" | "agent" | "provider" | "memory";
-  let mode: Mode = "skip";
-  let providersSeen = false;
-  for (const line of lines) {
-    const sectionMatch = /^\s*\[\[?([\w.-]+)\]\]?\s*$/.exec(line);
-    if (sectionMatch) {
-      const name = sectionMatch[1];
-      const isAgentTop = /^agents\.[\w-]+$/.test(name);
-      const isFirstProvider =
-        /^agents\.[\w-]+\.providers$/.test(name) && !providersSeen;
-      const isMemory = name === "memory";
-      if (isAgentTop) mode = "agent";
-      else if (isFirstProvider) {
-        mode = "provider";
-        providersSeen = true;
-      } else if (isMemory) mode = "memory";
-      else mode = "skip";
-      if (mode !== "skip") out.push(line.trimEnd());
-      continue;
-    }
-    if (mode === "skip") continue;
-    const kvMatch = /^\s*([A-Za-z_][\w-]*)\s*=/.exec(line);
-    if (!kvMatch) continue;
-    const key = kvMatch[1];
-    const keep =
-      (mode === "agent" && TOML_AGENT_KEEP_KEYS.has(key)) ||
-      (mode === "provider" && TOML_PROVIDER_KEEP_KEYS.has(key)) ||
-      (mode === "memory" && TOML_MEMORY_KEEP_KEYS.has(key));
-    if (keep) out.push(line.trimEnd());
+  const start = lines.findIndex((l) => /^\s*import\b/.test(l));
+  if (start < 0) return [];
+  let end = start;
+  for (let i = start; i < lines.length; i++) {
+    end = i;
+    if (/;\s*$/.test(lines[i])) break;
   }
-  return collapseBlanks(out).join("\n");
+  return lines.slice(start, end + 1);
 }
 
-/** Parse a full lobu.toml and pull the first agent name + description fields. */
-type TomlExampleMeta = { label: string | null; description: string | null };
+/**
+ * Slice the first `defineX(` call out of a config file by brace-balancing from
+ * the opening `(` to the matching `)` (string-literal aware). The returned
+ * lines include the leading `const name = ` (or `export default `) and the
+ * trailing `);`. Returns an empty array if the call is not present.
+ */
+function sliceDefineCall(raw: string, fnName: string): string[] {
+  const idx = raw.indexOf(`${fnName}(`);
+  if (idx < 0) return [];
+  // Walk back to the start of the statement (the `const`/`export` line start).
+  let stmtStart = raw.lastIndexOf("\n", idx);
+  stmtStart = stmtStart < 0 ? 0 : stmtStart + 1;
 
-function readExampleMeta(rawToml: string, slug: string): TomlExampleMeta {
-  const lines = rawToml.split("\n");
-  type Mode = "none" | "agent" | "memory";
-  let mode: Mode = "none";
-  let agentName: string | null = null;
-  let agentDescription: string | null = null;
-  let memoryDescription: string | null = null;
-  for (const line of lines) {
-    const sectionMatch = /^\s*\[\[?([\w.-]+)\]\]?\s*$/.exec(line);
-    if (sectionMatch) {
-      const name = sectionMatch[1];
-      if (/^agents\.[\w-]+$/.test(name) && mode === "none") mode = "agent";
-      else if (name === "memory") mode = "memory";
-      else if (mode !== "none") mode = "none";
+  // Brace-balance from the opening `(` of the call.
+  let i = raw.indexOf("(", idx);
+  let depth = 0;
+  let str: '"' | "'" | "`" | null = null;
+  for (; i < raw.length; i++) {
+    const ch = raw[i];
+    if (str) {
+      if (ch === "\\") {
+        i++;
+        continue;
+      }
+      if (ch === str) str = null;
       continue;
     }
-    const kv = /^\s*([A-Za-z_][\w-]*)\s*=\s*"([^"]*)"\s*$/.exec(line);
-    if (!kv) continue;
-    const [, key, value] = kv;
-    if (mode === "agent" && key === "name" && !agentName) agentName = value;
-    if (mode === "agent" && key === "description" && !agentDescription)
-      agentDescription = value;
-    if (mode === "memory" && key === "description" && !memoryDescription)
-      memoryDescription = value;
+    if (ch === '"' || ch === "'" || ch === "`") {
+      str = ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) break;
+    }
   }
-  const label = agentName ?? slug.charAt(0).toUpperCase() + slug.slice(1);
-  const description = memoryDescription ?? agentDescription ?? null;
-  return { label, description };
+  // Include a trailing `;` if present.
+  let end = i + 1;
+  if (raw[end] === ";") end++;
+  return raw.slice(stmtStart, end).split("\n");
 }
 
 /* -------------------------------------------------------------------------- */
-/*  YAML helpers                                                              */
+/*  Example metadata (label + description) via regex over config text         */
 /* -------------------------------------------------------------------------- */
 
-function extractYamlListItems(
-  raw: string,
-  topKey: string,
-  itemCount: number
-): string[] {
-  const lines = raw.split("\n");
-  let inSection = false;
-  let header: string | null = null;
-  const items: string[][] = [];
-  let current: string[] | null = null;
-  let baseIndent = -1;
+type ConfigMeta = { label: string; description: string | null };
 
-  for (const line of lines) {
-    if (/^[A-Za-z_][\w-]*:/.test(line)) {
-      const key = line.split(":")[0];
-      if (key === topKey) {
-        inSection = true;
-        header = line;
-        continue;
-      }
-      if (inSection) break;
-    }
-    if (!inSection) continue;
-    const dashMatch = /^(\s*)-\s/.exec(line);
-    if (dashMatch) {
-      if (baseIndent < 0) baseIndent = dashMatch[1].length;
-      if (dashMatch[1].length === baseIndent) {
-        if (current) items.push(current);
-        current = [line];
-        continue;
-      }
-    }
-    if (current) {
-      const indent = line.match(/^\s*/)?.[0].length ?? 0;
-      if (line.trim() === "" || indent > baseIndent) current.push(line);
-      else break;
-    }
+/** Pull a `key: "..."` string value from `defineConfig({...})`, tolerating the
+ *  value sitting on the line after the key (Biome wraps long strings). */
+function configStringField(raw: string, key: string): string | null {
+  const re = new RegExp(`\\b${key}:\\s*\\n?\\s*("(?:[^"\\\\]|\\\\.)*")`);
+  const m = re.exec(raw);
+  if (!m) return null;
+  try {
+    return JSON.parse(m[1]);
+  } catch {
+    return m[1].slice(1, -1);
   }
-  if (current) items.push(current);
-  if (!header) return [];
-  return [header, ...items.slice(0, itemCount).flat()];
+}
+
+function readConfigMeta(raw: string, slug: string): ConfigMeta {
+  const orgName = configStringField(raw, "orgName");
+  const orgDescription = configStringField(raw, "orgDescription");
+  const fallbackLabel = slug
+    .split("-")
+    .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+    .join(" ");
+  return {
+    label: orgName ?? fallbackLabel,
+    description: orgDescription,
+  };
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Connector definition extraction                                           */
+/*  Helpers                                                                   */
 /* -------------------------------------------------------------------------- */
 
-/* -------------------------------------------------------------------------- */
-/*  Memory (entity) compression                                               */
-/* -------------------------------------------------------------------------- */
-
-function compressEntities(yamlLines: string[]): string[] {
-  if (yamlLines.length === 0) return [];
-  const out: string[] = [];
-  let i = 0;
-  if (/^entities:/.test(yamlLines[0])) {
-    out.push("entities:");
-    i++;
-  }
-  while (i < yamlLines.length && yamlLines[i].trim() === "") i++;
-  if (i >= yamlLines.length) return out;
-
-  const firstLine = yamlLines[i];
-  const dashMatch = /^(\s*)-\s/.exec(firstLine);
-  if (!dashMatch) return out;
-  const baseIndent = dashMatch[1].length;
-  const childIndent = baseIndent + 2;
-  const pad = " ".repeat(baseIndent);
-  const padChild = " ".repeat(childIndent);
-
-  let slug = "";
-  let name = "";
-  const props: Array<{ key: string; type: string }> = [];
-
-  let cursor = i;
-  const slugInline = /^\s*-\s*slug:\s*(.+)$/.exec(firstLine);
-  if (slugInline) slug = slugInline[1].trim();
-  cursor++;
-
-  let inProperties = false;
-  let currentPropName: string | null = null;
-  let currentPropType: string | null = null;
-  while (cursor < yamlLines.length) {
-    const ln = yamlLines[cursor];
-    if (ln.trim() === "") {
-      cursor++;
-      continue;
-    }
-    const ind = ln.length - ln.trimStart().length;
-    if (ind <= baseIndent) break;
-    const trimmed = ln.trimStart();
-
-    if (ind === childIndent) {
-      if (trimmed.startsWith("slug:")) slug = trimmed.slice(5).trim();
-      else if (trimmed.startsWith("name:")) name = trimmed.slice(5).trim();
-      inProperties = false;
-      currentPropName = null;
-      currentPropType = null;
-      cursor++;
-      continue;
-    }
-    if (trimmed === "properties:" && ind === childIndent + 2) {
-      inProperties = true;
-      currentPropName = null;
-      currentPropType = null;
-      cursor++;
-      continue;
-    }
-    if (inProperties && ind === childIndent + 4) {
-      const m = /^([A-Za-z_][\w-]*)\s*:/.exec(trimmed);
-      if (m) {
-        if (currentPropName && currentPropType)
-          props.push({ key: currentPropName, type: currentPropType });
-        currentPropName = m[1];
-        currentPropType = "string";
-      }
-    } else if (inProperties && currentPropName && trimmed.startsWith("type:")) {
-      currentPropType = trimmed.slice(5).trim();
-    }
-    cursor++;
-  }
-  if (currentPropName && currentPropType)
-    props.push({ key: currentPropName, type: currentPropType });
-
-  out.push(`${pad}- slug: ${slug || "entity"}`);
-  if (name) out.push(`${padChild}name: ${name}`);
-  out.push(`${padChild}metadata_schema:`);
-  out.push(`${padChild}  type: object`);
-  out.push(`${padChild}  properties:`);
-  const shown = props.slice(0, 3);
-  for (const p of shown)
-    out.push(`${padChild}    ${p.key}: { type: ${p.type} }`);
-  if (props.length > shown.length)
-    out.push(`${padChild}    # ${props.length - shown.length} more…`);
-  return out;
+function configSnippet(
+  slug: string,
+  transform: (raw: string) => string
+): Snippet {
+  const abs = pinnedFile(slug, CONFIG_FILE);
+  const raw = readFileSync(abs, "utf-8");
+  return {
+    code: transform(raw).replace(/\s+$/, ""),
+    path: CONFIG_FILE,
+    githubUrl: githubFileUrl(slug, CONFIG_FILE),
+    language: "typescript",
+  };
 }
 
-/* -------------------------------------------------------------------------- */
-/*  Watcher compression                                                       */
-/* -------------------------------------------------------------------------- */
+function fileSnippet(
+  slug: string,
+  relativePath: string,
+  language: Language,
+  transform?: (raw: string) => string
+): Snippet {
+  const abs = pinnedFile(slug, relativePath);
+  const raw = readFileSync(abs, "utf-8");
+  const code = (transform ? transform(raw) : raw).replace(/\s+$/, "");
+  return {
+    code,
+    path: relativePath,
+    githubUrl: githubFileUrl(slug, relativePath),
+    language,
+  };
+}
 
-const WATCHER_KEEP_TOP_KEYS = new Set(["slug", "agent", "on", "schedule"]);
+/** The imports + the first `defineAgent({...})` block, the representative
+ *  agent slice for the landing "Agents" section. */
+function agentConfigSlice(raw: string): string {
+  const imports = sliceImportBlock(raw);
+  const agent = sliceDefineCall(raw, "defineAgent");
+  return [...imports, "", ...agent].join("\n");
+}
 
-function compressWatcher(yamlLines: string[]): string[] {
-  if (yamlLines.length === 0) return [];
-  const out: string[] = [];
-  if (/^watchers:/.test(yamlLines[0])) out.push("watchers:");
-  let i = 1;
-  while (i < yamlLines.length && yamlLines[i].trim() === "") i++;
-  if (i >= yamlLines.length) return out;
+function entitySlice(raw: string): string {
+  return sliceDefineCall(raw, "defineEntityType").join("\n");
+}
 
-  const firstLine = yamlLines[i];
-  const dashMatch = /^(\s*)-\s/.exec(firstLine);
-  if (!dashMatch) return out;
-  const baseIndent = dashMatch[1].length;
-  const childIndent = baseIndent + 2;
-  const pad = " ".repeat(baseIndent);
-  const padChild = " ".repeat(childIndent);
-
-  const fields: Record<string, string> = {};
-  let prompt = "";
-  let extractionRequired: string[] = [];
-
-  const slugInline = /^\s*-\s*slug:\s*(.+)$/.exec(firstLine);
-  if (slugInline) fields.slug = slugInline[1].trim();
-
-  let cursor = i + 1;
-  while (cursor < yamlLines.length) {
-    const ln = yamlLines[cursor];
-    if (ln.trim() === "") {
-      cursor++;
-      continue;
-    }
-    const ind = ln.length - ln.trimStart().length;
-    if (ind <= baseIndent) break;
-    const trimmed = ln.trimStart();
-
-    if (ind === childIndent) {
-      const kv = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(trimmed);
-      if (!kv) {
-        cursor++;
-        continue;
-      }
-      const [, key, value] = kv;
-      if (key === "prompt") {
-        if (
-          value === "|" ||
-          value === ">" ||
-          value === "" ||
-          value === "|-" ||
-          value === ">-"
-        ) {
-          let k = cursor + 1;
-          while (k < yamlLines.length) {
-            const sub = yamlLines[k];
-            if (sub.trim() === "") {
-              k++;
-              continue;
-            }
-            const subInd = sub.length - sub.trimStart().length;
-            if (subInd <= childIndent) break;
-            prompt = sub.trimStart();
-            break;
-          }
-          while (k < yamlLines.length) {
-            const sub = yamlLines[k];
-            if (sub.trim() === "") {
-              k++;
-              continue;
-            }
-            const subInd = sub.length - sub.trimStart().length;
-            if (subInd <= childIndent) break;
-            k++;
-          }
-          cursor = k;
-          continue;
-        }
-        prompt = value;
-        cursor++;
-        continue;
-      }
-      if (key === "extraction_schema") {
-        const schemaInd = childIndent + 2;
-        let k = cursor + 1;
-        let captured = false;
-        while (k < yamlLines.length) {
-          const sub = yamlLines[k];
-          if (sub.trim() === "") {
-            k++;
-            continue;
-          }
-          const subInd = sub.length - sub.trimStart().length;
-          if (subInd <= childIndent) break;
-          if (
-            !captured &&
-            subInd === schemaInd &&
-            sub.trimStart().startsWith("required:")
-          ) {
-            const sct = sub.trimStart();
-            const inline = sct.slice("required:".length).trim();
-            if (inline.startsWith("[") && inline.endsWith("]")) {
-              extractionRequired = inline
-                .slice(1, -1)
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean);
-              captured = true;
-              k++;
-              continue;
-            }
-            k++;
-            while (k < yamlLines.length) {
-              const sub2 = yamlLines[k];
-              if (sub2.trim() === "") {
-                k++;
-                continue;
-              }
-              const sub2Ind = sub2.length - sub2.trimStart().length;
-              const sub2Trim = sub2.trimStart();
-              if (sub2Ind === schemaInd + 2 && sub2Trim.startsWith("- ")) {
-                extractionRequired.push(sub2Trim.slice(2).trim());
-                k++;
-                continue;
-              }
-              break;
-            }
-            captured = true;
-            continue;
-          }
-          k++;
-        }
-        cursor = k;
-        continue;
-      }
-      if (WATCHER_KEEP_TOP_KEYS.has(key)) fields[key] = value;
-    }
-    cursor++;
-  }
-
-  out.push(`${pad}- slug: ${fields.slug ?? "watcher"}`);
-  if (fields.agent) out.push(`${padChild}agent: ${fields.agent}`);
-  if (fields.on) out.push(`${padChild}on: ${fields.on}`);
-  if (fields.schedule) out.push(`${padChild}schedule: ${fields.schedule}`);
-  if (prompt) {
-    const compact = prompt.replace(/^["'`]?|["'`]?$/g, "").replace(/\s+/g, " ");
-    out.push(`${padChild}prompt: "${compact}"`);
-  }
-  out.push(`${padChild}extraction_schema:`);
-  out.push(`${padChild}  type: object`);
-  if (extractionRequired.length > 0) {
-    out.push(
-      `${padChild}  required: [${extractionRequired.slice(0, 5).join(", ")}${
-        extractionRequired.length > 5
-          ? `, …${extractionRequired.length - 5}`
-          : ""
-      }]`
-    );
-  }
-  return out;
+function watcherSlice(raw: string): string {
+  return sliceDefineCall(raw, "defineWatcher").join("\n");
 }
 
 /* -------------------------------------------------------------------------- */
 /*  SKILL.md frontmatter extraction                                           */
 /* -------------------------------------------------------------------------- */
+
+function collapseBlanks(lines: string[]): string[] {
+  const out: string[] = [];
+  let blank = false;
+  for (const line of lines) {
+    const isBlank = line.trim() === "";
+    if (isBlank && blank) continue;
+    out.push(line);
+    blank = isBlank;
+  }
+  while (out.length > 0 && out[0].trim() === "") out.shift();
+  while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
+  return out;
+}
 
 /**
  * Pull just the YAML frontmatter out of a SKILL.md (everything between the
@@ -596,49 +373,6 @@ function trimSkillMarkdown(raw: string): string {
 }
 
 /* -------------------------------------------------------------------------- */
-/*  Helpers                                                                   */
-/* -------------------------------------------------------------------------- */
-
-function collapseBlanks(lines: string[]): string[] {
-  const out: string[] = [];
-  let blank = false;
-  for (const line of lines) {
-    const isBlank = line.trim() === "";
-    if (isBlank && blank) continue;
-    out.push(line);
-    blank = isBlank;
-  }
-  while (out.length > 0 && out[0].trim() === "") out.shift();
-  while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
-  return out;
-}
-
-function snippetFrom(
-  slug: string,
-  absPath: string,
-  relativePath: string,
-  language: Language,
-  transform?: (raw: string) => string
-): Snippet {
-  const raw = readFileSync(absPath, "utf-8");
-  const code = (transform ? transform(raw) : raw).replace(/\s+$/, "");
-  return {
-    code,
-    path: relativePath,
-    githubUrl: githubFileUrl(slug, relativePath),
-    language,
-  };
-}
-
-function warnOverBudget(label: string, lines: number, budget: number): void {
-  if (lines > budget) {
-    console.warn(
-      `gen-landing-snippets: ${label} is ${lines} lines, landing budget is <= ${budget}.`
-    );
-  }
-}
-
-/* -------------------------------------------------------------------------- */
 /*  Main                                                                      */
 /* -------------------------------------------------------------------------- */
 
@@ -654,151 +388,61 @@ function listExamples(): ExampleEntry[] {
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const slug = entry.name;
-    const tomlPath = resolve(examplesDir, slug, "lobu.toml");
-    if (!existsSync(tomlPath)) continue;
-    const raw = readFileSync(tomlPath, "utf-8");
-    const { label, description } = readExampleMeta(raw, slug);
-    out.push({
-      slug,
-      label: label ?? slug,
-      description,
-      githubUrl: githubTreeUrl(slug),
-    });
+    const configPath = resolve(examplesDir, slug, CONFIG_FILE);
+    if (!existsSync(configPath)) continue;
+    const raw = readFileSync(configPath, "utf-8");
+    const { label, description } = readConfigMeta(raw, slug);
+    out.push({ slug, label, description, githubUrl: githubTreeUrl(slug) });
   }
   out.sort((a, b) => a.slug.localeCompare(b.slug));
   return out;
 }
 
-function findConnectorFile(slug: string): { abs: string; rel: string } {
+function findConnectorFile(slug: string): { rel: string } {
   const connectorsDir = resolve(examplesDir, slug, "connectors");
   const file = readdirSync(connectorsDir).find((f) =>
     f.endsWith(".connector.ts")
   );
   if (!file) throw new Error(`No *.connector.ts in ${connectorsDir}`);
-  return {
-    abs: resolve(connectorsDir, file),
-    rel: `connectors/${file}`,
-  };
+  return { rel: `connectors/${file}` };
 }
 
 function buildUseCases(): Record<string, UseCaseSnippets> {
   const out: Record<string, UseCaseSnippets> = {};
   for (const slug of USE_CASE_SLUGS) {
-    const { abs, rel } = findConnectorFile(slug);
     // Show the full connector file (imports + class + definition + sync), like
-    // the pinned homepage connector. These files are ~32-39 lines, within the
-    // connector budget, and read as complete TypeScript rather than a fragment.
-    const connector = snippetFrom(slug, abs, rel, "typescript");
-
-    const schemaRel = "models/schema.yaml";
-    const memorySchema = snippetFrom(
+    // the pinned homepage connector. These read as complete TypeScript.
+    const connector = fileSnippet(
       slug,
-      pinnedFile(slug, schemaRel),
-      schemaRel,
-      "yaml",
-      (raw) =>
-        collapseBlanks(
-          compressEntities(extractYamlListItems(raw, "entities", 1))
-        ).join("\n")
+      findConnectorFile(slug).rel,
+      "typescript"
     );
-
-    const watcher = snippetFrom(
-      slug,
-      pinnedFile(slug, schemaRel),
-      schemaRel,
-      "yaml",
-      (raw) =>
-        collapseBlanks(
-          compressWatcher(extractYamlListItems(raw, "watchers", 1))
-        ).join("\n")
-    );
-
+    const memorySchema = configSnippet(slug, entitySlice);
+    const watcher = configSnippet(slug, watcherSlice);
     out[slug] = { connector, memorySchema, watcher };
   }
   return out;
 }
 
 function build(): LandingSnippets {
-  const connector = snippetFrom(
+  const connector = fileSnippet(
     PINNED.connector.slug,
-    pinnedFile(PINNED.connector.slug, PINNED.connector.path),
     PINNED.connector.path,
     "typescript"
   );
-  warnOverBudget(
-    `${PINNED.connector.slug}/${PINNED.connector.path}`,
-    connector.code.split("\n").length,
-    BUDGETS.connector
-  );
-
-  const memorySchema = snippetFrom(
-    PINNED.memorySchema.slug,
-    pinnedFile(PINNED.memorySchema.slug, PINNED.memorySchema.path),
-    PINNED.memorySchema.path,
-    "yaml",
-    (raw) =>
-      collapseBlanks(
-        compressEntities(extractYamlListItems(raw, "entities", 1))
-      ).join("\n")
-  );
-  warnOverBudget(
-    `${PINNED.memorySchema.slug}/${PINNED.memorySchema.path} (entities)`,
-    memorySchema.code.split("\n").length,
-    BUDGETS.memorySchema
-  );
-
-  const watcher = snippetFrom(
-    PINNED.watcher.slug,
-    pinnedFile(PINNED.watcher.slug, PINNED.watcher.path),
-    PINNED.watcher.path,
-    "yaml",
-    (raw) =>
-      collapseBlanks(
-        compressWatcher(extractYamlListItems(raw, "watchers", 1))
-      ).join("\n")
-  );
-  warnOverBudget(
-    `${PINNED.watcher.slug}/${PINNED.watcher.path} (watchers)`,
-    watcher.code.split("\n").length,
-    BUDGETS.watcher
-  );
-
-  const reaction = snippetFrom(
+  const memorySchema = configSnippet(PINNED.memorySchema.slug, entitySlice);
+  const watcher = configSnippet(PINNED.watcher.slug, watcherSlice);
+  const reaction = fileSnippet(
     PINNED.reaction.slug,
-    pinnedFile(PINNED.reaction.slug, PINNED.reaction.path),
     PINNED.reaction.path,
     "typescript"
   );
-  warnOverBudget(
-    `${PINNED.reaction.slug}/${PINNED.reaction.path}`,
-    reaction.code.split("\n").length,
-    BUDGETS.reaction
-  );
-
-  const agentToml = snippetFrom(
-    PINNED.agentToml.slug,
-    pinnedFile(PINNED.agentToml.slug, PINNED.agentToml.path),
-    PINNED.agentToml.path,
-    "toml",
-    trimAgentToml
-  );
-  warnOverBudget(
-    `${PINNED.agentToml.slug}/${PINNED.agentToml.path}`,
-    agentToml.code.split("\n").length,
-    BUDGETS.agentToml
-  );
-
-  const skill = snippetFrom(
+  const agentConfig = configSnippet(PINNED.agentConfig.slug, agentConfigSlice);
+  const skill = fileSnippet(
     PINNED.skill.slug,
-    pinnedFile(PINNED.skill.slug, PINNED.skill.path),
     PINNED.skill.path,
     "markdown",
     trimSkillMarkdown
-  );
-  warnOverBudget(
-    `${PINNED.skill.slug}/${PINNED.skill.path}`,
-    skill.code.split("\n").length,
-    BUDGETS.skill
   );
 
   return {
@@ -806,7 +450,7 @@ function build(): LandingSnippets {
     memorySchema,
     watcher,
     reaction,
-    agentToml,
+    agentConfig,
     skill,
     examples: listExamples(),
     useCases: buildUseCases(),

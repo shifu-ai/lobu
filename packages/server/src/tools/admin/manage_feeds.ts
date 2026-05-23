@@ -441,11 +441,11 @@ async function handleDeleteFeed(
   const sql = getDb();
   const { organizationId } = ctx;
 
-  await sql`
-    UPDATE runs SET status = 'cancelled', completed_at = NOW()
-    WHERE feed_id = ${args.feed_id} AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
-  `;
-
+  // Prove org ownership BEFORE any side effect: the run-cancel below is not
+  // org-scoped (runs has no organization_id of its own — it's reached through
+  // the feed), so cancelling runs first would let a guessed foreign feed_id
+  // cancel another org's runs even though the delete then no-ops. Delete the
+  // org-owned feed first and bail when nothing matched.
   const deleted = await sql`
     UPDATE feeds
     SET deleted_at = NOW(), status = 'paused', updated_at = NOW()
@@ -456,6 +456,12 @@ async function handleDeleteFeed(
   if (deleted.length === 0) {
     return { error: 'Feed not found or already deleted' };
   }
+
+  // Ownership confirmed — now safe to cancel this feed's active runs.
+  await sql`
+    UPDATE runs SET status = 'cancelled', completed_at = NOW()
+    WHERE feed_id = ${args.feed_id} AND status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+  `;
 
   // Record change event in knowledge for audit trail
   const feed = deleted[0];

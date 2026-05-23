@@ -29,7 +29,7 @@ async function resolveInstalledProviders(
  * but each agent chooses which providers to install from the catalog.
  */
 const DECLARED_AGENT_MUTATION_ERROR =
-  "provider list is declared in lobu.toml; edit the file and restart";
+  "provider list is declared in lobu.config.ts; edit the file and restart";
 
 export class ProviderCatalogService {
   constructor(

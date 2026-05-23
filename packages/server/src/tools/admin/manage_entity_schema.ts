@@ -342,6 +342,21 @@ async function getEntityCountForType(typeId: number, organizationId: string): Pr
   return Number(rows[0]?.count || 0);
 }
 
+async function getRelationshipCountForType(
+  typeId: number,
+  organizationId: string
+): Promise<number> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT COUNT(*)::int as count
+    FROM entity_relationships r
+    WHERE r.relationship_type_id = ${typeId}
+      AND r.organization_id = ${organizationId}
+      AND r.deleted_at IS NULL
+  `;
+  return Number(rows[0]?.count || 0);
+}
+
 async function recordAudit(
   sql: DbClient,
   entityTypeId: number,
@@ -739,21 +754,52 @@ async function requireRelationshipType(
     return { typeId: Number(rows[0].id), sql };
   }
 
+  // Write mode (update/delete/add_rule/…) only ever touches the caller's OWN
+  // type, so scope the lookup to ctx.organizationId. A public type from another
+  // org shares the slug but is read-only to this tenant (referenceable as an
+  // inverse, never mutable), and a PRIVATE foreign row must stay invisible — an
+  // unscoped lookup that fell back to a foreign row and threw 'Access denied'
+  // leaked the slug's existence in another org. Absent an own row → 'not found'.
   const existing = await sql`
-    SELECT id, organization_id FROM entity_relationship_types
+    SELECT id FROM entity_relationship_types
     WHERE slug = ${slug} AND deleted_at IS NULL
+      AND organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
   if (existing.length === 0) throw new Error(`Relationship type "${slug}" not found`);
 
-  const typeId = Number(existing[0].id);
-  const typeOrgId = String(existing[0].organization_id ?? '');
+  return { typeId: Number(existing[0].id), sql };
+}
 
-  if (typeOrgId && typeOrgId !== ctx.organizationId) {
-    throw new Error('Access denied: relationship type belongs to another organization');
+/**
+ * Resolve an inverse relationship type by slug, scoped to the caller's own org
+ * or a PUBLIC type from another org (same visibility filter as read mode). A
+ * PRIVATE type owned by another org is invisible here — without this scoping
+ * the lookup matched any org's row by slug, letting one tenant link to (and,
+ * via the reciprocal back-link, mutate) another tenant's relationship type.
+ * Returns the row id plus whether the caller owns it; the reciprocal back-link
+ * is only written when the caller owns the inverse, never onto a foreign public
+ * type.
+ */
+async function resolveInverseType(
+  sql: DbClient,
+  inverseSlug: string,
+  ctx: ToolContext
+): Promise<{ id: number; ownedByCaller: boolean }> {
+  const rows = await sql`
+    SELECT rt.id, (rt.organization_id = ${ctx.organizationId}) AS owned
+    FROM entity_relationship_types rt
+    LEFT JOIN organization o ON o.id = rt.organization_id
+    WHERE rt.slug = ${inverseSlug}
+      AND rt.deleted_at IS NULL
+      AND (rt.organization_id = ${ctx.organizationId} OR o.visibility = 'public')
+    ORDER BY (rt.organization_id = ${ctx.organizationId}) DESC, rt.id ASC
+    LIMIT 1
+  `;
+  if (rows.length === 0) {
+    throw new Error(`Inverse relationship type "${inverseSlug}" not found`);
   }
-
-  return { typeId, sql };
+  return { id: Number(rows[0].id), ownedByCaller: Boolean(rows[0].owned) };
 }
 
 function buildRelationshipIdentityMetadata(
@@ -878,9 +924,13 @@ async function rtHandleCreate(
 
   const sql = getDb();
 
+  // Org-scoped duplicate check — the unique index is (organization_id, slug),
+  // so a same-slug PUBLIC type from another org must NOT block this org from
+  // creating its own (matches entity-type create).
   const existing = await sql`
     SELECT id FROM entity_relationship_types
     WHERE slug = ${args.slug} AND deleted_at IS NULL
+      AND organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
   if (existing.length > 0) {
@@ -888,16 +938,11 @@ async function rtHandleCreate(
   }
 
   let inverseTypeId: number | null = null;
+  let inverseOwnedByCaller = false;
   if (args.inverse_type_slug) {
-    const inverseRows = await sql`
-      SELECT id FROM entity_relationship_types
-      WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
-      LIMIT 1
-    `;
-    if (inverseRows.length === 0) {
-      throw new Error(`Inverse relationship type "${args.inverse_type_slug}" not found`);
-    }
-    inverseTypeId = Number(inverseRows[0].id);
+    const inverse = await resolveInverseType(sql, args.inverse_type_slug, ctx);
+    inverseTypeId = inverse.id;
+    inverseOwnedByCaller = inverse.ownedByCaller;
   }
 
   const identityMetadata = buildRelationshipIdentityMetadata(args.auto_create_when, null);
@@ -925,7 +970,9 @@ async function rtHandleCreate(
   `;
   const typeId = Number((inserted[0] as { id: unknown }).id);
 
-  if (inverseTypeId !== null) {
+  // Only write the reciprocal back-link when the caller owns the inverse type.
+  // A public inverse from another org must never be mutated by this tenant.
+  if (inverseTypeId !== null && inverseOwnedByCaller) {
     await sql`
       UPDATE entity_relationship_types
       SET inverse_type_id = ${typeId}, updated_at = current_timestamp
@@ -962,17 +1009,9 @@ async function rtHandleUpdate(
     if (args.inverse_type_slug === null || args.inverse_type_slug === '') {
       inverseTypeId = null;
     } else {
-      const inverseRows = await sql`
-        SELECT id FROM entity_relationship_types
-        WHERE slug = ${args.inverse_type_slug} AND deleted_at IS NULL
-        LIMIT 1
-      `;
-      if (inverseRows.length === 0) {
-        throw new Error(`Inverse relationship type "${args.inverse_type_slug}" not found`);
-      }
-      const resolvedId = Number(inverseRows[0].id);
-      if (resolvedId === typeId) throw new Error('inverse_type_id cannot point to self');
-      inverseTypeId = resolvedId;
+      const inverse = await resolveInverseType(sql, args.inverse_type_slug, ctx);
+      if (inverse.id === typeId) throw new Error('inverse_type_id cannot point to self');
+      inverseTypeId = inverse.id;
     }
   }
 
@@ -1032,9 +1071,26 @@ async function rtHandleDelete(
 ): Promise<ManageEntitySchemaResult> {
   const { typeId, sql } = await requireRelationshipType(args.slug, 'delete', ctx);
 
+  // Refuse while relationship instances exist — mirrors entity-type delete so
+  // `lobu apply` prune (and the UI) can never orphan live relationship data
+  // under a deleted definition.
+  const relationshipCount = await getRelationshipCountForType(typeId, ctx.organizationId);
+  if (relationshipCount > 0) {
+    throw new Error(
+      `Cannot delete relationship type '${args.slug}': ${relationshipCount} relationships of this type exist. Remove or reassign them first.`
+    );
+  }
+
+  // Set status='archived' alongside deleted_at: the org/slug uniqueness index
+  // is partial on `WHERE status = 'active'` (NOT `deleted_at IS NULL`, unlike
+  // entity_types), so leaving status='active' keeps the tombstoned row in the
+  // index and a later re-create of the same slug (e.g. `lobu apply` prune then
+  // re-add) hits a unique violation. 'archived' is the only other status the
+  // check constraint allows; it vacates the index. The create dedup filters on
+  // deleted_at IS NULL, so the archived tombstone never blocks the re-create.
   await sql`
     UPDATE entity_relationship_types
-    SET deleted_at = current_timestamp, updated_at = current_timestamp
+    SET deleted_at = current_timestamp, status = 'archived', updated_at = current_timestamp
     WHERE id = ${typeId}
   `;
 

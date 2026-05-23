@@ -25,7 +25,7 @@ import type {
 
 // ── Diff verbs ──────────────────────────────────────────────────────────────
 
-export type DiffVerb = "create" | "update" | "noop" | "drift";
+export type DiffVerb = "create" | "update" | "noop" | "drift" | "delete";
 
 interface BaseRow {
   verb: DiffVerb;
@@ -142,7 +142,18 @@ export type DiffRow =
 export interface DiffPlan {
   rows: DiffRow[];
   /** Aggregate counters for the summary line. */
-  counts: { create: number; update: number; noop: number; drift: number };
+  counts: {
+    create: number;
+    update: number;
+    noop: number;
+    drift: number;
+    /**
+     * Definitions absent from the config that apply will delete. Always 0
+     * unless the config declares prune (`computeDiff({ prune: true })`);
+     * otherwise those remote-only definitions are reported as `drift`.
+     */
+    delete: number;
+  };
   /**
    * Informational, non-actionable notes — e.g. "connector X is installed
    * remotely but not declared locally". Rendered after the plan; never block
@@ -194,6 +205,21 @@ function stringChanged(
   b: string | null | undefined
 ): boolean {
   return (a ?? "") !== (b ?? "");
+}
+
+/**
+ * Compare an OPTIONAL display name. When the config omits it (undefined/empty),
+ * the operator has no opinion — the server keeps its derived/stored name (e.g.
+ * a feed `display_name` defaulted from the feed key), so an omitted name must
+ * NOT churn the plan into a perpetual "name changed" update. Only a name the
+ * operator explicitly set, and that differs, is a real change.
+ */
+function optionalNameChanged(
+  desired: string | null | undefined,
+  remote: string | null | undefined
+): boolean {
+  if (desired == null || desired === "") return false;
+  return stringChanged(desired, remote);
 }
 
 /**
@@ -284,7 +310,7 @@ function diffAgent(
  * AgentSettings shape currently has no redacted leaf strings, so this is a
  * forward-compatible guard rather than a hot path today.
  *
- * Field set: limited to the keys lobu.toml can express today. Settings that
+ * Field set: limited to the keys lobu.config.ts can express today. Settings that
  * only the UI mutates (e.g. `installedProviders[].installedAt`) are
  * excluded so unrelated UI activity doesn't show up as drift in the plan.
  */
@@ -350,6 +376,65 @@ function diffSettings(
   };
 }
 
+/**
+ * A platform-config value the CLI can't read back, so it must not drive a diff:
+ *   - the server redacts secrets in the GET response (`***`-suffixed), and
+ *   - it rewrites a `$VAR` placeholder into an internal `secret://…` reference.
+ * Either form is opaque — the cleartext never round-trips.
+ */
+function isOpaqueRemoteConfigValue(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    (value.startsWith("***") || value.startsWith("secret://"))
+  );
+}
+
+/**
+ * Compare a desired platform config against the remote one for drift.
+ *
+ * Two adjustments keep an unchanged platform a noop instead of restarting it on
+ * every apply:
+ *   - the route handler stores `platform` inside `config` for stable-id
+ *     matching, so the GET round-trip carries an extra `platform` key the CLI
+ *     never wrote — strip it before diffing;
+ *   - secret-bearing keys (`botToken`, app secrets, …) come back redacted or as
+ *     a `secret://` reference, never the cleartext the CLI sent as `$VAR`. When
+ *     the desired value is a `$VAR` placeholder and the remote value is opaque,
+ *     treat them as equal (the credential write path is idempotent and re-pushes
+ *     rotated secrets on its own, mirroring the auth-profile credentials rule).
+ */
+function platformConfigChanged(
+  desired: Record<string, unknown>,
+  remote: Record<string, unknown> | undefined
+): boolean {
+  const remoteConfig: Record<string, unknown> = { ...(remote ?? {}) };
+  delete remoteConfig.platform;
+  const desiredConfig: Record<string, unknown> = { ...desired };
+  delete desiredConfig.platform;
+
+  const keys = new Set([
+    ...Object.keys(desiredConfig),
+    ...Object.keys(remoteConfig),
+  ]);
+  for (const key of keys) {
+    const d = desiredConfig[key];
+    const r = remoteConfig[key];
+    if (isOpaqueRemoteConfigValue(r)) {
+      // Opaque remote (redacted `***` or a `secret://` ref): the resolved
+      // cleartext the CLI sent can never round-trip-match, so we can't tell a
+      // rotation from a no-op here. Treat as unchanged ONLY while the key is
+      // still declared — apply re-pushes every desired platform idempotently
+      // (like provider keys), so a rotated secret still reaches the server
+      // without a false "config changed" plan row. A key ABSENT from desired
+      // is a real removal → changed.
+      if (!(key in desiredConfig)) return true;
+      continue;
+    }
+    if (!deepEqual(d, r)) return true;
+  }
+  return false;
+}
+
 function diffPlatform(
   agentId: string,
   desired: DesiredPlatform,
@@ -365,15 +450,7 @@ function diffPlatform(
       { name: "type", changed: (d, r) => d.type !== r.platform },
       {
         name: "config",
-        changed: (d, r) => {
-          // The route handler stores `platform` inside `config` for stable-id
-          // matching, so a noop round-trip from GET will have an extra
-          // `platform` key the CLI never wrote. Strip it before diffing so an
-          // unchanged platform doesn't show as drift on every plan.
-          const remoteConfig: Record<string, unknown> = { ...(r.config ?? {}) };
-          delete remoteConfig.platform;
-          return !deepEqual(d.config, remoteConfig);
-        },
+        changed: (d, r) => platformConfigChanged(d.config, r.config),
       },
     ],
     updateExtras: (changed) => ({
@@ -703,7 +780,7 @@ function diffConnection(
     fields: [
       {
         name: "name",
-        changed: (d, r) => stringChanged(d.name, r.display_name),
+        changed: (d, r) => optionalNameChanged(d.name, r.display_name),
       },
       {
         name: "auth",
@@ -742,7 +819,7 @@ function diffFeed(
     fields: [
       {
         name: "name",
-        changed: (d, r) => stringChanged(d.name, r.display_name),
+        changed: (d, r) => optionalNameChanged(d.name, r.display_name),
       },
       {
         name: "schedule",
@@ -791,6 +868,23 @@ export interface DesiredStateForDiff {
 export interface ComputeDiffOptions {
   /** Limit the diff to a subset of resource kinds. */
   only?: "agents" | "memory";
+  /**
+   * When true, the config declares `prune: true`: it's the source of truth for
+   * *definitions*, so a remote definition (entity type, relationship type,
+   * watcher, connector definition) absent from desired is emitted as a `delete`
+   * row instead of an ignored `drift` — INCLUDING definitions created via the
+   * dashboard/API. Data (entity/relationship instances), connections, auth
+   * profiles, feeds, agents, and platforms are never pruned. Default (false)
+   * reports those remote-only definitions as `drift`.
+   */
+  prune?: boolean;
+  /**
+   * Target org id. The entity/relationship-type list endpoints also return
+   * *public* definitions owned by OTHER orgs, which this org neither manages
+   * nor can delete — so a remote type whose `organization_id` differs is
+   * excluded from drift/delete entirely. Omit to disable the filter (tests).
+   */
+  orgId?: string;
 }
 
 export function computeDiff(
@@ -800,6 +894,22 @@ export function computeDiff(
 ): DiffPlan {
   const rows: DiffRow[] = [];
   const only = opts.only;
+  const prune = opts.prune ?? false;
+  // A remote entity/relationship type is this org's to manage (drift/prune)
+  // only when it's org-owned. The list endpoints also surface public types
+  // from other orgs (`organization_id` differs) — never drift or delete those.
+  const orgId = opts.orgId;
+  const ownsDefinition = (definitionOrgId: string | undefined): boolean =>
+    orgId === undefined ||
+    definitionOrgId === undefined ||
+    definitionOrgId === orgId;
+  // `$`-prefixed definitions (e.g. the per-org `$member` entity type) are
+  // SYSTEM-managed — the server provisions them and rejects `$` slugs in
+  // create, so they can never appear in a user's config. They must NEVER be
+  // pruned (deleting `$member` corrupts the org; and because the delete is
+  // refused while member rows exist, an un-exempted prune HALTS every apply).
+  // They only ever surface as ignorable drift, in both prune and non-prune.
+  const isSystemSlug = (slug: string): boolean => slug.startsWith("$");
 
   if (only !== "memory") {
     const remoteByAgent = new Map(remote.agents.map((a) => [a.agentId, a]));
@@ -870,8 +980,16 @@ export function computeDiff(
   }
 
   if (only !== "agents") {
+    // Restrict entity/relationship types to the ones THIS org owns, for both
+    // matching and prune. The list endpoints also return public types from
+    // other orgs; the server returns them after the org's own rows, so a naive
+    // slug→row Map would let a foreign public type shadow the org's own
+    // definition (false noop/update) — and prune must never touch them.
+    const ownedEntityTypes = remote.entityTypes.filter((e) =>
+      ownsDefinition(e.organization_id)
+    );
     const remoteEntityBySlug = new Map(
-      remote.entityTypes.map((e) => [e.slug, e])
+      ownedEntityTypes.map((e) => [e.slug, e])
     );
     const desiredEntitySlugs = new Set(
       desired.memorySchema.entityTypes.map((e) => e.slug)
@@ -879,31 +997,35 @@ export function computeDiff(
     for (const entity of desired.memorySchema.entityTypes) {
       rows.push(diffEntityType(entity, remoteEntityBySlug.get(entity.slug)));
     }
-    for (const remoteEntity of remote.entityTypes) {
+    for (const remoteEntity of ownedEntityTypes) {
       if (!desiredEntitySlugs.has(remoteEntity.slug)) {
+        // Code-managed: delete. The server refuses an entity-type delete while
+        // instances exist (the data is exempt), surfacing a clear error.
+        // System (`$`) types are never user-declared → never pruned.
         rows.push({
           kind: "entity-type",
-          verb: "drift",
+          verb: prune && !isSystemSlug(remoteEntity.slug) ? "delete" : "drift",
           id: remoteEntity.slug,
           remote: remoteEntity,
         });
       }
     }
 
-    const remoteRelBySlug = new Map(
-      remote.relationshipTypes.map((r) => [r.slug, r])
+    const ownedRelTypes = remote.relationshipTypes.filter((r) =>
+      ownsDefinition(r.organization_id)
     );
+    const remoteRelBySlug = new Map(ownedRelTypes.map((r) => [r.slug, r]));
     const desiredRelSlugs = new Set(
       desired.memorySchema.relationshipTypes.map((r) => r.slug)
     );
     for (const rel of desired.memorySchema.relationshipTypes) {
       rows.push(diffRelationshipType(rel, remoteRelBySlug.get(rel.slug)));
     }
-    for (const remoteRel of remote.relationshipTypes) {
+    for (const remoteRel of ownedRelTypes) {
       if (!desiredRelSlugs.has(remoteRel.slug)) {
         rows.push({
           kind: "relationship-type",
-          verb: "drift",
+          verb: prune && !isSystemSlug(remoteRel.slug) ? "delete" : "drift",
           id: remoteRel.slug,
           remote: remoteRel,
         });
@@ -921,7 +1043,7 @@ export function computeDiff(
       if (!desiredWatcherSlugs.has(remoteWatcher.slug)) {
         rows.push({
           kind: "watcher",
-          verb: "drift",
+          verb: prune && !isSystemSlug(remoteWatcher.slug) ? "delete" : "drift",
           id: remoteWatcher.slug,
           remote: remoteWatcher,
         });
@@ -1000,15 +1122,30 @@ export function computeDiff(
         // plan-row loop. The render falls back to `id` (the connector key).
       });
     }
-    // Conservative: never auto-uninstall remote connector definitions that
-    // aren't declared/referenced locally — just note them.
+    // Connector keys still wired to a surviving remote connection / auth profile.
+    // Those are exempt from prune, so their connector must not be deleted —
+    // uninstalling it would orphan the connection.
+    const liveConnectorKeys = new Set<string>([
+      ...remoteConnections.map((c) => c.connector_key),
+      ...remoteAuthProfiles.map((p) => p.connector_key),
+    ]);
+    // Remote connector definitions not declared/referenced locally. Code-managed
+    // orgs delete them; UI-managed orgs just get a note (never auto-uninstall).
+    // Suppressed entirely when any local `*.connector.ts` has an unresolved key
+    // (`null`) — we can't tell which remote def corresponds to which local file.
     if (!hasUnnamedLocalDefs) {
       for (const def of remoteConnectorDefinitions) {
-        if (
-          def.installed &&
-          !declaredKeys.has(def.key) &&
-          !referencedConnectorKeys.has(def.key)
-        ) {
+        if (!def.installed) continue;
+        if (declaredKeys.has(def.key) || referencedConnectorKeys.has(def.key)) {
+          continue;
+        }
+        if (prune && !liveConnectorKeys.has(def.key)) {
+          rows.push({
+            kind: "connector-definition",
+            verb: "delete",
+            id: def.key,
+          });
+        } else {
           notes.push(
             `connector "${def.key}" is installed remotely but not declared in connectors/ — uninstall it manually if it's no longer wanted (lobu apply never auto-uninstalls connectors).`
           );
@@ -1080,7 +1217,7 @@ export function computeDiff(
     }
   }
 
-  const counts = { create: 0, update: 0, noop: 0, drift: 0 };
+  const counts = { create: 0, update: 0, noop: 0, drift: 0, delete: 0 };
   for (const row of rows) counts[row.verb]++;
 
   notes.sort();

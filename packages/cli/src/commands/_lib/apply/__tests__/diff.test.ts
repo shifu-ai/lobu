@@ -27,6 +27,7 @@ function buildState(
 ): DesiredState {
   return {
     agents,
+    prune: false,
     memorySchema: { entityTypes: [], relationshipTypes: [] },
     watchers: [],
     connectors: { definitions: [], authProfiles: [], connections: [] },
@@ -63,7 +64,13 @@ describe("apply diff — agents", () => {
     ]);
     const plan = computeDiff(desired, emptyRemote());
 
-    expect(plan.counts).toEqual({ create: 2, update: 0, noop: 0, drift: 0 });
+    expect(plan.counts).toEqual({
+      create: 2,
+      update: 0,
+      noop: 0,
+      drift: 0,
+      delete: 0,
+    });
     expect(renderPlan(plan)).toMatchSnapshot();
   });
 
@@ -261,6 +268,132 @@ describe("apply diff — platforms", () => {
     }
     expect(renderPlan(plan)).toMatchSnapshot();
   });
+
+  // A `$VAR` secret placeholder never round-trips: the server returns the secret
+  // redacted (`***`) or as an internal `secret://…` reference. Either form must
+  // be treated as unchanged so the platform isn't needlessly restarted.
+  test.each([
+    ["redacted (***)", "***oken"],
+    [
+      "secret:// reference",
+      "secret://connections%2Ftriage-telegram%2FbotToken",
+    ],
+  ])("noop when desired $VAR matches remote %s", (_label, remoteValue) => {
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        platforms: [
+          {
+            stableId: "triage-telegram",
+            type: "telegram",
+            config: { botToken: "$TELEGRAM_BOT_TOKEN" },
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      platformsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-telegram",
+              platform: "telegram",
+              // GET round-trip carries the `platform` key + the opaque secret.
+              config: { platform: "telegram", botToken: remoteValue },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("noop");
+  });
+
+  test("update when a non-secret config field changes (secret still opaque)", () => {
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        platforms: [
+          {
+            stableId: "triage-telegram",
+            type: "telegram",
+            config: { botToken: "$TELEGRAM_BOT_TOKEN", mode: "webhook" },
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      platformsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-telegram",
+              platform: "telegram",
+              config: {
+                platform: "telegram",
+                botToken: "***oken",
+                mode: "polling",
+              },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("update");
+  });
+
+  test("update when a secret-bearing config key is removed (opaque remote, absent in desired)", () => {
+    // The remote still carries `signingSecret` as an opaque value, but the
+    // desired config dropped it. A removal must surface as `update`, not be
+    // swallowed by the opaque-secret = unchanged rule.
+    const desired = buildState([
+      buildDesiredAgent("triage", {
+        metadata: { agentId: "triage", name: "Triage" },
+        platforms: [
+          {
+            stableId: "triage-slack",
+            type: "slack",
+            config: { botToken: "$SLACK_BOT_TOKEN" },
+          },
+        ],
+      }),
+    ]);
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      agents: [{ agentId: "triage", name: "Triage" }],
+      agentSettings: new Map<string, AgentSettings | null>([["triage", null]]),
+      platformsByAgent: new Map([
+        [
+          "triage",
+          [
+            {
+              id: "triage-slack",
+              platform: "slack",
+              config: {
+                platform: "slack",
+                botToken: "***oken",
+                signingSecret: "***cret",
+              },
+            },
+          ],
+        ],
+      ]),
+    };
+    const plan = computeDiff(desired, remote);
+    const platformRow = plan.rows.find((r) => r.kind === "platform");
+    expect(platformRow?.verb).toBe("update");
+  });
 });
 
 describe("apply diff — memory schema", () => {
@@ -302,6 +435,65 @@ describe("apply diff — memory schema", () => {
     const plan = computeDiff(desired, remote);
     expect(plan.counts.noop).toBe(1);
     expect(plan.counts.update).toBe(0);
+  });
+
+  test("relationship-type rules are a noop when remote rules match (idempotency)", () => {
+    // Regression: the rel-type `list` action omits rules, so apply hydrates
+    // them (listRelationshipTypeRules) into the snapshot. When the hydrated
+    // remote rules equal desired, the diff must be a noop — otherwise every
+    // re-apply churns a perpetual "rules changed" update.
+    const desired: DesiredState = {
+      agents: [],
+      memorySchema: {
+        entityTypes: [],
+        relationshipTypes: [
+          {
+            slug: "works-at",
+            name: "Works at",
+            rules: [{ source: "contact", target: "company" }],
+          },
+        ],
+      },
+      watchers: [],
+      requiredSecrets: [],
+    };
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      relationshipTypes: [
+        {
+          slug: "works-at",
+          name: "Works at",
+          rules: [{ source: "contact", target: "company" }],
+        },
+      ],
+    };
+    const plan = computeDiff(desired, remote);
+    expect(plan.counts.noop).toBe(1);
+    expect(plan.counts.update).toBe(0);
+  });
+
+  test("relationship-type rules update when remote rules differ", () => {
+    const desired: DesiredState = {
+      agents: [],
+      memorySchema: {
+        entityTypes: [],
+        relationshipTypes: [
+          {
+            slug: "works-at",
+            name: "Works at",
+            rules: [{ source: "contact", target: "company" }],
+          },
+        ],
+      },
+      watchers: [],
+      requiredSecrets: [],
+    };
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      relationshipTypes: [{ slug: "works-at", name: "Works at", rules: [] }],
+    };
+    const plan = computeDiff(desired, remote);
+    expect(plan.counts.update).toBe(1);
   });
 });
 
@@ -988,5 +1180,218 @@ describe("apply diff — connectors", () => {
     );
     // Exactly one row — the locally-declared def — never a bundled duplicate.
     expect(acmeRows).toHaveLength(1);
+  });
+});
+
+describe("apply diff — prune", () => {
+  // Remote state that has definitions + a connection the desired config drops.
+  function remoteWithExtras(): RemoteSnapshot {
+    return {
+      ...emptyRemote(),
+      entityTypes: [{ slug: "lead", properties: {} }, { slug: "stale-entity" }],
+      relationshipTypes: [{ slug: "stale-rel" }],
+      watchers: [{ slug: "stale-watcher", watcher_id: "42" }],
+      // stale-conn is dropped from config but exempt (drift); the connector "x"
+      // it still uses must therefore be spared from prune.
+      connections: [
+        { id: 7, slug: "stale-conn", connector_key: "x", status: "ok" },
+      ],
+      connectorDefinitions: [
+        { key: "x", installed: true },
+        { key: "orphan-connector", installed: true },
+      ],
+    };
+  }
+
+  function desiredKeepingLead(): DesiredState {
+    return buildState([], {
+      memorySchema: {
+        entityTypes: [{ slug: "lead", properties: {} }],
+        relationshipTypes: [],
+      },
+    });
+  }
+
+  test("default (prune off) reports removed definitions as drift, never delete", () => {
+    const plan = computeDiff(desiredKeepingLead(), remoteWithExtras());
+    expect(plan.counts.delete).toBe(0);
+    expect(plan.rows.some((r) => r.verb === "delete")).toBe(false);
+    expect(
+      plan.rows.find((r) => r.kind === "entity-type" && r.id === "stale-entity")
+        ?.verb
+    ).toBe("drift");
+  });
+
+  test("prune deletes removed entity/relationship/watcher/connector definitions", () => {
+    const plan = computeDiff(desiredKeepingLead(), remoteWithExtras(), {
+      prune: true,
+    });
+    const deletes = plan.rows.filter((r) => r.verb === "delete");
+    const deletedIds = deletes.map((r) => `${r.kind}:${r.id}`).sort();
+    expect(deletedIds).toEqual([
+      "connector-definition:orphan-connector",
+      "entity-type:stale-entity",
+      "relationship-type:stale-rel",
+      "watcher:stale-watcher",
+    ]);
+    expect(plan.counts.delete).toBe(4);
+    // The kept entity type is a noop, not a delete.
+    expect(
+      plan.rows.find((r) => r.kind === "entity-type" && r.id === "lead")?.verb
+    ).toBe("noop");
+  });
+
+  test("prune never deletes data, connections, or agents", () => {
+    const desired = buildState(
+      [
+        buildDesiredAgent("kept", {
+          metadata: { agentId: "kept", name: "Kept" },
+        }),
+      ],
+      {
+        memorySchema: { entityTypes: [], relationshipTypes: [] },
+      }
+    );
+    const remote: RemoteSnapshot = {
+      ...remoteWithExtras(),
+      agents: [{ agentId: "gone-agent", name: "Gone" }],
+      agentSettings: new Map([["kept", null]]),
+      platformsByAgent: new Map([["kept", []]]),
+    };
+    const plan = computeDiff(desired, remote, { prune: true });
+    // Connection removed from config is drift (exempt), not delete.
+    expect(
+      plan.rows.find((r) => r.kind === "connection" && r.id === "stale-conn")
+        ?.verb
+    ).toBe("drift");
+    // Remote agent absent from desired is drift (exempt), not delete.
+    expect(
+      plan.rows.find((r) => r.kind === "agent" && r.id === "gone-agent")?.verb
+    ).toBe("drift");
+  });
+
+  test("prune never deletes public types owned by another org", () => {
+    // The list endpoint returns this org's types PLUS public types from other
+    // orgs. With orgId set, a foreign-org type must not be pruned even if it's
+    // absent from the config.
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "lead", properties: {}, organization_id: "org_self" },
+        { slug: "stale-mine", organization_id: "org_self" },
+        { slug: "public-other", organization_id: "org_other" },
+      ],
+      relationshipTypes: [
+        { slug: "stale-rel-mine", organization_id: "org_self" },
+        { slug: "public-rel-other", organization_id: "org_other" },
+      ],
+    };
+    const plan = computeDiff(desiredKeepingLead(), remote, {
+      prune: true,
+      orgId: "org_self",
+    });
+    const deletedIds = plan.rows
+      .filter((r) => r.verb === "delete")
+      .map((r) => `${r.kind}:${r.id}`)
+      .sort();
+    // Only the org's own removed types — never the foreign public ones.
+    expect(deletedIds).toEqual([
+      "entity-type:stale-mine",
+      "relationship-type:stale-rel-mine",
+    ]);
+    expect(deletedIds.some((id) => id.includes("other"))).toBe(false);
+  });
+
+  test("prune never deletes system ($-prefixed) definitions (e.g. $member)", () => {
+    // Regression: $member is a per-org SYSTEM entity type the server provisions;
+    // it can't be declared in config, so prune would mark it deleted and then
+    // HALT every apply (the delete is refused while member rows exist). System
+    // definitions must stay ignorable drift, never delete.
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "lead", properties: {}, organization_id: "org_self" },
+        { slug: "$member", organization_id: "org_self" },
+      ],
+      relationshipTypes: [{ slug: "$system-rel", organization_id: "org_self" }],
+      watchers: [{ slug: "$system-watcher" }],
+    };
+    const plan = computeDiff(desiredKeepingLead(), remote, {
+      prune: true,
+      orgId: "org_self",
+    });
+    const verbOf = (kind: string, id: string) =>
+      plan.rows.find((r) => r.kind === kind && r.id === id)?.verb;
+    expect(verbOf("entity-type", "$member")).toBe("drift");
+    expect(verbOf("relationship-type", "$system-rel")).toBe("drift");
+    expect(verbOf("watcher", "$system-watcher")).toBe("drift");
+    // No system definition is ever in the delete set.
+    expect(
+      plan.rows.some((r) => r.verb === "delete" && r.id.startsWith("$"))
+    ).toBe(false);
+  });
+
+  test("matching prefers the org's own type over a foreign public type with the same slug", () => {
+    // Server returns the org's own row first, then a public row with the same
+    // slug. Matching must compare desired against the org-owned row (noop), not
+    // the foreign public one (which would falsely look like an update).
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "lead", properties: {}, organization_id: "org_self" },
+        {
+          slug: "lead",
+          properties: { foreign: { type: "string" } },
+          organization_id: "org_other",
+        },
+      ],
+    };
+    const plan = computeDiff(desiredKeepingLead(), remote, {
+      prune: true,
+      orgId: "org_self",
+    });
+    const leadRow = plan.rows.find(
+      (r) => r.kind === "entity-type" && r.id === "lead"
+    );
+    expect(leadRow?.verb).toBe("noop");
+    expect(plan.rows.some((r) => r.verb === "delete")).toBe(false);
+  });
+
+  test("connector prune suppressed when a local def has an unresolved (null) key", () => {
+    const desired = buildState([], {
+      connectors: {
+        definitions: [
+          {
+            key: null,
+            sourcePath: "/proj/connectors/local.connector.ts",
+            sourceCode: "export default class {}",
+            sourceFile: "connectors/local.connector.ts",
+          },
+        ],
+        authProfiles: [],
+        connections: [],
+      },
+    });
+    const plan = computeDiff(desired, remoteWithExtras(), {
+      prune: true,
+    });
+    // Can't map remote connectors to the unnamed local def → never delete them.
+    expect(
+      plan.rows.some(
+        (r) => r.kind === "connector-definition" && r.verb === "delete"
+      )
+    ).toBe(false);
+  });
+
+  test("delete rows render with a removed-from-config note + summary count", () => {
+    const plan = computeDiff(desiredKeepingLead(), remoteWithExtras(), {
+      prune: true,
+    });
+    expect(renderPlan(plan)).toContain("will be deleted");
+    expect(renderSummary(plan)).toContain("4 delete");
+    // Prune-off summary stays clean (no delete part).
+    expect(
+      renderSummary(computeDiff(desiredKeepingLead(), emptyRemote()))
+    ).not.toContain("delete");
   });
 });

@@ -413,7 +413,11 @@ export class OAuthProvider {
     name: string | null;
     picture: string | null;
     organization_slug: string | null;
-    organizations: { id: string; slug: string; name: string }[];
+    organizations: {
+      id: string;
+      slug: string;
+      name: string;
+    }[];
   } | null> {
     const authInfo = await this.verifyAccessToken(token);
     if (!authInfo) return null;

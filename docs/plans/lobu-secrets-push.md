@@ -4,7 +4,7 @@ Status: **planning** · Owner: @buremba · v3 follow-up to `lobu apply` (see `do
 
 ## Goal
 
-Push named secret **values** from a CLI-side source (`.env`, file, or stdin) into Lobu Cloud's per-org secret-proxy. The CLI never displays values, the server never returns them, and every write is audited. `lobu apply` continues to read `$VAR` references from `lobu.toml`, verifies the names exist in cloud, and **never uploads values**. `secrets push` is the only sanctioned write path for cloud secret values.
+Push named secret **values** from a CLI-side source (`.env`, file, or stdin) into Lobu Cloud's per-org secret-proxy. The CLI never displays values, the server never returns them, and every write is audited. `lobu apply` continues to read `$VAR` references from `lobu.config.ts`, verifies the names exist in cloud, and **never uploads values**. `secrets push` is the only sanctioned write path for cloud secret values.
 
 **Reuse-first**: `WritableSecretStore` (`packages/server/src/gateway/secrets/index.ts`) already has `put/list/delete` and is wired through `SecretStoreRegistry` to the Postgres-backed `agent_secrets` table. The proxy already swaps `lobu_secret_<uuid>` placeholders at egress. The gap is one HTTP surface — `POST /api/:orgSlug/secrets/manage` — plus org-scoping for `agent_secrets`, plus a dedicated audit table. Total v3.0: 2 PRs, ~700 LOC.
 
@@ -166,7 +166,7 @@ Validation: `bun run typecheck`, `bun run check`, `bun test packages/cli`, `make
 - **Audit log location?** New `public.secret_audit` table (PR-1). Modeled on the existing `entity_type_audit` precedent but with `fingerprint` instead of `before/after_payload`. The `events` table is rejected — that's the memory/knowledge log, not infra audit, and conflating them creates an exfil path (anyone with `events` read access could discover secret writes).
 - **Permission tier?** Org `owner` or `admin`. Reuses the same `memberRole` check as `mcp:admin` scope filtering. `member` gets `403 forbidden_role`. CLI surfaces as `secrets push requires org admin or owner role; current role: member`.
 - **Secret deletion?** Out of scope here. `lobu secrets delete <key>` ships in the same PR-2 if it's free, otherwise as a follow-up. The server route already supports `op: 'delete'` in PR-1, so the CLI cost is just adding a `delete` subcommand with the same per-key confirm. If it's not in PR-2, it goes in v3.1.
-- **`secret://` ref interaction?** `secrets push` produces `secret://<orgSlug>/user/<name>` refs. Workers receive `lobu_secret_<uuid>` placeholders that the proxy resolves to those refs at egress. `lobu apply` reads `$VAR` references in `lobu.toml`, looks them up by name in the org's pushed-secrets list, and only writes the resolved `secret://...` ref into the agent's settings — apply still never sees values. The `secret://` scheme is the bridge: push produces refs, apply consumes them, runtime dereferences them.
+- **`secret://` ref interaction?** `secrets push` produces `secret://<orgSlug>/user/<name>` refs. Workers receive `lobu_secret_<uuid>` placeholders that the proxy resolves to those refs at egress. `lobu apply` reads `$VAR` references in `lobu.config.ts`, looks them up by name in the org's pushed-secrets list, and only writes the resolved `secret://...` ref into the agent's settings — apply still never sees values. The `secret://` scheme is the bridge: push produces refs, apply consumes them, runtime dereferences them.
 - **`--rotate` confirmation UX?** Per-key, with `y/n/a/q` keystrokes. Summary-only confirm ("rotate 5 keys: A, B, C, D, E. Proceed?") was rejected because rotating four secrets you meant to rotate plus one you didn't is a single keystroke away — per-key with `a` (yes-to-all) for the trusting-CI case is the right tradeoff.
 - **No `.env` for first-time setup?** Recommended flow: `vault read -format=json secrets/foo | jq -r '.data | to_entries[] | "\(.key)=\(.value)"' | lobu secrets push --from-stdin`. Documented in the reference page. The CLI errors clearly when both `--from-env` is set (default) and `.env` is missing, suggesting `--from-stdin` or `--from-file <path>`.
 
@@ -186,7 +186,7 @@ After both PRs merge:
 4. `lobu secrets list` — verify `FOO`/`BAR` shown with 4-char fingerprints, no values anywhere.
 5. Edit `.env` to `FOO=v1` (unchanged), `BAR=v2-new`. Run `lobu secrets push --from-env --rotate BAR --yes-rotate`. Verify 1 audit row added with action=rotate, ref unchanged.
 6. Stop the gateway and `grep -ri 'v1\|v2\|v2-new' /tmp/lobu-logs/` — must return zero hits.
-7. Author a `lobu.toml` agent referencing `$FOO`. Run `lobu apply`. Verify it succeeds because `FOO` is in cloud secrets list. Add `$BAZ` (not pushed) — verify apply fails with `missing required secrets: BAZ`.
+7. Author a `lobu.config.ts` agent referencing `$FOO`. Run `lobu apply`. Verify it succeeds because `FOO` is in cloud secrets list. Add `$BAZ` (not pushed) — verify apply fails with `missing required secrets: BAZ`.
 8. Boot a worker, exercise the agent. Verify the worker's `process.env` shows `FOO=lobu_secret_<uuid>` (placeholder), and the upstream HTTP call resolves to `v1` via the proxy.
 9. Run `lobu secrets push --from-env --yes` again with `.env` unchanged → output: `nothing to do (2 unchanged)`.
 10. Member-role token: `lobu secrets push` returns `403 forbidden_role`.

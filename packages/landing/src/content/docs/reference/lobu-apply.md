@@ -1,9 +1,9 @@
 ---
 title: lobu apply CLI Reference
-description: Sync your local lobu.toml + agent dirs to a Lobu Cloud org. One-way, idempotent, prompt-confirmed.
+description: Sync your local lobu.config.ts + agent dirs to a Lobu Cloud org. One-way, idempotent, prompt-confirmed.
 ---
 
-`lobu apply` reads `lobu.toml`, computes a diff against your cloud org, shows a plan, and — once you accept — calls existing CRUD endpoints in dependency order to converge the org to match your files.
+`lobu apply` imports `lobu.config.ts`, computes a diff against your cloud org, shows a plan, and once you accept calls existing CRUD endpoints in dependency order to converge the org to match your project.
 
 Mental model: `terraform apply` lite. Files are the source of truth; the cloud is a follower.
 
@@ -13,8 +13,8 @@ Mental model: `terraform apply` lite. Files are the source of truth; the cloud i
 lobu apply                       # plan + prompt + apply
 lobu apply --dry-run             # plan only
 lobu apply --yes                 # plan + apply, no prompt (CI)
-lobu apply --only agents         # restrict to agent + platform resources
-lobu apply --only memory         # restrict to entity + relationship types
+lobu apply --only agents         # restrict to agent resources
+lobu apply --only memory         # restrict to entity + relationship types + watchers
 lobu apply --org my-org          # override active org
 lobu apply --url https://...     # override the server URL
 lobu apply --force               # bypass the .lobu/project.json link guard
@@ -36,30 +36,45 @@ Authentication is shared with the rest of the CLI. Run `lobu login` once.
 
 - Agents (metadata: `agentId`, `name`, `description`)
 - Agent settings: `networkConfig`, `egressConfig`, `nixConfig`, `mcpServers`, `skillsConfig`, `toolsConfig`, `guardrails`, `preApprovedTools`, `providerModelPreferences`, `modelSelection`, `IDENTITY.md` / `SOUL.md` / `USER.md`
-- Chat platforms under `[[agents.<id>.platforms]]`, keyed by a stable ID derived from `(agentId, type, name?)`
-- Memory entity types, relationship types, and watchers from YAML bundles under `[memory].models`
+- Memory entity types, relationship types, and watchers declared with `defineEntityType` / `defineRelationshipType` / `defineWatcher`
+- Connections and auth profiles declared with `defineConnection` / `defineAuthProfile`, plus the connectors they reference
 
-Model bundles use the dbt-style Lobu model schema:
+The memory schema is declared directly in `lobu.config.ts` and passed to `defineConfig`:
 
-```yaml
-version: 2
-entities:
-  - slug: account
-    name: Account
-relationships:
-  - slug: owns
-    name: Owns
-watchers:
-  - slug: account-digest
-    name: Account digest
-    schedule: "0 9 * * 1"
-    prompt: Summarize account changes.
+```ts
+import {
+  defineConfig,
+  defineEntityType,
+  defineRelationshipType,
+  defineWatcher,
+} from "@lobu/sdk";
+
+const account = defineEntityType({ key: "account", name: "Account" });
+const owns = defineRelationshipType({ key: "owns", name: "Owns" });
+const digest = defineWatcher({
+  agent: "sales",
+  slug: "account-digest",
+  name: "Account digest",
+  schedule: "0 9 * * 1",
+  prompt: "Summarize account changes.",
+  extractionSchema: { type: "object", properties: {} },
+});
+
+export default defineConfig({
+  agents: [/* ... */],
+  entities: [account],
+  relationships: [owns],
+  watchers: [digest],
+});
 ```
+
+Chat platforms are not synced by `lobu apply`. Connect them through the `/agents` admin UI or the CRUD API.
 
 ## What is not synced
 
+- Chat platforms (connect them through the admin UI or CRUD API)
 - Memory data (entities, relationships, knowledge events)
-- Secret values — `lobu apply` only checks that the env vars referenced as `$VAR` in `lobu.toml` are present locally, never uploads their values
+- Secret values — `lobu apply` only checks that the env vars referenced via `secret("VAR")` in `lobu.config.ts` are present locally, never uploads their values
 - Anything not in the list above
 
 ## Plan output
@@ -71,9 +86,7 @@ Each row is one of four verbs:
 | `+ create` | resource doesn't exist in the cloud — will be created |
 | `~ update` | resource exists with different content — will be patched (changed fields shown) |
 | `= noop` | resource exists and matches the desired state |
-| `? drift` | cloud has a resource not declared in `lobu.toml` — **reported only**, never deleted in v1 |
-
-When a platform update will restart the live worker, the plan adds an inline warning line.
+| `? drift` | cloud has a resource not declared in `lobu.config.ts` — **reported only**, never deleted in v1 |
 
 ## Apply order
 
@@ -84,22 +97,24 @@ upsertAgent          (POST /api/:org/agents/)
         ↓
 patchAgentSettings   (PATCH /api/:org/agents/:id/config)
         ↓
-upsertPlatform       (PUT /api/:org/agents/:id/platforms/by-stable-id/:stableId)
-        ↓
 upsertEntityType        (manage_entity_schema)
         ↓
 upsertRelationshipType  (manage_entity_schema)
+        ↓
+upsertWatcher
+        ↓
+upsertAuthProfile / upsertConnection (when connectors are declared)
 ```
 
 If any call fails, the CLI prints partial progress and exits non-zero. Every endpoint is idempotent — re-running converges.
 
 ## Required secrets
 
-Before any mutation, `lobu apply` walks `lobu.toml` for `$VAR` references in:
+Before any mutation, `lobu apply` collects every `secret("VAR")` reference in `lobu.config.ts`:
 
-- `[[agents.<id>.providers]]` — `key`, `secret_ref`
-- `[[agents.<id>.platforms]]` — every value in `[agents.<id>.platforms.config]`
-- `[agents.<id>.skills.mcp.<id>]` — `headers`, `env`, `oauth.client_id`, `oauth.client_secret`
+- provider `key` on `defineAgent({ providers })`
+- `mcpServers` `headers`, `env`, and `oauth` credentials on `defineAgent`
+- `credentials` on `defineAuthProfile`
 
 Each name must be set in the apply runner's environment (e.g. via `.env` loaded by your shell). Any missing name short-circuits the apply with a list of every missing var.
 
@@ -107,17 +122,7 @@ Secret values are never uploaded by `lobu apply`. Use your deployment's secret m
 
 ## Drift
 
-Cloud-side resources not declared in `lobu.toml` are reported but never deleted. v1 has no `--prune`. To remove a cloud-side agent or platform, use the admin UI or the underlying CRUD endpoints directly; the next `lobu apply` will continue to surface it as drift until you remove it from the cloud or add it to your files.
-
-## Stable platform IDs
-
-Each platform's URL — including webhook URLs (`/api/v1/webhooks/<id>`) — is derived from `(agentId, type, name)`:
-
-```
-{slugify(agentId)}-{slugify(type)}[-{slugify(name)}]
-```
-
-When you have more than one platform of the same `type` under the same agent, `name = "..."` is required. The same rule applies in `lobu run` (file-loader.ts) — both paths build identical stable IDs.
+Cloud-side resources not declared in `lobu.config.ts` are reported but never deleted. v1 has no `--prune`. To remove a cloud-side agent, use the admin UI or the underlying CRUD endpoints directly; the next `lobu apply` will continue to surface it as drift until you remove it from the cloud or add it to your project.
 
 ## CI usage
 
@@ -132,4 +137,4 @@ lobu apply --yes --org my-org
 
 - Lobu CLI: [CLI Reference](/reference/cli/)
 - Memory CLI: [Memory](/reference/lobu-memory/)
-- `lobu.toml`: [Configuration Reference](/reference/lobu-toml/)
+- `lobu.config.ts`: [Configuration Reference](/reference/lobu-config/)

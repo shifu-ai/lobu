@@ -117,7 +117,7 @@ You process video files using ffmpeg. For every video task:
 Never delete source files.
 ```
 
-`nixPackages` installs ffmpeg, jq, and mediainfo via Nix. `network.allow` configures the sandbox to only allow those two domains. `mcpServers` registers a cloud storage MCP server behind the gateway proxy with per-user credential injection. The markdown body gets injected into the agent's system prompt. If you want to lock down tool visibility or pre-approve specific MCP calls, that lives in `lobu.toml`, not in `SKILL.md`.
+`nixPackages` installs ffmpeg, jq, and mediainfo via Nix. `network.allow` configures the sandbox to only allow those two domains. `mcpServers` registers a cloud storage MCP server behind the gateway proxy with per-user credential injection. The markdown body gets injected into the agent's system prompt. If you want to lock down tool visibility or pre-approve specific MCP calls, that lives in `lobu.config.ts`, not in `SKILL.md`.
 
 When a user enables this skill, the gateway resolves every section. The worker starts with those binaries on `$PATH`, the network sandbox blocks everything except the declared domains, and the MCP server is available. The agent starts and has no idea any of this happened.
 

@@ -1,18 +1,18 @@
 ---
 title: Agent Workspace
-description: How agent files are organized across prompt files, local skills, evals, and lobu.toml.
+description: How agent files are organized across prompt files, local skills, evals, and lobu.config.ts.
 ---
 
-Every Lobu agent has a workspace directory such as `agents/my-agent/`. `lobu.toml` points each agent at that directory with `dir = "./agents/my-agent"`.
+Every Lobu agent has a workspace directory such as `agents/my-agent/`. `lobu.config.ts` points each agent at that directory with `dir: "./agents/my-agent"`.
 
-The workspace contains the agent's prompt files plus any agent-local skills and evals. Operator-controlled configuration such as providers, connections, network policy, tool policy, and enabled registry skills lives in [`lobu.toml`](/reference/lobu-toml/).
+The workspace contains the agent's prompt files plus any agent-local skills and evals. Operator-controlled configuration such as providers, connections, network policy, tool policy, and enabled registry skills lives in [`lobu.config.ts`](/reference/lobu-config/).
 
 At runtime, Lobu gives each user, DM, or channel its own isolated sandbox workspace. The files in `agents/<agent>/` are templates for that sandbox, so every new workspace starts from the same `IDENTITY.md`, `SOUL.md`, `USER.md`, skills, and eval setup for that agent.
 
 ## Workspace layout
 
 ```text
-lobu.toml
+lobu.config.ts
 agents/
   my-agent/
     IDENTITY.md
@@ -38,7 +38,7 @@ skills/
 | Agent-local skills | `agents/<agent>/skills/<name>/SKILL.md` | Available only to one agent |
 | Shared skills | `skills/<name>/SKILL.md` | Available to all agents in the project |
 | Evaluations | `agents/<agent>/evals/` | Test cases for behavior and quality |
-| Providers, connections, network, tool policy, enabled registry skills | `lobu.toml` | Operator-controlled runtime config |
+| Providers, connections, network, tool policy, enabled registry skills | `lobu.config.ts` | Operator-controlled runtime config |
 
 ## Runtime model
 
@@ -124,9 +124,9 @@ Local skills live in one of two places:
 
 Use this page to understand where those files live. Use the [`SKILL.md` Reference](/reference/skill-md/) for the skill file format, frontmatter, packages, MCP servers, and network declarations.
 
-## lobu.toml
+## lobu.config.ts
 
-`lobu.toml` is the runtime wiring layer for the workspace. It tells Lobu:
+`lobu.config.ts` is the runtime wiring layer for the workspace. It tells Lobu:
 
 - which agent directories exist
 - which providers and connections to use
@@ -134,7 +134,7 @@ Use this page to understand where those files live. Use the [`SKILL.md` Referenc
 - which custom MCP servers are attached directly to the agent
 - what network and tool policy applies
 
-Use the [`lobu.toml` Reference](/reference/lobu-toml/) for the exact schema. Keep operator policy there rather than spreading it into prompt files or `SKILL.md`.
+Use the [`lobu.config.ts` Reference](/reference/lobu-config/) for the exact schema. Keep operator policy there rather than spreading it into prompt files or `SKILL.md`.
 
 ## Memory
 
@@ -146,16 +146,24 @@ See [Memory](/getting-started/memory/) for the full model.
 
 ## Multi-agent layout
 
-With multiple agents in `lobu.toml`, each one gets its own workspace:
+With multiple agents in `lobu.config.ts`, each one gets its own workspace:
 
-```toml
-[agents.support]
-name = "support"
-dir = "./agents/support"
+```ts
+import { defineAgent, defineConfig } from "@lobu/sdk";
 
-[agents.sales]
-name = "sales"
-dir = "./agents/sales"
+const support = defineAgent({
+  id: "support",
+  name: "support",
+  dir: "./agents/support",
+});
+
+const sales = defineAgent({
+  id: "sales",
+  name: "sales",
+  dir: "./agents/sales",
+});
+
+export default defineConfig({ agents: [support, sales] });
 ```
 
 ```
@@ -173,5 +181,5 @@ agents/
 ## Related docs
 
 - [SKILL.md Reference](/reference/skill-md/)
-- [`lobu.toml` Reference](/reference/lobu-toml/)
+- [`lobu.config.ts` Reference](/reference/lobu-config/)
 - [Evaluations](/guides/evals/)
