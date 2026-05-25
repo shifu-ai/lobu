@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import type {
@@ -10,7 +10,7 @@ import type {
 import type { AgentSettings } from "@lobu/core";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
-import type { Project, Skill } from "../../../config/index.js";
+import type { ConnectorSource, Project, Skill } from "../../../config/index.js";
 import { ValidationError } from "../../memory/_lib/errors.js";
 import {
   mapProjectToDesiredState,
@@ -215,8 +215,8 @@ export interface DesiredState {
   /** Watchers declared via `defineWatcher`. */
   watchers: DesiredWatcher[];
   /**
-   * Connectors: local `*.connector.ts` definitions (discovered under
-   * `./connectors`), `defineConnection`s, and `defineAuthProfile`s.
+   * Connectors: local `*.connector.ts` definitions (declared via
+   * `connectorFromFile`), `defineConnection`s, and `defineAuthProfile`s.
    */
   connectors: {
     definitions: DesiredConnectorDefinition[];
@@ -707,60 +707,74 @@ export interface LoadDesiredStateOptions {
 }
 
 /**
- * Discover local connector definitions for the TypeScript config path.
+ * Resolve the project's explicit `connectors: [connectorFromFile(...)]` list
+ * into connector definitions to compile + ship. Replaces directory
+ * auto-discovery: only listed connectors are uploaded. Paths are relative to
+ * the config dir and guarded (no absolute, `..`, or backslash escapes),
+ * mirroring `resolveReactionScript`.
  *
- * A `lobu.config.ts` references connectors by key (or via the class returned by
- * `defineConnector`); the source the server compiles lives in
- * `./connectors/*.connector.ts`. We ship each file's source with `key: null` —
- * the server compiles it and resolves the real key, the same contract the YAML
- * loader used for auto-discovered `.connector.ts` files. `apply-cmd` then
- * compiles each `sourcePath` on the CLI (where the project's node_modules is
- * available) and uploads it via `install_connector`.
- *
- * We intentionally do NOT compile/instantiate the connector here to resolve its
- * key eagerly: that would force a full esbuild + module load (and installed
- * project deps, and any module-load side effects) on every load — including
- * `--dry-run` — for no benefit, since the server is the source of truth for the
- * compiled key. The cost is deferred to post-confirmation install in apply-cmd.
- *
- * Caveat (shared with YAML auto-discovery, see `locallyDeclaredConnectorKeys`):
- * because the shipped key is `null`, a connection's config is validated against
- * the *fresh* catalog only after install, and a connection that references a
+ * Each source ships with `key: null`; `apply-cmd` compiles each `sourcePath` on
+ * the CLI (where the project's node_modules is available) and the server
+ * resolves the real key. We intentionally do NOT compile/instantiate here to
+ * resolve the key eagerly — that would force a full esbuild + module load on
+ * every load (including `--dry-run`) for no benefit, since the server is the
+ * source of truth for the compiled key. A connection that references a
  * connector by a bare *string* key relies on that string matching the file's
- * compiled `definition.key`. Reference the connector by its `defineConnector`
- * class instead (`connector: myConnector`) to make that match exact — the
- * mapper resolves the key from `definition.key`, so a typo can't silently bind
- * the connection to a different (bundled/remote) connector.
+ * compiled `definition.key`; reference it by its `defineConnector` class
+ * (`connector: myConnector`) to make that match exact.
  */
-async function discoverLocalConnectorDefinitions(
+function resolveConnectorSources(
+  sources: ConnectorSource[],
   cwd: string
-): Promise<DesiredConnectorDefinition[]> {
-  const dirPath = resolve(cwd, "connectors");
-  let entries: string[];
-  try {
-    entries = (await readdir(dirPath)).sort();
-  } catch {
-    // No `./connectors` dir — a project may declare no local connectors.
-    return [];
-  }
-
+): DesiredConnectorDefinition[] {
+  const baseDir = resolve(cwd);
   const defs: DesiredConnectorDefinition[] = [];
-  for (const entry of entries) {
-    if (!entry.endsWith(".connector.ts")) continue;
-    const entryPath = join(dirPath, entry);
-    let entryStat;
-    try {
-      entryStat = await stat(entryPath);
-    } catch {
-      continue;
+  for (const src of sources) {
+    const rel = src.path.trim();
+    if (!rel) {
+      throw new ValidationError(
+        "connectorFromFile() requires a path to a `*.connector.ts` file"
+      );
     }
-    if (!entryStat.isFile()) continue;
-    const sourceCode = await readFile(entryPath, "utf-8");
+    if (rel.startsWith("/") || rel.includes("\\")) {
+      throw new ValidationError(
+        `connectorFromFile(${JSON.stringify(rel)}) must be a relative POSIX path (./foo.connector.ts) — absolute paths and backslashes are not allowed`
+      );
+    }
+    if (rel.split("/").some((seg) => seg === "..")) {
+      throw new ValidationError(
+        `connectorFromFile(${JSON.stringify(rel)}) must not contain \`..\` segments — keep the connector under the config directory`
+      );
+    }
+    if (!rel.endsWith(".ts")) {
+      throw new ValidationError(
+        `connectorFromFile(${JSON.stringify(rel)}) must point at a \`.ts\` file`
+      );
+    }
+    const abs = resolve(baseDir, rel);
+    const relPath = relative(baseDir, abs);
+    if (
+      relPath === ".." ||
+      relPath.startsWith(`..${sep}`) ||
+      isAbsolute(relPath)
+    ) {
+      throw new ValidationError(
+        `connectorFromFile(${JSON.stringify(rel)}) resolves outside the config directory (${abs})`
+      );
+    }
+    let sourceCode: string;
+    try {
+      sourceCode = readFileSync(abs, "utf-8");
+    } catch {
+      throw new ValidationError(
+        `connectorFromFile(${JSON.stringify(rel)}) does not exist (resolved to ${abs})`
+      );
+    }
     defs.push({
       key: null,
-      sourcePath: entryPath,
+      sourcePath: abs,
       sourceCode,
-      sourceFile: `connectors/${entry}`,
+      sourceFile: rel.replace(/^\.\//, ""),
     });
   }
   return defs.sort((a, b) => a.sourceFile.localeCompare(b.sourceFile));
@@ -935,7 +949,8 @@ export async function loadDesiredStateFromConfig(
   // `--only agents|memory` skips connectors (matching the mapper), so don't
   // ship local connector source for those runs either.
   if (!opts.only) {
-    state.connectors.definitions = await discoverLocalConnectorDefinitions(
+    state.connectors.definitions = resolveConnectorSources(
+      typedProject.connectors ?? [],
       opts.cwd
     );
   }
