@@ -424,6 +424,17 @@ export async function resolveConnectionAuthSelection(params: {
   const browserMethod = getBrowserMethods(params.authSchema)[0] ?? null;
   const preferredMethodType = getPreferredAuthMethodType(params.authSchema);
 
+  // 0. An explicit app profile slug points at an `oauth_app` (local client
+  //    credentials). Resolve it once so it can be honored as the oauth_account
+  //    app profile (step 2).
+  const explicitAppProfile = params.appAuthProfileSlug
+    ? await resolveAuthProfileSlugToId({
+        organizationId,
+        slug: params.appAuthProfileSlug,
+        connectorKey,
+      })
+    : null;
+
   // 1. Resolve explicitly selected auth profile, or auto-select the primary
   //    auth profile for the connector's preferred auth method.
   const authProfile =
@@ -456,15 +467,14 @@ export async function resolveConnectionAuthSelection(params: {
     return EMPTY_SELECTION({ oauthMethod, envMethod, browserMethod, preferredMethodType });
   }
 
-  // 2. For OAuth accounts, also resolve the app credentials profile.
+  // 2. For OAuth accounts, also resolve the app credentials profile. The
+  //    explicit app profile (resolved in step 0) is an `oauth_app` (local
+  //    client credentials); here we accept only `oauth_app`.
   const needsAppAuth = authProfile.profile_kind === 'oauth_account' || !!params.appAuthProfileSlug;
   const appAuthProfile = needsAppAuth
-    ? ((await resolveAuthProfileSlugToId({
-        organizationId,
-        slug: params.appAuthProfileSlug,
-        expectedKind: 'oauth_app',
-        connectorKey,
-      })) ??
+    ? ((explicitAppProfile && explicitAppProfile.profile_kind === 'oauth_app'
+        ? explicitAppProfile
+        : null) ??
       (oauthMethod && authProfile.profile_kind === 'oauth_account'
         ? await getPrimaryAuthProfileForKind({
             organizationId,

@@ -706,19 +706,25 @@ async function handleUpdateAuthProfile(
         error: `You can only update OAuth account profiles you created. Ask an admin if you need to manage another member's profile.`,
       };
     }
+
   }
+
+  // The payload that will actually be persisted: an explicit `auth_data` wins,
+  // else `credentials` (normalized to a string map), else undefined (leave the
+  // existing auth_data as-is).
+  const updateAuthDataPayload: Record<string, unknown> | undefined =
+    args.auth_data !== undefined
+      ? (args.auth_data as Record<string, unknown>)
+      : args.credentials
+        ? normalizeAuthValues(args.credentials)
+        : undefined;
 
   let authProfile = await updateAuthProfile({
     organizationId: ctx.organizationId,
     slug: args.auth_profile_slug,
     displayName: args.display_name,
     nextSlug: args.slug,
-    authData:
-      args.auth_data !== undefined
-        ? (args.auth_data as Record<string, unknown>)
-        : args.credentials
-          ? normalizeAuthValues(args.credentials)
-          : undefined,
+    authData: updateAuthDataPayload,
     status: args.status as AuthProfileStatus | undefined,
   });
 

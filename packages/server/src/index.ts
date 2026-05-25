@@ -21,6 +21,7 @@ import { mcpAuth } from './auth/middleware';
 import { oauthRoutes } from './auth/oauth/routes';
 import { findExistingPersonalOrg } from './auth/personal-org-provisioning';
 import { credentialRoutes } from './auth/routes';
+import { connectionTokenRoutes } from './connect/connection-token-route';
 import { connectRoutes } from './connect/routes';
 import { getDb } from './db/client';
 import * as invalidationEmitter from './events/emitter';
@@ -550,6 +551,16 @@ app.route('/mcp', oauthRoutes);
  * Used by MCP clients to complete OAuth/env_keys auth for connections
  */
 app.route('/connect', connectRoutes);
+
+/**
+ * Managed-connector connection-token route — PAT-gated. A managed connector
+ * lives in a PUBLIC org with a managed `oauth_app`; a user joins it and
+ * connects normally (a connection owned by them). Their LOCAL Lobu fetches a
+ * fresh access token for its OWN user's connection via POST
+ * /oauth/connection-token, authenticating with the user's cloud PAT. The
+ * managed client secret + refresh token never leave the cloud.
+ */
+app.route('/', connectionTokenRoutes);
 
 /**
  * Logo endpoint for MCP/OAuth client metadata.

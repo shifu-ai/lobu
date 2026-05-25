@@ -304,6 +304,39 @@ describe("mapProjectToDesiredState", () => {
     expect(dc?.feeds).toEqual([{ feedKey: "stars", schedule: "0 */6 * * *" }]);
   });
 
+  test("folds `managedBy` (org only — no url) into the connection config", () => {
+    const conn = defineConnection({
+      slug: "gh-managed",
+      connector: "github",
+      config: { existing: true },
+      managedBy: { org: "lobu-managed" },
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [], connections: [conn] })
+    );
+    const dc = state.connectors.connections[0];
+    // No connection-supplied URL: a connection can never redirect where the
+    // cloud PAT is sent (it always targets the instance's LOBU_CLOUD_URL).
+    expect(dc?.config).toEqual({
+      existing: true,
+      managedBy: { org: "lobu-managed" },
+    });
+  });
+
+  test("a connection without `managedBy` carries no managedBy in config", () => {
+    const conn = defineConnection({
+      slug: "gh-plain",
+      connector: "github",
+      config: { existing: true },
+    });
+    const state = mapProjectToDesiredState(
+      defineConfig({ agents: [], connections: [conn] })
+    );
+    const dc = state.connectors.connections[0];
+    expect(dc?.config).toEqual({ existing: true });
+    expect(dc?.config?.managedBy).toBeUndefined();
+  });
+
   test("rejects an invalid connection slug", () => {
     const conn = defineConnection({ slug: "Bad_Slug", connector: "github" });
     expect(() =>

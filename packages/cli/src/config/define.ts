@@ -92,6 +92,24 @@ export interface ConnectionFeed {
   config?: Record<string, unknown>;
 }
 
+/**
+ * Marks a connection as MANAGED by a cloud (public) org. The OAuth grant lives
+ * in the cloud: a user joins the public `org`, connects normally (consent
+ * against the managed app → a connection owned by them), and the local instance
+ * fetches a fresh access token for its own user's connection at runtime via
+ * `POST /oauth/connection-token`, authenticating with the instance's cloud PAT
+ * (`LOBU_CLOUD_PAT`). The managed client secret + refresh token never leave the
+ * cloud.
+ *
+ * The cloud origin is fixed by the instance's `LOBU_CLOUD_URL` — a connection
+ * CANNOT supply a URL, so a malicious config can never redirect where the cloud
+ * PAT is sent.
+ */
+export interface ManagedBy {
+  /** The cloud (public) org the managed connector lives under. */
+  org: string;
+}
+
 export interface Connection {
   readonly kind: "connection";
   /** Stable slug — diff key. */
@@ -103,6 +121,20 @@ export interface Connection {
   /** OAuth-app auth profile (handle or slug). */
   appAuthProfile?: AuthProfile | string;
   config?: Record<string, unknown>;
+  /**
+   * Mark this connection as managed by a cloud (public) org — the grant lives
+   * in the cloud and the local instance fetches its token at runtime. See
+   * {@link ManagedBy}.
+   */
+  managedBy?: ManagedBy;
+  /**
+   * Consent-only connections exist solely to hold an OAuth grant for delegation
+   * (the cloud grant-holder behind a managed connector); they cannot have feeds,
+   * so they never sync. This is the by-construction guarantee that a managed
+   * connector's data only ever lives on the local instance — feed creation is
+   * rejected for a connection whose persisted `config.consent_only === true`.
+   */
+  consentOnly?: boolean;
   /** UUID pinning syncs/actions to a specific device worker. */
   deviceWorkerId?: string;
   feeds?: ConnectionFeed[];
