@@ -364,7 +364,7 @@ export class ChatResponseBridge implements ResponseRenderer {
     const ctx = this.extractResponseContext(payload);
     if (!ctx) return;
 
-    const { connectionId, strategy, channelId } = ctx;
+    const { connectionId, strategy, channelId, instance } = ctx;
     const key = `${channelId}:${payload.conversationId}`;
 
     // If a guardrail blocked this stream mid-flight, skip completion
@@ -395,10 +395,63 @@ export class ChatResponseBridge implements ResponseRenderer {
           "Adapter stream errored during completion"
         );
       }
-
-      await strategy.handleCompletion({ ctx, payload, stream });
-      this.streams.delete(key);
     }
+
+    // Deliver when this replica has a local stream OR when this is a post-once
+    // strategy (Slack) carrying the worker's full text. Under N>1 replicas the
+    // delta rows and the terminal row are claimed competitively from the shared
+    // `thread_response` queue with no per-conversation affinity, so the
+    // completion can land on a pod that buffered no (or only some) deltas — only
+    // `payload.finalText` is authoritative there. A live-streaming strategy with
+    // no local stream already posted its deltas on the claiming replica, so it
+    // is intentionally skipped (re-posting would duplicate).
+    const canDeliverFromFinalText =
+      strategy.deliversAtCompletion && !!payload.finalText?.trim();
+
+    // Output guardrail for the post-once path. A post-once strategy delivers
+    // here from the full text, so the per-delta scan in handleDelta is NOT a
+    // sufficient guard under N>1 replicas: this completing pod may have scanned
+    // no deltas (cross-pod) or only the subset it claimed, and a secret split
+    // across deltas that scattered to different pods trips no per-delta scan.
+    // `blockedStreams` is pod-local and cannot protect a cross-replica
+    // completion. So scan the full delivered text once here; on a trip, post
+    // the block message and suppress both delivery and history. (Live-streaming
+    // strategies can't defer — they already streamed per-delta — so this only
+    // runs for deliversAtCompletion strategies.)
+    let blockedAtCompletion = false;
+    if (strategy.deliversAtCompletion) {
+      const completionText = payload.finalText ?? stream?.buffer ?? "";
+      if (completionText.trim()) {
+        const trip = await this.runOutputGuardrails(completionText, payload, ctx);
+        if (trip) {
+          blockedAtCompletion = true;
+          const blockText = `Message blocked by guardrail: ${trip.reason ?? trip.guardrail}`;
+          try {
+            const target = await this.resolveTarget(
+              instance,
+              channelId,
+              payload.conversationId,
+              platformMetadataString(
+                payload.platformMetadata,
+                "responseThreadId"
+              ),
+              readPlatformMetadata(payload.platformMetadata)
+            );
+            if (target) await target.post(blockText);
+          } catch (err) {
+            logger.error(
+              { err: String(err) },
+              "Failed to post guardrail block message at completion"
+            );
+          }
+        }
+      }
+    }
+
+    if (!blockedAtCompletion && (stream || canDeliverFromFinalText)) {
+      await strategy.handleCompletion({ ctx, payload, stream: stream ?? null });
+    }
+    if (stream) this.streams.delete(key);
     // Next stream on the same key starts with a fresh tail.
     this.guardrailTails.delete(key);
 
@@ -408,12 +461,15 @@ export class ChatResponseBridge implements ResponseRenderer {
     // Gap 1: Store outgoing response in history. Wrap so that a state-store
     // outage doesn't fail the whole response delivery — the user has
     // already seen the message; missing history is recoverable, a 500
-    // here is not.
-    if (stream?.buffer.trim() && conversationState) {
+    // here is not. Prefer the worker's authoritative finalText: under N>1
+    // replicas `stream?.buffer` is null (cross-pod) or only the subset of
+    // deltas this pod claimed, so persisting it would store a truncated reply.
+    const historyText = payload.finalText ?? stream?.buffer;
+    if (!blockedAtCompletion && historyText?.trim() && conversationState) {
       try {
         await conversationState.appendHistory(connectionId, channelId, {
           role: "assistant",
-          content: stream.buffer,
+          content: historyText,
           timestamp: Date.now(),
         });
       } catch (error) {
