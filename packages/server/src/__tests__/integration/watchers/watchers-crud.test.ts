@@ -86,6 +86,123 @@ describe('watcher CRUD', () => {
     expect(list.watchers?.some((w) => w.watcher_id === watcherId)).toBe(false);
   });
 
+  it('round-trips execution_config through create → list → update', async () => {
+    const created = (await owner.watchers.create({
+      entity_id: entityId,
+      slug: 'exec-config-watcher',
+      name: 'Exec Config Watcher',
+      prompt: 'Track things.',
+      extraction_schema: { type: 'object', properties: {} },
+      agent_id: agentId,
+      execution_config: {
+        timeout_seconds: 1800,
+        max_budget_usd: 2.5,
+        model: 'opus',
+        permission_mode: 'acceptEdits',
+        effort: 'high',
+      },
+    })) as { watcher_id: string };
+    const watcherId = created.watcher_id;
+
+    const findRow = (
+      res: {
+        watchers?: Array<{ watcher_id: string; execution_config?: Record<string, unknown> | null }>;
+      },
+      id: string
+    ) => res.watchers?.find((w) => String(w.watcher_id) === String(id));
+
+    const list = (await owner.watchers.list({ entity_id: entityId })) as {
+      watchers?: Array<{ watcher_id: string; execution_config?: Record<string, unknown> }>;
+    };
+    expect(findRow(list, watcherId)?.execution_config).toEqual({
+      timeout_seconds: 1800,
+      max_budget_usd: 2.5,
+      model: 'opus',
+      permission_mode: 'acceptEdits',
+      effort: 'high',
+    });
+
+    // Update replaces the whole jsonb; a partial object is stored verbatim.
+    await owner.watchers.update({
+      watcher_id: watcherId,
+      execution_config: { timeout_seconds: 300 },
+    });
+    const after = (await owner.watchers.list({ entity_id: entityId })) as {
+      watchers?: Array<{ watcher_id: string; execution_config?: Record<string, unknown> }>;
+    };
+    expect(findRow(after, watcherId)?.execution_config).toEqual({ timeout_seconds: 300 });
+
+    // Passing null clears the saved config back to NULL/defaults.
+    await owner.watchers.update({ watcher_id: watcherId, execution_config: null });
+    const cleared = (await owner.watchers.list({ entity_id: entityId })) as {
+      watchers?: Array<{ watcher_id: string; execution_config?: Record<string, unknown> | null }>;
+    };
+    expect(findRow(cleared, watcherId)?.execution_config ?? null).toBeNull();
+
+    await owner.watchers.delete([watcherId]);
+  });
+
+  it('leaves execution_config null when unset', async () => {
+    const created = (await owner.watchers.create({
+      entity_id: entityId,
+      slug: 'no-exec-config-watcher',
+      name: 'No Exec Config',
+      prompt: 'Track things.',
+      extraction_schema: { type: 'object', properties: {} },
+      agent_id: agentId,
+    })) as { watcher_id: string };
+
+    const list = (await owner.watchers.list({ entity_id: entityId })) as {
+      watchers?: Array<{ watcher_id: string; execution_config?: Record<string, unknown> | null }>;
+    };
+    const row = list.watchers?.find(
+      (w) => String(w.watcher_id) === String(created.watcher_id)
+    );
+    expect(row).toBeDefined();
+    expect(row?.execution_config ?? null).toBeNull();
+
+    await owner.watchers.delete([created.watcher_id]);
+  });
+
+  it('rejects an invalid execution_config (type/range/unknown-key)', async () => {
+    const base = {
+      entity_id: entityId,
+      name: 'Bad Exec',
+      prompt: 'x',
+      extraction_schema: { type: 'object', properties: {} },
+      agent_id: agentId,
+    };
+    // timeout_seconds below minimum
+    await expect(
+      owner.watchers.create({ ...base, slug: 'bad-1', execution_config: { timeout_seconds: 0 } })
+    ).rejects.toThrow(/execution_config/i);
+    // wrong type (string where integer expected) — would otherwise brick the
+    // Swift payload decode at run time.
+    await expect(
+      owner.watchers.create({
+        ...base,
+        slug: 'bad-2',
+        execution_config: { timeout_seconds: '600' },
+      } as never)
+    ).rejects.toThrow(/execution_config/i);
+    // unknown key (additionalProperties: false)
+    await expect(
+      owner.watchers.create({
+        ...base,
+        slug: 'bad-3',
+        execution_config: { bogus: true },
+      } as never)
+    ).rejects.toThrow(/execution_config/i);
+    // above maximum
+    await expect(
+      owner.watchers.create({
+        ...base,
+        slug: 'bad-4',
+        execution_config: { timeout_seconds: 999_999 },
+      })
+    ).rejects.toThrow(/execution_config/i);
+  });
+
   it('creates an org-scoped watcher with no entity_id', async () => {
     const created = (await owner.watchers.create({
       slug: 'org-scoped-watcher',

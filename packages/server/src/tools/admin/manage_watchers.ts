@@ -61,6 +61,10 @@ import { validateTemplate } from '../../watchers/renderer';
 import { validateClassifierSourcePaths, validateExtractionSchema } from '../../watchers/validator';
 import type { ToolContext } from '../registry';
 import { routeAction } from './action-router';
+import {
+  assertValidExecutionConfig,
+  WatcherExecutionConfigSchema,
+} from './watcher-execution-config';
 import { getNextNumericId, requireExists } from './helpers/db-helpers';
 
 // Initialize AJV for JSON Schema validation
@@ -406,6 +410,11 @@ export const ManageWatchersSchema = Type.Object({
     })
   ),
   model_config: Type.Optional(Type.Any({ description: '[create/update] AI model configuration' })),
+  // Union with Null so `update` can clear a previously-saved config back to
+  // NULL/defaults — omitted = unchanged, null = clear, object = replace. The
+  // object shape lives in WatcherExecutionConfigSchema (below) so it can also
+  // be compiled into a runtime validator (assertValidExecutionConfig).
+  execution_config: Type.Optional(Type.Union([Type.Null(), WatcherExecutionConfigSchema])),
   tags: Type.Optional(Type.Array(Type.String(), { description: '[create] Tags for filtering' })),
 
   // Version management
@@ -719,7 +728,7 @@ export async function manageWatchers(
 
   return routeAction<ManageWatchersResult>('manage_watchers', args.action, ctx, {
     create: () => handleCreate(args, env, ctx),
-    update: () => handleUpdate(args, env),
+    update: () => handleUpdate(args, env, ctx),
     create_version: () => handleCreateVersion(args, env, ctx),
     upgrade: () => handleUpgrade(args, env),
     complete_window: () => handleCompleteWindow(args, env, ctx),
@@ -943,6 +952,7 @@ async function handleCreate(
   if (!args.extraction_schema) {
     throw new ToolUserError('extraction_schema is required for create action');
   }
+  assertValidExecutionConfig(args.execution_config, ctx);
 
   // entity_id is optional: omit it for an org-scoped/global watcher.
   const entityId = args.entity_id;
@@ -1056,7 +1066,8 @@ async function handleCreate(
         current_version_id, tags, status, created_by, created_at, updated_at,
         watcher_group_id,
         device_worker_id, agent_kind,
-        notification_channel, notification_priority, min_cooldown_seconds
+        notification_channel, notification_priority, min_cooldown_seconds,
+        execution_config
       ) VALUES (
         ${watcherId}, ${args.name ?? args.slug}, ${args.slug}, ${organizationId},
         ${`{${entityIdsArray.join(',')}}`}::bigint[],
@@ -1069,7 +1080,8 @@ async function handleCreate(
         ${args.device_worker_id ?? null}, ${args.agent_kind ?? null},
         ${args.notification_channel ?? 'canvas'},
         ${args.notification_priority ?? 'normal'},
-        ${args.min_cooldown_seconds ?? 0}
+        ${args.min_cooldown_seconds ?? 0},
+        ${toJsonParam(tx, args.execution_config)}
       )
     `;
 
@@ -1173,7 +1185,7 @@ async function handleCreateFromVersion(
   // entity. Without this copy the new assignment would have no reactions.
   const versionRows = await sql`
     SELECT wv.*, w.organization_id, w.schedule, w.sources, w.agent_id, w.scheduler_client_id,
-           w.model_config, w.tags, w.watcher_group_id,
+           w.model_config, w.execution_config, w.tags, w.watcher_group_id,
            w.reaction_script, w.reaction_script_compiled
     FROM watcher_versions wv
     JOIN watchers w ON w.id = wv.watcher_id
@@ -1230,7 +1242,7 @@ async function handleCreateFromVersion(
     await sql`
       INSERT INTO watchers (
         id, name, slug, organization_id, entity_ids,
-        schedule, next_run_at, agent_id, scheduler_client_id, model_config, sources, version,
+        schedule, next_run_at, agent_id, scheduler_client_id, model_config, execution_config, sources, version,
         current_version_id, tags, status, created_by, created_at, updated_at,
         watcher_group_id, source_watcher_id,
         reaction_script, reaction_script_compiled
@@ -1239,7 +1251,7 @@ async function handleCreateFromVersion(
         ${`{${entityId}}`}::bigint[],
         ${version.schedule ?? null}, ${version.schedule ? nextRunAt(version.schedule as string) : null},
         ${version.agent_id ?? null}, ${version.scheduler_client_id ?? null},
-        ${toJsonParam(sql, version.model_config)}, ${toJsonParam(sql, sources)},
+        ${toJsonParam(sql, version.model_config)}, ${toJsonParam(sql, version.execution_config)}, ${toJsonParam(sql, sources)},
         ${(version.version as number) ?? 1}, ${sharedVersionId}, ${toTextArrayParam((version.tags as string[]) || [])}::text[],
         'active', ${createdBy}, NOW(), NOW(),
         ${groupId}, ${version.watcher_id},
@@ -1265,13 +1277,15 @@ async function handleCreateFromVersion(
 
 async function handleUpdate(
   args: ManageWatchersArgs,
-  _env: Env
+  _env: Env,
+  ctx: ToolContext
 ): Promise<{ action: 'update'; watcher_id: string; updated_fields: string[] }> {
   const sql = getDb();
 
   if (!args.watcher_id) {
     throw new Error('watcher_id is required for update action');
   }
+  assertValidExecutionConfig(args.execution_config, ctx);
 
   await requireExists(sql, 'watchers', args.watcher_id, 'Watcher');
 
@@ -1306,6 +1320,7 @@ async function handleUpdate(
 
   const updatedFields: string[] = [];
   if (args.model_config !== undefined) updatedFields.push('model_config');
+  if (args.execution_config !== undefined) updatedFields.push('execution_config');
   if (args.schedule !== undefined) updatedFields.push('schedule');
   if (args.agent_id !== undefined) updatedFields.push('agent_id');
   if (args.scheduler_client_id !== undefined) updatedFields.push('scheduler_client_id');
@@ -1331,6 +1346,7 @@ async function handleUpdate(
     UPDATE watchers SET
       updated_at = NOW(),
       model_config = CASE WHEN ${args.model_config !== undefined} THEN ${sql.json(args.model_config ?? {})} ELSE model_config END,
+      execution_config = CASE WHEN ${args.execution_config !== undefined} THEN ${toJsonParam(sql, args.execution_config)} ELSE execution_config END,
       schedule = CASE WHEN ${args.schedule !== undefined} THEN ${scheduleValue} ELSE schedule END,
       next_run_at = CASE WHEN ${args.schedule !== undefined} THEN ${nextRunAtVal}::timestamptz ELSE next_run_at END,
       agent_id = CASE WHEN ${args.agent_id !== undefined} THEN ${args.agent_id ?? null} ELSE agent_id END,
@@ -2296,6 +2312,7 @@ async function handleList(
       i.last_fired_at,
       i.scheduler_client_id,
       i.model_config,
+      i.execution_config,
       i.sources,
       -- With fetch_types:false (see db/client.ts) postgres.js does not parse
       -- arrays, so text[] arrives as the literal "{a,b}"; wrap in to_jsonb so
