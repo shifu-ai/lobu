@@ -48,6 +48,7 @@ import {
   materializeInlineAttachments,
   triggerAudioTranscriptions,
 } from './utils/inline-attachments';
+import { configuredEmbeddingModelSqlLiteral } from './utils/embeddings';
 import { insertEvent, recordLifecycleEvent } from './utils/insert-event';
 import logger from './utils/logger';
 import { getWorkspaceRole } from './utils/organization-access';
@@ -819,6 +820,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
         origin_parent_id?: string;
         origin_type?: string;
         embedding?: number[];
+        embedding_model?: string;
         semantic_type?: string;
       }>;
       checkpoint?: Record<string, unknown>;
@@ -933,6 +935,7 @@ export async function streamContent(c: Context<{ Bindings: Env }>) {
             occurredAt: item.occurred_at,
             score: item.score,
             embedding: item.embedding,
+            embeddingModel: item.embedding_model,
             metadata: item.metadata as Record<string, unknown> | undefined,
             semanticType: itemSemanticType,
             originType: itemOriginType,
@@ -1628,13 +1631,20 @@ export async function fetchEventsForEmbedding(c: Context<{ Bindings: Env }>) {
       return c.json({ events: [] });
     }
 
+    // Return events with no embedding OR an embedding whose stamp is not the
+    // configured model — including NULL (legacy row, unknown model). Search
+    // excludes those rows from vector comparison, so they must be restamped.
+    // `IS DISTINCT FROM` makes NULL count as different from the (non-NULL)
+    // configured model. The model is server config, inlined as a validated
+    // literal.
+    const modelLiteral = configuredEmbeddingModelSqlLiteral();
     const placeholders = safeIds.map((_, i) => `$${i + 1}`).join(',');
     const rows = await sql.unsafe(
       `SELECT e.id, e.payload_text, e.title
        FROM events e
        LEFT JOIN event_embeddings emb ON emb.event_id = e.id
        WHERE e.id IN (${placeholders})
-         AND emb.event_id IS NULL`,
+         AND (emb.event_id IS NULL OR emb.embedding_model IS DISTINCT FROM ${modelLiteral})`,
       safeIds
     );
 
@@ -1661,7 +1671,7 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
     const req = await c.req.json<{
       run_id: number;
       worker_id: string;
-      embeddings: Array<{ event_id: number; embedding: number[] }>;
+      embeddings: Array<{ event_id: number; embedding: number[]; embedding_model?: string }>;
       error_message?: string;
     }>();
 
@@ -1693,9 +1703,19 @@ export async function completeEmbeddings(c: Context<{ Bindings: Env }>) {
       try {
         // pgvector expects '[0.1,0.2,...]' format
         const vectorStr = `[${item.embedding.join(',')}]`;
+        // On conflict, REPLACE a stale-model row (a model swap left its vector in
+        // an incompatible space) with the freshly-embedded vector + stamp. The
+        // WHERE makes a same-model re-submit a no-op (idempotent), so we never
+        // churn rows that are already current.
         const result = await sql.unsafe(
-          'INSERT INTO event_embeddings (event_id, embedding) VALUES ($1, $2::vector) ON CONFLICT (event_id) DO NOTHING',
-          [item.event_id, vectorStr]
+          `INSERT INTO event_embeddings (event_id, embedding, embedding_model)
+           VALUES ($1, $2::vector, $3)
+           ON CONFLICT (event_id) DO UPDATE
+             SET embedding = EXCLUDED.embedding,
+                 embedding_model = EXCLUDED.embedding_model,
+                 created_at = now()
+             WHERE event_embeddings.embedding_model IS DISTINCT FROM EXCLUDED.embedding_model`,
+          [item.event_id, vectorStr, item.embedding_model ?? null]
         );
         if (result.count > 0) updated++;
       } catch (err) {

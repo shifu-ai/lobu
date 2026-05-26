@@ -43,6 +43,8 @@ interface InsertEventParams {
   parentOriginId?: string | null;
   score?: number | null;
   embedding?: number[] | null;
+  /** Model/version stamp that produced `embedding`; persisted so vector spaces never mix. */
+  embeddingModel?: string | null;
   interactionType?: 'none' | 'approval';
   interactionStatus?: 'pending' | 'approved' | 'rejected' | 'completed' | 'failed' | null;
   interactionInputSchema?: Record<string, unknown> | null;
@@ -166,14 +168,22 @@ function isSemanticallyEqual(
 async function upsertEmbedding(
   eventId: number,
   embedding: number[] | null | undefined,
+  embeddingModel: string | null | undefined,
   sql: ReturnType<typeof getDb> = getDb()
 ): Promise<void> {
   if (!embedding || embedding.length === 0) return;
   const vectorLiteral = `[${embedding.join(',')}]`;
+  // On conflict, REPLACE a stale-model row with the freshly-embedded vector +
+  // stamp; the WHERE makes a same-model re-submit a no-op (idempotent), so a
+  // re-ingest of unchanged content under the same model never churns the row.
   await sql`
-    INSERT INTO event_embeddings (event_id, embedding)
-    VALUES (${eventId}, ${vectorLiteral}::vector)
-    ON CONFLICT (event_id) DO NOTHING
+    INSERT INTO event_embeddings (event_id, embedding, embedding_model)
+    VALUES (${eventId}, ${vectorLiteral}::vector, ${embeddingModel ?? null})
+    ON CONFLICT (event_id) DO UPDATE
+      SET embedding = EXCLUDED.embedding,
+          embedding_model = EXCLUDED.embedding_model,
+          created_at = now()
+      WHERE event_embeddings.embedding_model IS DISTINCT FROM EXCLUDED.embedding_model
   `;
 }
 
@@ -240,7 +250,7 @@ export async function insertEvent(
         `;
         const existingRow = existingRows[0] as InsertedEvent | undefined;
         if (existingRow) {
-          await upsertEmbedding(existingRow.id, params.embedding, sql);
+          await upsertEmbedding(existingRow.id, params.embedding, params.embeddingModel, sql);
           return existingRow;
         }
         // Race: the existing row was deleted/tombstoned between the
@@ -342,7 +352,7 @@ export async function insertEvent(
         `Row was not persisted; check server logs for diagnostic context.`
     );
   }
-  await upsertEmbedding(inserted.id, params.embedding, sql);
+  await upsertEmbedding(inserted.id, params.embedding, params.embeddingModel, sql);
   return inserted;
 }
 

@@ -7,6 +7,7 @@
  */
 
 import { getDb } from '../db/client';
+import { configuredEmbeddingModelSqlLiteral } from '../utils/embeddings';
 import type { Env } from '../index';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
@@ -25,16 +26,29 @@ interface OrgBatch {
   event_count: number;
 }
 
+// A row needs (re)embedding when it has no embedding at all, OR its stamp is
+// not the configured model — including a NULL stamp (legacy row whose true
+// model is unknown, written before stamping). Search excludes those NULL/stale
+// rows from vector comparison, so the backfill must restamp them to make them
+// searchable again. `IS DISTINCT FROM` makes NULL count as different from the
+// (non-NULL) configured model. The model is server config, inlined as a
+// validated literal.
+function needsEmbeddingPredicate(): string {
+  const model = configuredEmbeddingModelSqlLiteral();
+  return `(emb.event_id IS NULL OR emb.embedding_model IS DISTINCT FROM ${model})`;
+}
+
 export async function triggerEmbedBackfill(_env: Env): Promise<BackfillResult> {
   const sql = getDb();
+  const needsEmbedding = needsEmbeddingPredicate();
 
   try {
-    // Find organizations with events missing embeddings, grouped for batch runs
+    // Find organizations with events missing/stale embeddings, grouped for batch runs
     const orgBatches = await sql<OrgBatch>`
       SELECT ev.organization_id, COUNT(*)::int AS event_count
       FROM current_event_records ev
       LEFT JOIN event_embeddings emb ON emb.event_id = ev.id
-      WHERE emb.event_id IS NULL
+      WHERE ${sql.unsafe(needsEmbedding)}
         AND ev.payload_text IS NOT NULL
         AND ev.payload_text != ''
         AND ev.organization_id IS NOT NULL
@@ -94,14 +108,16 @@ export async function triggerEmbedBackfill(_env: Env): Promise<BackfillResult> {
 async function createBackfillRun(organizationId: string): Promise<boolean> {
   const sql = getDb();
 
+  const needsEmbedding = needsEmbeddingPredicate();
+
   try {
     return await sql.begin(async (tx) => {
-      // Collect event IDs that need embeddings (up to batch limit)
+      // Collect event IDs that need (re)embedding (up to batch limit)
       const events = await tx`
         SELECT ev.id
         FROM current_event_records ev
         LEFT JOIN event_embeddings emb ON emb.event_id = ev.id
-        WHERE emb.event_id IS NULL
+        WHERE ${tx.unsafe(needsEmbedding)}
           AND ev.payload_text IS NOT NULL
           AND ev.payload_text != ''
           AND ev.organization_id = ${organizationId}
