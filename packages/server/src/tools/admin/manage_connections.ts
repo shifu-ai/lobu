@@ -487,6 +487,46 @@ export async function manageConnections(
 }
 
 // ============================================
+// Managed-connector detection (public-org delegation)
+// ============================================
+
+/**
+ * Is this connect happening against a MANAGED connector in a PUBLIC org?
+ *
+ * Managed connectors live in a `visibility='public'` org with a managed
+ * org-level `oauth_app` profile (the client secret stays in the cloud). When a
+ * member connects one here, the resulting connection must be CONSENT-ONLY: it
+ * holds the OAuth grant for delegation (the local instance fetches a fresh
+ * access token at runtime via /oauth/connection-token) but has NO feeds, so the
+ * cloud never syncs a copy — the managed connector's data lives only on the
+ * member's local instance.
+ *
+ * Signal (the cleanest available, no new schema): the org is public AND the
+ * connector resolves to an org-level managed `oauth_app` profile for the OAuth
+ * method's provider. We only mark consent-only on the OAuth path — env-key /
+ * browser connectors aren't delegated this way.
+ */
+async function isManagedPublicOrgConnect(params: {
+  organizationId: string;
+  connectorKey: string;
+  provider: string;
+}): Promise<boolean> {
+  const sql = getDb();
+  const orgRows = (await sql`
+    SELECT visibility FROM "organization" WHERE id = ${params.organizationId} LIMIT 1
+  `) as unknown as Array<{ visibility: string | null }>;
+  if (orgRows[0]?.visibility !== 'public') return false;
+
+  const managedApp = await getPrimaryAuthProfileForKind({
+    organizationId: params.organizationId,
+    connectorKey: params.connectorKey,
+    profileKind: 'oauth_app',
+    provider: params.provider,
+  });
+  return !!managedApp && managedApp.status === 'active';
+}
+
+// ============================================
 // Action Handlers
 // ============================================
 
@@ -913,16 +953,51 @@ async function handleCreate(
   // that emits artifacts (qr/code/etc.) for the UI to render.
   const interactiveMethod = getInteractiveMethods(connector.auth_schema)[0] ?? null;
 
-  const authSelection = interactiveMethod
-    ? null
-    : await resolveConnectionAuthSelection({
-        organizationId,
-        connectorKey: args.connector_key,
-        authSchema: connector.auth_schema,
-        authProfileSlug: args.auth_profile_slug,
-        appAuthProfileSlug: args.app_auth_profile_slug,
-        deviceWorkerId: deviceBinding.deviceWorkerId,
-      });
+  // A `managedBy` connection's OAuth grant lives in a cloud (public) org — the
+  // local instance fetches the token at runtime (execution-context.ts) and never
+  // holds a LOCAL auth profile. The trusted `config.managedBy.org` signal (set by
+  // `defineConnection({ managedBy })` via `lobu apply`) puts the connection on a
+  // dedicated path: local auth-profile selection is skipped ENTIRELY (no binding,
+  // requirement, status gating, or oauth sync), and it is created `active` with
+  // null local auth profiles. An empty `org` is not a valid managed connection,
+  // so it falls through to the normal auth path rather than being created
+  // active+unauthenticated.
+  const incomingConfig = parseJsonObject(args.config);
+  const managedByOrg =
+    !!incomingConfig.managedBy &&
+    typeof incomingConfig.managedBy === 'object' &&
+    !Array.isArray(incomingConfig.managedBy)
+      ? (incomingConfig.managedBy as Record<string, unknown>).org
+      : undefined;
+  const managedByRequested =
+    typeof managedByOrg === 'string' && managedByOrg.trim().length > 0;
+  // managedBy delegates to a cloud OAuth grant, so it only applies to OAuth
+  // connectors. On a non-OAuth connector (env/browser/none) treating it as
+  // managed would bypass a real local auth requirement, so reject it instead of
+  // creating an unauthenticated connection.
+  if (managedByRequested && !authMethods.some((m) => m.type === 'oauth')) {
+    return {
+      error:
+        'managedBy is only valid for OAuth connectors (the managed grant is an OAuth token fetched from the cloud); this connector has no OAuth auth method.',
+    };
+  }
+  const isManagedByConnection = managedByRequested;
+
+  // Leave `authSelection` null for managed (and interactive) connections so the
+  // entire auth-profile validation + binding chain below is uniformly bypassed —
+  // a managed connection is created with null `auth_profile_id` /
+  // `app_auth_profile_id` regardless of any local profile that happens to exist.
+  const authSelection =
+    interactiveMethod || isManagedByConnection
+      ? null
+      : await resolveConnectionAuthSelection({
+          organizationId,
+          connectorKey: args.connector_key,
+          authSchema: connector.auth_schema,
+          authProfileSlug: args.auth_profile_slug,
+          appAuthProfileSlug: args.app_auth_profile_slug,
+          deviceWorkerId: deviceBinding.deviceWorkerId,
+        });
 
   if (authSelection) {
     const requiresAuth =
@@ -1054,6 +1129,34 @@ async function handleCreate(
     };
   }
 
+  // Managed-connector path (mirrors handleConnect): a member creating an OAuth
+  // connection for a managed connector in a PUBLIC org gets a CONSENT-ONLY
+  // connection — it holds the OAuth grant for cloud-delegated token fetch but
+  // has no feeds, so the cloud never syncs a copy (the member's data lives only
+  // on their local instance; the manage_feeds guard refuses feeds on a
+  // consent_only connection). Without this, `create` (vs `connect`) would mint a
+  // non-consent-only grant-holder a member could attach feeds to, breaking the
+  // "data stays local" invariant.
+  //
+  // Deliberately NOT marked for: a `managedBy` connection (its grant lives in
+  // the cloud but it SYNCS LOCALLY — consent_only and managedBy are mutually
+  // exclusive), a non-OAuth method, or any non-managed / non-public-org create.
+  const isManagedCreate =
+    !isManagedByConnection && authSelection?.oauthMethod
+      ? await isManagedPublicOrgConnect({
+          organizationId,
+          connectorKey: args.connector_key,
+          provider: authSelection.oauthMethod.provider,
+        })
+      : false;
+  const connectionConfigToInsert =
+    isManagedCreate || splitConfig.connectionConfig
+      ? {
+          ...(splitConfig.connectionConfig ?? {}),
+          ...(isManagedCreate ? { consent_only: true } : {}),
+        }
+      : null;
+
   // Interactive auth: always create a fresh `interactive` auth profile scoped to
   // this connection. Connection starts in pending_auth; feed is paused; an auth
   // run drives the authenticate() lifecycle which writes credentials on success.
@@ -1156,7 +1259,7 @@ async function handleCreate(
           ${connectionStatus},
           ${interactiveAuthProfileId ?? authSelection?.authProfile?.id ?? null},
           ${authSelection?.appAuthProfile?.id ?? null},
-          ${splitConfig.connectionConfig ? sql.json(splitConfig.connectionConfig) : null},
+          ${connectionConfigToInsert ? sql.json(connectionConfigToInsert) : null},
           ${effectiveCreatedBy},
           ${visibility},
           ${effectiveDeviceWorkerId}
@@ -1440,6 +1543,27 @@ async function handleConnect(
     };
   }
 
+  // Managed-connector path: a member connecting a managed connector in a PUBLIC
+  // org gets a CONSENT-ONLY connection — it holds the OAuth grant for delegation
+  // but has no feeds, so the cloud never syncs a copy (the data lives only on
+  // the member's local instance). The consent_only flag lives in the trusted
+  // connection `config` (where managedBy lives), and the manage_feeds guard
+  // already refuses to create feeds on a consent_only connection.
+  const isManagedConnect = authSelection.oauthMethod
+    ? await isManagedPublicOrgConnect({
+        organizationId,
+        connectorKey: args.connector_key,
+        provider: authSelection.oauthMethod.provider,
+      })
+    : false;
+  const connectionConfigToInsert =
+    isManagedConnect || splitConfig.connectionConfig
+      ? {
+          ...(splitConfig.connectionConfig ?? {}),
+          ...(isManagedConnect ? { consent_only: true } : {}),
+        }
+      : null;
+
   const connectSlugResult = await resolveNewConnectionSlug({
     organizationId,
     connectorKey: args.connector_key,
@@ -1468,7 +1592,7 @@ async function handleConnect(
           ${connectionStatus},
           ${authSelection.authProfile?.id ?? null},
           ${authSelection.appAuthProfile?.id ?? null},
-          ${splitConfig.connectionConfig ? sql.json(splitConfig.connectionConfig) : null},
+          ${connectionConfigToInsert ? sql.json(connectionConfigToInsert) : null},
           ${userId},
           ${connectVisibility},
           ${effectiveDeviceWorkerIdConnect}
@@ -1876,6 +2000,16 @@ async function handleUpdate(
           'This connection has feeds; a consent-only connection cannot have feeds. Remove its feeds first.',
       };
     }
+  }
+  // Reverse direction: a consent-only grant-holder (the cloud OAuth grant behind
+  // a managed connector) must STAY consent-only. Stripping the flag would let
+  // feeds be added, so the cloud would start syncing the grant-holder's data —
+  // breaking the "data stays local" invariant. Reject the removal.
+  if (existingConfig.consent_only === true && !willBeConsentOnly) {
+    return {
+      error:
+        'This connection is consent-only (holds an OAuth grant for delegation); the consent-only flag cannot be removed.',
+    };
   }
 
   // Slug is only ever changed when the caller passes one explicitly — a

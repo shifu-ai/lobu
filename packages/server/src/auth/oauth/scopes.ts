@@ -23,6 +23,26 @@ export const AVAILABLE_SCOPES = [
 /** Default scopes for MCP access */
 export const DEFAULT_SCOPES = ['mcp:read', 'mcp:write'] as const;
 
+/**
+ * The least-privilege scope a token must carry to fetch a managed connector's
+ * access token via POST /oauth/connection-token.
+ *
+ * It is granted ONLY on the first-party `lobu login` device-code grant, and
+ * only when that grant EXPLICITLY REQUESTS it (the CLI now includes
+ * `connections:token` in the scope it sends to the device-authorization
+ * endpoint; see `packages/cli/src/internal/oauth.ts`). The device-approve
+ * handler grants exactly the requested scope — it is NOT auto-appended.
+ *
+ * It is NEVER granted on the generic authorization-code consent path (the one
+ * arbitrary third-party MCP clients use — Claude Desktop, Cursor, …), and it is
+ * never silently widened onto any device client that did not request it. A
+ * non-interactive PAT (`lobu token create`) likewise does NOT get it by
+ * default; it must be requested explicitly (`--scope connections:token`). This
+ * keeps a broad `mcp` CI PAT — or any DCR-registered device client — from
+ * minting managed-connection tokens, so the endpoint gate stays meaningful.
+ */
+export const CONNECTIONS_TOKEN_SCOPE = 'connections:token';
+
 /** Default scopes as a space-separated string (for OAuth params) */
 export const DEFAULT_SCOPES_STRING = DEFAULT_SCOPES.join(' ');
 

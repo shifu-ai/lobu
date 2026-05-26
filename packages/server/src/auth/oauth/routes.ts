@@ -622,6 +622,13 @@ oauthRoutes.post('/oauth/authorize/consent', requireAuth, async (c) => {
           400
         );
       }
+      // NOTE: `connections:token` is deliberately NOT granted here. The
+      // authorization-code consent path is used by arbitrary third-party MCP
+      // clients (Claude Desktop, Cursor, ChatGPT, …); granting it here would
+      // silently widen their tokens beyond the scopes they requested/consented
+      // to. Only the first-party `lobu login` device-code grant gets it (see
+      // POST /oauth/device/approve) — that is the credential the local
+      // instance's managed-connector resolver uses.
       params.scope = filtered;
     }
 
@@ -761,6 +768,15 @@ oauthRoutes.post('/oauth/device/approve', requireAuth, async (c) => {
         400
       );
     }
+    // NOTE: `connections:token` is NOT auto-appended here. Device-code
+    // registration is open (DCR), so auto-granting it to any device client
+    // would silently widen its token beyond what it requested — the same
+    // scope-creep we removed from the authorization-code path. The first-party
+    // `lobu login` requests `connections:token` explicitly in its
+    // device_authorization scope (see `packages/cli/src/internal/oauth.ts`);
+    // `filterScopeByRole` only strips `mcp:admin`, so an explicitly-requested
+    // `connections:token` survives in `deviceCode.scope` and is granted. A
+    // device client that did NOT request it simply doesn't get it.
   }
 
   const approved = await provider.approveDeviceCode(

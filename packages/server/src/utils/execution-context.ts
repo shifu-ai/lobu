@@ -1,4 +1,5 @@
 import { CredentialService } from '../auth/credentials';
+import { resolveCloudCredential } from '../connect/cloud-credential';
 import { getBuiltinProviderConfig } from '../connect/oauth-providers';
 import { type DbClient, getDb } from '../db/client';
 import { getAuthProfileById, normalizeAuthValues } from './auth-profiles';
@@ -160,8 +161,12 @@ interface ManagedByDescriptor {
   connectorKey: string;
   /** Cloud base URL (no trailing `/oauth/connection-token`). */
   baseUrl: string;
-  /** The instance's cloud PAT (`owl_pat_*`), the user's own credential. */
-  pat: string;
+  /**
+   * The cloud bearer credential — the user's OWN device-login access token
+   * (`lobu login`, carrying `connections:token`), or the headless/CI fallback
+   * `LOBU_CLOUD_PAT`. Resolved by `resolveCloudCredential`.
+   */
+  token: string;
 }
 
 /**
@@ -169,14 +174,15 @@ interface ManagedByDescriptor {
  * connection is NOT managed (i.e. it uses the local/unchanged credential path).
  *
  * A connection opts into the managed path by carrying `config.managedBy = {
- * org }` (set via `defineConnection({ connector, managedBy })`). The cloud PAT
- * AND the cloud base URL are sourced ONLY from the INSTANCE config
- * (`LOBU_CLOUD_PAT` / `LOBU_CLOUD_URL`) — a single credential + a single fixed,
- * trusted origin for the local instance. The connection config supplies ONLY
- * the `org`; it CANNOT influence where the PAT is sent (a connection-controlled
- * URL would let a malicious config exfiltrate the cloud PAT). Returns `null`
- * (so the connection falls through to the local path) when the descriptor, the
- * instance cloud PAT, or the instance cloud URL is missing.
+ * org }` (set via `defineConnection({ connector, managedBy })`). The cloud
+ * bearer credential AND the cloud base URL are sourced ONLY from the local
+ * instance's own login (`resolveCloudCredential`: the stored `lobu login`
+ * device credential, falling back to `LOBU_CLOUD_PAT`/`LOBU_CLOUD_URL` for
+ * headless/CI). The connection config supplies ONLY the `org`; it CANNOT
+ * influence where the credential is sent (a connection-controlled URL would let
+ * a malicious config exfiltrate the cloud credential). Returns `null` (so the
+ * connection falls through to the local path) when the descriptor or the cloud
+ * credential is missing.
  */
 async function resolveManagedByForConnection(
   organizationId: string,
@@ -205,48 +211,30 @@ async function resolveManagedByForConnection(
   const org = typeof managedBy.org === 'string' ? managedBy.org.trim() : '';
   if (!org) return null;
 
-  const pat = process.env.LOBU_CLOUD_PAT?.trim();
-  if (!pat) return null;
+  // The credential + base URL come from the local instance's OWN login (or the
+  // env fallback), never from the connection config — so a malicious config
+  // can't redirect where the credential is sent.
+  const cloud = await resolveCloudCredential();
+  if (!cloud) return null;
 
-  // The PAT is ALWAYS sent to the instance-configured cloud origin only. The
-  // connection config never supplies a URL, so it cannot redirect the PAT.
-  const baseUrl = (process.env.LOBU_CLOUD_URL?.trim() ?? '').replace(/\/+$/, '');
-  if (!baseUrl) return null;
-
-  return { org, connectorKey: rows[0].connector_key, baseUrl, pat };
+  return { org, connectorKey: rows[0].connector_key, baseUrl: cloud.baseUrl, token: cloud.token };
 }
-
-/**
- * Per-instance cache of fetched managed access tokens. Keyed by a
- * JSON.stringify'd [org, connectorKey, baseUrl] tuple so field boundaries are
- * unambiguous and values can't collide across keys; cached until shortly before
- * expiry so a burst of runs doesn't re-fetch on every resolution. Pod-local by
- * design (a cache miss simply re-fetches), so this holds under N>1 replicas.
- */
-const MANAGED_TOKEN_CACHE = new Map<
-  string,
-  { accessToken: string; expiresAt: string | null; expiresAtMs: number }
->();
-/** Refresh a cached token this long before its stated expiry. */
-const MANAGED_TOKEN_EXPIRY_BUFFER_MS = 60_000;
 
 /**
  * Fetch a fresh access token for a managed connection from the cloud via POST
  * /oauth/connection-token. The cloud holds the managed grant + secret and
  * refreshes server-side; we only ever receive `{ access_token, expires_at }`.
- * Caches until near expiry. Returns null on any failure so the connection
- * resolves without credentials (fail-soft, like the local path).
+ * Returns null on any failure so the connection resolves without credentials
+ * (fail-soft, like the local path).
+ *
+ * Deliberately uncached: this resolves once per worker run / feed sync (not per
+ * message), so a fresh fetch is cheap — and skipping a process-shared token
+ * cache means one caller's cloud token can never be served to another.
  */
 async function fetchManagedConnectionToken(
   managed: ManagedByDescriptor,
   logContext: Record<string, unknown>
 ): Promise<{ access_token: string; expires_at: string | null } | null> {
-  const cacheKey = JSON.stringify([managed.org, managed.connectorKey, managed.baseUrl]);
-  const cached = MANAGED_TOKEN_CACHE.get(cacheKey);
-  if (cached && cached.expiresAtMs - MANAGED_TOKEN_EXPIRY_BUFFER_MS > Date.now()) {
-    return { access_token: cached.accessToken, expires_at: cached.expiresAt };
-  }
-
   let tokenUrl: string;
   try {
     tokenUrl = new URL(`${managed.baseUrl}/oauth/connection-token`).toString();
@@ -260,7 +248,7 @@ async function fetchManagedConnectionToken(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${managed.pat}`,
+        Authorization: `Bearer ${managed.token}`,
       },
       body: JSON.stringify({ org: managed.org, connector_key: managed.connectorKey }),
     });
@@ -276,14 +264,7 @@ async function fetchManagedConnectionToken(
       expires_at?: string | null;
     };
     if (!body.access_token) return null;
-    const expiresAt = body.expires_at ?? null;
-    const expiresAtMs = expiresAt ? new Date(expiresAt).getTime() : Number.POSITIVE_INFINITY;
-    MANAGED_TOKEN_CACHE.set(cacheKey, {
-      accessToken: body.access_token,
-      expiresAt,
-      expiresAtMs: Number.isFinite(expiresAtMs) ? expiresAtMs : Number.POSITIVE_INFINITY,
-    });
-    return { access_token: body.access_token, expires_at: expiresAt };
+    return { access_token: body.access_token, expires_at: body.expires_at ?? null };
   } catch (error) {
     logger.warn(
       { ...logContext, error: errorMessage(error) },

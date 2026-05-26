@@ -26,9 +26,20 @@
  *      calling the cloud endpoint (cloud = the in-process server in-test).
  */
 
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	it,
+} from "vitest";
 import { connectionTokenRoutes } from "../../../connect/connection-token-route";
 import type { Env } from "../../../index";
 import { createAuthProfile } from "../../../utils/auth-profiles";
@@ -37,7 +48,9 @@ import { initWorkspaceProvider } from "../../../workspace";
 import { cleanupTestDatabase, getTestDb } from "../../setup/test-db";
 import {
 	addUserToOrganization,
+	createTestAccessToken,
 	createTestConnectorDefinition,
+	createTestOAuthClient,
 	createTestOrganization,
 	createTestPAT,
 	createTestUser,
@@ -491,11 +504,28 @@ describe("managed connector — POST /oauth/connection-token", () => {
 	});
 });
 
-describe("managed connector — local resolver", () => {
+describe("managed connector — local resolver (env LOBU_CLOUD_PAT fallback)", () => {
+	let savedConfigDir: string | undefined;
+
 	beforeEach(async () => {
 		await cleanupTestDatabase();
 		lastRefreshBody = {};
 		process.env.LOBU_CLOUD_URL = cloudBaseUrl;
+		// Point the resolver's config dir at an EMPTY throwaway dir so it finds no
+		// stored `lobu login` credential and falls back to LOBU_CLOUD_PAT /
+		// LOBU_CLOUD_URL — the headless/CI path these tests exercise. Without this
+		// the resolver would read the developer's real ~/.config/lobu login.
+		savedConfigDir = process.env.LOBU_CONFIG_DIR;
+		process.env.LOBU_CONFIG_DIR = mkdtempSync(join(tmpdir(), "lobu-cred-test-"));
+	});
+
+	afterEach(() => {
+		const dir = process.env.LOBU_CONFIG_DIR;
+		if (dir?.includes("lobu-cred-test-")) {
+			rmSync(dir, { recursive: true, force: true });
+		}
+		if (savedConfigDir === undefined) delete process.env.LOBU_CONFIG_DIR;
+		else process.env.LOBU_CONFIG_DIR = savedConfigDir;
 	});
 
 	it("a `managedBy` connection resolves its access token via the cloud endpoint", async () => {
@@ -644,5 +674,466 @@ describe("managed connector — local resolver", () => {
 		// Local env credentials resolve unchanged; the cloud was never contacted.
 		expect(resolved.connectionCredentials.DEMO_API_KEY).toBe("local-key-123");
 		expect(lastRefreshBody).toEqual({});
+	});
+});
+
+describe("managed connector — local resolver (Stage 2: login credential)", () => {
+	// Stage 2: the resolver sources its cloud credential from the stored
+	// `lobu login` device credential (~/.config/lobu/credentials.json) instead of
+	// LOBU_CLOUD_PAT. We point LOBU_CONFIG_DIR at a throwaway dir, write a
+	// credentials.json holding the OWNER's real OAuth LOGIN access token (carrying
+	// `connections:token`, granted at login by Stage 1), plus a config.json that
+	// binds the default context to the in-process cloud origin. LOBU_CLOUD_PAT is
+	// UNSET so the ONLY usable credential is the login token.
+	let configDir = "";
+	let savedConfigDir: string | undefined;
+
+	beforeEach(async () => {
+		await cleanupTestDatabase();
+		lastRefreshBody = {};
+		savedConfigDir = process.env.LOBU_CONFIG_DIR;
+		configDir = mkdtempSync(join(tmpdir(), "lobu-login-test-"));
+		process.env.LOBU_CONFIG_DIR = configDir;
+		// No env PAT/URL — prove the resolver uses the LOGIN credential, not env.
+		delete process.env.LOBU_CLOUD_PAT;
+		delete process.env.LOBU_CLOUD_URL;
+	});
+
+	afterEach(() => {
+		if (configDir.includes("lobu-login-test-")) {
+			rmSync(configDir, { recursive: true, force: true });
+		}
+		if (savedConfigDir === undefined) delete process.env.LOBU_CONFIG_DIR;
+		else process.env.LOBU_CONFIG_DIR = savedConfigDir;
+	});
+
+	it("resolves a managed connection using the stored `lobu login` token (no env PAT)", async () => {
+		const cloud = await seedManagedConnection("Login Cloud Org");
+
+		// Mint the OWNER's real OAuth login access token — the credential `lobu`
+		// itself stores. It carries `connections:token` (Stage 1 grants it at
+		// login), so it passes the connection-token endpoint's scope gate.
+		const client = await createTestOAuthClient({ client_name: "Lobu CLI" });
+		const login = await createTestAccessToken(cloud.ownerId, cloud.orgId, client.client_id, {
+			scope: "mcp:read mcp:write connections:token",
+		});
+
+		// Write the CLI credential store + context config the resolver reads.
+		writeFileSync(
+			join(configDir, "credentials.json"),
+			JSON.stringify({
+				version: 2,
+				contexts: { lobu: { accessToken: login.token } },
+			}),
+		);
+		writeFileSync(
+			join(configDir, "config.json"),
+			JSON.stringify({
+				currentContext: "lobu",
+				contexts: { lobu: { url: `${cloudBaseUrl}/api/v1` } },
+			}),
+		);
+
+		// Local managed connection (no local grant).
+		const sql = getTestDb();
+		const localOrg = await createTestOrganization({ name: "Login Local Org" });
+		const localUser = await createTestUser({ name: "Login Local User" });
+		await addUserToOrganization(localUser.id, localOrg.id, "owner");
+		await createTestConnectorDefinition({
+			key: "demo.oauth",
+			name: "Demo OAuth Local Login",
+			organization_id: localOrg.id,
+			auth_schema: {
+				methods: [{ type: "oauth", provider: "demo", requiredScopes: ["read"] }],
+			},
+			feeds_schema: { items: {} },
+		});
+		const localConnRows = (await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        config, created_at, updated_at
+      ) VALUES (
+        ${localOrg.id}, 'demo.oauth', 'demo-login', 'Login Demo', 'active',
+        ${sql.json({ managedBy: { org: cloud.orgId } })}, NOW(), NOW()
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+
+		const resolved = await resolveExecutionAuth({
+			organizationId: localOrg.id,
+			connectionId: Number(localConnRows[0].id),
+			authProfileId: null,
+			appAuthProfileId: null,
+			credentialDb: sql,
+		});
+
+		// The login token authenticated the cloud fetch → the refreshed token came
+		// back, proving the resolver used the stored device-login credential (env
+		// PAT is unset, so no other credential could have worked).
+		expect(resolved.credentials?.accessToken).toBe(REFRESHED.access_token);
+		expect(lastRefreshBody.client_secret).toBe(MANAGED_SECRET);
+	});
+
+	it("ignores the active LOCAL context and fetches from the cloud `lobu` context", async () => {
+		// Under `lobu run` the active/current context is the local loopback
+		// instance. The resolver must NOT use it (that would POST the local session
+		// token to the local /oauth/connection-token) — it uses the explicit cloud
+		// context. Here currentContext is `local`; the cloud login lives under
+		// `lobu`. A naive resolver would pick `local` and fail.
+		const cloud = await seedManagedConnection("Run Cloud Org");
+		const client = await createTestOAuthClient({ client_name: "Lobu CLI" });
+		const login = await createTestAccessToken(
+			cloud.ownerId,
+			cloud.orgId,
+			client.client_id,
+			{ scope: "mcp:read mcp:write connections:token" },
+		);
+
+		writeFileSync(
+			join(configDir, "credentials.json"),
+			JSON.stringify({
+				version: 2,
+				contexts: {
+					local: { accessToken: "local-session-token-must-not-be-used" },
+					lobu: { accessToken: login.token },
+				},
+			}),
+		);
+		writeFileSync(
+			join(configDir, "config.json"),
+			JSON.stringify({
+				currentContext: "local",
+				contexts: {
+					local: { url: "http://localhost:9/api/v1" },
+					lobu: { url: `${cloudBaseUrl}/api/v1` },
+				},
+			}),
+		);
+
+		const sql = getTestDb();
+		const localOrg = await createTestOrganization({ name: "Run Local Org" });
+		const localUser = await createTestUser({ name: "Run Local User" });
+		await addUserToOrganization(localUser.id, localOrg.id, "owner");
+		await createTestConnectorDefinition({
+			key: "demo.oauth",
+			name: "Demo OAuth Run",
+			organization_id: localOrg.id,
+			auth_schema: {
+				methods: [{ type: "oauth", provider: "demo", requiredScopes: ["read"] }],
+			},
+			feeds_schema: { items: {} },
+		});
+		const localConnRows = (await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        config, created_at, updated_at
+      ) VALUES (
+        ${localOrg.id}, 'demo.oauth', 'demo-run', 'Run Demo', 'active',
+        ${sql.json({ managedBy: { org: cloud.orgId } })}, NOW(), NOW()
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+
+		const resolved = await resolveExecutionAuth({
+			organizationId: localOrg.id,
+			connectionId: Number(localConnRows[0].id),
+			authProfileId: null,
+			appAuthProfileId: null,
+			credentialDb: sql,
+		});
+
+		// The cloud (`lobu`) login token authenticated the fetch — not the local
+		// context's token (which points at a dead local port).
+		expect(resolved.credentials?.accessToken).toBe(REFRESHED.access_token);
+		expect(lastRefreshBody.client_secret).toBe(MANAGED_SECRET);
+	});
+
+	it("returns no managed credentials when there is neither a login nor an env PAT", async () => {
+		// Empty config dir (no credentials.json), no env PAT → resolver yields no
+		// managed credentials (fail-soft) and never contacts the cloud.
+		const cloud = await seedManagedConnection("No-Cred Cloud Org");
+		const sql = getTestDb();
+		const localOrg = await createTestOrganization({ name: "No-Cred Local Org" });
+		const localUser = await createTestUser({ name: "No-Cred Local User" });
+		await addUserToOrganization(localUser.id, localOrg.id, "owner");
+		await createTestConnectorDefinition({
+			key: "demo.oauth",
+			name: "Demo OAuth No Cred",
+			organization_id: localOrg.id,
+			auth_schema: {
+				methods: [{ type: "oauth", provider: "demo", requiredScopes: ["read"] }],
+			},
+			feeds_schema: { items: {} },
+		});
+		const localConnRows = (await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        config, created_at, updated_at
+      ) VALUES (
+        ${localOrg.id}, 'demo.oauth', 'demo-nocred', 'No Cred Demo', 'active',
+        ${sql.json({ managedBy: { org: cloud.orgId } })}, NOW(), NOW()
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+
+		const resolved = await resolveExecutionAuth({
+			organizationId: localOrg.id,
+			connectionId: Number(localConnRows[0].id),
+			authProfileId: null,
+			appAuthProfileId: null,
+			credentialDb: sql,
+		});
+
+		expect(resolved.credentials).toBeNull();
+		expect(lastRefreshBody).toEqual({});
+	});
+
+	it("refreshes an EXPIRED login token, uses the rotated token, and writes it back to credentials.json", async () => {
+		// T1 (the most important Stage-2 case): the stored login credential is
+		// EXPIRED and refreshable (it carries oauth.tokenEndpoint + clientId +
+		// refreshToken). resolveCloudCredential must (a) refresh the login token at
+		// its issuer, (b) use the ROTATED login token to authenticate the cloud
+		// connection-token fetch, and (c) PERSIST the rotated refresh token + new
+		// expiry back to credentials.json (issuers revoke the old refresh token on
+		// use; not writing back would strand the CLI).
+		const cloud = await seedManagedConnection("Login Refresh Cloud Org");
+		const client = await createTestOAuthClient({ client_name: "Lobu CLI" });
+
+		// The ORIGINAL login token (what's stored, but expired) and the ROTATED one
+		// the issuer hands back on refresh. Both are real, valid, connections:token
+		// access tokens for the owner — only the rotated one is presented to the
+		// cloud after refresh.
+		const originalLogin = await createTestAccessToken(
+			cloud.ownerId,
+			cloud.orgId,
+			client.client_id,
+			{ scope: "mcp:read mcp:write connections:token" },
+		);
+		const rotatedLogin = await createTestAccessToken(
+			cloud.ownerId,
+			cloud.orgId,
+			client.client_id,
+			{ scope: "mcp:read mcp:write connections:token" },
+		);
+
+		// Fake LOGIN issuer token endpoint: a refresh_token grant returns the
+		// rotated login access token + a rotated refresh token. Distinct from the
+		// managed provider's /token endpoint (that one rotates the MANAGED grant).
+		let loginRefreshBody: Record<string, string> = {};
+		const ROTATED_REFRESH = "rotated-login-refresh-token-789";
+		const loginIssuer = new Hono();
+		loginIssuer.post("/token", async (c) => {
+			loginRefreshBody = (await c.req.json().catch(() => ({}))) as Record<
+				string,
+				string
+			>;
+			return c.json({
+				access_token: rotatedLogin.token,
+				refresh_token: ROTATED_REFRESH,
+				expires_in: 3600,
+			});
+		});
+		let loginServerPort = 0;
+		const loginServer = await new Promise<ReturnType<typeof serve>>(
+			(resolve) => {
+				const s = serve(
+					{ fetch: loginIssuer.fetch, hostname: "127.0.0.1", port: 0 },
+					(info) => {
+						loginServerPort = info.port;
+						resolve(s);
+					},
+				);
+			},
+		);
+		const loginTokenEndpoint = `http://127.0.0.1:${loginServerPort}/token`;
+
+		// credentials.json: an EXPIRED, refreshable login credential.
+		writeFileSync(
+			join(configDir, "credentials.json"),
+			JSON.stringify({
+				version: 2,
+				contexts: {
+					lobu: {
+						accessToken: originalLogin.token,
+						refreshToken: "original-login-refresh-token",
+						expiresAt: Date.now() - 60_000, // expired a minute ago
+						oauth: {
+							clientId: client.client_id,
+							tokenEndpoint: loginTokenEndpoint,
+						},
+					},
+				},
+			}),
+		);
+		writeFileSync(
+			join(configDir, "config.json"),
+			JSON.stringify({
+				currentContext: "lobu",
+				contexts: { lobu: { url: `${cloudBaseUrl}/api/v1` } },
+			}),
+		);
+
+		// Local managed connection (no local grant).
+		const sql = getTestDb();
+		const localOrg = await createTestOrganization({
+			name: "Login Refresh Local",
+		});
+		const localUser = await createTestUser({ name: "Login Refresh User" });
+		await addUserToOrganization(localUser.id, localOrg.id, "owner");
+		await createTestConnectorDefinition({
+			key: "demo.oauth",
+			name: "Demo OAuth Login Refresh",
+			organization_id: localOrg.id,
+			auth_schema: {
+				methods: [
+					{ type: "oauth", provider: "demo", requiredScopes: ["read"] },
+				],
+			},
+			feeds_schema: { items: {} },
+		});
+		const localConnRows = (await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        config, created_at, updated_at
+      ) VALUES (
+        ${localOrg.id}, 'demo.oauth', 'demo-login-refresh', 'Login Refresh Demo', 'active',
+        ${sql.json({ managedBy: { org: cloud.orgId } })}, NOW(), NOW()
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+
+		try {
+			const resolved = await resolveExecutionAuth({
+				organizationId: localOrg.id,
+				connectionId: Number(localConnRows[0].id),
+				authProfileId: null,
+				appAuthProfileId: null,
+				credentialDb: sql,
+			});
+
+			// (a) The cloud fetch succeeded — proving the ROTATED login token (not the
+			// expired original) authenticated it: the managed refresh ran and returned
+			// the managed access token.
+			expect(resolved.credentials?.accessToken).toBe(REFRESHED.access_token);
+			expect(lastRefreshBody.client_secret).toBe(MANAGED_SECRET);
+			// The login issuer saw a refresh_token grant with the ORIGINAL refresh token.
+			expect(loginRefreshBody.grant_type).toBe("refresh_token");
+			expect(loginRefreshBody.refresh_token).toBe(
+				"original-login-refresh-token",
+			);
+
+			// (b) credentials.json on disk now holds the ROTATED refresh token + a
+			// fresh (future) expiry — the write-back happened.
+			const onDisk = JSON.parse(
+				readFileSync(join(configDir, "credentials.json"), "utf-8"),
+			) as {
+				contexts: {
+					lobu: {
+						accessToken: string;
+						refreshToken: string;
+						expiresAt: number;
+					};
+				};
+			};
+			expect(onDisk.contexts.lobu.refreshToken).toBe(ROTATED_REFRESH);
+			expect(onDisk.contexts.lobu.accessToken).toBe(rotatedLogin.token);
+			expect(onDisk.contexts.lobu.expiresAt).toBeGreaterThan(Date.now());
+		} finally {
+			await new Promise<void>((done) => loginServer.close(() => done()));
+		}
+	});
+
+	it("fails soft (null credentials) when the cloud connection-token endpoint errors", async () => {
+		// T4: the cloud returns 5xx for the token fetch. The resolver must NOT throw
+		// — a managed connection whose cloud fetch fails resolves to null
+		// credentials (the run fails loudly downstream, but resolution itself is
+		// fail-soft and never crashes the worker).
+		const sql = getTestDb();
+
+		// Point the resolver at a cloud origin that always 500s.
+		let errorServerPort = 0;
+		const errorCloud = new Hono();
+		errorCloud.post("/oauth/connection-token", (c) =>
+			c.json({ error: "server_error" }, 500),
+		);
+		const errorServer = await new Promise<ReturnType<typeof serve>>(
+			(resolve) => {
+				const s = serve(
+					{ fetch: errorCloud.fetch, hostname: "127.0.0.1", port: 0 },
+					(info) => {
+						errorServerPort = info.port;
+						resolve(s);
+					},
+				);
+			},
+		);
+		const errorCloudUrl = `http://127.0.0.1:${errorServerPort}`;
+
+		// A login credential pointing at the erroring cloud. Reuse a real
+		// owner/org just to mint a structurally valid login token; the cloud 500s
+		// before any DB lookup matters.
+		const client = await createTestOAuthClient({ client_name: "Lobu CLI" });
+		const failOrg = await createTestOrganization({ name: "Fail Cloud Org" });
+		const failOwner = await createTestUser({ name: "Fail Owner" });
+		await addUserToOrganization(failOwner.id, failOrg.id, "member");
+		const login = await createTestAccessToken(
+			failOwner.id,
+			failOrg.id,
+			client.client_id,
+			{ scope: "mcp:read mcp:write connections:token" },
+		);
+		writeFileSync(
+			join(configDir, "credentials.json"),
+			JSON.stringify({
+				version: 2,
+				contexts: { lobu: { accessToken: login.token } },
+			}),
+		);
+		writeFileSync(
+			join(configDir, "config.json"),
+			JSON.stringify({
+				currentContext: "lobu",
+				contexts: { lobu: { url: `${errorCloudUrl}/api/v1` } },
+			}),
+		);
+
+		const localOrg = await createTestOrganization({ name: "Fail Local Org" });
+		const localUser = await createTestUser({ name: "Fail Local User" });
+		await addUserToOrganization(localUser.id, localOrg.id, "owner");
+		await createTestConnectorDefinition({
+			key: "demo.oauth",
+			name: "Demo OAuth Fail",
+			organization_id: localOrg.id,
+			auth_schema: {
+				methods: [
+					{ type: "oauth", provider: "demo", requiredScopes: ["read"] },
+				],
+			},
+			feeds_schema: { items: {} },
+		});
+		const localConnRows = (await sql`
+      INSERT INTO connections (
+        organization_id, connector_key, slug, display_name, status,
+        config, created_at, updated_at
+      ) VALUES (
+        ${localOrg.id}, 'demo.oauth', 'demo-fail', 'Fail Demo', 'active',
+        ${sql.json({ managedBy: { org: failOrg.id } })}, NOW(), NOW()
+      )
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+
+		try {
+			const resolved = await resolveExecutionAuth({
+				organizationId: localOrg.id,
+				connectionId: Number(localConnRows[0].id),
+				authProfileId: null,
+				appAuthProfileId: null,
+				credentialDb: sql,
+			});
+			// Fail-soft: no managed credentials, no throw.
+			expect(resolved.credentials).toBeNull();
+		} finally {
+			await new Promise<void>((done) => errorServer.close(() => done()));
+		}
 	});
 });
