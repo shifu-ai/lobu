@@ -156,12 +156,19 @@ Save this file in your Lobu project (e.g. `github-issues.connector.ts` next to `
 
 ```ts
 import { connectorFromFile, defineConfig } from "@lobu/cli/config";
+import type GitHubIssuesConnector from "./github-issues.connector.ts";
 
 export default defineConfig({
-  connectors: [connectorFromFile("./github-issues.connector.ts")],
+  connectors: [
+    connectorFromFile<typeof GitHubIssuesConnector>(
+      "./github-issues.connector.ts"
+    ),
+  ],
   // ...agents, connections, etc.
 });
 ```
+
+Passing the connector's type via the generic (`import type` + `connectorFromFile<typeof GitHubIssuesConnector>`) is optional — bare `connectorFromFile("./github-issues.connector.ts")` still works — but it gives you go-to-definition, rename, and a `tsc` error if the file's default export ever stops being a `ConnectorRuntime` subclass. The `import type` is erased at compile time, so the connector module is never loaded while your config is evaluated.
 
 `lobu apply` ships the source to the gateway, which compiles and registers it; from there each `feeds.<key>` entry shows up as something a user can create a connection for in the admin UI.
 
@@ -320,7 +327,7 @@ A `*.connector.ts` file can live anywhere in your Lobu project; reference each o
 
 ```
 my-agent/
-├── lobu.config.ts          # connectors: [connectorFromFile("./github-issues.connector.ts")]
+├── lobu.config.ts          # connectors: [connectorFromFile<typeof GitHubIssuesConnector>(...)]
 ├── github-issues.connector.ts
 ├── stripe-charges.connector.ts
 └── agents/my-agent/...

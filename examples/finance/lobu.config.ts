@@ -5,8 +5,11 @@ import {
   defineEntityType,
   defineRelationshipType,
   defineWatcher,
+  reactionFromFile,
   secret,
 } from "@lobu/cli/config";
+import type QuickBooksTransactionsConnector from "./quickbooks-transactions.connector.ts";
+import type reconciliationMonitorReaction from "./reconciliation-monitor.reaction.ts";
 
 const finance = defineAgent({
   id: "finance",
@@ -172,7 +175,9 @@ const reconciliationMonitor = defineWatcher({
   notification: { priority: "high", channel: "both" },
   tags: ["finance", "reconciliation", "daily"],
   minCooldownSeconds: 3600,
-  reaction: "./reconciliation-monitor.reaction.ts",
+  reaction: reactionFromFile<typeof reconciliationMonitorReaction>(
+    "./reconciliation-monitor.reaction.ts"
+  ),
   prompt:
     "Check accounts for unreconciled transactions, new variances, and approaching reporting deadlines. Lead with exceptions that need review.\n",
   extractionSchema: {
@@ -188,7 +193,11 @@ const reconciliationMonitor = defineWatcher({
 });
 
 export default defineConfig({
-  connectors: [connectorFromFile("./quickbooks-transactions.connector.ts")],
+  connectors: [
+    connectorFromFile<typeof QuickBooksTransactionsConnector>(
+      "./quickbooks-transactions.connector.ts"
+    ),
+  ],
   org: "finance",
   orgName: "Finance",
   orgDescription:

@@ -5,8 +5,11 @@ import {
   defineEntityType,
   defineRelationshipType,
   defineWatcher,
+  reactionFromFile,
   secret,
 } from "@lobu/cli/config";
+import type DiscoursePostsConnector from "./discourse-posts.connector.ts";
+import type opportunityMatcherReaction from "./opportunity-matcher.reaction.ts";
 
 const agentCommunity = defineAgent({
   id: "agent-community",
@@ -147,7 +150,9 @@ const opportunityMatcher = defineWatcher({
   notification: { priority: "normal" },
   tags: ["community", "matching"],
   minCooldownSeconds: 300,
-  reaction: "./opportunity-matcher.reaction.ts",
+  reaction: reactionFromFile<typeof opportunityMatcherReaction>(
+    "./opportunity-matcher.reaction.ts"
+  ),
   prompt:
     "Monitor connected profiles, newsletters, websites, and member updates for new launches, posts, hiring signals, funding news, and project changes. Identify which members are likely to care, explain why, and queue approved intro or outreach drafts.\n",
   extractionSchema: {
@@ -173,7 +178,11 @@ const opportunityMatcher = defineWatcher({
 });
 
 export default defineConfig({
-  connectors: [connectorFromFile("./discourse-posts.connector.ts")],
+  connectors: [
+    connectorFromFile<typeof DiscoursePostsConnector>(
+      "./discourse-posts.connector.ts"
+    ),
+  ],
   org: "agent-community",
   orgName: "Agent Community",
   orgDescription:

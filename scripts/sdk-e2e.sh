@@ -80,7 +80,9 @@ PROJ="$RUN_DIR/proj"; mkdir -p "$PROJ"
 ( cd "$PROJ" && $LOBU init . -y --here --provider gemini >/dev/null 2>&1 )
 rm -f "$PROJ/package.json"
 cat > "$PROJ/lobu.config.ts" <<'TS'
-import { connectorFromFile, defineAgent, defineConfig, defineConnection, defineEntityType, defineRelationshipType, defineWatcher, secret } from "@lobu/cli/config";
+import { connectorFromFile, defineAgent, defineConfig, defineConnection, defineEntityType, defineRelationshipType, defineWatcher, reactionFromFile, secret } from "@lobu/cli/config";
+import type PulseConnector from "./connectors/pulse.connector.ts";
+import type digestReaction from "./reactions/digest.reaction.ts";
 
 const agent = defineAgent({
   id: "echo", name: "Echo", dir: "./agents/echo",
@@ -111,7 +113,7 @@ const pulseConn = defineConnection({
 const digest = defineWatcher({
   slug: "digest", agent, name: "Digest", prompt: "summarize",
   extractionSchema: { type: "object", properties: { s: { type: "string" } } },
-  reaction: "./reactions/digest.reaction.ts",
+  reaction: reactionFromFile<typeof digestReaction>("./reactions/digest.reaction.ts"),
   sources: {
     content:
       "SELECT id, title, payload_text, author_name, occurred_at, origin_type FROM events WHERE connector_key = 'sdke2e-pulse' ORDER BY occurred_at DESC LIMIT 100",
@@ -120,7 +122,7 @@ const digest = defineWatcher({
 
 // prune:true so the gate exercises the destructive path on every run (this is
 // what catches the system-type $member halt class of bug).
-export default defineConfig({ prune: true, agents: [agent], entities: [company, contact], relationships: [worksAt], connectors: [connectorFromFile("./connectors/pulse.connector.ts")], connections: [pulseConn], watchers: [digest] });
+export default defineConfig({ prune: true, agents: [agent], entities: [company, contact], relationships: [worksAt], connectors: [connectorFromFile<typeof PulseConnector>("./connectors/pulse.connector.ts")], connections: [pulseConn], watchers: [digest] });
 TS
 
 # Local connector: deterministic, zero-dep, no network. `sync()` returns one

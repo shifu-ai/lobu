@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import {
   type Agent,
   type AuthProfile,
+  type ConnectorClassExport,
+  connectorFromFile,
   defineAgent,
   defineAuthProfile,
   defineConfig,
@@ -10,6 +12,7 @@ import {
   defineRelationshipType,
   defineWatcher,
   type EntityType,
+  reactionFromFile,
 } from "../define.js";
 import { isSecretRef, secret } from "../secret.js";
 
@@ -56,6 +59,47 @@ describe("authoring producers", () => {
     });
     expect(w.kind).toBe("watcher");
     expect((w.agent as Agent).id).toBe("crm");
+  });
+
+  test("reactionFromFile carries the path as a branded marker (no import)", () => {
+    const r = reactionFromFile("./reactions/health.reaction.ts");
+    expect(r).toEqual({
+      kind: "reactionSource",
+      path: "./reactions/health.reaction.ts",
+    });
+
+    const w = defineWatcher({
+      agent: "crm",
+      slug: "health",
+      prompt: "assess",
+      extractionSchema: { type: "object" },
+      reaction: reactionFromFile("./reactions/health.reaction.ts"),
+    });
+    expect(w.reaction?.kind).toBe("reactionSource");
+    expect(w.reaction?.path).toBe("./reactions/health.reaction.ts");
+  });
+
+  test("connectorFromFile carries the path as a branded marker (no import)", () => {
+    // Bare (untyped) form still works — the generic defaults.
+    const bare = connectorFromFile("./github-issues.connector.ts");
+    expect(bare).toEqual({
+      kind: "connectorSource",
+      path: "./github-issues.connector.ts",
+    });
+
+    // The opt-in typed form produces the SAME runtime marker — the generic is
+    // erased, carrying only the path as data (no module import at eval time).
+    const typed = connectorFromFile<ConnectorClassExport>(
+      "./github-issues.connector.ts"
+    );
+    expect(typed).toEqual(bare);
+
+    const project = defineConfig({
+      agents: [defineAgent({ id: "crm" })],
+      connectors: [bare],
+    });
+    expect(project.connectors?.[0]?.kind).toBe("connectorSource");
+    expect(project.connectors?.[0]?.path).toBe("./github-issues.connector.ts");
   });
 
   test("connection + auth profile wire by handle", () => {

@@ -405,13 +405,13 @@ describe("loadDesiredStateFromConfig", () => {
     writeFileSync(
       join(dir, "lobu.config.ts"),
       [
-        `import { defineAgent, defineConfig, defineWatcher } from "@lobu/cli/config";`,
+        `import { defineAgent, defineConfig, defineWatcher, reactionFromFile } from "@lobu/cli/config";`,
         `const crm = defineAgent({ id: "crm" });`,
         `export default defineConfig({`,
         `  agents: [crm],`,
         `  watchers: [defineWatcher({`,
         `    agent: crm, slug: "health", prompt: "p", extractionSchema: { type: "object" },`,
-        `    reaction: "./reactions/health.reaction.ts",`,
+        `    reaction: reactionFromFile("./reactions/health.reaction.ts"),`,
         `  })],`,
         `});`,
         ``,
@@ -430,10 +430,10 @@ describe("loadDesiredStateFromConfig", () => {
       writeFileSync(
         join(dir, "lobu.config.ts"),
         [
-          `import { defineAgent, defineConfig, defineWatcher } from "@lobu/cli/config";`,
+          `import { defineAgent, defineConfig, defineWatcher, reactionFromFile } from "@lobu/cli/config";`,
           `const crm = defineAgent({ id: "crm" });`,
           `export default defineConfig({ agents: [crm], watchers: [defineWatcher({`,
-          `  agent: crm, slug: "w", prompt: "p", extractionSchema: {}, reaction: ${JSON.stringify(reaction)},`,
+          `  agent: crm, slug: "w", prompt: "p", extractionSchema: {}, reaction: reactionFromFile(${JSON.stringify(reaction)}),`,
           `})] });`,
           ``,
         ].join("\n")
@@ -457,6 +457,27 @@ describe("loadDesiredStateFromConfig", () => {
     await expect(write("./notes.md")).rejects.toThrow(/must end in `\.ts`/);
   });
 
+  test("rejects a bare-string reaction with a clear reactionFromFile message", async () => {
+    // jiti evaluates the config without typechecking, so a stale
+    // `reaction: "./x.reaction.ts"` string slips through. It must fail with
+    // guidance to use reactionFromFile(), not a downstream TypeError.
+    dir = mkdtempSync(join(import.meta.dir, "strreaction-"));
+    writeFileSync(
+      join(dir, "lobu.config.ts"),
+      [
+        `import { defineAgent, defineConfig, defineWatcher } from "@lobu/cli/config";`,
+        `const crm = defineAgent({ id: "crm" });`,
+        `export default defineConfig({ agents: [crm], watchers: [defineWatcher({`,
+        `  agent: crm, slug: "w", prompt: "p", extractionSchema: {}, reaction: "./reactions/x.reaction.ts",`,
+        `})] });`,
+        ``,
+      ].join("\n")
+    );
+    await expect(loadDesiredStateFromConfig({ cwd: dir })).rejects.toThrow(
+      /reactionFromFile/
+    );
+  });
+
   test("attaches the reaction to the right watcher when only one of several has one", async () => {
     dir = mkdtempSync(join(import.meta.dir, "reactionidx-"));
     mkdirSync(join(dir, "reactions"));
@@ -467,11 +488,11 @@ describe("loadDesiredStateFromConfig", () => {
     writeFileSync(
       join(dir, "lobu.config.ts"),
       [
-        `import { defineAgent, defineConfig, defineWatcher } from "@lobu/cli/config";`,
+        `import { defineAgent, defineConfig, defineWatcher, reactionFromFile } from "@lobu/cli/config";`,
         `const a = defineAgent({ id: "a" });`,
         `export default defineConfig({ agents: [a], watchers: [`,
         `  defineWatcher({ agent: a, slug: "first", prompt: "p", extractionSchema: {} }),`,
-        `  defineWatcher({ agent: a, slug: "second", prompt: "p", extractionSchema: {}, reaction: "./reactions/second.reaction.ts" }),`,
+        `  defineWatcher({ agent: a, slug: "second", prompt: "p", extractionSchema: {}, reaction: reactionFromFile("./reactions/second.reaction.ts") }),`,
         `] });`,
         ``,
       ].join("\n")
