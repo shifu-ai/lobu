@@ -94,14 +94,32 @@ export class SlackConnectionCoordinator {
     );
   }
 
+  /**
+   * Resolve the connection that should handle a webhook we could NOT route by
+   * team_id (url_verification challenges, events with no extractable team).
+   *
+   * Only the hosted shared-app / preview connection is a safe default: it is
+   * explicitly marked `settings.previewMode === true` and belongs to no
+   * specific tenant. Everything else is tenant-owned — a team-scoped row
+   * obviously so, but ALSO a plain org-owned row with empty metadata (a BYO
+   * connection created without an OAuth install never gets a `metadata.teamId`,
+   * yet still carries that org's bot token). Forwarding an unmatched-team
+   * webhook to any tenant-owned row would let one tenant's bot act on (and
+   * reply with its own bot token to) another tenant's Slack traffic.
+   * `listSlackConnections()` is platform-scoped only (the public `/slack/events`
+   * route carries no org context, so the store's per-tenant predicate doesn't
+   * apply) — so we must require the explicit preview marker and otherwise fail
+   * closed (return null → handled-by-OAuth-fallback / 503) rather than pick a
+   * foreign tenant.
+   */
   async getDefaultConnection(): Promise<PlatformConnection | null> {
     const connections = await this.deps.listSlackConnections();
-    if (connections.length === 1) {
-      return connections[0] || null;
-    }
-
     return (
-      connections.find((connection) => !connection.metadata?.teamId) || null
+      connections.find(
+        (connection) =>
+          connection.settings?.previewMode === true &&
+          !connection.metadata?.teamId
+      ) || null
     );
   }
 

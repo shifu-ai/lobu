@@ -31,6 +31,7 @@ import {
 import { resolveAgentOptions } from "../services/platform-helpers.js";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { isCloudMode } from "../../utils/cloud-mode.js";
+import { getDb } from "../../db/client.js";
 import {
   ConversationStateStore,
   type HistoryEntry,
@@ -71,6 +72,16 @@ function telegramBotToken(config: TelegramAdapterConfig): string | undefined {
   return typeof config.botToken === "string" ? config.botToken : undefined;
 }
 
+/**
+ * Generate a strong (64 hex char) Telegram webhook secret token. Telegram's
+ * `secret_token` allows 1-256 chars of `A-Za-z0-9_-`; hex is a safe subset.
+ * Two UUIDs (128 bits of randomness each) with hyphens stripped easily clear
+ * the >=32 char bar we want for a non-guessable token.
+ */
+function generateTelegramSecretToken(): string {
+  return `${randomUUID()}${randomUUID()}`.replace(/-/g, "");
+}
+
 /** Read `apiBaseUrl` from a Telegram connection config (with default). */
 function telegramApiBase(config: TelegramAdapterConfig): string {
   return typeof config.apiBaseUrl === "string" && config.apiBaseUrl
@@ -78,18 +89,39 @@ function telegramApiBase(config: TelegramAdapterConfig): string {
     : "https://api.telegram.org";
 }
 
-/** Shallow structural equality for plain config objects. */
+/**
+ * Stable canonical JSON serialization: object keys sorted recursively so two
+ * structurally-equal configs serialize identically regardless of key insertion
+ * order. Arrays preserve order (order is significant for things like scope
+ * lists). Used by `configsEqual` to deep-compare nested config (Discord/Teams
+ * OAuth blocks, scope arrays) — a shallow `!==` compares nested objects by
+ * reference and never sees a changed inner field, so a stale config would
+ * persist without restarting the adapter.
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+  }
+  const entries = Object.keys(value as Record<string, unknown>)
+    .sort()
+    .map(
+      (key) =>
+        `${JSON.stringify(key)}:${stableStringify(
+          (value as Record<string, unknown>)[key]
+        )}`
+    );
+  return `{${entries.join(",")}}`;
+}
+
+/** Deep structural equality for plain config objects (nested-aware). */
 function configsEqual(
   a: Record<string, unknown>,
   b: Record<string, unknown>
 ): boolean {
-  const aKeys = Object.keys(a);
-  const bKeys = Object.keys(b);
-  if (aKeys.length !== bKeys.length) return false;
-  for (const key of aKeys) {
-    if (a[key] !== b[key]) return false;
-  }
-  return true;
+  return stableStringify(a) === stableStringify(b);
 }
 
 const logger = createLogger("chat-instance-manager");
@@ -329,6 +361,26 @@ export class ChatInstanceManager {
       throw new Error(
         "Polling mode is not supported in Lobu Cloud — use webhook mode, or self-host."
       );
+    }
+
+    // Telegram's inbound webhook is authenticated solely by the adapter
+    // comparing `x-telegram-bot-api-secret-token` against the configured
+    // `secretToken` — and the adapter accepts the request when no token is
+    // set. The public `POST /api/v1/webhooks/:connectionId` route only checks
+    // the connection exists, so a Telegram connection created without a
+    // secretToken has an unauthenticated, forgeable webhook. Auto-generate a
+    // strong random token when the caller didn't supply one so
+    // configurePlatformWebhook always registers it and the adapter always
+    // verifies. The field name matches `isSecretField`, so it's persisted as
+    // a `secret://` ref like any other credential.
+    if (platform === "telegram") {
+      const tgConfig = config as TelegramAdapterConfig;
+      if (
+        typeof tgConfig.secretToken !== "string" ||
+        tgConfig.secretToken.length === 0
+      ) {
+        tgConfig.secretToken = generateTelegramSecretToken();
+      }
     }
 
     const id = stableId ?? randomUUID().replace(/-/g, "").slice(0, 16);
@@ -735,6 +787,17 @@ export class ChatInstanceManager {
         connection.config
       );
 
+      // Backfill a Telegram webhook secret for connections persisted before
+      // auto-generation existed (addConnection only protects newly-created
+      // rows). Without a secretToken the adapter accepts unsigned webhook
+      // payloads, so an EXISTING no-token row would stay forgeable across
+      // deploys/restarts. Generate + persist one here so this boot's adapter
+      // verifies it and configurePlatformWebhook registers it. Re-read after
+      // persisting so concurrent replicas converge on whichever token landed
+      // first rather than each booting with its own (the security property —
+      // a token is always required — holds regardless of which value wins).
+      await this.ensureTelegramWebhookSecret(connection);
+
       const adapter = await this.createAdapter(connection);
       const stateAdapter = await this.createStateAdapter();
       const conversationState = new ConversationStateStore(stateAdapter);
@@ -880,6 +943,108 @@ export class ChatInstanceManager {
       throw new Error(`No adapter factory for: ${connection.platform}`);
     }
     return factory(connection.config);
+  }
+
+  /**
+   * Ensure a started Telegram connection has a webhook `secretToken`, then
+   * assign the effective (plaintext) token onto `connection.config` so this
+   * boot's adapter verifies it and configurePlatformWebhook registers it.
+   * No-op for non-Telegram connections and for ones that already carry a token.
+   *
+   * Multi-replica safety: the claim is row-locked. Every replica boots every
+   * connection (initialize() starts them all), so a naive get-then-save would
+   * let two pods generate DIFFERENT tokens, persist+register whichever wrote
+   * last, and leave the other pod's adapter verifying a stale token (transient
+   * 401s). Instead we `SELECT ... FOR UPDATE` the row inside a transaction: the
+   * first pod generates + persists the secret ref under the lock and writes it
+   * into the row's config; later pods see the ref and adopt it — so every pod
+   * and Telegram converge on a single token.
+   *
+   * `connection.config` here is already resolved to plaintext (caller runs
+   * resolveConfigForRuntime first), so a present secretToken is the real value.
+   */
+  private async ensureTelegramWebhookSecret(
+    connection: PlatformConnection
+  ): Promise<void> {
+    if (!isTelegramConfig(connection.config)) return;
+    const current = connection.config.secretToken;
+    if (typeof current === "string" && current.length > 0) return;
+
+    const secretStore = this.services.getSecretStore();
+    const secretName = `connections/${connection.id}/secretToken`;
+    let generated = false;
+
+    // Row-locked claim: read the stored config under FOR UPDATE; if it still
+    // lacks a secretToken, generate + persist a ref and write it back in the
+    // same transaction. Concurrent replicas serialize on the row lock, so only
+    // the first writer generates and the rest read its ref. Returns the
+    // effective `secret://` ref, or null when there is no stored row to lock.
+    const tokenRef = await getDb().begin(async (tx) => {
+      const rows = await tx<{ config: Record<string, unknown> | null }>`
+        SELECT config FROM agent_connections
+        WHERE id = ${connection.id}
+        FOR UPDATE
+      `;
+      const row = rows[0];
+      if (!row) {
+        return null;
+      }
+      const storedConfig = (row.config ?? {}) as Record<string, unknown>;
+      const existingRef = storedConfig.secretToken;
+      if (typeof existingRef === "string" && existingRef.length > 0) {
+        return existingRef;
+      }
+      const ref = await persistSecretValue(
+        secretStore,
+        secretName,
+        generateTelegramSecretToken()
+      );
+      await tx`
+        UPDATE agent_connections
+        SET config = jsonb_set(
+              COALESCE(config, '{}'::jsonb),
+              '{secretToken}',
+              to_jsonb(${ref}::text),
+              true
+            ),
+            updated_at = now()
+        WHERE id = ${connection.id}
+      `;
+      generated = true;
+      return ref;
+    });
+
+    let effectiveRef = tokenRef;
+    if (effectiveRef === null) {
+      // No stored row to lock (a freshly-built in-memory connection the caller
+      // hasn't persisted — the boot/restart paths always have a row). Persist
+      // via the normal path and adopt the stored ref.
+      connection.config.secretToken = generateTelegramSecretToken();
+      await this.persistConnection(connection);
+      generated = true;
+      const reread = await this.connectionStore.getConnection(connection.id);
+      const rereadRef =
+        reread && typeof (reread.config as any).secretToken === "string"
+          ? ((reread.config as any).secretToken as string)
+          : null;
+      effectiveRef = rereadRef;
+    }
+
+    // Resolve the winning ref to plaintext for the adapter + webhook.
+    const resolved =
+      effectiveRef && isSecretRef(effectiveRef)
+        ? await resolveSecretValue(secretStore, effectiveRef)
+        : effectiveRef;
+    if (typeof resolved === "string" && resolved.length > 0) {
+      connection.config.secretToken = resolved;
+    }
+
+    if (generated) {
+      logger.info(
+        { id: connection.id },
+        "Backfilled Telegram webhook secret token for existing connection"
+      );
+    }
   }
 
   private async createStateAdapter(): Promise<any> {
