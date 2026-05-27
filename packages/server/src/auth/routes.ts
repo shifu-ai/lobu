@@ -16,6 +16,7 @@ import { resolveBaseUrl } from './base-url';
 import { createAuth } from './index';
 import { mcpAuth, requireAuth } from './middleware';
 import { OAuthClientsStore } from './oauth/clients';
+import { OAuthProvider } from './oauth/provider';
 import { PersonalAccessTokenService } from './tokens';
 
 const credentialRoutes = new Hono<{ Bindings: Env }>();
@@ -280,11 +281,33 @@ function assertLoopbackClient(
 
 /**
  * Mint a Better Auth session for a user and return the Set-Cookie value.
- * Centralised so /exchange-token and /local-init produce identical cookies.
+ *
+ * `partitioned` controls the cross-site posture of the cookie:
+ *   - false (default): SameSite=Lax (+ Secure on https). For first-party
+ *     callers — the CLI/menu-bar deep-link (GET /exchange-token) and
+ *     /local-init both run in a top-level browser tab where Lax is correct.
+ *   - true: SameSite=None; Secure; Partitioned (CHIPS). For the Owletto
+ *     extension's side-panel iframe (POST /exchange-token), which is a
+ *     CROSS-SITE iframe (top-level origin chrome-extension://…). A Lax cookie
+ *     is withheld on cross-site iframe loads, so the embedded app rendered
+ *     signed-out. Because the POST runs INSIDE the iframe, the cookie's
+ *     partition key is the chrome-extension://<id> top-level: it's delivered on
+ *     later same-partition iframe requests and ISOLATED from every other site's
+ *     partition — so it does NOT widen CSRF the way an unpartitioned
+ *     SameSite=None cookie would, and it survives third-party-cookie
+ *     deprecation. Verified with cross-site-iframe cookie probes from the
+ *     extension top-level (Lax → withheld; None;Secure;Partitioned set in the
+ *     partition → delivered same-partition, absent elsewhere).
+ *
+ * SameSite=None/Partitioned require Secure, which the browser only honours on a
+ * secure context (https or http://localhost). On a plain-http non-loopback
+ * self-host the partitioned variant can't be set, so it falls back to Lax — the
+ * extension's embedded view is unsupported there (first-party use is unaffected).
  */
 async function mintSessionCookieValue(
   c: Context<{ Bindings: Env }>,
-  userId: string
+  userId: string,
+  opts: { partitioned?: boolean } = {}
 ): Promise<{ cookieName: string; cookieHeader: string; sessionToken: string } | { error: string }> {
   const secret = c.env.BETTER_AUTH_SECRET;
   if (!secret) return { error: 'BETTER_AUTH_SECRET not set' };
@@ -300,39 +323,52 @@ async function mintSessionCookieValue(
   // __Secure- prefix iff the canonical baseURL is https — matches whatever
   // Better Auth would set during normal sign-in even when TLS is terminated
   // by a reverse proxy and the bind itself speaks plain HTTP.
-  const isHttps = resolveBaseUrl({ request: c.req.raw }).startsWith('https://');
+  const baseUrl = resolveBaseUrl({ request: c.req.raw });
+  const isHttps = baseUrl.startsWith('https://');
   const cookieName = isHttps ? '__Secure-better-auth.session_token' : 'better-auth.session_token';
+
+  const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(baseUrl);
+  const secureContext = isHttps || isLocalhost;
+  const partitioned = Boolean(opts.partitioned) && secureContext;
   const parts = [
     `${cookieName}=${cookieValue}`,
     'Path=/',
     'HttpOnly',
-    'SameSite=Lax',
+    partitioned ? 'SameSite=None' : 'SameSite=Lax',
     `Max-Age=${60 * 60 * 24 * 7}`,
   ];
-  if (isHttps) parts.push('Secure');
+  if (partitioned) {
+    parts.push('Secure');
+    parts.push('Partitioned');
+  } else if (isHttps) {
+    parts.push('Secure');
+  }
   return { cookieName, cookieHeader: parts.join('; '), sessionToken: session.token };
 }
 
 /**
- * Resolve a `?token=…` deep-link credential to a user id.
+ * Resolve a `?token=…` deep-link credential to a user id. Accepts all three
+ * credential shapes the deep-link callers hold:
+ *   - Personal Access Tokens (`owl_pat_*`, `personal_access_tokens`)
+ *   - OAuth 2.1 access tokens (`oauth_tokens`) — what the Owletto extension's
+ *     device-code pairing issues; without this the cloud-paired iframe 401s at
+ *     /api/exchange-token and renders signed-out
+ *   - Better Auth session tokens (`session`) — the macOS menu bar / local-init
+ *     hold one and deep-link into the SPA without ever issuing a PAT
  *
- * Accepts either a Personal Access Token (`owl_pat_*`, validated against
- * `personal_access_tokens`) or a Better Auth session token (looked up in
- * `session`). The session-token path lets the macOS menu bar — which holds
- * a session token from POST /api/local-init — deep-link the user into
- * the SPA without ever issuing a PAT.
+ * OAuthProvider.verifyAccessToken already covers the first two; the session
+ * lookup is the fallback for the third.
  */
 async function resolveDeepLinkToken(
   c: Context<{ Bindings: Env }>,
   token: string
 ): Promise<string | null> {
-  if (token.startsWith('owl_pat_')) {
-    const sql = createDbClientFromEnv(c.env);
-    const authInfo = await new PersonalAccessTokenService(sql).verify(token);
-    return authInfo?.userId ?? null;
-  }
-  // Treat anything else as a session token. Better Auth's adapter looks it up
-  // by the raw token (the unsigned half of the cookie value).
+  const sql = createDbClientFromEnv(c.env);
+  const baseUrl = resolveBaseUrl({ request: c.req.raw });
+  const authInfo = await new OAuthProvider(sql, baseUrl).verifyAccessToken(token);
+  if (authInfo?.userId) return authInfo.userId;
+  // Otherwise treat it as a Better Auth session token. Better Auth's adapter
+  // looks it up by the raw token (the unsigned half of the cookie value).
   const auth = await createAuth(c.env, c.req.raw);
   const ctx = await auth.$context;
   const session = await ctx.internalAdapter.findSession(token);
@@ -347,19 +383,33 @@ async function resolveDeepLinkToken(
  * web UI without typing a password. `next` is restricted to relative paths
  * to prevent open-redirect abuse; Referrer-Policy keeps the token out of
  * the next page's Referer.
+ *
+ * Shared by GET (CLI/menu-bar deep-link in a top-level browser tab, token in
+ * the query string) and POST (the Owletto extension's iframe bootstrap, token
+ * in the request body so it never lands in a URL — see extension-bootstrap).
+ * The Set-Cookie lands in whatever partition the request runs in: a top-level
+ * tab → first-party; the extension iframe → the chrome-extension partition,
+ * which is exactly what the CHIPS Partitioned cookie needs.
  */
-credentialRoutes.get('/exchange-token', async (c) => {
+async function handleExchangeToken(
+  c: Context<{ Bindings: Env }>,
+  token: string | undefined,
+  rawNext: string | undefined,
+  // true only for the extension iframe (POST): mint a CHIPS Partitioned cookie
+  // so it's delivered in the cross-site iframe. GET (first-party tab) → false.
+  partitioned: boolean
+) {
   c.header('Referrer-Policy', 'no-referrer');
 
-  const token = c.req.query('token')?.trim();
-  if (!token) {
+  const trimmed = token?.trim();
+  if (!trimmed) {
     return c.json(
-      { error: 'missing_token', error_description: 'token query param is required' },
+      { error: 'missing_token', error_description: 'token is required' },
       400
     );
   }
 
-  const userId = await resolveDeepLinkToken(c, token);
+  const userId = await resolveDeepLinkToken(c, trimmed);
   if (!userId) {
     return c.json(
       { error: 'invalid_token', error_description: 'token is invalid, expired, or revoked' },
@@ -367,7 +417,7 @@ credentialRoutes.get('/exchange-token', async (c) => {
     );
   }
 
-  const minted = await mintSessionCookieValue(c, userId);
+  const minted = await mintSessionCookieValue(c, userId, { partitioned });
   if ('error' in minted) {
     return c.json(
       { error: 'session_create_failed', error_description: minted.error },
@@ -376,9 +426,65 @@ credentialRoutes.get('/exchange-token', async (c) => {
   }
   c.header('Set-Cookie', minted.cookieHeader);
 
-  const rawNext = c.req.query('next') ?? '/';
-  const safeNext = rawNext.startsWith('/') && !rawNext.startsWith('//') ? rawNext : '/';
+  const next = rawNext ?? '/';
+  const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/';
   return c.redirect(safeNext, 302);
+}
+
+credentialRoutes.get('/exchange-token', async (c) =>
+  handleExchangeToken(c, c.req.query('token'), c.req.query('next'), false)
+);
+
+credentialRoutes.post('/exchange-token', async (c) => {
+  const body = await c.req.parseBody();
+  const token = typeof body.token === 'string' ? body.token : undefined;
+  const next = typeof body.next === 'string' ? body.next : undefined;
+  return handleExchangeToken(c, token, next, true);
+});
+
+/**
+ * Bootstrap page for the Owletto extension's side-panel iframe.
+ *
+ * The extension mounts the iframe at this route with the deep-link token in the
+ * URL **fragment** (`#token=…&worker=…`) — fragments are never sent to a server
+ * and the page strips it from history immediately, so the long-lived token
+ * never appears in a request URL, server log, or browser history entry. The
+ * page then POSTs the token to /api/exchange-token (same-origin, so the
+ * Set-Cookie is honoured) which sets the CHIPS Partitioned session cookie in
+ * THIS iframe's partition, then redirects the iframe to the app. This is the
+ * only place the partitioned cookie can be installed, because the partition key
+ * must be the chrome-extension:// top-level — a separate top-level tab would
+ * write it to the wrong partition.
+ */
+credentialRoutes.get('/extension-bootstrap', (c) => {
+  c.header('Referrer-Policy', 'no-referrer');
+  c.header('Cache-Control', 'no-store');
+  // Inline script is allowed: the app's CSP sets only frame-ancestors, no
+  // script-src. The page carries no markup an injection could target.
+  return c.html(
+    `<!doctype html><meta charset="utf-8"><title>Connecting…</title><body><script>
+(function () {
+  var h = new URLSearchParams(location.hash.slice(1));
+  var token = h.get("token") || "";
+  var worker = h.get("worker") || "";
+  // Strip the token out of the URL before doing anything else.
+  history.replaceState(null, "", location.pathname);
+  if (!token) { location.replace("/"); return; }
+  var form = document.createElement("form");
+  form.method = "POST";
+  form.action = "/api/exchange-token";
+  function add(name, value) {
+    var i = document.createElement("input");
+    i.type = "hidden"; i.name = name; i.value = value;
+    form.appendChild(i);
+  }
+  add("token", token);
+  add("next", worker ? "/#worker=" + encodeURIComponent(worker) : "/");
+  document.body.appendChild(form);
+  form.submit();
+})();
+</script></body>`
+  );
 });
 
 /**
