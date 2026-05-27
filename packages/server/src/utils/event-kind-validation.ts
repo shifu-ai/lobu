@@ -11,6 +11,7 @@
 
 import { getDb } from '../db/client';
 import { formatAjvError, getAjv } from './ajv-singleton';
+import { exceedsValidationLimits, isEmptyObject } from './metadata-limits';
 
 // ============================================
 // Types
@@ -215,14 +216,31 @@ function validateKindAgainstDefinitions(
     return { valid: false, errors, validKinds, expectedSchema: null, suggestion };
   }
 
-  // Kind found — validate metadata against its schema if defined
+  // Kind found — validate metadata against its schema if defined. Allocation-
+  // free emptiness check so a huge untrusted object isn't materialized via
+  // Object.keys before the size guard below runs.
   const metadataSchema = kindDef.metadataSchema;
-  if (!metadataSchema || !metadata || Object.keys(metadata).length === 0) {
+  if (!metadataSchema || !metadata || isEmptyObject(metadata)) {
     return {
       valid: true,
       errors: [],
       validKinds,
       expectedSchema: metadataSchema ?? null,
+      suggestion: null,
+    };
+  }
+
+  // Bound untrusted input before handing it to AJV. Pathologically deep/large
+  // metadata is a DoS vector regardless of AJV config, so reject it as a
+  // normal validation failure rather than spending CPU/memory validating it.
+  if (exceedsValidationLimits(metadata)) {
+    return {
+      valid: false,
+      errors: [
+        `Metadata validation failed for kind '${kind}': metadata exceeds size/nesting limits`,
+      ],
+      validKinds,
+      expectedSchema: metadataSchema,
       suggestion: null,
     };
   }
