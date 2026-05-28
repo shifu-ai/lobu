@@ -226,16 +226,20 @@ export function parseRevolutDate(
 
 /**
  * Deterministic id for a row that carries no DOM id: hash its stable fields.
- * The full occurredAt timestamp (not just the date) is part of the basis so
- * two same-merchant/same-amount payments on the same day at different times
- * (e.g. two £4.50 coffees) get distinct ids and aren't collapsed by dedup.
+ * The basis includes the date, the FULL time line as rendered (which carries
+ * Revolut's per-transaction reference, e.g. "07:18 · D4468637", so even two
+ * same-merchant/same-amount payments in the same minute get distinct ids), the
+ * description, and ALL rendered amounts (the FX source leg disambiguates rows
+ * with no reference). This is stable across syncs — the same row always hashes
+ * the same — without colliding distinct rows.
  */
 function synthesizeId(
-	isoTimestamp: string,
+	date: string,
+	timeRef: string,
 	desc: string,
-	signedAmount: string,
+	amounts: string[],
 ): string {
-	const basis = `${isoTimestamp}|${desc}|${signedAmount}`;
+	const basis = `${date}|${timeRef}|${desc}|${amounts.join("/")}`;
 	let h = 2166136261;
 	for (let i = 0; i < basis.length; i++) {
 		h ^= basis.charCodeAt(i);
@@ -258,15 +262,13 @@ export function buildTransactionsFromDom(
 		const money = parseAmountString(amounts[0]);
 		if (!money) continue;
 
-		const occurredAt = parseRevolutDate(r?.day ?? "", r?.timeRef ?? "", now);
+		const timeRef = (r?.timeRef ?? "").trim();
+		const occurredAt = parseRevolutDate(r?.day ?? "", timeRef, now);
 		if (!occurredAt) continue;
 
-		const signedStr =
-			money.amount < 0 ? `-${Math.abs(money.amount)}` : `${money.amount}`;
-		const iso = occurredAt.toISOString();
-		const date = iso.slice(0, 10);
+		const date = occurredAt.toISOString().slice(0, 10);
 		out.push({
-			id: synthesizeId(iso, desc, signedStr),
+			id: synthesizeId(date, timeRef, desc, amounts),
 			description: desc,
 			amount: Math.abs(money.amount),
 			direction: money.amount < 0 ? "out" : "in",

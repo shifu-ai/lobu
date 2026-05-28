@@ -152,6 +152,20 @@ describe("buildTransactionsFromDom", () => {
 		expect(txns[0]?.id).not.toBe(txns[1]?.id ?? "");
 	});
 
+	test("same minute, same amount, different reference → distinct ids", () => {
+		// The full time line carries Revolut's per-transaction reference, so two
+		// identical-looking payments in the same minute don't collide.
+		const txns = buildTransactionsFromDom(
+			[
+				{ day: "24 May", desc: "Co-op", amounts: ["-£4.50"], timeRef: "18:33 · D1111111" },
+				{ day: "24 May", desc: "Co-op", amounts: ["-£4.50"], timeRef: "18:33 · D2222222" },
+			],
+			now,
+		);
+		expect(txns).toHaveLength(2);
+		expect(txns[0]?.id).not.toBe(txns[1]?.id ?? "");
+	});
+
 	test("drops rows missing desc, amount, or date", () => {
 		const txns = buildTransactionsFromDom(
 			[
