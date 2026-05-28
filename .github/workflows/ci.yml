@@ -54,24 +54,17 @@ jobs:
         # install it in the worker runtime image" before it ships.
         run: node scripts/check-connector-runtime-deps.mjs
 
-      - name: Build core + sdk + embeddings + connector-worker + cli for downstream type-resolution
+      - name: Build core + sdk + embeddings + connector-worker for downstream type-resolution
         # connector-worker integration tests import from its compiled `dist/`
         # (subprocess-mode tests spawn the built executor); build it here
         # so those run. embeddings must build before connector-worker —
         # connector-worker's src/embeddings.ts imports from @lobu/embeddings
         # and resolves it via the workspace symlink → dist.
-        #
-        # CLI must build too: packages/cli/src/__tests__/cli-ux.test.ts
-        # spawns `bin/lobu.js`, which `require('../dist/index.js')`.
-        # Without this build the help-text regression test fails with
-        # "Cannot find module '../dist/index.js'" in CI while passing
-        # locally where a previous build's dist sits around.
         run: |
           cd packages/core && bun run build && cd ../..
           cd packages/connector-sdk && bun run build && cd ../..
           cd packages/embeddings && bun run build && cd ../..
           cd packages/connector-worker && bun run build && cd ../..
-          cd packages/cli && bun run build && cd ../..
 
       - name: core / cli (bun:test)
         run: bun test packages/core packages/cli --coverage
