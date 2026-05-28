@@ -215,7 +215,7 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
       const sql = getDb();
       const orgId = getOrgId();
       const now = new Date();
-      await sql`
+      const result = await sql`
         UPDATE agents SET
           model = ${settings.model ?? null},
           model_selection = ${sql.json(settings.modelSelection ?? {})},
@@ -237,6 +237,16 @@ export function createPostgresAgentConfigStore(): AgentConfigStore {
           updated_at = ${now}
         WHERE id = ${agentId} AND organization_id = ${orgId}
       `;
+      // UPDATE-only by design (agents row identity belongs to saveMetadata).
+      // Fail loud when no row matches so a save can't silently no-op — the
+      // ephemeral-chat path hit exactly this footgun (#1068 follow-up: agent
+      // row never existed → 0 rows updated → empty installedProviders → "No
+      // model configured"). Callers must call saveMetadata first.
+      if (result.count === 0) {
+        throw new Error(
+          `saveSettings: no agents row matches id=${agentId} org=${orgId}; call saveMetadata first`
+        );
+      }
     },
     async updateSettings(agentId, updates) {
       const existing = await store.getSettings(agentId);
