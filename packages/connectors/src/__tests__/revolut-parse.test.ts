@@ -140,6 +140,18 @@ describe("buildTransactionsFromDom", () => {
 		expect(a[0]?.id).not.toBe(c[0]?.id ?? "");
 	});
 
+	test("same day + desc + amount but different time → distinct ids", () => {
+		const txns = buildTransactionsFromDom(
+			[
+				{ day: "24 May", desc: "Co-op", amounts: ["-£4.50"], timeRef: "09:00" },
+				{ day: "24 May", desc: "Co-op", amounts: ["-£4.50"], timeRef: "18:33" },
+			],
+			now,
+		);
+		expect(txns).toHaveLength(2);
+		expect(txns[0]?.id).not.toBe(txns[1]?.id ?? "");
+	});
+
 	test("drops rows missing desc, amount, or date", () => {
 		const txns = buildTransactionsFromDom(
 			[
