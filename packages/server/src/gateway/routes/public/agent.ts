@@ -422,7 +422,7 @@ export interface AgentApiConfig {
     "getSettings" | "listAgents" | "getMetadata"
   >;
   userAgentsStore?: UserAgentsStore;
-  agentMetadataStore?: Pick<AgentMetadataStore, "getMetadata">;
+  agentMetadataStore?: Pick<AgentMetadataStore, "getMetadata" | "createAgent">;
   platformRegistry?: PlatformRegistry;
   approveToolCall?: (
     requestId: string,
@@ -649,10 +649,34 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         ? (await ownershipMetadataStore.getMetadata(agentId))?.organizationId
         : undefined;
 
-    // For ephemeral agents, auto-provision settings from system-key
-    // providers (env-var-based API keys). No more template-agent fallback —
-    // there are no template/sandbox agents anymore.
+    // For ephemeral agents, create the `agents` row first so subsequent
+    // `saveSettings` (an UPDATE-only path) actually persists. Without this,
+    // the row never exists, the UPDATE matches 0 rows silently, and the
+    // worker's session-context resolves `installedProviders = []` → no
+    // provider → "No model configured". Followed by provisioning system-
+    // key providers (env-var-based API keys) so the worker has something
+    // to talk to. No more template-agent fallback — there are no
+    // template/sandbox agents anymore.
     if (isEphemeral && agentSettingsStore) {
+      if (agentMetadataStore?.createAgent) {
+        try {
+          await agentMetadataStore.createAgent(
+            agentId,
+            agentId,
+            "api",
+            agentId,
+          );
+        } catch (err) {
+          // saveMetadata is INSERT ... ON CONFLICT DO UPDATE under the hood,
+          // so a re-create of the same id within the same org is benign.
+          // Genuine errors (FK / org mismatch) bubble below and surface as
+          // failed-create.
+          logger.debug(
+            `Ephemeral agent ${agentId}: createAgent threw (likely re-create): ${err}`,
+          );
+        }
+      }
+
       const providerModules = getModelProviderModules();
       const systemProviders: InstalledProvider[] = providerModules
         .filter((m) => m.hasSystemKey())
