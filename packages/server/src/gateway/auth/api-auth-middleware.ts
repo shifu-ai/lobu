@@ -7,6 +7,25 @@ import { getRevokedTokenStore } from "./revoked-token-store.js";
 export const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Caller identity surfaced to handlers via `c.get("authContext")` after a
+ * successful auth check. `organizationId` is the token-bound or personal-org
+ * id when the auth path can resolve one (worker token payload, or
+ * `/oauth/userinfo` org slug); otherwise undefined. `createAgent` uses it to
+ * stamp the worker token for ephemeral agents so the cross-pod conversation
+ * lock can be acquired (#1068).
+ */
+export interface ApiAuthContext {
+  userId?: string;
+  organizationId?: string;
+}
+
+declare module "hono" {
+  interface ContextVariableMap {
+    authContext?: ApiAuthContext;
+  }
+}
+
+/**
  * Creates a Hono middleware that enforces the standard auth check:
  *   1. Settings session cookie  2. Worker token (local)  3. External OAuth
  *
@@ -27,6 +46,7 @@ export function createApiAuthMiddleware(opts: {
     if (opts.allowSettingsSession) {
       const session = await verifySettingsSession(c);
       if (session) {
+        c.set("authContext", { userId: session.userId } satisfies ApiAuthContext);
         return next();
       }
     }
@@ -46,6 +66,10 @@ export function createApiAuthMiddleware(opts: {
           if (workerData.jti && (await revokedTokens.isRevoked(workerData.jti))) {
             return c.json({ success: false, error: "Unauthorized" }, 401);
           }
+          c.set("authContext", {
+            userId: workerData.userId,
+            organizationId: workerData.organizationId,
+          } satisfies ApiAuthContext);
           return next();
         }
       }
@@ -55,7 +79,13 @@ export function createApiAuthMiddleware(opts: {
     if (opts.externalAuthClient) {
       try {
         const userInfo = await opts.externalAuthClient.fetchUserInfo(token);
-        if (userInfo?.sub) return next();
+        if (userInfo?.sub) {
+          c.set("authContext", {
+            userId: userInfo.sub,
+            organizationId: userInfo.organizationId,
+          } satisfies ApiAuthContext);
+          return next();
+        }
       } catch {
         // Token not valid for external auth, continue to next method
       }
