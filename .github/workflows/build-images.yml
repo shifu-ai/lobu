@@ -5,6 +5,12 @@ on:
     branches:
       - main
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Target platforms for the docker builds. Defaults to amd64 only — bump to linux/amd64,linux/arm64 when you need the multi-arch image (rare)."
+        type: string
+        default: linux/amd64
+        required: false
 
 permissions:
   contents: read
@@ -18,6 +24,14 @@ env:
   IMAGE_NAME_APP: lobu-ai/lobu-app
   IMAGE_NAME_WORKER: lobu-ai/lobu-worker
   IMAGE_NAME_EMBEDDINGS: lobu-ai/lobu-embeddings
+  # Prod runs Hetzner cpx41 (x86_64 only — see project_hetzner_prod_cost
+  # memory), so main-branch pushes build amd64 only. This dropped the
+  # build-app step from ~25min to ~8min AND fixed the disk-full failure
+  # mode (~14GB GHA runner couldn't hold both arch Playwright/Chrome
+  # downloads + image layers + buildx cache). The workflow_dispatch
+  # `platforms` input lets you rebuild multi-arch on demand if a dev
+  # machine needs the arm64 image, without slowing every prod deploy.
+  BUILD_PLATFORMS: ${{ inputs.platforms || 'linux/amd64' }}
 
 jobs:
   generate-tag:
@@ -73,10 +87,18 @@ jobs:
 
   build-app:
     runs-on: ubuntu-latest
-    # Push the app image last. Flux's ImageUpdateAutomation only watches the
-    # app image policy, but the chart applies one shared tag to app, worker,
-    # and embeddings. If app pushed before the others, Flux could roll the
-    # release to a tag that does not yet exist for worker/embeddings.
+    # Push the app image LAST. Flux's ImageUpdateAutomation only watches
+    # the app image policy, but the chart applies one shared tag to app,
+    # worker, AND embeddings. If app pushed before worker or embeddings,
+    # Flux would roll the release to a tag whose sibling images don't yet
+    # exist (or never will, if a sibling build failed for an unrelated
+    # reason — disk pressure, registry hiccup, an unrelated Dockerfile
+    # regression). Earlier in this PR I tried parallelizing build-app for
+    # a ~7min critical-path win, but pi flagged the real (low-probability
+    # but not zero) failure window: a failed sibling build still lets
+    # build-app push the watched tag, and Flux rolls a half-existent
+    # tag. Reverted to the safe gate. The arm64-drop alone still cuts
+    # ~15-20min off the critical path, which is the bigger lever anyway.
     needs: [generate-tag, build-worker, build-embeddings-service]
     permissions:
       contents: read
@@ -117,7 +139,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/app/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -178,7 +200,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/worker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -234,7 +256,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ env.BUILD_PLATFORMS }}
           file: ./docker/embeddings-service/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
