@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
 	buildTransactionsFromDom,
+	decideScrollStop,
 	filterTransactionsSinceCheckpoint,
 	type RevolutTransaction,
+	STALL_CYCLES,
 	transactionToEvent,
 } from "../../../../../connectors/src/revolut";
 
@@ -83,6 +85,33 @@ describe("Revolut DOM-row parsing", () => {
 		);
 		expect(txns).toHaveLength(1);
 		expect(txns[0]?.description).toBe("Z");
+	});
+});
+
+describe("Revolut scroll-loop stop logic", () => {
+	it("backfill: keeps scrolling until STALL_CYCLES zero-progress cycles (exhausted)", () => {
+		expect(
+			decideScrollStop({ stall: 1, oldestDate: "2022-01-01", stopBeforeMs: null, timeUp: false }),
+		).toBeNull();
+		expect(
+			decideScrollStop({ stall: STALL_CYCLES, oldestDate: "2021-12-01", stopBeforeMs: null, timeUp: false }),
+		).toBe("exhausted");
+	});
+
+	it("incremental: stops once the oldest rendered day reaches the checkpoint", () => {
+		const cp = Date.UTC(2026, 4, 20, 10, 0, 0);
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2026-05-25", stopBeforeMs: cp, timeUp: false }),
+		).toBeNull();
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2026-05-20", stopBeforeMs: cp, timeUp: false }),
+		).toBe("reached_checkpoint");
+	});
+
+	it("safety: time cap fires when the wall-clock budget is exhausted", () => {
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2024-01-01", stopBeforeMs: null, timeUp: true }),
+		).toBe("capped_time");
 	});
 });
 

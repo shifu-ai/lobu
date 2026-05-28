@@ -442,8 +442,61 @@ const HARVEST_EXPRESSION = `
 })()
 `;
 
-/** Scroll the transaction list to lazy-load older rows. */
-const SCROLL_EXPRESSION = `(async()=>{window.scrollTo(0,document.body.scrollHeight);if(document.scrollingElement)document.scrollingElement.scrollTop=document.scrollingElement.scrollHeight;await new Promise(r=>setTimeout(r,1500));return document.querySelectorAll('[role="transactions-group"] button').length})()`;
+/**
+ * One scroll cycle: scroll to the bottom to lazy-load older rows, HARVEST the
+ * newly-rendered rows into the in-page accumulator (dedup), then return the
+ * running accumulated-row count and the OLDEST day heading now rendered
+ * (`YYYY-MM-DD`, resolved with the same year inference as the parser). Folding
+ * the harvest in keeps the loop to one `evaluate` per cycle. The oldest-day
+ * signal lets an incremental sync stop once it has scrolled back past the
+ * checkpoint date.
+ */
+const SCROLL_CYCLE_EXPRESSION = `
+(async () => {
+  window.scrollTo(0, document.body.scrollHeight);
+  if (document.scrollingElement) document.scrollingElement.scrollTop = document.scrollingElement.scrollHeight;
+  await new Promise(r => setTimeout(r, 1500));
+
+  // Harvest (same logic as HARVEST_EXPRESSION) into the shared accumulator.
+  const W = window;
+  W.__lobuRevTxns = W.__lobuRevTxns || {};
+  const acc = W.__lobuRevTxns;
+  const groups = [...document.querySelectorAll('[role="transactions-group"]')];
+  for (const g of groups) {
+    const day = (g.innerText || '').split('\\n')[0].trim();
+    let ord = 0;
+    for (const b of g.querySelectorAll('button')) {
+      const lines = b.innerText.split('\\n').map(s => s.trim()).filter(Boolean);
+      if (lines.length < 2) continue;
+      const amounts = lines.filter(l => /[£$€¥₹₽₺₩₪₴₫₱฿₦]|\\b[A-Z]{3}\\b/.test(l) && /\\d/.test(l));
+      if (!amounts.length) continue;
+      const titleEl = b.querySelector('[class*="ItemTitle"]');
+      const desc = titleEl ? titleEl.innerText.trim() : lines[0];
+      const timeRef = lines.find(l => /^\\d{1,2}:\\d{2}/.test(l)) || '';
+      const key = day + '|' + desc + '|' + amounts.join('/') + '|' + timeRef + '|' + (ord++);
+      if (!acc[key]) acc[key] = { day: day, desc: desc, amounts: amounts, timeRef: timeRef };
+    }
+  }
+
+  // Oldest rendered day = last group's heading. Resolve its year the same way
+  // the connector's parser does (current year, rolling back if future).
+  const MONTHS = { jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,sept:8,oct:9,nov:10,dec:11 };
+  const resolveDay = (heading) => {
+    const m = (heading || '').match(/(\\d{1,2})\\s*([A-Za-z]{3,4})\\.?\\s*(\\d{4})?/);
+    if (!m) return null;
+    const month = MONTHS[m[2].toLowerCase()];
+    if (month === undefined) return null;
+    const day = parseInt(m[1], 10);
+    const now = Date.now();
+    let year = m[3] ? parseInt(m[3], 10) : new Date(now).getUTCFullYear();
+    let d = Date.UTC(year, month, day, 12, 0, 0);
+    if (!m[3] && d > now + 86400000) d = Date.UTC(year - 1, month, day, 12, 0, 0);
+    return new Date(d).toISOString().slice(0, 10);
+  };
+  const oldestHead = groups.length ? (groups[groups.length - 1].innerText || '').split('\\n')[0].trim() : '';
+  return JSON.stringify({ accCount: Object.keys(acc).length, renderedButtons: document.querySelectorAll('[role="transactions-group"] button').length, oldestDate: resolveDay(oldestHead) });
+})()
+`;
 
 /** Read the accumulated rows out of the page and clear the accumulator. */
 const COLLECT_EXPRESSION = `
@@ -470,14 +523,157 @@ interface ProbeResult {
 	hasLoginForm: boolean;
 }
 
+interface ScrollProgress {
+	accCount: number;
+	renderedButtons: number;
+	oldestDate: string | null;
+}
+
+/** How the scroll loop terminated, surfaced in sync metadata + logs. */
+export type ScrapeStopReason =
+	| "exhausted" // hit the bottom of history (stall)
+	| "reached_checkpoint" // scrolled back past the last-seen txn (incremental)
+	| "capped_cycles" // safety cap on scroll iterations
+	| "capped_time"; // wall-clock budget exhausted
+
+export interface ScrapeResult {
+	rows: RevolutDomRow[];
+	stopReason: ScrapeStopReason;
+	cycles: number;
+	/** Oldest day heading reached (`YYYY-MM-DD`), or null if nothing rendered. */
+	oldestDate: string | null;
+}
+
+// Backfill safety rails: a first full-history sync can be multi-minute, but it
+// must never loop forever. STALL_CYCLES consecutive zero-new-row scrolls means
+// the bottom; MAX_SCROLL_CYCLES / TIME_BUDGET_MS are hard ceilings.
+export const STALL_CYCLES = 3;
+const MAX_SCROLL_CYCLES = 300;
+const TIME_BUDGET_MS = 4 * 60_000;
+
+/** Per-cycle inputs the stop decision is made from. */
+export interface ScrollCycleState {
+	/** Consecutive zero-progress cycles, INCLUDING this one if it added nothing. */
+	stall: number;
+	/** Oldest day reached so far (`YYYY-MM-DD`), or null. */
+	oldestDate: string | null;
+	/** Incremental checkpoint cutoff (ms epoch), or null for a full backfill. */
+	stopBeforeMs: number | null;
+	/** True once the wall-clock budget is exhausted. */
+	timeUp: boolean;
+}
+
 /**
- * Render the Revolut transactions page in the paired Chrome and harvest rows.
+ * Pure stop decision for one scroll cycle (unit-tested). Returns the stop
+ * reason if the loop should halt, or null to keep scrolling.
+ *
+ * Precedence: reached the checkpoint date (incremental) → time cap → stall
+ * (exhausted bottom). The cycle cap is handled by the loop bound itself.
+ */
+export function decideScrollStop(
+	state: ScrollCycleState,
+): ScrapeStopReason | null {
+	if (
+		state.stopBeforeMs !== null &&
+		state.oldestDate &&
+		// The oldest rendered DAY is at/before the checkpoint's day. Compare at
+		// start-of-day so reaching the checkpoint's own day (regardless of the
+		// checkpoint's intra-day time) counts as "scrolled back far enough" —
+		// filterTransactionsSinceCheckpoint then drops anything actually older.
+		new Date(`${state.oldestDate}T00:00:00Z`).getTime() <=
+			new Date(new Date(state.stopBeforeMs).toISOString().slice(0, 10)).getTime()
+	) {
+		return "reached_checkpoint";
+	}
+	if (state.timeUp) return "capped_time";
+	if (state.stall >= STALL_CYCLES) return "exhausted";
+	return null;
+}
+
+/**
+ * The scroll-until-stop core. Harvests the initial view, then repeatedly
+ * scrolls + harvests + accumulates (dedup) in-page until one of:
+ *  - `STALL_CYCLES` consecutive cycles add ZERO new rows → "exhausted" (bottom).
+ *  - (incremental) the oldest rendered day is at/before `stopBeforeMs` → we've
+ *    scrolled back past the checkpoint, so stop → "reached_checkpoint".
+ *  - the scroll-cycle cap is hit → "capped_cycles".
+ *  - the wall-clock budget is exhausted → "capped_time".
+ *
+ * Returns the collected rows plus how it stopped + how far back it reached.
+ */
+async function scrollUntilStop(
+	dispatcher: ChromeActionDispatcher,
+	tabId: number,
+	maxCycles: number,
+	stopBeforeMs: number | null,
+	now: number = Date.now(),
+): Promise<ScrapeResult> {
+	// Harvest the initial view before scrolling so day-zero rows aren't missed.
+	await dispatcher.dispatch("evaluate", { tab_id: tabId, expression: HARVEST_EXPRESSION });
+
+	const deadline = now + TIME_BUDGET_MS;
+	let prevCount = 0;
+	let stall = 0;
+	let cycles = 0;
+	let oldestDate: string | null = null;
+	let stopReason: ScrapeStopReason = "capped_cycles";
+
+	while (cycles < maxCycles) {
+		cycles++;
+		// One round-trip: scroll → harvest → report (count + oldest day).
+		const res = await dispatcher.dispatch<{ value?: unknown }>("evaluate", {
+			tab_id: tabId,
+			expression: SCROLL_CYCLE_EXPRESSION,
+		});
+		let progress: ScrollProgress = { accCount: prevCount, renderedButtons: 0, oldestDate };
+		try {
+			if (typeof res?.value === "string") progress = JSON.parse(res.value) as ScrollProgress;
+		} catch {
+			// Keep prior progress on a parse failure.
+		}
+		if (progress.oldestDate) oldestDate = progress.oldestDate;
+		const count = progress.accCount;
+
+		stall = count > prevCount ? 0 : stall + 1;
+		prevCount = count;
+
+		const decision = decideScrollStop({
+			stall,
+			oldestDate,
+			stopBeforeMs,
+			timeUp: Date.now() >= deadline,
+		});
+		if (decision) {
+			stopReason = decision;
+			break;
+		}
+		// Reached the cycle cap without stopping → capped_cycles (loop default).
+	}
+
+	const collected = await dispatcher.dispatch<{ value?: unknown }>("evaluate", {
+		tab_id: tabId,
+		expression: COLLECT_EXPRESSION,
+	});
+	const rows = Array.isArray(collected?.value)
+		? (collected.value as RevolutDomRow[])
+		: [];
+	return { rows, stopReason, cycles, oldestDate };
+}
+
+/**
+ * Render the Revolut transactions page in the paired Chrome and scrape rows.
  *
  * Tries `focus_mode:"window"` first (a background scrape window that renders
  * without switching the user's tab); if it yields nothing — the signature of a
  * fully-occluded background window Chrome throttled — retries once with
- * `bring_to_front`. The list is virtualized, so we harvest after each of
- * `maxScrolls` scroll steps and accumulate (dedup) in-page, then collect.
+ * `bring_to_front`. The window stays open for the whole scroll loop (a
+ * first-time full backfill can take minutes; that's a one-time cost).
+ *
+ * `stopBeforeMs` drives backfill vs incremental:
+ *  - null (no checkpoint) → full backfill: scroll until the history bottom
+ *    (stall) or a safety cap.
+ *  - a timestamp (checkpoint set) → incremental: scroll only until the oldest
+ *    rendered day reaches that date, then stop.
  *
  * On an auth wall (landed host != requested, or zero rows + a login form) we
  * `focus_tab` to surface the tab so the user can re-enter their passcode, then
@@ -486,12 +682,14 @@ interface ProbeResult {
 async function scrapeTransactionRows(
 	dispatcher: ChromeActionDispatcher,
 	url: string,
-	maxScrolls: number,
-): Promise<RevolutDomRow[]> {
+	maxCycles: number,
+	stopBeforeMs: number | null,
+): Promise<ScrapeResult> {
 	const modes: Array<Record<string, unknown>> = [
 		{ focus_mode: "window" },
 		{ bring_to_front: true },
 	];
+	let last: ScrapeResult = { rows: [], stopReason: "exhausted", cycles: 0, oldestDate: null };
 	for (const mode of modes) {
 		const nav = await dispatcher.dispatch<{ tab_id: number; current_url?: string }>(
 			"navigate",
@@ -543,29 +741,8 @@ async function scrapeTransactionRows(
 		}
 
 		try {
-			// Harvest the initial view, then scroll + harvest repeatedly.
-			await dispatcher.dispatch("evaluate", {
-				tab_id: tabId,
-				expression: HARVEST_EXPRESSION,
-			});
-			for (let i = 0; i < maxScrolls; i++) {
-				await dispatcher.dispatch("evaluate", {
-					tab_id: tabId,
-					expression: SCROLL_EXPRESSION,
-				});
-				await dispatcher.dispatch("evaluate", {
-					tab_id: tabId,
-					expression: HARVEST_EXPRESSION,
-				});
-			}
-			const collected = await dispatcher.dispatch<{ value?: unknown }>("evaluate", {
-				tab_id: tabId,
-				expression: COLLECT_EXPRESSION,
-			});
-			const rows = Array.isArray(collected?.value)
-				? (collected.value as RevolutDomRow[])
-				: [];
-			if (rows.length > 0) return rows;
+			last = await scrollUntilStop(dispatcher, tabId, maxCycles, stopBeforeMs);
+			if (last.rows.length > 0) return last;
 			// Empty: likely the background window was occluded → try the next mode.
 		} finally {
 			try {
@@ -575,7 +752,7 @@ async function scrapeTransactionRows(
 			}
 		}
 	}
-	return [];
+	return last;
 }
 
 // ---------------------------------------------------------------------------
@@ -605,10 +782,10 @@ const configSchema = {
 		max_scrolls: {
 			type: "integer",
 			minimum: 1,
-			maximum: 100,
-			default: 20,
+			maximum: 300,
+			default: 300,
 			description:
-				"Maximum scroll iterations to lazy-load older transactions (default: 20).",
+				"Safety cap on scroll iterations. The first sync (no checkpoint) backfills ALL history — scrolling until the bottom (3 consecutive empty cycles) or this cap / a ~4-minute budget. Later syncs stop at the last-seen transaction. Lower it only to bound a one-off run.",
 		},
 	},
 };
@@ -674,17 +851,42 @@ export default class RevolutConnector extends ConnectorRuntime {
 				: null;
 		const maxScrolls = Math.max(
 			1,
-			Math.min(100, Number(config.max_scrolls ?? 20) || 20),
+			Math.min(MAX_SCROLL_CYCLES, Number(config.max_scrolls ?? MAX_SCROLL_CYCLES) || MAX_SCROLL_CYCLES),
 		);
 
-		const rows = await scrapeTransactionRows(dispatcher, startUrl, maxScrolls);
-		const all = buildTransactionsFromDom(rows);
+		// First sync (no checkpoint) → full backfill: scroll until the history
+		// bottom. Subsequent syncs → incremental: stop once we've scrolled back
+		// past the last-seen transaction's date.
+		const stopBeforeMs = checkpoint.last_timestamp
+			? new Date(checkpoint.last_timestamp).getTime()
+			: null;
+		const isBackfill = stopBeforeMs === null;
+
+		const scrape = await scrapeTransactionRows(
+			dispatcher,
+			startUrl,
+			maxScrolls,
+			Number.isFinite(stopBeforeMs as number) ? (stopBeforeMs as number) : null,
+		);
+		const all = buildTransactionsFromDom(scrape.rows);
 
 		let transactions = filterTransactionsSinceCheckpoint(all, checkpoint);
 		if (currencyFilter) {
 			transactions = transactions.filter((t) => t.currency === currencyFilter);
 		}
 		transactions.sort((a, b) => b.occurredAt.getTime() - a.occurredAt.getTime());
+
+		// Loudly note a capped backfill — we did NOT reach the bottom, so the
+		// oldest history is missing and a follow-up run is needed. Surfaced both
+		// here (worker run log) and in metadata.history_complete below; never a
+		// silent truncation.
+		const capped =
+			scrape.stopReason === "capped_cycles" || scrape.stopReason === "capped_time";
+		if (capped) {
+			console.warn(
+				`[revolut] backfill hit the ${scrape.stopReason === "capped_time" ? "time" : "scroll"} cap after ${scrape.cycles} cycles; reached back to ${scrape.oldestDate ?? "unknown"} but did NOT exhaust history. Re-run to continue from this point.`,
+			);
+		}
 
 		const events: EventEnvelope[] = transactions.map(transactionToEvent);
 		const newest = transactions[0];
@@ -700,8 +902,13 @@ export default class RevolutConnector extends ConnectorRuntime {
 			checkpoint: newCheckpoint as unknown as Record<string, unknown>,
 			metadata: {
 				items_found: events.length,
-				items_scraped: rows.length,
+				items_scraped: scrape.rows.length,
 				backend: "extension-dom",
+				mode: isBackfill ? "backfill" : "incremental",
+				stop_reason: scrape.stopReason,
+				scroll_cycles: scrape.cycles,
+				oldest_date_reached: scrape.oldestDate,
+				history_complete: scrape.stopReason !== "capped_cycles" && scrape.stopReason !== "capped_time",
 				...(currencyFilter ? { currency_filter: currencyFilter } : {}),
 			},
 		};

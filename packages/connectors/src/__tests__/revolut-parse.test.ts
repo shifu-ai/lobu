@@ -9,11 +9,13 @@ mock.module("@lobu/connector-sdk", () => ({
 
 import {
 	buildTransactionsFromDom,
+	decideScrollStop,
 	filterTransactionsSinceCheckpoint,
 	isAuthWall,
 	parseAmountString,
 	parseRevolutDate,
 	type RevolutTransaction,
+	STALL_CYCLES,
 	transactionToEvent,
 } from "../revolut";
 
@@ -228,6 +230,53 @@ describe("isAuthWall", () => {
 
 	test("same host, zero rows, no form is NOT an auth wall (just empty)", () => {
 		expect(isAuthWall(req, req, 0, false)).toBe(false);
+	});
+});
+
+describe("decideScrollStop (backfill exhaustion + incremental early-stop)", () => {
+	test("keeps scrolling while still making progress (no stop)", () => {
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2024-01-01", stopBeforeMs: null, timeUp: false }),
+		).toBeNull();
+		// One or two stall cycles is not yet the bottom.
+		expect(
+			decideScrollStop({ stall: STALL_CYCLES - 1, oldestDate: "2024-01-01", stopBeforeMs: null, timeUp: false }),
+		).toBeNull();
+	});
+
+	test("backfill stops as exhausted after STALL_CYCLES zero-progress cycles", () => {
+		expect(
+			decideScrollStop({ stall: STALL_CYCLES, oldestDate: "2021-12-01", stopBeforeMs: null, timeUp: false }),
+		).toBe("exhausted");
+	});
+
+	test("incremental stops once oldest rendered day reaches the checkpoint date", () => {
+		const checkpoint = Date.UTC(2026, 4, 20, 10, 0, 0); // 20 May 2026
+		// Still newer than the checkpoint → keep going.
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2026-05-25", stopBeforeMs: checkpoint, timeUp: false }),
+		).toBeNull();
+		// Oldest rendered day is the checkpoint day (end-of-day >= cutoff) → stop.
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2026-05-20", stopBeforeMs: checkpoint, timeUp: false }),
+		).toBe("reached_checkpoint");
+		// Scrolled a day past it → stop.
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2026-05-19", stopBeforeMs: checkpoint, timeUp: false }),
+		).toBe("reached_checkpoint");
+	});
+
+	test("time cap fires (capped_time) when the budget is exhausted", () => {
+		expect(
+			decideScrollStop({ stall: 0, oldestDate: "2024-01-01", stopBeforeMs: null, timeUp: true }),
+		).toBe("capped_time");
+	});
+
+	test("checkpoint precedence: reached_checkpoint wins over stall + time cap", () => {
+		const checkpoint = Date.UTC(2026, 4, 20, 10, 0, 0);
+		expect(
+			decideScrollStop({ stall: STALL_CYCLES, oldestDate: "2026-05-20", stopBeforeMs: checkpoint, timeUp: true }),
+		).toBe("reached_checkpoint");
 	});
 });
 
