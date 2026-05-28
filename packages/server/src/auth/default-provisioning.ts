@@ -23,6 +23,7 @@
 
 import { getDb } from '../db/client';
 import type { DbClient } from '../db/client';
+import { getModelProviderModules } from '../gateway/modules/module-system';
 import { getNextNumericId } from '../tools/admin/helpers/db-helpers';
 import { nextRunAt } from '../utils/cron';
 import logger from '../utils/logger';
@@ -116,10 +117,103 @@ export async function hasOrgSentinel(
 }
 
 /**
- * Provision the default Owletto agent for the given org, exactly once.
+ * Backfill an existing default-agent row to the shape this code expects:
+ *   - owner_platform / owner_user_id populated to the personal-org owner
+ *     (legacy installs wrote `'lobu', NULL` which fails the per-user
+ *     ownership check in `verifyOwnedAgentAccess`).
+ *   - agent_users mapping for that (platform, user_id) so `ownsAgent`
+ *     returns true on the PAT-session path.
+ *   - installed_providers populated with all currently-available
+ *     system-key providers when empty. Never removes existing entries
+ *     and never overwrites a non-empty list — admins may have curated
+ *     the list intentionally.
  *
- * Three guards stack:
- *   1. Sentinel in `organization.metadata` (deletion stickiness).
+ * Idempotent and only writes when there's something to fix. Returns
+ * silently when the row is absent (caller decides whether to INSERT).
+ */
+async function backfillDefaultAgent(
+  organizationId: string,
+  client: DbClient
+): Promise<void> {
+  const rows = (await client`
+    SELECT owner_platform, owner_user_id, installed_providers
+      FROM agents
+     WHERE organization_id = ${organizationId}
+       AND id = ${DEFAULT_AGENT_ID}
+     LIMIT 1
+  `) as unknown as Array<{
+    owner_platform: string | null;
+    owner_user_id: string | null;
+    installed_providers: unknown;
+  }>;
+  const row = rows[0];
+  if (!row) return;
+
+  const orgMetadata = await readOrgMetadata(client, organizationId);
+  const ownerUserIdRaw = orgMetadata['personal_org_for_user_id'];
+  const ownerUserId =
+    typeof ownerUserIdRaw === 'string' && ownerUserIdRaw.length > 0
+      ? ownerUserIdRaw
+      : null;
+
+  const installedNow = Array.isArray(row.installed_providers)
+    ? (row.installed_providers as Array<{ providerId: string }>)
+    : [];
+  const installedIds = new Set(installedNow.map((p) => p.providerId));
+  const missingSystemProviders = getModelProviderModules()
+    .filter((m) => m.hasSystemKey() && !installedIds.has(m.providerId))
+    .map((m) => ({ providerId: m.providerId, installedAt: Date.now() }));
+
+  const needsOwnerFix =
+    ownerUserId &&
+    (row.owner_user_id !== ownerUserId || row.owner_platform !== 'external');
+  const needsProvidersFix =
+    installedNow.length === 0 && missingSystemProviders.length > 0;
+
+  if (needsOwnerFix || needsProvidersFix) {
+    const nextProviders = needsProvidersFix
+      ? missingSystemProviders
+      : installedNow;
+    await client`
+      UPDATE agents SET
+        owner_platform = ${needsOwnerFix ? 'external' : row.owner_platform},
+        owner_user_id = ${needsOwnerFix ? ownerUserId : row.owner_user_id},
+        installed_providers = ${client.json(nextProviders)},
+        updated_at = NOW()
+      WHERE organization_id = ${organizationId}
+        AND id = ${DEFAULT_AGENT_ID}
+    `;
+    logger.info(
+      {
+        organizationId,
+        agentId: DEFAULT_AGENT_ID,
+        ownerFixed: !!needsOwnerFix,
+        providersAdded: needsProvidersFix
+          ? missingSystemProviders.map((p) => p.providerId)
+          : [],
+      },
+      '[default-provisioning] Backfilled default agent'
+    );
+  }
+
+  if (ownerUserId) {
+    await client`
+      INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+      VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, now())
+      ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+    `;
+  }
+}
+
+/**
+ * Provision the default Owletto agent for the given org, exactly once. Also
+ * runs `backfillDefaultAgent` on every call so legacy installs (where the
+ * row was inserted before this code populated owner/providers) heal in
+ * place — that part is idempotent and only writes on divergence.
+ *
+ * Three guards stack on the create path:
+ *   1. Sentinel in `organization.metadata` (deletion stickiness — a deleted
+ *      default agent is NOT auto-recreated).
  *   2. No existing agents in the org (don't graft Owletto's defaults onto an
  *      org that's already curated agents by hand).
  *   3. ON CONFLICT (organization_id, id) DO NOTHING on the agents PK.
@@ -133,6 +227,14 @@ export async function ensureDefaultAgent(
 ): Promise<{ created: boolean; reason: 'sentinel' | 'has_agents' | 'inserted' }> {
   const client = sql ?? getDb();
   try {
+    // Always run the backfill — it's idempotent and only writes when there's
+    // a divergence to fix. Legacy installs that ran ensureDefaultAgent before
+    // this PR have the row but with `owner_user_id = NULL` and
+    // `installed_providers = []`; the sentinel-fast-path would have skipped
+    // them otherwise, and `lobu chat -c local` would still hit 403 / "No
+    // model configured" on those installs.
+    await backfillDefaultAgent(organizationId, client);
+
     const provisioned = await hasOrgSentinel(organizationId, DEFAULT_AGENT_SENTINEL, client);
     if (provisioned) {
       return { created: false, reason: 'sentinel' };
@@ -152,20 +254,58 @@ export async function ensureDefaultAgent(
       return { created: false, reason: 'has_agents' };
     }
 
+    // Resolve the set of model providers that have a system-level credential
+    // available at this boot (env-var API keys, claude OAuth-discovery, etc.)
+    // and install them onto the default agent up front. Without this, the row
+    // exists but `installed_providers = '[]'` and `lobu chat -c local` would
+    // immediately hit "No model configured" — even though the env keys are
+    // sitting right there in the same process.
+    const systemProviders = getModelProviderModules()
+      .filter((m) => m.hasSystemKey())
+      .map((m) => ({
+        providerId: m.providerId,
+        installedAt: Date.now(),
+      }));
+
+    // Resolve the owning user — the personal_org metadata is the canonical
+    // marker. The default agent is shown as user-owned (rather than the
+    // legacy `'lobu', NULL` org-level marker) so the per-user ownership
+    // check in `verifyOwnedAgentAccess` recognizes this user as the agent's
+    // owner: without it, a PAT session for the user can't open a session
+    // against their own org's default agent.
+    const orgMetadataForInsert = await readOrgMetadata(client, organizationId);
+    const ownerForInsertRaw = orgMetadataForInsert['personal_org_for_user_id'];
+    const ownerUserId =
+      typeof ownerForInsertRaw === 'string' && ownerForInsertRaw.length > 0
+        ? ownerForInsertRaw
+        : null;
+
     // Insert the default agent. The PK is (organization_id, id) so we can
     // ON CONFLICT DO NOTHING to guard against a parallel boot.
     await client`
       INSERT INTO agents (
         id, organization_id, name, identity_md,
         owner_platform, owner_user_id, is_workspace_agent,
+        installed_providers,
         created_at, updated_at
       ) VALUES (
         ${DEFAULT_AGENT_ID}, ${organizationId}, ${DEFAULT_AGENT_NAME}, ${DEFAULT_AGENT_IDENTITY},
-        'lobu', NULL, false,
+        'external', ${ownerUserId}, false,
+        ${client.json(systemProviders)},
         NOW(), NOW()
       )
       ON CONFLICT (organization_id, id) DO NOTHING
     `;
+
+    // Mirror the ownership into agent_users so `userAgentsStore.ownsAgent`
+    // returns true on the PAT-session path used by `lobu chat -c local`.
+    if (ownerUserId) {
+      await client`
+        INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+        VALUES (${organizationId}, ${DEFAULT_AGENT_ID}, 'external', ${ownerUserId}, now())
+        ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+      `;
+    }
 
     await writeOrgSentinel(
       client,
@@ -175,7 +315,7 @@ export async function ensureDefaultAgent(
     );
 
     logger.info(
-      { organizationId, agentId: DEFAULT_AGENT_ID },
+      { organizationId, agentId: DEFAULT_AGENT_ID, ownerUserId },
       '[default-provisioning] Provisioned default agent'
     );
     return { created: true, reason: 'inserted' };

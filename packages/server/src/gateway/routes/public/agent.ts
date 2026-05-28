@@ -5,7 +5,6 @@ import {
   createLogger,
   createRootSpan,
   generateWorkerToken,
-  type InstalledProvider,
   type McpServerConfig,
   type NetworkConfig,
   normalizeDomainPatterns,
@@ -15,6 +14,7 @@ import type { Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import { bindRequestAbortToStream } from "../../../events/sse-abort-bridge.js";
 import { z } from "zod";
+import { DEFAULT_AGENT_ID } from "../../../auth/default-provisioning.js";
 import type { AgentMetadataStore } from "../../auth/agent-metadata-store.js";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
 import {
@@ -26,7 +26,6 @@ import type { AgentSettingsStore } from "../../auth/settings/agent-settings-stor
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
 import type { QueueProducer } from "../../infrastructure/queue/queue-producer.js";
-import { getModelProviderModules } from "../../modules/module-system.js";
 import type { PlatformRegistry } from "../../platform.js";
 import { resolveAgentOptions } from "../../services/platform-helpers.js";
 import type { SseManager } from "../../services/sse-manager.js";
@@ -506,10 +505,60 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
    */
   async function requireAgentOwnership(
     c: Context,
-    resolvedAgentId: string
+    resolvedAgentId: string,
+    sessionForTenantCheck?: { organizationId?: string } | null
   ): Promise<Response | null> {
     const deny = () =>
       c.json({ success: false, error: "Forbidden" }, 403) as Response;
+
+    // Tenant guard: agent-id-string ownership is per (platform, userId,
+    // agentId) — but the agentId string can repeat across tenants (the
+    // global `DEFAULT_AGENT_ID` constant, or two orgs that happen to share
+    // an id). If a session belongs to org A and the caller's auth context
+    // says org B, deny BEFORE any ownership check — otherwise org B would
+    // pass ownership against its own agent-X and reach org A's session
+    // routed by the same agent-X. Returning the same `Forbidden` shape as
+    // ownership keeps the response uniform (no enumeration oracle on which
+    // check failed). Routes that load a session before calling this MUST
+    // pass it in; createAgent has no pre-existing session and passes null.
+    if (sessionForTenantCheck?.organizationId) {
+      const callerOrgId =
+        (c.get("organizationId") as string | undefined) ??
+        c.get("authContext")?.organizationId;
+      if (
+        callerOrgId &&
+        sessionForTenantCheck.organizationId !== callerOrgId
+      ) {
+        return deny();
+      }
+    }
+
+    // Defense-in-depth for the tenant guard above. That guard only fires when
+    // the auth method populated an org (PAT bridge / worker token / external
+    // OAuth all set one). The settings-session COOKIE path authenticates a
+    // userId but carries NO org, so the guard above is a no-op for it — yet
+    // `verifyOwnedAgentAccess` authorizes on (platform, userId, agentId) and
+    // returns the CALLER's org, never the session's. Without this, a cookie
+    // session for org B could read org A's session via a shared agentId (the
+    // global DEFAULT_AGENT_ID). So compare the org ownership actually resolved
+    // to against the session's, and deny on a definite mismatch. An undefined
+    // on either side falls through unchanged — this never denies a legitimate
+    // same-org caller, it only closes the cross-org case the guard above misses.
+    const authorizeOwnership = (access: {
+      authorized: boolean;
+      organizationId?: string;
+    }): Response | null => {
+      if (!access.authorized) return deny();
+      const tenantOrg = sessionForTenantCheck?.organizationId;
+      if (
+        tenantOrg &&
+        access.organizationId &&
+        access.organizationId !== tenantOrg
+      ) {
+        return deny();
+      }
+      return null;
+    };
 
     const bearer = tokenFromHeader(c);
 
@@ -521,7 +570,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         resolvedAgentId,
         ownershipAccessConfig
       );
-      return access.authorized ? null : deny();
+      return authorizeOwnership(access);
     }
 
     if (!bearer) return deny();
@@ -563,7 +612,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             resolvedAgentId,
             ownershipAccessConfig
           );
-          return access.authorized ? null : deny();
+          return authorizeOwnership(access);
         }
       } catch {
         // fall through to deny
@@ -624,57 +673,78 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       }
     }
 
-    const isEphemeral = !requestedAgentId?.trim();
-    const agentId = requestedAgentId?.trim() || randomUUID();
-
-    // If the caller pinned a specific agentId, require ownership so a signed-in
-    // user cannot open a session against another tenant's agent. The denial is
-    // uniform on purpose: never reveal whether `agentId` exists (distinguishing
-    // "missing" from "exists-but-unauthorized" would be a cross-tenant
-    // enumeration oracle). The getting-started UX is carried by `lobu run`
-    // auto-applying the project, so a fresh local agent exists by chat time.
-    if (!isEphemeral) {
-      const denial = await requireAgentOwnership(c, agentId);
-      if (denial) return denial;
+    // Resolve the target agent. Two flows, no third:
+    //   - caller pinned agentId → use it (with ownership check)
+    //   - no agentId → route to the org's default agent (`owletto-default`)
+    // The third flow that used to live here ("ephemeral": generate a UUID
+    // and auto-install providers on it) is gone — it created a phantom
+    // agent per chat, never used the user's actual default agent, and the
+    // saveSettings UPDATE silently no-op'd on a row that didn't exist yet.
+    // Default-agent provisioning runs at signup (`ensureDefaultAgent`) and
+    // already populates `installed_providers` from system-key providers,
+    // so the row exists with credentials by the time chat reaches here.
+    //
+    // Org resolution: `createLobuAuthBridge` (outer middleware on `/lobu/*`)
+    // sets `c.get("organizationId")` from the PAT — that's the common path
+    // for `lobu chat -c local`. `createApiAuthMiddleware` (this app's inner
+    // middleware) sets `authContext` for the worker-token and external-OAuth
+    // paths. Check both.
+    const callerOrgId =
+      (c.get("organizationId") as string | undefined) ??
+      c.get("authContext")?.organizationId;
+    let agentId = requestedAgentId?.trim();
+    if (!agentId) {
+      if (!callerOrgId) {
+        return c.json(
+          {
+            success: false,
+            error:
+              "Cannot resolve default agent: caller has no organization context",
+          },
+          400
+        );
+      }
+      const defaultMeta = await ownershipMetadataStore?.getMetadata(
+        DEFAULT_AGENT_ID
+      );
+      if (!defaultMeta || defaultMeta.organizationId !== callerOrgId) {
+        return c.json(
+          {
+            success: false,
+            error: `Default agent "${DEFAULT_AGENT_ID}" not provisioned for this organization. Run lobu apply or create an agent first.`,
+          },
+          404
+        );
+      }
+      agentId = DEFAULT_AGENT_ID;
     }
+
+    const ownershipDenial = await requireAgentOwnership(c, agentId);
+    if (ownershipDenial) return ownershipDenial;
 
     // Stamp the worker token with the agent's owning org so the egress
     // proxy's per-tenant gates (grant/deny, judge cache, judge policy)
-    // can scope decisions by org. Ephemeral agents have no preexisting
-    // metadata; their token mints without orgId and the proxy falls
-    // through to unscoped checks for that worker — flagged for a
-    // future fix that derives org from the auth session.
-    const tokenOrganizationId =
-      !isEphemeral && ownershipMetadataStore
-        ? (await ownershipMetadataStore.getMetadata(agentId))?.organizationId
-        : undefined;
-
-    // For ephemeral agents, auto-provision settings from system-key
-    // providers (env-var-based API keys). No more template-agent fallback —
-    // there are no template/sandbox agents anymore.
-    if (isEphemeral && agentSettingsStore) {
-      const providerModules = getModelProviderModules();
-      const systemProviders: InstalledProvider[] = providerModules
-        .filter((m) => m.hasSystemKey())
-        .map((m) => ({
-          providerId: m.providerId,
-          installedAt: Date.now(),
-        }));
-
-      if (systemProviders.length > 0) {
-        await agentSettingsStore.saveSettings(agentId, {
-          installedProviders: systemProviders,
-        });
-        logger.info(
-          `Ephemeral agent ${agentId}: provisioned system providers [${systemProviders.map((p) => p.providerId).join(", ")}]`
-        );
-      }
-    }
+    // can scope decisions by org. Prefer the agent's metadata; fall back
+    // to the caller's auth-context org for the default-agent route where
+    // the lookup above already proved ownership.
+    const metadataOrgId = ownershipMetadataStore
+      ? (await ownershipMetadataStore.getMetadata(agentId))?.organizationId
+      : undefined;
+    const tokenOrganizationId = metadataOrgId ?? callerOrgId;
 
     const watcherIntent = intent?.kind === "watcher_run" ? intent : null;
+    // userId backs `conversationId = ${agentId}_${userId}[_${thread}]`, which
+    // is the session-store key. For pinned agents the agentId is per-org so
+    // collisions are bounded to a single tenant. For the default-agent path
+    // agentId is a GLOBAL constant (DEFAULT_AGENT_ID) — so the userId must
+    // be unique-per-caller to keep conversationIds globally unique and
+    // prevent cross-tenant session resume. Prefer the request body, then the
+    // authenticated caller's userId (per-org-unique via the auth bridge),
+    // then fall back to agentId (only for pinned agents where that's safe).
+    const authUserId = c.get("authContext")?.userId;
     const userId = watcherIntent
       ? `watcher_${watcherIntent.watcherId}`
-      : requestedUserId || agentId;
+      : requestedUserId || authUserId || agentId;
     const effectiveThread = watcherIntent
       ? `run_${watcherIntent.runId}`
       : thread;
@@ -685,15 +755,48 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     // Uses _ separator (colons not allowed in BullMQ custom IDs). Watcher
     // automation gets one deterministic one-shot session per run and never
     // resumes human/API sessions such as marketing_marketing.
+    //
+    // Tenant-scope: include tokenOrganizationId so default-agent sessions
+    // (DEFAULT_AGENT_ID is a global constant) AND pinned-agent sessions
+    // (agentId is a per-org-unique row id, but two orgs can share the same
+    // id string) never collide across tenants in the in-memory session
+    // store. The resume guard below catches in-flight collisions; the org
+    // suffix prevents `forceNew` from silently overwriting another tenant's
+    // session at setSession time.
+    //
+    // Watcher sessions are EXEMPT: their conversationId is already globally
+    // unique via the DB-serial watcherId + runId, and downstream correlation
+    // relies on the exact `..._watcher_<id>_run_<id>` shape — the worker
+    // session key AND the API/SSE owner-routing key (unified-thread-consumer)
+    // both derive from this conversationId. Injecting `_<org>_` mid-id splits
+    // `watcher_<id>` from `run_<id>`, breaking watcher→worker dispatch (caught
+    // by the sdk-e2e gate). Keep the prod-proven shape for the watcher path.
+    const orgScope =
+      tokenOrganizationId && !watcherIntent ? `_${tokenOrganizationId}` : "";
     const conversationId = effectiveThread
-      ? `${agentId}_${userId}_${effectiveThread}`
-      : `${agentId}_${userId}`;
+      ? `${agentId}_${userId}${orgScope}_${effectiveThread}`
+      : `${agentId}_${userId}${orgScope}`;
     const channelId = `api_${userId}`;
     const deploymentName = `api-${agentId.slice(0, 8)}`;
 
-    // Try to resume existing session (unless forceNew is requested)
+    // Try to resume existing session (unless forceNew is requested).
+    // Refuse cross-tenant resume defensively: even though the userId fallback
+    // above is per-org-unique for the default-agent path, a future caller that
+    // bypasses the auth bridge or passes a colliding requestedUserId would
+    // otherwise resume another tenant's session and leak its worker token.
     if (!effectiveForceNew) {
       const existing = await sessMgr.getSession(conversationId);
+      if (
+        existing &&
+        existing.organizationId &&
+        tokenOrganizationId &&
+        existing.organizationId !== tokenOrganizationId
+      ) {
+        logger.warn(
+          `Refusing to resume session ${conversationId} for org ${tokenOrganizationId}: belongs to org ${existing.organizationId}`
+        );
+        return c.json({ success: false, error: "Forbidden" }, 403);
+      }
       if (existing) {
         // Reuse existing session — touch lastActivity and return existing token
         await sessMgr.touchSession(conversationId);
@@ -761,7 +864,6 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       ...(tokenOrganizationId ? { organizationId: tokenOrganizationId } : {}),
       dryRun: effectiveDryRun,
       intent: watcherIntent ?? undefined,
-      isEphemeral,
     };
     await sessMgr.setSession(session);
 
@@ -792,7 +894,8 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     const denial = await requireAgentOwnership(
       c,
-      session.agentId || sessionKey
+      session.agentId || sessionKey,
+      session
     );
     if (denial) return denial;
 
@@ -820,7 +923,8 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     const existingSession = await sessMgr.getSession(sessionKey);
     const denial = await requireAgentOwnership(
       c,
-      existingSession?.agentId || sessionKey
+      existingSession?.agentId || sessionKey,
+      existingSession
     );
     if (denial) return denial;
 
@@ -829,20 +933,12 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     // replay stale completion events from this deleted session.
     sseManager.closeAgent(sessionKey, "agent_deleted");
 
-    // Reuse the session we loaded for ownership verification above.
-    const realAgentId = existingSession?.agentId || sessionKey;
-    const wasEphemeral = existingSession?.isEphemeral === true;
-
+    // Delete the session only. Agent rows persist — they're owned by the
+    // org (declared agents) or the user's personal org (the default agent).
+    // The phantom-ephemeral-agent cleanup that used to run here is gone:
+    // there are no phantom rows to clean up under the default-agent flow.
     await sessMgr.deleteSession(sessionKey);
-    // Only tear down agent settings if we auto-provisioned them for an
-    // ephemeral session. Named/shared agents (like ones loaded from
-    // filesystem config) must keep their settings across session lifecycles.
-    if (wasEphemeral && agentSettingsStore) {
-      await agentSettingsStore.deleteSettings(realAgentId).catch(() => {
-        /* best-effort cleanup */
-      });
-    }
-    logger.info(`Deleted agent ${sessionKey}`);
+    logger.info(`Deleted agent session ${sessionKey}`);
 
     return c.json({
       success: true,
@@ -864,7 +960,8 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     // cross-tenant caller would receive another agent's buffered events.
     const denial = await requireAgentOwnership(
       c,
-      session.agentId || sessionKey
+      session.agentId || sessionKey,
+      session
     );
     if (denial) return denial;
 
@@ -981,7 +1078,8 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     const preSession = await sessMgr.getSession(agentId);
     const ownershipDenial = await requireAgentOwnership(
       c,
-      preSession?.agentId || agentId
+      preSession?.agentId || agentId,
+      preSession
     );
     if (ownershipDenial) return ownershipDenial;
 
