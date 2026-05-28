@@ -638,16 +638,22 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       if (denial) return denial;
     }
 
-    // Stamp the worker token with the agent's owning org so the egress
-    // proxy's per-tenant gates (grant/deny, judge cache, judge policy)
-    // can scope decisions by org. Ephemeral agents have no preexisting
-    // metadata; their token mints without orgId and the proxy falls
-    // through to unscoped checks for that worker — flagged for a
-    // future fix that derives org from the auth session.
-    const tokenOrganizationId =
+    // Stamp the worker token with the owning org so the egress proxy's
+    // per-tenant gates (grant/deny, judge cache, judge policy) can scope
+    // decisions by org. Prefer the agent's own metadata; fall back to the
+    // caller's organizationId (already resolved by `createLobuAuthBridge`
+    // from the PAT or Better Auth session). Without the fallback,
+    // ephemeral agents under `lobu chat -c local` mint a tokenless org and
+    // the downstream cross-pod conversation-lock guard refuses to spawn
+    // the worker (#1068).
+    const callerOrgId =
+      (c.get("organizationId") as string | undefined) ??
+      c.get("authContext")?.organizationId;
+    const metadataOrgId =
       !isEphemeral && ownershipMetadataStore
         ? (await ownershipMetadataStore.getMetadata(agentId))?.organizationId
         : undefined;
+    const tokenOrganizationId = metadataOrgId ?? callerOrgId;
 
     // For ephemeral agents, auto-provision settings from system-key
     // providers (env-var-based API keys). No more template-agent fallback —
