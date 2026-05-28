@@ -46,6 +46,75 @@ const pendingSignalWaiters = new Map<
 >();
 const authAbortController = new AbortController();
 
+// ---------------------------------------------------------------------------
+// Chrome-action dispatch reverse channel: connectors call
+// `ctx.sessionState.chrome_dispatcher.dispatch(action_key, input)` from inside
+// `sync()`; the call is routed over IPC to the parent (connector-worker
+// daemon), which posts to the gateway's
+// /api/workers/dispatch-chrome-action endpoint. The endpoint inserts a chrome
+// connector action run, waits for the paired Owletto extension to claim +
+// complete it, and returns the action_output back along the chain.
+//
+// One IPC request id per call. Resolves with the observation; rejects with
+// the gateway-side error_message on failure.
+// ---------------------------------------------------------------------------
+
+let nextDispatchRequestId = 1;
+const pendingDispatchWaiters = new Map<
+  number,
+  { resolve: (v: Record<string, unknown>) => void; reject: (e: Error) => void }
+>();
+
+// Hard ceiling per dispatch. The gateway bridge itself caps at
+// QUEUE_BUDGET_MS (60s) + POST_CLAIM_BUDGET_MS (120s) = 180s, plus a small
+// buffer for HTTP round-trip. We give the child 240s before forcibly
+// rejecting so a wedged daemon/IPC channel can't leave sync() hanging
+// indefinitely. Caught by pi review of #1132.
+const CHROME_DISPATCH_HARD_TIMEOUT_MS = 240_000;
+
+function dispatchChromeAction(
+  actionKey: string,
+  actionInput: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  return new Promise<Record<string, unknown>>((resolve, reject) => {
+    const requestId = nextDispatchRequestId++;
+    const timer = setTimeout(() => {
+      if (pendingDispatchWaiters.delete(requestId)) {
+        reject(
+          new Error(
+            `chrome_dispatcher.dispatch('${actionKey}') exceeded ${CHROME_DISPATCH_HARD_TIMEOUT_MS}ms; IPC may be wedged`
+          )
+        );
+      }
+    }, CHROME_DISPATCH_HARD_TIMEOUT_MS);
+    pendingDispatchWaiters.set(requestId, {
+      resolve: (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      reject: (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    });
+    sendIPC({
+      type: 'chrome_dispatch_request',
+      requestId,
+      actionKey,
+      actionInput,
+    }).catch((err: unknown) => {
+      if (pendingDispatchWaiters.delete(requestId)) {
+        clearTimeout(timer);
+        reject(
+          new Error(
+            `chrome_dispatcher.dispatch('${actionKey}') IPC send failed: ${err instanceof Error ? err.message : String(err)}`
+          )
+        );
+      }
+    });
+  });
+}
+
 function awaitAuthSignal(
   name: string,
   options?: { timeoutMs?: number }
@@ -138,13 +207,27 @@ async function executeConnectorRuntime(
     await sendIPC({ type: 'checkpoint_update', checkpoint: checkpoint ?? null });
   };
 
+  // Always splice a live `chrome_dispatcher` handle onto sessionState. The
+  // dispatcher is a JS object that closes over the IPC channel — it can't
+  // travel through the wire, so we re-create it in the child every run.
+  // Connectors that don't need it simply ignore the field; calling
+  // .dispatch() with no online paired Owletto extension surfaces a clean
+  // error from the gateway-side bridge.
+  const sessionStateForSync = {
+    ...(job.sessionState ?? {}),
+    chrome_dispatcher: {
+      dispatch: (actionKey: string, actionInput: Record<string, unknown>) =>
+        dispatchChromeAction(actionKey, actionInput),
+    },
+  } as Record<string, unknown>;
+
   const syncResult = (await instance.sync({
     feedKey: job.feedKey,
     config: { ...job.env, ...job.config },
     checkpoint: job.checkpoint,
     credentials: job.credentials,
     entityIds: job.entityIds,
-    sessionState: job.sessionState,
+    sessionState: sessionStateForSync,
     emitEvents,
     updateCheckpoint,
   })) as SyncResult;
@@ -248,6 +331,20 @@ async function main() {
   let started = false;
   // Wait for message from parent
   process.on('message', async (msg: any) => {
+    // Chrome-dispatch reverse channel: parent ships the
+    // /dispatch-chrome-action observation (or error) back to us.
+    if (msg?.type === 'chrome_dispatch_response') {
+      const waiter = pendingDispatchWaiters.get(msg.requestId);
+      if (waiter) {
+        pendingDispatchWaiters.delete(msg.requestId);
+        if (msg.error) {
+          waiter.reject(new Error(String(msg.error)));
+        } else {
+          waiter.resolve((msg.output ?? {}) as Record<string, unknown>);
+        }
+      }
+      return;
+    }
     // Auth-mode reverse channel: parent sends signal payloads + abort.
     if (msg?.type === 'await_signal_response') {
       const waiter = pendingSignalWaiters.get(msg.requestId);

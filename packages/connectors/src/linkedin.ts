@@ -1,30 +1,29 @@
 /**
  * LinkedIn Connector
  *
- * Scrapes LinkedIn company pages via browser network interception.
- * Uses Playwright to navigate company pages and intercept Voyager API responses.
- * Auth via Chrome attach over CDP — the user signs in once to a dedicated
- * Chrome window started by `lobu memory browser-auth`, and the connector
- * connects to that live profile at sync time.
+ * Scrapes LinkedIn company pages via the paired Owletto Chrome extension's
+ * network-intercept primitive. The extension runs inside the user's real
+ * Chrome session — no Playwright, no cookie cache, no `--remote-debugging-
+ * port` plumbing. We attach the CDP Network domain in the user's signed-in
+ * tab, drive scroll pagination, and parse the Voyager API responses the
+ * page emits.
  *
- * Follows the same pattern as the X (Twitter) connector.
+ * Auth is implicit: the user is already signed into linkedin.com in the
+ * paired Chrome. There is no fallback path — if no online Owletto extension
+ * is reachable in the connection's org, this sync fails fast with a clear
+ * "no paired Owletto extension" error.
  */
 
 import {
-  browserNetworkSync,
+  type ChromeActionDispatcher,
   type ConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
   type EventEnvelope,
+  extensionNetworkSync,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
-import {
-  getBrowserCdpUrl,
-  getBrowserCookies,
-  getBrowserUserDataDir,
-  validateCookieNotExpired,
-} from './browser-scraper-utils';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -57,6 +56,27 @@ interface LinkedInJob {
 function normalizeCheckpointPostId(postId?: string): string | undefined {
   if (!postId) return undefined;
   return postId.startsWith('li_post_') ? postId.slice('li_post_'.length) : postId;
+}
+
+/**
+ * Pull the chrome action dispatcher from sessionState. The connector-worker
+ * subprocess (child-runner.ts) splices a live `chrome_dispatcher` object
+ * onto every sync's sessionState; the dispatcher's `dispatch()` rides an
+ * IPC channel up to the daemon and out to the gateway's
+ * /api/workers/dispatch-chrome-action bridge. When no paired Owletto
+ * extension is online in the connection's org, the bridge returns the
+ * `failed` status and the dispatcher throws — we surface that as the sync
+ * failure verbatim.
+ */
+function requireExtensionDispatcher(ctx: SyncContext): ChromeActionDispatcher {
+  const handle = (ctx.sessionState as Record<string, unknown> | null | undefined)
+    ?.chrome_dispatcher as ChromeActionDispatcher | undefined;
+  if (!handle || typeof handle.dispatch !== 'function') {
+    throw new Error(
+      'LinkedIn connector requires a paired Owletto Chrome extension. No chrome_dispatcher was injected into sessionState — re-run on a connector-worker that has the dispatcher bridge.'
+    );
+  }
+  return handle;
 }
 
 export function filterPostsSinceCheckpoint(
@@ -236,17 +256,14 @@ export default class LinkedInConnector extends ConnectorRuntime {
   readonly definition: ConnectorDefinition = {
     key: 'linkedin',
     name: 'LinkedIn',
-    description: 'Scrapes LinkedIn company pages for posts, hiring signals, and team data.',
-    version: '1.1.0',
+    description:
+      'Scrapes LinkedIn company pages for posts, hiring signals, and team data via the paired Owletto Chrome extension.',
+    version: '2.0.0',
     faviconDomain: 'linkedin.com',
     authSchema: {
       methods: [
         {
-          type: 'browser',
-          capture: 'cli',
-          requiredDomains: ['linkedin.com', '.linkedin.com'],
-          description:
-            'Preferred auth mode for LinkedIn scraping. The CLI launches a dedicated Chrome with remote debugging; you log into LinkedIn once and the connector attaches over CDP, harvesting cookies live from that session.',
+          type: 'none',
         },
         {
           type: 'oauth',
@@ -260,7 +277,7 @@ export default class LinkedInConnector extends ConnectorRuntime {
           clientIdKey: 'LINKEDIN_CLIENT_ID',
           clientSecretKey: 'LINKEDIN_CLIENT_SECRET',
           description:
-            'Optional LinkedIn OAuth app config for sign-in and future API-based access. Current company page and jobs feeds still scrape via browser session cookies.',
+            'Optional LinkedIn OAuth app config for sign-in. Current company page and jobs feeds run via the Chrome extension; OAuth is here for downstream sign-in flows.',
           setupInstructions:
             'Create a LinkedIn OAuth app, add {{redirect_uri}} as the callback URL, then paste the client ID and client secret below.',
         },
@@ -320,67 +337,41 @@ export default class LinkedInConnector extends ConnectorRuntime {
 
     // Normalize URL - remove trailing slash
     const baseUrl = companyUrl.replace(/\/$/, '');
-
-    const userDataDir = getBrowserUserDataDir(ctx.sessionState);
-    const cdpUrlFromSession = getBrowserCdpUrl(ctx.sessionState);
-    const cdpUrl = cdpUrlFromSession ?? 'auto';
-    // No need to require cookies when the device tells us to attach directly
-    // (managed --user-data-dir on disk, or an explicit CDP endpoint pointed
-    // at the user's running Chrome). The cookie cascade is only the fallback
-    // for the cloud/auto path.
-    const skipServerCookies = !!userDataDir || !!cdpUrlFromSession;
-    const cookies = skipServerCookies
-      ? []
-      : getBrowserCookies(ctx.checkpoint as any, ctx.sessionState as any, 'linkedin');
-    if (!skipServerCookies) {
-      validateCookieNotExpired(cookies, 'li_at', 'linkedin');
-    }
-
     const maxScrolls = (config.max_scrolls as number) ?? (feedKey === 'jobs' ? 3 : 5);
 
+    const dispatcher = requireExtensionDispatcher(ctx);
     if (feedKey === 'jobs') {
-      return this.syncJobs(baseUrl, cookies, maxScrolls, checkpoint, userDataDir, cdpUrl);
+      return this.syncJobs(baseUrl, maxScrolls, checkpoint, dispatcher);
     }
-
-    return this.syncUpdates(baseUrl, cookies, maxScrolls, checkpoint, userDataDir, cdpUrl);
+    return this.syncUpdates(baseUrl, maxScrolls, checkpoint, dispatcher);
   }
 
   private async syncUpdates(
     baseUrl: string,
-    cookies: any[],
     maxScrolls: number,
     checkpoint: LinkedInCheckpoint,
-    userDataDir: string | undefined,
-    cdpUrl: string | 'auto'
+    dispatcher: ChromeActionDispatcher
   ): Promise<SyncResult> {
     const postsUrl = `${baseUrl}/posts/`;
-
-    const result = await browserNetworkSync<LinkedInPost>({
+    const result = await extensionNetworkSync<LinkedInPost>({
+      dispatcher,
+      url: postsUrl,
       config: {
         interceptPatterns: [
-          /voyager\/api\/graphql\?variables=.*ORGANIZATION_MEMBER_FEED/,
-          /voyager\/api\/graphql\?variables=.*organizationalPageUrn/,
+          { regex: 'voyager/api/graphql\\?variables=.*ORGANIZATION_MEMBER_FEED' },
+          { regex: 'voyager/api/graphql\\?variables=.*organizationalPageUrn' },
         ],
-        authDomains: ['linkedin.com', '.linkedin.com', '.www.linkedin.com'],
-        stealth: true,
+        allowedOrigins: ['linkedin.com', '*.linkedin.com'],
         maxScrolls,
         scrollDelayMs: 3000,
         responseTimeoutMs: 8000,
-        navigationTimeoutMs: 20000,
       },
-      url: postsUrl,
-      cdpUrl,
-      cookies,
-      userDataDir,
       parseResponse: parseCompanyUpdates,
-      checkAuth: async (page) => {
-        const url = page.url();
-        return !url.includes('/login') && !url.includes('/authwall');
-      },
+      checkAuth: (currentUrl) =>
+        !currentUrl.includes('/login') && !currentUrl.includes('/authwall'),
     });
 
     const posts = filterPostsSinceCheckpoint(result.items, checkpoint);
-
     const events: EventEnvelope[] = posts.map((post) => ({
       origin_id: `li_post_${post.id}`,
       payload_text: post.text,
@@ -399,8 +390,9 @@ export default class LinkedInConnector extends ConnectorRuntime {
         shares: post.shares,
       },
     }));
-
-    events.sort((a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime());
+    events.sort(
+      (a, b) => new Date(b.occurred_at).getTime() - new Date(a.occurred_at).getTime()
+    );
 
     return {
       events,
@@ -408,58 +400,49 @@ export default class LinkedInConnector extends ConnectorRuntime {
         last_post_id: posts[0]?.id ?? checkpoint.last_post_id,
         last_timestamp: events[0]?.occurred_at?.toISOString?.() ?? checkpoint.last_timestamp,
       } as unknown as Record<string, unknown>,
-      auth_update: { cookies: result.cookies },
+      // No cookie persistence — auth lives in the user's signed-in Chrome,
+      // not in our cookie cache.
       metadata: {
         items_found: events.length,
         items_skipped: result.items.length - posts.length,
         api_calls: result.apiCallCount,
+        backend: 'extension',
       },
     };
   }
 
   private async syncJobs(
     baseUrl: string,
-    cookies: any[],
     maxScrolls: number,
     checkpoint: LinkedInCheckpoint,
-    userDataDir: string | undefined,
-    cdpUrl: string | 'auto'
+    dispatcher: ChromeActionDispatcher
   ): Promise<SyncResult> {
     const jobsUrl = `${baseUrl}/jobs/`;
-
-    const result = await browserNetworkSync<LinkedInJob>({
+    const result = await extensionNetworkSync<LinkedInJob>({
+      dispatcher,
+      url: jobsUrl,
       config: {
         interceptPatterns: [
-          /voyager\/api\/graphql.*jobPosting/i,
-          /voyager\/api\/search\/dash\/.*jobs/i,
-          /voyager\/api\/organization\/.*jobs/i,
+          { regex: 'voyager/api/graphql.*jobPosting', flags: 'i' },
+          { regex: 'voyager/api/search/dash/.*jobs', flags: 'i' },
+          { regex: 'voyager/api/organization/.*jobs', flags: 'i' },
         ],
-        authDomains: ['linkedin.com', '.linkedin.com', '.www.linkedin.com'],
-        stealth: true,
+        allowedOrigins: ['linkedin.com', '*.linkedin.com'],
         maxScrolls,
         scrollDelayMs: 3000,
         responseTimeoutMs: 8000,
-        navigationTimeoutMs: 20000,
       },
-      url: jobsUrl,
-      cdpUrl,
-      cookies,
-      userDataDir,
       parseResponse: parseJobListings,
-      checkAuth: async (page) => {
-        const url = page.url();
-        return !url.includes('/login') && !url.includes('/authwall');
-      },
+      checkAuth: (currentUrl) =>
+        !currentUrl.includes('/login') && !currentUrl.includes('/authwall'),
     });
 
-    // Deduplicate
     const seenIds = new Set<string>();
     const jobs = result.items.filter((j) => {
       if (!j.id || seenIds.has(j.id)) return false;
       seenIds.add(j.id);
       return true;
     });
-
     jobs.sort((a, b) => b.postedAt.getTime() - a.postedAt.getTime());
 
     const events: EventEnvelope[] = jobs.map((job) => ({
@@ -469,9 +452,7 @@ export default class LinkedInConnector extends ConnectorRuntime {
       occurred_at: job.postedAt,
       origin_type: 'job_posting',
       source_url: job.url,
-      metadata: {
-        location: job.location,
-      },
+      metadata: { location: job.location },
     }));
 
     return {
@@ -480,10 +461,10 @@ export default class LinkedInConnector extends ConnectorRuntime {
         last_job_id: jobs[0]?.id ?? checkpoint.last_job_id,
         last_timestamp: jobs[0]?.postedAt?.toISOString?.() ?? checkpoint.last_timestamp,
       } as unknown as Record<string, unknown>,
-      auth_update: { cookies: result.cookies },
       metadata: {
         items_found: events.length,
         api_calls: result.apiCallCount,
+        backend: 'extension',
       },
     };
   }
