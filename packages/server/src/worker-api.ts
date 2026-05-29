@@ -40,6 +40,7 @@ import { getNextNumericId } from './tools/admin/helpers/db-helpers';
 import { reconcileDeviceCapabilities } from './worker-api/device-reconcile';
 import { findBundledConnectorFile } from './utils/connector-catalog';
 import { resolveConnectorCode } from './utils/ensure-connector-installed';
+import { resolveDeviceClaimableOrgs, runInWorkerScope } from './utils/device-claimable-orgs';
 import { applyEntityLinks } from './utils/entity-link-upsert';
 import { errorMessage } from './utils/errors';
 import { validateConnectorEventSemanticType } from './utils/event-kind-validation';
@@ -96,10 +97,14 @@ async function authorizeRunForWorker(
   const orgIds = c.var.workerOrgIds ?? [];
   const sql = getDb();
   const rows = (await sql`
-    SELECT r.status, r.claimed_by, r.organization_id, dw.user_id AS device_owner
+    SELECT r.status, r.claimed_by, r.organization_id,
+           dw.user_id AS device_owner,
+           wdw.user_id AS watcher_device_owner
     FROM runs r
     LEFT JOIN connections con ON con.id = r.connection_id
     LEFT JOIN device_workers dw ON dw.id = con.device_worker_id
+    LEFT JOIN watchers w ON w.id = r.watcher_id
+    LEFT JOIN device_workers wdw ON wdw.id = w.device_worker_id
     WHERE r.id = ${runId}
     LIMIT 1
   `) as unknown as Array<{
@@ -107,14 +112,16 @@ async function authorizeRunForWorker(
     claimed_by: string | null;
     organization_id: string;
     device_owner: string | null;
+    watcher_device_owner: string | null;
   }>;
   if (rows.length === 0) {
     return c.json({ error: 'Run not found' }, 404);
   }
   const run = rows[0];
-  const inScope =
-    orgIds.includes(run.organization_id) ||
-    (!!workerUserId && run.device_owner === workerUserId);
+  // Watcher runs pinned to a device the worker owns are in scope too (the pin
+  // is the owner's consent), so a device can FINISH a cross-org run it claimed —
+  // not just claim it. Without this the poll widening would 403 on completion.
+  const inScope = runInWorkerScope(run, { workerUserId, orgIds });
   if (!inScope) {
     return c.json({ error: 'Forbidden' }, 403);
   }
@@ -385,18 +392,54 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
   // middleware. Trusted workers (matched WORKER_API_TOKEN) and anonymous
   // local-dev requests see all pending runs — preserving the existing
   // server-side worker fleet behavior.
+  //
+  // Cross-org device pins: also let the device claim runs in any org where it
+  // has a pinned watcher/connection AND its owner is still a member of that
+  // org. The pin IS the owner's consent — `evaluateDeviceWorkerAccess` only
+  // lets a device's owner attach it — so this keeps the device anchored to its
+  // home + personal org while serving watchers it was explicitly attached to in
+  // other orgs the owner belongs to. The membership join revokes access
+  // automatically if the owner later leaves the org. Within-org claiming still
+  // follows the pinned/capability rules below, so the device only ever runs the
+  // resource it was actually pinned to.
+  let claimableOrgIds = effectiveWorkerOrgIds;
+  if (isUserScopedWorker && deviceWorkerId && effectiveWorkerUserId) {
+    try {
+      claimableOrgIds = await resolveDeviceClaimableOrgs(sql, {
+        deviceWorkerId,
+        ownerUserId: effectiveWorkerUserId,
+        baseOrgIds: effectiveWorkerOrgIds ?? [],
+      });
+    } catch (err) {
+      // Non-fatal: fall back to the base [bound, personal] scope.
+      logger.warn(
+        { worker_id, err: errorMessage(err) },
+        '[pollWorkerJob] cross-org pinned-scope lookup failed'
+      );
+    }
+  }
   // Org scope applies to every device (user-scoped) worker — including a
-  // re-anchored local device, whose org is effectiveWorkerOrgIds. A signed-in
+  // re-anchored local device, whose org is claimableOrgIds. A signed-in
   // worker with no org in scope can claim nothing; a re-anchored device with no
   // org falls through to the empty-array gate (claims only by capability).
-  if (c.var.workerAuthMode === 'user' && (!effectiveWorkerOrgIds || effectiveWorkerOrgIds.length === 0)) {
+  if (c.var.workerAuthMode === 'user' && (!claimableOrgIds || claimableOrgIds.length === 0)) {
     // No org in scope — nothing this worker can ever claim.
     return c.json({ next_poll_seconds: 30 });
   }
   const orgScopeActive = isUserScopedWorker;
   // Always pass a non-empty array to ANY() to keep the SQL valid; the gate
   // below only activates when orgScopeActive is true.
-  const orgScopeIds = orgScopeActive && effectiveWorkerOrgIds ? effectiveWorkerOrgIds : [''];
+  //
+  // Two scopes: `orgScopeIds` (widened with cross-org pins) gates the
+  // explicitly-PINNED claim branches — the pin is the owner's consent.
+  // `baseOrgScopeIds` (token's bound + personal org only) gates the UNPINNED
+  // capability-matched branch, so a single pin in org B does NOT also let the
+  // device claim unrelated unpinned device-connector runs in org B.
+  const orgScopeIds = orgScopeActive && claimableOrgIds ? claimableOrgIds : [''];
+  const baseOrgScopeIds =
+    orgScopeActive && effectiveWorkerOrgIds && effectiveWorkerOrgIds.length > 0
+      ? effectiveWorkerOrgIds
+      : [''];
 
   const claimNextPendingRun = async () =>
     sql.begin(async (tx) => {
@@ -440,7 +483,7 @@ export async function pollWorkerJob(c: Context<{ Bindings: Env }>) {
                   AND cd.required_capability IS NOT NULL
                   AND cd.required_capability = ANY(${pgTextArray(authorizedCapabilities)}::text[])
                   AND con.device_worker_id IS NULL
-                  AND r.organization_id = ANY(${pgTextArray(orgScopeIds)}::text[])
+                  AND r.organization_id = ANY(${pgTextArray(baseOrgScopeIds)}::text[])
                 )
                 -- ... or any connection explicitly pinned to THIS device (this is
                 --     "run the Reddit connector on my Mac"). Still: a device-only
@@ -3171,9 +3214,21 @@ export async function triggerWatcherForDevice(c: Context<{ Bindings: Env }>) {
     return c.json({ error: 'Watcher not found' }, 404);
   }
 
+  // Org scope: the watcher's org must be in the caller's base scope OR be a
+  // cross-org pin the caller still has access to. The pin to THIS device is
+  // verified next (the consent); here we just confirm membership of the
+  // watcher's org for the cross-org case, mirroring the poll's membership gate.
   const orgIds = c.var.workerOrgIds ?? [];
   if (!orgIds.includes(watcher.organization_id)) {
-    return c.json({ error: 'Forbidden' }, 403);
+    // workerUserId is guaranteed non-null by the guard above.
+    const memberRows = (await sql`
+      SELECT 1 FROM "member"
+      WHERE "organizationId" = ${watcher.organization_id} AND "userId" = ${workerUserId}
+      LIMIT 1
+    `) as unknown as Array<unknown>;
+    if (memberRows.length === 0) {
+      return c.json({ error: 'Forbidden' }, 403);
+    }
   }
   if (!watcher.device_worker_id || watcher.device_worker_id !== resolvedDeviceWorkerId) {
     return c.json({ error: 'Watcher is not pinned to this device' }, 403);
