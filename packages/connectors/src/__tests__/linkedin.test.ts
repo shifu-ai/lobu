@@ -1,17 +1,9 @@
 import { beforeAll, describe, expect, mock, test } from 'bun:test';
+import { connectorSdkMock } from './connector-sdk.mock';
 
-// linkedin.ts imports ConnectorRuntime / calculateEngagementScore /
-// extensionNetworkSync from @lobu/connector-sdk, which pulls in playwright.
-// Stub the SDK so the connector can be imported + instantiated without the
-// real browser stack. ConnectorRuntime is a no-op base class here; the
-// home-feed path only needs the dispatcher we pass in.
-mock.module('@lobu/connector-sdk', () => ({
-  ConnectorRuntime: class {},
-  calculateEngagementScore: () => 0,
-  extensionNetworkSync: () => {
-    throw new Error('not used in home_feed unit tests');
-  },
-}));
+// Stub @lobu/connector-sdk (it pulls in playwright) so the connector imports
+// without the browser stack. Shared superset — see connector-sdk.mock.ts.
+mock.module('@lobu/connector-sdk', connectorSdkMock);
 
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let LinkedInConnector: any;

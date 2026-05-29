@@ -1,26 +1,9 @@
 import { describe, expect, mock, test } from 'bun:test';
+import { connectorSdkMock } from './connector-sdk.mock';
 
-// browser-scraper-utils.ts pulls runtime symbols (acquireBrowser,
-// captureErrorArtifacts) from @lobu/connector-sdk, which itself pulls in
-// playwright. Stub the SDK so the pure helpers (validateUrlDomain,
-// getBrowserCookies, validateCookieNotExpired, filterByCheckpoint) can be
-// imported without spinning up a real browser stack.
-mock.module('@lobu/connector-sdk', () => ({
-  acquireBrowser: () => {
-    throw new Error('not used in unit tests');
-  },
-  captureErrorArtifacts: () => {
-    throw new Error('not used in unit tests');
-  },
-  // Other connector tests (linkedin) load the same stubbed module in the same
-  // run; expose the symbols they need so the shared mock satisfies every
-  // importer regardless of file order.
-  ConnectorRuntime: class {},
-  calculateEngagementScore: () => 0,
-  extensionNetworkSync: () => {
-    throw new Error('not used in unit tests');
-  },
-}));
+// Stub @lobu/connector-sdk (it pulls in playwright) so the pure helpers import
+// without the browser stack. Shared superset — see connector-sdk.mock.ts.
+mock.module('@lobu/connector-sdk', connectorSdkMock);
 
 const {
   filterByCheckpoint,
