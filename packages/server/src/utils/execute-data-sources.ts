@@ -8,21 +8,18 @@
  *   - Any other name → treated as an entity_type slug, filtered from entities
  *
  * Security:
- *   - SQL parsed via node-sql-parser to extract ALL table references
+ *   - SQL parsed via @polyglot-sql/sdk to extract ALL table references
  *   - Schema-qualified references (e.g. public.user) rejected outright
  *   - Every table ref gets a CTE with org-scoping baked in
  *   - READ ONLY transaction + timeout via sql.begin()
  *   - FORBIDDEN_OPS regex as additional safeguard
  */
 
-import { createRequire } from 'node:module';
-
-const _require = createRequire(import.meta.url);
-const { Parser } = _require('node-sql-parser');
-
+import { Dialect, ast, parse as parseSql } from '@polyglot-sql/sdk';
 import type { DbClient } from '../db/client';
 import logger from './logger';
 import {
+  ADMIN_ONLY_QUERYABLE_TABLES,
   buildColumnList,
   type ColumnDef,
   QUERYABLE_TABLE_NAMES,
@@ -49,58 +46,233 @@ const FORBIDDEN_OPS = /\b(COPY|IMPORT|PRAGMA|CALL)\b/i;
 const MAX_ROWS = 1000;
 const QUERY_TIMEOUT_MS = 5000;
 
-const sqlParser = new Parser();
+type SqlNode = ast.Expression;
+
+/** Strip {{...}} template placeholders to a literal so the parser doesn't choke. */
+function stripPlaceholders(sql: string): string {
+  return sql.replace(/\{\{\w+(?:\.\w+)?\}\}/g, '0');
+}
+
+/** Parse to the top-level statement node, or undefined when the SQL won't parse. */
+function parseRoot(sql: string): SqlNode | undefined {
+  const res = parseSql(stripPlaceholders(sql), Dialect.PostgreSQL);
+  if (!res.success || !res.ast) return undefined;
+  return (Array.isArray(res.ast) ? res.ast[0] : res.ast) as SqlNode | undefined;
+}
+
+/** Pull a bare identifier string out of polyglot's `{ name, quoted }` shapes. */
+function identName(value: unknown): string | null {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object') {
+    const o = value as Record<string, unknown>;
+    if (typeof o.name === 'string') return o.name;
+    if (o.name && typeof o.name === 'object') return identName(o.name);
+    if (o.this) return identName(o.this);
+  }
+  return null;
+}
+
+/**
+ * Collect every schema-qualified table reference (`schema.table`) in the parsed
+ * tree by recursing the RAW AST node graph.
+ *
+ * Security-critical: org-scoping shadows UNQUALIFIED table names with CTEs, so a
+ * schema-qualified ref (`public.connections`, `pg_catalog.*`) bypasses scoping
+ * and reads every org's rows. polyglot's `getTables`/`walk`/`findByType` only
+ * surface the FIRST `FROM` table — they do NOT descend into JOINs or
+ * sub-selects — so a qualified table in a join or subquery would slip past a
+ * node-enumeration check. A raw recursion over the node graph is the only
+ * reliable way to see them all. A polyglot table-ref node is shaped
+ * `{ name, schema, catalog, ... }`; `schema` is null when unqualified.
+ *
+ * Iterative (stack) traversal, NOT recursion: a recursion depth-cap would
+ * fail OPEN — a deeply-nested `public.oauth_tokens` past the cap would slip
+ * past and bypass scoping. The `seen` set bounds the walk on cyclic graphs.
+ */
+function collectSchemaQualifiedTables(root: unknown): string[] {
+  const seen = new Set<object>();
+  const hits: string[] = [];
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (seen.has(node as object)) continue;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+      continue;
+    }
+    const obj = node as Record<string, unknown>;
+    if (obj.schema != null && obj.name != null && Object.hasOwn(obj, 'catalog')) {
+      hits.push(`${identName(obj.schema) ?? '?'}.${identName(obj.name) ?? '?'}`);
+    }
+    for (const key of Object.keys(obj)) stack.push(obj[key]);
+  }
+  return hits;
+}
+
+/**
+ * Every table-ref name anywhere in the tree (lowercased) via the same raw walk.
+ * Security-critical: `ast.getTableNames` does NOT descend into subqueries nested
+ * inside an expression (e.g. `(CASE WHEN … THEN (SELECT … FROM oauth_tokens) …)`),
+ * so a table hidden there would be neither scoped nor admin-gated. This walk
+ * reaches them. Includes CTE-reference names (filtered out by the caller).
+ */
+function collectAllTableNames(root: unknown): string[] {
+  const seen = new Set<object>();
+  const names: string[] = [];
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (seen.has(node as object)) continue;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+      continue;
+    }
+    const obj = node as Record<string, unknown>;
+    if (obj.name != null && Object.hasOwn(obj, 'catalog')) {
+      const n = identName(obj.name);
+      if (n) names.push(n.toLowerCase());
+    }
+    for (const key of Object.keys(obj)) stack.push(obj[key]);
+  }
+  return names;
+}
+
+/**
+ * Names defined in every WITH clause in the tree (lowercased), incl. nested
+ * WITHs. A CTE name is a local alias, NOT a base table — it must be excluded
+ * from the scoping list (we'd otherwise inject a conflicting CTE) and from the
+ * admin gate (a `WITH events AS …` would otherwise be treated as the base table).
+ */
+function collectCteNames(root: unknown): Set<string> {
+  const seen = new Set<object>();
+  const names = new Set<string>();
+  const stack: unknown[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (seen.has(node as object)) continue;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      for (const child of node) stack.push(child);
+      continue;
+    }
+    const obj = node as Record<string, unknown>;
+    if (Array.isArray(obj.ctes)) {
+      for (const cte of obj.ctes) {
+        const alias = identName((cte as Record<string, unknown>)?.alias);
+        if (alias) names.add(alias.toLowerCase());
+      }
+    }
+    for (const key of Object.keys(obj)) stack.push(obj[key]);
+  }
+  return names;
+}
+
+/**
+ * Strip leading whitespace + SQL comments (line `--…` and block `/* … *​/`) with
+ * a single linear scan. Deliberately NOT a regex: a comment-stripping regex with
+ * nested quantifiers (`(?:--…|/*…*​/)*`) backtracks catastrophically on crafted
+ * input (e.g. many unclosed `/*`) — a ReDoS DoS, since this runs on member SQL.
+ */
+export function stripLeadingComments(sql: string): string {
+  const n = sql.length;
+  let i = 0;
+  for (;;) {
+    while (i < n && /\s/.test(sql[i])) i++;
+    if (sql.startsWith('--', i)) {
+      const nl = sql.indexOf('\n', i);
+      if (nl === -1) return '';
+      i = nl + 1;
+    } else if (sql.startsWith('/*', i)) {
+      const end = sql.indexOf('*/', i);
+      if (end === -1) return '';
+      i = end + 2;
+    } else {
+      return sql.slice(i);
+    }
+  }
+}
+
+// A read query is SELECT or WITH … SELECT, after any leading comments. Rejects
+// DML/DDL prefixes AND PostgreSQL's `TABLE <name>` shorthand (≡ SELECT * FROM
+// <name>) — polyglot mis-parses the latter as a column, so it yields no table
+// refs and would otherwise pass through unscoped.
+export function isReadQuery(sql: string): boolean {
+  return /^(SELECT|WITH)\b/i.test(stripLeadingComments(sql));
+}
 
 // ============================================
 // SQL Parsing
 // ============================================
 
 /**
- * Extract all table references from a SQL query.
- * Rejects schema-qualified references (e.g. public.users, pg_catalog.pg_roles).
- * Filters out user-defined CTE names so they aren't treated as virtual tables.
+ * Extract the COMPLETE set of base-table references a query reads, lowercased —
+ * the list that must each be wrapped in an org-scoping CTE.
+ *
+ * Why this is more than `ast.getTableNames`: the @polyglot-sql/sdk migration's
+ * scoping relied on `getTableNames`, which has TWO blind spots that each leak
+ * (found by the adversarial bug-hunt):
+ *  1. It does not descend into subqueries nested inside an EXPRESSION — e.g.
+ *     `(CASE WHEN … THEN (SELECT … FROM oauth_tokens) END)` or a scalar
+ *     `SELECT (SELECT … FROM events) …`. Such a table was left unscoped.
+ *  2. PostgreSQL's `TABLE <name>` shorthand mis-parses as a column, yielding no
+ *     refs at all (handled by the SELECT/WITH guard in validateAndScopeQuery).
+ *
+ * Strategy here:
+ *  - Reject multiple statements and schema-qualified refs (both bypass scoping).
+ *  - Build the ref set from a raw AST walk (`collectAllTableNames`), which is a
+ *    strict SUPERSET of `ast.getTableNames` (verified across diverse shapes) and
+ *    additionally reaches expression-nested subqueries getTableNames misses. The
+ *    completeness-invariant test suite guards this against parser changes.
+ *  - Exclude CTE names (local aliases, not base tables).
+ *  - FAIL-CLOSED collision guard: reject a query whose CTE name shadows a real
+ *    or admin table. The parser cannot tell, by lexical scope, whether `events`
+ *    in `WITH events AS (SELECT … FROM events)` is the CTE or the base table —
+ *    so we forbid the ambiguity rather than risk an unscoped base-table read.
  */
 function extractTableRefs(query: string): string[] {
-  // Replace {{...}} placeholders with a literal so the parser doesn't choke
-  const forParsing = query.replace(/\{\{\w+(?:\.\w+)?\}\}/g, '0');
+  const res = parseSql(stripPlaceholders(query), Dialect.PostgreSQL);
+  if (!res.success || !res.ast) {
+    throw new Error('Could not parse SQL query for table extraction');
+  }
+  // Reject multiple statements: org-scoping CTEs only wrap the FIRST statement,
+  // so a trailing `; SELECT … FROM public.oauth_tokens` would run unscoped.
+  const statements = Array.isArray(res.ast) ? res.ast : [res.ast];
+  if (statements.length > 1) {
+    throw new Error('Multiple SQL statements are not allowed; provide a single query.');
+  }
+  const root = statements[0] as SqlNode;
 
-  const tableList = sqlParser.tableList(forParsing, { database: 'PostgreSql' });
-
-  // Extract user-defined CTE names to exclude
-  const userCteNames = new Set<string>();
-  try {
-    const ast = sqlParser.astify(forParsing, { database: 'PostgreSql' });
-    const astObj = (Array.isArray(ast) ? ast[0] : ast) as unknown as Record<string, unknown>;
-    const withClause = astObj?.with as Array<{ name: { value: string } }> | undefined;
-    if (withClause) {
-      for (const cte of withClause) {
-        if (cte.name?.value) userCteNames.add(cte.name.value.toLowerCase());
-      }
-    }
-  } catch {
-    // If AST parsing fails, we still have tableList — just can't filter CTEs
+  // Reject schema-qualified references anywhere in the tree (joins, subqueries,
+  // CTE bodies, UNION branches) — they bypass the org-scoping CTEs.
+  const qualified = collectSchemaQualifiedTables(root);
+  if (qualified.length > 0) {
+    throw new Error(
+      `Schema-qualified table references are not allowed: ${[...new Set(qualified)].join(', ')}`
+    );
   }
 
-  const tables = new Set<string>();
-  for (const ref of tableList) {
-    // Format: "operation::schema::table"
-    const parts = ref.split('::');
-    const schema = parts[1];
-    const table = parts[2];
-
-    if (schema && schema !== 'null' && schema !== '') {
-      throw new Error(`Schema-qualified table references are not allowed: ${schema}.${table}`);
-    }
-
-    if (table) {
-      const lower = table.toLowerCase();
-      if (!userCteNames.has(lower)) {
-        tables.add(lower);
-      }
+  const cteNames = collectCteNames(root);
+  // A CTE may not shadow a real/admin table name — see fail-closed note above.
+  for (const cte of cteNames) {
+    if (QUERYABLE_TABLE_NAMES.has(cte) || ADMIN_ONLY_QUERYABLE_TABLES.has(cte)) {
+      throw new Error(
+        `CTE name '${cte}' collides with a reserved table name; rename the CTE.`
+      );
     }
   }
 
-  return Array.from(tables);
+  // Every base-table ref via the raw walk (superset of getTableNames, incl.
+  // expression-nested), minus CTE names (local aliases, not base tables).
+  const refs = new Set<string>();
+  for (const n of collectAllTableNames(root)) {
+    if (!cteNames.has(n)) refs.add(n);
+  }
+  return Array.from(refs);
 }
 
 // ============================================
@@ -113,7 +285,7 @@ function extractTableRefs(query: string): string[] {
  * Validation pipeline:
  *   1. validateTableQuery() — @polyglot-sql/sdk parses the SQL and checks
  *      all table/column references against the allowlisted schema
- *   2. extractTableRefs() — node-sql-parser AST extracts table names
+ *   2. extractTableRefs() — @polyglot-sql/sdk AST extracts table names
  *   3. buildScopedQuery() — wraps each table reference in an org-scoped CTE
  *
  * Throws on any validation failure.
@@ -121,11 +293,29 @@ function extractTableRefs(query: string): string[] {
 export function validateAndScopeQuery(
   rawSql: string,
   organizationId: string,
-  options?: { safeColumns?: Map<string, ColumnDef[]> }
+  options?: {
+    safeColumns?: Map<string, ColumnDef[]>;
+    /**
+     * Tables the caller may NOT reference (rejected even though they're in the
+     * global allowlist). Used to keep auth/identity tables (oauth_tokens,
+     * oauth_clients, user) admin-only when a non-admin runs query_sql /
+     * metric_series. Omit for admin / server-internal callers (full access).
+     */
+    restrictedTables?: ReadonlySet<string>;
+  }
 ): { sql: string; params: unknown[] } {
   const trimmed = rawSql.trim();
   if (!trimmed) {
     throw new Error('SQL query is required');
+  }
+
+  // Must be a read query. Rejects DML/DDL AND PostgreSQL's `TABLE <name>`
+  // shorthand (≡ `SELECT * FROM <name>`) — polyglot mis-parses `TABLE` as a
+  // column, so it would yield zero table refs and pass through UNSCOPED and
+  // past the admin-table gate. The gate below is fail-closed regardless, but
+  // rejecting the shorthand outright keeps the contract obvious.
+  if (!isReadQuery(trimmed)) {
+    throw new Error('Only SELECT / WITH queries are allowed.');
   }
 
   // Schema-level validation via SQL parser (rejects unknown tables/columns, mutations, etc.)
@@ -134,11 +324,22 @@ export function validateAndScopeQuery(
     throw new Error(validation.errors.join('; '));
   }
 
-  // AST-based table extraction
+  // COMPLETE table extraction (union of getTableNames + raw walk, CTE names
+  // excluded). Drives the unknown-table check, the admin gate, AND org-scoping,
+  // so an expression-nested table is caught by all three.
   const tableRefs = extractTableRefs(trimmed);
   const unknown = tableRefs.filter((t) => !QUERYABLE_TABLE_NAMES.has(t));
   if (unknown.length > 0) {
     throw new Error(`Unknown table(s): ${unknown.join(', ')}`);
+  }
+
+  if (options?.restrictedTables) {
+    const blocked = tableRefs.filter((t) => options.restrictedTables?.has(t));
+    if (blocked.length > 0) {
+      throw new Error(
+        `Table(s) require admin access: ${[...new Set(blocked)].join(', ')}`
+      );
+    }
   }
 
   return buildScopedQuery(trimmed, tableRefs, { organizationId }, options);
@@ -371,12 +572,17 @@ function buildScopedQuery(
   if (ctes.length === 0) return { sql: processedQuery, params };
 
   const cteStr = `WITH ${ctes.join(',\n')}`;
-  const trimmed = processedQuery.trim();
+  // Strip leading line/block comments before deciding how to merge: a
+  // `-- note\nWITH x AS (…) …` query is still a WITH, and prepending a second
+  // WITH keyword would emit invalid SQL (`WITH … \n -- note \n WITH x …`).
+  // Comments are cosmetic, so dropping the leading ones is safe.
+  const body = stripLeadingComments(processedQuery).trim();
 
-  // If user query starts with WITH, merge CTEs (no duplicate WITH keyword)
-  const finalSql = /^WITH\b/i.test(trimmed)
-    ? `${cteStr},\n${trimmed.replace(/^WITH\s+/i, '')}`
-    : `${cteStr}\n${trimmed}`;
+  // If the user query is itself a WITH, splice our CTEs in front of its CTE list
+  // (single WITH keyword); otherwise prepend our WITH block.
+  const finalSql = /^WITH\b/i.test(body)
+    ? `${cteStr},\n${body.replace(/^WITH\s+/i, '')}`
+    : `${cteStr}\n${body}`;
 
   return { sql: finalSql, params };
 }
@@ -404,32 +610,26 @@ function buildScopedQuery(
  */
 export function queryProjectsIdColumn(query: string): boolean {
   try {
-    const forParsing = query.trim().replace(/\{\{\w+(?:\.\w+)?\}\}/g, '0');
-    const ast = sqlParser.astify(forParsing, { database: 'PostgreSql' });
-    const stmt = (Array.isArray(ast) ? ast[0] : ast) as Record<string, unknown> | undefined;
-    const columns = stmt?.columns;
-    if (!Array.isArray(columns)) {
-      // `SELECT *` is sometimes represented as a non-array; treat unknown
-      // shapes as "has id" so we never block a save we can't analyze.
-      return true;
-    }
-    for (const col of columns as Array<Record<string, unknown>>) {
-      const as = col.as;
-      if (typeof as === 'string' && as.toLowerCase() === 'id') return true;
+    const root = parseRoot(query);
+    // Treat any shape we can't analyze (parse failure, non-SELECT) as "has id"
+    // so we never block a save on a parser edge case.
+    if (!root || ast.getExprType(root) !== 'select') return true;
+    const projection = (ast.getExprData(root) as { expressions?: unknown[] }).expressions;
+    if (!Array.isArray(projection)) return true;
 
-      const expr = col.expr as Record<string, unknown> | undefined;
-      if (!expr || expr.type !== 'column_ref') continue;
-
-      const column = expr.column;
+    for (const item of projection as SqlNode[]) {
+      const itemType = ast.getExprType(item);
       // Star projection: `*` or `alias.*`
-      if (column === '*') return true;
-      // Bare column reference: { expr: { value: 'id' } }
-      const name =
-        typeof column === 'string'
-          ? column
-          : ((column as Record<string, unknown>)?.expr as Record<string, unknown> | undefined)
-              ?.value;
-      if (typeof name === 'string' && name.toLowerCase() === 'id') return true;
+      if (itemType === 'star' || ast.isStar?.(item)) return true;
+      if (itemType === 'alias') {
+        const d = ast.getExprData(item) as Record<string, unknown>;
+        if (identName(d.alias)?.toLowerCase() === 'id') return true; // ... AS id
+        const inner = (d.this ?? d.expr) as SqlNode | undefined;
+        if (inner && (ast.getExprType(inner) === 'star' || ast.isStar?.(inner))) return true;
+      } else if (itemType === 'column') {
+        if (identName((ast.getExprData(item) as Record<string, unknown>).name)?.toLowerCase() === 'id')
+          return true; // bare `id`
+      }
     }
     return false;
   } catch {
@@ -452,8 +652,8 @@ export function validateDataSourceQuery(name: string, query: string, parse = fal
   }
   if (parse) {
     try {
-      const forParsing = trimmed.replace(/\{\{\w+(?:\.\w+)?\}\}/g, '0');
-      sqlParser.astify(forParsing, { database: 'PostgreSql' });
+      const res = parseSql(stripPlaceholders(trimmed), Dialect.PostgreSQL);
+      if (!res.success) throw new Error(res.error ?? 'could not parse query');
       extractTableRefs(trimmed);
     } catch (err) {
       throw new Error(`Data source '${name}': ${err instanceof Error ? err.message : String(err)}`);

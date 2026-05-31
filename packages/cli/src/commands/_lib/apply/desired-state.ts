@@ -43,6 +43,14 @@ export interface DesiredEntityType {
   required?: string[];
   properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  /**
+   * Present only for derived (SQL-view-backed) entity types; absent ⇒ stored
+   * (the default). Normalized so a stored type compares equal on both sides
+   * (desired + remote both omit it) and never churns the diff.
+   */
+  backing?: {
+    sql: string;
+  };
 }
 
 export interface DesiredRelationshipType {

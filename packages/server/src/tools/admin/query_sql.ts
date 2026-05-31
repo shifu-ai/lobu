@@ -11,14 +11,14 @@ import { getDb } from '../../db/client';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
 import logger from '../../utils/logger';
 import { raceAbort } from '../../utils/race-abort';
-import { SAFE_COLUMN_DEFS } from '../../utils/table-schema';
+import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
 import { getCachedMembershipRole, getCachedOrgBySlug } from '../../workspace/multi-tenant';
 import type { ToolContext } from '../registry';
 
 export const QuerySqlSchema = Type.Object({
   sql: Type.String({
     description:
-      'Base SELECT query. Table references are auto-scoped to your organization. Do NOT include ORDER BY, LIMIT, or OFFSET — they are added automatically.',
+      'Base SELECT query. Table references are auto-scoped to your organization. It is wrapped as a subquery, so ORDER BY / LIMIT / window functions inside it are fine; pagination + sort are added on the outside via sort_by/limit/offset.',
   }),
   org_slug: Type.Optional(
     Type.String({
@@ -26,9 +26,11 @@ export const QuerySqlSchema = Type.Object({
         'Optional. Only honored on the unscoped `/mcp` endpoint with OAuth auth. Rejected for PAT auth, browser-session auth, and scoped `/mcp/{slug}` connections — re-connect to the target workspace instead.',
     })
   ),
-  sort_by: Type.String({
-    description: 'Column name to sort by.',
-  }),
+  sort_by: Type.Optional(
+    Type.String({
+      description: 'Column name to sort by. Omit to return rows unordered (e.g. a view whose columns you don\'t know upfront).',
+    })
+  ),
   sort_order: Type.Optional(
     Type.Union([Type.Literal('asc'), Type.Literal('desc')], {
       description: 'Sort direction. Default: asc.',
@@ -68,7 +70,6 @@ interface QuerySqlResult {
   error?: string;
 }
 
-const TRAILING_CLAUSES = /\b(ORDER\s+BY|LIMIT|OFFSET)\b/i;
 const COLUMN_NAME_RE = /^[a-zA-Z_]\w*$/;
 
 const PG_OID_TYPE_MAP: Record<number, string> = {
@@ -121,21 +122,16 @@ export async function querySql(
   if (typeof args.sql !== 'string') {
     return errorResult('sql (string) is required.', startTime);
   }
-  if (typeof args.sort_by !== 'string' || args.sort_by.length === 0) {
-    return errorResult('sort_by (string column name) is required.', startTime);
-  }
 
   const baseSql = args.sql.trim();
   if (!baseSql) return errorResult('SQL query is required.', startTime);
 
-  if (TRAILING_CLAUSES.test(baseSql)) {
-    return errorResult(
-      'Do not include ORDER BY, LIMIT, or OFFSET in your SQL — they are added automatically.',
-      startTime
-    );
-  }
+  // The base query is wrapped as `SELECT * FROM (<sql>) _t [ORDER BY …] LIMIT …`,
+  // so an ORDER BY / LIMIT / window inside the caller's SQL is valid (it sits in
+  // the subquery). A derived view's backing_sql commonly has `OVER (ORDER BY …)`.
 
-  if (!COLUMN_NAME_RE.test(args.sort_by)) {
+  // sort_by is optional: omit it for a view whose columns aren't known upfront.
+  if (args.sort_by !== undefined && !COLUMN_NAME_RE.test(args.sort_by)) {
     return errorResult(`Invalid sort_by column name: ${args.sort_by}`, startTime);
   }
 
@@ -144,6 +140,9 @@ export async function querySql(
   // cross-org. The single source of truth is `ctx.allowCrossOrg`, which is
   // computed from `tokenType === 'oauth' && !scopedToOrg`.
   let targetOrgId = ctx.organizationId;
+  // Members may query their own org's operational tables; the auth/identity
+  // tables stay admin-only (enforced via restrictedTables below).
+  let callerIsAdmin = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
   if (args.org_slug) {
     if (!ctx.allowCrossOrg) {
       if (ctx.scopedToOrg) {
@@ -171,16 +170,22 @@ export async function querySql(
         startTime
       );
     }
-    // `query_sql` is admin-tier (it can read audit/event tables); the cross-
-    // org hop must re-validate that constraint against the *target* org's
-    // role, not just the caller's role in the bound org.
-    if (role !== 'owner' && role !== 'admin') {
-      return errorResult(
-        `Cross-org query_sql requires owner or admin access in '${args.org_slug}'.`,
-        startTime
-      );
-    }
     targetOrgId = targetOrg.id;
+    // Reaching into ANOTHER workspace stays owner/admin-only. Passing your OWN
+    // org slug is just an explicit form of the default and stays read-tier —
+    // don't reject a member or silently escalate them to admin. Either way the
+    // role is re-validated against the *target* org, not the bound-org role.
+    if (targetOrg.id !== ctx.organizationId) {
+      if (role !== 'owner' && role !== 'admin') {
+        return errorResult(
+          `Cross-org query_sql requires owner or admin access in '${args.org_slug}'.`,
+          startTime
+        );
+      }
+      callerIsAdmin = true; // cross-org already required owner/admin in the target
+    } else {
+      callerIsAdmin = role === 'owner' || role === 'admin';
+    }
   }
 
   // Validate, parse, and org-scope the query
@@ -189,6 +194,7 @@ export async function querySql(
   try {
     const scoped = validateAndScopeQuery(baseSql, targetOrgId, {
       safeColumns: SAFE_COLUMN_DEFS,
+      restrictedTables: callerIsAdmin ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
     });
     scopedSql = scoped.sql;
     params = scoped.params;
@@ -227,7 +233,8 @@ export async function querySql(
   const offset = Math.max(0, Math.trunc(rawOffset));
 
   const countSql = `SELECT count(*)::int AS c FROM (${scopedSql}) AS _t ${searchWhere}`;
-  const dataSql = `SELECT * FROM (${scopedSql}) AS _t ${searchWhere} ORDER BY "${args.sort_by}" ${sortOrder} LIMIT ${limit} OFFSET ${offset}`;
+  const orderBy = args.sort_by ? `ORDER BY "${args.sort_by}" ${sortOrder}` : '';
+  const dataSql = `SELECT * FROM (${scopedSql}) AS _t ${searchWhere} ${orderBy} LIMIT ${limit} OFFSET ${offset}`;
 
   try {
     const sql = getDb();

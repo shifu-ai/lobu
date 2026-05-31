@@ -21,7 +21,8 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../../db/client';
-import { validateAndScopeQuery } from '../../utils/execute-data-sources';
+import { isReadQuery, validateAndScopeQuery } from '../../utils/execute-data-sources';
+import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
 import { ToolUserError } from '../../utils/errors';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
@@ -43,11 +44,6 @@ const STATEMENT_TIMEOUT_MS = 5000;
 // megabytes back to the client.
 const MAX_ROWS = 2000;
 
-// Only SELECT or WITH … SELECT are valid metric queries. Catches DML/DDL
-// prefixes (INSERT/UPDATE/DELETE/TRUNCATE/COPY/CREATE/DROP/ALTER/GRANT/
-// REVOKE/VACUUM/ANALYZE/EXPLAIN/SET/RESET/LOCK/CALL/DO/…) before they hit
-// the heavier AST validator.
-const SELECT_OR_WITH = /^\s*(?:--[^\n]*\n\s*|\/\*[\s\S]*?\*\/\s*)*(SELECT|WITH)\b/i;
 
 export interface MetricSeriesResult {
   columns: string[];
@@ -64,11 +60,19 @@ export async function metricSeries(
     throw new Error('metric_series: caller must be scoped to an organization');
   }
 
-  if (!SELECT_OR_WITH.test(args.sql)) {
+  if (!isReadQuery(args.sql)) {
     throw new ToolUserError('metric_series: only SELECT or WITH … SELECT queries are accepted');
   }
 
-  const { sql: scopedSql, params } = validateAndScopeQuery(args.sql, orgId);
+  // Members may chart their org's operational data; the auth/identity tables
+  // (oauth_tokens, oauth_clients, user) stay admin-only.
+  const isAdmin = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+  const { sql: scopedSql, params } = validateAndScopeQuery(args.sql, orgId, {
+    // Emit the safe column allowlist (not SELECT *) so a member charting e.g.
+    // `connections` can't pull credential columns the allowlist withholds.
+    safeColumns: SAFE_COLUMN_DEFS,
+    restrictedTables: isAdmin ? undefined : ADMIN_ONLY_QUERYABLE_TABLES,
+  });
   const db = getDb();
 
   // Run inside a transaction so SET LOCAL applies for the user query only.
@@ -77,6 +81,10 @@ export async function metricSeries(
   let rows: Record<string, unknown>[];
   try {
     rows = (await db.begin(async (tx) => {
+      // READ ONLY first: a data-modifying CTE (`WITH x AS (DELETE … RETURNING …)
+      // SELECT …`) passes the SELECT/WITH guard, so the DB must refuse the write.
+      // Mirrors query_sql; without it this read-tier endpoint could mutate.
+      await tx.unsafe('SET TRANSACTION READ ONLY');
       await tx.unsafe(`SET LOCAL statement_timeout = ${STATEMENT_TIMEOUT_MS}`);
       return tx.unsafe(scopedSql, params as unknown[]);
     })) as Record<string, unknown>[];

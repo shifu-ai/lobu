@@ -505,6 +505,14 @@ function mapAgent(
 }
 
 function mapEntityType(entity: EntityType): DesiredEntityType {
+  // Fail loud in the CLI before any remote mutation: the server's
+  // assertValidBacking would otherwise reject an empty backing mid-apply with a
+  // confusing 4xx, possibly after other mutations have already landed.
+  if (entity.backing && entity.backing.sql.trim() === "") {
+    throw new ValidationError(
+      `entity type "${entity.key}" has an empty backing.sql`
+    );
+  }
   return {
     slug: entity.key,
     ...(entity.name ? { name: entity.name } : {}),
@@ -512,6 +520,9 @@ function mapEntityType(entity: EntityType): DesiredEntityType {
     ...(entity.required ? { required: entity.required } : {}),
     ...(entity.properties ? { properties: entity.properties } : {}),
     ...(entity.metadata ? { metadata: entity.metadata } : {}),
+    // `backing` is present only for derived types; a stored entity (the default)
+    // carries no backing so it never churns the diff.
+    ...(entity.backing ? { backing: { sql: entity.backing.sql } } : {}),
   };
 }
 

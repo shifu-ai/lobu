@@ -454,6 +454,9 @@ async function handleCreate(
     throw new Error('name is required for create action');
   }
 
+  // (Derived-type rejection lives in createEntity — the single chokepoint that
+  // also resolves public-catalog types.)
+
   // Validate metadata against entity type's JSON schema (if defined)
   if (args.metadata && Object.keys(args.metadata).length > 0) {
     const validation = await validateEntityMetadata(args.entity_type, args.metadata, ctx);

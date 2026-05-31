@@ -25,6 +25,21 @@ export type ConnectorRef = string | ConnectorClass;
 // Memory schema
 // ---------------------------------------------------------------------------
 
+/**
+ * Makes an entity type **derived**: its rows are a read-only SQL view over other
+ * relations (events, other entities) instead of inserted/validated rows.
+ *
+ * Presence is the discriminant: an entity type with `backing` is derived; without
+ * it, it is **stored** (the default — a curated entity like a Company or a
+ * hand-named Trip). There is no separate `mode` field — "derived" just means
+ * "has a view". Read a derived type's rows by running its SQL through `query_sql`;
+ * measure vs. dimension columns are classified on read (not declared here).
+ */
+export interface EntityBacking {
+  /** ANSI SELECT over other relations (events, entities, …). */
+  sql: string;
+}
+
 export interface EntityType {
   readonly kind: "entityType";
   /** Stable slug — diff key. */
@@ -36,6 +51,12 @@ export interface EntityType {
   /** JSON Schema properties for the entity's metadata. */
   properties?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+  /**
+   * Present only for DERIVED types — a read-only SQL view (`{ sql }`). Omitted ⇒
+   * the type is stored (the default; rows are inserted/validated). Presence is
+   * the only discriminant; there is no separate `mode` field.
+   */
+  backing?: EntityBacking;
 }
 
 export function defineEntityType(config: Omit<EntityType, "kind">): EntityType {

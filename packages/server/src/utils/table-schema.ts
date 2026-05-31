@@ -9,7 +9,7 @@
  *      is bypassed
  */
 
-import { validateWithSchema } from '@polyglot-sql/sdk';
+import { Dialect, ast, parse, validateWithSchema } from '@polyglot-sql/sdk';
 
 export interface ColumnDef {
   name: string;
@@ -348,6 +348,20 @@ export const QUERYABLE_SCHEMA = {
 
 export const QUERYABLE_TABLE_NAMES = new Set(QUERYABLE_SCHEMA.tables.map((t) => t.name));
 
+/**
+ * Queryable tables that stay OWNER/ADMIN-only even when query_sql / metric_series
+ * are member-accessible: the auth + identity tables. Members can read the
+ * org's operational data (entities, events, connections, feeds, watchers, …) but
+ * not enumerate every OAuth token/app or the full user roster. Secret columns
+ * (credentials, client_secret, token_hash, email, phone) are already excluded
+ * from the schema above; this is the table-level guard on top of that.
+ */
+export const ADMIN_ONLY_QUERYABLE_TABLES: ReadonlySet<string> = new Set([
+  'oauth_tokens',
+  'oauth_clients',
+  'user',
+]);
+
 /** table name → column definitions for use in CTE SELECT.
  *  Columns with `expr` are derived from JSONB and need special handling. */
 export const SAFE_COLUMN_DEFS = new Map<string, ColumnDef[]>(
@@ -371,11 +385,54 @@ export function buildColumnList(defs: ColumnDef[], alias?: string): string {
  * Validate that SQL only references allowed tables and columns.
  * E200 = unknown table, E201 = unknown column.
  */
+/**
+ * Output-column aliases of the query's top-level SELECT. `ORDER BY`/`GROUP BY`
+ * may reference these (valid SQL), but the schema validator treats them as
+ * unknown columns — so we use this to suppress those false positives.
+ * Best-effort: empty on parse failure. Only matches the alias NAME, never the
+ * underlying expression, so an excluded column referenced as `SELECT credentials
+ * AS x` is still rejected (the `credentials` reference itself fails).
+ */
+function outputAliases(sql: string): Set<string> {
+  const out = new Set<string>();
+  try {
+    const res = parse(sql, Dialect.PostgreSQL);
+    if (!res.success || !res.ast) return out;
+    const root = Array.isArray(res.ast) ? res.ast[0] : res.ast;
+    const data = ast.getExprData(root) as { expressions?: unknown[] };
+    for (const item of data.expressions ?? []) {
+      try {
+        if (ast.getExprType(item as never) !== 'alias') continue;
+        const a = (ast.getExprData(item as never) as { alias?: unknown }).alias;
+        const name =
+          typeof a === 'string'
+            ? a
+            : ((a as { name?: string; value?: string })?.name ??
+              (a as { value?: string })?.value);
+        if (typeof name === 'string' && name) out.add(name.toLowerCase());
+      } catch {
+        // skip malformed projection item
+      }
+    }
+  } catch {
+    // unparseable → no aliases; validator errors stand
+  }
+  return out;
+}
+
 export function validateTableQuery(sql: string): { valid: boolean; errors: string[] } {
   const result = validateWithSchema(sql, QUERYABLE_SCHEMA, 'postgresql', { checkReferences: true });
-  const errors = (result.errors ?? []).filter(
-    (e: { code: string }) => e.code === 'E200' || e.code === 'E201'
-  );
+  const aliases = outputAliases(sql);
+  const errors = (result.errors ?? []).filter((e: { code: string; message: string }) => {
+    // E201 = unknown column. A reference to the query's OWN output alias (e.g.
+    // `SELECT count(*) AS n … ORDER BY n`) is valid SQL, not an unknown column.
+    if (e.code === 'E201') {
+      const m = /Unknown column '([^']+)'/i.exec(e.message ?? '');
+      if (m && aliases.has(m[1].toLowerCase())) return false;
+      return true;
+    }
+    return e.code === 'E200'; // unknown table — always a real error
+  });
   return {
     valid: errors.length === 0,
     errors: errors.map((e: { message: string }) => e.message),

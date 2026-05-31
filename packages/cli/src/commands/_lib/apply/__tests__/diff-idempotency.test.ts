@@ -120,6 +120,63 @@ describe("computeDiff — idempotency (applying twice is a no-op)", () => {
     expect(secondPlan.counts.update).toBe(0);
   });
 
+  test("derived entity type: same backing_sql is a noop (no persisted inference)", () => {
+    // A derived type stores only backing.sql — measure roles are classified on
+    // read, never persisted — so a re-apply is a plain, churn-free noop.
+    const sql =
+      "SELECT company_id, SUM(amount) AS spend FROM events GROUP BY company_id";
+    const desired = buildState([], {
+      memorySchema: {
+        entityTypes: [
+          { slug: "subscription", name: "Subscription", backing: { sql } },
+        ],
+        relationshipTypes: [],
+      },
+    });
+
+    const afterFirstApply: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        { slug: "subscription", name: "Subscription", backing: { sql } },
+      ],
+    };
+
+    const plan = computeDiff(desired, afterFirstApply);
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("noop");
+    expect(plan.counts.update).toBe(0);
+  });
+
+  test("derived entity type: a changed backing_sql is an update", () => {
+    const desired = buildState([], {
+      memorySchema: {
+        entityTypes: [
+          {
+            slug: "subscription",
+            name: "Subscription",
+            backing: { sql: "SELECT 2 AS x FROM events" },
+          },
+        ],
+        relationshipTypes: [],
+      },
+    });
+    const remote: RemoteSnapshot = {
+      ...emptyRemote(),
+      entityTypes: [
+        {
+          slug: "subscription",
+          name: "Subscription",
+          backing: { sql: "SELECT 1 AS x FROM events" },
+        },
+      ],
+    };
+    const plan = computeDiff(desired, remote);
+    const row = plan.rows.find((r) => r.kind === "entity-type");
+    expect(row?.verb).toBe("update");
+    if (row?.kind === "entity-type")
+      expect(row.changedFields).toContain("backing");
+  });
+
   test("relationship type: same desired+remote is noop", () => {
     const desired = buildState([], {
       memorySchema: {

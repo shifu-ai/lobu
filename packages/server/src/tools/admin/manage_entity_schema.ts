@@ -11,6 +11,7 @@
 import { type Static, Type } from '@sinclair/typebox';
 import type { AutoCreateWhenRule } from '@lobu/connector-sdk';
 import { type DbClient, getDb } from '../../db/client';
+import { measureColumns } from '../../utils/infer-measures';
 import type { Env } from '../../index';
 import logger from '../../utils/logger';
 import { compileRulesMetadata, ruleHashFor } from '../../identity/rules';
@@ -36,6 +37,14 @@ const AutoCreateWhenRuleInputSchema = Type.Object(
     ]),
     matchStrategy: Type.Union([Type.Literal('unique_only'), Type.Literal('all_matches')]),
     notes: Type.Optional(Type.String()),
+  },
+  { additionalProperties: false }
+);
+
+/** Derived-entity backing: a read-only SQL view. */
+const BackingInputSchema = Type.Object(
+  {
+    sql: Type.String({ minLength: 1, description: 'ANSI SELECT defining the view' }),
   },
   { additionalProperties: false }
 );
@@ -98,6 +107,12 @@ export const ManageEntitySchemaSchema = Type.Object({
       }
     )
   ),
+  backing: Type.Optional(
+    Type.Union([Type.Null(), BackingInputSchema], {
+      description:
+        "[entity_type: create/update] Makes the type DERIVED — a read-only SQL view. `{ sql }` to set; `null` to clear (revert to a stored type); omit to leave unchanged. Read a derived type's rows by running its `backing_sql` (returned by `get`) through `query_sql`, which org-scopes the view; `get` also returns `measure_columns` (the view's aggregate columns, classified on read).",
+    })
+  ),
 
   // Relationship type fields
   is_symmetric: Type.Optional(
@@ -157,6 +172,7 @@ interface EntityTypeRow {
   color?: string | null;
   metadata_schema?: Record<string, unknown> | null;
   event_kinds?: Record<string, unknown> | null;
+  backing_sql?: string | null;
   is_system: boolean;
   created_by?: string | null;
   organization_id?: string | null;
@@ -165,6 +181,8 @@ interface EntityTypeRow {
   updated_at: Date;
   entity_count?: number;
   current_view_template_version_id?: number | null;
+  /** Derived types only — the view's aggregate columns, classified on read. */
+  measure_columns?: string[];
 }
 
 interface AuditEntry {
@@ -264,10 +282,11 @@ export async function manageEntitySchema(
 // ============================================
 
 const ENTITY_TYPE_COLUMNS =
-  'id, slug, name, description, icon, color, metadata_schema, event_kinds, created_by, organization_id, created_at, updated_at, current_view_template_version_id';
+  'id, slug, name, description, icon, color, metadata_schema, event_kinds, backing_sql, created_by, organization_id, created_at, updated_at, current_view_template_version_id';
 
 const ENTITY_TYPE_COLUMNS_WITH_ORG = `et.id, et.slug, et.name, et.description, et.icon, et.color,
-  et.metadata_schema, et.event_kinds, et.created_by, et.organization_id,
+  et.metadata_schema, et.event_kinds, et.backing_sql,
+  et.created_by, et.organization_id,
   et.created_at, et.updated_at, et.current_view_template_version_id,
   o.slug AS organization_slug`;
 
@@ -311,6 +330,18 @@ function validateEntityMetadataSchemaDisplayConfig(
 
   if (tableColumnCount > 4) {
     throw new Error('At most 4 metadata fields can have x-table-column=true.');
+  }
+}
+
+/**
+ * Reject an empty/whitespace `backing.sql`. TypeBox's `minLength: 1` is not
+ * enforced for this tool (it isn't in VALIDATED_TOOLS), so without this guard a
+ * caller could persist a "derived" type whose view is blank — unqueryable and
+ * with no inferable measures. `backing: null` (revert to stored) is fine.
+ */
+function assertValidBacking(backing: ManageEntitySchemaArgs['backing']): void {
+  if (backing && typeof backing.sql === 'string' && backing.sql.trim() === '') {
+    throw new Error('backing.sql cannot be empty');
   }
 }
 
@@ -454,6 +485,8 @@ async function etHandleGet(
   const [resolved] = await resolveUsernames([rows[0] as Record<string, unknown>], 'created_by');
   const mapped = mapRowToEntityType(resolved);
   mapped.entity_count = await getEntityCountForType(Number(mapped.id), ctx.organizationId);
+  // Classify the view's measure columns on read (never persisted).
+  if (mapped.backing_sql) mapped.measure_columns = measureColumns(mapped.backing_sql);
 
   return { schema_type: 'entity_type', action: 'get', entity_type: mapped };
 }
@@ -492,7 +525,10 @@ async function etHandleCreate(
   }
 
   validateEntityMetadataSchemaDisplayConfig(args.metadata_schema);
+  assertValidBacking(args.backing);
 
+  // metadata_schema is stored as the author sent it — measure/dimension roles for
+  // a derived type are classified ON READ (see etHandleGet), never persisted.
   const metadataSchema = args.metadata_schema ? sql.json(args.metadata_schema) : null;
   const eventKinds = args.event_kinds ? sql.json(args.event_kinds) : null;
 
@@ -500,6 +536,7 @@ async function etHandleCreate(
     INSERT INTO entity_types (
       slug, name, description, icon, color,
       metadata_schema, event_kinds,
+      backing_sql,
       organization_id, created_by,
       created_at, updated_at
     ) VALUES (
@@ -510,6 +547,7 @@ async function etHandleCreate(
       ${args.color ?? null},
       ${metadataSchema},
       ${eventKinds},
+      ${args.backing?.sql ?? null},
       ${ctx.organizationId},
       ${ctx.userId},
       current_timestamp,
@@ -556,17 +594,29 @@ async function etHandleUpdate(
   const current = existing[0];
 
   const beforePayload = { ...current } as Record<string, unknown>;
-  const hasMetadataSchema = args.metadata_schema !== undefined;
-  if (hasMetadataSchema) {
+  if (args.metadata_schema !== undefined) {
     validateEntityMetadataSchemaDisplayConfig(args.metadata_schema);
   }
-  const metadataSchemaJson = hasMetadataSchema
-    ? args.metadata_schema
-      ? sql.json(args.metadata_schema)
-      : null
-    : null;
+  assertValidBacking(args.backing);
+  // Converting a populated stored type to a derived (view-backed) type would
+  // orphan its existing rows (the view ignores them). Reject it.
+  if (args.backing?.sql) {
+    const existingCount = await getEntityCountForType(Number(current.id), ctx.organizationId);
+    if (existingCount > 0) {
+      throw new Error(
+        `Cannot make entity type '${args.slug}' derived: ${existingCount} stored ${existingCount === 1 ? 'entity exists' : 'entities exist'}. Delete them first.`
+      );
+    }
+  }
+  // metadata_schema is stored verbatim (measure roles are classified on read).
+  const hasMetadataSchema = args.metadata_schema !== undefined;
+  const metadataSchemaJson = args.metadata_schema ? sql.json(args.metadata_schema) : null;
   const hasEventKinds = args.event_kinds !== undefined;
   const eventKindsJson = hasEventKinds && args.event_kinds ? sql.json(args.event_kinds) : null;
+
+  // Backing is set as a unit: callers send `backing` (an object makes the type
+  // derived, null reverts it to stored) or omit it to leave backing unchanged.
+  const hasBacking = args.backing !== undefined;
 
   await sql`
     UPDATE entity_types SET
@@ -581,6 +631,10 @@ async function etHandleUpdate(
       event_kinds = CASE
         WHEN ${hasEventKinds} THEN ${eventKindsJson}
         ELSE event_kinds
+      END,
+      backing_sql = CASE
+        WHEN ${hasBacking} THEN ${args.backing?.sql ?? null}::text
+        ELSE backing_sql
       END,
       updated_by = ${ctx.userId},
       updated_at = current_timestamp

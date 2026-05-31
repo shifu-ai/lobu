@@ -78,6 +78,71 @@ describe('entity schema CRUD', () => {
       expect(slugs).toContain('lst-asset');
       await owner.entity_schema.deleteType('lst-asset');
     });
+
+    it('round-trips a derived backing (sql) and reverts to stored', async () => {
+      type Got = {
+        entity_type?: {
+          backing_sql?: string | null;
+          measure_columns?: string[];
+          metadata_schema?: { properties?: Record<string, Record<string, unknown>> } | null;
+        };
+      };
+
+      await owner.entity_schema.createType({
+        slug: 'spend-by-vendor',
+        name: 'Spend by vendor',
+        backing: {
+          sql: 'SELECT company_id, currency, SUM(amount) AS total_spend, COUNT(DISTINCT u) AS users FROM events GROUP BY company_id, currency',
+        },
+      });
+      const created = (await owner.entity_schema.getType('spend-by-vendor')) as Got;
+      expect(created.entity_type?.backing_sql).toContain('SUM(amount)');
+      // Measure columns are classified ON READ (not persisted into metadata_schema).
+      expect((created.entity_type?.measure_columns ?? []).sort()).toEqual([
+        'total_spend',
+        'users',
+      ]);
+      // No inferred annotations are persisted — metadata_schema stays as authored.
+      const props = created.entity_type?.metadata_schema?.properties ?? {};
+      expect(props.total_spend).toBeUndefined();
+
+      // update the view sql → backing_sql changes, measure_columns recompute
+      await owner.entity_schema.updateType({
+        slug: 'spend-by-vendor',
+        backing: { sql: 'SELECT company_id, AVG(amount) AS avg_spend FROM events GROUP BY company_id' },
+      });
+      const updated = (await owner.entity_schema.getType('spend-by-vendor')) as Got;
+      expect(updated.entity_type?.backing_sql).toContain('AVG(amount)');
+      expect(updated.entity_type?.measure_columns).toEqual(['avg_spend']);
+
+      // revert to stored: backing = null clears the view; no measure_columns.
+      await owner.entity_schema.updateType({ slug: 'spend-by-vendor', backing: null });
+      const reverted = (await owner.entity_schema.getType('spend-by-vendor')) as Got;
+      expect(reverted.entity_type?.backing_sql ?? null).toBeNull();
+      expect(reverted.entity_type?.measure_columns ?? []).toEqual([]);
+
+      await owner.entity_schema.deleteType('spend-by-vendor');
+    });
+
+    it('a stored type carries no backing_sql', async () => {
+      await owner.entity_schema.createType({ slug: 'plain-thing', name: 'Plain' });
+      const got = (await owner.entity_schema.getType('plain-thing')) as {
+        entity_type?: { backing_sql?: string | null };
+      };
+      expect(got.entity_type?.backing_sql ?? null).toBeNull();
+      await owner.entity_schema.deleteType('plain-thing');
+    });
+
+    it('rejects an empty / whitespace backing.sql (no corrupt derived type)', async () => {
+      // TypeBox minLength isn't enforced for this tool, so the handler guards.
+      await expect(
+        owner.entity_schema.createType({
+          slug: 'blank-view',
+          name: 'Blank',
+          backing: { sql: '   ' },
+        })
+      ).rejects.toThrow(/backing\.sql cannot be empty/i);
+    });
   });
 
   describe('relationship_type', () => {

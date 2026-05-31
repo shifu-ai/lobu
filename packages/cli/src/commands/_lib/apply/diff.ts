@@ -482,6 +482,12 @@ function diffEntityType(
         name: "properties",
         changed: (d, r) => !deepEqual(d.properties, r.properties),
       },
+      {
+        // Derived types store metadata_schema verbatim (no inferred superset),
+        // so a plain properties + backing diff is exact and idempotent.
+        name: "backing",
+        changed: (d, r) => !deepEqual(d.backing, r.backing),
+      },
     ],
   }) as EntityTypeDiffRow;
 }
