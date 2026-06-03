@@ -16,6 +16,7 @@ import { runClassificationReconciliation } from './classification-reconciliation
 import { registerScheduledJobsTicker } from './scheduled-jobs-service';
 import { TaskScheduler } from './task-scheduler';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
+import { triggerFactExtraction } from './trigger-fact-extraction';
 import { getDb, pgTextArray } from '../db/client';
 import { createNotificationForUsers } from '../notifications/service';
 import {
@@ -123,6 +124,20 @@ function registerMaintenanceTasks(
       const result = await triggerEmbedBackfill(env);
       if (result.runsCreated > 0) {
         logger.info({ ...result }, '[task] trigger-embed-backfill enqueued runs');
+      }
+    },
+    { cron: '*/5 * * * *' },
+  );
+
+  // Query-focused fact extraction: distills long raw events into atomic
+  // `extracted_fact` events that back focused reads. Same cadence/family as
+  // embed-backfill; runs inline (runs-queue-claimed, so multi-replica-safe).
+  scheduler.register(
+    'trigger-fact-extraction',
+    async () => {
+      const result = await triggerFactExtraction(env);
+      if (result.factsCreated > 0) {
+        logger.info({ ...result }, '[task] trigger-fact-extraction created facts');
       }
     },
     { cron: '*/5 * * * *' },

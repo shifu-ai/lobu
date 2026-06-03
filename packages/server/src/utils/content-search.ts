@@ -191,6 +191,54 @@ export const STANDARD_IDENTITY_NAMESPACES = [
 ] as const;
 
 /**
+ * Derived `extracted_fact` events are an internal focused-read index (built by
+ * trigger-fact-extraction.ts, served by the `focused` flag in get_content),
+ * NOT first-class content. They must never leak into normal content lists,
+ * search_memory results, watcher windows, the Atlas events page, or counts —
+ * so every raw events list/search/count excludes them by default.
+ *
+ * Returns an empty string (no exclusion) when the caller explicitly asked for
+ * `extracted_fact` via `semantic_type`; otherwise an `AND <alias>.semantic_type
+ * <> 'extracted_fact'` fragment. The literal is constant, so it's safe to inline.
+ */
+export const EXTRACTED_FACT_SEMANTIC_TYPE = 'extracted_fact';
+
+export function callerRequestedExtractedFact(
+  semanticType: string | string[] | undefined
+): boolean {
+  if (!semanticType) return false;
+  const types = Array.isArray(semanticType) ? semanticType : [semanticType];
+  return types.includes(EXTRACTED_FACT_SEMANTIC_TYPE);
+}
+
+/**
+ * Bare predicate (no leading `AND`) excluding derived facts, or `'1=1'` when the
+ * caller explicitly requested them. Use where a condition is joined into an
+ * array with `' AND '`. `alias` defaults to `f`.
+ */
+export function excludeExtractedFactCondition(
+  semanticType: string | string[] | undefined,
+  alias = 'f'
+): string {
+  return callerRequestedExtractedFact(semanticType)
+    ? '1=1'
+    : `${alias}.semantic_type <> '${EXTRACTED_FACT_SEMANTIC_TYPE}'`;
+}
+
+/**
+ * `AND`-prefixed variant of {@link excludeExtractedFactCondition}, for splicing
+ * into an inline WHERE body. Empty string when the caller requested facts.
+ */
+export function excludeExtractedFactClause(
+  semanticType: string | string[] | undefined,
+  alias = 'f'
+): string {
+  return callerRequestedExtractedFact(semanticType)
+    ? ''
+    : `AND ${alias}.semantic_type <> '${EXTRACTED_FACT_SEMANTIC_TYPE}'`;
+}
+
+/**
  * SQL predicate: "event `<alias>` is linked to entity `<paramRef>`".
  *
  * Matches two ways:
@@ -1255,6 +1303,9 @@ async function listContentInternal(
       baseParams.push(options.agent_id);
       baseConditions.push(`f.metadata->>'agent_id' = $${baseParams.length}`);
     }
+    // Derived facts are an internal focused-read index — never list them unless
+    // the caller explicitly asked for `extracted_fact`.
+    baseConditions.push(excludeExtractedFactCondition(options.semantic_type, 'f'));
 
     const classificationExists = buildClassificationExistsClauses(
       filtersBySlug,
@@ -1362,6 +1413,7 @@ async function listContentInternal(
           AND ${connectionCondition}
           AND ${feedCondition}
           AND ${runCondition}
+          ${excludeExtractedFactClause(options.semantic_type, 'f')}
           ${excludeClause.sql}
           ${visibilityClause.sql}
           ${orgScope.sql}`,
@@ -1600,6 +1652,7 @@ async function searchContentBySingleQuery(
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
           AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)
+          ${excludeExtractedFactClause(options.semantic_type, 'f')}
           ${excludeClause.sql}
           ${visibilityClause.sql}
           ${orgScope.sql}`;

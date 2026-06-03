@@ -24,6 +24,8 @@ import {
 import {
   buildConnectionVisibilityClause,
   buildEntityLinkUnion,
+  excludeExtractedFactClause,
+  excludeExtractedFactCondition,
   fetchEntityIdentityScopes,
   searchContentByText,
 } from '../utils/content-search';
@@ -206,6 +208,13 @@ export const GetContentSchema = Type.Object({
         'Weight of vector similarity vs text rank in combined_score (0.0-1.0, default: 0.6). Higher values favor semantic match over keyword overlap. Only applies when a query and embeddings are both present.',
       minimum: 0.0,
       maximum: 1.0,
+    })
+  ),
+  focused: Type.Optional(
+    Type.Boolean({
+      description:
+        'Return query-focused extracted facts (semantic_type=extracted_fact) for the retrieved events when a focused index exists; fall back to raw payload_text otherwise. Default: false.',
+      default: false,
     })
   ),
   classification_filters: Type.Optional(
@@ -779,12 +788,16 @@ export async function getContent(
       });
       queryParams.push(...visibility.params);
 
+      // Derived facts are an internal focused-read index — exclude them even
+      // when fetched by explicit id, unless `extracted_fact` was requested.
+      const factExclusion = excludeExtractedFactClause(args.semantic_type, 'f');
+
       // Query content by IDs with classifications
       const result = await sql.unsafe(
         buildContentQuery({
           table: 'current_event_records',
           alias: 'f',
-          where: `f.id IN (${idPlaceholders}) ${orgScope}${entityFilter} ${visibility.sql}`,
+          where: `f.id IN (${idPlaceholders}) ${orgScope}${entityFilter} ${visibility.sql} ${factExclusion}`,
           orderBy: 'f.occurred_at DESC',
           limit,
           offset,
@@ -800,6 +813,7 @@ export async function getContent(
           ${orgScope}
           ${entityFilter}
           ${visibility.sql}
+          ${factExclusion}
       `,
         queryParams
       );
@@ -905,6 +919,9 @@ export async function getContent(
         queryParams.push(pgTextArray(types));
         paramIndex += 1;
       }
+      // Derived facts are an internal focused-read index — exclude from the
+      // superseded-history listing unless `extracted_fact` was requested.
+      conditions.push(excludeExtractedFactCondition(args.semantic_type, 'e'));
       if (args.interaction_status) {
         conditions.push(`e.interaction_status = $${paramIndex}`);
         queryParams.push(args.interaction_status);
@@ -1049,6 +1066,9 @@ export async function getContent(
     if (includeClassificationSummary) {
       // Build dynamic WHERE conditions using inline SQL
       const conditions: string[] = ['1=1'];
+      // Derived facts are an internal focused-read index — keep them out of the
+      // classification-stats distribution unless `extracted_fact` was requested.
+      conditions.push(excludeExtractedFactCondition(args.semantic_type, 'f'));
       const params: any[] = [];
       let paramIndex = 1;
 
@@ -1250,8 +1270,34 @@ export async function getContent(
       });
     }
 
+    // Focused read: replace each retrieved event's text with its query-focused
+    // extracted facts (semantic_type='extracted_fact') when a focused index
+    // exists for it. One round-trip joins the derived facts back to their
+    // parents; events with no facts fall back to raw payload_text below.
+    const factsByParent = new Map<number, string>();
+    if (args.focused && rawContent.length > 0) {
+      const retrievedIds = rawContent.map((r) => Number(r.id)).filter((id) => Number.isFinite(id));
+      if (retrievedIds.length > 0) {
+        const factRows = await sql`
+          SELECT (d.metadata->>'derived_from_event_id')::bigint AS parent_id,
+                 string_agg(d.payload_text, E'\n' ORDER BY d.id) AS facts
+          FROM events d
+          WHERE d.semantic_type = 'extracted_fact'
+            AND d.organization_id = ${ctx.organizationId}
+            AND (d.metadata->>'derived_from_event_id')::bigint = ANY(${`{${retrievedIds.join(',')}}`}::bigint[])
+          GROUP BY parent_id
+        `;
+        for (const row of factRows as Array<{ parent_id: number | string; facts: string | null }>) {
+          if (row.facts) {
+            factsByParent.set(Number(row.parent_id), row.facts);
+          }
+        }
+      }
+    }
+
     // Map to the canonical content item shape used across the app.
     const contentItems: ContentItem[] = rawContent.map((f) => {
+      const focusedFacts = args.focused ? factsByParent.get(f.id) : undefined;
       const metadata = parseJsonObject(f.metadata);
       const classifications = parseJsonObject(f.classifications);
 
@@ -1263,14 +1309,14 @@ export async function getContent(
         semantic_type: f.semantic_type ?? 'content',
         origin_type: f.origin_type ?? null,
         payload_type: f.payload_type ?? 'text',
-        payload_text: f.payload_text ?? '',
+        payload_text: focusedFacts ?? f.payload_text ?? '',
         payload_data: parseJsonObject(f.payload_data),
         payload_template: f.payload_template ? parseJsonObject(f.payload_template) : null,
         attachments: parseRecordArray(f.attachments),
         author_name: f.author_name ?? null,
         client_name: f.client_name ?? clientNameMap.get(f.id) ?? null,
         title: f.title,
-        text_content: f.payload_text ?? '',
+        text_content: focusedFacts ?? f.payload_text ?? '',
         rating: (metadata.rating as string) || null,
         source_url: f.source_url ?? null,
         score: Number(f.score) || 0,
@@ -1722,6 +1768,7 @@ async function handleWatcherMode(
       WHERE c.entity_ids && ARRAY[${entityIdPlaceholders}]::bigint[]
         AND c.occurred_at >= $${sourceEntityIds.length + 1}
         AND c.occurred_at < $${sourceEntityIds.length + 2}
+        ${excludeExtractedFactClause(undefined, 'c')}
     `,
       [...sourceEntityIds, windowStartIso, windowEndIso]
     ),
@@ -1780,6 +1827,7 @@ async function handleWatcherMode(
           COUNT(*) as total
         FROM current_event_records c
         WHERE c.entity_ids && ARRAY[${entityIdPlaceholders}]::bigint[]
+          ${excludeExtractedFactClause(undefined, 'c')}
         GROUP BY DATE_TRUNC('month', c.occurred_at)
         ORDER BY month
       `,
@@ -1795,6 +1843,7 @@ async function handleWatcherMode(
         JOIN watcher_windows iw ON iwc.window_id = iw.id
         WHERE c.entity_ids && ARRAY[${entityIdPlaceholders}]::bigint[]
           AND iw.watcher_id = $${sourceEntityIds.length + 1}
+          ${excludeExtractedFactClause(undefined, 'c')}
         GROUP BY DATE_TRUNC('month', c.occurred_at)
       `,
         [...sourceEntityIds, watcherId]

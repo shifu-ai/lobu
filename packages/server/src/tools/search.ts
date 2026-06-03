@@ -10,7 +10,11 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
-import { entityLinkMatchSql, searchContentByText } from '../utils/content-search';
+import {
+  entityLinkMatchSql,
+  excludeExtractedFactCondition,
+  searchContentByText,
+} from '../utils/content-search';
 import { toVectorLiteral } from '../utils/entity-management';
 import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
@@ -430,7 +434,7 @@ async function fetchTopEntitiesByType(
     JOIN entity_types et ON et.id = e.entity_type_id
     WHERE e.organization_id = ${organizationId}
       AND e.deleted_at IS NULL
-    ORDER BY (SELECT COUNT(*) FROM current_event_records ev WHERE ${sql.unsafe(entityLinkMatchSql('e.id::bigint', 'ev'))}) DESC
+    ORDER BY (SELECT COUNT(*) FROM current_event_records ev WHERE ${sql.unsafe(entityLinkMatchSql('e.id::bigint', 'ev'))} AND ${sql.unsafe(excludeExtractedFactCondition(undefined, 'ev'))}) DESC
     LIMIT 30
   `;
 
@@ -467,6 +471,7 @@ function entitySelectColumns(callerOrgParamIdx: number): string {
       SELECT COUNT(*) FROM current_event_records ev
       WHERE ${entityLinkMatchSql('e.id::bigint', 'ev')}
         AND ev.organization_id = e.organization_id
+        AND ${excludeExtractedFactCondition(undefined, 'ev')}
     ), 0)
   ELSE 0 END as content_count,
   CASE WHEN ${ownOrg} THEN
@@ -736,7 +741,8 @@ async function formatEntityResult(
           COALESCE(
             (SELECT COUNT(*) FROM current_event_records ev
               WHERE e.id = ANY(ev.entity_ids)
-                AND ev.organization_id = e.organization_id),
+                AND ev.organization_id = e.organization_id
+                AND ev.semantic_type <> 'extracted_fact'),
             0
           )
         ELSE 0 END as content_count

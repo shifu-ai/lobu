@@ -9,6 +9,7 @@ import {
   buildEntityLinkUnion,
   type EntityIdentityScope,
   entityLinkMatchSql,
+  excludeExtractedFactCondition,
   fetchEntityIdentityScopes,
 } from './content-search';
 import logger from './logger';
@@ -119,6 +120,10 @@ function buildFilterConditionsAndJoins(
   }
   const filterConditions: string[] = [entityLinkSql];
   const additionalJoins: string[] = [];
+
+  // Derived facts are an internal focused-read index — exclude from score-sorted
+  // lists/counts unless the caller explicitly requested `extracted_fact`.
+  filterConditions.push(excludeExtractedFactCondition(filters?.semantic_type, 'f'));
 
   if (filters?.connection_ids && filters.connection_ids.length > 0) {
     const validatedIds = validateAndFormatIds(filters.connection_ids, 'connection_ids');

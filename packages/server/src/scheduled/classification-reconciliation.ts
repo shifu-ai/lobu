@@ -80,6 +80,7 @@ export async function runClassificationReconciliation(_env: Env): Promise<{
           FROM events e
           JOIN event_embeddings emb ON emb.event_id = e.id
           WHERE e.entity_ids @> ARRAY[ent.id]
+            AND e.semantic_type <> 'extracted_fact'
             AND e.created_at > now() - interval '7 days'
             AND NOT EXISTS (
               SELECT 1 FROM events newer WHERE newer.supersedes_event_id = e.id
@@ -148,6 +149,7 @@ export async function runClassificationReconciliation(_env: Env): Promise<{
             LEFT JOIN event_classifiers fc ON ecv.classifier_id = fc.id
             WHERE ${sql.unsafe(entityLinkMatchSql(`${Number(entityId)}::bigint`, 'ev'))}
               AND ev.embedding IS NOT NULL
+              AND ev.semantic_type <> 'extracted_fact'
             GROUP BY ev.id
           ) per_event
           WHERE per_event.classified_count < ${expectedCount}
