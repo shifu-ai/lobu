@@ -29,6 +29,7 @@ import {
   fetchEntityIdentityScopes,
   searchContentByText,
 } from '../utils/content-search';
+import { factExtractorVersion } from '../utils/fact-extractor';
 import { parseJsonObject } from '@lobu/core';
 import { parseDateAlias, toEndOfDay } from '../utils/date-aliases';
 import { type DataSourceContext, executeDataSources } from '../utils/execute-data-sources';
@@ -1278,12 +1279,17 @@ export async function getContent(
     if (args.focused && rawContent.length > 0) {
       const retrievedIds = rawContent.map((r) => Number(r.id)).filter((id) => Number.isFinite(id));
       if (retrievedIds.length > 0) {
+        // Serve ONLY the current extractor version's facts. After a model/prompt
+        // bump the builder re-extracts under a new version stamp; the old-version
+        // rows remain (events is append-only) but must not be aggregated in — else
+        // focused reads would mix stale + current facts for the same parent.
         const factRows = await sql`
           SELECT (d.metadata->>'derived_from_event_id')::bigint AS parent_id,
                  string_agg(d.payload_text, E'\n' ORDER BY d.id) AS facts
           FROM events d
           WHERE d.semantic_type = 'extracted_fact'
             AND d.organization_id = ${ctx.organizationId}
+            AND d.metadata->>'fact_extractor_version' = ${factExtractorVersion(env)}
             AND (d.metadata->>'derived_from_event_id')::bigint = ANY(${`{${retrievedIds.join(',')}}`}::bigint[])
           GROUP BY parent_id
         `;

@@ -1,17 +1,11 @@
 /**
- * Scheduled Job: Trigger Query-Focused Fact Extraction
+ * Scheduled job: distill long raw events into atomic `extracted_fact` events
+ * that back focused reads (`read_knowledge({ focused: true })`).
  *
- * Runs periodically to distill long raw events into atomic `extracted_fact`
- * events that back focused reads (`read_knowledge({ focused: true })`).
- *
- * Unlike embed-backfill (which enqueues a worker run per org), this job does
- * the extraction INLINE: the scheduled tick is itself a runs-queue-claimed
- * task (see scheduled/jobs.ts header), so exactly one replica runs a given
- * tick — there is no in-memory shared state and no cross-pod fan-out needed.
- * The `NOT EXISTS` guard below makes the scan idempotent even if two ticks
- * race: an event already extracted at the current extractor version is skipped,
- * and a duplicate insert from an overlapping tick is harmless (focused reads
- * `string_agg` the facts, and the next tick re-skips the parent).
+ * Extraction runs INLINE in the tick (not via a worker run like embed-backfill):
+ * the tick is runs-queue-claimed, so one replica runs it, and the NOT EXISTS
+ * guard keyed on (derived_from_event_id, fact_extractor_version) keeps it
+ * idempotent.
  */
 
 import { getDb, parsePgNumberArray } from '../db/client';

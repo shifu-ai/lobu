@@ -4,29 +4,33 @@
  * Exercises the full build → serve loop against a real Postgres:
  *
  *   1. The async builder `triggerFactExtraction` scans long events, calls the
- *      (stubbed) extractor, and writes one `semantic_type='extracted_fact'`
- *      event per fact, stamped with `metadata.{derived_from_event_id,
+ *      extractor, and writes one `semantic_type='extracted_fact'` event per
+ *      fact, stamped with `metadata.{derived_from_event_id,
  *      fact_extractor_version}` and inheriting the parent's entity_ids +
  *      occurred_at.
  *   2. `getContent({ focused: true })` replaces the parent's text_content /
- *      payload_text with the joined facts, and never lists the derived
- *      fact rows as standalone content.
+ *      payload_text with the joined facts (current extractor version only),
+ *      and never lists the derived fact rows as standalone content.
  *   3. `getContent({ focused: false })` returns the raw payload and never
  *      leaks a derived fact row into the list or the count.
  *   4. The builder is idempotent at a fixed extractor version (NOT EXISTS
  *      guard), and re-extracts when the version stamp changes.
  *
- * The LLM is stubbed via `vi.mock` so the test is deterministic and offline.
- * `factExtractorVersion` is also stubbed (to a controllable string) so the
- * version-stamp + NOT EXISTS guard are exercised with a known value and the
- * version-bump branch can be driven.
+ * The extractor is exercised for real — the LLM is stubbed at the network
+ * boundary (`global.fetch` returns a canned chat-completion), NOT via module
+ * mocking, so the test is robust under the canonical full-suite runner
+ * (`vitest run` over the whole integration dir). The extractor version is
+ * driven through `FACT_EXTRACTOR_MODEL` (real `factExtractorVersion`), so the
+ * version-stamp + NOT EXISTS guard + version-bump branch run with real values.
  */
 
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { getDb, parsePgNumberArray } from '../../../db/client';
 import type { Env } from '../../../index';
 import { getContent } from '../../../tools/get_content';
 import type { ToolContext } from '../../../tools/registry';
+import { factExtractorVersion } from '../../../utils/fact-extractor';
+import { triggerFactExtraction } from '../../../scheduled/trigger-fact-extraction';
 import { initWorkspaceProvider } from '../../../workspace';
 import { cleanupTestDatabase } from '../../setup/test-db';
 import {
@@ -38,25 +42,34 @@ import {
   seedSystemEntityTypes,
 } from '../../setup/test-fixtures';
 
-// ── Stub the extractor LLM ────────────────────────────────────────────────
-// `vi.hoisted` lets the mock factory close over mutable state the test mutates
-// (the fact list + the version stamp) so we can drive idempotency and the
-// version-bump branch without re-mocking.
-const stub = vi.hoisted(() => ({
-  facts: ['User lives in NYC.', 'User owns a dog named Rex.', 'User owns a cat named Whiskers.'],
-  version: 'fact-extract-test:v1',
-}));
+const FACTS = ['User lives in NYC.', 'User owns a dog named Rex.', 'User owns a cat named Whiskers.'];
 
-vi.mock('../../../utils/fact-extractor', () => ({
-  extractFacts: vi.fn(async () => stub.facts),
-  factExtractorVersion: vi.fn(() => stub.version),
-  factExtractorModel: vi.fn(() => 'stub-model'),
-}));
+// The extractor reads these off the passed `env`; setting them makes the REAL
+// extractFacts run (no module mock). FACT_EXTRACTOR_MODEL feeds the version
+// stamp, so mutating it drives the version-bump branch.
+const TEST_ENV = {
+  ENVIRONMENT: 'test',
+  DATABASE_URL: process.env.DATABASE_URL,
+  FACT_EXTRACTOR_API_KEY: 'test-key',
+  FACT_EXTRACTOR_BASE_URL: 'https://stub.invalid/v1',
+  FACT_EXTRACTOR_MODEL: 'stub-model-v1',
+} as Env;
 
-// Import AFTER the mock so the builder picks up the stubbed extractor.
-import { triggerFactExtraction } from '../../../scheduled/trigger-fact-extraction';
-
-const TEST_ENV = { ENVIRONMENT: 'test', DATABASE_URL: process.env.DATABASE_URL } as Env;
+// Stub the LLM at the network boundary: intercept the extractor's
+// /chat/completions call, pass everything else through to the real fetch.
+const originalFetch = global.fetch;
+function installFetchStub() {
+  global.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url.includes('/chat/completions')) {
+      return new Response(
+        JSON.stringify({ choices: [{ message: { content: FACTS.join('\n') } }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+}
 
 // A parent payload well over the 200-char extraction floor.
 const PARENT_BLOB =
@@ -90,6 +103,8 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
     await initWorkspaceProvider();
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
+    installFetchStub();
+    TEST_ENV.FACT_EXTRACTOR_MODEL = 'stub-model-v1';
 
     org = await createTestOrganization({ name: 'Focused Retrieval Org' });
     user = await createTestUser({ email: 'focused@example.com' });
@@ -111,14 +126,10 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
       semantic_type: 'content',
     });
     parentEventId = parent.id;
-
-    // Reset the stub to its default state for each fresh suite run.
-    stub.facts = ['User lives in NYC.', 'User owns a dog named Rex.', 'User owns a cat named Whiskers.'];
-    stub.version = 'fact-extract-test:v1';
   });
 
   afterAll(() => {
-    vi.restoreAllMocks();
+    global.fetch = originalFetch;
   });
 
   it('builder extracts 3 facts as derived events with the right stamp + inherited fields', async () => {
@@ -147,24 +158,19 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
     }>;
 
     expect(factRows).toHaveLength(3);
-    expect(factRows.map((r) => r.payload_text)).toEqual([
-      'User lives in NYC.',
-      'User owns a dog named Rex.',
-      'User owns a cat named Whiskers.',
-    ]);
+    expect(factRows.map((r) => r.payload_text)).toEqual(FACTS);
 
+    const expectedVersion = factExtractorVersion(TEST_ENV);
     for (const row of factRows) {
       expect(row.semantic_type).toBe('extracted_fact');
       expect(Number(row.metadata.derived_from_event_id)).toBe(parentEventId);
-      expect(row.metadata.fact_extractor_version).toBe('fact-extract-test:v1');
+      expect(row.metadata.fact_extractor_version).toBe(expectedVersion);
       expect(row.organization_id).toBe(org.id);
       // entity_ids inherited from the parent.
       const ids = parsePgNumberArray(row.entity_ids);
       expect(ids).toContain(entity.id);
       // occurred_at inherited from the parent.
-      expect(new Date(row.occurred_at as string).toISOString()).toBe(
-        parentOccurredAt.toISOString()
-      );
+      expect(new Date(row.occurred_at as string).toISOString()).toBe(parentOccurredAt.toISOString());
     }
   });
 
@@ -175,11 +181,7 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
       ctx()
     );
 
-    const expectedFacts = [
-      'User lives in NYC.',
-      'User owns a dog named Rex.',
-      'User owns a cat named Whiskers.',
-    ].join('\n');
+    const expectedFacts = FACTS.join('\n');
 
     // The parent item carries the focused facts in BOTH fields.
     const parentItem = result.content.find((c) => c.id === parentEventId);
@@ -254,10 +256,13 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
     expect(count).toBe(3);
   });
 
-  it('version bump re-extracts: new stamp produces a fresh set of fact rows', async () => {
-    // Bump the stubbed extractor version → the NOT EXISTS guard no longer
-    // matches the v1 rows, so the parent is re-extracted under v2.
-    stub.version = 'fact-extract-test:v2';
+  it('version bump re-extracts under a new stamp, and focused reads serve ONLY the current version', async () => {
+    const v1 = factExtractorVersion(TEST_ENV);
+    // Bump the model → factExtractorVersion changes → the NOT EXISTS guard no
+    // longer matches the v1 rows, so the parent is re-extracted under v2.
+    TEST_ENV.FACT_EXTRACTOR_MODEL = 'stub-model-v2';
+    const v2 = factExtractorVersion(TEST_ENV);
+    expect(v2).not.toBe(v1);
 
     const third = await triggerFactExtraction(TEST_ENV);
     expect(third.factsCreated).toBe(3);
@@ -271,10 +276,12 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
         AND (metadata->>'derived_from_event_id')::bigint = ${parentEventId}
       ORDER BY v
     `) as Array<{ v: string }>;
-    expect(versions.map((r) => r.v)).toEqual(['fact-extract-test:v1', 'fact-extract-test:v2']);
+    // Both versions coexist in the append-only log (6 rows total)...
+    expect(versions.map((r) => r.v).sort()).toEqual([v1, v2].sort());
 
-    // Focused read now aggregates BOTH versions' facts (6 lines). It still
-    // serves facts (not the raw blob) and still lists only the parent.
+    // ...but the focused read serves ONLY the current (v2) version's 3 facts —
+    // never a mix of stale + current. Still serves facts (not raw), lists only
+    // the parent.
     const result = await getContent(
       { entity_id: entity.id, limit: 100, focused: true } as never,
       TEST_ENV as never,
@@ -282,7 +289,8 @@ describe('focused retrieval (#1172) — build + serve loop', () => {
     );
     const parentItem = result.content.find((c) => c.id === parentEventId);
     expect(parentItem).toBeDefined();
-    expect(parentItem!.text_content.split('\n')).toHaveLength(6);
+    expect(parentItem!.text_content.split('\n')).toHaveLength(3);
+    expect(parentItem!.text_content).toBe(FACTS.join('\n'));
     expect(parentItem!.text_content).not.toContain('walk-up apartment');
     expect(result.content.some((c) => c.semantic_type === 'extracted_fact')).toBe(false);
     expect(result.content).toHaveLength(1);

@@ -39,11 +39,14 @@ export const FACT_EXTRACTION_PROMPT_HASH = createHash('sha256')
   .slice(0, 8);
 
 /**
- * Resolve the extractor model name from env, defaulting to a small Haiku.
+ * Resolve the extractor model name from env. Defaults to a small
+ * OpenAI-compatible model, coherent with the OpenAI-compatible `/chat/completions`
+ * default base URL below — deployments point both at their own provider (Haiku,
+ * GLM, Gemini's OpenAI endpoint, …) via FACT_EXTRACTOR_MODEL + _BASE_URL.
  * Exported so the builder can compose the version stamp from the same source.
  */
 export function factExtractorModel(env: Env): string {
-  return env.FACT_EXTRACTOR_MODEL || 'claude-haiku-4-5';
+  return env.FACT_EXTRACTOR_MODEL || 'gpt-4o-mini';
 }
 
 /**
