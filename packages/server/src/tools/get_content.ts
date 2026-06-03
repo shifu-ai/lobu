@@ -1284,13 +1284,13 @@ export async function getContent(
         // rows remain (events is append-only) but must not be aggregated in — else
         // focused reads would mix stale + current facts for the same parent.
         const factRows = await sql`
-          SELECT (d.metadata->>'derived_from_event_id')::bigint AS parent_id,
+          SELECT d.metadata->>'derived_from_event_id' AS parent_id,
                  string_agg(d.payload_text, E'\n' ORDER BY d.id) AS facts
           FROM events d
           WHERE d.semantic_type = 'extracted_fact'
             AND d.organization_id = ${ctx.organizationId}
             AND d.metadata->>'fact_extractor_version' = ${factExtractorVersion(env)}
-            AND (d.metadata->>'derived_from_event_id')::bigint = ANY(${`{${retrievedIds.join(',')}}`}::bigint[])
+            AND d.metadata->>'derived_from_event_id' = ANY(${pgTextArray(retrievedIds.map(String))}::text[])
           GROUP BY parent_id
         `;
         for (const row of factRows as Array<{ parent_id: number | string; facts: string | null }>) {

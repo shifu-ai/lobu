@@ -63,7 +63,7 @@ export async function triggerFactExtraction(env: Env): Promise<FactExtractionRes
         SELECT 1
         FROM events d
         WHERE d.semantic_type = 'extracted_fact'
-          AND (d.metadata->>'derived_from_event_id')::bigint = ev.id
+          AND d.metadata->>'derived_from_event_id' = ev.id::text
           AND d.metadata->>'fact_extractor_version' = ${version}
       )
     ORDER BY ev.created_at DESC
