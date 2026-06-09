@@ -67,18 +67,15 @@ function resolveKey(id: string, envVarName: string): string | undefined {
 }
 
 /**
- * The OpenAI-compatible base URL the worker's OpenAI SDK resolves to. The SDK
- * appends `/chat/completions`, so this must include the version segment.
- * Mirror that: for providers exposing `/v1/models`, the chat base is the same
- * prefix with `/models` stripped; providers whose upstream already embeds the
- * version (e.g. gemini's `/v1beta/openai`) use the upstream as-is.
+ * The chat endpoint, composed exactly as production does. Proven by driving the
+ * real OpenAI SDK (v6) + the proxy `forward()` with a mocked upstream: the
+ * worker's OpenAI client appends `/chat/completions` verbatim to its baseURL,
+ * and the proxy forwards `upstreamBaseUrl + thatPath`. So the chat URL is just
+ * `${upstreamBaseUrl}/chat/completions` — `upstreamBaseUrl` MUST already carry
+ * whatever version segment the provider needs (the contract test pins this).
  */
-function chatBaseUrl(p: ProviderEntry): string {
-	const upstream = p.upstreamBaseUrl.replace(/\/$/, "");
-	if (p.modelsEndpoint) {
-		return `${upstream}${p.modelsEndpoint.replace(/\/models$/, "")}`;
-	}
-	return upstream;
+function chatUrl(p: ProviderEntry): string {
+	return `${p.upstreamBaseUrl.replace(/\/$/, "")}/chat/completions`;
 }
 
 const TIMEOUT_MS = 30_000;
@@ -180,7 +177,7 @@ describe("live provider smoke", () => {
 					return;
 				}
 				const { status, body } = await fetchJson(
-					`${chatBaseUrl(provider)}/chat/completions`,
+					chatUrl(provider),
 					{
 						method: "POST",
 						headers: {
@@ -219,7 +216,7 @@ describe("live provider smoke", () => {
 				const model = provider.defaultModel ?? discoveredModels[0];
 				if (!model) return;
 				const { status, body } = await fetchJson(
-					`${chatBaseUrl(provider)}/chat/completions`,
+					chatUrl(provider),
 					{
 						method: "POST",
 						headers: {
