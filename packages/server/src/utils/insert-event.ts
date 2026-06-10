@@ -5,12 +5,22 @@
  * a single place for validation, defaults, and future hooks (e.g. embeddings).
  */
 
+import { retryWithBackoff } from '@lobu/core';
 import { getDb } from '../db/client';
 import {
   lookupGeoEnrichment,
   mergeEnrichedMetadata,
 } from './geo-enrichment';
 import logger from './logger';
+
+/**
+ * Single bounded retry for the fire-and-forget audit writers below
+ * (recordChangeEvent / recordLifecycleEvent). One retry after a short delay
+ * rides out transient DB blips (pool checkout timeout, failover) without
+ * turning the audit path into a queue; a persistent failure is surfaced at
+ * error level instead of being silently dropped.
+ */
+const AUDIT_EVENT_RETRY = { maxRetries: 1, baseDelay: 500 } as const;
 
 // ============================================
 // Types
@@ -373,7 +383,10 @@ interface ChangeEventParams {
 /**
  * Record a change event for audit purposes.
  *
- * Fire-and-forget — never throws, logs on failure.
+ * Fire-and-forget — never throws. Retries once after a short delay (the same
+ * originId, so a retry can't double-write past a unique origin constraint);
+ * if both attempts fail the dropped audit row is logged at ERROR with full
+ * event context so it's visible in alerting rather than silently lost.
  * Used for entity updates, watcher archival, connection/feed deletion, etc.
  */
 export function recordChangeEvent(params: ChangeEventParams): void {
@@ -381,18 +394,32 @@ export function recordChangeEvent(params: ChangeEventParams): void {
 
   const externalId = `change_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-  insertEvent({
-    entityIds: params.entityIds,
-    organizationId: params.organizationId,
-    originId: externalId,
-    title: params.title,
-    content: params.content,
-    semanticType: 'change',
-    metadata: params.metadata,
-    createdBy: params.createdBy ?? null,
-    clientId: params.clientId ?? null,
-  }).catch((err) => {
-    logger.warn({ err, title: params.title }, 'Failed to record change event');
+  retryWithBackoff(
+    () =>
+      insertEvent({
+        entityIds: params.entityIds,
+        organizationId: params.organizationId,
+        originId: externalId,
+        title: params.title,
+        content: params.content,
+        semanticType: 'change',
+        metadata: params.metadata,
+        createdBy: params.createdBy ?? null,
+        clientId: params.clientId ?? null,
+      }),
+    AUDIT_EVENT_RETRY
+  ).catch((err) => {
+    logger.error(
+      {
+        err,
+        originId: externalId,
+        organizationId: params.organizationId,
+        entityIds: params.entityIds,
+        title: params.title,
+        metadata: params.metadata,
+      },
+      '[insert-event] change audit event DROPPED after retry — audit trail is missing this row'
+    );
   });
 }
 
@@ -437,25 +464,41 @@ interface LifecycleEventParams {
 export function recordLifecycleEvent(params: LifecycleEventParams): void {
   const externalId = `lifecycle_${params.entityType}_${params.op}_${params.entityId}_${Date.now()}`;
 
-  insertEvent({
-    entityIds: [],
-    organizationId: params.organizationId,
-    originId: externalId,
-    title: params.summary,
-    semanticType: 'change',
-    originType: `${params.entityType}_${params.op}`,
-    metadata: {
-      category: 'lifecycle',
-      entity_type: params.entityType,
-      op: params.op,
-      entity_id: String(params.entityId),
-      ...(params.extra ? { extra: params.extra } : {}),
-    },
-    createdBy: params.createdBy ?? null,
-  }).catch((err) => {
-    logger.warn(
-      { err, entityType: params.entityType, op: params.op },
-      '[insert-event] failed to record lifecycle event'
+  // Fire-and-forget with one bounded retry (same originId, so the retry is
+  // safe against duplicate writes). A doubly-failed write is an ERROR — these
+  // rows feed the dashboard metric_series, and a silent drop skews the
+  // cumulative counts forever.
+  retryWithBackoff(
+    () =>
+      insertEvent({
+        entityIds: [],
+        organizationId: params.organizationId,
+        originId: externalId,
+        title: params.summary,
+        semanticType: 'change',
+        originType: `${params.entityType}_${params.op}`,
+        metadata: {
+          category: 'lifecycle',
+          entity_type: params.entityType,
+          op: params.op,
+          entity_id: String(params.entityId),
+          ...(params.extra ? { extra: params.extra } : {}),
+        },
+        createdBy: params.createdBy ?? null,
+      }),
+    AUDIT_EVENT_RETRY
+  ).catch((err) => {
+    logger.error(
+      {
+        err,
+        originId: externalId,
+        organizationId: params.organizationId,
+        entityType: params.entityType,
+        op: params.op,
+        entityId: String(params.entityId),
+        summary: params.summary,
+      },
+      '[insert-event] lifecycle audit event DROPPED after retry — audit trail is missing this row'
     );
   });
 }
