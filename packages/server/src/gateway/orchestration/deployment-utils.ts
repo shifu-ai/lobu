@@ -22,6 +22,34 @@ export async function buildModuleEnvVars(
   return envVars;
 }
 
+/**
+ * Run an async action over `items` in parallel batches of `batchSize`
+ * (Promise.allSettled per batch — one failure never blocks the rest of the
+ * batch). Rejections are reported through `onError`; the return value is the
+ * number of fulfilled actions.
+ */
+export async function runInBatches<T>(
+  items: readonly T[],
+  batchSize: number,
+  action: (item: T) => Promise<unknown>,
+  onError: (item: T, reason: unknown) => void
+): Promise<number> {
+  let fulfilled = 0;
+  for (let i = 0; i < items.length; i += batchSize) {
+    const batch = items.slice(i, i + batchSize);
+    const results = await Promise.allSettled(batch.map(action));
+    for (let j = 0; j < results.length; j++) {
+      const result = results[j];
+      if (result?.status === "fulfilled") {
+        fulfilled++;
+      } else {
+        onError(batch[j] as T, (result as PromiseRejectedResult).reason);
+      }
+    }
+  }
+  return fulfilled;
+}
+
 export function buildDeploymentInfoSummary({
   deploymentName,
   lastActivity,

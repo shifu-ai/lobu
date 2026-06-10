@@ -9,15 +9,19 @@
  * consumer).
  *
  * Behavior notes (preserved exactly from the previous inline implementation):
- *  - Backlog is per-agentId, capped at `BACKLOG_LIMIT` most-recent entries.
- *  - Backlog entries older than `BACKLOG_TTL_MS` are pruned lazily on every
- *    read AND every write.
+ *  - Backlog is per-agentId, capped at `backlogLimit` most-recent entries
+ *    (default from `intervals.sseBacklogLimit`).
+ *  - Backlog entries older than `backlogTtlMs` (default from
+ *    `intervals.sseBacklogTtlMs`) are pruned lazily on every read AND every
+ *    write.
  *  - `broadcast` writes to every live connection; a connection is treated as
  *    dead when it reports `closed`/`destroyed`/`writableEnded` OR when a
  *    write throws — dead connections are removed silently (no throw, no log).
  *  - Backlog is ALWAYS remembered (even when no connections are attached) so
  *    a late subscriber can replay recent events.
  */
+
+import { intervals } from "../../config/intervals.js";
 
 interface SseEvent {
   event: string;
@@ -45,8 +49,8 @@ export class SseManager {
   private readonly backlog = new Map<string, SseEvent[]>();
 
   constructor(
-    private readonly backlogLimit = 100,
-    private readonly backlogTtlMs = 2 * 60 * 1000
+    private readonly backlogLimit = intervals.sseBacklogLimit,
+    private readonly backlogTtlMs = intervals.sseBacklogTtlMs
   ) {}
 
   /**

@@ -73,4 +73,53 @@ export const intervals = {
   get embeddedWorkerPollIntervalMs(): number {
     return parseEnvInt('EMBEDDED_WORKER_POLL_INTERVAL_MS', 5_000);
   },
+
+  /** Grace window (ms) an embedded worker subprocess gets after SIGTERM
+   *  before the orchestrator escalates to SIGKILL. */
+  get workerKillTimeoutMs(): number {
+    return parseEnvInt('WORKER_KILL_TIMEOUT_MS', 5_000);
+  },
+
+  /** Default turn-liveness deadline. Comfortably exceeds the worker's 20s
+   *  heartbeat interval so a live worker (which extends on every heartbeat)
+   *  is never falsely failed; a silent/dead worker lapses within this window
+   *  of its last heartbeat. */
+  get turnDefaultDeadlineMs(): number {
+    return parseEnvInt('TURN_DEFAULT_DEADLINE_MS', 60_000);
+  },
+
+  /** How often each replica sweeps for lapsed turn-liveness markers. */
+  get turnLivenessSweepIntervalMs(): number {
+    return parseEnvInt('TURN_LIVENESS_SWEEP_INTERVAL_MS', 15_000);
+  },
+
+  /** Runs-queue claim visibility timeout: rows in `claimed` for longer than
+   *  this without a heartbeat are reset to pending so a fresh claim can pick
+   *  them up. Must stay well above the claim heartbeat interval. */
+  get runsClaimVisibilityTimeoutMs(): number {
+    return parseEnvInt('RUNS_CLAIM_VISIBILITY_TIMEOUT_MS', 5 * 60 * 1000);
+  },
+
+  /** How often an in-flight runs-queue handler refreshes `claimed_at` to
+   *  prove it's still alive. Must be << runsClaimVisibilityTimeoutMs so the
+   *  sweeper doesn't race a healthy handler. */
+  get runsClaimHeartbeatIntervalMs(): number {
+    return parseEnvInt('RUNS_CLAIM_HEARTBEAT_INTERVAL_MS', 60 * 1000);
+  },
+
+  /** Runs-queue worker poll cadence between empty claims (a NOTIFY for the
+   *  channel cuts the sleep short). */
+  get runsPollIntervalMs(): number {
+    return parseEnvInt('RUNS_POLL_INTERVAL_MS', 200);
+  },
+
+  /** TTL for per-agent SSE backlog entries (pruned lazily on read/write). */
+  get sseBacklogTtlMs(): number {
+    return parseEnvInt('SSE_BACKLOG_TTL_MS', 2 * 60 * 1000);
+  },
+
+  /** Max retained SSE backlog entries per agent (most-recent wins). */
+  get sseBacklogLimit(): number {
+    return parseEnvInt('SSE_BACKLOG_LIMIT', 100);
+  },
 };
