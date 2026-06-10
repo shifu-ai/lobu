@@ -1,5 +1,10 @@
 import { createLogger, type McpOAuthConfig } from "@lobu/core";
 import { Hono } from "hono";
+import { DEFAULT_MCP_DEVICE_SCOPE } from "../../../auth/oauth/scopes.js";
+import {
+  buildRefreshRequest,
+  parseTokenRefreshResponse,
+} from "../../../auth/oauth/token-refresh.js";
 import { GenericDeviceCodeClient } from "../../auth/external/device-code-client.js";
 import type { McpConfigService } from "../../auth/mcp/config-service.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
@@ -8,8 +13,6 @@ import { authenticateWorker } from "./middleware.js";
 import type { WorkerContext } from "./types.js";
 
 const logger = createLogger("device-auth");
-
-const DEFAULT_MCP_SCOPE = "mcp:read mcp:write profile:read";
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 
 interface StoredCredential {
@@ -191,7 +194,7 @@ function resolveOAuthEndpoints(
       oauth?.deviceAuthorizationUrl ?? `${issuer}/oauth/device_authorization`,
     tokenUrl: oauth?.tokenUrl ?? `${issuer}/oauth/token`,
     verificationUri: oauth?.authUrl ?? `${issuer}/oauth/device`,
-    scope: oauth?.scopes?.join(" ") || DEFAULT_MCP_SCOPE,
+    scope: oauth?.scopes?.join(" ") || DEFAULT_MCP_DEVICE_SCOPE,
     clientId: oauth?.clientId,
     clientSecret: oauth?.clientSecret,
     resource: oauth?.resource,
@@ -286,46 +289,19 @@ export async function refreshCredential(
   }
 
   try {
-    const body: Record<string, string> = {
-      grant_type: "refresh_token",
-      client_id: credential.clientId,
-      refresh_token: credential.refreshToken,
-    };
-    if (credential.resource) {
-      body.resource = credential.resource;
-    }
-
-    const authMethod = credential.tokenEndpointAuthMethod;
-    const headers: Record<string, string> = { Accept: "application/json" };
-    let requestBody: string;
-
-    if (!authMethod) {
-      // Legacy device-code path — JSON body with secret inline.
-      if (credential.clientSecret) body.client_secret = credential.clientSecret;
-      headers["Content-Type"] = "application/json";
-      requestBody = JSON.stringify(body);
-    } else {
-      // RFC 6749-compliant form-encoded refresh. Auth method drives where the
-      // secret goes.
-      headers["Content-Type"] = "application/x-www-form-urlencoded";
-      if (authMethod === "client_secret_post" && credential.clientSecret) {
-        body.client_secret = credential.clientSecret;
-      } else if (
-        authMethod === "client_secret_basic" &&
-        credential.clientSecret
-      ) {
-        const basic = Buffer.from(
-          `${encodeURIComponent(credential.clientId)}:${encodeURIComponent(credential.clientSecret)}`
-        ).toString("base64");
-        headers.Authorization = `Basic ${basic}`;
-      }
-      requestBody = new URLSearchParams(body).toString();
-    }
+    const { headers, body } = buildRefreshRequest({
+      profile: "mcp-credential",
+      clientId: credential.clientId,
+      clientSecret: credential.clientSecret,
+      refreshToken: credential.refreshToken,
+      authMethod: credential.tokenEndpointAuthMethod,
+      resource: credential.resource,
+    });
 
     const response = await fetch(credential.tokenUrl, {
       method: "POST",
       headers,
-      body: requestBody,
+      body,
     });
 
     if (!response.ok) {
@@ -339,18 +315,15 @@ export async function refreshCredential(
     }
 
     const data = (await response.json()) as Record<string, unknown>;
-    if (typeof data.access_token !== "string") return null;
+    const parsed = parseTokenRefreshResponse(data, {
+      previousRefreshToken: credential.refreshToken,
+    });
+    if (!parsed) return null;
 
     const refreshed: StoredCredential = {
-      accessToken: data.access_token,
-      refreshToken:
-        typeof data.refresh_token === "string"
-          ? data.refresh_token
-          : credential.refreshToken,
-      expiresAt:
-        typeof data.expires_in === "number"
-          ? Date.now() + data.expires_in * 1000
-          : Date.now() + 3_600_000,
+      accessToken: parsed.accessToken,
+      refreshToken: parsed.refreshToken,
+      expiresAt: parsed.expiresAtMs,
       clientId: credential.clientId,
       clientSecret: credential.clientSecret,
       tokenUrl: credential.tokenUrl,
@@ -405,7 +378,7 @@ export async function tryCompletePendingDeviceAuth(
       deviceAuthorizationUrl:
         deviceState.deviceAuthorizationUrl ??
         `${deviceState.issuer}/oauth/device_authorization`,
-      scope: deviceState.scope ?? DEFAULT_MCP_SCOPE,
+      scope: deviceState.scope ?? DEFAULT_MCP_DEVICE_SCOPE,
       resource: deviceState.resource,
       tokenEndpointAuthMethod: deviceState.clientSecret
         ? "client_secret_post"
@@ -718,7 +691,7 @@ export function createDeviceAuthRoutes(
         deviceAuthorizationUrl:
           deviceState.deviceAuthorizationUrl ??
           `${deviceState.issuer}/oauth/device_authorization`,
-        scope: deviceState.scope ?? DEFAULT_MCP_SCOPE,
+        scope: deviceState.scope ?? DEFAULT_MCP_DEVICE_SCOPE,
         resource: deviceState.resource,
         tokenEndpointAuthMethod: deviceState.clientSecret
           ? "client_secret_post"

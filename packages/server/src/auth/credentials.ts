@@ -6,6 +6,7 @@
  */
 
 import type { DbClient } from '../db/client';
+import { buildRefreshRequest, parseTokenRefreshResponse } from './oauth/token-refresh';
 
 /**
  * Credential tokens for sync execution
@@ -124,25 +125,13 @@ export class CredentialService {
     refreshToken: string;
     authMethod?: 'client_secret_post' | 'client_secret_basic' | 'none';
   }): Promise<{ accessToken: string; expiresAt: Date; refreshToken?: string } | null> {
-    const authMethod = params.authMethod || 'client_secret_post';
-
-    const body = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: params.refreshToken,
+    const { headers, body } = buildRefreshRequest({
+      profile: 'account-credential',
+      clientId: params.clientId,
+      clientSecret: params.clientSecret,
+      refreshToken: params.refreshToken,
+      authMethod: params.authMethod,
     });
-
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    };
-
-    if (authMethod === 'client_secret_basic') {
-      headers.Authorization = `Basic ${Buffer.from(`${params.clientId}:${params.clientSecret || ''}`).toString('base64')}`;
-    } else {
-      body.set('client_id', params.clientId);
-      if (authMethod !== 'none' && params.clientSecret) {
-        body.set('client_secret', params.clientSecret);
-      }
-    }
 
     try {
       const response = await fetch(params.tokenUrl, {
@@ -156,16 +145,17 @@ export class CredentialService {
         return null;
       }
 
-      const data = (await response.json()) as {
-        access_token: string;
-        expires_in?: number;
-        refresh_token?: string;
-      };
+      const data = (await response.json()) as Record<string, unknown>;
+      const parsed = parseTokenRefreshResponse(data);
+      if (!parsed) {
+        console.error('[Credentials] Generic token refresh returned no access_token');
+        return null;
+      }
 
       return {
-        accessToken: data.access_token,
-        expiresAt: new Date(Date.now() + (data.expires_in || 3600) * 1000),
-        refreshToken: data.refresh_token,
+        accessToken: parsed.accessToken,
+        expiresAt: new Date(parsed.expiresAtMs),
+        refreshToken: parsed.refreshToken,
       };
     } catch (error) {
       console.error('[Credentials] Generic token refresh error:', error);

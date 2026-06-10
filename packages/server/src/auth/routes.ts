@@ -17,6 +17,7 @@ import { createAuth } from './index';
 import { mcpAuth, requireAuth } from './middleware';
 import { OAuthClientsStore } from './oauth/clients';
 import { OAuthProvider } from './oauth/provider';
+import { AVAILABLE_PAT_SCOPES, DEFAULT_SCOPES_STRING } from './oauth/scopes';
 import { PersonalAccessTokenService } from './tokens';
 
 const credentialRoutes = new Hono<{ Bindings: Env }>();
@@ -105,17 +106,10 @@ credentialRoutes.get('/agents', requireAuth, async (c) => {
 // Org-scoped Personal Access Token Routes
 // ============================================
 
-// `connections:token` lets a PAT call POST /oauth/connection-token to fetch a
-// managed connector's access token (the local instance's LOBU_CLOUD_PAT is
-// minted with it). Mintable here, but NOT a default scope.
-const AVAILABLE_PAT_SCOPES = new Set([
-  'mcp:read',
-  'mcp:write',
-  'mcp:admin',
-  'profile:read',
-  'connections:token',
-]);
-const DEFAULT_PAT_SCOPE = 'mcp:read mcp:write';
+// Mintable PAT scopes + default scope live in oauth/scopes.ts — the single
+// source of truth for scope definitions.
+const AVAILABLE_PAT_SCOPE_SET = new Set<string>(AVAILABLE_PAT_SCOPES);
+const DEFAULT_PAT_SCOPE = DEFAULT_SCOPES_STRING;
 const MAX_PAT_EXPIRY_DAYS = 3650;
 
 function authorizeTokenCreation(c: Context<{ Bindings: Env }>) {
@@ -159,7 +153,7 @@ function normalizePatScope(scope: unknown): string | undefined {
   }
   const scopes = Array.from(new Set(scope.split(/\s+/).map((value) => value.trim()).filter(Boolean)));
   if (scopes.length === 0) return DEFAULT_PAT_SCOPE;
-  const invalid = scopes.filter((value) => !AVAILABLE_PAT_SCOPES.has(value));
+  const invalid = scopes.filter((value) => !AVAILABLE_PAT_SCOPE_SET.has(value));
   if (invalid.length > 0) {
     throw new Error(`Invalid scope(s): ${invalid.join(', ')}`);
   }
