@@ -171,7 +171,7 @@ test-e2e-cli:
 #   OPENAI_API_KEY=sk-... make test-providers-live
 test-providers-live:
 	@echo "🌐 Live provider smoke (key-gated)…"
-	@bun test packages/server/src/__tests__/live-providers
+	@bun test --timeout 60000 packages/server/src/__tests__/live-providers
 
 # Stop any embedded worker subprocesses left over from a crashed gateway.
 # Workers are normally cleaned up when the gateway exits; this target is a

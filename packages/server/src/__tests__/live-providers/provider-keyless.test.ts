@@ -23,7 +23,7 @@
  * defaultModel. Excluded from the default CI gates (needs network).
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setDefaultTimeout, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -50,6 +50,7 @@ const flattened = registry.providers.flatMap((entry) =>
 const VOICE_ONLY = new Set(["elevenlabs"]);
 
 const TIMEOUT_MS = 20_000;
+setDefaultTimeout(60_000);
 
 async function probe(
 	url: string,
