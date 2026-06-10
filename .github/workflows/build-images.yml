@@ -21,9 +21,9 @@ env:
   # Image names are pinned so the GitOps repo's ImageUpdateAutomation keeps
   # tracking ghcr.io/lobu-ai/lobu-{app,worker,embeddings} after the
   # lobu -> lobu monorepo consolidation.
-  IMAGE_NAME_APP: lobu-ai/lobu-app
-  IMAGE_NAME_WORKER: lobu-ai/lobu-worker
-  IMAGE_NAME_EMBEDDINGS: lobu-ai/lobu-embeddings
+  IMAGE_NAME_APP: ${{ github.repository_owner }}/lobu-app
+  IMAGE_NAME_WORKER: ${{ github.repository_owner }}/lobu-worker
+  IMAGE_NAME_EMBEDDINGS: ${{ github.repository_owner }}/lobu-embeddings
   # Prod runs Hetzner cpx41 (x86_64 only — see project_hetzner_prod_cost
   # memory), so main-branch pushes build amd64 only. This dropped the
   # build-app step from ~25min to ~8min AND fixed the disk-full failure

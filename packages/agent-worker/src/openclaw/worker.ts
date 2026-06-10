@@ -46,6 +46,7 @@ import {
 // module continue to resolve without change.
 export {
   countCompactionsOnCurrentBranch,
+  buildLobuSystemPrompt,
   estimatePromptTokenCost,
   getLatestAssistantText,
   replaceBasePromptIdentity,

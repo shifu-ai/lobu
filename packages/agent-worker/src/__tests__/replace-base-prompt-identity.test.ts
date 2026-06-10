@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { replaceBasePromptIdentity } from "../openclaw/worker";
+import {
+  buildLobuSystemPrompt,
+  replaceBasePromptIdentity,
+} from "../openclaw/worker";
 
 const PI_OPENER =
   "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
@@ -37,5 +40,18 @@ describe("replaceBasePromptIdentity", () => {
 
     expect(out.startsWith(identity)).toBe(true);
     expect(out).toContain("Available tools:");
+  });
+
+  test("builds the Lobu base system prompt before the session starts", () => {
+    const base = `${PI_OPENER}\n\nAvailable tools:\n- read`;
+    const identity = "## Agent Identity\n\nYou are ShiFu onboarding agent.";
+    const gateway = "## Conversation History\n\nUse get_channel_history.";
+    const out = buildLobuSystemPrompt(base, identity, gateway);
+
+    expect(out.startsWith(identity)).toBe(true);
+    expect(out).not.toContain("expert coding assistant");
+    expect(out).toContain("Available tools:");
+    expect(out).toContain("---");
+    expect(out).toContain(gateway);
   });
 });
