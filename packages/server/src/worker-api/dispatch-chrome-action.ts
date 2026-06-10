@@ -28,7 +28,7 @@ import type { Env } from '../index';
 import { waitForDeviceActionRun } from '../tools/admin/manage_operations';
 import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
-import { createConnectorOperationRun } from '../utils/queue-helpers';
+import { createConnectorOperationRun } from '../runs/queue-service';
 
 interface DispatchChromeActionBody {
   parent_run_id: number;

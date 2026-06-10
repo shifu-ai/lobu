@@ -19,7 +19,7 @@ import { resolveConnectorCode } from '../../utils/ensure-connector-installed';
 import { resolveExecutionAuth } from '../../utils/execution-context';
 import { insertEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
-import { createConnectorOperationRun } from '../../utils/queue-helpers';
+import { createConnectorOperationRun } from '../../runs/queue-service';
 import { buildEventPermalink } from '../../utils/url-builder';
 import { trackWatcherReaction } from '../../utils/watcher-reactions';
 import type { ToolContext } from '../registry';

@@ -21,7 +21,7 @@ import { nextRunAt, validateSchedule } from '../../utils/cron';
 import { recordChangeEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
 import { syncOAuthConnectionsForAuthProfile } from '../../utils/oauth-connection-state';
-import { createSyncRun } from '../../utils/queue-helpers';
+import { createSyncRun } from '../../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../utils/run-statuses';
 import type { ToolContext } from '../registry';
 import { action, defineActionTool } from './action-tool';

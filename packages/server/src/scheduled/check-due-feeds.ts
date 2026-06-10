@@ -11,7 +11,7 @@ import type { DbClient } from '../db/client';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import logger from '../utils/logger';
-import { createSyncRun } from '../utils/queue-helpers';
+import { createSyncRun } from '../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { materializeDueItems } from './due-materializer';
 

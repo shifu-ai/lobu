@@ -10,7 +10,7 @@ import {
   summarizeBrowserSessionAuthData,
 } from '../../../../utils/auth-profiles';
 import { getWorkspaceRole } from '../../../../utils/organization-access';
-import { createAuthRun } from '../../../../utils/queue-helpers';
+import { createAuthRun } from '../../../../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-statuses';
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';

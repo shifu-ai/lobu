@@ -19,7 +19,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
 import { manageWatchers } from '../../../tools/admin/manage_watchers';
 import type { ToolContext } from '../../../tools/registry';
-import { createWatcherRun } from '../../../utils/queue-helpers';
+import { createWatcherRun } from '../../../runs/queue-service';
 import { parseWatcherRunPayload } from '../../../watchers/automation';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestAgent, createTestEntity } from '../../setup/test-fixtures';

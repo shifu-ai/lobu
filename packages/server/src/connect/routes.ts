@@ -34,7 +34,7 @@ import { type ConnectTokenRow, resolveConnectToken } from '../utils/connect-toke
 import logger from '../utils/logger';
 import { syncOAuthConnectionsForAuthProfile } from '../utils/oauth-connection-state';
 import { mergeOAuthScopeAuthData, normalizeScopeList } from '../auth/oauth/scopes';
-import { createSyncRun } from '../utils/queue-helpers';
+import { createSyncRun } from '../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { buildConnectionsUrl, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import {

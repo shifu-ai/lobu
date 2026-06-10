@@ -14,7 +14,7 @@ import {
 } from '../lobu/gateway';
 import { getLobuServiceToken } from '../lobu/service-token';
 import logger from '../utils/logger';
-import { createWatcherRun, type WatcherRunPayload } from '../utils/queue-helpers';
+import { createWatcherRun, type WatcherRunPayload } from '../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { computePendingWindow } from '../utils/window-utils';
 import {

@@ -10,7 +10,7 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { Env } from '../../../index';
-import { createSyncRun } from '../../../utils/queue-helpers';
+import { createSyncRun } from '../../../runs/queue-service';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import {
   createTestConnection,

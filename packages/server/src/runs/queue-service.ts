@@ -10,12 +10,12 @@
 import type { DbClient } from '../db/client';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
-import { isCloudMode } from './cloud-mode';
-import { findBundledConnectorFile } from './connector-catalog';
-import { CLOUD_RESTRICTED_CONNECTOR_KEYS } from './connector-cloud-gate';
+import { isCloudMode } from '../utils/cloud-mode';
+import { findBundledConnectorFile } from '../utils/connector-catalog';
+import { CLOUD_RESTRICTED_CONNECTOR_KEYS } from '../utils/connector-cloud-gate';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
-import { ACTIVE_RUN_STATUSES, runStatusLiteral } from './run-statuses';
+import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 
 export type WatcherDispatchSource = 'scheduled' | 'manual';
 
