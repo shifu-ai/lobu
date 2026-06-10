@@ -5,7 +5,7 @@ import { resolveContext } from "../../../internal/context.js";
 import { parseEnvContent } from "../../../internal/env-file.js";
 import { loadProjectLink } from "../../../internal/project-link.js";
 import { ApiError, ValidationError } from "../../memory/_lib/errors.js";
-import { printError, printText } from "../../memory/_lib/output.js";
+import { printError, printText } from "../../../internal/output.js";
 import {
   type ApplyClient,
   type RemoteAgent,

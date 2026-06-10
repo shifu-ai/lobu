@@ -4,6 +4,7 @@
  */
 
 import { input, password } from "@inquirer/prompts";
+import { getPlatformDefinition } from "./registry.js";
 
 interface PlatformPromptResult {
   platformConfig: Record<string, string>;
@@ -16,181 +17,25 @@ export async function promptPlatformConfig(
   const platformConfig: Record<string, string> = {};
   const platformSecrets: Array<{ envVar: string; value: string }> = [];
 
-  if (platform === "telegram") {
-    const botToken = await password({
-      message: "Telegram bot token (from @BotFather):",
-      mask: true,
-    });
-    if (botToken) {
-      platformConfig.botToken = "$TELEGRAM_BOT_TOKEN";
-      platformSecrets.push({ envVar: "TELEGRAM_BOT_TOKEN", value: botToken });
-    }
-  } else if (platform === "slack") {
-    console.log(
-      "\nCreate a Slack app for this agent, then paste its bot token + signing secret below."
-    );
-    console.log(
-      "  1. Visit https://api.slack.com/apps → 'Create New App' → 'From an app manifest'"
-    );
-    console.log(
-      "  2. Pick your workspace, then paste the self-install manifest template:"
-    );
-    console.log(
-      "     https://github.com/lobu-ai/lobu/blob/main/config/slack-app-manifest.self-install.json"
-    );
-    console.log(
-      "     (or run: SLACK_MANIFEST_PATH=config/slack-app-manifest.self-install.json \\"
-    );
-    console.log("              PUBLIC_GATEWAY_URL=<your gateway URL> \\");
-    console.log("              SLACK_CONNECTION_ID=<agent>-slack \\");
-    console.log("              bun run scripts/slack-manifest.ts print)");
-    console.log(
-      "  3. In the manifest, replace the request URLs with https://<gateway>/api/v1/webhooks/<agent>-slack"
-    );
-    console.log(
-      "  4. Install the app to your workspace to mint the bot token.\n"
-    );
-    const slackBotToken = await password({
-      message: "Slack bot token (xoxb-...):",
-      mask: true,
-    });
-    const slackSigningSecret = await password({
-      message: "Slack signing secret:",
-      mask: true,
-    });
-    if (slackBotToken) {
-      platformConfig.botToken = "$SLACK_BOT_TOKEN";
-      platformSecrets.push({
-        envVar: "SLACK_BOT_TOKEN",
-        value: slackBotToken,
-      });
-    }
-    if (slackSigningSecret) {
-      platformConfig.signingSecret = "$SLACK_SIGNING_SECRET";
-      platformSecrets.push({
-        envVar: "SLACK_SIGNING_SECRET",
-        value: slackSigningSecret,
-      });
-    }
-  } else if (platform === "discord") {
-    const botToken = await password({
-      message: "Discord bot token:",
-      mask: true,
-    });
-    const applicationId = await input({
-      message: "Discord application ID:",
-    });
-    const publicKey = await password({
-      message: "Discord application public key:",
-      mask: true,
-    });
-    if (botToken) {
-      platformConfig.botToken = "$DISCORD_BOT_TOKEN";
-      platformSecrets.push({ envVar: "DISCORD_BOT_TOKEN", value: botToken });
-    }
-    if (applicationId) {
-      platformConfig.applicationId = "$DISCORD_APPLICATION_ID";
-      platformSecrets.push({
-        envVar: "DISCORD_APPLICATION_ID",
-        value: applicationId,
-      });
-    }
-    if (publicKey) {
-      platformConfig.publicKey = "$DISCORD_PUBLIC_KEY";
-      platformSecrets.push({ envVar: "DISCORD_PUBLIC_KEY", value: publicKey });
-    }
-  } else if (platform === "whatsapp") {
-    const accessToken = await password({
-      message: "WhatsApp Business access token:",
-      mask: true,
-    });
-    const phoneNumberId = await input({
-      message: "WhatsApp phone number ID:",
-    });
-    const verifyToken = await password({
-      message: "WhatsApp webhook verify token:",
-      mask: true,
-    });
-    const appSecret = await password({
-      message: "WhatsApp app secret:",
-      mask: true,
-    });
-    if (accessToken) {
-      platformConfig.accessToken = "$WHATSAPP_ACCESS_TOKEN";
-      platformSecrets.push({
-        envVar: "WHATSAPP_ACCESS_TOKEN",
-        value: accessToken,
-      });
-    }
-    if (phoneNumberId) {
-      platformConfig.phoneNumberId = "$WHATSAPP_PHONE_NUMBER_ID";
-      platformSecrets.push({
-        envVar: "WHATSAPP_PHONE_NUMBER_ID",
-        value: phoneNumberId,
-      });
-    }
-    if (verifyToken) {
-      platformConfig.verifyToken = "$WHATSAPP_WEBHOOK_VERIFY_TOKEN";
-      platformSecrets.push({
-        envVar: "WHATSAPP_WEBHOOK_VERIFY_TOKEN",
-        value: verifyToken,
-      });
-    }
-    if (appSecret) {
-      platformConfig.appSecret = "$WHATSAPP_APP_SECRET";
-      platformSecrets.push({
-        envVar: "WHATSAPP_APP_SECRET",
-        value: appSecret,
-      });
-    }
-  } else if (platform === "teams") {
-    const appId = await input({
-      message: "Teams App ID (from Azure Bot):",
-    });
-    const appPassword = await password({
-      message: "Teams App Password (client secret):",
-      mask: true,
-    });
-    const appTenantId = await input({
-      message: "Teams App Tenant ID (leave empty for multi-tenant apps):",
-    });
-    if (appId) {
-      platformConfig.appId = "$TEAMS_APP_ID";
-      platformSecrets.push({
-        envVar: "TEAMS_APP_ID",
-        value: appId,
-      });
-    }
-    if (appPassword) {
-      platformConfig.appPassword = "$TEAMS_APP_PASSWORD";
-      platformSecrets.push({
-        envVar: "TEAMS_APP_PASSWORD",
-        value: appPassword,
-      });
-    }
-    if (appTenantId) {
-      platformConfig.appTenantId = "$TEAMS_APP_TENANT_ID";
-      platformSecrets.push({
-        envVar: "TEAMS_APP_TENANT_ID",
-        value: appTenantId,
-      });
-      platformConfig.appType = "SingleTenant";
-    } else if (appId || appPassword) {
-      platformConfig.appType = "MultiTenant";
-    }
-  } else if (platform === "gchat") {
-    const credentials = await password({
-      message: "Google Chat service account JSON:",
-      mask: true,
-    });
-    if (credentials) {
-      platformConfig.credentials = "$GOOGLE_CHAT_CREDENTIALS";
-      platformSecrets.push({
-        envVar: "GOOGLE_CHAT_CREDENTIALS",
-        value: credentials,
-      });
+  const def = getPlatformDefinition(platform);
+  if (!def) return { platformConfig, platformSecrets };
+
+  for (const line of def.intro ?? []) {
+    console.log(line);
+  }
+
+  const values: Record<string, string> = {};
+  for (const field of def.fields) {
+    const value = field.secret
+      ? await password({ message: field.label, mask: true })
+      : await input({ message: field.label });
+    values[field.key] = value;
+    if (value) {
+      platformConfig[field.key] = `$${field.envVar}`;
+      platformSecrets.push({ envVar: field.envVar, value });
     }
   }
+  def.finalize?.(platformConfig, values);
 
   return { platformConfig, platformSecrets };
 }

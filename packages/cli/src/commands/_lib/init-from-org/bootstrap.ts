@@ -17,7 +17,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { AgentSettings } from "@lobu/core";
 import chalk from "chalk";
-import { printText } from "../../memory/_lib/output.js";
+import { printText } from "../../../internal/output.js";
 import type {
   ApplyClient,
   RemoteAgent,

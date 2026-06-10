@@ -14,6 +14,10 @@ import chalk from "chalk";
 import ora from "ora";
 import { promptPlatformConfig } from "../commands/platforms/platform-prompts.js";
 import {
+  getPlatformPlaceholders,
+  PLATFORM_REGISTRY,
+} from "../commands/platforms/registry.js";
+import {
   getProviderById,
   loadProviderRegistry,
   type RegistryProvider,
@@ -25,15 +29,7 @@ import { initFromOrg } from "./_lib/init-from-org/bootstrap.js";
 import { isPortFree } from "./dev.js";
 
 const PROJECT_NAME_PATTERN = /^[a-z0-9-]+$/;
-const PLATFORM_CHOICES = [
-  "telegram",
-  "slack",
-  "discord",
-  "whatsapp",
-  "teams",
-  "gchat",
-] as const;
-type PlatformChoice = (typeof PLATFORM_CHOICES)[number];
+const PLATFORM_CHOICES = PLATFORM_REGISTRY.map((p) => p.id);
 const NETWORK_CHOICES = ["restricted", "open", "isolated"] as const;
 type NetworkChoice = (typeof NETWORK_CHOICES)[number];
 const MEMORY_CHOICES = ["none", "lobu-cloud", "lobu-custom"] as const;
@@ -518,12 +514,7 @@ export async function initCommand(
 
   const platformChoices = [
     { name: "Skip — I'll connect a platform later", value: "" },
-    { name: "Telegram", value: "telegram" },
-    { name: "Slack", value: "slack" },
-    { name: "Discord", value: "discord" },
-    { name: "WhatsApp", value: "whatsapp" },
-    { name: "Microsoft Teams", value: "teams" },
-    { name: "Google Chat", value: "gchat" },
+    ...PLATFORM_REGISTRY.map((p) => ({ name: p.displayName, value: p.id })),
   ];
 
   const platformType = await promptOrDefault({
@@ -531,7 +522,7 @@ export async function initCommand(
     useDefaults,
     defaultValue: "",
     validate: (v: string) =>
-      v === "" || (PLATFORM_CHOICES as readonly string[]).includes(v)
+      v === "" || PLATFORM_CHOICES.includes(v)
         ? true
         : `Unknown platform "${v}". Available: ${PLATFORM_CHOICES.join(", ")}`,
     prompt: () =>
@@ -548,7 +539,7 @@ export async function initCommand(
   let platformSecrets: Array<{ envVar: string; value: string }> = [];
   if (platformType) {
     if (useDefaults) {
-      platformConfig = PLATFORM_PLACEHOLDERS[platformType as PlatformChoice];
+      platformConfig = getPlatformPlaceholders(platformType);
     } else {
       ({ platformConfig, platformSecrets } =
         await promptPlatformConfig(platformType));
@@ -896,32 +887,6 @@ async function promptBooleanOrDefault(opts: {
   if (opts.useDefaults) return opts.defaultValue;
   return opts.prompt();
 }
-
-// Placeholder env-var refs for `--yes` mode; the user fills the values into .env.
-const PLATFORM_PLACEHOLDERS: Record<PlatformChoice, Record<string, string>> = {
-  telegram: { botToken: "$TELEGRAM_BOT_TOKEN" },
-  slack: {
-    botToken: "$SLACK_BOT_TOKEN",
-    signingSecret: "$SLACK_SIGNING_SECRET",
-  },
-  discord: {
-    botToken: "$DISCORD_BOT_TOKEN",
-    applicationId: "$DISCORD_APPLICATION_ID",
-    publicKey: "$DISCORD_PUBLIC_KEY",
-  },
-  whatsapp: {
-    accessToken: "$WHATSAPP_ACCESS_TOKEN",
-    phoneNumberId: "$WHATSAPP_PHONE_NUMBER_ID",
-    verifyToken: "$WHATSAPP_WEBHOOK_VERIFY_TOKEN",
-    appSecret: "$WHATSAPP_APP_SECRET",
-  },
-  teams: {
-    appId: "$TEAMS_APP_ID",
-    appPassword: "$TEAMS_APP_PASSWORD",
-    appType: "MultiTenant",
-  },
-  gchat: { credentials: "$GOOGLE_CHAT_CREDENTIALS" },
-};
 
 function extractEnvVarRef(value: string): string | null {
   const match = value.match(/^\$([A-Z_][A-Z0-9_]*)$/);

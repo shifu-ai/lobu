@@ -19,7 +19,7 @@ import {
   resolveCdpUrl,
 } from "@lobu/connector-sdk";
 import { resolveMcpEndpoint, restToolCall } from "./mcp.js";
-import { printText } from "./output.js";
+import { printText } from "../../../internal/output.js";
 
 /** Stub of the old getProfile() shim. resolveMcpEndpoint falls through to
  * auth store / env when config is empty, which is what we want. */

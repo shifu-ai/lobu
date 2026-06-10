@@ -8,6 +8,7 @@ import {
 import { join } from "node:path";
 import chalk from "chalk";
 import { resolveApiClient } from "../internal/index.js";
+import { printJson } from "../internal/output.js";
 
 interface AgentCommandOptions {
   context?: string;
@@ -183,10 +184,6 @@ export async function agentConfigPatchCommand(
     return;
   }
   console.log(chalk.green(`\n  Updated config for ${agentId}.\n`));
-}
-
-function printJson(value: unknown): void {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
 async function pathExists(path: string): Promise<boolean> {
