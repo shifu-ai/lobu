@@ -1,6 +1,17 @@
 import type { AgentSettings } from "@lobu/core";
 import { resolveApiClient } from "../../../internal/index.js";
 import { ApiError } from "../../memory/_lib/errors.js";
+import type {
+  DesiredAgentMetadata,
+  DesiredEntityType,
+  DesiredRelationshipType,
+} from "./desired-state.js";
+import {
+  type EntityBacking,
+  isRecord,
+  type RelationshipRule,
+  type WatcherSource,
+} from "./shared.js";
 
 // ── Wire types ─────────────────────────────────────────────────────────────
 
@@ -25,10 +36,7 @@ export interface RemoteEntityType {
   required?: string[];
   properties?: Record<string, unknown>;
   /** Present only for derived types (mirrors {@link DesiredEntityType.backing}). */
-  backing?: {
-    sql: string;
-    connection?: string;
-  };
+  backing?: EntityBacking;
   /**
    * Owning org id. The list endpoint also returns *public* types from OTHER
    * orgs (`o.visibility = 'public'`), so prune must compare this against the
@@ -41,7 +49,7 @@ export interface RemoteRelationshipType {
   slug: string;
   name?: string;
   description?: string;
-  rules?: Array<{ source: string; target: string }>;
+  rules?: RelationshipRule[];
   /** Owning org id — see RemoteEntityType.organization_id (public-type guard). */
   organization_id?: string;
 }
@@ -66,7 +74,7 @@ export interface RemoteWatcher {
   notification_priority?: string | null;
   min_cooldown_seconds?: number | null;
   tags?: string[] | null;
-  sources?: Array<{ name: string; query: string }> | null;
+  sources?: WatcherSource[] | null;
   // include_details=true → version-bound fields
   description?: string | null;
   prompt?: string | null;
@@ -163,10 +171,6 @@ export interface EnsureAuthProfileResult {
 }
 
 // ── Shape predicates ───────────────────────────────────────────────────────
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /**
  * Read the first array-valued key from a response body. Endpoints that may
@@ -379,11 +383,7 @@ export class ApplyClient {
    * we re-throw verbatim so `lobu apply` can show the operator the link
    * to the org-scoped IDs issue.
    */
-  async upsertAgent(agent: {
-    agentId: string;
-    name: string;
-    description?: string;
-  }): Promise<RemoteAgent> {
+  async upsertAgent(agent: DesiredAgentMetadata): Promise<RemoteAgent> {
     const { body } = await this.request<RemoteAgent>(
       "POST",
       // No trailing slash — Hono matches `routes.post('/', ...)` mounted at
@@ -469,7 +469,11 @@ export class ApplyClient {
   async upsertPlatform(
     agentId: string,
     stableId: string,
-    payload: { platform: string; name?: string; config: Record<string, string> }
+    payload: {
+      platform: string;
+      name?: string;
+      config: Record<string, string>;
+    }
   ): Promise<UpsertPlatformResult> {
     const { body } = await this.request<UpsertPlatformResult>(
       "PUT",
@@ -557,17 +561,11 @@ export class ApplyClient {
     }
   }
 
-  async upsertEntityType(entity: {
-    slug: string;
-    name?: string;
-    description?: string;
-    required?: string[];
-    properties?: Record<string, unknown>;
-    backing?: {
-      sql: string;
-      connection?: string;
-    };
-  }): Promise<UpsertEntityTypeResult> {
+  async upsertEntityType(
+    // `metadata` is authoring-only — never sent to the server (see
+    // DesiredEntityType); extra properties on the passed value are ignored.
+    entity: Omit<DesiredEntityType, "metadata">
+  ): Promise<UpsertEntityTypeResult> {
     // The server stores per-type fields as a single `metadata_schema` JSON
     // Schema (`{ type, properties, required }`) — it does NOT read top-level
     // `properties`/`required`. Fold them into `metadata_schema` so the schema
@@ -616,7 +614,7 @@ export class ApplyClient {
    */
   async listRelationshipTypeRules(
     slug: string
-  ): Promise<Array<{ id: number; source: string; target: string }>> {
+  ): Promise<Array<RelationshipRule & { id: number }>> {
     const { body } = await this.request<{
       rules?: Array<{
         id?: number;
@@ -640,12 +638,10 @@ export class ApplyClient {
       }));
   }
 
-  async upsertRelationshipType(rel: {
-    slug: string;
-    name?: string;
-    description?: string;
-    rules?: Array<{ source: string; target: string }>;
-  }): Promise<UpsertEntityTypeResult> {
+  async upsertRelationshipType(
+    // `metadata` is authoring-only — never sent (see DesiredRelationshipType).
+    rel: Omit<DesiredRelationshipType, "metadata">
+  ): Promise<UpsertEntityTypeResult> {
     const { rules, ...payload } = rel;
     const result = await this.upsertSchemaResource(
       "relationship_type",
@@ -657,8 +653,7 @@ export class ApplyClient {
     // would never take effect AND would churn a perpetual "rules changed"
     // update on every apply. add_rule is idempotent; remove_rule takes a id.
     const desired = rules ?? [];
-    const ruleKey = (r: { source: string; target: string }) =>
-      `${r.source}	${r.target}`;
+    const ruleKey = (r: RelationshipRule) => `${r.source}	${r.target}`;
     const desiredKeys = new Set(desired.map(ruleKey));
     const remote = await this.listRelationshipTypeRules(rel.slug);
     const remoteKeys = new Set(remote.map(ruleKey));
@@ -771,7 +766,7 @@ export class ApplyClient {
     prompt: string;
     extraction_schema: Record<string, unknown>;
     schedule?: string;
-    sources?: Array<{ name: string; query: string }>;
+    sources?: WatcherSource[];
     reactions_guidance?: string;
     device_worker_id?: string;
     scheduler_client_id?: string;
@@ -898,7 +893,7 @@ export class ApplyClient {
     watcher_id: string;
     prompt?: string;
     extraction_schema?: Record<string, unknown>;
-    sources?: Array<{ name: string; query: string }>;
+    sources?: WatcherSource[];
     json_template?: unknown;
     keying_config?: Record<string, unknown>;
     classifiers?: unknown[];

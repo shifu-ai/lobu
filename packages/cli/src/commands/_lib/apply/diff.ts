@@ -20,8 +20,10 @@ import type {
   DesiredFeed,
   DesiredPlatform,
   DesiredRelationshipType,
+  DesiredState,
   DesiredWatcher,
 } from "./desired-state.js";
+import { declaredConnectorKeys, referencedConnectorKeys } from "./shared.js";
 
 // ── Diff verbs ──────────────────────────────────────────────────────────────
 
@@ -33,12 +35,19 @@ interface BaseRow {
   id: string;
 }
 
-export interface AgentDiffRow extends BaseRow {
-  kind: "agent";
-  desired?: DesiredAgent["metadata"];
-  remote?: RemoteAgent;
-  /** Field-level changes when verb === "update". */
+/**
+ * The desired/remote/changed-fields triple shared by every per-resource row
+ * kind. `changedFields` carries field-level changes when verb === "update".
+ */
+interface ResourceRow<D, R> extends BaseRow {
+  desired?: D;
+  remote?: R;
   changedFields?: string[];
+}
+
+export interface AgentDiffRow
+  extends ResourceRow<DesiredAgent["metadata"], RemoteAgent> {
+  kind: "agent";
 }
 
 export interface SettingsDiffRow extends BaseRow {
@@ -47,36 +56,27 @@ export interface SettingsDiffRow extends BaseRow {
   changedFields?: string[];
 }
 
-export interface PlatformDiffRow extends BaseRow {
+export interface PlatformDiffRow
+  extends ResourceRow<DesiredPlatform, RemotePlatform> {
   kind: "platform";
   agentId: string;
-  desired?: DesiredPlatform;
-  remote?: RemotePlatform;
-  changedFields?: string[];
   /** True when an update will restart the live worker — surfaced in the plan. */
   willRestart?: boolean;
 }
 
-export interface EntityTypeDiffRow extends BaseRow {
+export interface EntityTypeDiffRow
+  extends ResourceRow<DesiredEntityType, RemoteEntityType> {
   kind: "entity-type";
-  desired?: DesiredEntityType;
-  remote?: RemoteEntityType;
-  changedFields?: string[];
 }
 
-export interface RelationshipTypeDiffRow extends BaseRow {
+export interface RelationshipTypeDiffRow
+  extends ResourceRow<DesiredRelationshipType, RemoteRelationshipType> {
   kind: "relationship-type";
-  desired?: DesiredRelationshipType;
-  remote?: RemoteRelationshipType;
-  changedFields?: string[];
 }
 
-export interface WatcherDiffRow extends BaseRow {
+export interface WatcherDiffRow
+  extends ResourceRow<DesiredWatcher, RemoteWatcher> {
   kind: "watcher";
-  desired?: DesiredWatcher;
-  remote?: RemoteWatcher;
-  /** Per-field changes when verb === "update". */
-  changedFields?: string[];
   /**
    * Field names that require a `create_version` + `upgrade` (vs a plain
    * `update`). Apply uses this to route writes to the right admin action.
@@ -102,29 +102,22 @@ export interface ConnectorDefinitionDiffRow extends BaseRow {
   installedRemotely?: boolean;
 }
 
-export interface AuthProfileDiffRow extends BaseRow {
+export interface AuthProfileDiffRow
+  extends ResourceRow<DesiredAuthProfile, RemoteAuthProfile> {
   kind: "auth-profile";
-  desired?: DesiredAuthProfile;
-  remote?: RemoteAuthProfile;
-  changedFields?: string[];
   /** True for `oauth_account` / `browser_session` profiles not yet `active`. */
   needsAuth?: boolean;
 }
 
-export interface ConnectionDiffRow extends BaseRow {
+export interface ConnectionDiffRow
+  extends ResourceRow<DesiredConnection, RemoteConnection> {
   kind: "connection";
-  desired?: DesiredConnection;
-  remote?: RemoteConnection;
-  changedFields?: string[];
 }
 
-export interface FeedDiffRow extends BaseRow {
+export interface FeedDiffRow extends ResourceRow<DesiredFeed, RemoteFeed> {
   kind: "feed";
   /** Owning connection slug. */
   connectionSlug: string;
-  desired?: DesiredFeed;
-  remote?: RemoteFeed;
-  changedFields?: string[];
 }
 
 export type DiffRow =
@@ -857,19 +850,14 @@ export interface RemoteSnapshot {
   feedsByConnectionId: Map<number, RemoteFeed[]>;
 }
 
-export interface DesiredStateForDiff {
-  agents: DesiredAgent[];
-  memorySchema: {
-    entityTypes: DesiredEntityType[];
-    relationshipTypes: DesiredRelationshipType[];
-  };
-  watchers: DesiredWatcher[];
-  connectors: {
-    definitions: DesiredConnectorDefinition[];
-    authProfiles: DesiredAuthProfile[];
-    connections: DesiredConnection[];
-  };
-}
+/**
+ * The subset of {@link DesiredState} the diff consumes — everything except the
+ * apply-only knobs (prune flag, org metadata, requiredSecrets).
+ */
+export type DesiredStateForDiff = Pick<
+  DesiredState,
+  "agents" | "memorySchema" | "watchers" | "connectors"
+>;
 
 export interface ComputeDiffOptions {
   /** Limit the diff to a subset of resource kinds. */
@@ -1082,18 +1070,11 @@ export function computeDiff(
     const installedKeys = new Set(
       remoteConnectorDefinitions.filter((d) => d.installed).map((d) => d.key)
     );
-    const declaredKeys = new Set(
-      desiredConnectors.definitions
-        .map((d) => d.key)
-        .filter((k): k is string => !!k)
-    );
+    const declaredKeys = declaredConnectorKeys(desiredConnectors.definitions);
     // Connectors referenced by a desired auth profile / connection are (or
     // will be) installed in the org too — bundled ones included — so they
     // aren't "undeclared".
-    const referencedConnectorKeys = new Set<string>([
-      ...desiredConnectors.authProfiles.map((p) => p.connector),
-      ...desiredConnectors.connections.map((c) => c.connector),
-    ]);
+    const referencedKeys = referencedConnectorKeys(desiredConnectors);
     // Auto-discovered `.connector.ts` files whose key the CLI can't know up
     // front (the server compiles them). When any exist, suppress the
     // "undeclared remote connector" notes entirely — we can't tell which
@@ -1114,7 +1095,7 @@ export function computeDiff(
         .filter((d) => d.installable && d.source_uri)
         .map((d) => [d.key, d])
     );
-    for (const key of [...referencedConnectorKeys].sort()) {
+    for (const key of [...referencedKeys].sort()) {
       if (installedKeys.has(key)) continue;
       if (declaredKeys.has(key)) continue; // a local def supplies this key
       const entry = installableByKey.get(key);
@@ -1142,7 +1123,7 @@ export function computeDiff(
     if (!hasUnnamedLocalDefs) {
       for (const def of remoteConnectorDefinitions) {
         if (!def.installed) continue;
-        if (declaredKeys.has(def.key) || referencedConnectorKeys.has(def.key)) {
+        if (declaredKeys.has(def.key) || referencedKeys.has(def.key)) {
           continue;
         }
         if (prune && !liveConnectorKeys.has(def.key)) {

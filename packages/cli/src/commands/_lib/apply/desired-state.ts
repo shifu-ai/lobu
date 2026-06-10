@@ -13,9 +13,16 @@ import addFormats from "ajv-formats";
 import type { ConnectorSource, Project, Skill } from "../../../config/index.js";
 import { ValidationError } from "../../memory/_lib/errors.js";
 import {
+  type AgentMarkdown,
   mapProjectToDesiredState,
   mergeAgentDirArtifacts,
 } from "./map-config.js";
+import {
+  type EntityBacking,
+  isRecord,
+  type RelationshipRule,
+  type WatcherSource,
+} from "./shared.js";
 
 // ── Desired state types ────────────────────────────────────────────────────
 
@@ -46,21 +53,17 @@ export interface DesiredEntityType {
   /**
    * Present only for derived (SQL-view-backed) entity types; absent ⇒ stored
    * (the default). Normalized so a stored type compares equal on both sides
-   * (desired + remote both omit it) and never churns the diff. `connection` (a
-   * slug) is present only for an external-backed view; both sides omit it for an
-   * internal view, so it never churns either.
+   * (desired + remote both omit it) and never churns the diff — see
+   * {@link EntityBacking}.
    */
-  backing?: {
-    sql: string;
-    connection?: string;
-  };
+  backing?: EntityBacking;
 }
 
 export interface DesiredRelationshipType {
   slug: string;
   name?: string;
   description?: string;
-  rules?: Array<{ source: string; target: string }>;
+  rules?: RelationshipRule[];
   metadata?: Record<string, unknown>;
 }
 
@@ -75,7 +78,7 @@ export interface DesiredWatcher {
   /** Parsed JSON Schema object describing the LLM output. */
   extractionSchema: Record<string, unknown>;
   /** Optional SQL data sources; server applies a default when omitted. */
-  sources?: Array<{ name: string; query: string }>;
+  sources?: WatcherSource[];
   /**
    * Reaction script — TypeScript source compiled + executed in an isolate at
    * watcher-firing time. Authored as a sibling `.ts` file referenced by
@@ -254,15 +257,7 @@ interface SkillFrontmatter {
     judge?: Array<string | { domain: string; judge?: string }>;
   };
   judges?: Record<string, string>;
-  mcpServers?: Record<
-    string,
-    {
-      url?: string;
-      type?: string;
-      command?: string;
-      args?: string[];
-    }
-  >;
+  mcpServers?: SkillMcpInput;
 }
 
 function normalizeDomainPattern(pattern: string): string {
@@ -458,10 +453,8 @@ async function resolveAgentSkills(
   return [...byName.values()];
 }
 
-async function readMarkdown(
-  agentDir: string
-): Promise<{ identityMd?: string; soulMd?: string; userMd?: string }> {
-  const result: { identityMd?: string; soulMd?: string; userMd?: string } = {};
+async function readMarkdown(agentDir: string): Promise<AgentMarkdown> {
+  const result: AgentMarkdown = {};
   const files: Array<["identityMd" | "soulMd" | "userMd", string]> = [
     ["identityMd", "IDENTITY.md"],
     ["soulMd", "SOUL.md"],
@@ -476,10 +469,6 @@ async function readMarkdown(
     }
   }
   return result;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function asString(value: unknown): string | undefined {
