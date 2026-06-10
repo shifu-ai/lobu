@@ -13,81 +13,41 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { Readable } from "node:stream";
-import { type AdapterPostableMessage, Chat } from "chat";
-import type {
-  AgentConnectionStore,
-  StoredConnection,
-} from "@lobu/core";
+import type { AgentConnectionStore, StoredConnection } from "@lobu/core";
 import { createLogger, isSecretRef } from "@lobu/core";
-import type { CoreServices, PlatformAdapter } from "../platform.js";
-import type { IFileHandler } from "../platform/file-handler.js";
+import { type AdapterPostableMessage, Chat } from "chat";
+import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { CommandDispatcher } from "../commands/command-dispatcher.js";
+import type { IFileHandler } from "../platform/file-handler.js";
+import type { CoreServices, PlatformAdapter } from "../platform.js";
 import {
   deleteSecretsByPrefix,
   persistSecretValue,
   resolveSecretValue,
 } from "../secrets/index.js";
 import { resolveAgentOptions } from "../services/platform-helpers.js";
-import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
-import { isCloudMode } from "../../utils/cloud-mode.js";
-import { getDb } from "../../db/client.js";
 import {
   ConversationStateStore,
   type HistoryEntry,
 } from "./conversation-state-store.js";
-import { createGatewayStateAdapter } from "./state-adapter.js";
-import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
-import { SlackInstructionProvider } from "./slack-instruction-provider.js";
-import {
-  registerSlackAppHome,
-  registerSlackPlatformHandlers,
-} from "./slack-platform-bridge.js";
 import { registerInteractionBridge } from "./interaction-bridge.js";
 import {
   type MessageHandlerBridge,
   registerMessageHandlers,
 } from "./message-handler-bridge.js";
+import { getPlatformDescriptor, PLATFORM_REGISTRY } from "./platforms/index.js";
+import { SlackConnectionCoordinator } from "./slack-connection-coordinator.js";
+import {
+  registerSlackAppHome,
+  registerSlackPlatformHandlers,
+} from "./slack-platform-bridge.js";
+import { createGatewayStateAdapter } from "./state-adapter.js";
 import {
   type ConnectionSettings,
-  isSlackConfig,
   isSecretField,
-  isTelegramConfig,
   type PlatformAdapterConfig,
   type PlatformConnection,
-  type TelegramAdapterConfig,
 } from "./types.js";
-
-/** Drain a Readable into a single Buffer. */
-async function streamToBuffer(readable: Readable): Promise<Buffer> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of readable) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks);
-}
-
-/** Read `botToken` from a Telegram connection config, or undefined. */
-function telegramBotToken(config: TelegramAdapterConfig): string | undefined {
-  return typeof config.botToken === "string" ? config.botToken : undefined;
-}
-
-/**
- * Generate a strong (64 hex char) Telegram webhook secret token. Telegram's
- * `secret_token` allows 1-256 chars of `A-Za-z0-9_-`; hex is a safe subset.
- * Two UUIDs (128 bits of randomness each) with hyphens stripped easily clear
- * the >=32 char bar we want for a non-guessable token.
- */
-function generateTelegramSecretToken(): string {
-  return `${randomUUID()}${randomUUID()}`.replace(/-/g, "");
-}
-
-/** Read `apiBaseUrl` from a Telegram connection config (with default). */
-function telegramApiBase(config: TelegramAdapterConfig): string {
-  return typeof config.apiBaseUrl === "string" && config.apiBaseUrl
-    ? config.apiBaseUrl
-    : "https://api.telegram.org";
-}
 
 /**
  * Stable canonical JSON serialization: object keys sorted recursively so two
@@ -125,32 +85,6 @@ function configsEqual(
 }
 
 const logger = createLogger("chat-instance-manager");
-
-
-/**
- * `mode: "polling"` is the only config that forces long-polling regardless
- * of whether the gateway has a public webhook URL. `mode: "auto"` resolves
- * to webhook on cloud (publicGatewayUrl is always set there), so it's fine
- * to allow. Only the explicit polling opt-in is rejected in cloud.
- */
-function isPollingTelegramMode(config: { mode?: string }): boolean {
-  return config.mode === "polling";
-}
-
-const ADAPTER_FACTORIES: Record<string, (config: any) => Promise<any>> = {
-  telegram: async (c) =>
-    (await import("@chat-adapter/telegram")).createTelegramAdapter(c),
-  slack: async (c) =>
-    (await import("@chat-adapter/slack")).createSlackAdapter(c),
-  discord: async (c) =>
-    (await import("@chat-adapter/discord")).createDiscordAdapter(c),
-  whatsapp: async (c) =>
-    (await import("@chat-adapter/whatsapp")).createWhatsAppAdapter(c),
-  teams: async (c) =>
-    (await import("@chat-adapter/teams")).createTeamsAdapter(c),
-  gchat: async (c) =>
-    (await import("@chat-adapter/gchat")).createGoogleChatAdapter(c),
-};
 
 interface ManagedInstance {
   connection: PlatformConnection;
@@ -208,21 +142,21 @@ export class ChatInstanceManager {
       // errored so an operator can repair or remove it.
       const connection = storedToPlatform(stored);
 
-      // Apply the cloud-mode polling guard before startInstance — otherwise
-      // a previously-persisted `mode: "polling"` Telegram row would silently
-      // start at boot and bypass the create-time rejection added in
-      // `addConnection()`. Mark the row errored so an operator notices.
-      if (
-        connection.status === "active" &&
-        connection.platform === "telegram" &&
-        isCloudMode() &&
-        isPollingTelegramMode(connection.config as { mode?: string })
-      ) {
-        const message =
-          "Polling mode is not supported in Lobu Cloud — use webhook mode, or self-host.";
+      // Apply platform config guards before startInstance (e.g. Telegram's
+      // cloud-mode polling rejection) — otherwise a previously-persisted
+      // refused config would silently start at boot and bypass the
+      // create-time rejection in `addConnection()`. Mark the row errored so
+      // an operator notices.
+      const message =
+        connection.status === "active"
+          ? getPlatformDescriptor(connection.platform)?.getConfigRejection?.(
+              connection.config
+            )
+          : undefined;
+      if (message) {
         logger.warn(
           { id: connection.id, agentId: connection.agentId },
-          `Refusing to boot Telegram polling connection in cloud mode: ${message}`
+          `Refusing to boot ${connection.platform} connection: ${message}`
         );
         // Self-bind the connection's owning org so the PostgreSQL-backed
         // store's per-tenant predicate is satisfied — boot has no HTTP
@@ -287,7 +221,10 @@ export class ChatInstanceManager {
           }
         }
       } catch (error) {
-        logger.error({ id: connection.id, error: String(error) }, "Failed to load connection");
+        logger.error(
+          { id: connection.id, error: String(error) },
+          "Failed to load connection"
+        );
         // Mark the row errored under the connection's own org context:
         // boot has no HTTP request and no ALS org id, and the postgres
         // store's saveConnection() requires getOrgId() — without the
@@ -345,7 +282,8 @@ export class ChatInstanceManager {
     metadata: Record<string, any> = {},
     stableId?: string
   ): Promise<PlatformConnection> {
-    if (!(platform in ADAPTER_FACTORIES)) {
+    const descriptor = getPlatformDescriptor(platform);
+    if (!descriptor) {
       throw new Error(`Unsupported platform: ${platform}`);
     }
     if (config.platform !== platform) {
@@ -354,43 +292,17 @@ export class ChatInstanceManager {
       );
     }
 
-    // `mode: "polling"` long-polls Telegram's edge from the gateway pod and
-    // bypasses the per-tenant webhook URL we issue. On Lobu Cloud — where
-    // the same gateway serves many tenants — that means one org's connection
-    // can starve every other tenant's webhook delivery (and produces no
-    // audit trail tied to the inbound HTTP request). Refuse the explicit
-    // polling opt-in up front; self-hosters (LOBU_CLOUD_MODE unset/0) still
-    // get polling for tunnel-less dev. `mode: "auto"` is fine — it resolves
-    // to webhook whenever `publicGatewayUrl` is set, which cloud always has.
-    if (
-      platform === "telegram" &&
-      isCloudMode() &&
-      isPollingTelegramMode(config as { mode?: string })
-    ) {
-      throw new Error(
-        "Polling mode is not supported in Lobu Cloud — use webhook mode, or self-host."
-      );
+    // Platform-specific config refusal (e.g. Telegram rejects explicit
+    // polling mode in Lobu Cloud — see the telegram descriptor for why).
+    const rejection = descriptor.getConfigRejection?.(config);
+    if (rejection) {
+      throw new Error(rejection);
     }
 
-    // Telegram's inbound webhook is authenticated solely by the adapter
-    // comparing `x-telegram-bot-api-secret-token` against the configured
-    // `secretToken` — and the adapter accepts the request when no token is
-    // set. The public `POST /api/v1/webhooks/:connectionId` route only checks
-    // the connection exists, so a Telegram connection created without a
-    // secretToken has an unauthenticated, forgeable webhook. Auto-generate a
-    // strong random token when the caller didn't supply one so
-    // configurePlatformWebhook always registers it and the adapter always
-    // verifies. The field name matches `isSecretField`, so it's persisted as
-    // a `secret://` ref like any other credential.
-    if (platform === "telegram") {
-      const tgConfig = config as TelegramAdapterConfig;
-      if (
-        typeof tgConfig.secretToken !== "string" ||
-        tgConfig.secretToken.length === 0
-      ) {
-        tgConfig.secretToken = generateTelegramSecretToken();
-      }
-    }
+    // Let the platform prime a brand-new config before it is persisted —
+    // e.g. Telegram auto-generates a strong webhook `secretToken` when the
+    // caller didn't supply one, so its inbound webhook is never forgeable.
+    descriptor.prepareNewConnectionConfig?.(config);
 
     const id = stableId ?? randomUUID().replace(/-/g, "").slice(0, 16);
     const now = Date.now();
@@ -459,10 +371,7 @@ export class ChatInstanceManager {
     );
     await this.connectionStore.deleteConnection(id);
 
-    logger.info(
-      { id, historyDeleted, secretsDeleted },
-      "Connection removed"
-    );
+    logger.info({ id, historyDeleted, secretsDeleted }, "Connection removed");
   }
 
   async restartConnection(id: string): Promise<void> {
@@ -761,9 +670,7 @@ export class ChatInstanceManager {
    * Returns the instance that was removed, if any, so callers can reuse its
    * conversation-state store.
    */
-  private async stopInstance(
-    id: string
-  ): Promise<ManagedInstance | undefined> {
+  private async stopInstance(id: string): Promise<ManagedInstance | undefined> {
     const instance = this.instances.get(id);
     if (instance) {
       instance.interactionCleanup?.();
@@ -786,9 +693,8 @@ export class ChatInstanceManager {
     // can land in an admin's session context whose org doesn't match
     // the connection's row).
     if (connection.organizationId) {
-      return orgContext.run(
-        { organizationId: connection.organizationId },
-        () => this.startInstanceUnscoped(connection)
+      return orgContext.run({ organizationId: connection.organizationId }, () =>
+        this.startInstanceUnscoped(connection)
       );
     }
     // Pre-org-scoping rows (legacy connections without organizationId)
@@ -811,16 +717,16 @@ export class ChatInstanceManager {
         connection.config
       );
 
-      // Backfill a Telegram webhook secret for connections persisted before
-      // auto-generation existed (addConnection only protects newly-created
-      // rows). Without a secretToken the adapter accepts unsigned webhook
+      // Backfill a webhook verification secret for connections persisted
+      // before auto-generation existed (addConnection only protects
+      // newly-created rows) — today only Telegram implements this hook.
+      // Without a secretToken the Telegram adapter accepts unsigned webhook
       // payloads, so an EXISTING no-token row would stay forgeable across
-      // deploys/restarts. Generate + persist one here so this boot's adapter
-      // verifies it and configurePlatformWebhook registers it. Re-read after
-      // persisting so concurrent replicas converge on whichever token landed
-      // first rather than each booting with its own (the security property —
-      // a token is always required — holds regardless of which value wins).
-      await this.ensureTelegramWebhookSecret(connection);
+      // deploys/restarts. The descriptor generates + persists one here so
+      // this boot's adapter verifies it and configurePlatformWebhook
+      // registers it, with a row-locked claim so concurrent replicas
+      // converge on a single token.
+      await this.ensurePlatformWebhookSecret(connection);
 
       const adapter = await this.createAdapter(connection);
       const stateAdapter = await this.createStateAdapter();
@@ -861,9 +767,10 @@ export class ChatInstanceManager {
       await chat.initialize();
 
       // Set webhook URL if applicable
-      const mode = isTelegramConfig(connection.config)
-        ? (connection.config.mode ?? "auto")
-        : "auto";
+      const mode =
+        getPlatformDescriptor(connection.platform)?.resolveWebhookMode?.(
+          connection.config
+        ) ?? "auto";
       const useWebhook =
         mode === "webhook" || (mode === "auto" && !!this.publicGatewayUrl);
       if (useWebhook && this.publicGatewayUrl) {
@@ -962,113 +869,41 @@ export class ChatInstanceManager {
   }
 
   private async createAdapter(connection: PlatformConnection): Promise<any> {
-    const factory = ADAPTER_FACTORIES[connection.platform];
-    if (!factory) {
+    const descriptor = getPlatformDescriptor(connection.platform);
+    if (!descriptor) {
       throw new Error(`No adapter factory for: ${connection.platform}`);
     }
-    return factory(connection.config);
+    return descriptor.createAdapter(connection.config);
   }
 
   /**
-   * Ensure a started Telegram connection has a webhook `secretToken`, then
-   * assign the effective (plaintext) token onto `connection.config` so this
-   * boot's adapter verifies it and configurePlatformWebhook registers it.
-   * No-op for non-Telegram connections and for ones that already carry a token.
-   *
-   * Multi-replica safety: the claim is row-locked. Every replica boots every
-   * connection (initialize() starts them all), so a naive get-then-save would
-   * let two pods generate DIFFERENT tokens, persist+register whichever wrote
-   * last, and leave the other pod's adapter verifying a stale token (transient
-   * 401s). Instead we `SELECT ... FOR UPDATE` the row inside a transaction: the
-   * first pod generates + persists the secret ref under the lock and writes it
-   * into the row's config; later pods see the ref and adopt it — so every pod
-   * and Telegram converge on a single token.
-   *
-   * `connection.config` here is already resolved to plaintext (caller runs
-   * resolveConfigForRuntime first), so a present secretToken is the real value.
+   * Delegate webhook-secret bootstrapping to the platform descriptor (today
+   * only Telegram implements the hook — see `platforms/telegram.ts` for the
+   * row-locked multi-replica convergence story). No-op for platforms without
+   * the hook.
    */
-  private async ensureTelegramWebhookSecret(
+  private async ensurePlatformWebhookSecret(
     connection: PlatformConnection
   ): Promise<void> {
-    if (!isTelegramConfig(connection.config)) return;
-    const current = connection.config.secretToken;
-    if (typeof current === "string" && current.length > 0) return;
-
-    const secretStore = this.services.getSecretStore();
-    const secretName = `connections/${connection.id}/secretToken`;
-    let generated = false;
-
-    // Row-locked claim: read the stored config under FOR UPDATE; if it still
-    // lacks a secretToken, generate + persist a ref and write it back in the
-    // same transaction. Concurrent replicas serialize on the row lock, so only
-    // the first writer generates and the rest read its ref. Returns the
-    // effective `secret://` ref, or null when there is no stored row to lock.
-    const tokenRef = await getDb().begin(async (tx) => {
-      const rows = await tx<{ config: Record<string, unknown> | null }>`
-        SELECT config FROM agent_connections
-        WHERE id = ${connection.id}
-        FOR UPDATE
-      `;
-      const row = rows[0];
-      if (!row) {
-        return null;
-      }
-      const storedConfig = (row.config ?? {}) as Record<string, unknown>;
-      const existingRef = storedConfig.secretToken;
-      if (typeof existingRef === "string" && existingRef.length > 0) {
-        return existingRef;
-      }
-      const ref = await persistSecretValue(
-        secretStore,
-        secretName,
-        generateTelegramSecretToken()
-      );
-      await tx`
-        UPDATE agent_connections
-        SET config = jsonb_set(
-              COALESCE(config, '{}'::jsonb),
-              '{secretToken}',
-              to_jsonb(${ref}::text),
-              true
-            ),
-            updated_at = now()
-        WHERE id = ${connection.id}
-      `;
-      generated = true;
-      return ref;
+    const descriptor = getPlatformDescriptor(connection.platform);
+    if (!descriptor?.ensureWebhookSecret) return;
+    await descriptor.ensureWebhookSecret(connection, {
+      secretStore: this.services.getSecretStore(),
+      persistConnection: (c) => this.persistConnection(c),
+      getStoredConnection: (id) => this.connectionStore.getConnection(id),
     });
+  }
 
-    let effectiveRef = tokenRef;
-    if (effectiveRef === null) {
-      // No stored row to lock (a freshly-built in-memory connection the caller
-      // hasn't persisted — the boot/restart paths always have a row). Persist
-      // via the normal path and adopt the stored ref.
-      connection.config.secretToken = generateTelegramSecretToken();
-      await this.persistConnection(connection);
-      generated = true;
-      const reread = await this.connectionStore.getConnection(connection.id);
-      const rereadRef =
-        reread && typeof (reread.config as any).secretToken === "string"
-          ? ((reread.config as any).secretToken as string)
-          : null;
-      effectiveRef = rereadRef;
-    }
-
-    // Resolve the winning ref to plaintext for the adapter + webhook.
-    const resolved =
-      effectiveRef && isSecretRef(effectiveRef)
-        ? await resolveSecretValue(secretStore, effectiveRef)
-        : effectiveRef;
-    if (typeof resolved === "string" && resolved.length > 0) {
-      connection.config.secretToken = resolved;
-    }
-
-    if (generated) {
-      logger.info(
-        { id: connection.id },
-        "Backfilled Telegram webhook secret token for existing connection"
-      );
-    }
+  /**
+   * Back-compat name for `ensurePlatformWebhookSecret` — existing gateway
+   * tests drive the Telegram backfill through this method directly. (Not
+   * `private`: nothing inside the class calls it, and `noUnusedLocals`
+   * rejects unused private members.)
+   */
+  async ensureTelegramWebhookSecret(
+    connection: PlatformConnection
+  ): Promise<void> {
+    return this.ensurePlatformWebhookSecret(connection);
   }
 
   private async createStateAdapter(): Promise<any> {
@@ -1076,38 +911,24 @@ export class ChatInstanceManager {
   }
 
   /**
-   * Register slash commands with the platform's native command menu.
-   * Currently supports Telegram (setMyCommands) and Slack (via manifest).
+   * Register the public per-connection webhook URL with the platform via its
+   * descriptor hook (today only Telegram implements it — setWebhook with the
+   * verification secret_token). No-op for platforms without the hook.
    */
   private async configurePlatformWebhook(
     connection: PlatformConnection,
     webhookUrl: string
   ): Promise<void> {
-    if (!isTelegramConfig(connection.config)) return;
-    const config = connection.config;
-
-    const botToken = telegramBotToken(config);
-    if (!botToken) return;
-
-    const apiBase = telegramApiBase(config);
-    const body: Record<string, unknown> = { url: webhookUrl };
-    const secretToken = config.secretToken;
-    if (typeof secretToken === "string" && secretToken.length > 0) {
-      body.secret_token = secretToken;
-    }
-
-    const resp = await fetch(`${apiBase}/bot${botToken}/setWebhook`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-
-    if (!resp.ok) {
-      const text = await resp.text();
-      throw new Error(`Telegram setWebhook failed: ${resp.status} ${text}`);
-    }
+    await getPlatformDescriptor(connection.platform)?.configureWebhook?.(
+      connection,
+      webhookUrl
+    );
   }
 
+  /**
+   * Register slash commands with the platform's native command menu via its
+   * descriptor hook (today only Telegram implements it — setMyCommands).
+   */
   private async registerPlatformCommands(
     connection: PlatformConnection
   ): Promise<void> {
@@ -1119,29 +940,10 @@ export class ChatInstanceManager {
         description: cmd.description,
       }));
 
-    if (isTelegramConfig(connection.config)) {
-      const botToken = telegramBotToken(connection.config);
-      if (!botToken) return;
-
-      const apiBase = telegramApiBase(connection.config);
-      const resp = await fetch(`${apiBase}/bot${botToken}/setMyCommands`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ commands }),
-      });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(
-          `Telegram setMyCommands failed: ${resp.status} ${text}`
-        );
-      }
-
-      logger.info(
-        { id: connection.id, count: commands.length },
-        "Telegram bot commands menu registered"
-      );
-    }
+    await getPlatformDescriptor(connection.platform)?.registerCommands?.(
+      connection,
+      commands
+    );
   }
 
   private buildSlackCoordinator(): SlackConnectionCoordinator {
@@ -1280,12 +1082,13 @@ export class ChatInstanceManager {
    * These are lightweight adapters that delegate to this manager.
    */
   createPlatformAdapters(): PlatformAdapter[] {
-    return Object.keys(ADAPTER_FACTORIES).map((name) =>
+    return Object.keys(PLATFORM_REGISTRY).map((name) =>
       this.createPlatformAdapter(name)
     );
   }
 
   private createPlatformAdapter(name: string): PlatformAdapter {
+    const descriptor = getPlatformDescriptor(name);
     return {
       name,
       initialize: async () => {
@@ -1299,7 +1102,7 @@ export class ChatInstanceManager {
       },
       isHealthy: () => true,
       extractRoutingInfo: (body: Record<string, unknown>) =>
-        this.extractPlatformRoutingInfo(name, body),
+        descriptor?.extractRoutingInfo?.(body) ?? null,
       sendMessage: (
         token: string,
         message: string,
@@ -1312,9 +1115,10 @@ export class ChatInstanceManager {
         }
       ) => this.routePlatformMessage(name, token, message, options),
       getFileHandler: (options) => this.getPlatformFileHandler(name, options),
-      ...(name === "slack"
+      ...(descriptor?.getInstructionProvider
         ? {
-            getInstructionProvider: () => new SlackInstructionProvider(this),
+            getInstructionProvider: () =>
+              descriptor.getInstructionProvider!(this),
           }
         : {}),
       getConversationHistory: (
@@ -1347,19 +1151,7 @@ export class ChatInstanceManager {
       return undefined;
     }
 
-    if (name === "telegram") {
-      return this.createTelegramFileHandler(instance.connection);
-    }
-
-    if (name === "slack") {
-      return this.createSlackFileHandler(instance);
-    }
-
-    if (name === "discord" || name === "teams") {
-      return this.createChatSdkFileHandler(instance);
-    }
-
-    return undefined;
+    return getPlatformDescriptor(name)?.createFileHandler?.(instance);
   }
 
   private resolveFileHandlerInstance(
@@ -1393,286 +1185,6 @@ export class ChatInstanceManager {
       }
       return true;
     });
-  }
-
-  private createTelegramFileHandler(
-    connection: PlatformConnection
-  ): IFileHandler | undefined {
-    if (!isTelegramConfig(connection.config)) return undefined;
-    const botToken = telegramBotToken(connection.config);
-    if (!botToken) return undefined;
-
-    const apiBaseUrl = telegramApiBase(connection.config).replace(/\/$/, "");
-    const botUsername =
-      typeof connection.metadata.botUsername === "string"
-        ? connection.metadata.botUsername.replace(/^@/, "")
-        : undefined;
-
-    const parseTelegramTarget = (
-      channelId: string,
-      conversationId?: string
-    ): { chatId: string; messageThreadId?: number } => {
-      if (conversationId?.startsWith("telegram:")) {
-        const [, chatId, rawThreadId] = conversationId.split(":");
-        const messageThreadId = Number.parseInt(rawThreadId || "", 10);
-        return {
-          chatId: chatId || channelId,
-          messageThreadId: Number.isFinite(messageThreadId)
-            ? messageThreadId
-            : undefined,
-        };
-      }
-      return { chatId: channelId };
-    };
-
-    const buildTelegramPermalink = (
-      chatId: string,
-      messageId: number
-    ): string => {
-      if (/^-100\d+$/.test(chatId)) {
-        return `https://t.me/c/${chatId.slice(4)}/${messageId}`;
-      }
-      if (botUsername) {
-        return `https://t.me/${botUsername}`;
-      }
-      return `telegram://chat/${chatId}/${messageId}`;
-    };
-
-    const telegramApiRequest = async (
-      method: string,
-      body: FormData | URLSearchParams
-    ) => {
-      const response = await fetch(`${apiBaseUrl}/bot${botToken}/${method}`, {
-        method: "POST",
-        body,
-      });
-      const text = await response.text();
-      let payload: any = null;
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = null;
-      }
-      if (!response.ok || payload?.ok === false || !payload?.result) {
-        throw new Error(
-          `Telegram ${method} failed: ${response.status} ${text}`
-        );
-      }
-      return payload.result;
-    };
-
-    return {
-      uploadFile: async (fileStream, options) => {
-        const target = parseTelegramTarget(options.channelId, options.threadTs);
-        const buffer = await streamToBuffer(fileStream);
-        const form = new FormData();
-        form.set("chat_id", target.chatId);
-        if (target.messageThreadId) {
-          form.set("message_thread_id", String(target.messageThreadId));
-        }
-        if (options.initialComment) {
-          form.set("caption", options.initialComment);
-        }
-        form.set(
-          options.voiceMessage ? "voice" : "document",
-          new Blob([buffer]),
-          options.filename
-        );
-
-        const result = await telegramApiRequest(
-          options.voiceMessage ? "sendVoice" : "sendDocument",
-          form
-        );
-        const media = options.voiceMessage ? result.voice : result.document;
-        const fileId = String(media?.file_id || result.document?.file_id || "");
-        if (!fileId) {
-          throw new Error("Telegram upload did not return a file_id");
-        }
-        const messageId = Number(result.message_id || 0);
-        return {
-          fileId,
-          permalink: buildTelegramPermalink(target.chatId, messageId),
-          name: options.filename,
-          size: buffer.length,
-        };
-      },
-    };
-  }
-
-  /**
-   * Post a Postable (carrying a file buffer) to a thread or channel on a
-   * managed Chat instance. Shared by every Chat-SDK-backed file handler
-   * (Slack, Discord, Teams). `threadId` / `channelKey` are already the
-   * canonical platform-prefixed ids the Chat SDK expects.
-   */
-  private async postFileToChatTarget(
-    instance: ManagedInstance,
-    target: { threadId?: string; channelKey: string },
-    postable: { raw: string; files: Array<{ data: Buffer; filename: string }> }
-  ): Promise<any> {
-    const { chat } = instance;
-    const platform = instance.connection.platform;
-
-    if (target.threadId) {
-      const adapter = chat.getAdapter?.(platform);
-      const createThread = (chat as any).createThread;
-      if (!adapter || typeof createThread !== "function") {
-        throw new Error(`Chat instance has no createThread for ${platform}`);
-      }
-      // `undefined` (not `{}`) — empty object makes Chat SDK crash in
-      // handleStream reading `_currentMessage.author.userId`.
-      const thread = await createThread.call(
-        chat,
-        adapter,
-        target.threadId,
-        undefined,
-        false
-      );
-      if (!thread) {
-        throw new Error(
-          `Unable to resolve ${platform} thread ${target.threadId} for upload`
-        );
-      }
-      return thread.post(postable);
-    }
-
-    const channel = chat.channel?.(target.channelKey);
-    if (!channel) {
-      throw new Error(
-        `Unable to resolve ${platform} channel ${target.channelKey} for upload`
-      );
-    }
-    return channel.post(postable);
-  }
-
-  private createSlackFileHandler(
-    instance: ManagedInstance
-  ): IFileHandler | undefined {
-    if (!isSlackConfig(instance.connection.config)) return undefined;
-    if (typeof instance.connection.config.botToken !== "string") {
-      return undefined;
-    }
-    const platform = instance.connection.platform;
-
-    // For Slack, `conversationId` is the Chat SDK's canonical `thread.id`
-    // (`slack:{channel}:{parent_thread_ts}`) for group threads, or the bare
-    // channel id for DMs/channel-level posts (no thread_ts).
-    const parseSlackThread = (
-      channelId: string,
-      conversationId?: string
-    ): { channel: string; threadTs?: string } => {
-      if (conversationId?.startsWith("slack:")) {
-        const [, channel, threadTs] = conversationId.split(":");
-        return {
-          channel: channel || channelId,
-          threadTs: threadTs && threadTs !== "" ? threadTs : undefined,
-        };
-      }
-      return { channel: channelId };
-    };
-
-    return {
-      // Use the Chat SDK's Postable.files mechanism — the slack adapter handles
-      // files.uploadV2 internally. We resolve a Thread (in-thread reply) or
-      // Channel (top-level) and post a Postable carrying the file buffer.
-      uploadFile: async (fileStream, options) => {
-        const target = parseSlackThread(options.channelId, options.threadTs);
-        const buffer = await streamToBuffer(fileStream);
-
-        const sent = await this.postFileToChatTarget(
-          instance,
-          {
-            threadId: target.threadTs
-              ? `${platform}:${target.channel}:${target.threadTs}`
-              : undefined,
-            channelKey: `${platform}:${target.channel}`,
-          },
-          {
-            raw: options.initialComment || "",
-            files: [{ data: buffer, filename: options.filename }],
-          }
-        );
-
-        const uploadedFile = (sent?.attachments || sent?.files || [])[0] as
-          | { id?: string; permalink?: string; name?: string; size?: number }
-          | undefined;
-        const fileId = String(
-          uploadedFile?.id || sent?.id || sent?.messageId || sent?.ts || ""
-        );
-        return {
-          fileId,
-          permalink: uploadedFile?.permalink || "",
-          name: uploadedFile?.name || options.filename,
-          size: Number(uploadedFile?.size || buffer.length),
-        };
-      },
-    };
-  }
-
-  // Generic file handler for platforms whose Chat SDK adapter already supports
-  // Postable.files (Discord, Teams). The conversationId arriving as `threadTs`
-  // is the canonical platform-prefixed thread ID (e.g. `discord:guildId:channelId`).
-  private createChatSdkFileHandler(instance: ManagedInstance): IFileHandler {
-    const platform = instance.connection.platform;
-
-    return {
-      uploadFile: async (fileStream, options) => {
-        const buffer = await streamToBuffer(fileStream);
-        const sent = await this.postFileToChatTarget(
-          instance,
-          {
-            threadId: options.threadTs,
-            channelKey: `${platform}:${options.channelId}`,
-          },
-          {
-            raw: options.initialComment || "",
-            files: [{ data: buffer, filename: options.filename }],
-          }
-        );
-
-        return {
-          fileId: String(sent?.id || sent?.messageId || sent?.ts || Date.now()),
-          permalink: "",
-          name: options.filename,
-          size: buffer.length,
-        };
-      },
-    };
-  }
-
-  private extractPlatformRoutingInfo(
-    name: string,
-    body: Record<string, unknown>
-  ): { channelId: string; conversationId?: string; teamId?: string } | null {
-    if (name === "slack") {
-      const slack = body.slack as
-        | { channel?: string; thread?: string; team?: string }
-        | undefined;
-      if (!slack?.channel) return null;
-      return {
-        channelId: slack.channel,
-        conversationId: slack.thread,
-        teamId: slack.team,
-      };
-    }
-
-    if (name === "telegram") {
-      const telegram = body.telegram as
-        | { chatId?: string | number }
-        | undefined;
-      if (!telegram?.chatId) return null;
-      return {
-        channelId: String(telegram.chatId),
-        conversationId: String(telegram.chatId),
-      };
-    }
-
-    const whatsapp = body.whatsapp as { chat?: string } | undefined;
-    if (!whatsapp?.chat) return null;
-    return {
-      channelId: whatsapp.chat,
-      conversationId: whatsapp.chat,
-    };
   }
 
   async routePlatformMessage(
