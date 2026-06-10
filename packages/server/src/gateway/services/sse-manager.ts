@@ -19,11 +19,21 @@
  *    a late subscriber can replay recent events.
  */
 
-interface SseEvent {
-  event: string;
-  data: unknown;
-  timestamp: number;
+export interface SseEvent {
+	event: string;
+	data: unknown;
+	timestamp: number;
 }
+
+/**
+ * Sink that fans a broadcast event out to peer replicas. Injected by
+ * `SseFanout` via `setPublisher`; absent (single-replica / tests) means
+ * broadcasts stay local-only. Kept as a plain callback — not a hard
+ * dependency on Postgres — so `SseManager` stays a pure in-memory fan-out and
+ * the cross-pod transport can be swapped (e.g. targeted delivery at large N)
+ * without touching any broadcast call site.
+ */
+export type SseFanoutPublisher = (agentId: string, entry: SseEvent) => void;
 
 /**
  * Minimal shape of an SSE stream we can write to. Matches Hono's
@@ -33,179 +43,213 @@ interface SseEvent {
  * lifecycle, it just fans events out.
  */
 export interface SseConnection {
-  closed?: boolean;
-  destroyed?: boolean;
-  writableEnded?: boolean;
-  writeSSE?(payload: { event: string; data: string }): unknown;
-  write?(chunk: string): unknown;
+	closed?: boolean;
+	destroyed?: boolean;
+	writableEnded?: boolean;
+	writeSSE?(payload: { event: string; data: string }): unknown;
+	write?(chunk: string): unknown;
 }
 
 export class SseManager {
-  private readonly connections = new Map<string, Set<SseConnection>>();
-  private readonly backlog = new Map<string, SseEvent[]>();
+	private readonly connections = new Map<string, Set<SseConnection>>();
+	private readonly backlog = new Map<string, SseEvent[]>();
+	private publisher?: SseFanoutPublisher;
 
-  constructor(
-    private readonly backlogLimit = 100,
-    private readonly backlogTtlMs = 2 * 60 * 1000
-  ) {}
+	constructor(
+		private readonly backlogLimit = 100,
+		private readonly backlogTtlMs = 2 * 60 * 1000,
+	) {}
 
-  /**
-   * Append an event to the per-agent backlog and prune expired entries.
-   *
-   * Called from `broadcast` and is safe to call on its own for callers that
-   * want to seed the backlog without an active connection.
-   */
-  rememberEvent(agentId: string, event: SseEvent): void {
-    this.pruneExpired(event.timestamp);
-    const existing = this.backlog.get(agentId) || [];
-    const next = existing.concat(event).slice(-this.backlogLimit);
-    this.backlog.set(agentId, next);
-  }
+	/**
+	 * Append an event to the per-agent backlog and prune expired entries.
+	 *
+	 * Called from `broadcast` and is safe to call on its own for callers that
+	 * want to seed the backlog without an active connection.
+	 */
+	rememberEvent(agentId: string, event: SseEvent): void {
+		this.pruneExpired(event.timestamp);
+		const existing = this.backlog.get(agentId) || [];
+		const next = existing.concat(event).slice(-this.backlogLimit);
+		this.backlog.set(agentId, next);
+	}
 
-  /**
-   * Return the current fresh backlog for an agent. Always prunes expired
-   * entries first so callers never observe stale events.
-   *
-   * The optional `since` timestamp filters entries with `timestamp > since`.
-   * Without it, the full retained backlog is returned.
-   */
-  getRecentEvents(agentId: string, since?: number): SseEvent[] {
-    this.pruneExpired();
-    const entries = this.backlog.get(agentId) || [];
-    if (typeof since === "number") {
-      return entries.filter((entry) => entry.timestamp > since);
-    }
-    return entries;
-  }
+	/**
+	 * Return the current fresh backlog for an agent. Always prunes expired
+	 * entries first so callers never observe stale events.
+	 *
+	 * The optional `since` timestamp filters entries with `timestamp > since`.
+	 * Without it, the full retained backlog is returned.
+	 */
+	getRecentEvents(agentId: string, since?: number): SseEvent[] {
+		this.pruneExpired();
+		const entries = this.backlog.get(agentId) || [];
+		if (typeof since === "number") {
+			return entries.filter((entry) => entry.timestamp > since);
+		}
+		return entries;
+	}
 
-  /**
-   * Remember the event, then write it to every live connection for `agentId`.
-   * Dead connections (closed / ended / threw on write) are removed silently.
-   * If the agent has no connections, only the backlog is updated.
-   */
-  broadcast(agentId: string, event: string, data: unknown): void {
-    const entry: SseEvent = { event, data, timestamp: Date.now() };
-    this.rememberEvent(agentId, entry);
+	/**
+	 * Remember the event, then write it to every live connection for `agentId`.
+	 * Dead connections (closed / ended / threw on write) are removed silently.
+	 * If the agent has no connections, only the backlog is updated.
+	 */
+	broadcast(agentId: string, event: string, data: unknown): void {
+		const entry: SseEvent = { event, data, timestamp: Date.now() };
+		this.rememberEvent(agentId, entry);
+		this.writeToConnections(agentId, entry);
+		// Fan out to peer replicas. The SSE connection for `agentId` may live on a
+		// different pod than the one producing this event: workers and
+		// thread_response rows are claimed by whichever replica is free
+		// (SKIP-LOCKED), independent of the ClientIP affinity that pins the
+		// client's SSE to one pod. Best-effort — a dropped NOTIFY costs one
+		// ephemeral event; durable terminal delivery stays on the thread_response
+		// owner-gate. No-op (local-only) when no publisher is wired.
+		this.publisher?.(agentId, entry);
+	}
 
-    const connections = this.connections.get(agentId);
-    if (!connections || connections.size === 0) return;
+	/**
+	 * Deliver an event that originated on a peer replica (via `SseFanout`).
+	 * Only delivers when THIS pod actually holds a connection for `agentId` —
+	 * otherwise the event is dropped without seeding the backlog, so peers don't
+	 * accumulate backlog for agents they never serve.
+	 */
+	deliverFromPeer(agentId: string, entry: SseEvent): void {
+		if (!this.hasActiveConnection(agentId)) return;
+		this.rememberEvent(agentId, entry);
+		this.writeToConnections(agentId, entry);
+	}
 
-    const dead = new Set<SseConnection>();
-    for (const res of connections) {
-      try {
-        if (res.closed || res.destroyed || res.writableEnded) {
-          dead.add(res);
-          continue;
-        }
-        if (typeof res.writeSSE === "function") {
-          res.writeSSE({ event, data: JSON.stringify(data) });
-        } else if (typeof res.write === "function") {
-          const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-          res.write(message);
-        }
-      } catch {
-        dead.add(res);
-      }
-    }
+	/**
+	 * Register (or clear, with `undefined`) the sink that fans broadcast events
+	 * out to peer replicas. Called once at startup by `SseFanout`.
+	 */
+	setPublisher(publisher: SseFanoutPublisher | undefined): void {
+		this.publisher = publisher;
+	}
 
-    for (const deadRes of dead) {
-      connections.delete(deadRes);
-    }
-    if (connections.size === 0) {
-      this.connections.delete(agentId);
-    }
-  }
+	/** Write an event to every live connection for `agentId`, sweeping dead ones. */
+	private writeToConnections(agentId: string, entry: SseEvent): void {
+		const connections = this.connections.get(agentId);
+		if (!connections || connections.size === 0) return;
 
-  /**
-   * Register a live connection for fan-out. Caller is responsible for calling
-   * `removeConnection` on disconnect — `broadcast` will also evict connections
-   * it detects as dead during a write.
-   */
-  addConnection(agentId: string, connection: SseConnection): void {
-    let set = this.connections.get(agentId);
-    if (!set) {
-      set = new Set();
-      this.connections.set(agentId, set);
-    }
-    set.add(connection);
-  }
+		const { event, data } = entry;
+		const dead = new Set<SseConnection>();
+		for (const res of connections) {
+			try {
+				if (res.closed || res.destroyed || res.writableEnded) {
+					dead.add(res);
+					continue;
+				}
+				if (typeof res.writeSSE === "function") {
+					res.writeSSE({ event, data: JSON.stringify(data) });
+				} else if (typeof res.write === "function") {
+					const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+					res.write(message);
+				}
+			} catch {
+				dead.add(res);
+			}
+		}
 
-  removeConnection(agentId: string, connection: SseConnection): void {
-    const set = this.connections.get(agentId);
-    if (!set) return;
-    set.delete(connection);
-    if (set.size === 0) {
-      this.connections.delete(agentId);
-    }
-  }
+		for (const deadRes of dead) {
+			connections.delete(deadRes);
+		}
+		if (connections.size === 0) {
+			this.connections.delete(agentId);
+		}
+	}
 
-  /**
-   * True if `agentId` has at least one live connection registered.
-   * Used by status endpoints that expose `hasActiveConnection`.
-   */
-  hasActiveConnection(agentId: string): boolean {
-    const set = this.connections.get(agentId);
-    return !!set && set.size > 0;
-  }
+	/**
+	 * Register a live connection for fan-out. Caller is responsible for calling
+	 * `removeConnection` on disconnect — `broadcast` will also evict connections
+	 * it detects as dead during a write.
+	 */
+	addConnection(agentId: string, connection: SseConnection): void {
+		let set = this.connections.get(agentId);
+		if (!set) {
+			set = new Set();
+			this.connections.set(agentId, set);
+		}
+		set.add(connection);
+	}
 
-  /**
-   * Snapshot the number of live connections for an agent. Used for
-   * per-agent connection-limit checks.
-   */
-  connectionCount(agentId: string): number {
-    return this.connections.get(agentId)?.size ?? 0;
-  }
+	removeConnection(agentId: string, connection: SseConnection): void {
+		const set = this.connections.get(agentId);
+		if (!set) return;
+		set.delete(connection);
+		if (set.size === 0) {
+			this.connections.delete(agentId);
+		}
+	}
 
-  /** Total number of live connections across all agents. */
-  totalConnections(): number {
-    let total = 0;
-    for (const set of this.connections.values()) total += set.size;
-    return total;
-  }
+	/**
+	 * True if `agentId` has at least one live connection registered.
+	 * Used by status endpoints that expose `hasActiveConnection`.
+	 */
+	hasActiveConnection(agentId: string): boolean {
+		const set = this.connections.get(agentId);
+		return !!set && set.size > 0;
+	}
 
-  /**
-   * Close every connection for `agentId`, emitting a `closed` event with
-   * `reason` first (best-effort — write errors are swallowed, matching the
-   * previous inline DELETE /agents behavior). Also drops the backlog so a
-   * later connection with the same key cannot replay stale completion
-   * events from the deleted session.
-   */
-  closeAgent(agentId: string, reason: string): void {
-    const connections = this.connections.get(agentId);
-    if (connections) {
-      for (const connection of connections) {
-        try {
-          if (typeof connection.writeSSE === "function") {
-            connection.writeSSE({
-              event: "closed",
-              data: JSON.stringify({ reason }),
-            });
-          } else if (typeof connection.write === "function") {
-            connection.write(
-              `event: closed\ndata: ${JSON.stringify({ reason })}\n\n`
-            );
-          }
-          (connection as { close?: () => void }).close?.();
-          (connection as { end?: () => void }).end?.();
-        } catch {
-          // Ignore — connection is already dead.
-        }
-      }
-      this.connections.delete(agentId);
-    }
-    this.backlog.delete(agentId);
-  }
+	/**
+	 * Snapshot the number of live connections for an agent. Used for
+	 * per-agent connection-limit checks.
+	 */
+	connectionCount(agentId: string): number {
+		return this.connections.get(agentId)?.size ?? 0;
+	}
 
-  private pruneExpired(now = Date.now()): void {
-    for (const [agentId, entries] of this.backlog.entries()) {
-      const fresh = entries.filter(
-        (entry) => now - entry.timestamp <= this.backlogTtlMs
-      );
-      if (fresh.length === 0) {
-        this.backlog.delete(agentId);
-        continue;
-      }
-      this.backlog.set(agentId, fresh);
-    }
-  }
+	/** Total number of live connections across all agents. */
+	totalConnections(): number {
+		let total = 0;
+		for (const set of this.connections.values()) total += set.size;
+		return total;
+	}
+
+	/**
+	 * Close every connection for `agentId`, emitting a `closed` event with
+	 * `reason` first (best-effort — write errors are swallowed, matching the
+	 * previous inline DELETE /agents behavior). Also drops the backlog so a
+	 * later connection with the same key cannot replay stale completion
+	 * events from the deleted session.
+	 */
+	closeAgent(agentId: string, reason: string): void {
+		const connections = this.connections.get(agentId);
+		if (connections) {
+			for (const connection of connections) {
+				try {
+					if (typeof connection.writeSSE === "function") {
+						connection.writeSSE({
+							event: "closed",
+							data: JSON.stringify({ reason }),
+						});
+					} else if (typeof connection.write === "function") {
+						connection.write(
+							`event: closed\ndata: ${JSON.stringify({ reason })}\n\n`,
+						);
+					}
+					(connection as { close?: () => void }).close?.();
+					(connection as { end?: () => void }).end?.();
+				} catch {
+					// Ignore — connection is already dead.
+				}
+			}
+			this.connections.delete(agentId);
+		}
+		this.backlog.delete(agentId);
+	}
+
+	private pruneExpired(now = Date.now()): void {
+		for (const [agentId, entries] of this.backlog.entries()) {
+			const fresh = entries.filter(
+				(entry) => now - entry.timestamp <= this.backlogTtlMs,
+			);
+			if (fresh.length === 0) {
+				this.backlog.delete(agentId);
+				continue;
+			}
+			this.backlog.set(agentId, fresh);
+		}
+	}
 }
