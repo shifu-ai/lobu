@@ -25,7 +25,8 @@ import {
 import { assertEntityIdsInOrg } from '../../helpers/db-helpers';
 import { type FeedDefinition, splitConfigByFeedScope } from '../../helpers/feed-helpers';
 import { getScopedConnectorDefinition } from '../../connector-definition-helpers';
-import { buildConnectionsUrl, getOrganizationSlug, getPublicWebUrl } from '../../../../utils/url-builder';
+import { buildConnectionsUrl } from '../../../../utils/url-builder';
+import { getOrgUrlContext } from '../../../view-urls';
 import { createConnectToken } from '../../../../utils/connect-tokens';
 import { resolveUsernames } from '../../../../utils/resolve-usernames';
 import type { ToolContext } from '../../../registry';
@@ -39,8 +40,7 @@ export async function handleConnect(
   const sql = getDb();
   const { organizationId, userId } = ctx;
 
-  const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
-  const ownerSlug = await getOrganizationSlug(organizationId);
+  const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
   const buildSetupUrl = (opts?: { connectorKey?: string; install?: string }) =>
     ownerSlug && baseUrl
       ? buildConnectionsUrl(

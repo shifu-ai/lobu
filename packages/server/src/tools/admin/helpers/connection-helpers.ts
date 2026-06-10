@@ -25,12 +25,10 @@ import {
   readRequestedScopesFromAuthData,
 } from '../../../auth/oauth/scopes';
 import { getWorkspaceRole } from '../../../utils/organization-access';
-import {
-  buildConnectionsUrl,
-  getOrganizationSlug,
-  getPublicWebUrl,
-} from '../../../utils/url-builder';
+import { buildConnectionsUrl } from '../../../utils/url-builder';
 import type { ToolContext } from '../../registry';
+import { getOrgUrlContext } from '../../view-urls';
+import { isAdminOrOwnerRole } from '../../access-control';
 
 // ============================================
 // Auth Schema Types
@@ -339,8 +337,7 @@ export async function buildViewUrl(
   ctx: ToolContext,
   connectorKey?: string | null
 ): Promise<string | undefined> {
-  const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
-  const ownerSlug = await getOrganizationSlug(ctx.organizationId);
+  const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
   if (!ownerSlug || !baseUrl) return undefined;
   return buildConnectionsUrl(ownerSlug, baseUrl, connectorKey);
 }
@@ -352,7 +349,7 @@ export async function resolveConnectionVisibility(
   if (!userId) return 'org';
   const sql = getDb();
   const role = await getWorkspaceRole(sql, organizationId, userId);
-  return role === 'owner' || role === 'admin' ? 'org' : 'private';
+  return isAdminOrOwnerRole(role) ? 'org' : 'private';
 }
 
 export async function resolveConnectionDisplayName(params: {

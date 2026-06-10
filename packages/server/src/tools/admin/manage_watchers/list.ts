@@ -5,7 +5,8 @@
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import logger from '../../../utils/logger';
-import { getOrganizationSlug, getPublicWebUrl, buildWatchersUrl, type EntityInfo } from '../../../utils/url-builder';
+import { getOrganizationSlug, getPublicWebUrl, buildWatchersUrl } from '../../../utils/url-builder';
+import { toEntityInfo } from '../../view-urls';
 import { buildLatestWatcherRunJoinSql } from '../../../watchers/automation';
 import type { ToolContext } from '../../registry';
 import { batchCountUnanalyzedContent } from './shared';
@@ -173,14 +174,13 @@ export async function handleList(
     const countData = counts.get(watcherId) || { pending: 0, historical: 0 };
     const orgSlug = orgSlugMap.get(watcher.organization_id as string) ?? null;
 
-    const entityInfo: EntityInfo | null = orgSlug
-      ? {
-          ownerSlug: orgSlug,
-          entityType: watcher.entity_type,
+    const entityInfo = orgSlug
+      ? toEntityInfo(orgSlug, {
+          entity_type: watcher.entity_type,
           slug: watcher.entity_slug,
-          parentType: watcher.parent_entity_type ?? null,
-          parentSlug: watcher.parent_slug ?? null,
-        }
+          parent_entity_type: watcher.parent_entity_type ?? null,
+          parent_slug: watcher.parent_slug ?? null,
+        })
       : null;
     const viewUrl = entityInfo ? buildWatchersUrl(entityInfo, baseUrl) : undefined;
 

@@ -9,7 +9,8 @@ import { ToolUserError } from '../../../utils/errors';
 import { nextRunAt, validateSchedule } from '../../../utils/cron';
 import { recordChangeEvent, recordLifecycleEvent } from '../../../utils/insert-event';
 import logger from '../../../utils/logger';
-import { getOrganizationSlug, getPublicWebUrl, buildWatchersUrl, type EntityInfo } from '../../../utils/url-builder';
+import { getOrganizationSlug, getPublicWebUrl, buildWatchersUrl } from '../../../utils/url-builder';
+import { toEntityInfo } from '../../view-urls';
 import {
   createClassifiersForWatcher,
   enableClassifiersOnEntity,
@@ -238,15 +239,7 @@ export async function handleCreate(
   let viewUrl: string | undefined;
 
   if (entityRow !== null && organizationSlug) {
-    const er = entityRow;
-    const entityInfo: EntityInfo = {
-      ownerSlug: organizationSlug,
-      entityType: er.entity_type,
-      slug: er.slug,
-      parentType: er.parent_entity_type ?? null,
-      parentSlug: er.parent_slug ?? null,
-    };
-    viewUrl = buildWatchersUrl(entityInfo, baseUrl);
+    viewUrl = buildWatchersUrl(toEntityInfo(organizationSlug, entityRow), baseUrl);
   }
 
   logger.info(`[manage_watchers] Created watcher ${watcherId} with slug '${args.slug}'`);

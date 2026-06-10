@@ -1,5 +1,6 @@
 import type { DbClient } from '../../db/client';
 import { ToolUserError } from '../../utils/errors';
+import { isAdminOrOwnerRole } from '../access-control';
 
 /**
  * Ownership/access enforcement for pinning a watcher to a device worker
@@ -56,7 +57,7 @@ export function evaluateDeviceWorkerAccess(
   }
 
   // Org owner/admin may pin any device attached to their org.
-  const isOwnerOrAdmin = caller.memberRole === 'owner' || caller.memberRole === 'admin';
+  const isOwnerOrAdmin = isAdminOrOwnerRole(caller.memberRole);
   if (
     isOwnerOrAdmin &&
     device.organization_id !== null &&

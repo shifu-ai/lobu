@@ -20,10 +20,11 @@ import { resolveExecutionAuth } from '../../utils/execution-context';
 import { insertEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
 import { createConnectorOperationRun } from '../../utils/queue-helpers';
-import { buildEventPermalink, getOrganizationSlug, getPublicWebUrl } from '../../utils/url-builder';
+import { buildEventPermalink } from '../../utils/url-builder';
 import { trackWatcherReaction } from '../../utils/watcher-reactions';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { getOrgUrlContext } from '../view-urls';
+import { action, defineActionTool } from './action-tool';
 import { PaginationFields } from './schemas/common-fields';
 
 const BackendLiteral = Type.Union([
@@ -93,14 +94,6 @@ const RejectAction = Type.Object({
   reason: Type.Optional(Type.String()),
 });
 
-export const ManageOperationsSchema = Type.Union([
-  ListAvailableAction,
-  ExecuteAction,
-  ListRunsAction,
-  GetRunAction,
-  ApproveAction,
-  RejectAction,
-]);
 
 type ManageOperationsResult =
   | { error: string }
@@ -145,7 +138,6 @@ type ManageOperationsResult =
   | { action: 'approve'; approved: true; run_id: number; event_id?: number; message: string }
   | { action: 'reject'; rejected: true; run_id: number; event_id?: number };
 
-type OperationsArgs = Static<typeof ManageOperationsSchema>;
 
 type InlineExecutionResult =
   | { status: 'completed'; output: Record<string, unknown>; metadata?: Record<string, unknown> }
@@ -162,21 +154,17 @@ type ConnectionRow = {
   name: string;
 };
 
-export async function manageOperations(
-  args: OperationsArgs,
-  env: Env,
-  ctx: ToolContext
-): Promise<ManageOperationsResult> {
-  return routeAction<ManageOperationsResult>('manage_operations', args.action, ctx, {
-    list_available: () =>
-      handleListAvailable(args as Extract<OperationsArgs, { action: 'list_available' }>, ctx),
-    execute: () => handleExecute(args as Extract<OperationsArgs, { action: 'execute' }>, env, ctx),
-    list_runs: () => handleListRuns(args as Extract<OperationsArgs, { action: 'list_runs' }>, ctx),
-    get_run: () => handleGetRun(args as Extract<OperationsArgs, { action: 'get_run' }>, ctx),
-    approve: () => handleApprove(args as Extract<OperationsArgs, { action: 'approve' }>, env, ctx),
-    reject: () => handleReject(args as Extract<OperationsArgs, { action: 'reject' }>, ctx),
-  });
-}
+const manageOperationsTool = defineActionTool('manage_operations', {
+  list_available: action(ListAvailableAction, handleListAvailable),
+  execute: action(ExecuteAction, handleExecute),
+  list_runs: action(ListRunsAction, handleListRuns),
+  get_run: action(GetRunAction, handleGetRun),
+  approve: action(ApproveAction, handleApprove),
+  reject: action(RejectAction, handleReject),
+});
+
+export const ManageOperationsSchema = manageOperationsTool.schema;
+export const manageOperations = manageOperationsTool.run;
 
 // Update the run to failed status and return the error result in one call.
 async function failRunInline(
@@ -445,7 +433,7 @@ async function executeOperationInline(
 }
 
 async function handleListAvailable(
-  args: Extract<OperationsArgs, { action: 'list_available' }>,
+  args: Static<typeof ListAvailableAction>,
   ctx: ToolContext
 ): Promise<ManageOperationsResult> {
   const result = await listOperations({
@@ -607,9 +595,9 @@ export async function waitForDeviceActionRun(
 }
 
 async function handleExecute(
-  args: Extract<OperationsArgs, { action: 'execute' }>,
-  env: Env,
-  ctx: ToolContext
+  args: Static<typeof ExecuteAction>,
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageOperationsResult> {
   const sql = getDb();
   const resolved = await getOperationForConnection(
@@ -729,8 +717,7 @@ async function handleExecute(
       authorName: ctx.clientId ?? 'agent',
     });
     const eventId = Number(event.id);
-    const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
-    const orgSlug = await getOrganizationSlug(ctx.organizationId);
+    const { ownerSlug: orgSlug, baseUrl } = await getOrgUrlContext(ctx);
     const approvalUrl =
       orgSlug && baseUrl ? buildEventPermalink(orgSlug, eventId, baseUrl) : undefined;
 
@@ -810,7 +797,7 @@ async function handleExecute(
 }
 
 async function handleListRuns(
-  args: Extract<OperationsArgs, { action: 'list_runs' }>,
+  args: Static<typeof ListRunsAction>,
   ctx: ToolContext
 ): Promise<ManageOperationsResult> {
   const sql = getDb();
@@ -889,7 +876,7 @@ async function handleListRuns(
 }
 
 async function handleGetRun(
-  args: Extract<OperationsArgs, { action: 'get_run' }>,
+  args: Static<typeof GetRunAction>,
   ctx: ToolContext
 ): Promise<ManageOperationsResult> {
   const sql = getDb();
@@ -973,9 +960,9 @@ export async function supersedeActionEvent(
 }
 
 async function handleApprove(
-  args: Extract<OperationsArgs, { action: 'approve' }>,
-  env: Env,
-  ctx: ToolContext
+  args: Static<typeof ApproveAction>,
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageOperationsResult> {
   if (ctx.clientId) {
     return {
@@ -1079,7 +1066,7 @@ async function handleApprove(
 }
 
 async function handleReject(
-  args: Extract<OperationsArgs, { action: 'reject' }>,
+  args: Static<typeof RejectAction>,
   ctx: ToolContext
 ): Promise<ManageOperationsResult> {
   if (ctx.clientId) {

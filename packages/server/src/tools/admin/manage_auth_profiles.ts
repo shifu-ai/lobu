@@ -14,7 +14,6 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../../db/client';
-import type { Env } from '../../index';
 import {
   type AuthProfileKind,
   type AuthProfileStatus,
@@ -35,7 +34,7 @@ import {
 import { createConnectToken } from '../../utils/connect-tokens';
 import { getWorkspaceRole } from '../../utils/organization-access';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { action, defineActionTool } from './action-tool';
 import { getScopedConnectorDefinition } from './connector-definition-helpers';
 import {
   buildOAuthConnectConfig,
@@ -47,6 +46,7 @@ import {
   resolveRequestedOAuthScopes,
   serializeAuthProfile,
 } from './helpers/connection-helpers';
+import { isAdminOrOwnerRole } from '../access-control';
 
 // ============================================
 // Schema
@@ -148,16 +148,6 @@ const SetDefaultAuthProfileAction = Type.Object({
   }),
 });
 
-export const ManageAuthProfilesSchema = Type.Union([
-  ListAuthProfilesAction,
-  GetAuthProfileAction,
-  TestAuthProfileAction,
-  CreateAuthProfileAction,
-  UpdateAuthProfileAction,
-  DeleteAuthProfileAction,
-  SetDefaultAuthProfileAction,
-]);
-
 // ============================================
 // Result Types
 // ============================================
@@ -192,59 +182,29 @@ type ManageAuthProfilesResult =
       auth_profile: any | null;
     };
 
-type AuthProfilesArgs = Static<typeof ManageAuthProfilesSchema>;
-
 // ============================================
 // Main Function (Action Router)
 // ============================================
 
-export async function manageAuthProfiles(
-  args: AuthProfilesArgs,
-  _env: Env,
-  ctx: ToolContext
-): Promise<ManageAuthProfilesResult> {
-  return routeAction<ManageAuthProfilesResult>('manage_auth_profiles', args.action, ctx, {
-    list_auth_profiles: () =>
-      handleListAuthProfiles(
-        args as Extract<AuthProfilesArgs, { action: 'list_auth_profiles' }>,
-        ctx
-      ),
-    get_auth_profile: () =>
-      handleGetAuthProfile(args as Extract<AuthProfilesArgs, { action: 'get_auth_profile' }>, ctx),
-    test_auth_profile: () =>
-      handleTestAuthProfile(
-        args as Extract<AuthProfilesArgs, { action: 'test_auth_profile' }>,
-        ctx
-      ),
-    create_auth_profile: () =>
-      handleCreateAuthProfile(
-        args as Extract<AuthProfilesArgs, { action: 'create_auth_profile' }>,
-        ctx
-      ),
-    update_auth_profile: () =>
-      handleUpdateAuthProfile(
-        args as Extract<AuthProfilesArgs, { action: 'update_auth_profile' }>,
-        ctx
-      ),
-    delete_auth_profile: () =>
-      handleDeleteAuthProfile(
-        args as Extract<AuthProfilesArgs, { action: 'delete_auth_profile' }>,
-        ctx
-      ),
-    set_default_auth_profile: () =>
-      handleSetDefaultAuthProfile(
-        args as Extract<AuthProfilesArgs, { action: 'set_default_auth_profile' }>,
-        ctx
-      ),
-  });
-}
+const manageAuthProfilesTool = defineActionTool('manage_auth_profiles', {
+  list_auth_profiles: action(ListAuthProfilesAction, handleListAuthProfiles),
+  get_auth_profile: action(GetAuthProfileAction, handleGetAuthProfile),
+  test_auth_profile: action(TestAuthProfileAction, handleTestAuthProfile),
+  create_auth_profile: action(CreateAuthProfileAction, handleCreateAuthProfile),
+  update_auth_profile: action(UpdateAuthProfileAction, handleUpdateAuthProfile),
+  delete_auth_profile: action(DeleteAuthProfileAction, handleDeleteAuthProfile),
+  set_default_auth_profile: action(SetDefaultAuthProfileAction, handleSetDefaultAuthProfile),
+});
+
+export const ManageAuthProfilesSchema = manageAuthProfilesTool.schema;
+export const manageAuthProfiles = manageAuthProfilesTool.run;
 
 // ============================================
 // Action Handlers
 // ============================================
 
 async function handleListAuthProfiles(
-  args: Extract<AuthProfilesArgs, { action: 'list_auth_profiles' }>,
+  args: Static<typeof ListAuthProfilesAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   const authProfiles = await listAuthProfiles({
@@ -261,7 +221,7 @@ async function handleListAuthProfiles(
 }
 
 async function handleGetAuthProfile(
-  args: Extract<AuthProfilesArgs, { action: 'get_auth_profile' }>,
+  args: Static<typeof GetAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   const authProfile = await getAuthProfileBySlug(ctx.organizationId, args.auth_profile_slug);
@@ -276,7 +236,7 @@ async function handleGetAuthProfile(
 }
 
 async function handleTestAuthProfile(
-  args: Extract<AuthProfilesArgs, { action: 'test_auth_profile' }>,
+  args: Static<typeof TestAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   const authProfile = await getAuthProfileBySlug(ctx.organizationId, args.auth_profile_slug);
@@ -451,7 +411,7 @@ async function syncConnectionsForBrowserAuthProfile(
 }
 
 async function handleCreateAuthProfile(
-  args: Extract<AuthProfilesArgs, { action: 'create_auth_profile' }>,
+  args: Static<typeof CreateAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   // Only oauth_account profiles are user-personal; every other kind is an
@@ -537,7 +497,7 @@ async function handleCreateAuthProfile(
       const role = ctx.userId
         ? await getWorkspaceRole(getDb(), ctx.organizationId, ctx.userId)
         : null;
-      const callerIsAdmin = role === 'admin' || role === 'owner';
+      const callerIsAdmin = isAdminOrOwnerRole(role);
       if (!callerIsAdmin && existing.created_by !== ctx.userId) {
         return {
           error: `Auth profile '${existing.slug}' belongs to another user. Choose a different slug.`,
@@ -664,7 +624,7 @@ async function handleCreateAuthProfile(
 }
 
 async function handleCreateBrowserSessionProfile(
-  args: Extract<AuthProfilesArgs, { action: 'create_auth_profile' }>,
+  args: Static<typeof CreateAuthProfileAction>,
   ctx: ToolContext,
   connector: Awaited<ReturnType<typeof getScopedConnectorDefinition>>
 ): Promise<ManageAuthProfilesResult> {
@@ -706,7 +666,7 @@ async function handleCreateBrowserSessionProfile(
 }
 
 async function handleUpdateAuthProfile(
-  args: Extract<AuthProfilesArgs, { action: 'update_auth_profile' }>,
+  args: Static<typeof UpdateAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   // Mirror create gating: only oauth_account profiles are member-editable.
@@ -721,7 +681,7 @@ async function handleUpdateAuthProfile(
     const role = ctx.userId
       ? await getWorkspaceRole(getDb(), ctx.organizationId, ctx.userId)
       : null;
-    const callerIsAdmin = role === 'admin' || role === 'owner';
+    const callerIsAdmin = isAdminOrOwnerRole(role);
     if (existingForRoleCheck.profile_kind !== 'oauth_account' && !callerIsAdmin) {
       return {
         error: `Only admins can modify ${existingForRoleCheck.profile_kind} auth profiles.`,
@@ -892,7 +852,7 @@ async function handleUpdateAuthProfile(
 }
 
 async function handleDeleteAuthProfile(
-  args: Extract<AuthProfilesArgs, { action: 'delete_auth_profile' }>,
+  args: Static<typeof DeleteAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   const sql = getDb();
@@ -1008,7 +968,7 @@ async function handleDeleteAuthProfile(
 }
 
 async function handleSetDefaultAuthProfile(
-  args: Extract<AuthProfilesArgs, { action: 'set_default_auth_profile' }>,
+  args: Static<typeof SetDefaultAuthProfileAction>,
   ctx: ToolContext
 ): Promise<ManageAuthProfilesResult> {
   if (args.auth_profile_slug !== null) {

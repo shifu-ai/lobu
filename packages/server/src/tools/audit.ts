@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
+import { AUDIT_SEMANTIC_TYPE } from './constants';
 import type { ToolContext } from './registry';
 
 const MAX_PREVIEW_CHARS = 500;
@@ -115,7 +116,7 @@ export async function recordToolInvocationAudit(
       title: `${params.toolName} ${success ? 'completed' : 'failed'}`,
       payloadType: 'empty',
       payloadData: payload,
-      semanticType: 'audit',
+      semanticType: AUDIT_SEMANTIC_TYPE,
       originType: 'tool_invocation',
       metadata: {
         category: 'audit',

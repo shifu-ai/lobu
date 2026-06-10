@@ -34,7 +34,7 @@ import {
 } from '../../utils/organization-access';
 import { WatcherExecutionConfigSchema } from './watcher-execution-config';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { defineFlatActionTool, flatAction } from './action-tool';
 import { requireWatcherAccess } from './manage_watchers/shared';
 import { handleCreate, handleUpdate, handleDelete, handleCreateFromVersion } from './manage_watchers/crud';
 import { handleCreateVersion, handleUpgrade, handleGetVersions, handleGetVersionDetails } from './manage_watchers/version-actions';
@@ -519,23 +519,28 @@ export async function manageWatchers(
     }
   }
 
-  return routeAction<ManageWatchersResult>('manage_watchers', args.action, ctx, {
-    create: () => handleCreate(args, env, ctx),
-    update: () => handleUpdate(args, env, ctx),
-    create_version: () => handleCreateVersion(args, env, ctx),
-    upgrade: () => handleUpgrade(args, env),
-    complete_window: () => handleCompleteWindow(args, env, ctx),
-    trigger: () => handleTrigger(args, env),
-    delete: () => handleDelete(args),
-    set_reaction_script: () => handleSetReactionScript(args, env),
-    get_versions: () => handleGetVersions(args),
-    get_version_details: () => handleGetVersionDetails(args),
-    get_component_reference: () => Promise.resolve(handleGetComponentReference()),
-    submit_feedback: () => handleSubmitFeedback(args, ctx),
-    get_feedback: () => handleGetFeedback(args, ctx),
-    create_from_version: () => handleCreateFromVersion(args, env, ctx),
-  });
+  return runManageWatchers(args, env, ctx);
 }
+
+const runManageWatchers = defineFlatActionTool<ManageWatchersArgs, ManageWatchersResult>(
+  'manage_watchers',
+  {
+    create: flatAction((args, ctx, env) => handleCreate(args, env, ctx)),
+    update: flatAction((args, ctx, env) => handleUpdate(args, env, ctx)),
+    create_version: flatAction((args, ctx, env) => handleCreateVersion(args, env, ctx)),
+    upgrade: flatAction((args, _ctx, env) => handleUpgrade(args, env)),
+    complete_window: flatAction((args, ctx, env) => handleCompleteWindow(args, env, ctx)),
+    trigger: flatAction((args, _ctx, env) => handleTrigger(args, env)),
+    delete: flatAction(handleDelete),
+    set_reaction_script: flatAction((args, _ctx, env) => handleSetReactionScript(args, env)),
+    get_versions: flatAction(handleGetVersions),
+    get_version_details: flatAction(handleGetVersionDetails),
+    get_component_reference: flatAction(() => Promise.resolve(handleGetComponentReference())),
+    submit_feedback: flatAction(handleSubmitFeedback),
+    get_feedback: flatAction(handleGetFeedback),
+    create_from_version: flatAction((args, ctx, env) => handleCreateFromVersion(args, env, ctx)),
+  }
+);
 
 export async function listWatchers(
   args: ListWatchersArgs,

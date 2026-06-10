@@ -19,7 +19,7 @@ import { ensureMemberEntityType } from '../../utils/member-entity-type';
 import { RESERVED_ENTITY_TYPES } from '../../utils/reserved';
 import { resolveUsernames } from '../../utils/resolve-usernames';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { defineFlatActionTool, flatAction } from './action-tool';
 
 // ============================================
 // Typebox Schema
@@ -258,32 +258,41 @@ type ManageEntitySchemaResult =
 // Main Function (Action Router)
 // ============================================
 
+const runEntityTypeActions = defineFlatActionTool<ManageEntitySchemaArgs, ManageEntitySchemaResult>(
+  'manage_entity_schema',
+  {
+    list: flatAction((_args, ctx) => etHandleList(ctx)),
+    get: flatAction((args, ctx) => etHandleGet(args.slug, ctx)),
+    create: flatAction((args, ctx) => etHandleCreate(args, ctx)),
+    update: flatAction((args, ctx) => etHandleUpdate(args, ctx)),
+    delete: flatAction((args, ctx) => etHandleDelete(args.slug, ctx)),
+    audit: flatAction((args, ctx) => etHandleAudit(args.slug, ctx)),
+  }
+);
+
+const runRelationshipTypeActions = defineFlatActionTool<
+  ManageEntitySchemaArgs,
+  ManageEntitySchemaResult
+>('manage_entity_schema', {
+  list: flatAction(rtHandleList),
+  get: flatAction(rtHandleGet),
+  create: flatAction(rtHandleCreate),
+  update: flatAction(rtHandleUpdate),
+  delete: flatAction(rtHandleDelete),
+  add_rule: flatAction(rtHandleAddRule),
+  remove_rule: flatAction(rtHandleRemoveRule),
+  list_rules: flatAction(rtHandleListRules),
+});
+
 export async function manageEntitySchema(
   args: ManageEntitySchemaArgs,
-  _env: Env,
+  env: Env,
   ctx: ToolContext
 ): Promise<ManageEntitySchemaResult> {
   if (args.schema_type === 'entity_type') {
-    return routeAction('manage_entity_schema', args.action, ctx, {
-      list: () => etHandleList(ctx),
-      get: () => etHandleGet(args.slug, ctx),
-      create: () => etHandleCreate(args, ctx),
-      update: () => etHandleUpdate(args, ctx),
-      delete: () => etHandleDelete(args.slug, ctx),
-      audit: () => etHandleAudit(args.slug, ctx),
-    });
+    return runEntityTypeActions(args, env, ctx);
   }
-
-  return routeAction('manage_entity_schema', args.action, ctx, {
-    list: () => rtHandleList(args, ctx),
-    get: () => rtHandleGet(args, ctx),
-    create: () => rtHandleCreate(args, ctx),
-    update: () => rtHandleUpdate(args, ctx),
-    delete: () => rtHandleDelete(args, ctx),
-    add_rule: () => rtHandleAddRule(args, ctx),
-    remove_rule: () => rtHandleRemoveRule(args, ctx),
-    list_rules: () => rtHandleListRules(args, ctx),
-  });
+  return runRelationshipTypeActions(args, env, ctx);
 }
 
 // ============================================

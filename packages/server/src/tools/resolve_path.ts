@@ -22,6 +22,8 @@ import { resolveMemberSchemaFieldsFromSchema } from '../utils/member-entity-type
 import { stripMemberEmailsFromRows } from '../utils/member-redaction';
 import { RESERVED_PATHS } from '../utils/reserved';
 import { getWorkspaceProvider } from '../workspace';
+import { isAdminOrOwnerRole } from './access-control';
+import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { ToolContext } from './registry';
 
 export const ResolvePathSchema = Type.Object({
@@ -366,7 +368,7 @@ async function _resolvePath(
         LEFT JOIN organization eo ON eo.id = e.organization_id
         WHERE (
             e.organization_id = ${workspace.id}
-            OR (eo.visibility = 'public' AND et.slug <> '$member')
+            OR (eo.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
           )
           AND e.deleted_at IS NULL
           AND et.slug = ${segment.entity_type}
@@ -419,7 +421,7 @@ async function _resolvePath(
         LEFT JOIN organization eo ON eo.id = e.organization_id
         WHERE (
             e.organization_id = ${workspace.id}
-            OR (eo.visibility = 'public' AND et.slug <> '$member')
+            OR (eo.visibility = 'public' AND et.slug <> ${MEMBER_ENTITY_TYPE_SLUG})
           )
           AND e.deleted_at IS NULL
           AND et.slug = ${segment.entity_type}
@@ -496,7 +498,7 @@ async function _resolvePath(
     const mergedTabs = mergeTabs(entityTabs, entityTypeTabs);
     let processedEntityTabs = await processTabsDataSources(mergedTabs, entityDataCtx, sql);
     let redactedTemplateData = entityTemplateData;
-    if (entityRow.entity_type === '$member' && !ctx.memberRole) {
+    if (entityRow.entity_type === MEMBER_ENTITY_TYPE_SLUG && !ctx.memberRole) {
       throw new ToolUserError(
         'Member details are only visible to members of this workspace. Join the workspace to see members.',
         403
@@ -504,16 +506,16 @@ async function _resolvePath(
     }
     const rawEntityMetadata = entityRow.metadata ?? {};
     let safeEntityMetadata = rawEntityMetadata;
-    const canSeeEmail = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+    const canSeeEmail = isAdminOrOwnerRole(ctx.memberRole);
     if (!canSeeEmail) {
       const schemaRow = await sql`
         SELECT metadata_schema FROM entity_types
-        WHERE slug = '$member' AND organization_id = ${workspace.id} AND deleted_at IS NULL
+        WHERE slug = ${MEMBER_ENTITY_TYPE_SLUG} AND organization_id = ${workspace.id} AND deleted_at IS NULL
         LIMIT 1
       `;
       const memberSchema = (schemaRow[0]?.metadata_schema as Record<string, unknown> | null) ?? null;
       const { emailField } = resolveMemberSchemaFieldsFromSchema(memberSchema);
-      if (entityRow.entity_type === '$member' && emailField in safeEntityMetadata) {
+      if (entityRow.entity_type === MEMBER_ENTITY_TYPE_SLUG && emailField in safeEntityMetadata) {
         const { [emailField]: _drop, ...rest } = safeEntityMetadata;
         safeEntityMetadata = rest;
       }

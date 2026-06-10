@@ -26,6 +26,7 @@ import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table
 import { ToolUserError } from '../../utils/errors';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
+import { isAdminOrOwnerRole } from '../access-control';
 
 export const MetricSeriesSchema = Type.Object({
   sql: Type.String({
@@ -66,7 +67,7 @@ export async function metricSeries(
 
   // Members may chart their org's operational data; the auth/identity tables
   // (oauth_tokens, oauth_clients, user) stay admin-only.
-  const isAdmin = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+  const isAdmin = isAdminOrOwnerRole(ctx.memberRole);
   const { sql: scopedSql, params } = validateAndScopeQuery(args.sql, orgId, {
     // Emit the safe column allowlist (not SELECT *) so a member charting e.g.
     // `connections` can't pull credential columns the allowlist withholds.

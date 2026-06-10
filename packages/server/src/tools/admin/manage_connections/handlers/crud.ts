@@ -47,6 +47,7 @@ import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
 import { resolveDeviceBinding, isManagedPublicOrgConnect } from './device-binding';
 import { assertConnectorAllowedInCloud } from '../../../../utils/connector-cloud-gate';
 import { ensureConnectorInstalled } from '../../../../utils/ensure-connector-installed';
+import { isAdminOrOwnerRole } from '../../../access-control';
 
 // ============================================
 // handleList
@@ -305,7 +306,7 @@ export async function handleCreate(
   // Resolve caller role once — we use it for created_by overrides, explicit
   // app_auth_profile picks, and member-friendly error messages downstream.
   const callerRole = userId ? await getWorkspaceRole(sql, organizationId, userId) : null;
-  const callerIsAdmin = callerRole === 'admin' || callerRole === 'owner';
+  const callerIsAdmin = isAdminOrOwnerRole(callerRole);
 
   // Resolve effective owner — admins can create connections on behalf of other users
   let effectiveCreatedBy = userId;
@@ -837,7 +838,7 @@ export async function handleUpdate(
   const callerRole = ctx.userId
     ? await getWorkspaceRole(sql, organizationId, ctx.userId)
     : null;
-  const callerIsAdmin = callerRole === 'admin' || callerRole === 'owner';
+  const callerIsAdmin = isAdminOrOwnerRole(callerRole);
 
   if (!callerIsAdmin) {
     if (!ctx.userId || existing.created_by !== ctx.userId) {

@@ -19,9 +19,11 @@ import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
 import { ensureMemberEntityType } from '../utils/member-entity-type';
 import { requireWriteAccess } from '../utils/organization-access';
-import { buildEventPermalink, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import { trackWatcherReaction } from '../utils/watcher-reactions';
+import { isSystemContext } from './access-control';
+import { MEMBER_ENTITY_TYPE_SLUG } from './constants';
 import type { ToolContext } from './registry';
+import { buildEventViewUrl } from './view-urls';
 
 // ============================================
 // Typebox Schema
@@ -135,8 +137,7 @@ export async function saveContent(
   // SDK delegates (`client.knowledge.save`) skip `checkToolAccess`, so apply
   // the same member+scope gate here. System contexts (userId=null + auth=true)
   // bypass — watcher reactions don't carry a user identity.
-  const isSystem = ctx.userId === null && ctx.isAuthenticated;
-  if (!isSystem) {
+  if (!isSystemContext(ctx)) {
     if (!ctx.memberRole) {
       throw new ToolUserError('save_memory requires workspace membership with write access.', 403);
     }
@@ -203,7 +204,7 @@ export async function saveContent(
           AND ei.namespace = 'auth_user_id'
           AND ei.identifier = ${authId}
           AND ei.deleted_at IS NULL
-          AND et.slug = '$member'
+          AND et.slug = ${MEMBER_ENTITY_TYPE_SLUG}
           AND e.deleted_at IS NULL
         LIMIT 1
       `;
@@ -223,7 +224,7 @@ export async function saveContent(
             AND ei.namespace = 'email'
             AND ei.identifier = ${userEmail}
             AND ei.deleted_at IS NULL
-            AND et.slug = '$member'
+            AND et.slug = ${MEMBER_ENTITY_TYPE_SLUG}
             AND e.deleted_at IS NULL
           LIMIT 1
         `;
@@ -352,10 +353,9 @@ export async function saveContent(
     result.supersedes_event_id = args.supersedes_event_id;
   }
 
-  const ownerSlug = await getOrganizationSlug(ctx.organizationId);
-  if (ownerSlug) {
-    const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
-    result.view_url = buildEventPermalink(ownerSlug, result.id, baseUrl);
+  const viewUrl = await buildEventViewUrl(ctx, result.id);
+  if (viewUrl) {
+    result.view_url = viewUrl;
   }
 
   return result;

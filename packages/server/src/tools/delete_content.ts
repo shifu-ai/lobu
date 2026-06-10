@@ -23,6 +23,8 @@ import { getDb, pgBigintArray } from '../db/client';
 import type { Env } from '../index';
 import { insertEvent } from '../utils/insert-event';
 import logger from '../utils/logger';
+import { isSystemContext } from './access-control';
+import { TOMBSTONE_SEMANTIC_TYPE } from './constants';
 import type { ToolContext } from './registry';
 
 const DeleteContentSchema = Type.Object({
@@ -53,15 +55,12 @@ export interface DeleteContentResult {
   already_superseded_ids: number[];
 }
 
-const TOMBSTONE_SEMANTIC_TYPE = 'tombstone';
-
 export async function deleteContent(
   args: DeleteContentArgs,
   _env: Env,
   ctx: ToolContext
 ): Promise<DeleteContentResult> {
-  const isSystem = ctx.userId === null && ctx.isAuthenticated;
-  if (!isSystem) {
+  if (!isSystemContext(ctx)) {
     if (!ctx.memberRole) {
       throw new Error('delete_knowledge requires workspace membership with write access.');
     }
