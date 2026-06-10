@@ -44,6 +44,24 @@ function defineTool<T extends TSchema>(config: {
   };
 }
 
+/**
+ * Declare a built-in gateway tool as `{ name, parameters, run }`. The shared
+ * boilerplate — description lookup via getCustomToolDescription and the
+ * defineTool result/type bridging — happens here, once.
+ */
+function createGatewayTool<T extends TSchema>(config: {
+  name: string;
+  parameters: T;
+  run: (args: Static<T>) => Promise<TextResult>;
+}): ToolDefinition {
+  return defineTool({
+    name: config.name,
+    description: getCustomToolDescription(config.name),
+    parameters: config.parameters,
+    run: config.run,
+  });
+}
+
 export function createOpenClawCustomTools(params: {
   gatewayUrl: string;
   workerToken: string;
@@ -69,14 +87,15 @@ export function createOpenClawCustomTools(params: {
     workerToken: params.workerToken,
     channelId: params.channelId,
     conversationId: params.conversationId,
-    platform: params.platform || "slack",
+    // No silent default — tools that need the platform (get_channel_history)
+    // fail loudly at the point of use instead of behaving as if on Slack.
+    platform: params.platform,
     workspaceDir: params.workspaceDir,
   };
 
   const tools: ToolDefinition[] = [
-    defineTool({
+    createGatewayTool({
       name: "upload_file",
-      description: getCustomToolDescription("upload_file"),
       parameters: Type.Object({
         file_path: Type.String({
           description:
@@ -95,9 +114,8 @@ export function createOpenClawCustomTools(params: {
         }),
     }),
 
-    defineTool({
+    createGatewayTool({
       name: "generate_image",
-      description: getCustomToolDescription("generate_image"),
       parameters: Type.Object({
         prompt: Type.String({
           description: "The image prompt to generate",
@@ -152,9 +170,8 @@ export function createOpenClawCustomTools(params: {
       run: (args) => generateImage(gw, args),
     }),
 
-    defineTool({
+    createGatewayTool({
       name: "generate_audio",
-      description: getCustomToolDescription("generate_audio"),
       parameters: Type.Object({
         text: Type.String({
           description: "The text to convert to speech (max 4096 characters)",
@@ -174,9 +191,8 @@ export function createOpenClawCustomTools(params: {
       run: (args) => generateAudio(gw, args),
     }),
 
-    defineTool({
+    createGatewayTool({
       name: "get_channel_history",
-      description: getCustomToolDescription("get_channel_history"),
       parameters: Type.Object({
         limit: Type.Optional(
           Type.Number({
@@ -193,9 +209,8 @@ export function createOpenClawCustomTools(params: {
       run: (args) => getChannelHistory(gw, args),
     }),
 
-    defineTool({
+    createGatewayTool({
       name: "ask_user",
-      description: getCustomToolDescription("ask_user"),
       parameters: Type.Object({
         question: Type.String({
           description: "The question to ask the user",
@@ -260,6 +275,36 @@ export function createMcpToolDefinitions(
   return tools;
 }
 
+/**
+ * Spec table for the per-MCP auth tool trio (`<id>_login`, `<id>_login_check`,
+ * `<id>_logout`). Order matters: tests and tool listings expect
+ * login → login_check → logout.
+ */
+const MCP_AUTH_TOOL_SPECS: Array<{
+  suffix: string;
+  description: (mcpName: string) => string;
+  run: (gw: GatewayParams, mcpId: string) => Promise<TextResult>;
+}> = [
+  {
+    suffix: "_login",
+    description: (mcpName) =>
+      `Start the authentication flow for the ${mcpName} MCP. Use this when ${mcpName} requires login before its tools can be used.`,
+    run: (gw, mcpId) => startMcpLogin(gw, { mcpId }),
+  },
+  {
+    suffix: "_login_check",
+    description: (mcpName) =>
+      `Check whether authentication for the ${mcpName} MCP has completed. Call this after the user finishes login.`,
+    run: (gw, mcpId) => checkMcpLogin(gw, { mcpId }),
+  },
+  {
+    suffix: "_logout",
+    description: (mcpName) =>
+      `Remove the stored authentication credential for the ${mcpName} MCP.`,
+    run: (gw, mcpId) => logoutMcp(gw, { mcpId }),
+  },
+];
+
 export function createMcpAuthToolDefinitions(
   mcpStatus: Array<{
     id: string;
@@ -279,43 +324,20 @@ export function createMcpAuthToolDefinitions(
       continue;
     }
 
-    const loginToolName = `${mcp.id}_login`;
-    if (!existingToolNames.has(loginToolName)) {
+    for (const spec of MCP_AUTH_TOOL_SPECS) {
+      const toolName = `${mcp.id}${spec.suffix}`;
+      if (existingToolNames.has(toolName)) {
+        continue;
+      }
       tools.push(
         defineTool({
-          name: loginToolName,
-          description: `Start the authentication flow for the ${mcp.name} MCP. Use this when ${mcp.name} requires login before its tools can be used.`,
+          name: toolName,
+          description: spec.description(mcp.name),
           parameters: Type.Object({}),
-          run: () => startMcpLogin(gw, { mcpId: mcp.id }),
+          run: () => spec.run(gw, mcp.id),
         })
       );
-      existingToolNames.add(loginToolName);
-    }
-
-    const checkToolName = `${mcp.id}_login_check`;
-    if (!existingToolNames.has(checkToolName)) {
-      tools.push(
-        defineTool({
-          name: checkToolName,
-          description: `Check whether authentication for the ${mcp.name} MCP has completed. Call this after the user finishes login.`,
-          parameters: Type.Object({}),
-          run: () => checkMcpLogin(gw, { mcpId: mcp.id }),
-        })
-      );
-      existingToolNames.add(checkToolName);
-    }
-
-    const logoutToolName = `${mcp.id}_logout`;
-    if (!existingToolNames.has(logoutToolName)) {
-      tools.push(
-        defineTool({
-          name: logoutToolName,
-          description: `Remove the stored authentication credential for the ${mcp.name} MCP.`,
-          parameters: Type.Object({}),
-          run: () => logoutMcp(gw, { mcpId: mcp.id }),
-        })
-      );
-      existingToolNames.add(logoutToolName);
+      existingToolNames.add(toolName);
     }
   }
 

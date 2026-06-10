@@ -1,8 +1,39 @@
 import { createLogger } from "@lobu/core";
 import type { AgentSessionEvent } from "@mariozechner/pi-coding-agent";
-import { formatToolExecution } from "../shared/processor-utils";
+import { getToolDisplayConfig } from "../shared/tool-display-config";
 
 const logger = createLogger("openclaw-processor");
+
+/**
+ * Format MCP-style tool names: prefix__server__tool -> prefix.server.tool
+ */
+function formatMcpToolName(toolName: string): string {
+  const match = toolName.match(/^([^_]+)__([^_]+)__(.+)$/);
+  if (!match) return toolName;
+  const [, prefix, server, tool] = match;
+  return `${prefix}.${server}.${tool}`;
+}
+
+/**
+ * Format tool execution for user-friendly display in bullet lists.
+ */
+function formatToolExecution(
+  toolName: string,
+  params: Record<string, unknown>,
+  verboseLogging: boolean
+): string | null {
+  if (!verboseLogging) return null;
+
+  const config = getToolDisplayConfig(toolName);
+  const displayName = config ? toolName : formatMcpToolName(toolName);
+  const emoji = config?.emoji ?? "🔧";
+
+  const inputStr =
+    Object.keys(params).length > 0
+      ? `\n\`\`\`json\n${JSON.stringify(params, null, 2)}\n\`\`\``
+      : "";
+  return `└ ${emoji} **${displayName}**${inputStr}`;
+}
 
 /**
  * Processes Pi agent streaming events and extracts user-friendly content.

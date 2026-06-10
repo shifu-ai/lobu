@@ -228,4 +228,20 @@ describe("tool implementations", () => {
     expect(text).toContain("Burak: Hello");
     expect(text).toContain('before="2026-04-11T18:00:00.000Z"');
   });
+
+  test("getChannelHistory fails loudly when platform is missing (no slack fallback)", async () => {
+    const fetchMock = mock(async () => Response.json({ messages: [] }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await getChannelHistory(
+      { ...gw, platform: undefined },
+      { limit: 5 }
+    );
+
+    expect(extractText(result as any)).toContain(
+      "platform is required for get_channel_history"
+    );
+    // Must not have silently queried the gateway as if on Slack.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
