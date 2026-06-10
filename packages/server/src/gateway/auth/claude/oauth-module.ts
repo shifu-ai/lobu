@@ -1,4 +1,11 @@
-import { createLogger, type ModelOption } from "@lobu/core";
+import {
+  CLAUDE_HAIKU_3_5_MODEL_ID,
+  CLAUDE_OPUS_4_MODEL_ID,
+  CLAUDE_SONNET_4_MODEL_ID,
+  createLogger,
+  DEFAULT_AGENT_MODEL,
+  type ModelOption,
+} from "@lobu/core";
 import { BaseProviderModule } from "../base-provider-module.js";
 import { resolveEnv } from "../mcp/string-substitution.js";
 import type { OAuthCredentials } from "../oauth/credentials.js";
@@ -130,9 +137,7 @@ export class ClaudeOAuthModule extends BaseProviderModule {
       preferredModel,
     });
     const defaultModel =
-      preferredModel ||
-      process.env.AGENT_DEFAULT_MODEL ||
-      "claude-sonnet-4-20250514";
+      preferredModel || process.env.AGENT_DEFAULT_MODEL || DEFAULT_AGENT_MODEL;
     const options: ModelOption[] = [];
     const seen = new Set<string>();
 
@@ -203,17 +208,17 @@ export class ClaudeOAuthModule extends BaseProviderModule {
     type: string;
   }> = [
     {
-      id: "claude-sonnet-4-20250514",
+      id: CLAUDE_SONNET_4_MODEL_ID,
       display_name: "Claude Sonnet 4",
       type: "model",
     },
     {
-      id: "claude-opus-4-20250514",
+      id: CLAUDE_OPUS_4_MODEL_ID,
       display_name: "Claude Opus 4",
       type: "model",
     },
     {
-      id: "claude-haiku-3-5-20241022",
+      id: CLAUDE_HAIKU_3_5_MODEL_ID,
       display_name: "Claude Haiku 3.5",
       type: "model",
     },

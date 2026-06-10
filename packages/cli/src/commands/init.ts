@@ -10,6 +10,7 @@ import {
 } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { confirm, input, password, select } from "@inquirer/prompts";
+import { DEFAULT_AGENT_MODEL } from "@lobu/core";
 import chalk from "chalk";
 import ora from "ora";
 import { promptPlatformConfig } from "../commands/platforms/platform-prompts.js";
@@ -94,7 +95,7 @@ const SYNTHETIC_CLAUDE_PROVIDER: RegistryProvider = {
       displayName: "Claude (Anthropic)",
       envVarName: "ANTHROPIC_API_KEY",
       upstreamBaseUrl: "https://api.anthropic.com",
-      defaultModel: "claude-sonnet-4-20250514",
+      defaultModel: DEFAULT_AGENT_MODEL,
       apiKeyInstructions:
         "Get your API key from https://console.anthropic.com/settings/keys",
     },
