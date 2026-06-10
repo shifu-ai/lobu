@@ -24,10 +24,6 @@ import {
 import { autoLinkEvent } from '../utils/auto-linker';
 import { nextRunAt as nextRunAtFromCron } from '../utils/cron';
 import { advanceWatcherSchedule } from '../watchers/automation';
-import { handleCompleteWindow } from '../tools/admin/manage_watchers/complete-window';
-import type { ManageWatchersArgs } from '../tools/admin/manage_watchers';
-import type { ToolContext } from '../tools/registry';
-import { generateWindowToken } from '../utils/jwt';
 import { applyEntityLinks } from '../utils/entity-link-upsert';
 import { errorMessage } from '../utils/errors';
 import { validateConnectorEventSemanticType } from '../utils/event-kind-validation';
@@ -496,20 +492,24 @@ export async function completeWorkerJob(c: Context<{ Bindings: Env }>) {
 /**
  * POST /api/workers/me/runs/:runId/complete-watcher
  *
- * Device-side completion path for a watcher run that was executed by a local
- * CLI agent (Claude Code, Codex, etc.) on the user's machine. The Owletto
- * Mac app's `WatcherDispatcher` posts here once the subprocess exits.
+ * Device-side EXIT REPORT for a watcher run executed by a local CLI agent
+ * (Claude Code, etc.) on the user's machine. The Owletto Mac app's
+ * `WatcherDispatcher` posts here once the subprocess exits.
  *
- * The CLI's output must end with a JSON object (the dispatcher puts the
- * contract — including the watcher's extraction_schema — in the prompt).
- * This endpoint extracts that object and runs it through the SAME
- * `handleCompleteWindow` pipeline the MCP `manage_watchers` tool uses:
- * schema validation, version pinning, run completion, schedule advancement,
- * reactions. The only device-specific part is transport (stdout over HTTP
- * instead of an MCP tool call) plus the window token, which is minted
- * server-side from the run's snapshotted bounds and never leaves the
- * gateway. Output with no parseable JSON object fails the run — a window is
- * only ever created through the one pipeline.
+ * The CLI agent completes the run itself, over MCP, exactly like a
+ * server-side watcher agent: `read_knowledge({watcher_id})` → window_token
+ * → `manage_watchers({action: "complete_window", extracted_data})`. The
+ * dispatcher wires the gateway MCP server into the spawned CLI
+ * (--mcp-config) and the prompt carries the completion instructions. This
+ * endpoint therefore only records process exit metadata:
+ *
+ * - body.error set → the subprocess crashed/timed out → run failed.
+ * - clean exit + run already completed (by complete_window) → ack; stamp
+ *   exit metadata and the window's wall-clock.
+ * - clean exit + run still running → the agent never called
+ *   complete_window → run FAILED. Same rule as the server-side dispatch
+ *   guard (automation.ts): complete_window is the only signal that real
+ *   work happened; absence of it is a failure, not a pass.
  *
  * Authorization: the caller must own the claim — same gate as
  * /api/workers/complete (status='running' AND claimed_by === worker_id).
@@ -539,18 +539,19 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
     return c.json({ error: 'Invalid or missing JSON body' }, 400);
   }
 
-  const denied = await authorizeRunForWorker(c, runId, body.worker_id);
+  // allowTerminal: when the CLI agent already completed the run via MCP
+  // complete_window, the exit report arrives against a terminal run — that's
+  // the happy path. Ownership (scope + claimed_by) is still enforced.
+  const denied = await authorizeRunForWorker(c, runId, body.worker_id, { allowTerminal: true });
   if (denied) return denied;
 
   const sql = getDb();
-  // Reload the row now that authorization has cleared. We need the watcher_id
-  // + organization_id + approved_input to drive the completion. Status here
-  // also feeds the idempotency fast-path below; the authoritative guards are
-  // the status-filtered UPDATEs (failRun's `AND status = 'running'` and
-  // handleCompleteWindow's run transition), so a stale read can't double-
-  // complete — at worst it reports `idempotent: true` with the loser's view.
+  // Reload the row now that authorization has cleared. Status drives the
+  // exit-report decision; the authoritative guard against double-writes is
+  // failRun's status-filtered UPDATE, so a stale read can't double-fail —
+  // at worst it reports `idempotent: true` with the loser's view.
   const runRows = (await sql`
-    SELECT id, organization_id, watcher_id, approved_input, run_type, claimed_at, status
+    SELECT id, organization_id, watcher_id, approved_input, run_type, claimed_at, status, window_id
     FROM runs
     WHERE id = ${runId}
     LIMIT 1
@@ -562,6 +563,7 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
     run_type: string;
     claimed_at: string | Date | null;
     status: string;
+    window_id: number | null;
   }>;
   const run = runRows[0];
   if (!run) return c.json({ error: 'Run not found' }, 404);
@@ -665,95 +667,25 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
     }
   }
 
-  // Fix 5: validate the window bounds BEFORE opening any transaction. The
-  // legacy code defaulted silently to `new Date().toISOString()` — that hid
-  // garbage payloads behind a fresh timestamp. If approved_input contains a
-  // bound, it must be a parseable ISO string; otherwise the run is
-  // unrecoverably malformed and we mark it failed up front (so it can't get
-  // stuck in `running` waiting for a stale-run sweep that may not exist).
-  const validateIsoBound = (
-    key: 'window_start' | 'window_end',
-    fallback: string
-  ): { value: string } | { error: string } => {
-    const raw = approved[key];
-    if (raw === undefined || raw === null) return { value: fallback };
-    if (typeof raw !== 'string') {
-      return { error: `approved_input.${key} must be an ISO timestamp string` };
-    }
-    const parsed = Date.parse(raw);
-    if (!Number.isFinite(parsed)) {
-      return { error: `approved_input.${key} is not a valid ISO timestamp` };
-    }
-    return { value: raw };
-  };
-
-  const nowIso = new Date().toISOString();
-  const startResult = validateIsoBound('window_start', nowIso);
-  const endResult = validateIsoBound('window_end', nowIso);
-  if ('error' in startResult || 'error' in endResult) {
-    const reason =
-      'error' in startResult ? startResult.error : (endResult as { error: string }).error;
-    // Mark the run failed so the watcher's `next_run_at` advances and the
-    // schedule doesn't loop on this poisoned payload forever.
-    //
-    // Pi round-2 #C: only advance the schedule when the UPDATE actually
-    // changed a row. Without `RETURNING id`, two concurrent malformed
-    // completions would BOTH advance the schedule — the second one's UPDATE
-    // matches zero rows (status already 'failed') but we'd still tick
-    // `next_run_at` forward, potentially skipping a window.
-    try {
-      const failedRows = (await sql`
-        UPDATE runs
-        SET status = 'failed',
-            completed_at = current_timestamp,
-            error_message = ${`Invalid completion payload: ${reason}`},
-            exit_reason = 'error_message'
-        WHERE id = ${runId}
-          AND status = 'running'
-        RETURNING id
-      `) as unknown as Array<{ id: number }>;
-      if (failedRows.length > 0) {
-        await advanceWatcherSchedule(sql, watcherId);
-      }
-    } catch (err) {
-      logger.error(
-        { run_id: runId, err: errorMessage(err) },
-        '[completeWatcherRun] failed to mark run failed after validation error'
-      );
-    }
-    return c.json({ error: reason }, 400);
-  }
-
-  const windowStart = startResult.value;
-  const windowEnd = endResult.value;
-  // Granularity isn't stored on watcher runs — infer once for the window
-  // row. A blank string fails the NOT NULL constraint; default to "ad_hoc"
-  // for device-driven runs (the dashboard's rollup logic treats this as a
-  // leaf window with no parent).
-  const granularity = 'ad_hoc';
-
   const hasError = typeof body.error === 'string' && body.error.trim() !== '';
   const output = typeof body.output === 'string' ? body.output : '';
   const durationMs =
     typeof body.duration_ms === 'number' && Number.isFinite(body.duration_ms)
       ? Math.max(0, Math.floor(body.duration_ms))
       : null;
-  const agentKind =
-    typeof approved.agent_kind === 'string' && (approved.agent_kind as string).trim()
-      ? (approved.agent_kind as string).trim()
-      : null;
-  const deviceWorkerIdMeta =
-    typeof approved.device_worker_id === 'string' ? approved.device_worker_id : null;
 
   // Mark the run failed and tick the schedule forward — but only when the
   // UPDATE actually transitioned the row (RETURNING guard), so a concurrent
   // duplicate POST can't double-advance `next_run_at` and skip a window.
+  // The stdout tail is stashed for diagnosis (why didn't the agent call
+  // complete_window?); the worker redacts before sending.
   const failRun = async (reason: string): Promise<boolean> => {
     const failedRows = (await sql`
       UPDATE runs
       SET status = 'failed',
           completed_at = current_timestamp,
           error_message = ${reason},
+          output_tail = ${output ? output.slice(-2000) : null},
           exit_code = ${body.exit_code ?? null},
           exit_signal = ${body.exit_signal ?? null},
           exit_reason = ${body.exit_reason ?? 'error_message'}
@@ -794,12 +726,6 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
     });
   };
 
-  // Idempotency fast-path: a concurrent caller (or a retry) already
-  // terminated this run. Echo what landed; don't re-fire side effects.
-  if (run.status !== 'running') {
-    return c.json({ ok: true, status: run.status, idempotent: true });
-  }
-
   if (hasError) {
     const transitioned = await failRun(body.error as string);
     if (!transitioned) {
@@ -812,89 +738,43 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
     return c.json({ ok: true, status: 'failed' });
   }
 
-  // The device contract: the CLI's final output must end with a single JSON
-  // object (the watcher prompt carries the schema — see WatcherDispatcher).
-  // It feeds the SAME complete_window pipeline that MCP watcher agents use:
-  // extraction-schema validation, version pinning, run completion, schedule
-  // advancement, reactions. No JSON → the run failed; a watcher window is
-  // only ever created through that one pipeline (fail closed, the same rule
-  // the server-side dispatch guard enforces).
-  const extracted = extractTrailingJsonObject(output);
-  if (!extracted) {
-    const reason =
-      'Device CLI finished without a JSON result. The final output must be a single JSON ' +
-      "object matching the watcher's extraction_schema (or {\"summary\": ...} when it has " +
-      `none). Output started with: ${JSON.stringify(output.slice(0, 200))}`;
-    await failRun(reason);
-    emitCompletionEvent('failed', reason);
-    return c.json({ ok: true, status: 'failed', error: reason });
-  }
-
-  // Server-side handshake into the shared pipeline: the window token never
-  // leaves the gateway — we mint it here with the run's snapshotted bounds
-  // and hand it straight to handleCompleteWindow. content_ids is empty by
-  // construction: device watchers fetch their own context locally; there is
-  // no server-side content to link.
-  const windowToken = await generateWindowToken(
-    {
-      watcher_id: watcherId,
-      window_start: windowStart,
-      window_end: windowEnd,
-      granularity,
-      content_count: 0,
-      content_ids: [],
-    },
-    c.env
-  );
-
-  // System context, same convention as reaction scripts: the device binding
-  // was already authorized above (token-bound worker → pinned device), so
-  // handler-level access checks treat this as an org-scoped system call.
-  const toolCtx: ToolContext = {
-    organizationId: run.organization_id,
-    userId: null,
-    memberRole: null,
-    isAuthenticated: true,
-    clientId: deviceWorkerIdMeta ? `device:${deviceWorkerIdMeta}` : 'device-cli',
-    tokenType: 'session',
-    scopedToOrg: true,
-    allowCrossOrg: false,
-  };
-
-  try {
-    const result = await handleCompleteWindow(
-      {
-        action: 'complete_window',
-        watcher_id: String(watcherId),
-        window_token: windowToken,
-        extracted_data: extracted,
-        watcher_run_id: runId,
-        model: agentKind ? `device-cli:${agentKind}` : 'device-cli',
-        run_metadata: {
-          source: 'device_worker',
-          device_worker_id: deviceWorkerIdMeta,
-          agent_kind: agentKind,
-          duration_ms: durationMs,
-        },
-      } as ManageWatchersArgs,
-      c.env,
-      toolCtx
-    );
-
-    // Provenance only — handleCompleteWindow owns the run/window/schedule
-    // writes; exit metadata and wall-clock are device-endpoint extras.
-    await sql`
+  // Clean exit + run already completed: the agent finished the job over MCP
+  // (read_knowledge → complete_window) before the subprocess exited. Stamp
+  // the device-side provenance the pipeline can't know — exit metadata and
+  // the subprocess wall-clock — plus the cooldown bookkeeping. The
+  // `exit_reason IS NULL` filter makes this first-report-only: a duplicate
+  // exit report matches zero rows and acks without re-firing side effects.
+  if (run.status === 'completed') {
+    const stamped = (await sql`
       UPDATE runs
       SET exit_code = ${body.exit_code ?? null},
           exit_signal = ${body.exit_signal ?? null},
           exit_reason = ${body.exit_reason ?? 'ok'}
       WHERE id = ${runId}
-    `;
-    if (durationMs != null) {
+        AND exit_reason IS NULL
+      RETURNING id
+    `) as unknown as Array<{ id: number }>;
+    if (stamped.length === 0) {
+      return c.json({ ok: true, status: 'completed', window_id: run.window_id, idempotent: true });
+    }
+    if (run.window_id != null) {
+      const agentKind =
+        typeof approved.agent_kind === 'string' && (approved.agent_kind as string).trim()
+          ? (approved.agent_kind as string).trim()
+          : null;
+      // Deterministic provenance from the system of record (the run's pinned
+      // agent_kind): the agent isn't trusted to self-report `model` through
+      // complete_window, so windows it left on the pipeline default get the
+      // device stamp. An explicit model passed by the agent wins.
       await sql`
         UPDATE watcher_windows
-        SET execution_time_ms = ${durationMs}
-        WHERE id = ${result.window_id}
+        SET execution_time_ms = COALESCE(${durationMs}, execution_time_ms),
+            model_used = CASE
+              WHEN model_used = 'external-client'
+                THEN ${agentKind ? `device-cli:${agentKind}` : 'device-cli'}
+              ELSE model_used
+            END
+        WHERE id = ${run.window_id}
       `;
     }
     await sql`
@@ -902,111 +782,29 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
       SET last_fired_at = NOW(), updated_at = NOW()
       WHERE id = ${watcherId}
     `;
-
     emitCompletionEvent('completed');
-    return c.json({ ok: true, status: 'completed', window_id: result.window_id });
-  } catch (err) {
-    const reason = errorMessage(err);
-    // A concurrent duplicate may have won the pipeline (unique window period
-    // / run-status guard). If the run is already terminal, report that
-    // instead of failing a run that actually completed.
-    const finalRows = (await sql`
-      SELECT status FROM runs WHERE id = ${runId} LIMIT 1
-    `) as unknown as Array<{ status: string }>;
-    const finalStatus = finalRows[0]?.status ?? null;
-    if (finalStatus && finalStatus !== 'running') {
-      return c.json({ ok: true, status: finalStatus, idempotent: true });
-    }
-    logger.error(
-      { error: reason, run_id: runId, watcher_id: watcherId },
-      '[completeWatcherRun] complete_window pipeline rejected device result'
-    );
-    await failRun(`complete_window failed: ${reason}`);
-    emitCompletionEvent('failed', reason);
-    return c.json({ ok: true, status: 'failed', error: reason });
-  }
-}
-
-/**
- * Pull the trailing JSON object out of a device CLI's stdout. Tries (1) the
- * whole trimmed output, (2) the last ```json fenced block, (3) the last
- * balanced top-level `{...}`. Returns null when no parseable object is
- * found — the caller fails the run (the contract is JSON, not prose).
- *
- * Deliberately LENIENT about surrounding prose, including text AFTER the
- * object, even though the prompt contract demands the object be the last
- * thing printed. The prompt is strict to push the model; the server is
- * liberal because position is not the safety gate — extraction-schema
- * validation in handleCompleteWindow is. Strict trailing-only matching
- * would fail runs over harmless epilogues (e.g. the dispatcher's own
- * "[output truncated]" marker on capped stdout) without rejecting any
- * data that schema validation wouldn't already reject.
- */
-export function extractTrailingJsonObject(output: string): Record<string, unknown> | null {
-  const tryParse = (candidate: string): Record<string, unknown> | null => {
-    try {
-      const parsed = JSON.parse(candidate);
-      return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-        ? (parsed as Record<string, unknown>)
-        : null;
-    } catch {
-      return null;
-    }
-  };
-
-  const trimmed = output.trim();
-  if (!trimmed) return null;
-
-  const whole = tryParse(trimmed);
-  if (whole) return whole;
-  // The whole output IS valid JSON but the wrong shape (array, string,
-  // number): fail rather than salvage an interior object. An agent that
-  // returns `[{...}, {...}]` meant all of it — silently keeping the last
-  // element would drop data.
-  try {
-    JSON.parse(trimmed);
-    return null;
-  } catch {
-    // not whole-output JSON — fall through to fence/balanced-object scans
+    return c.json({ ok: true, status: 'completed', window_id: run.window_id });
   }
 
-  const fences = [...trimmed.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/g)];
-  for (let i = fences.length - 1; i >= 0; i--) {
-    const fenced = tryParse(fences[i][1].trim());
-    if (fenced) return fenced;
+  // Already failed/timed out (a concurrent report, the reconciler, or the
+  // 2h sweep won): idempotent ack, no side effects.
+  if (run.status !== 'running') {
+    return c.json({ ok: true, status: run.status, idempotent: true });
   }
 
-  // Scan backwards for the last balanced top-level object. Brace counting
-  // ignores braces inside strings.
-  for (let end = trimmed.length - 1; end >= 0; end--) {
-    if (trimmed[end] !== '}') continue;
-    let depth = 0;
-    let inString = false;
-    for (let start = end; start >= 0; start--) {
-      const ch = trimmed[start];
-      if (inString) {
-        // Leaving a string going backwards: a quote not escaped by the
-        // preceding character.
-        if (ch === '"' && trimmed[start - 1] !== '\\') inString = false;
-        continue;
-      }
-      if (ch === '"') {
-        inString = true;
-        continue;
-      }
-      if (ch === '}') depth++;
-      if (ch === '{') {
-        depth--;
-        if (depth === 0) {
-          const candidate = tryParse(trimmed.slice(start, end + 1));
-          if (candidate) return candidate;
-          break;
-        }
-      }
-    }
-  }
-
-  return null;
+  // Clean exit but the run is still `running`: the agent never called
+  // manage_watchers(complete_window). Fail closed — complete_window is the
+  // only signal that real work happened (the same rule the server-side
+  // dispatch guard enforces in automation.ts). The stdout tail lands in
+  // runs.output_tail for diagnosis.
+  const reason =
+    'Device CLI exited without calling manage_watchers(action="complete_window"). ' +
+    'The watcher prompt instructs the agent to complete via the lobu MCP server — check that ' +
+    'the dispatcher passed --mcp-config, the gateway is reachable from the device, and the ' +
+    'device token has mcp:write scope.';
+  await failRun(reason);
+  emitCompletionEvent('failed', reason);
+  return c.json({ ok: true, status: 'failed', error: reason });
 }
 
 /**
