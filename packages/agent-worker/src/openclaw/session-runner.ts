@@ -18,6 +18,7 @@ import {
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
   AuthStorage,
+  DefaultResourceLoader,
   ModelRegistry,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
@@ -242,6 +243,21 @@ export function replaceBasePromptIdentity(
   // Upstream wording drifted — prepend identity with a framing note rather
   // than silently letting the upstream opener win.
   return `${identity}\n\nThe section below describes the runtime tooling available to you. It does not change your role.\n\n${basePrompt}`;
+}
+
+export function buildLobuSystemPrompt(
+  basePrompt: string | undefined,
+  agentInstructions: string | undefined,
+  finalInstructions: string | undefined
+): string {
+  const base = basePrompt || "";
+  const identity = agentInstructions?.trim();
+  const extra = finalInstructions?.trim();
+  const promptWithIdentity = identity
+    ? replaceBasePromptIdentity(base, identity)
+    : base;
+
+  return [promptWithIdentity, extra].filter(Boolean).join("\n\n---\n\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -929,6 +945,18 @@ Use it when the user references past discussions or you need context.`);
     .filter(Boolean)
     .join("\n\n");
 
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: workspaceDir,
+    settingsManager,
+    systemPromptOverride: (base) =>
+      buildLobuSystemPrompt(
+        base,
+        context.agentInstructions,
+        finalInstructionsUpdated
+      ),
+  });
+  await resourceLoader.reload();
+
   logger.info(
     `Starting OpenClaw session: provider=${provider}, model=${modelId}, tools=${tools.length}, customTools=${customTools.length}`
   );
@@ -977,6 +1005,7 @@ Use it when the user references past discussions or you need context.`);
       ),
       sessionManager,
       settingsManager,
+      resourceLoader,
       authStorage,
       modelRegistry,
     });
@@ -991,26 +1020,6 @@ Use it when the user references past discussions or you need context.`);
     turnController.attachAbort(() => {
       createdSession.session.agent.abort();
     });
-
-    // Pi-coding-agent's base prompt opens with "You are an expert coding
-    // assistant operating inside pi, a coding agent harness…" — that anchor
-    // overrides any IDENTITY.md the agent ships with. Replace just that
-    // opener with the agent's real identity (or the lobu default) so the
-    // tools/guidelines/cwd footer below it still applies, but the role on
-    // top is the one we actually want.
-    const basePrompt = session.systemPrompt;
-    const identity = context.agentInstructions?.trim();
-    const finalSystemPrompt = identity
-      ? [
-          replaceBasePromptIdentity(basePrompt, identity),
-          finalInstructionsUpdated,
-        ]
-          .filter(Boolean)
-          .join("\n\n---\n\n")
-      : [basePrompt, finalInstructionsUpdated]
-          .filter(Boolean)
-          .join("\n\n---\n\n");
-    session.agent.setSystemPrompt(finalSystemPrompt);
 
     let resolveTurnDone: (() => void) | null = null;
     let turnNonce = 0;
