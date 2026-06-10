@@ -8,6 +8,7 @@
 import Ajv from 'ajv';
 import { createDbClientFromEnv, getDb } from '../../../db/client';
 import type { Env } from '../../../index';
+import { ToolUserError } from '../../../utils/errors';
 import { verifyWindowToken } from '../../../utils/jwt';
 import logger from '../../../utils/logger';
 import { computeStableKeys } from '../../../utils/stable-keys';
@@ -101,7 +102,9 @@ export async function handleCompleteWindow(
     )) as VerifiedWindowToken[];
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
-    throw new Error(
+    // Agent-recoverable validation (the message says how) — ToolUserError so
+    // it returns 400 and stays out of the Sentry feed (was LOBU-BACKEND-D).
+    throw new ToolUserError(
       `Invalid window_token: ${errorMsg}. ` +
         'The token may have expired or been tampered with. ' +
         'Get a fresh token from read_knowledge({ watcher_id: ... }).'
@@ -338,7 +341,7 @@ export async function handleCompleteWindow(
   // ============================================
   const perTokenIds = tokenPayloads.map((token) => {
     if (!Array.isArray(token.content_ids)) {
-      throw new Error(
+      throw new ToolUserError(
         'Invalid window_token: content_ids is required. Get a fresh token from read_knowledge({ watcher_id: ... }).'
       );
     }
@@ -351,7 +354,7 @@ export async function handleCompleteWindow(
       ),
     ];
     if (ids.length !== token.content_count) {
-      throw new Error(
+      throw new ToolUserError(
         `Invalid window_token: content_ids has ${ids.length} IDs, but content_count is ${token.content_count}. ` +
           'Get a fresh token from read_knowledge({ watcher_id: ... }).'
       );
@@ -466,9 +469,12 @@ export async function handleCompleteWindow(
             `;
           }
         } else {
-          throw new Error(
+          // Conflict with an existing window, not a server fault — 409 keeps
+          // it out of the Sentry feed (was LOBU-BACKEND-Q).
+          throw new ToolUserError(
             `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
-              'Use replace_existing: true to replace it, or query a different time period.'
+              'Use replace_existing: true to replace it, or query a different time period.',
+            409
           );
         }
       }
@@ -492,9 +498,10 @@ export async function handleCompleteWindow(
           `;
         } catch (err: any) {
           if (err?.code === '23505') {
-            throw new Error(
+            throw new ToolUserError(
               `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
-                'Use replace_existing: true to replace it, or query a different time period.'
+                'Use replace_existing: true to replace it, or query a different time period.',
+              409
             );
           }
           throw err;
