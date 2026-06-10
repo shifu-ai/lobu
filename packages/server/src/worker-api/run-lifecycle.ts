@@ -544,9 +544,11 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
 
   const sql = getDb();
   // Reload the row now that authorization has cleared. We need the watcher_id
-  // + organization_id + approved_input to write the completion side-effects.
-  // The transaction below will re-lock and re-check status under SELECT ...
-  // FOR UPDATE; this read just gates the cheap rejection paths.
+  // + organization_id + approved_input to drive the completion. Status here
+  // also feeds the idempotency fast-path below; the authoritative guards are
+  // the status-filtered UPDATEs (failRun's `AND status = 'running'` and
+  // handleCompleteWindow's run transition), so a stale read can't double-
+  // complete — at worst it reports `idempotent: true` with the loser's view.
   const runRows = (await sql`
     SELECT id, organization_id, watcher_id, approved_input, run_type, claimed_at, status
     FROM runs
@@ -926,11 +928,19 @@ export async function completeWatcherRun(c: Context<{ Bindings: Env }>) {
 }
 
 /**
- * Pull the trailing JSON object out of a device CLI's stdout. Tolerant of
- * agents that narrate before the result: tries (1) the whole trimmed output,
- * (2) the last ```json fenced block, (3) the last balanced top-level
- * `{...}`. Returns null when no parseable object is found — the caller
- * fails the run (the contract is JSON, not prose).
+ * Pull the trailing JSON object out of a device CLI's stdout. Tries (1) the
+ * whole trimmed output, (2) the last ```json fenced block, (3) the last
+ * balanced top-level `{...}`. Returns null when no parseable object is
+ * found — the caller fails the run (the contract is JSON, not prose).
+ *
+ * Deliberately LENIENT about surrounding prose, including text AFTER the
+ * object, even though the prompt contract demands the object be the last
+ * thing printed. The prompt is strict to push the model; the server is
+ * liberal because position is not the safety gate — extraction-schema
+ * validation in handleCompleteWindow is. Strict trailing-only matching
+ * would fail runs over harmless epilogues (e.g. the dispatcher's own
+ * "[output truncated]" marker on capped stdout) without rejecting any
+ * data that schema validation wouldn't already reject.
  */
 export function extractTrailingJsonObject(output: string): Record<string, unknown> | null {
   const tryParse = (candidate: string): Record<string, unknown> | null => {
@@ -949,6 +959,16 @@ export function extractTrailingJsonObject(output: string): Record<string, unknow
 
   const whole = tryParse(trimmed);
   if (whole) return whole;
+  // The whole output IS valid JSON but the wrong shape (array, string,
+  // number): fail rather than salvage an interior object. An agent that
+  // returns `[{...}, {...}]` meant all of it — silently keeping the last
+  // element would drop data.
+  try {
+    JSON.parse(trimmed);
+    return null;
+  } catch {
+    // not whole-output JSON — fall through to fence/balanced-object scans
+  }
 
   const fences = [...trimmed.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n\s*```/g)];
   for (let i = fences.length - 1; i >= 0; i--) {
