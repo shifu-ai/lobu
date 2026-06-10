@@ -49,12 +49,12 @@ function requireAdminPat(c: Context<{ Bindings: Env }>): Response | null {
 	);
 }
 
-function validateSettings(settings: unknown): AgentSettings {
+function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
 	if (settings === undefined) return {};
 	if (!isObject(settings)) {
 		throw new Error("settings must be an object");
 	}
-	return settings as AgentSettings;
+	return settings as Omit<AgentSettings, "updatedAt">;
 }
 
 provisioningRoutes.post("/agents", async (c) => {
@@ -102,7 +102,7 @@ provisioningRoutes.post("/agents", async (c) => {
 		);
 	}
 
-	let settings: AgentSettings;
+	let settings: Omit<AgentSettings, "updatedAt">;
 	try {
 		settings = validateSettings(body.settings);
 	} catch (error) {
@@ -124,7 +124,7 @@ provisioningRoutes.post("/agents", async (c) => {
 		createdAt: existing?.createdAt ?? Date.now(),
 		lastUsedAt: existing?.lastUsedAt,
 	});
-	await configStore.saveSettings(agentId, settings);
+	await configStore.saveSettings(agentId, { ...settings, updatedAt: Date.now() });
 
 	return c.json(
 		{
