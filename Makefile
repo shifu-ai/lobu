@@ -13,7 +13,7 @@ help:
 	@echo "  make test-integration                      - Run the CI integration suite (needs DATABASE_URL with pgvector)"
 	@echo "  make test-e2e                              - Boot the dev server + run openclaw-plugin e2e against it"
 	@echo "  make test-e2e-cli                          - Boot lobu run + walk every CLI command (the CI cli-smoke gate)"
-	@echo "  make test-providers-live                   - Live, key-gated round-trips against every provider (opt-in)"
+	@echo "  make test-providers-live                   - Validate every provider against its live API (keyless tier + key-gated smoke)"
 	@echo "  make clean-workers                         - Stop any running embedded worker subprocesses"
 	@echo "  make clean-test-pg                         - Reap orphaned lobu-test-pg embedded-Postgres clusters (frees macOS shm slots)"
 	@echo "  make typecheck                             - Strict typecheck (same as Dockerfile) for server + owletto"
@@ -159,12 +159,15 @@ test-e2e-sdk:
 test-e2e-cli:
 	@./scripts/cli-smoke.sh
 
-# Live provider smoke — opt-in, key-gated round-trips against every provider in
-# config/providers.json (models + chat + tool-call). Replaces the manual
-# provider pass. Each provider whose API key is absent from the env is cleanly
-# skipped, so this is safe to run with any subset of keys (or none). NOT part of
-# the default gates — invoke explicitly. Pass keys via .env or the environment.
-#   make test-providers-live                      # runs whichever keys are set
+# Live provider validation — opt-in, networked, NOT part of the default gates.
+# Two tiers, both derived from config/providers.json:
+#   keyless — probes every composed chat/models route against the real APIs
+#             (wrong path 404s, right path 401s) and checks defaultModel
+#             against the public catalogs; needs NO keys, runs every time.
+#   keyed   — full models + chat + tool-call round-trip per provider whose API
+#             key is in the env; the rest skip cleanly. Replaces the manual
+#             provider pass. Pass keys via .env or the environment.
+#   make test-providers-live                      # keyless tier + whichever keys are set
 #   OPENAI_API_KEY=sk-... make test-providers-live
 test-providers-live:
 	@echo "🌐 Live provider smoke (key-gated)…"

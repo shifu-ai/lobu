@@ -73,7 +73,7 @@
           "apiKeyPlaceholder": "nvapi-...",
           "sdkCompat": "openai",
           "modelsEndpoint": "/models",
-          "defaultModel": "nvidia/moonshotai/kimi-k2.5"
+          "defaultModel": "nvidia/moonshotai/kimi-k2.6"
         }
       ]
     },
@@ -218,7 +218,7 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://opencode.ai/auth\" target=\"_blank\" class=\"text-blue-600 hover:underline\">OpenCode Zen</a>",
           "apiKeyPlaceholder": "zen-...",
           "sdkCompat": "openai",
-          "defaultModel": "anthropic/claude-sonnet-4",
+          "defaultModel": "claude-sonnet-4-6",
           "modelsEndpoint": "/models"
         }
       ]
@@ -254,7 +254,7 @@
           "apiKeyInstructions": "Get your API key from <a href=\"https://www.perplexity.ai/settings/api\" target=\"_blank\" class=\"text-blue-600 hover:underline\">Perplexity Settings</a>",
           "apiKeyPlaceholder": "pplx-...",
           "sdkCompat": "openai",
-          "defaultModel": "sonar-pro",
+          "defaultModel": "sonar",
           "modelsEndpoint": "/v1/models"
         }
       ]

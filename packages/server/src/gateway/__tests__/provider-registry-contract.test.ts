@@ -162,107 +162,31 @@ describe("provider registry contract (config/providers.json)", () => {
 });
 
 /**
- * Composed-URL contract — pins the exact upstream endpoints production
- * composes, because `upstreamBaseUrl` and `modelsEndpoint` must be mutually
- * consistent and a bad edit is a silent 404 in prod.
- *
- * Production composes provider URLs with NO version-segment magic (verified
- * by driving the real OpenAI SDK + the proxy `forward()` with a mocked
- * upstream, and keyless probes of the live APIs — wrong path 404s, right
- * path 401s):
+ * Composed-URL invariant. Production composes provider URLs with NO
+ * version-segment magic (verified by driving the real OpenAI SDK + the proxy
+ * `forward()` with a mocked upstream):
  *   - chat   = `${upstreamBaseUrl}/chat/completions`
  *               (the worker's OpenAI SDK appends `/chat/completions` verbatim
  *                to its baseURL; the proxy forwards `upstreamBaseUrl + path`)
  *   - models = `${upstreamBaseUrl}${modelsEndpoint}`
  *               (ApiKeyProviderModule.fetchModelsGeneric, direct fetch)
  *
- * This caught two real bugs: 9 providers composing `/v1/v1/models`, and
- * groq/openai chat missing the `/v1` segment entirely.
- *
- * `models` is omitted where the generic fetch doesn't apply: gemini lists
- * models via the native `…/v1beta/models?key=` path (fetchGeminiModels), and
- * z-ai has no modelsEndpoint. elevenlabs is voice-only (no chat surface) and
- * is intentionally not in the table.
+ * So a doubled version segment (`/v1/v1/`) in a composed URL is always a
+ * dead route — this generic check caught 9 providers composing
+ * `/v1/v1/models`. Whether each composed URL actually EXISTS upstream is
+ * deliberately not pinned here: live-providers/provider-keyless.test.ts
+ * probes the real APIs (keyless — a wrong path 404s, a right path 401s),
+ * so reality is the oracle instead of a hand-maintained URL table.
  */
-describe("composed upstream URLs (proxy + SDK contract)", () => {
-	const EXPECTED: Record<string, { chat: string; models?: string }> = {
-		groq: {
-			chat: "https://api.groq.com/openai/v1/chat/completions",
-			models: "https://api.groq.com/openai/v1/models",
-		},
-		gemini: {
-			chat: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-		},
-		"together-ai": {
-			chat: "https://api.together.xyz/v1/chat/completions",
-			models: "https://api.together.xyz/v1/models",
-		},
-		nvidia: {
-			chat: "https://integrate.api.nvidia.com/v1/chat/completions",
-			models: "https://integrate.api.nvidia.com/v1/models",
-		},
-		"z-ai": { chat: "https://api.z.ai/api/coding/paas/v4/chat/completions" },
-		fireworks: {
-			chat: "https://api.fireworks.ai/inference/v1/chat/completions",
-			models: "https://api.fireworks.ai/inference/v1/models",
-		},
-		mistral: {
-			chat: "https://api.mistral.ai/v1/chat/completions",
-			models: "https://api.mistral.ai/v1/models",
-		},
-		deepseek: {
-			chat: "https://api.deepseek.com/chat/completions",
-			models: "https://api.deepseek.com/v1/models",
-		},
-		openrouter: {
-			chat: "https://openrouter.ai/api/v1/chat/completions",
-			models: "https://openrouter.ai/api/v1/models",
-		},
-		cerebras: {
-			chat: "https://api.cerebras.ai/v1/chat/completions",
-			models: "https://api.cerebras.ai/v1/models",
-		},
-		"opencode-zen": {
-			chat: "https://opencode.ai/zen/v1/chat/completions",
-			models: "https://opencode.ai/zen/v1/models",
-		},
-		xai: {
-			chat: "https://api.x.ai/v1/chat/completions",
-			models: "https://api.x.ai/v1/models",
-		},
-		perplexity: {
-			chat: "https://api.perplexity.ai/chat/completions",
-			models: "https://api.perplexity.ai/v1/models",
-		},
-		cohere: {
-			chat: "https://api.cohere.com/compatibility/v1/chat/completions",
-			models: "https://api.cohere.com/compatibility/v1/models",
-		},
-		openai: {
-			chat: "https://api.openai.com/v1/chat/completions",
-			models: "https://api.openai.com/v1/models",
-		},
-	};
-	const VOICE_ONLY = new Set(["elevenlabs"]);
-
+describe("composed upstream URLs", () => {
+	const DOUBLED_VERSION = /\/v\d+\/v\d+\//;
 	for (const { id, provider } of flattened) {
-		const expected = EXPECTED[id];
-		if (!expected) continue;
-		test(`${id}: composed endpoints match the documented URLs`, () => {
+		test(`${id}: composed URLs have no doubled version segment`, () => {
 			const base = provider.upstreamBaseUrl.replace(/\/$/, "");
-			expect(`${base}/chat/completions`).toBe(expected.chat);
-			if (expected.models) {
-				expect(`${base}${provider.modelsEndpoint}`).toBe(expected.models);
+			expect(`${base}/chat/completions`).not.toMatch(DOUBLED_VERSION);
+			if (provider.modelsEndpoint) {
+				expect(`${base}${provider.modelsEndpoint}`).not.toMatch(DOUBLED_VERSION);
 			}
 		});
 	}
-
-	test("every chat-capable provider is pinned in EXPECTED", () => {
-		// Forces a new provider to add its endpoint pins (or be declared
-		// voice-only) instead of slipping in unguarded.
-		const uncovered = flattened
-			.map((f) => f.id)
-			.filter((id) => !EXPECTED[id] && !VOICE_ONLY.has(id));
-		expect(uncovered).toEqual([]);
-	});
 });

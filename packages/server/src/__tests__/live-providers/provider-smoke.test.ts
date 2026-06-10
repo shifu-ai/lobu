@@ -24,7 +24,8 @@
  *   - models: ApiKeyProviderModule.fetchModelsGeneric / fetchGeminiModels
  *   - chat:   `${upstreamBaseUrl}/chat/completions` — the worker's OpenAI SDK
  *     appends that path verbatim to its baseURL and the proxy forwards
- *     `upstreamBaseUrl + path` (pinned by the contract test)
+ *     `upstreamBaseUrl + path` (validated keyless
+ *     against the live APIs by provider-keyless.test.ts in this directory)
  * so a passing smoke means the real worker path works, not just some URL.
  */
 
