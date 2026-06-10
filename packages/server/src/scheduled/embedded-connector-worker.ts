@@ -21,10 +21,9 @@
 import { hostname } from 'node:os';
 import { WorkerDaemon } from '../../../connector-worker/src/daemon/worker';
 import { buildConnectorWorkerEnv } from '../../../connector-worker/src/env';
+import { intervals } from '../config/intervals';
 import type { Env } from '../index';
 import logger from '../utils/logger';
-
-const DEFAULT_POLL_INTERVAL_MS = 5_000;
 
 export interface EmbeddedConnectorWorkerHandle {
   /** Stop polling. In-flight jobs continue to completion (or `wait()`). */
@@ -64,7 +63,7 @@ export function startEmbeddedConnectorWorker(
       workerId,
       workerApiToken: serverEnv.WORKER_API_TOKEN,
       capabilities: {},
-      pollIntervalMs: DEFAULT_POLL_INTERVAL_MS,
+      pollIntervalMs: intervals.embeddedWorkerPollIntervalMs,
       maxConcurrentJobs: 1,
     },
     connectorEnv

@@ -1,8 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { generateWorkerToken } from '@lobu/core';
 import { inferWatcherGranularityFromSchedule } from '@lobu/connector-sdk';
+import { intervals } from '../config/intervals';
 import type { DbClient } from '../db/client';
 import { getDb, pgTextArray } from '../db/client';
+import { materializeDueItems } from '../scheduled/due-materializer';
+import { markStaleRunsAsTimeout } from '../scheduled/stale-run-sweeper';
 import { incrementCounter, setGauge } from '../gateway/metrics/prometheus';
 import type { Env } from '../index';
 import {
@@ -411,62 +414,31 @@ export async function reconcileWatcherRuns(db?: DbClient): Promise<ReconcileWatc
  *  2. Coarse TTL (generous, 2h): the legacy backstop for runs that never
  *     heartbeat — measured from the claim/creation. Kept so a long but live
  *     non-heartbeating turn isn't killed prematurely.
+ *
+ * Both paths run through the shared `markStaleRunsAsTimeout` core
+ * (scheduled/stale-run-sweeper.ts) with 'beat-after-claim' heartbeat
+ * semantics; thresholds live in config/intervals.ts
+ * (WATCHER_RUN_STALE_INTERVAL / WATCHER_RUN_HEARTBEAT_STALE_INTERVAL).
  */
-const WATCHER_RUN_STALE_INTERVAL = '2 hours';
-
-/** ~4 missed 30s device heartbeats. A heartbeating executor that goes silent
- *  this long is crashed/abandoned; a live one (beats every ~30s) never lapses. */
-const WATCHER_RUN_HEARTBEAT_STALE_INTERVAL = '3 minutes';
-
 export async function sweepStaleWatcherRuns(
   db?: DbClient
 ): Promise<{ timedOut: number }> {
   const sql = db ?? getDb();
-  const heartbeatError = `Watcher run heartbeat went silent for over ${WATCHER_RUN_HEARTBEAT_STALE_INTERVAL} — the executor crashed or was abandoned`;
-  const coarseError = `Watcher run exceeded ${WATCHER_RUN_STALE_INTERVAL} without reaching terminal state`;
-  const result = await sql`
-    UPDATE runs
-    SET status = 'timeout',
-        completed_at = current_timestamp,
-        error_message = CASE
-          WHEN last_heartbeat_at IS NOT NULL
-               AND claimed_at IS NOT NULL
-               AND last_heartbeat_at > claimed_at
-            THEN ${heartbeatError}
-          ELSE ${coarseError}
-        END
-    WHERE run_type = 'watcher'
-      AND status IN ('running', 'claimed')
-      AND (
-        -- Fast path: the executor was heartbeating, then went silent.
-        (last_heartbeat_at IS NOT NULL
-         AND claimed_at IS NOT NULL
-         AND last_heartbeat_at > claimed_at
-         AND last_heartbeat_at
-             < current_timestamp - ${WATCHER_RUN_HEARTBEAT_STALE_INTERVAL}::interval)
-        OR
-        -- Coarse backstop: ONLY for runs that never heartbeated. A heartbeating
-        -- run is governed solely by the fast path above — so a live one that
-        -- legitimately runs past 2h (fresh heartbeat) is never killed here.
-        ((last_heartbeat_at IS NULL
-          OR claimed_at IS NULL
-          OR last_heartbeat_at <= claimed_at)
-         AND COALESCE(claimed_at, created_at)
-             < current_timestamp - ${WATCHER_RUN_STALE_INTERVAL}::interval)
-      )
-  `;
-  const timedOut = Number(result.count ?? 0);
+  const heartbeatStaleInterval = intervals.watcherRunHeartbeatStaleInterval;
+  const coarseStaleInterval = intervals.watcherRunStaleInterval;
+  const timedOut = await markStaleRunsAsTimeout(sql, {
+    runTypes: ['watcher'],
+    heartbeatSemantics: 'beat-after-claim',
+    heartbeatStaleInterval,
+    coarseStaleInterval,
+    heartbeatErrorMessage: `Watcher run heartbeat went silent for over ${heartbeatStaleInterval} — the executor crashed or was abandoned`,
+    coarseErrorMessage: `Watcher run exceeded ${coarseStaleInterval} without reaching terminal state`,
+  });
   if (timedOut > 0) {
     logger.warn({ timedOut }, '[watchers] Swept stale watcher runs');
   }
   return { timedOut };
 }
-
-/** Stale-claim threshold for orphan recovery: a watcher run stuck in `claimed`
- *  this long without progressing to `running` is taken to be from a crashed
- *  dispatcher (real session-create + fetch + POST takes seconds, not minutes).
- *  Any tighter and we'd race a legitimate slow dispatch on the same row. */
-const ORPHANED_CLAIM_THRESHOLD = '5 minutes';
 
 /**
  * Recover scheduled watcher runs that were claimed by the dispatcher but
@@ -486,8 +458,12 @@ const ORPHANED_CLAIM_THRESHOLD = '5 minutes';
  *   just claimed but hasn't yet moved to `running`.
  * - `dispatch_source='scheduled'` only. Manual triggers are not auto-retried;
  *   the caller would see the failure and decide whether to re-trigger.
+ *
+ * Module-private: `runWatcherAutomationTick` is the only driver. The
+ * stale-claim threshold lives in config/intervals.ts
+ * (WATCHER_ORPHANED_CLAIM_THRESHOLD, default 5 minutes).
  */
-export async function resetOrphanedWatcherRuns(
+async function resetOrphanedWatcherRuns(
   db?: DbClient
 ): Promise<{ reset: number }> {
   const sql = db ?? getDb();
@@ -501,7 +477,7 @@ export async function resetOrphanedWatcherRuns(
     WHERE run_type = 'watcher'
       AND status = 'claimed'
       AND claimed_by = 'lobu-dispatcher'
-      AND claimed_at < now() - ${ORPHANED_CLAIM_THRESHOLD}::interval
+      AND claimed_at < now() - ${intervals.watcherOrphanedClaimThreshold}::interval
       AND COALESCE(approved_input->>'dispatch_source', 'scheduled') = 'scheduled'
   `;
   const reset = Number(result.count ?? 0);
@@ -517,83 +493,81 @@ export async function materializeDueWatcherRuns(
 ): Promise<MaterializeDueWatcherRunsResult> {
   const sql = db ?? getDb();
 
-  // Only schedule watchers we can actually execute: either device-pinned (an
-  // external/device worker claims it via the poll lane — no cloud agent row
-  // needed) OR the assigned agent still exists in the org. A watcher whose
-  // `agents` row was deleted is otherwise materialized every cron tick and fails
-  // at dispatch ("Assigned agent ... does not exist"). Skipping at the source is
-  // self-healing: it resumes automatically if the agent is recreated. The
-  // dispatch-time `ensureWatcherAgentExists` check stays as a delete-after-select
-  // backstop.
-  const dueWatchers = await sql<DueWatcherRow>`
-    SELECT w.id, w.organization_id, w.agent_id, w.schedule,
-           w.device_worker_id::text AS device_worker_id, w.agent_kind
-    FROM watchers w
-    WHERE w.status = 'active'
-      AND w.schedule IS NOT NULL
-      AND w.next_run_at IS NOT NULL
-      AND w.next_run_at <= current_timestamp
-      AND (
-        w.device_worker_id IS NOT NULL
-        OR (
-          w.agent_id IS NOT NULL
-          AND EXISTS (
+  let unrunnable = 0;
+
+  const counts = await materializeDueItems<DueWatcherRow>({
+    label: 'watcher-automation',
+    fetchDue: async () => {
+      // Only schedule watchers we can actually execute: either device-pinned (an
+      // external/device worker claims it via the poll lane — no cloud agent row
+      // needed) OR the assigned agent still exists in the org. A watcher whose
+      // `agents` row was deleted is otherwise materialized every cron tick and fails
+      // at dispatch ("Assigned agent ... does not exist"). Skipping at the source is
+      // self-healing: it resumes automatically if the agent is recreated. The
+      // dispatch-time `ensureWatcherAgentExists` check stays as a delete-after-select
+      // backstop.
+      const dueWatchers = await sql<DueWatcherRow>`
+        SELECT w.id, w.organization_id, w.agent_id, w.schedule,
+               w.device_worker_id::text AS device_worker_id, w.agent_kind
+        FROM watchers w
+        WHERE w.status = 'active'
+          AND w.schedule IS NOT NULL
+          AND w.next_run_at IS NOT NULL
+          AND w.next_run_at <= current_timestamp
+          AND (
+            w.device_worker_id IS NOT NULL
+            OR (
+              w.agent_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM agents a
+                WHERE a.id = w.agent_id
+                  AND a.organization_id = w.organization_id
+              )
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM runs r
+            WHERE r.watcher_id = w.id
+              AND r.run_type = 'watcher'
+              AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+          )
+        ORDER BY w.next_run_at ASC
+        LIMIT 100
+      `;
+
+      // Count (cheap, tiny table) due active watchers that this tick filtered out
+      // SOLELY for lacking a runnable executor — for visibility in the tick summary.
+      // Mirrors the dueWatchers predicate (incl. the no-active-run clause) so a ghost
+      // watcher that already has an in-flight run isn't double-counted here.
+      const [unrunnableRow] = await sql<{ count: number }>`
+        SELECT count(*)::int AS count
+        FROM watchers w
+        WHERE w.status = 'active'
+          AND w.schedule IS NOT NULL
+          AND w.next_run_at IS NOT NULL
+          AND w.next_run_at <= current_timestamp
+          AND w.device_worker_id IS NULL
+          AND NOT EXISTS (
             SELECT 1 FROM agents a
             WHERE a.id = w.agent_id
               AND a.organization_id = w.organization_id
           )
-        )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM runs r
-        WHERE r.watcher_id = w.id
-          AND r.run_type = 'watcher'
-          AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
-      )
-    ORDER BY w.next_run_at ASC
-    LIMIT 100
-  `;
+          AND NOT EXISTS (
+            SELECT 1 FROM runs r
+            WHERE r.watcher_id = w.id
+              AND r.run_type = 'watcher'
+              AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+          )
+      `;
+      unrunnable = unrunnableRow?.count ?? 0;
 
-  // Count (cheap, tiny table) due active watchers that this tick filtered out
-  // SOLELY for lacking a runnable executor — for visibility in the tick summary.
-  // Mirrors the dueWatchers predicate (incl. the no-active-run clause) so a ghost
-  // watcher that already has an in-flight run isn't double-counted here.
-  const [unrunnableRow] = await sql<{ count: number }>`
-    SELECT count(*)::int AS count
-    FROM watchers w
-    WHERE w.status = 'active'
-      AND w.schedule IS NOT NULL
-      AND w.next_run_at IS NOT NULL
-      AND w.next_run_at <= current_timestamp
-      AND w.device_worker_id IS NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM agents a
-        WHERE a.id = w.agent_id
-          AND a.organization_id = w.organization_id
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM runs r
-        WHERE r.watcher_id = w.id
-          AND r.run_type = 'watcher'
-          AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
-      )
-  `;
-  const unrunnable = unrunnableRow?.count ?? 0;
-
-  if (dueWatchers.length === 0) {
-    return { dueWatchers: 0, runsCreated: 0, skipped: 0, unrunnable };
-  }
-
-  let runsCreated = 0;
-  let skipped = 0;
-
-  for (const watcher of dueWatchers) {
-    try {
+      return dueWatchers;
+    },
+    createRun: async (watcher) => {
       const result = await enqueueWatcherRunForRecord(sql, watcher, 'scheduled');
-
-      if (result.created) runsCreated++;
-      else skipped++;
-    } catch (error) {
+      return result.created ? 'created' : 'skipped';
+    },
+    onError: async (watcher, error) => {
       logger.error(
         { error, watcherId: watcher.id },
         '[watcher-automation] Failed to materialize due watcher run'
@@ -601,13 +575,13 @@ export async function materializeDueWatcherRuns(
       // Don't leave next_run_at in the past — that would re-select this watcher
       // on every 60s tick. Push it forward per the watcher's cron schedule.
       await advanceWatcherSchedule(sql, watcher.id);
-    }
-  }
+    },
+  });
 
   return {
-    dueWatchers: dueWatchers.length,
-    runsCreated,
-    skipped,
+    dueWatchers: counts.due,
+    runsCreated: counts.runsCreated,
+    skipped: counts.skipped,
     unrunnable,
   };
 }

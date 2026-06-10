@@ -12,6 +12,7 @@ import type { Env } from '../index';
 import logger from '../utils/logger';
 import { isUniqueViolation } from '../utils/pg-errors';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
+import { materializeDueItems } from './due-materializer';
 
 const BATCH_LIMIT = 100;
 
@@ -43,58 +44,54 @@ export async function triggerEmbedBackfill(_env: Env): Promise<BackfillResult> {
   const needsEmbedding = needsEmbeddingPredicate();
 
   try {
-    // Find organizations with events missing/stale embeddings, grouped for batch runs
-    const orgBatches = await sql<OrgBatch>`
-      SELECT ev.organization_id, COUNT(*)::int AS event_count
-      FROM current_event_records ev
-      LEFT JOIN event_embeddings emb ON emb.event_id = ev.id
-      WHERE ${sql.unsafe(needsEmbedding)}
-        AND ev.payload_text IS NOT NULL
-        AND ev.payload_text != ''
-        AND ev.organization_id IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1
-          FROM runs r
-          WHERE r.organization_id = ev.organization_id
-            AND r.run_type = 'embed_backfill'
-            AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
-        )
-      GROUP BY ev.organization_id
-      ORDER BY event_count DESC
-      LIMIT 10
-    `;
-
-    if (orgBatches.length === 0) {
-      return { organizations: 0, runsCreated: 0, totalEvents: 0 };
-    }
-
-    let runsCreated = 0;
     let totalEvents = 0;
 
-    for (const batch of orgBatches) {
-      try {
+    const counts = await materializeDueItems<OrgBatch>({
+      label: 'EmbedBackfill',
+      // Find organizations with events missing/stale embeddings, grouped for batch runs
+      fetchDue: () => sql<OrgBatch>`
+        SELECT ev.organization_id, COUNT(*)::int AS event_count
+        FROM current_event_records ev
+        LEFT JOIN event_embeddings emb ON emb.event_id = ev.id
+        WHERE ${sql.unsafe(needsEmbedding)}
+          AND ev.payload_text IS NOT NULL
+          AND ev.payload_text != ''
+          AND ev.organization_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM runs r
+            WHERE r.organization_id = ev.organization_id
+              AND r.run_type = 'embed_backfill'
+              AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[])
+          )
+        GROUP BY ev.organization_id
+        ORDER BY event_count DESC
+        LIMIT 10
+      `,
+      createRun: async (batch) => {
         const created = await createBackfillRun(batch.organization_id);
-        if (created) {
-          runsCreated++;
-          totalEvents += batch.event_count;
-          logger.info(
-            { organization_id: batch.organization_id, event_count: batch.event_count },
-            '[EmbedBackfill] Created run'
-          );
-        }
-      } catch (error) {
+        if (!created) return 'skipped';
+        totalEvents += batch.event_count;
+        logger.info(
+          { organization_id: batch.organization_id, event_count: batch.event_count },
+          '[EmbedBackfill] Created run'
+        );
+        return 'created';
+      },
+      onError: (batch, error) => {
         logger.error(
           { error, organization_id: batch.organization_id },
           '[EmbedBackfill] Failed to create run'
         );
-      }
-    }
+      },
+      onDone: ({ runsCreated }) => {
+        if (runsCreated > 0) {
+          logger.info({ runsCreated, totalEvents }, '[EmbedBackfill] Batch complete');
+        }
+      },
+    });
 
-    if (runsCreated > 0) {
-      logger.info({ runsCreated, totalEvents }, '[EmbedBackfill] Batch complete');
-    }
-
-    return { organizations: orgBatches.length, runsCreated, totalEvents };
+    return { organizations: counts.due, runsCreated: counts.runsCreated, totalEvents };
   } catch (error) {
     logger.error({ error }, '[EmbedBackfill] Error checking for missing embeddings');
     throw error;

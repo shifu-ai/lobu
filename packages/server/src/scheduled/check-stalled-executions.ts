@@ -37,28 +37,18 @@
  */
 
 import type { ReservedSql } from 'postgres';
+import { intervals } from '../config/intervals';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
 import { expireStaleConnectTokens } from '../utils/connect-tokens';
 import logger from '../utils/logger';
 import { reconcileWatcherRuns, sweepStaleWatcherRuns } from '../watchers/automation';
+import { buildStaleRunWhereSql } from './stale-run-sweeper';
 
 /** Advisory-lock key for cross-pod coordination of the stale-run reaper.
  *  Picked from the >2^31 range to avoid collisions with the queue-NOTIFY
  *  channel ids and the due-feeds lock; the high bits are arbitrary. */
 const REAPER_ADVISORY_LOCK_KEY = 0x726e7372; // 'rnsr' — runs-reaper
-
-/** Default stale threshold in seconds; override via RUNS_REAPER_STALE_AFTER_SECONDS.
- *  120s leaves room for the 30s worker heartbeat to miss ~3 ticks before
- *  the reaper writes the row off — a real worker stutter (GC pause, network
- *  blip) gets a grace window, but a crashed worker frees the feed within
- *  a couple of minutes instead of five. */
-const DEFAULT_STALE_AFTER_SECONDS = 120;
-
-function staleAfterSeconds(): number {
-  const raw = Number(process.env.RUNS_REAPER_STALE_AFTER_SECONDS);
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_STALE_AFTER_SECONDS;
-}
 
 export interface ReapStaleRunsResult {
   /** Whether the advisory lock was acquired. False means another pod is
@@ -76,7 +66,18 @@ export interface ReapStaleRunsResult {
  */
 export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
   const sql = getDb();
-  const thresholdSeconds = staleAfterSeconds();
+  const thresholdSeconds = intervals.runsReaperStaleAfterSeconds;
+
+  // Shared staleness predicate (scheduled/stale-run-sweeper.ts). Connector
+  // claims don't stamp a heartbeat, so any non-NULL `last_heartbeat_at` means
+  // the executor beat at least once; rows with none are judged on
+  // COALESCE(claimed_at, created_at). One threshold covers both paths.
+  const staleWhereSql = buildStaleRunWhereSql({
+    runTypes: ['sync', 'action', 'embed_backfill', 'auth'],
+    heartbeatSemantics: 'any-heartbeat',
+    heartbeatStaleInterval: `${thresholdSeconds} seconds`,
+    coarseStaleInterval: `${thresholdSeconds} seconds`,
+  });
 
   // pg_try_advisory_lock is session-scoped — the connection holds the lock
   // until we explicitly release. With postgres.js any random pool connection
@@ -129,17 +130,7 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
           SET status = 'timeout',
               completed_at = current_timestamp,
               error_message = ${errorMessage}
-          WHERE run_type IN ('sync', 'action', 'embed_backfill', 'auth')
-            AND status IN ('claimed', 'running')
-            AND (
-              (last_heartbeat_at IS NULL
-               AND COALESCE(claimed_at, created_at)
-                   < current_timestamp - (${thresholdSeconds}::int * interval '1 second'))
-              OR
-              (last_heartbeat_at IS NOT NULL
-               AND last_heartbeat_at
-                   < current_timestamp - (${thresholdSeconds}::int * interval '1 second'))
-            )
+          WHERE ${reserved.unsafe(staleWhereSql)}
           RETURNING id, run_type, feed_id, connection_id, connector_key, connector_version, organization_id
         ),
         retries AS (
@@ -215,9 +206,6 @@ export async function reapStaleRuns(): Promise<ReapStaleRunsResult> {
   }
 }
 
-/** How often the gateway-boot setInterval calls `reapStaleRuns`. */
-const REAP_INTERVAL_MS = 30_000;
-
 /**
  * Start the 30s reaper interval. Returns a teardown function — call it from
  * the gateway's shutdown path so the interval doesn't keep the process alive.
@@ -239,7 +227,7 @@ export function startStaleRunReaper(): () => void {
   // Fire once on boot so a crash-recovered gateway clears the queue without
   // waiting a full interval.
   void tick();
-  activeInterval = setInterval(tick, REAP_INTERVAL_MS);
+  activeInterval = setInterval(tick, intervals.runsReaperTickMs);
   if (typeof activeInterval.unref === 'function') {
     activeInterval.unref();
   }
