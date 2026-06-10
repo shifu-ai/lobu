@@ -9,7 +9,10 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventEnvelope,
+  HttpStatusError,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -265,65 +268,63 @@ export default class ProductHuntConnector extends ConnectorRuntime {
 
     const previousCheckpoint = ctx.checkpoint as ProductHuntCheckpoint | null;
 
+    const http = createHttpClient({
+      getAccessToken: () => token,
+      headers: { Accept: 'application/json' },
+      errorPrefix: 'Product Hunt API',
+    });
+
     const events: EventEnvelope[] = [];
     const seenIds = new Set<string>();
     let cursor: string | null = previousCheckpoint?.last_cursor ?? null;
-    let page = 0;
     let reachedCutoff = false;
 
-    while (page < maxPages && !reachedCutoff) {
-      const variables: Record<string, string | null> = {
-        postedAfter: cutoffDate.toISOString(),
-        after: cursor,
-      };
+    const pages = paginateByCursor<ProductHuntPostEdge, string>(
+      async (pageCursor) => {
+        const variables: Record<string, string | null> = {
+          postedAfter: cutoffDate.toISOString(),
+          after: pageCursor,
+        };
 
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-      };
-      if (token) {
-        headers.Authorization = `Bearer ${token}`;
-      }
-
-      const response = await fetch(this.API_URL, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          query: LIST_POSTS_QUERY,
-          variables,
-        }),
-      });
-
-      if (!response.ok) {
-        const status = response.status;
-        if (status === 429) {
-          throw new Error('Product Hunt rate limit exceeded. Please wait before retrying.');
-        }
-        if (status === 401) {
-          if (!token) {
-            // PH v2 API requires auth; return empty results when no token configured
-            console.warn(
-              'Product Hunt API requires a Developer Token. Configure PRODUCTHUNT_TOKEN for results.'
-            );
-            break;
+        let result: ProductHuntPostsResponse;
+        try {
+          result = await http.post<ProductHuntPostsResponse>(this.API_URL, {
+            query: LIST_POSTS_QUERY,
+            variables,
+          });
+        } catch (error) {
+          if (error instanceof HttpStatusError && error.status === 401) {
+            if (!token) {
+              // PH v2 API requires auth; return empty results when no token configured
+              console.warn(
+                'Product Hunt API requires a Developer Token. Configure PRODUCTHUNT_TOKEN for results.'
+              );
+              return { items: [], nextCursor: null };
+            }
+            throw new Error('Product Hunt authentication failed. Check your Developer Token.');
           }
-          throw new Error('Product Hunt authentication failed. Check your Developer Token.');
+          throw error;
         }
-        throw new Error(`Product Hunt API error (${status}): ${await response.text()}`);
-      }
 
-      const result = (await response.json()) as ProductHuntPostsResponse;
+        if (result.errors && result.errors.length > 0) {
+          throw new Error(
+            `Product Hunt GraphQL error: ${result.errors.map((e) => e.message).join(', ')}`
+          );
+        }
 
-      if (result.errors && result.errors.length > 0) {
-        throw new Error(
-          `Product Hunt GraphQL error: ${result.errors.map((e) => e.message).join(', ')}`
-        );
-      }
+        const edges = result.data.posts.edges;
+        const pageInfo = result.data.posts.pageInfo;
+        const nextCursor = edges.length > 0 && pageInfo.hasNextPage ? pageInfo.endCursor : null;
+        if (nextCursor) cursor = nextCursor;
+        return { items: edges, nextCursor };
+      },
+      { maxPages, initialCursor: cursor, delayMs: this.RATE_LIMIT_MS }
+    );
 
-      const edges = result.data.posts.edges;
+    const queryLower = searchQuery.toLowerCase();
+
+    for await (const edges of pages) {
       if (edges.length === 0) break;
-
-      const queryLower = searchQuery.toLowerCase();
 
       for (const edge of edges) {
         const post = edge.node;
@@ -363,15 +364,7 @@ export default class ProductHuntConnector extends ConnectorRuntime {
         }
       }
 
-      const pageInfo = result.data.posts.pageInfo;
-      if (!pageInfo.hasNextPage) break;
-
-      cursor = pageInfo.endCursor;
-      page++;
-
-      if (page < maxPages && !reachedCutoff) {
-        await this.sleep(this.RATE_LIMIT_MS);
-      }
+      if (reachedCutoff) break;
     }
 
     // Sort events by occurred_at descending
@@ -454,11 +447,4 @@ export default class ProductHuntConnector extends ConnectorRuntime {
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Utilities
-  // -------------------------------------------------------------------------
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
 }

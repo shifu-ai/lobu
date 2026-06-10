@@ -11,7 +11,10 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventEnvelope,
+  type HttpClient,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -245,25 +248,9 @@ function finalizeSyncResult(
   };
 }
 
-async function fetchJson<T>(url: URL, accessToken: string): Promise<T> {
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`X API request failed (${response.status}): ${text}`);
-  }
-
-  return (await response.json()) as T;
-}
-
-async function resolveUserId(handle: string, accessToken: string): Promise<string> {
+async function resolveUserId(handle: string, http: HttpClient): Promise<string> {
   const url = new URL(`https://api.x.com/2/users/by/username/${encodeURIComponent(handle)}`);
-  const json = await fetchJson<{ data?: { id?: string } }>(url, accessToken);
+  const json = await http.get<{ data?: { id?: string } }>(url.toString());
   const userId = json.data?.id;
   if (!userId) {
     throw new Error(`Could not resolve X user id for @${handle}`);
@@ -281,6 +268,12 @@ async function syncViaOAuthApi(
     throw new Error('OAuth access token missing for X connector');
   }
 
+  const http = createHttpClient({
+    getAccessToken: () => accessToken,
+    headers: { 'Content-Type': 'application/json' },
+    errorPrefix: 'X API',
+  });
+
   const maxPages = Math.max(1, Math.min(50, Number(config.max_scrolls ?? 10) || 10));
   const accountHandle = normalizeHandle(
     typeof config.account_handle === 'string' ? config.account_handle : undefined
@@ -290,58 +283,68 @@ async function syncViaOAuthApi(
 
   const tweets: XTweet[] = [];
   let pageCount = 0;
-  let nextToken: string | undefined;
 
   if (explicitSearchQuery.length === 0 && accountHandle) {
-    const userId = await resolveUserId(accountHandle, accessToken);
+    const userId = await resolveUserId(accountHandle, http);
 
-    for (let page = 0; page < maxPages; page += 1) {
-      const url = new URL(`https://api.x.com/2/users/${encodeURIComponent(userId)}/tweets`);
-      url.searchParams.set('max_results', '100');
-      url.searchParams.set(
-        'tweet.fields',
-        'author_id,conversation_id,created_at,public_metrics,referenced_tweets'
-      );
-      if (checkpoint.last_tweet_id) {
-        url.searchParams.set('since_id', checkpoint.last_tweet_id);
-      }
-      if (nextToken) {
-        url.searchParams.set('pagination_token', nextToken);
-      }
+    const pages = paginateByCursor<XTweet, string>(
+      async (nextToken) => {
+        const url = new URL(`https://api.x.com/2/users/${encodeURIComponent(userId)}/tweets`);
+        url.searchParams.set('max_results', '100');
+        url.searchParams.set(
+          'tweet.fields',
+          'author_id,conversation_id,created_at,public_metrics,referenced_tweets'
+        );
+        if (checkpoint.last_tweet_id) {
+          url.searchParams.set('since_id', checkpoint.last_tweet_id);
+        }
+        if (nextToken) {
+          url.searchParams.set('pagination_token', nextToken);
+        }
 
-      const json = await fetchJson<XApiListResponse>(url, accessToken);
-      tweets.push(...parseApiListResponse(json, accountHandle));
-      pageCount += 1;
+        const json = await http.get<XApiListResponse>(url.toString());
+        pageCount += 1;
+        return {
+          items: parseApiListResponse(json, accountHandle),
+          nextCursor: json.meta?.next_token,
+        };
+      },
+      { maxPages }
+    );
 
-      nextToken = json.meta?.next_token;
-      if (!nextToken) break;
+    for await (const items of pages) {
+      tweets.push(...items);
     }
   } else {
     const searchQuery = buildSearchQuery(config);
 
-    for (let page = 0; page < maxPages; page += 1) {
-      const url = new URL('https://api.x.com/2/tweets/search/recent');
-      url.searchParams.set('query', searchQuery);
-      url.searchParams.set('max_results', '100');
-      url.searchParams.set(
-        'tweet.fields',
-        'author_id,conversation_id,created_at,public_metrics,referenced_tweets'
-      );
-      url.searchParams.set('expansions', 'author_id');
-      url.searchParams.set('user.fields', 'username');
-      if (checkpoint.last_tweet_id) {
-        url.searchParams.set('since_id', checkpoint.last_tweet_id);
-      }
-      if (nextToken) {
-        url.searchParams.set('next_token', nextToken);
-      }
+    const pages = paginateByCursor<XTweet, string>(
+      async (nextToken) => {
+        const url = new URL('https://api.x.com/2/tweets/search/recent');
+        url.searchParams.set('query', searchQuery);
+        url.searchParams.set('max_results', '100');
+        url.searchParams.set(
+          'tweet.fields',
+          'author_id,conversation_id,created_at,public_metrics,referenced_tweets'
+        );
+        url.searchParams.set('expansions', 'author_id');
+        url.searchParams.set('user.fields', 'username');
+        if (checkpoint.last_tweet_id) {
+          url.searchParams.set('since_id', checkpoint.last_tweet_id);
+        }
+        if (nextToken) {
+          url.searchParams.set('next_token', nextToken);
+        }
 
-      const json = await fetchJson<XApiListResponse>(url, accessToken);
-      tweets.push(...parseApiListResponse(json));
-      pageCount += 1;
+        const json = await http.get<XApiListResponse>(url.toString());
+        pageCount += 1;
+        return { items: parseApiListResponse(json), nextCursor: json.meta?.next_token };
+      },
+      { maxPages }
+    );
 
-      nextToken = json.meta?.next_token;
-      if (!nextToken) break;
+    for await (const items of pages) {
+      tweets.push(...items);
     }
   }
 

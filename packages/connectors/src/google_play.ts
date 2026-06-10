@@ -9,7 +9,10 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventEnvelope,
+  HttpStatusError,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -17,6 +20,8 @@ import {
 // ── Google Play batchexecute API helpers ────────────────────────────
 
 const BASE_URL = 'https://play.google.com';
+
+const http = createHttpClient({ errorPrefix: 'Google Play' });
 
 const SORT = {
   HELPFULNESS: 1,
@@ -124,23 +129,20 @@ async function fetchReviewsPage(
   const url = buildBatchUrl(lang, country);
   const body = buildRequestBody(appId, sort, numPerPage, token);
 
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-    },
-    body,
-  });
-
-  if (!res.ok) {
-    if (res.status === 404) throw new Error('App not found (404)');
-    if (res.status === 429) {
-      const retryAfter = res.headers.get('Retry-After');
-      throw new Error(
-        `Google Play rate limit (429). Retry after ${retryAfter ?? 'unknown'} seconds.`
-      );
+  let res: Response;
+  try {
+    res = await http.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+      },
+      body,
+    });
+  } catch (error) {
+    if (error instanceof HttpStatusError && error.status === 404) {
+      throw new Error('App not found (404)');
     }
-    throw new Error(`Google Play request failed: ${res.status} ${res.statusText}`);
+    throw error;
   }
 
   const text = await res.text();
@@ -280,13 +282,25 @@ export default class GooglePlayConnector extends ConnectorRuntime {
       : null;
     let hitCheckpoint = false;
 
-    while (allReviews.length < MAX_REVIEWS) {
-      const page = await fetchReviewsPage(app_id, SORT.HELPFULNESS, lang, country, nextToken);
+    // Tracks the token returned by the most recent fetch; `nextToken` (used for
+    // the persisted checkpoint) only advances after a fully-consumed page.
+    let lastFetchedToken: string | null = null;
 
-      if (page.reviews.length === 0) break;
+    const pages = paginateByCursor<RawReview, string>(
+      async (cursor) => {
+        const page = await fetchReviewsPage(app_id, SORT.HELPFULNESS, lang, country, cursor);
+        lastFetchedToken = page.nextToken;
+        return { items: page.reviews, nextCursor: page.nextToken };
+      },
+      // Rate-limit delay between pagination requests
+      { initialCursor: nextToken, delayMs: 1000 }
+    );
+
+    for await (const reviews of pages) {
+      if (reviews.length === 0) break;
 
       if (lastTimestamp) {
-        for (const review of page.reviews) {
+        for (const review of reviews) {
           const reviewTime = review.date ? new Date(review.date).getTime() : 0;
           if (reviewTime > lastTimestamp) {
             allReviews.push(review);
@@ -297,14 +311,11 @@ export default class GooglePlayConnector extends ConnectorRuntime {
         }
         if (hitCheckpoint) break;
       } else {
-        allReviews.push(...page.reviews);
+        allReviews.push(...reviews);
       }
 
-      nextToken = page.nextToken;
-      if (!nextToken) break;
-
-      // Rate-limit delay between pagination requests
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      nextToken = lastFetchedToken;
+      if (allReviews.length >= MAX_REVIEWS) break;
     }
 
     // Transform to EventEnvelope format — skip reviews without text

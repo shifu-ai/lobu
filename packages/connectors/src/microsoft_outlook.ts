@@ -8,7 +8,10 @@
 import {
   type ConnectorDefinition,
   ConnectorRuntime,
+  createHttpClient,
   type EventEnvelope,
+  type HttpClient,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -229,11 +232,17 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
       throw new Error('Microsoft Outlook requires OAuth authentication.');
     }
 
+    const http = createHttpClient({
+      getAccessToken: () => accessToken,
+      headers: { 'Content-Type': 'application/json' },
+      errorPrefix: 'Microsoft Graph API',
+    });
+
     switch (ctx.feedKey) {
       case 'messages':
-        return this.syncMessages(ctx, accessToken);
+        return this.syncMessages(ctx, http);
       case 'calendar':
-        return this.syncCalendar(ctx, accessToken);
+        return this.syncCalendar(ctx, http);
       default:
         throw new Error(`Unknown feed: ${ctx.feedKey}`);
     }
@@ -246,7 +255,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
   // Feed: messages
   // -------------------------------------------------------------------------
 
-  private async syncMessages(ctx: SyncContext, accessToken: string): Promise<SyncResult> {
+  private async syncMessages(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const config = ctx.config as Record<string, unknown>;
     const folder = (config.folder as string) ?? 'inbox';
     const maxResults = (config.max_results as number) ?? 50;
@@ -257,7 +266,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
     const sinceFilter = since.toISOString();
 
     const events: EventEnvelope[] = [];
-    let url =
+    const firstUrl =
       `${this.API_BASE}/me/mailFolders/${folder}/messages` +
       `?$top=${Math.min(maxResults, this.PAGE_SIZE)}` +
       '&$orderby=receivedDateTime desc' +
@@ -266,10 +275,17 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
 
     let fetched = 0;
 
-    for (let page = 0; page < this.MAX_PAGES && fetched < maxResults; page++) {
-      const data = await this.graphGet<GraphPagedResponse<GraphMessage>>(url, accessToken);
+    // Graph paginates via full `@odata.nextLink` URLs, so the cursor is the page URL.
+    const pages = paginateByCursor<GraphMessage, string>(
+      async (url) => {
+        const data = await http.get<GraphPagedResponse<GraphMessage>>(url ?? firstUrl);
+        return { items: data.value, nextCursor: data['@odata.nextLink'] };
+      },
+      { maxPages: this.MAX_PAGES, initialCursor: firstUrl }
+    );
 
-      for (const msg of data.value) {
+    for await (const value of pages) {
+      for (const msg of value) {
         if (fetched >= maxResults) break;
         events.push({
           origin_id: `outlook_msg_${msg.id}`,
@@ -293,8 +309,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
 
       if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
 
-      if (!data['@odata.nextLink'] || fetched >= maxResults) break;
-      url = data['@odata.nextLink'];
+      if (fetched >= maxResults) break;
     }
 
     return {
@@ -309,7 +324,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
   // Feed: calendar
   // -------------------------------------------------------------------------
 
-  private async syncCalendar(ctx: SyncContext, accessToken: string): Promise<SyncResult> {
+  private async syncCalendar(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const config = ctx.config as Record<string, unknown>;
     const lookbackDays = (config.lookback_days as number) ?? 7;
     const lookaheadDays = (config.lookahead_days as number) ?? 30;
@@ -321,7 +336,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
     endDate.setDate(endDate.getDate() + lookaheadDays);
 
     const events: EventEnvelope[] = [];
-    let url =
+    const firstUrl =
       `${this.API_BASE}/me/calendarView` +
       `?startDateTime=${startDate.toISOString()}` +
       `&endDateTime=${endDate.toISOString()}` +
@@ -331,10 +346,16 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
 
     let fetched = 0;
 
-    for (let page = 0; page < this.MAX_PAGES && fetched < maxResults; page++) {
-      const data = await this.graphGet<GraphPagedResponse<GraphEvent>>(url, accessToken);
+    const pages = paginateByCursor<GraphEvent, string>(
+      async (url) => {
+        const data = await http.get<GraphPagedResponse<GraphEvent>>(url ?? firstUrl);
+        return { items: data.value, nextCursor: data['@odata.nextLink'] };
+      },
+      { maxPages: this.MAX_PAGES, initialCursor: firstUrl }
+    );
 
-      for (const evt of data.value) {
+    for await (const value of pages) {
+      for (const evt of value) {
         if (fetched >= maxResults) break;
         events.push({
           origin_id: `outlook_evt_${evt.id}`,
@@ -359,8 +380,7 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
 
       if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
 
-      if (!data['@odata.nextLink'] || fetched >= maxResults) break;
-      url = data['@odata.nextLink'];
+      if (fetched >= maxResults) break;
     }
 
     return {
@@ -369,35 +389,5 @@ export default class MicrosoftOutlookConnector extends ConnectorRuntime {
         last_sync_at: new Date().toISOString(),
       } satisfies OutlookCheckpoint as Record<string, unknown>,
     };
-  }
-
-  // -------------------------------------------------------------------------
-  // API helpers
-  // -------------------------------------------------------------------------
-
-  private async graphGet<T>(url: string, accessToken: string): Promise<T> {
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-    });
-
-    if (response.status === 401) {
-      throw new Error('Microsoft access token expired or invalid.');
-    }
-
-    if (response.status === 429) {
-      const retryAfter = response.headers.get('Retry-After');
-      throw new Error(
-        `Microsoft Graph rate limit exceeded. Retry after ${retryAfter ?? 'unknown'} seconds.`
-      );
-    }
-
-    if (!response.ok) {
-      throw new Error(`Microsoft Graph API error (${response.status}): ${await response.text()}`);
-    }
-
-    return response.json() as Promise<T>;
   }
 }
