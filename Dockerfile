@@ -111,7 +111,7 @@ ARG VITE_SENTRY_DSN=
 ENV VITE_SENTRY_DSN=$VITE_SENTRY_DSN
 ARG VITE_ENVIRONMENT=production
 ENV VITE_ENVIRONMENT=$VITE_ENVIRONMENT
-ARG SKIP_WEB_BUILD=false
+ARG SKIP_WEB_BUILD=true
 RUN if [ "$SKIP_WEB_BUILD" = "false" ] && [ -f packages/owletto/package.json ]; then \
       cd packages/owletto && bun run build; \
     else \
