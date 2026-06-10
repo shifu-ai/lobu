@@ -20,6 +20,13 @@ import * as Sentry from "@sentry/node";
 import { Hono } from "hono";
 import { closeDbSingleton } from "./db/client";
 import { mountViteDev } from "./dev-vite";
+import {
+	delay,
+	drainHttpServer,
+	parseDurationMs,
+	setShuttingDown,
+} from "./lifecycle-state";
+import { isCloudMode } from "./utils/cloud-mode";
 import type { Env } from "./index";
 import { app as mainApp } from "./index";
 import {
@@ -360,10 +367,27 @@ export function createServerLifecycle(
 		let embeddedWorker: ReturnType<typeof startEmbeddedConnectorWorker> = null;
 
 		const shutdown = async (signal: string): Promise<void> => {
+			// Flip readiness to 503 FIRST so the k8s Service deregisters this pod
+			// before we tear anything down. Then wait for that to propagate
+			// through kube-proxy so new traffic stops landing here. Defaults to
+			// 5s in cloud mode (override via SHUTDOWN_READINESS_DELAY_MS), 0 in
+			// dev/embedded where there is no LB in front of the process.
+			setShuttingDown(true);
 			logger.info(
 				{ signal, mode },
 				"Received shutdown signal, stopping gracefully...",
 			);
+			const readinessDelayMs = parseDurationMs(
+				"SHUTDOWN_READINESS_DELAY_MS",
+				isCloudMode() ? 5_000 : 0,
+			);
+			if (readinessDelayMs > 0) {
+				logger.info(
+					{ readinessDelayMs, mode },
+					"Readiness now draining (503); waiting for the load balancer to deregister this pod",
+				);
+				await delay(readinessDelayMs);
+			}
 			// Each step is wrapped in try/catch so one failing teardown can't
 			// block the rest — we still want the listener closed and the
 			// process gone, even if (say) the gateway drain rejects. Catch +
@@ -393,6 +417,25 @@ export function createServerLifecycle(
 			await safe("stopReaper", () => stopReaper());
 			//   d. Stop the task scheduler dispatch loop.
 			await safe("taskScheduler.stop", () => taskScheduler.stop());
+			//   d2. Stop accepting new HTTP and drain in-flight requests BEFORE
+			//       tearing down the gateway + DB pool those requests depend on.
+			//       Previously the listener was only closed at the very end (step
+			//       h), after the DB pool had already closed, so any request still
+			//       in flight during teardown hit a half-dead process. The embedded
+			//       connector worker (step a) is stopped first so its in-process
+			//       HTTP calls to the gateway aren't cut off by this drain.
+			const drainDeadlineMs = parseDurationMs(
+				"SHUTDOWN_HTTP_DRAIN_DEADLINE_MS",
+				15_000,
+			);
+			await safe("drainHttpServer", () =>
+				drainHttpServer(httpServer, drainDeadlineMs, (ms) =>
+					logger.warn(
+						{ deadlineMs: ms, mode },
+						"HTTP drain deadline reached; force-closing remaining connections",
+					),
+				),
+			);
 			//   e. Drain MCP sessions / DB listeners / secret-proxy. Gateway
 			//      holds postgres.js connections that must be released before
 			//      mode-specific db teardown runs.
@@ -404,9 +447,7 @@ export function createServerLifecycle(
 			for (let i = 0; i < extraTeardown.length; i++) {
 				await safe(`extraTeardown[${i}]`, extraTeardown[i]);
 			}
-			//   h. Finally, close the listener. Matches the historical behavior of
-			//      not awaiting (server.ts:260; embedded-runtime.ts:200).
-			httpServer.close();
+			//   h. Listener was already drained + closed in step d2; just exit.
 			process.exit(0);
 		};
 		// Single-flight guard: SIGTERM+SIGINT or a double-tap on either must

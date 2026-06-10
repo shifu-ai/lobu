@@ -24,6 +24,11 @@ app:
   # Recreate below.
   strategy: {}
 
+  # Grace period for the app pod to drain on rollout/scale-down. Must exceed
+  # SHUTDOWN_READINESS_DELAY_MS + SHUTDOWN_HTTP_DRAIN_DEADLINE_MS (defaults
+  # 5s + 15s) plus worker drain headroom, or k8s SIGKILLs mid-drain.
+  terminationGracePeriodSeconds: 60
+
   resources:
     requests:
       cpu: 100m

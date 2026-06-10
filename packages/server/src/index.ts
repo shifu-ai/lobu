@@ -15,6 +15,7 @@ import { compress } from 'hono/compress';
 import { cors } from 'hono/cors';
 import { pinoLogger } from 'hono-pino';
 import { LOBU_LOGO_PNG_BASE64 } from './assets/logo';
+import { isShuttingDown } from './lifecycle-state';
 import { createAuth } from './auth';
 import { getAuthConfig as getAuthConfigFromEnv } from './auth/config';
 import { mcpAuth } from './auth/middleware';
@@ -463,6 +464,12 @@ app.get('/health', (c) => {
  * it, which is the right semantic for transient DB unavailability.
  */
 app.get('/health/ready', async (c) => {
+  // During graceful shutdown report unready FIRST, before touching the DB, so
+  // the Service deregisters this pod and stops routing new traffic while we
+  // drain in-flight requests and tear down the gateway/DB pool.
+  if (isShuttingDown()) {
+    return c.json({ status: 'draining', service: 'lobu-api' }, 503);
+  }
   try {
     const sql = getDb();
     await sql`SELECT 1`;

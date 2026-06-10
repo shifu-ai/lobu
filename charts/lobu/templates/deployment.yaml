@@ -24,6 +24,11 @@ spec:
       labels:
         {{- include "lobu.appSelectorLabels" . | nindent 8 }}
     spec:
+      # Give the app time to drain on rollout: flip readiness to 503, let the
+      # LB deregister this pod, drain in-flight HTTP, then tear down the gateway
+      # and DB pool (see server-lifecycle.ts shutdown). The kube default of 30s
+      # can SIGKILL mid-drain and drop in-flight agent runs.
+      terminationGracePeriodSeconds: {{ .Values.app.terminationGracePeriodSeconds | default 60 }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}

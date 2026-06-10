@@ -328,18 +328,30 @@ describe("createServerLifecycle (source-level contract)", () => {
 		const vite = indexOf('safe("vite.close"');
 		const reaper = indexOf('safe("stopReaper"');
 		const scheduler = indexOf('safe("taskScheduler.stop"');
+		const drain = indexOf('safe("drainHttpServer"');
 		const gateway = indexOf('safe("stopLobuGateway"');
 		const db = indexOf('safe("closeDbSingleton"');
 		const extra = indexOf("safe(`extraTeardown[");
-		const close = indexOf("httpServer.close();");
 
 		expect(worker).toBeLessThan(vite);
 		expect(vite).toBeLessThan(reaper);
 		expect(reaper).toBeLessThan(scheduler);
-		expect(scheduler).toBeLessThan(gateway);
+		// HTTP is drained AFTER background loops stop but BEFORE the gateway and
+		// DB pool tear down, so in-flight requests don't hit a dead pool.
+		expect(scheduler).toBeLessThan(drain);
+		expect(drain).toBeLessThan(gateway);
 		expect(gateway).toBeLessThan(db);
 		expect(db).toBeLessThan(extra);
-		expect(extra).toBeLessThan(close);
+	});
+
+	it("flips readiness to draining before any teardown", () => {
+		// setShuttingDown(true) must run before the gateway/DB are stopped so
+		// /health/ready returns 503 and the Service deregisters the pod while
+		// in-flight requests drain. Lock the ordering against future reshuffles.
+		const flip = indexOf("setShuttingDown(true)");
+		const gateway = indexOf('safe("stopLobuGateway"');
+		expect(flip).toBeGreaterThanOrEqual(0);
+		expect(flip).toBeLessThan(gateway);
 	});
 
 	it("wraps every shutdown step in a safe() helper (one failing step does not skip the rest)", () => {
