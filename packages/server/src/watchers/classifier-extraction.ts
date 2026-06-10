@@ -21,7 +21,20 @@ import {
 	validateEmbeddingsService,
 } from "../utils/embeddings";
 import logger from "../utils/logger";
-import { cosineSimilarity } from "../utils/vector-math";
+
+function cosineSimilarity(a: number[], b: number[]): number {
+	let dot = 0;
+	let normA = 0;
+	let normB = 0;
+	for (let i = 0; i < a.length; i++) {
+		dot += a[i] * b[i];
+		normA += a[i] * a[i];
+		normB += b[i] * b[i];
+	}
+	const denom = Math.sqrt(normA) * Math.sqrt(normB);
+	if (denom === 0) return 0;
+	return dot / denom;
+}
 
 // ============================================
 // Types

@@ -1831,7 +1831,7 @@ async function handleWatcherMode(
   // Render template prompt if available
   let promptRendered: string | undefined;
   if (templatePrompt) {
-    const { renderPromptTemplate } = await import('../utils/template-renderer');
+    const { renderPromptTemplate } = await import('../watchers/template-renderer');
 
     const entities = Array.isArray(watcher.entities)
       ? watcher.entities

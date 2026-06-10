@@ -10,7 +10,6 @@
 import { type DbClient, getDb } from '../db/client';
 import { entityLinkMatchSql } from './content-search';
 import logger from './logger';
-import { combineEmbeddings, cosineSimilarity, roundTo4 } from './vector-math';
 
 /**
  * Default weights for combining child and parent embeddings.
@@ -19,6 +18,37 @@ import { combineEmbeddings, cosineSimilarity, roundTo4 } from './vector-math';
  */
 const CHILD_EMBEDDING_WEIGHT = 0.7;
 const PARENT_EMBEDDING_WEIGHT = 0.3;
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denom === 0) return 0;
+  return dot / denom;
+}
+
+function combineEmbeddings(
+  child: number[],
+  parent: number[],
+  childWeight: number,
+  parentWeight: number
+): number[] {
+  const result = new Array(child.length);
+  for (let i = 0; i < child.length; i++) {
+    result[i] = child[i] * childWeight + parent[i] * parentWeight;
+  }
+  return result;
+}
+
+function roundTo4(n: number): number {
+  return Math.round(n * 10000) / 10000;
+}
 
 interface ClassificationQueryOptions {
   /**

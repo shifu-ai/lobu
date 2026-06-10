@@ -30,7 +30,7 @@ import {
 } from './mcp-session-state';
 import { type AuthContext, executeTool, extractAuthContext } from './tools/execute';
 import { getAllTools } from './tools/registry';
-import { formatToolResult } from './utils/markdown-formatter';
+import { formatToolResult } from './formatting/markdown-formatter';
 import { getConfiguredPublicOrigin } from './utils/public-origin';
 import { buildWorkspaceInstructions } from './utils/workspace-instructions';
 
