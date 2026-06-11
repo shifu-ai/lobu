@@ -33,17 +33,27 @@ export const CUSTOM_TOOL_METADATA: Record<string, CustomToolMetadata> = {
     description:
       "Posts a question with button options to the user. Session ends after posting. The user's response will arrive as a new message in the next session.",
   },
+  request_human_decision: {
+    description:
+      "Use this for a recoverable blocker when the user needs to choose how the agent should proceed. Posts a structured ShiFu work-state event and ends the turn.",
+  },
 };
 
 export const TOOL_INTENT_RULES: ToolIntentRule[] = [
   {
     id: "structured-user-choices",
     title: "Structured User Choices",
-    tools: ["ask_user"],
+    tools: ["ask_user", "request_human_decision"],
     instructionLines: [
       "Use ask_user when you need the user to choose from a short list of options or approvals.",
+      "For a recoverable blocker, do not just stop or only explain that you are blocked; use request_human_decision.",
+      "A recoverable blocker decision must present exactly three recovery options.",
+      "Mark exactly one recommended option and include a recommendation reason.",
+      "Include a non-empty tradeoff for every option.",
+      "Allow a custom answer from the user.",
       "Use plain text only for open-ended clarifications or when you need a free-form value.",
       "After calling ask_user, stop. The user's answer arrives as the next message.",
+      "After calling request_human_decision, stop. The user's decision arrives as the next message.",
     ],
     patterns: [],
     priority: 10,

@@ -118,6 +118,61 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
       timestamp: 1000,
     });
   });
+
+  test("broadcasts shifu.work_state customEvent by event name without assistant text conversion", async () => {
+    const queue = {
+      start: mock(async () => undefined),
+      stop: mock(async () => undefined),
+      createQueue: mock(async () => undefined),
+      work: mock(async () => undefined),
+    };
+    const broadcast = mock(() => undefined);
+    const renderer = {
+      handleCompletion: mock(async () => undefined),
+      handleError: mock(async () => undefined),
+    };
+    const platformRegistry = {
+      get: mock(() => ({ getResponseRenderer: () => renderer })),
+    };
+    const consumer = new UnifiedThreadResponseConsumer(
+      queue as any,
+      platformRegistry as any,
+      { broadcast } as any
+    ) as any;
+
+    await consumer.handleThreadResponse({
+      id: "job-work-state",
+      data: {
+        messageId: "decision-1",
+        channelId: "line:U1",
+        conversationId: "conv-1",
+        userId: "user-1",
+        teamId: "team-1",
+        platform: "line",
+        timestamp: 1000,
+        customEvent: {
+          name: "shifu.work_state",
+          data: {
+            type: "human_input.requested",
+            eventId: "decision-1",
+            title: "Blocked",
+          },
+        },
+      },
+    });
+
+    expect(broadcast).toHaveBeenCalledWith(
+      "conv-1",
+      "shifu.work_state",
+      expect.objectContaining({
+        type: "human_input.requested",
+        eventId: "decision-1",
+        messageId: "decision-1",
+        timestamp: 1000,
+      })
+    );
+    expect(renderer.handleCompletion).not.toHaveBeenCalled();
+  });
 });
 
 describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {

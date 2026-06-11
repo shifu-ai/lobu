@@ -748,6 +748,7 @@ export async function runAISession(
       runJobToken,
       getOptionalEnv("WORKER_TOKEN", "")
     ),
+    agentId: agentId || "",
     channelId,
     conversationId,
     platform,

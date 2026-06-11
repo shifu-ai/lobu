@@ -80,6 +80,17 @@ describe("renderAlwaysOnToolPolicyRules", () => {
       renderAlwaysOnToolPolicyRules()
     );
   });
+
+  test("requires structured recovery choices for recoverable blockers", () => {
+    const output = renderAlwaysOnToolPolicyRules();
+    expect(output).toContain("recoverable blocker");
+    expect(output).toContain("request_human_decision");
+    expect(output).toContain("exactly three recovery options");
+    expect(output).toContain("one recommended option");
+    expect(output).toContain("recommendation reason");
+    expect(output).toContain("tradeoff for every option");
+    expect(output).toContain("custom answer");
+  });
 });
 
 // ── getCustomToolDescription ──────────────────────────────────────────────────
@@ -110,6 +121,11 @@ describe("getCustomToolDescription", () => {
   test("returns the registered description for ask_user", () => {
     const desc = getCustomToolDescription("ask_user");
     expect(desc.length).toBeGreaterThan(0);
+  });
+
+  test("returns the registered description for request_human_decision", () => {
+    const desc = getCustomToolDescription("request_human_decision");
+    expect(desc).toContain("recoverable blocker");
   });
 
   test("falls back to the tool name for unknown tools", () => {

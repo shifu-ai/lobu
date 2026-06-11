@@ -117,6 +117,7 @@ describe("worker agent bash secret leak (E2E, Finding #1)", () => {
     const gwParams: GatewayParams = {
       gatewayUrl: process.env.DISPATCHER_URL ?? "",
       workerToken: process.env.WORKER_TOKEN ?? "",
+      agentId: "agent",
       channelId: "ch",
       conversationId: "conv",
       platform: "telegram",

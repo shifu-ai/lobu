@@ -36,6 +36,7 @@ const originalFetch = globalThis.fetch;
 const gw: GatewayParams = {
   gatewayUrl: "http://gateway",
   workerToken: "tok-abc",
+  agentId: "agent-1",
   channelId: "ch-1",
   conversationId: "conv-1",
   platform: "telegram",

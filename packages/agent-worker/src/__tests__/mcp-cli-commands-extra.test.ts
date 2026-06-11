@@ -15,6 +15,7 @@ import type { GatewayParams } from "../shared/tool-implementations";
 const gw: GatewayParams = {
   gatewayUrl: "http://gateway",
   workerToken: "worker-token",
+  agentId: "agent-1",
   channelId: "channel-1",
   conversationId: "conversation-1",
   platform: "telegram",

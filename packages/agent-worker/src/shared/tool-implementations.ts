@@ -1,9 +1,14 @@
 import * as nodeFs from "node:fs";
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createLogger } from "@lobu/core";
 import FormData from "form-data";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
+import {
+  assertRecoverableDecisionOptions,
+  type StructuredDecisionOption,
+} from "./structured-work-state";
 
 const logger = createLogger("shared-tools");
 
@@ -129,6 +134,7 @@ async function postLinkButton(
 export interface GatewayParams {
   gatewayUrl: string;
   workerToken: string;
+  agentId: string;
   channelId: string;
   conversationId: string;
   platform?: string;
@@ -399,6 +405,68 @@ export async function askUserQuestion(
 
     return textResult(
       "Question posted with buttons. Your turn is now ending — the user's click will arrive as a new inbound message that resumes this session. Do not call ask_user again."
+    );
+  });
+}
+
+// ============================================================================
+// request_human_decision
+// ============================================================================
+
+export async function requestHumanDecision(
+  gw: GatewayParams,
+  args: {
+    title: string;
+    prompt: string;
+    options: StructuredDecisionOption[];
+  },
+  hooks?: {
+    onPosted?: () => void;
+  }
+): Promise<TextResult> {
+  return withErrorHandling("request_human_decision", async () => {
+    if (!args.title?.trim()) {
+      return textResult("Error: request_human_decision requires a title");
+    }
+    if (!args.prompt?.trim()) {
+      return textResult("Error: request_human_decision requires a prompt");
+    }
+    if (!gw.agentId?.trim()) {
+      return textResult("Error: request_human_decision requires an agentId");
+    }
+    assertRecoverableDecisionOptions(args.options);
+
+    const decisionId = randomUUID();
+    const event = {
+      type: "human_input.requested",
+      version: 1,
+      decisionId,
+      eventId: decisionId,
+      agentId: gw.agentId,
+      conversationId: gw.conversationId,
+      channel: gw.platform || "unknown",
+      title: args.title,
+      prompt: args.prompt,
+      allowCustomResponse: true,
+      options: args.options,
+      createdAt: new Date().toISOString(),
+    };
+
+    const { error } = await gatewayFetch<{ id: string }>(
+      gw,
+      "/internal/work-state/events",
+      {
+        method: "POST",
+        body: JSON.stringify(event),
+      },
+      "Failed to post human decision request"
+    );
+    if (error) return error;
+
+    hooks?.onPosted?.();
+
+    return textResult(
+      "Human decision request posted as structured work state. Your turn is now ending — the user's decision will arrive as a new inbound message that resumes this session. Do not call request_human_decision again."
     );
   });
 }

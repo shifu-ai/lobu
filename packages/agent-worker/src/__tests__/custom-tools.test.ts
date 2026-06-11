@@ -17,6 +17,7 @@ describe("createOpenClawCustomTools", () => {
     const tools = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",
       workerToken: "worker-token",
+      agentId: "agent-1",
       channelId: "channel-1",
       conversationId: "conversation-1",
       platform: "telegram",
@@ -29,6 +30,7 @@ describe("createOpenClawCustomTools", () => {
       "generate_audio",
       "get_channel_history",
       "ask_user",
+      "request_human_decision",
     ]);
   });
 
@@ -54,6 +56,7 @@ describe("createOpenClawCustomTools", () => {
       const uploadTool = createOpenClawCustomTools({
         gatewayUrl: "http://gateway",
         workerToken: "worker-token",
+        agentId: "agent-1",
         channelId: "channel-1",
         conversationId: "conversation-1",
         platform: "telegram",
@@ -103,6 +106,7 @@ describe("createOpenClawCustomTools", () => {
     const askTool = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",
       workerToken: "worker-token",
+      agentId: "agent-1",
       channelId: "channel-1",
       conversationId: "conversation-1",
       platform: "slack",

@@ -19,6 +19,7 @@ import { createFileRoutes } from "../routes/internal/files.js";
 import { createHistoryRoutes } from "../routes/internal/history.js";
 import { createImageRoutes } from "../routes/internal/images.js";
 import { createInteractionRoutes } from "../routes/internal/interactions.js";
+import { createWorkStateRoutes } from "../routes/internal/work-state.js";
 import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { createAgentConfigRoutes } from "../routes/public/agent-config.js";
@@ -249,6 +250,14 @@ export function createGatewayApp(
     const internalRouter = createInteractionRoutes(interactionService);
     app.route("", internalRouter);
     logger.debug("Internal interaction routes enabled");
+  }
+
+  if (coreServices) {
+    const queueProducer = coreServices.getQueueProducer();
+    if (queueProducer) {
+      app.route("", createWorkStateRoutes(queueProducer));
+      logger.debug("Internal work-state routes enabled");
+    }
   }
 
   if (coreServices) {

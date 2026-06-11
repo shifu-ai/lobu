@@ -12,6 +12,7 @@ import {
   generateImage,
   getChannelHistory,
   logoutMcp,
+  requestHumanDecision,
   startMcpLogin,
   uploadUserFile,
 } from "../shared/tool-implementations";
@@ -47,6 +48,7 @@ function defineTool<T extends TSchema>(config: {
 export function createOpenClawCustomTools(params: {
   gatewayUrl: string;
   workerToken: string;
+  agentId: string;
   channelId: string;
   conversationId: string;
   platform?: string;
@@ -67,6 +69,7 @@ export function createOpenClawCustomTools(params: {
   const gw: GatewayParams = {
     gatewayUrl: params.gatewayUrl,
     workerToken: params.workerToken,
+    agentId: params.agentId,
     channelId: params.channelId,
     conversationId: params.conversationId,
     platform: params.platform || "slack",
@@ -206,6 +209,52 @@ export function createOpenClawCustomTools(params: {
       }),
       run: (args) =>
         askUserQuestion(gw, args, { onPosted: params.onAskUserPosted }),
+    }),
+
+    defineTool({
+      name: "request_human_decision",
+      description: getCustomToolDescription("request_human_decision"),
+      parameters: Type.Object({
+        title: Type.String({
+          description: "Short title for the decision request",
+        }),
+        prompt: Type.String({
+          description:
+            "Clear explanation of the recoverable blocker and the decision needed",
+        }),
+        options: Type.Array(
+          Type.Object({
+            value: Type.String({
+              description: "Stable machine-readable option value",
+            }),
+            label: Type.String({
+              description: "Short user-facing option label",
+            }),
+            tradeoff: Type.String({
+              description: "Tradeoff or consequence of choosing this option",
+            }),
+            recommended: Type.Optional(
+              Type.Boolean({
+                description: "True for exactly one recommended option",
+              })
+            ),
+            recommendationReason: Type.Optional(
+              Type.String({
+                description:
+                  "Required on the recommended option; explains why it is recommended",
+              })
+            ),
+          }),
+          {
+            description:
+              "Exactly three recovery options. Exactly one must be recommended.",
+          }
+        ),
+      }),
+      run: (args) =>
+        requestHumanDecision(gw, args, {
+          onPosted: params.onAskUserPosted,
+        }),
     }),
   ];
 
