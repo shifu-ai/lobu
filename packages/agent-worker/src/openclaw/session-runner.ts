@@ -326,6 +326,13 @@ export interface RunAISessionParams {
   /** Arbitrary platform-level metadata (e.g. { sessionReset: true, files: [...] }). */
   platformMetadata: unknown;
   agentId: string | undefined;
+  /**
+   * Per-run worker JWT minted by the gateway for this message. Internal
+   * gateway calls made by first-class tools must use this token instead of
+   * the deployment-lifetime WORKER_TOKEN so worker-auth can resolve the
+   * current agent/user/run context.
+   */
+  runJobToken?: string;
 
   // Resolved workspace directory (from WorkspaceManager)
   workspaceDir: string;
@@ -366,6 +373,13 @@ export interface RunAISessionParams {
   ) => string;
 }
 
+export function resolveGatewayWorkerToken(
+  runJobToken: string | undefined,
+  envWorkerToken: string
+): string {
+  return runJobToken && runJobToken.length > 0 ? runJobToken : envWorkerToken;
+}
+
 // ---------------------------------------------------------------------------
 // Main function
 // ---------------------------------------------------------------------------
@@ -384,6 +398,7 @@ export async function runAISession(
     platform,
     platformMetadata,
     agentId,
+    runJobToken,
     workspaceDir,
     progressProcessor,
     onSessionFilePathResolved,
@@ -604,7 +619,10 @@ export async function runAISession(
   // successfully and overwrites the latest pointer).
   {
     const gatewayUrl = process.env.DISPATCHER_URL;
-    const workerToken = process.env.WORKER_TOKEN;
+    const workerToken = resolveGatewayWorkerToken(
+      runJobToken,
+      process.env.WORKER_TOKEN ?? ""
+    );
     if (gatewayUrl && workerToken) {
       try {
         await hydrateFromSnapshot({
@@ -726,7 +744,10 @@ export async function runAISession(
 
   const gwParams: GatewayParams = {
     gatewayUrl: getOptionalEnv("DISPATCHER_URL", ""),
-    workerToken: getOptionalEnv("WORKER_TOKEN", ""),
+    workerToken: resolveGatewayWorkerToken(
+      runJobToken,
+      getOptionalEnv("WORKER_TOKEN", "")
+    ),
     channelId,
     conversationId,
     platform,
@@ -1271,7 +1292,10 @@ Use it when the user references past discussions or you need context.`);
       // happened.
       {
         const gatewayUrl = process.env.DISPATCHER_URL;
-        const workerToken = process.env.WORKER_TOKEN;
+        const workerToken = resolveGatewayWorkerToken(
+          runJobToken,
+          process.env.WORKER_TOKEN ?? ""
+        );
         if (gatewayUrl && workerToken) {
           await clearSnapshots({ gatewayUrl, workerToken });
         }
