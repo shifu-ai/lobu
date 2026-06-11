@@ -1,4 +1,5 @@
 import { verifyWorkerToken } from "@lobu/core";
+import { orgContext } from "../../../lobu/stores/org-context.js";
 import { getRevokedTokenStore } from "../../auth/revoked-token-store.js";
 
 /**
@@ -26,6 +27,12 @@ export const authenticateWorker = async (
     return c.json({ error: "Invalid worker token" }, 401);
   }
   c.set("worker", tokenData);
-  await next();
+  if (tokenData.organizationId) {
+    await orgContext.run({ organizationId: tokenData.organizationId }, () =>
+      next()
+    );
+  } else {
+    await next();
+  }
   return undefined;
 };

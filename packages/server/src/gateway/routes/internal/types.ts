@@ -17,6 +17,7 @@ export type WorkerContext = {
       deploymentName: string;
       platform?: string;
       connectionId?: string;
+      organizationId?: string;
     };
   };
 };
