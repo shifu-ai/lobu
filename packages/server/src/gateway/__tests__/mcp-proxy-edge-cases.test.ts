@@ -25,6 +25,7 @@ import { generateWorkerToken, type SecretRef } from "@lobu/core";
 import { MockMessageQueue } from "@lobu/core/testing";
 import { McpProxy } from "../auth/mcp/proxy.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
+import { tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { GrantStore } from "../permissions/grant-store.js";
 import type {
   SecretListEntry,
@@ -67,6 +68,20 @@ class InMemoryWritableStore implements WritableSecretStore {
       });
     }
     return out;
+  }
+}
+
+class OrgAwareGrantStore extends GrantStore {
+  public checks: Array<{
+    agentId: string;
+    pattern: string;
+    orgId: string | null;
+  }> = [];
+
+  override async hasGrant(agentId: string, pattern: string): Promise<boolean> {
+    const orgId = tryGetOrgId();
+    this.checks.push({ agentId, pattern, orgId });
+    return orgId === "test-org";
   }
 }
 
@@ -486,6 +501,53 @@ describe("cross-agent JWT isolation", () => {
       body: JSON.stringify({}),
     });
     expect(res2.status).toBe(403);
+  });
+
+  test("evaluates tool approval grants inside worker token organization context", async () => {
+    const toolCache = new McpToolCache();
+    const grantStore = new OrgAwareGrantStore();
+
+    const configSource = createConfigSource({
+      "org-mcp": { id: "org-mcp", upstreamUrl: "http://org.example.com/mcp" },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      toolCache,
+      grantStore,
+    });
+    const app = proxy.getApp();
+
+    await toolCache.set("org-mcp", [{ name: "read_report" }], "agent1");
+
+    successFetch({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: "ok" }], isError: false },
+    });
+
+    const token = generateWorkerToken("user1", "conv1", "deploy1", {
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+    });
+
+    const res = await app.request("/org-mcp/tools/read_report", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+
+    expect(res.status).toBe(200);
+    expect(grantStore.checks).toEqual([
+      {
+        agentId: "agent1",
+        pattern: "/mcp/org-mcp/tools/read_report",
+        orgId: "test-org",
+      },
+    ]);
   });
 });
 

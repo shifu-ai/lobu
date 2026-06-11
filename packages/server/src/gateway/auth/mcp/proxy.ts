@@ -14,6 +14,7 @@ import { requiresToolApproval } from "../../permissions/approval-policy.js";
 import type { GrantStore } from "../../permissions/grant-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
+import { orgContext } from "../../../lobu/stores/org-context.js";
 import {
   getStoredCredential,
   refreshCredential,
@@ -522,6 +523,22 @@ export class McpProxy {
   }
 
   private setupRoutes() {
+    this.app.use("*", async (c, next) => {
+      const sessionToken = extractSessionToken(c);
+      if (!sessionToken) {
+        return next();
+      }
+
+      const tokenData = verifyWorkerToken(sessionToken);
+      if (!tokenData?.organizationId) {
+        return next();
+      }
+
+      return orgContext.run({ organizationId: tokenData.organizationId }, () =>
+        next()
+      );
+    });
+
     // REST API endpoints for curl-based tool access (registered BEFORE catch-all)
     this.app.get("/tools", (c) => this.handleListAllTools(c));
     this.app.get("/:mcpId/tools", (c) => this.handleListTools(c));
