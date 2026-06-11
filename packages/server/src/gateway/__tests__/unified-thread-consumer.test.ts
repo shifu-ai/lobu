@@ -127,17 +127,20 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
       work: mock(async () => undefined),
     };
     const broadcast = mock(() => undefined);
+    const hasActiveConnection = mock(() => true);
     const renderer = {
       handleCompletion: mock(async () => undefined),
       handleError: mock(async () => undefined),
     };
     const platformRegistry = {
-      get: mock(() => ({ getResponseRenderer: () => renderer })),
+      get: mock((name: string) =>
+        name === "api" ? { getResponseRenderer: () => renderer } : null
+      ),
     };
     const consumer = new UnifiedThreadResponseConsumer(
       queue as any,
       platformRegistry as any,
-      { broadcast } as any
+      { broadcast, hasActiveConnection } as any
     ) as any;
 
     await consumer.handleThreadResponse({
@@ -148,10 +151,15 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
         conversationId: "conv-1",
         userId: "user-1",
         teamId: "team-1",
-        platform: "line",
+        platform: "api",
+        platformMetadata: {
+          sourcePlatform: "line",
+          sourceChannel: "line",
+        },
         timestamp: 1000,
         customEvent: {
           name: "shifu.work_state",
+          requireSseOwner: true,
           data: {
             type: "human_input.requested",
             eventId: "decision-1",
@@ -161,6 +169,9 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
       },
     });
 
+    expect(platformRegistry.get).toHaveBeenCalledWith("api");
+    expect(platformRegistry.get).not.toHaveBeenCalledWith("line");
+    expect(hasActiveConnection).toHaveBeenCalledWith("conv-1");
     expect(broadcast).toHaveBeenCalledWith(
       "conv-1",
       "shifu.work_state",
@@ -209,7 +220,11 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
           conversationId: "conv-1",
           userId: "user-1",
           teamId: "team-1",
-          platform: "line",
+          platform: "api",
+          platformMetadata: {
+            sourcePlatform: "line",
+            sourceChannel: "line",
+          },
           timestamp: 1000,
           customEvent: {
             name: "shifu.work_state",

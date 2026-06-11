@@ -94,7 +94,11 @@ describe("work-state routes", () => {
       conversationId: "conv-1",
       channelId: "line:U1",
       teamId: "team-1",
-      platform: "line",
+      platform: "api",
+      platformMetadata: {
+        sourcePlatform: "line",
+        sourceChannel: "line",
+      },
       customEvent: {
         name: "shifu.work_state",
         requireSseOwner: true,

@@ -141,14 +141,18 @@ export function createWorkStateRoutes(
       }
 
       const channelId = worker.channelId || parsed.channel;
-      const platform = worker.platform || parsed.channel || "unknown";
+      const sourcePlatform = worker.platform || parsed.channel || "unknown";
       const payload = {
         messageId: parsed.eventId,
         channelId,
         conversationId: worker.conversationId,
         userId: worker.userId,
         teamId: worker.teamId,
-        platform,
+        platform: "api",
+        platformMetadata: {
+          sourcePlatform,
+          sourceChannel: parsed.channel,
+        },
         timestamp: Date.now(),
         customEvent: {
           name: "shifu.work_state",
