@@ -1,84 +1,172 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { generateWorkerToken } from "@lobu/core";
+import { generateWorkerToken, type SecretRef } from "@lobu/core";
 import { WorkerGateway } from "../gateway/index.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
+import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
 
 const TEST_ENCRYPTION_KEY = Buffer.from(
-  "12345678901234567890123456789012"
+	"12345678901234567890123456789012",
 ).toString("base64");
 
 describe("WorkerGateway session context", () => {
-  const previousEncryptionKey = process.env.ENCRYPTION_KEY;
+	const previousEncryptionKey = process.env.ENCRYPTION_KEY;
 
-  beforeEach(() => {
-    process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
-  });
+	beforeEach(() => {
+		process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+	});
 
-  afterEach(() => {
-    if (previousEncryptionKey === undefined) {
-      delete process.env.ENCRYPTION_KEY;
-    } else {
-      process.env.ENCRYPTION_KEY = previousEncryptionKey;
-    }
-  });
+	afterEach(() => {
+		if (previousEncryptionKey === undefined) {
+			delete process.env.ENCRYPTION_KEY;
+		} else {
+			process.env.ENCRYPTION_KEY = previousEncryptionKey;
+		}
+	});
 
-  test("syncs only agent-configured skills into skillsConfig", async () => {
-    const gateway = new WorkerGateway(
-      { send: async () => undefined } as any,
-      "https://gateway.example.com",
-      {
-        getWorkerConfig: async () => ({ mcpServers: {} }),
-      } as any,
-      {
-        getSessionContext: async () => ({
-          agentInstructions: "",
-          platformInstructions: "",
-          networkInstructions: "",
-          skillsInstructions:
-            "## Skills\n\n- **Custom Skill** (`owner/custom-skill`)",
-          mcpStatus: [],
-        }),
-      } as any,
-      undefined,
-      undefined,
-      {
-        getSettings: async () => ({
-          skillsConfig: {
-            skills: [
-              {
-                name: "custom-skill",
-                enabled: true,
-                content: "# Custom Skill\n",
-              },
-            ],
-          },
-        }),
-      } as any
-    );
+	test("syncs only agent-configured skills into skillsConfig", async () => {
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions:
+						"## Skills\n\n- **Custom Skill** (`owner/custom-skill`)",
+					mcpStatus: [],
+				}),
+			} as any,
+			undefined,
+			undefined,
+			{
+				getSettings: async () => ({
+					skillsConfig: {
+						skills: [
+							{
+								name: "custom-skill",
+								enabled: true,
+								content: "# Custom Skill\n",
+							},
+						],
+					},
+				}),
+			} as any,
+		);
 
-    const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
-      channelId: "channel-1",
-      agentId: "agent-1",
-    });
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+		});
 
-    const response = await gateway.getApp().request("/session-context", {
-      headers: {
-        authorization: `Bearer ${token}`,
-        host: "gateway.example.com",
-      },
-    });
+		const response = await gateway.getApp().request("/session-context", {
+			headers: {
+				authorization: `Bearer ${token}`,
+				host: "gateway.example.com",
+			},
+		});
 
-    expect(response.status).toBe(200);
+		expect(response.status).toBe(200);
 
-    const body = (await response.json()) as {
-      skillsConfig: Array<{ name: string; content: string }>;
-      skillsInstructions: string;
-    };
+		const body = (await response.json()) as {
+			skillsConfig: Array<{ name: string; content: string }>;
+			skillsInstructions: string;
+		};
 
-    expect(body.skillsConfig).toEqual([
-      { name: "custom-skill", content: "# Custom Skill\n" },
-    ]);
-    expect(body.skillsInstructions).toContain("## Skills");
-    expect(body.skillsInstructions).toContain("owner/custom-skill");
-    expect(body.skillsInstructions).not.toContain("Built-in System Skills");
-  });
+		expect(body.skillsConfig).toEqual([
+			{ name: "custom-skill", content: "# Custom Skill\n" },
+		]);
+		expect(body.skillsInstructions).toContain("## Skills");
+		expect(body.skillsInstructions).toContain("owner/custom-skill");
+		expect(body.skillsInstructions).not.toContain("Built-in System Skills");
+	});
+
+	test("looks up MCP credentials inside worker token organization context", async () => {
+		class OrgAwareSecretStore implements WritableSecretStore {
+			async get(ref: SecretRef): Promise<string | null> {
+				if (orgContext.getStore()?.organizationId !== "org-a") return null;
+				if (
+					ref !==
+					("secret://mcp-auth%2Fagent-1%2Fuser-1%2Fshifu-toolbox%2Fcredential" as SecretRef)
+				) {
+					return null;
+				}
+				return JSON.stringify({
+					accessToken: "access-token",
+					refreshToken: "refresh-token",
+					expiresAt: Date.now() + 60_000,
+					clientId: "client-id",
+					tokenUrl: "https://auth.example.test/token",
+				});
+			}
+			async put(): Promise<SecretRef> {
+				throw new Error("not used");
+			}
+			async delete(): Promise<void> {
+				throw new Error("not used");
+			}
+			async list(): Promise<SecretListEntry[]> {
+				return [];
+			}
+		}
+
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [
+						{
+							id: "shifu-toolbox",
+							name: "ShiFu Toolbox",
+							requiresAuth: true,
+							requiresInput: false,
+						},
+					],
+				}),
+			} as any,
+			undefined,
+			undefined,
+			undefined,
+			new OrgAwareSecretStore(),
+		);
+
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-a",
+		});
+
+		const response = await gateway.getApp().request("/session-context", {
+			headers: {
+				authorization: `Bearer ${token}`,
+				host: "gateway.example.com",
+			},
+		});
+
+		expect(response.status).toBe(200);
+
+		const body = (await response.json()) as {
+			mcpStatus: Array<{ id: string; authenticated: boolean }>;
+		};
+
+		expect(body.mcpStatus).toContainEqual({
+			id: "shifu-toolbox",
+			name: "ShiFu Toolbox",
+			requiresAuth: true,
+			requiresInput: false,
+			authenticated: true,
+			configured: true,
+		});
+	});
 });
