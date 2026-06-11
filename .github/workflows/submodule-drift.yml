@@ -58,11 +58,55 @@ jobs:
           fi
           echo "::notice::Fork PR with unchanged submodule pointer — drift check skipped."
 
+      - name: Detect submodule pointer change without deploy key
+        id: pointer-change
+        if: |
+          steps.submodule.outputs.stubbed == 'true'
+          && (github.event_name == 'push' || github.event_name == 'pull_request')
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="$BASE_SHA"
+            head="$HEAD_SHA"
+            git fetch --depth=1 origin "$base" "$head"
+          else
+            base="$BEFORE_SHA"
+            head="$HEAD_SHA"
+            # New branch pushes can use an all-zero before SHA; treat those as
+            # changed so same-repo submodule bumps still require the deploy key.
+            if [ "$base" = "0000000000000000000000000000000000000000" ]; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            git fetch --depth=1 origin "$base" "$head"
+          fi
+
+          base_pointer=$(git ls-tree "$base" packages/owletto | awk '{print $3}')
+          head_pointer=$(git ls-tree "$head" packages/owletto | awk '{print $3}')
+          if [ "$base_pointer" != "$head_pointer" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip drift check when deploy key is missing and pointer is unchanged
+        if: |
+          steps.submodule.outputs.stubbed == 'true'
+          && steps.pointer-change.outputs.changed == 'false'
+        run: |
+          echo "::notice::OWLETTO_WEB_DEPLOY_KEY is missing, but packages/owletto pointer is unchanged — drift check skipped for this run."
+
       - name: Fail when deploy key is missing on a same-repo run
         if: |
           steps.submodule.outputs.stubbed == 'true'
           && !(github.event_name == 'pull_request'
             && github.event.pull_request.head.repo.full_name != github.repository)
+          && steps.pointer-change.outputs.changed != 'false'
         run: |
           echo "::error::OWLETTO_WEB_DEPLOY_KEY is missing for a same-repo run; drift check cannot run."
           exit 1
