@@ -12,7 +12,7 @@ import { ToolUserError } from '../../utils/errors';
 import { validateDataSourceQuery } from '../../utils/execute-data-sources';
 import { resolveUsernames } from '../../utils/resolve-usernames';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { defineFlatActionTool, flatAction } from './action-tool';
 
 // ============================================
 // View template versioning types + helpers
@@ -110,18 +110,15 @@ type ManageViewTemplatesResult =
 // Main Function
 // ============================================
 
-export async function manageViewTemplates(
-  args: ManageViewTemplatesArgs,
-  _env: unknown,
-  ctx: ToolContext
-): Promise<ManageViewTemplatesResult> {
-  return routeAction<ManageViewTemplatesResult>('manage_view_templates', args.action, ctx, {
-    set: () => handleSet(args, ctx),
-    get: () => handleGet(args, ctx),
-    rollback: () => handleRollback(args, ctx),
-    remove_tab: () => handleRemoveTab(args, ctx),
-  });
-}
+export const manageViewTemplates = defineFlatActionTool<
+  ManageViewTemplatesArgs,
+  ManageViewTemplatesResult
+>('manage_view_templates', {
+  set: flatAction(handleSet),
+  get: flatAction(handleGet),
+  rollback: flatAction(handleRollback),
+  remove_tab: flatAction(handleRemoveTab),
+});
 
 // ============================================
 // Helpers

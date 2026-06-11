@@ -14,6 +14,7 @@ import {
 } from "../internal/index.js";
 import { renderMarkdown } from "../utils/markdown.js";
 import { loadProjectConfig } from "./_lib/apply/desired-state.js";
+import { getPlatformDefinition } from "./platforms/registry.js";
 
 const THREADS_FILE = join(LOBU_CONFIG_DIR, "threads.json");
 
@@ -212,12 +213,12 @@ async function sendViaPlatform(
     content: opts.message,
   };
 
-  if (opts.platform === "telegram") {
-    body.telegram = { chatId: opts.userId };
-  } else if (opts.platform === "slack") {
-    body.slack = { channel: opts.userId, thread: opts.thread };
-  } else if (opts.platform === "discord") {
-    body.discord = { channelId: opts.userId };
+  const chatTarget = getPlatformDefinition(opts.platform)?.chatTarget;
+  if (chatTarget) {
+    body[opts.platform] = {
+      [chatTarget.key]: opts.userId,
+      ...(chatTarget.includeThread ? { thread: opts.thread } : {}),
+    };
   }
 
   const res = await fetch(

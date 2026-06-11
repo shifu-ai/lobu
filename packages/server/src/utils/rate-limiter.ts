@@ -1,11 +1,37 @@
 /**
  * Rate Limiting Module
  *
- * In-memory sliding window counter algorithm.
- * O(1) space per key — stores only prev_count, curr_count, and window_start.
+ * Cluster-wide fixed-window counters backed by Postgres
+ * (`rate_limit_counters`, UNLOGGED — see
+ * db/migrations/20260610130000_rate_limit_counters.sql), fronted by a
+ * synchronous per-pod cache.
  *
- * Replaces the PostgreSQL `check_rate_limit()` stored procedure.
+ * Why this shape: the previous implementation was a purely in-memory sliding
+ * window, which is per-pod state — with N replicas behind ClientIP affinity
+ * every IP limit was effectively multiplied by N (affinity churn / restarts /
+ * multiple ingress paths spread one client across pods). Counters now live in
+ * Postgres so the limit holds across the whole cluster.
+ *
+ * Semantics: fixed window (epoch-aligned) instead of the old interpolated
+ * sliding window. Each `checkLimit` call:
+ *   1. increments a per-pod local counter for the current window and decides
+ *      synchronously from `max(localCount, lastSharedCount)` — so the public
+ *      API stays synchronous and existing callers are unchanged;
+ *   2. fires one atomic UPSERT (`INSERT ... ON CONFLICT ... DO UPDATE SET
+ *      count = count + 1 RETURNING count`) in the background and folds the
+ *      returned cluster-wide count back into the cache.
+ * Cross-pod counts therefore apply with ~one DB round-trip of lag; within a
+ * single pod enforcement is exact and immediate (matching the old behavior).
+ *
+ * Failure policy: FAIL OPEN on any Postgres error (same philosophy as
+ * guardrails). A DB outage degrades to the old per-pod in-memory enforcement
+ * — it never blocks a request and never takes down the auth routes. A missing
+ * table (migration not applied yet) logs a single warning and behaves the
+ * same way.
  */
+
+import { type DbClient, getDb } from '../db/client';
+import logger from './logger';
 
 interface RateLimitConfig {
   /** Maximum number of requests allowed in the window */
@@ -19,7 +45,7 @@ interface RateLimitConfig {
 interface RateLimitResult {
   /** Whether the request is allowed */
   allowed: boolean;
-  /** Current interpolated count of requests in the window */
+  /** Current count of requests in the window (cluster-wide, best known) */
   count: number;
   /** Maximum requests allowed */
   limit: number;
@@ -30,25 +56,49 @@ interface RateLimitResult {
 }
 
 interface WindowState {
-  prevCount: number;
-  currCount: number;
-  windowStart: number; // epoch seconds
+  /** Fixed-window start (epoch seconds, aligned to windowSeconds). */
+  windowStart: number;
+  /** Increments observed by this pod in the window (exact, immediate). */
+  localCount: number;
+  /** Last cluster-wide count returned by Postgres for this window. */
+  sharedCount: number;
 }
 
+/** Throttle for DB-failure warn logs (avoid one warn per request during an outage). */
+const DB_WARN_INTERVAL_MS = 30_000;
+/** Pause DB writes briefly after a failure so a down DB isn't hammered. */
+const DB_ERROR_BACKOFF_MS = 5_000;
+/** Longer pause when the table is missing (migration not applied). */
+const DB_TABLE_MISSING_BACKOFF_MS = 60_000;
+/** Postgres error code: undefined_table. */
+const PG_UNDEFINED_TABLE = '42P01';
+
 /**
- * In-memory Rate Limiter using sliding window counter.
- *
- * Same algorithm as the old PostgreSQL `check_rate_limit()`:
- * - Maintains prev_count and curr_count per key
- * - Interpolates between windows for smooth limiting
- * - Periodic cleanup of stale entries
+ * High-water mark for in-flight counter UPSERTs. A slow-but-not-erroring
+ * Postgres never trips the error backoff, so without a cap the pending set
+ * would grow with request-rate × latency. Past the cap new increments skip
+ * the DB write — per-pod local enforcement (the fail-open mode) still holds.
  */
-class RateLimiter {
+const MAX_PENDING_WRITES = 500;
+
+/**
+ * Postgres-backed fixed-window rate limiter with a synchronous local facade.
+ */
+export class RateLimiter {
   private windows = new Map<string, WindowState>();
   private cleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** In-flight background UPSERTs — awaitable for deterministic tests. */
+  private pendingWrites = new Set<Promise<void>>();
+  /** Largest window seen so far; bounds the DB cleanup horizon. */
+  private maxWindowSeconds = 3600;
+  private dbBackoffUntilMs = 0;
+  private lastDbWarnAtMs = 0;
+  private warnedTableMissing = false;
 
   constructor() {
-    // Clean up stale entries every 5 minutes
+    // Clean up stale entries every 5 minutes (local map + opportunistic
+    // sweep of expired Postgres windows — piggybacked here rather than a
+    // scheduled job so the limiter stays self-contained).
     this.cleanupTimer = setInterval(() => this.cleanup(), 5 * 60_000);
     // Allow Node to exit even if timer is active
     if (this.cleanupTimer.unref) {
@@ -58,54 +108,48 @@ class RateLimiter {
 
   /**
    * Check if a request is within rate limit.
-   * Uses in-memory sliding window counter (same algorithm as the old PG stored proc).
    *
-   * Concurrency safety: This method is synchronous (no awaits), so it runs to
-   * completion in a single microtask. In single-threaded Node.js, concurrent
-   * callers cannot interleave between the read and write of the window state.
+   * Synchronous (no awaits) — the decision runs to completion in a single
+   * microtask, so concurrent callers on this pod cannot interleave between
+   * the read and write of the window state. The cluster-wide count is folded
+   * in asynchronously (see module docs); `count` reflects the best currently
+   * known value.
    */
   checkLimit(key: string, config: RateLimitConfig): RateLimitResult {
     const now = Math.floor(Date.now() / 1000);
-    const currentWindow = now - (now % config.windowSeconds);
+    const windowStart = now - (now % config.windowSeconds);
 
-    let state = this.windows.get(key);
-
-    if (!state) {
-      // First request for this key
-      state = { prevCount: 0, currCount: 1, windowStart: currentWindow };
-      this.windows.set(key, state);
-    } else {
-      // Update window state
-      if (currentWindow > state.windowStart + config.windowSeconds) {
-        // More than 1 window passed, reset prev
-        state.prevCount = 0;
-        state.currCount = 1;
-        state.windowStart = currentWindow;
-      } else if (currentWindow > state.windowStart) {
-        // Window rolled over, curr becomes prev
-        state.prevCount = state.currCount;
-        state.currCount = 1;
-        state.windowStart = currentWindow;
-      } else {
-        // Same window, increment
-        state.currCount++;
-      }
+    if (config.windowSeconds > this.maxWindowSeconds) {
+      this.maxWindowSeconds = config.windowSeconds;
     }
 
-    // Calculate elapsed time in current window
-    const elapsed = now - state.windowStart;
+    let state = this.windows.get(key);
+    if (!state || state.windowStart !== windowStart) {
+      // First request for this key, or the fixed window rolled over.
+      state = { windowStart, localCount: 0, sharedCount: 0 };
+      this.windows.set(key, state);
+    }
 
-    // Interpolate: weight previous window by remaining time
-    const effectiveCount =
-      state.prevCount * Math.max(0, (config.windowSeconds - elapsed) / config.windowSeconds) +
-      state.currCount;
+    state.localCount++;
+
+    // Cluster-wide UPSERT, fire-and-forget. The shared count it returns is
+    // applied to the *next* decision; this one uses the cached value.
+    this.persistIncrement(key, state.windowStart);
+
+    // `sharedCount` is the cluster-wide count as of our last committed
+    // increment (it already includes this pod's prior requests, and was read
+    // before this request's UPSERT fired) — so `sharedCount + 1` counts all
+    // known prior requests plus this one, with no double-counting. `localCount`
+    // covers the burst case where our own increments are still in flight.
+    // Either term can only *under*-count by the in-flight round-trip.
+    const effectiveCount = Math.max(state.localCount, state.sharedCount + 1);
 
     const allowed = effectiveCount <= config.limit;
-    const resetInSeconds = Math.max(0, config.windowSeconds - elapsed);
+    const resetInSeconds = Math.max(0, config.windowSeconds - (now - state.windowStart));
 
     return {
       allowed,
-      count: Math.ceil(effectiveCount),
+      count: effectiveCount,
       limit: config.limit,
       resetInSeconds,
       errorMessage: allowed
@@ -115,7 +159,101 @@ class RateLimiter {
   }
 
   /**
-   * Cleanup stale rate limit entries (default: older than 24h).
+   * Background increment of the cluster-wide counter. Never throws; any DB
+   * failure logs (throttled) and leaves the local counter as the only
+   * enforcement — i.e. fail open to the old per-pod behavior.
+   */
+  private persistIncrement(key: string, windowStartSec: number): void {
+    if (Date.now() < this.dbBackoffUntilMs) return;
+    if (this.pendingWrites.size >= MAX_PENDING_WRITES) {
+      const now = Date.now();
+      if (now - this.lastDbWarnAtMs >= DB_WARN_INTERVAL_MS) {
+        this.lastDbWarnAtMs = now;
+        logger.warn(
+          { pendingWrites: this.pendingWrites.size },
+          '[rate-limiter] counter write backlog at high-water mark (slow Postgres?) — ' +
+            'skipping cluster-wide increments, per-pod limiting still enforced'
+        );
+      }
+      return;
+    }
+
+    let db: DbClient;
+    try {
+      db = getDb(); // throws when DATABASE_URL is unset
+    } catch (err) {
+      this.noteDbFailure(err);
+      return;
+    }
+
+    const windowStart = new Date(windowStartSec * 1000);
+    const write: Promise<void> = db<{ count: number }>`
+      INSERT INTO rate_limit_counters (key, window_start, count)
+      VALUES (${key}, ${windowStart}, 1)
+      ON CONFLICT (key, window_start)
+      DO UPDATE SET count = rate_limit_counters.count + 1
+      RETURNING count
+    `
+      .then((rows) => {
+        const sharedCount = rows[0]?.count;
+        if (typeof sharedCount !== 'number') return;
+        const state = this.windows.get(key);
+        // Only fold back into the same window; a rolled-over window starts fresh.
+        if (state && state.windowStart === windowStartSec && sharedCount > state.sharedCount) {
+          state.sharedCount = sharedCount;
+        }
+      })
+      .catch((err) => {
+        this.noteDbFailure(err);
+      })
+      .finally(() => {
+        this.pendingWrites.delete(write);
+      });
+    this.pendingWrites.add(write);
+  }
+
+  /** Record a DB failure: throttled warn + short write backoff. Fail open. */
+  private noteDbFailure(err: unknown): void {
+    const tableMissing = (err as { code?: string } | null)?.code === PG_UNDEFINED_TABLE;
+    this.dbBackoffUntilMs =
+      Date.now() + (tableMissing ? DB_TABLE_MISSING_BACKOFF_MS : DB_ERROR_BACKOFF_MS);
+
+    if (tableMissing) {
+      if (!this.warnedTableMissing) {
+        this.warnedTableMissing = true;
+        logger.warn(
+          { err },
+          '[rate-limiter] rate_limit_counters table missing (migration not applied?) — ' +
+            'failing open to per-pod in-memory limiting'
+        );
+      }
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastDbWarnAtMs >= DB_WARN_INTERVAL_MS) {
+      this.lastDbWarnAtMs = now;
+      logger.warn(
+        { err },
+        '[rate-limiter] Postgres counter update failed — failing open to per-pod in-memory limiting'
+      );
+    }
+  }
+
+  /**
+   * Wait for all in-flight counter UPSERTs to settle. Test hook — production
+   * code never needs to await the background writes.
+   */
+  async flushPendingWrites(): Promise<void> {
+    while (this.pendingWrites.size > 0) {
+      await Promise.allSettled([...this.pendingWrites]);
+    }
+  }
+
+  /**
+   * Cleanup stale rate limit entries (default: older than 24h) from the local
+   * cache, and opportunistically sweep expired windows from Postgres.
+   * Returns the number of local entries deleted.
    */
   cleanup(maxAgeSeconds: number = 86400): number {
     const cutoff = Math.floor(Date.now() / 1000) - maxAgeSeconds;
@@ -128,6 +266,29 @@ class RateLimiter {
       }
     }
 
+    // Opportunistic DB sweep: a window is definitely expired once
+    // 2 × the largest window we've ever been asked about has elapsed.
+    // Fire-and-forget; failures follow the same fail-open path as writes.
+    if (Date.now() >= this.dbBackoffUntilMs) {
+      try {
+        const db = getDb();
+        const horizon = new Date(Date.now() - 2 * this.maxWindowSeconds * 1000);
+        const sweep: Promise<void> = db`
+          DELETE FROM rate_limit_counters WHERE window_start < ${horizon}
+        `
+          .then(() => undefined)
+          .catch((err) => {
+            this.noteDbFailure(err);
+          })
+          .finally(() => {
+            this.pendingWrites.delete(sweep);
+          });
+        this.pendingWrites.add(sweep);
+      } catch (err) {
+        this.noteDbFailure(err);
+      }
+    }
+
     return deleted;
   }
 
@@ -137,6 +298,7 @@ class RateLimiter {
       clearInterval(this.cleanupTimer);
       this.cleanupTimer = null;
     }
+    this.windows.clear();
   }
 }
 
@@ -199,12 +361,18 @@ export const RateLimitPresets = {
 /** Module-level singleton rate limiter. */
 let _rateLimiter: RateLimiter | null = null;
 
-/** Get the shared in-memory rate limiter instance. */
+/** Get the shared rate limiter instance. */
 export function getRateLimiter(): RateLimiter {
   if (!_rateLimiter) {
     _rateLimiter = new RateLimiter();
   }
   return _rateLimiter;
+}
+
+/** Destroy and reset the singleton. Test hook. */
+export function resetRateLimiterForTests(): void {
+  _rateLimiter?.destroy();
+  _rateLimiter = null;
 }
 
 /**

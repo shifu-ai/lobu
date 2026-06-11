@@ -10,8 +10,11 @@ import {
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
+  createHttpClient,
   type EventEnvelope,
+  type HttpClient,
   IDENTITY,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -286,37 +289,43 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const afterEpochSeconds = Math.floor(afterDate.getTime() / 1000);
     const query = `after:${afterEpochSeconds} label:${label}`;
 
+    const http = this.createClient(token);
     const events: EventEnvelope[] = [];
-    let pageToken: string | undefined;
     let totalCollected = 0;
 
-    while (totalCollected < maxResults) {
-      const params = new URLSearchParams({
-        q: query,
-        maxResults: String(Math.min(100, maxResults - totalCollected)),
-      });
-      if (pageToken) {
-        params.set('pageToken', pageToken);
-      }
+    const pages = paginateByCursor<NonNullable<GmailThreadListResponse['threads']>[number], string>(
+      async (pageToken) => {
+        const params = new URLSearchParams({
+          q: query,
+          maxResults: String(Math.min(100, maxResults - totalCollected)),
+        });
+        if (pageToken) {
+          params.set('pageToken', pageToken);
+        }
 
-      const listUrl = `${this.BASE_URL}/threads?${params.toString()}`;
-      const listResponse = await this.apiGet(listUrl, token);
+        const listUrl = `${this.BASE_URL}/threads?${params.toString()}`;
+        const listResponse = await http.raw(listUrl);
 
-      if (!listResponse.ok) {
-        throw new Error(
-          `Gmail threads.list error (${listResponse.status}): ${await listResponse.text()}`
-        );
-      }
+        if (!listResponse.ok) {
+          throw new Error(
+            `Gmail threads.list error (${listResponse.status}): ${await listResponse.text()}`
+          );
+        }
 
-      const listData = (await listResponse.json()) as GmailThreadListResponse;
+        const listData = (await listResponse.json()) as GmailThreadListResponse;
+        return { items: listData.threads ?? [], nextCursor: listData.nextPageToken };
+      },
+      { delayMs: this.RATE_LIMIT_MS }
+    );
 
-      if (!listData.threads || listData.threads.length === 0) break;
+    for await (const threads of pages) {
+      if (threads.length === 0) break;
 
       // Fetch each thread with metadata format
-      for (const threadStub of listData.threads) {
+      for (const threadStub of threads) {
         try {
           const threadUrl = `${this.BASE_URL}/threads/${threadStub.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
-          const threadResponse = await this.apiGet(threadUrl, token);
+          const threadResponse = await http.raw(threadUrl);
 
           if (!threadResponse.ok) continue;
 
@@ -361,10 +370,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         }
       }
 
-      pageToken = listData.nextPageToken;
-      if (!pageToken) break;
-
-      await this.sleep(this.RATE_LIMIT_MS);
+      if (totalCollected >= maxResults) break;
     }
 
     // Sort by occurred_at descending
@@ -394,17 +400,19 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         return { success: false, error: 'Gmail actions require Google OAuth credentials.' };
       }
 
+      const http = this.createClient(token);
+
       switch (ctx.actionKey) {
         case 'send_email':
-          return await this.sendEmail(token, ctx.input);
+          return await this.sendEmail(http, ctx.input);
         case 'create_draft':
-          return await this.createDraft(token, ctx.input);
+          return await this.createDraft(http, ctx.input);
         case 'reply':
-          return await this.replyToThread(token, ctx.input);
+          return await this.replyToThread(http, ctx.input);
         case 'search':
-          return await this.searchEmails(token, ctx.input);
+          return await this.searchEmails(http, ctx.input);
         case 'get_thread':
-          return await this.getThread(token, ctx.input);
+          return await this.getThread(http, ctx.input);
         default:
           return { success: false, error: `Unknown action: ${ctx.actionKey}` };
       }
@@ -420,7 +428,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   // Actions
   // -------------------------------------------------------------------------
 
-  private async sendEmail(token: string, input: Record<string, unknown>): Promise<ActionResult> {
+  private async sendEmail(http: HttpClient, input: Record<string, unknown>): Promise<ActionResult> {
     const to = input.to as string;
     const subject = input.subject as string;
     const body = input.body as string;
@@ -443,12 +451,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const encoded = this.base64UrlEncode(rawMessage);
 
     const sendUrl = `${this.BASE_URL}/messages/send`;
-    const response = await fetch(sendUrl, {
+    const response = await http.raw(sendUrl, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw: encoded }),
     });
 
@@ -469,7 +474,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     };
   }
 
-  private async createDraft(token: string, input: Record<string, unknown>): Promise<ActionResult> {
+  private async createDraft(
+    http: HttpClient,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
     const to = input.to as string;
     const subject = input.subject as string;
     const body = input.body as string;
@@ -490,9 +498,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     const draftBody: { message: { raw: string; threadId?: string } } = { message: { raw } };
     if (threadId) draftBody.message.threadId = threadId;
 
-    const response = await fetch(`${this.BASE_URL}/drafts`, {
+    const response = await http.raw(`${this.BASE_URL}/drafts`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(draftBody),
     });
 
@@ -517,7 +525,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
   }
 
   private async replyToThread(
-    token: string,
+    http: HttpClient,
     input: Record<string, unknown>
   ): Promise<ActionResult> {
     const threadId = input.thread_id as string;
@@ -529,9 +537,8 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     }
 
     // Fetch the thread to get the last message's headers
-    const threadRes = await this.apiGet(
-      `${this.BASE_URL}/threads/${threadId}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Message-ID`,
-      token
+    const threadRes = await http.raw(
+      `${this.BASE_URL}/threads/${threadId}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To&metadataHeaders=Message-ID`
     );
     if (!threadRes.ok) {
       return {
@@ -558,9 +565,9 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
 
     const raw = this.base64UrlEncode(messageParts.join('\r\n'));
 
-    const response = await fetch(`${this.BASE_URL}/messages/send`, {
+    const response = await http.raw(`${this.BASE_URL}/messages/send`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ raw, threadId }),
     });
 
@@ -580,7 +587,10 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     };
   }
 
-  private async searchEmails(token: string, input: Record<string, unknown>): Promise<ActionResult> {
+  private async searchEmails(
+    http: HttpClient,
+    input: Record<string, unknown>
+  ): Promise<ActionResult> {
     const query = input.query as string;
     const maxResults = (input.max_results as number) || 10;
 
@@ -593,7 +603,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
       maxResults: String(maxResults),
     });
     const listUrl = `${this.BASE_URL}/messages?${params.toString()}`;
-    const listResponse = await this.apiGet(listUrl, token);
+    const listResponse = await http.raw(listUrl);
 
     if (!listResponse.ok) {
       const errText = await listResponse.text();
@@ -619,7 +629,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
 
     for (const msg of listData.messages) {
       const msgUrl = `${this.BASE_URL}/messages/${msg.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
-      const msgResponse = await this.apiGet(msgUrl, token);
+      const msgResponse = await http.raw(msgUrl);
       if (!msgResponse.ok) continue;
 
       const msgData = (await msgResponse.json()) as GmailMessage;
@@ -636,7 +646,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     return { success: true, output: { messages } };
   }
 
-  private async getThread(token: string, input: Record<string, unknown>): Promise<ActionResult> {
+  private async getThread(http: HttpClient, input: Record<string, unknown>): Promise<ActionResult> {
     const threadId = input.thread_id as string;
 
     if (!threadId) {
@@ -644,7 +654,7 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     }
 
     const url = `${this.BASE_URL}/threads/${threadId}?format=full`;
-    const response = await this.apiGet(url, token);
+    const response = await http.raw(url);
 
     if (!response.ok) {
       const errText = await response.text();
@@ -748,10 +758,8 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
     return encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  private async apiGet(url: string, token: string): Promise<Response> {
-    return fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+  private createClient(token: string): HttpClient {
+    return createHttpClient({ getAccessToken: () => token, errorPrefix: 'Gmail API' });
   }
 
   private sleep(ms: number): Promise<void> {

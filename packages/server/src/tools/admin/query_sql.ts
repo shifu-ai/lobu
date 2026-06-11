@@ -15,6 +15,8 @@ import { raceAbort } from '../../utils/race-abort';
 import { ADMIN_ONLY_QUERYABLE_TABLES, SAFE_COLUMN_DEFS } from '../../utils/table-schema';
 import { getCachedMembershipRole, getCachedOrgBySlug } from '../../workspace/multi-tenant';
 import type { ToolContext } from '../registry';
+import { SortOrderField } from './schemas/common-fields';
+import { isAdminOrOwnerRole } from '../access-control';
 
 export const QuerySqlSchema = Type.Object({
   sql: Type.String({
@@ -38,11 +40,7 @@ export const QuerySqlSchema = Type.Object({
       description: 'Column name to sort by. Omit to return rows unordered (e.g. a view whose columns you don\'t know upfront).',
     })
   ),
-  sort_order: Type.Optional(
-    Type.Union([Type.Literal('asc'), Type.Literal('desc')], {
-      description: 'Sort direction. Default: asc.',
-    })
-  ),
+  sort_order: SortOrderField('Sort direction. Default: asc.'),
   limit: Type.Optional(
     Type.Number({
       description: 'Rows per page (1–500). Default: 50.',
@@ -181,7 +179,7 @@ export async function querySql(
   let targetOrgId = ctx.organizationId;
   // Members may query their own org's operational tables; the auth/identity
   // tables stay admin-only (enforced via restrictedTables below).
-  let callerIsAdmin = ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+  let callerIsAdmin = isAdminOrOwnerRole(ctx.memberRole);
   if (args.org_slug) {
     if (!ctx.allowCrossOrg) {
       if (ctx.scopedToOrg) {
@@ -223,7 +221,7 @@ export async function querySql(
       }
       callerIsAdmin = true; // cross-org already required owner/admin in the target
     } else {
-      callerIsAdmin = role === 'owner' || role === 'admin';
+      callerIsAdmin = isAdminOrOwnerRole(role);
     }
   }
 

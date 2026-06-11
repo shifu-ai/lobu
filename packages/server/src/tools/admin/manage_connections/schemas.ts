@@ -10,7 +10,7 @@ import type { ListedConnectorDefinition } from '../helpers/connector-definition-
 // Schema
 // ============================================
 
-const ListAction = Type.Object({
+export const ListAction = Type.Object({
   action: Type.Literal('list'),
   connector_key: Type.Optional(
     Type.String({ description: 'Filter by connector key (e.g. google.gmail)' })
@@ -25,12 +25,12 @@ const ListAction = Type.Object({
   ...PaginationFields,
 });
 
-const GetAction = Type.Object({
+export const GetAction = Type.Object({
   action: Type.Literal('get'),
   connection_id: Type.Number({ description: 'Connection ID' }),
 });
 
-const ListConnectorDefinitionsAction = Type.Object({
+export const ListConnectorDefinitionsAction = Type.Object({
   action: Type.Literal('list_connector_definitions'),
   include_installable: Type.Optional(
     Type.Boolean({
@@ -58,7 +58,7 @@ export const EntityLinkOverridesSchema = Type.Union(
   }
 );
 
-const CreateAction = Type.Object({
+export const CreateAction = Type.Object({
   action: Type.Literal('create'),
   connector_key: Type.String({ description: 'Connector key (e.g. google.gmail)' }),
   display_name: Type.Optional(Type.String({ description: 'Human-readable name' })),
@@ -96,7 +96,7 @@ const CreateAction = Type.Object({
   entity_link_overrides: Type.Optional(EntityLinkOverridesSchema),
 });
 
-const UpdateAction = Type.Object({
+export const UpdateAction = Type.Object({
   action: Type.Literal('update'),
   connection_id: Type.Number({ description: 'Connection ID' }),
   display_name: Type.Optional(Type.String()),
@@ -127,12 +127,12 @@ const UpdateAction = Type.Object({
   ),
 });
 
-const DeleteAction = Type.Object({
+export const DeleteAction = Type.Object({
   action: Type.Literal('delete'),
   connection_id: Type.Number({ description: 'Connection ID' }),
 });
 
-const ReauthenticateAction = Type.Object({
+export const ReauthenticateAction = Type.Object({
   action: Type.Literal('reauthenticate'),
   connection_id: Type.Number({
     description:
@@ -140,12 +140,12 @@ const ReauthenticateAction = Type.Object({
   }),
 });
 
-const TestAction = Type.Object({
+export const TestAction = Type.Object({
   action: Type.Literal('test'),
   connection_id: Type.Number({ description: 'Connection ID to test' }),
 });
 
-const InstallConnectorAction = Type.Object({
+export const InstallConnectorAction = Type.Object({
   action: Type.Literal('install_connector'),
   source_url: Type.Optional(Type.String({ description: 'Direct URL to connector source file' })),
   source_uri: Type.Optional(
@@ -174,12 +174,12 @@ const InstallConnectorAction = Type.Object({
   entity_link_overrides: Type.Optional(EntityLinkOverridesSchema),
 });
 
-const UninstallConnectorAction = Type.Object({
+export const UninstallConnectorAction = Type.Object({
   action: Type.Literal('uninstall_connector'),
   connector_key: Type.String({ description: 'Connector key to uninstall' }),
 });
 
-const ConnectAction = Type.Object({
+export const ConnectAction = Type.Object({
   action: Type.Literal('connect'),
   connector_key: Type.String({ description: 'Connector key (e.g. google.gmail)' }),
   display_name: Type.Optional(
@@ -214,13 +214,13 @@ const ConnectAction = Type.Object({
   entity_link_overrides: Type.Optional(EntityLinkOverridesSchema),
 });
 
-const ToggleConnectorLoginAction = Type.Object({
+export const ToggleConnectorLoginAction = Type.Object({
   action: Type.Literal('toggle_connector_login'),
   connector_key: Type.String({ description: 'Connector key (e.g. github, google.gmail)' }),
   enabled: Type.Boolean({ description: 'Enable or disable this connector as a login provider' }),
 });
 
-const UpdateConnectorAuthAction = Type.Object({
+export const UpdateConnectorAuthAction = Type.Object({
   action: Type.Literal('update_connector_auth'),
   connector_key: Type.String({ description: 'Connector key (e.g. reddit, google.gmail)' }),
   auth_values: Type.Record(Type.String(), Type.String(), {
@@ -228,7 +228,7 @@ const UpdateConnectorAuthAction = Type.Object({
   }),
 });
 
-const UpdateConnectorDefaultConfigAction = Type.Object({
+export const UpdateConnectorDefaultConfigAction = Type.Object({
   action: Type.Literal('update_connector_default_config'),
   connector_key: Type.String({ description: 'Connector key' }),
   default_connection_config: Type.Record(Type.String(), Type.Any(), {
@@ -236,13 +236,13 @@ const UpdateConnectorDefaultConfigAction = Type.Object({
   }),
 });
 
-const SetConnectorEntityLinkOverridesAction = Type.Object({
+export const SetConnectorEntityLinkOverridesAction = Type.Object({
   action: Type.Literal('set_connector_entity_link_overrides'),
   connector_key: Type.String({ description: 'Connector key' }),
   overrides: EntityLinkOverridesSchema,
 });
 
-const UpdateConnectorDefaultRepairAgentAction = Type.Object({
+export const UpdateConnectorDefaultRepairAgentAction = Type.Object({
   action: Type.Literal('update_connector_default_repair_agent'),
   connector_key: Type.String({ description: 'Connector key' }),
   default_repair_agent_id: Type.Union([Type.String(), Type.Null()], {
@@ -251,24 +251,6 @@ const UpdateConnectorDefaultRepairAgentAction = Type.Object({
   }),
 });
 
-export const ManageConnectionsSchema = Type.Union([
-  ListAction,
-  ListConnectorDefinitionsAction,
-  GetAction,
-  CreateAction,
-  ConnectAction,
-  UpdateAction,
-  DeleteAction,
-  ReauthenticateAction,
-  TestAction,
-  InstallConnectorAction,
-  UninstallConnectorAction,
-  ToggleConnectorLoginAction,
-  UpdateConnectorAuthAction,
-  UpdateConnectorDefaultConfigAction,
-  UpdateConnectorDefaultRepairAgentAction,
-  SetConnectorEntityLinkOverridesAction,
-]);
 
 // ============================================
 // Result Types
@@ -350,4 +332,25 @@ export type ManageConnectionsResult =
   | ConnectorActionOk<'update_connector_default_repair_agent', { default_repair_agent_id: string | null }>
   | ConnectorActionOk<'set_connector_entity_link_overrides', { overrides: Record<string, unknown> | null }>;
 
-export type ConnectionsArgs = Static<typeof ManageConnectionsSchema>;
+/**
+ * Union of all action variants. Defined from the variants directly (rather
+ * than from the derived union schema in manage_connections.ts) so the handler
+ * modules can use `Extract<ConnectionsArgs, ...>` without a circular type.
+ */
+export type ConnectionsArgs =
+  | Static<typeof ListAction>
+  | Static<typeof ListConnectorDefinitionsAction>
+  | Static<typeof GetAction>
+  | Static<typeof CreateAction>
+  | Static<typeof ConnectAction>
+  | Static<typeof UpdateAction>
+  | Static<typeof DeleteAction>
+  | Static<typeof ReauthenticateAction>
+  | Static<typeof TestAction>
+  | Static<typeof InstallConnectorAction>
+  | Static<typeof UninstallConnectorAction>
+  | Static<typeof ToggleConnectorLoginAction>
+  | Static<typeof UpdateConnectorAuthAction>
+  | Static<typeof UpdateConnectorDefaultConfigAction>
+  | Static<typeof UpdateConnectorDefaultRepairAgentAction>
+  | Static<typeof SetConnectorEntityLinkOverridesAction>;

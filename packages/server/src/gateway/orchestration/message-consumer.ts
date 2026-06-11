@@ -554,20 +554,41 @@ export class MessageConsumer {
               { traceId, deploymentName },
               "Another handler is creating this deployment, waiting"
             );
-            await new Promise((r) => setTimeout(r, 3000));
-            const rechecked = await this.deploymentManager.listDeployments();
-            if (rechecked.some((d) => d.deploymentName === deploymentName)) {
-              await this.deploymentManager.scaleDeployment(deploymentName, 1);
-              logger.info(
-                { traceId, deploymentName },
-                "Deployment created by other handler, scaled up"
-              );
-              await this.deploymentManager.updateDeploymentActivity(
-                deploymentName
-              );
-              return;
-            }
-            throw new Error("Deployment lock held but deployment not created");
+            // Poll for the other handler's create to land: one 3s-spaced
+            // recheck, same total wait as the prior hand-rolled sleep (the
+            // added up-front check is a cheap read that only lets us scale
+            // up sooner when the create has already finished). Exhausting
+            // the poll throws to the outer retryWithBackoff, exactly like
+            // the old single-recheck throw did.
+            await retryWithBackoff(
+              async () => {
+                const rechecked =
+                  await this.deploymentManager.listDeployments();
+                if (
+                  !rechecked.some((d) => d.deploymentName === deploymentName)
+                ) {
+                  throw new Error(
+                    "Deployment lock held but deployment not created"
+                  );
+                }
+              },
+              {
+                maxRetries: 1,
+                baseDelay: 3000,
+                strategy: "linear",
+                // Quiet retry — the "waiting" log above already covers it.
+                onRetry: () => {},
+              }
+            );
+            await this.deploymentManager.scaleDeployment(deploymentName, 1);
+            logger.info(
+              { traceId, deploymentName },
+              "Deployment created by other handler, scaled up"
+            );
+            await this.deploymentManager.updateDeploymentActivity(
+              deploymentName
+            );
+            return;
           }
 
           try {

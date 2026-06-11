@@ -9,7 +9,10 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventEnvelope,
+  HttpStatusError,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -290,47 +293,51 @@ export default class RedditConnector extends ConnectorRuntime {
     const cutoffDate = new Date();
     cutoffDate.setDate(cutoffDate.getDate() - lookbackDays);
 
+    const http = createHttpClient({
+      getAccessToken: () => accessToken,
+      headers: { 'User-Agent': this.USER_AGENT },
+      errorPrefix: 'Reddit API',
+    });
+
     const events: EventEnvelope[] = [];
     let after: string | null = null;
-    let page = 0;
     let reachedCutoff = false;
 
-    while (page < this.MAX_PAGES && !reachedCutoff) {
-      const url = this.buildFetchUrl({
-        baseUrl,
-        subreddit,
-        searchTerms,
-        username,
-        contentType,
-        after,
-        isOAuth: !!accessToken,
-      });
+    const pages = paginateByCursor<RedditListingResponse['data']['children'][number], string>(
+      async (cursor) => {
+        const url = this.buildFetchUrl({
+          baseUrl,
+          subreddit,
+          searchTerms,
+          username,
+          contentType,
+          after: cursor,
+          isOAuth: !!accessToken,
+        });
 
-      const headers: Record<string, string> = {
-        'User-Agent': this.USER_AGENT,
-      };
-      if (accessToken) {
-        headers.Authorization = `Bearer ${accessToken}`;
-      }
-
-      const response = await fetch(url, { headers });
-      if (!response.ok) {
-        const status = response.status;
-        if (status === 429) {
-          throw new Error('Reddit rate limit exceeded. Please wait before retrying.');
+        let listing: RedditListingResponse;
+        try {
+          listing = await http.get<RedditListingResponse>(url);
+        } catch (error) {
+          if (error instanceof HttpStatusError) {
+            if (error.status === 404) {
+              throw new Error('Subreddit or resource not found. Please check the subreddit name.');
+            }
+            if (error.status === 403) {
+              throw new Error('Access forbidden. The subreddit may be private or banned.');
+            }
+          }
+          throw error;
         }
-        if (status === 404) {
-          throw new Error('Subreddit or resource not found. Please check the subreddit name.');
-        }
-        if (status === 403) {
-          throw new Error('Access forbidden. The subreddit may be private or banned.');
-        }
-        throw new Error(`Reddit API error (${status}): ${await response.text()}`);
-      }
 
-      const listing = (await response.json()) as RedditListingResponse;
-      const children = listing.data.children;
+        const children = listing.data.children;
+        if (children.length > 0) after = listing.data.after;
+        return { items: children, nextCursor: children.length > 0 ? listing.data.after : null };
+      },
+      { maxPages: this.MAX_PAGES, delayMs: this.RATE_LIMIT_MS }
+    );
 
+    for await (const children of pages) {
       if (children.length === 0) break;
 
       for (const child of children) {
@@ -364,14 +371,7 @@ export default class RedditConnector extends ConnectorRuntime {
         }
       }
 
-      after = listing.data.after;
-      if (!after) break;
-
-      page++;
-
-      if (page < this.MAX_PAGES && !reachedCutoff) {
-        await this.sleep(this.RATE_LIMIT_MS);
-      }
+      if (reachedCutoff) break;
     }
 
     const checkpoint: RedditCheckpoint = {
@@ -584,11 +584,4 @@ export default class RedditConnector extends ConnectorRuntime {
     };
   }
 
-  // -------------------------------------------------------------------------
-  // Utilities
-  // -------------------------------------------------------------------------
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
 }

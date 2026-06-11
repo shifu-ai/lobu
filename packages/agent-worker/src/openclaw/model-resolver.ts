@@ -5,7 +5,11 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type ConfigProviderMeta, createLogger } from "@lobu/core";
+import {
+  type ConfigProviderMeta,
+  createLogger,
+  DEFAULT_AGENT_MODEL,
+} from "@lobu/core";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 
 const logger = createLogger("model-resolver");
@@ -25,7 +29,7 @@ export const DEFAULT_PROVIDER_BASE_URL_ENV: Record<string, string> = {
 
 /** Default model IDs per provider, used when no explicit model is configured. */
 export const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
-  anthropic: "claude-sonnet-4-20250514",
+  anthropic: DEFAULT_AGENT_MODEL,
   openai: "gpt-4.1",
   "openai-codex": "gpt-5.1-codex-max",
   // Keyed by gateway slug ("gemini", not "google"). Overridden at runtime by

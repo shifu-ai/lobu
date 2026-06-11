@@ -27,7 +27,7 @@ import {
 import logger from '../../utils/logger';
 import { resolveUsernames } from '../../utils/resolve-usernames';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { defineFlatActionTool, flatAction } from './action-tool';
 
 // ============================================
 // Typebox Schema
@@ -240,22 +240,19 @@ function stripEmbeddingsFromAttributeValues(
 // Main Function (Action Router)
 // ============================================
 
-export async function manageClassifiers(
-  args: ManageClassifiersArgs,
-  env: Env,
-  ctx: ToolContext
-): Promise<ManageClassifiersResult> {
-  return routeAction<ManageClassifiersResult>('manage_classifiers', args.action, ctx, {
-    create: () => handleCreate(args, env, ctx),
-    create_version: () => handleCreateVersion(args, env, ctx),
-    list: () => handleList(args, ctx),
-    get_versions: () => handleGetVersions(args, ctx),
-    set_current_version: () => handleSetCurrentVersion(args, ctx),
-    generate_embeddings: () => handleGenerateEmbeddings(args, env, ctx),
-    delete: () => handleDelete(args, ctx),
-    classify: () => handleClassify(args, ctx),
-  });
-}
+export const manageClassifiers = defineFlatActionTool<
+  ManageClassifiersArgs,
+  ManageClassifiersResult
+>('manage_classifiers', {
+  create: flatAction((args, ctx, env) => handleCreate(args, env, ctx)),
+  create_version: flatAction((args, ctx, env) => handleCreateVersion(args, env, ctx)),
+  list: flatAction(handleList),
+  get_versions: flatAction(handleGetVersions),
+  set_current_version: flatAction(handleSetCurrentVersion),
+  generate_embeddings: flatAction((args, ctx, env) => handleGenerateEmbeddings(args, env, ctx)),
+  delete: flatAction(handleDelete),
+  classify: flatAction(handleClassify),
+});
 
 // ============================================
 // Template CRUD Handlers

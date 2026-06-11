@@ -17,6 +17,11 @@ function textResult(text: string): TextResult {
   return { content: [{ type: "text" as const, text }] };
 }
 
+/** TextResult carrying a JSON-encoded payload (MCP auth tool responses). */
+function jsonResult(payload: Record<string, unknown>): TextResult {
+  return textResult(JSON.stringify(payload));
+}
+
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -131,6 +136,12 @@ export interface GatewayParams {
   workerToken: string;
   channelId: string;
   conversationId: string;
+  /**
+   * Platform identifier (e.g. "slack", "telegram"). Genuinely absent for some
+   * callers (tests, non-platform contexts), so optional here — but there is
+   * NO silent default: tools that need it (get_channel_history) throw if it
+   * is missing.
+   */
   platform?: string;
   /**
    * Session workspace directory. Relative file paths from the model get
@@ -426,13 +437,11 @@ export async function startMcpLogin(
     if (statusResult.error) return statusResult.error;
 
     if (statusResult.data?.authenticated) {
-      return textResult(
-        JSON.stringify({
-          status: "already_authenticated",
-          mcp_id: args.mcpId,
-          message: `${args.mcpId} is already authenticated.`,
-        })
-      );
+      return jsonResult({
+        status: "already_authenticated",
+        mcp_id: args.mcpId,
+        message: `${args.mcpId} is already authenticated.`,
+      });
     }
 
     const startResult = await gatewayFetch<{
@@ -463,20 +472,18 @@ export async function startMcpLogin(
       });
     }
 
-    return textResult(
-      JSON.stringify({
-        status: "login_started",
-        mcp_id: args.mcpId,
-        verification_url: verificationUrl,
-        verification_uri: startResult.data?.verificationUri,
-        user_code: startResult.data?.userCode,
-        expires_in_seconds: startResult.data?.expiresIn,
-        interaction_posted: Boolean(verificationUrl),
-        message: verificationUrl
-          ? `Authentication required for ${args.mcpId}. The login link has been sent directly to the user. Do not repeat the URL unless they ask.`
-          : `Authentication required for ${args.mcpId}. Show the user the verification URL and code, then wait for them to finish login.`,
-      })
-    );
+    return jsonResult({
+      status: "login_started",
+      mcp_id: args.mcpId,
+      verification_url: verificationUrl,
+      verification_uri: startResult.data?.verificationUri,
+      user_code: startResult.data?.userCode,
+      expires_in_seconds: startResult.data?.expiresIn,
+      interaction_posted: Boolean(verificationUrl),
+      message: verificationUrl
+        ? `Authentication required for ${args.mcpId}. The login link has been sent directly to the user. Do not repeat the URL unless they ask.`
+        : `Authentication required for ${args.mcpId}. Show the user the verification URL and code, then wait for them to finish login.`,
+    });
   });
 }
 
@@ -503,15 +510,13 @@ export async function checkMcpLogin(
         "../openclaw/session-context"
       );
       invalidateSessionContextCache();
-      return textResult(
-        JSON.stringify({
-          status: "already_authenticated",
-          mcp_id: args.mcpId,
-          authenticated: true,
-          refreshed_session_context: true,
-          message: `${args.mcpId} is already authenticated. Newly available MCP tools will be refreshed for the next message.`,
-        })
-      );
+      return jsonResult({
+        status: "already_authenticated",
+        mcp_id: args.mcpId,
+        authenticated: true,
+        refreshed_session_context: true,
+        message: `${args.mcpId} is already authenticated. Newly available MCP tools will be refreshed for the next message.`,
+      });
     }
 
     const pollResult = await gatewayFetch<{
@@ -534,38 +539,32 @@ export async function checkMcpLogin(
         "../openclaw/session-context"
       );
       invalidateSessionContextCache();
-      return textResult(
-        JSON.stringify({
-          status: "complete",
-          mcp_id: args.mcpId,
-          authenticated: true,
-          refreshed_session_context: true,
-          message: `${args.mcpId} authentication completed successfully. Newly available MCP tools will be refreshed for the next message.`,
-        })
-      );
+      return jsonResult({
+        status: "complete",
+        mcp_id: args.mcpId,
+        authenticated: true,
+        refreshed_session_context: true,
+        message: `${args.mcpId} authentication completed successfully. Newly available MCP tools will be refreshed for the next message.`,
+      });
     }
 
     if (pollStatus === "pending") {
-      return textResult(
-        JSON.stringify({
-          status: "pending",
-          mcp_id: args.mcpId,
-          authenticated: false,
-          message: `Authentication for ${args.mcpId} is still pending. Wait for the user to complete login in their browser.`,
-        })
-      );
-    }
-
-    return textResult(
-      JSON.stringify({
-        status: "error",
+      return jsonResult({
+        status: "pending",
         mcp_id: args.mcpId,
         authenticated: false,
-        message:
-          pollResult.data?.message ||
-          `Authentication for ${args.mcpId} failed or expired.`,
-      })
-    );
+        message: `Authentication for ${args.mcpId} is still pending. Wait for the user to complete login in their browser.`,
+      });
+    }
+
+    return jsonResult({
+      status: "error",
+      mcp_id: args.mcpId,
+      authenticated: false,
+      message:
+        pollResult.data?.message ||
+        `Authentication for ${args.mcpId} failed or expired.`,
+    });
   });
 }
 
@@ -584,16 +583,14 @@ export async function logoutMcp(
     );
     if (error) return error;
 
-    return textResult(
-      JSON.stringify({
-        status: data?.success ? "logged_out" : "already_logged_out",
-        mcp_id: args.mcpId,
-        authenticated: false,
-        message: data?.success
-          ? `${args.mcpId} has been logged out.`
-          : `${args.mcpId} was not logged in.`,
-      })
-    );
+    return jsonResult({
+      status: data?.success ? "logged_out" : "already_logged_out",
+      mcp_id: args.mcpId,
+      authenticated: false,
+      message: data?.success
+        ? `${args.mcpId} has been logged out.`
+        : `${args.mcpId} was not logged in.`,
+    });
   });
 }
 
@@ -871,7 +868,12 @@ export async function getChannelHistory(
 ): Promise<TextResult> {
   return withErrorHandling("get_channel_history", async () => {
     const limit = Math.min(Math.max(args.limit || 50, 1), 100);
-    const platform = gw.platform || "slack";
+    const platform = gw.platform;
+    if (!platform) {
+      // No silent fallback: defaulting to "slack" returned another platform's
+      // (empty/wrong) history. Surface the wiring bug instead.
+      throw new Error("platform is required for get_channel_history");
+    }
     logger.info(
       `get_channel_history: limit=${limit}, before=${args.before || "none"}`
     );

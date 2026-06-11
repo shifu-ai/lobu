@@ -3,7 +3,7 @@ import {
   resolveOrg,
   setActiveOrg,
 } from "./_lib/openclaw-auth.js";
-import { printText } from "./_lib/output.js";
+import { printText } from "../../internal/output.js";
 
 interface OrgOptions {
   context?: string;

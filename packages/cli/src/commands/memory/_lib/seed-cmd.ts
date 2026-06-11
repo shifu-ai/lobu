@@ -15,7 +15,7 @@ import {
   resolveOrg,
   resolveServerUrl,
 } from "./openclaw-auth.js";
-import { printError, printText } from "./output.js";
+import { printError, printText } from "../../../internal/output.js";
 import {
   type DataRecordType,
   type ValidationError as SchemaError,

@@ -8,7 +8,11 @@
 import {
   type ConnectorDefinition,
   ConnectorRuntime,
+  createHttpClient,
   type EventEnvelope,
+  type HttpClient,
+  paginateByCursor,
+  paginateByOffset,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -284,15 +288,20 @@ export default class SpotifyConnector extends ConnectorRuntime {
       throw new Error('Spotify requires OAuth authentication.');
     }
 
+    const http = createHttpClient({
+      getAccessToken: () => accessToken,
+      errorPrefix: 'Spotify API',
+    });
+
     switch (ctx.feedKey) {
       case 'saved_tracks':
-        return this.syncSavedTracks(ctx, accessToken);
+        return this.syncSavedTracks(ctx, http);
       case 'playlists':
-        return this.syncPlaylists(ctx, accessToken);
+        return this.syncPlaylists(ctx, http);
       case 'recently_played':
-        return this.syncRecentlyPlayed(ctx, accessToken);
+        return this.syncRecentlyPlayed(ctx, http);
       case 'top_tracks':
-        return this.syncTopTracks(ctx, accessToken);
+        return this.syncTopTracks(ctx, http);
       default:
         throw new Error(`Unknown feed: ${ctx.feedKey}`);
     }
@@ -305,17 +314,21 @@ export default class SpotifyConnector extends ConnectorRuntime {
   // Feed: saved_tracks
   // -------------------------------------------------------------------------
 
-  private async syncSavedTracks(ctx: SyncContext, accessToken: string): Promise<SyncResult> {
+  private async syncSavedTracks(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const events: EventEnvelope[] = [];
-    let offset = 0;
 
-    for (let page = 0; page < this.MAX_PAGES; page++) {
-      const data = await this.spotifyGet<SpotifyPagingResponse<SpotifySavedTrack>>(
-        `${this.API_BASE}/me/tracks?limit=${this.PAGE_SIZE}&offset=${offset}`,
-        accessToken
-      );
+    const pages = paginateByOffset(
+      async (offset) => {
+        const data = await http.get<SpotifyPagingResponse<SpotifySavedTrack>>(
+          `${this.API_BASE}/me/tracks?limit=${this.PAGE_SIZE}&offset=${offset}`
+        );
+        return { items: data.items, hasMore: !!data.next };
+      },
+      { pageSize: this.PAGE_SIZE, maxPages: this.MAX_PAGES }
+    );
 
-      for (const item of data.items) {
+    for await (const items of pages) {
+      for (const item of items) {
         const track = item.track;
         events.push({
           origin_id: `spotify_track_${track.id}`,
@@ -338,9 +351,6 @@ export default class SpotifyConnector extends ConnectorRuntime {
       }
 
       if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
-
-      if (!data.next) break;
-      offset += this.PAGE_SIZE;
     }
 
     return {
@@ -356,20 +366,22 @@ export default class SpotifyConnector extends ConnectorRuntime {
   // Feed: playlists
   // -------------------------------------------------------------------------
 
-  private async syncPlaylists(ctx: SyncContext, accessToken: string): Promise<SyncResult> {
+  private async syncPlaylists(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const events: EventEnvelope[] = [];
 
     // First, fetch all playlists
     const playlists: SpotifyPlaylist[] = [];
-    let offset = 0;
-    for (let page = 0; page < this.MAX_PAGES; page++) {
-      const data = await this.spotifyGet<SpotifyPagingResponse<SpotifyPlaylist>>(
-        `${this.API_BASE}/me/playlists?limit=${this.PAGE_SIZE}&offset=${offset}`,
-        accessToken
-      );
-      playlists.push(...data.items);
-      if (!data.next) break;
-      offset += this.PAGE_SIZE;
+    const playlistPages = paginateByOffset(
+      async (offset) => {
+        const data = await http.get<SpotifyPagingResponse<SpotifyPlaylist>>(
+          `${this.API_BASE}/me/playlists?limit=${this.PAGE_SIZE}&offset=${offset}`
+        );
+        return { items: data.items, hasMore: !!data.next };
+      },
+      { pageSize: this.PAGE_SIZE, maxPages: this.MAX_PAGES }
+    );
+    for await (const items of playlistPages) {
+      playlists.push(...items);
     }
 
     // Emit playlist events
@@ -395,15 +407,19 @@ export default class SpotifyConnector extends ConnectorRuntime {
 
     // Then fetch tracks for each playlist
     for (const pl of playlists) {
-      let trackOffset = 0;
-      for (let page = 0; page < this.MAX_PAGES; page++) {
-        const data = await this.spotifyGet<SpotifyPagingResponse<SpotifyPlaylistTrackItem>>(
-          `${this.API_BASE}/playlists/${pl.id}/tracks?limit=${this.PAGE_SIZE}&offset=${trackOffset}`,
-          accessToken
-        );
+      const trackPages = paginateByOffset(
+        async (offset) => {
+          const data = await http.get<SpotifyPagingResponse<SpotifyPlaylistTrackItem>>(
+            `${this.API_BASE}/playlists/${pl.id}/tracks?limit=${this.PAGE_SIZE}&offset=${offset}`
+          );
+          return { items: data.items, hasMore: !!data.next };
+        },
+        { pageSize: this.PAGE_SIZE, maxPages: this.MAX_PAGES }
+      );
 
+      for await (const items of trackPages) {
         const trackEvents: EventEnvelope[] = [];
-        for (const item of data.items) {
+        for (const item of items) {
           if (!item.track) continue;
           const track = item.track;
           trackEvents.push({
@@ -428,9 +444,6 @@ export default class SpotifyConnector extends ConnectorRuntime {
 
         if (ctx.emitEvents) await ctx.emitEvents(trackEvents);
         else events.push(...trackEvents);
-
-        if (!data.next) break;
-        trackOffset += this.PAGE_SIZE;
       }
     }
 
@@ -447,22 +460,33 @@ export default class SpotifyConnector extends ConnectorRuntime {
   // Feed: recently_played
   // -------------------------------------------------------------------------
 
-  private async syncRecentlyPlayed(ctx: SyncContext, accessToken: string): Promise<SyncResult> {
+  private async syncRecentlyPlayed(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const events: EventEnvelope[] = [];
     const checkpoint = (ctx.checkpoint ?? {}) as SpotifyCheckpoint;
-    let url = `${this.API_BASE}/me/player/recently-played?limit=${this.PAGE_SIZE}`;
+    let firstUrl = `${this.API_BASE}/me/player/recently-played?limit=${this.PAGE_SIZE}`;
 
     // Resume from last cursor if available
     if (checkpoint.cursor) {
-      url += `&after=${checkpoint.cursor}`;
+      firstUrl += `&after=${checkpoint.cursor}`;
     }
 
     let newCursor: string | undefined;
 
-    for (let page = 0; page < this.MAX_PAGES; page++) {
-      const data = await this.spotifyGet<SpotifyRecentlyPlayedResponse>(url, accessToken);
+    // Spotify paginates recently-played via full `next` URLs, so the cursor is the page URL.
+    const pages = paginateByCursor<SpotifyRecentlyPlayedItem, string>(
+      async (url) => {
+        const data = await http.get<SpotifyRecentlyPlayedResponse>(url ?? firstUrl);
+        // Store the latest cursor for next sync
+        if (data.cursors?.after) {
+          newCursor = data.cursors.after;
+        }
+        return { items: data.items, nextCursor: data.next };
+      },
+      { maxPages: this.MAX_PAGES, initialCursor: firstUrl }
+    );
 
-      for (const item of data.items) {
+    for await (const items of pages) {
+      for (const item of items) {
         const track = item.track;
         const playedAt = new Date(item.played_at);
         events.push({
@@ -484,14 +508,6 @@ export default class SpotifyConnector extends ConnectorRuntime {
       }
 
       if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
-
-      // Store the latest cursor for next sync
-      if (data.cursors?.after) {
-        newCursor = data.cursors.after;
-      }
-
-      if (!data.next) break;
-      url = data.next;
     }
 
     return {
@@ -507,19 +523,23 @@ export default class SpotifyConnector extends ConnectorRuntime {
   // Feed: top_tracks
   // -------------------------------------------------------------------------
 
-  private async syncTopTracks(ctx: SyncContext, accessToken: string): Promise<SyncResult> {
+  private async syncTopTracks(ctx: SyncContext, http: HttpClient): Promise<SyncResult> {
     const timeRange = (ctx.config.time_range as string) ?? 'medium_term';
     const events: EventEnvelope[] = [];
-    let offset = 0;
     let rank = 1;
 
-    for (let page = 0; page < this.MAX_PAGES; page++) {
-      const data = await this.spotifyGet<SpotifyPagingResponse<SpotifyTrack>>(
-        `${this.API_BASE}/me/top/tracks?time_range=${timeRange}&limit=${this.PAGE_SIZE}&offset=${offset}`,
-        accessToken
-      );
+    const pages = paginateByOffset(
+      async (offset) => {
+        const data = await http.get<SpotifyPagingResponse<SpotifyTrack>>(
+          `${this.API_BASE}/me/top/tracks?time_range=${timeRange}&limit=${this.PAGE_SIZE}&offset=${offset}`
+        );
+        return { items: data.items, hasMore: !!data.next };
+      },
+      { pageSize: this.PAGE_SIZE, maxPages: this.MAX_PAGES }
+    );
 
-      for (const track of data.items) {
+    for await (const items of pages) {
+      for (const track of items) {
         events.push({
           origin_id: `spotify_top_${timeRange}_${track.id}`,
           title: `#${rank} ${track.name}`,
@@ -540,9 +560,6 @@ export default class SpotifyConnector extends ConnectorRuntime {
       }
 
       if (ctx.emitEvents) await ctx.emitEvents(events.splice(0));
-
-      if (!data.next) break;
-      offset += this.PAGE_SIZE;
     }
 
     return {
@@ -552,32 +569,5 @@ export default class SpotifyConnector extends ConnectorRuntime {
         unknown
       >,
     };
-  }
-
-  // -------------------------------------------------------------------------
-  // API helpers
-  // -------------------------------------------------------------------------
-
-  private async spotifyGet<T>(url: string, accessToken: string): Promise<T> {
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (response.status === 429) {
-      const retryAfter = response.headers.get('Retry-After');
-      throw new Error(
-        `Spotify rate limit exceeded. Retry after ${retryAfter ?? 'unknown'} seconds.`
-      );
-    }
-
-    if (response.status === 401) {
-      throw new Error('Spotify access token expired or invalid.');
-    }
-
-    if (!response.ok) {
-      throw new Error(`Spotify API error (${response.status}): ${await response.text()}`);
-    }
-
-    return response.json() as Promise<T>;
   }
 }

@@ -13,3 +13,8 @@ export const PaginationFields = {
   offset: Type.Optional(Type.Number({ description: 'Pagination offset (default: 0)', default: 0 })),
 };
 
+/** Optional `asc`/`desc` sort-order field with a tool-specific description. */
+export function SortOrderField(description: string) {
+  return Type.Optional(Type.Union([Type.Literal('asc'), Type.Literal('desc')], { description }));
+}
+

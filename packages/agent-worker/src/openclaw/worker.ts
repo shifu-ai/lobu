@@ -27,20 +27,20 @@ import {
   OpenClawCoreInstructionProvider,
   OpenClawPromptIntentInstructionProvider,
 } from "./instructions";
+import type { openOrCreateSessionManager } from "./model-resolver";
 import { OpenClawProgressProcessor } from "./processor";
 import { checkSandboxLeak } from "./sandbox-leak";
-import type { buildAgentSession } from "./session-builder";
-import type { openOrCreateSessionManager } from "./model-resolver";
-import { type TerminalStatus, writeSnapshot } from "./transcript-snapshot";
 import {
+  type buildAgentSession,
   countCompactionsOnCurrentBranch,
   estimatePromptTokenCost,
   getLatestAssistantText,
   MEMORY_FLUSH_STATE_CUSTOM_TYPE,
+  type ResolvedMemoryFlushConfig,
   readLastFlushedCompactionCount,
   runAISession as runAISessionImpl,
-  type ResolvedMemoryFlushConfig,
 } from "./session-runner";
+import { type TerminalStatus, writeSnapshot } from "./transcript-snapshot";
 
 // Re-export pure utilities from session-runner so existing imports of this
 // module continue to resolve without change.
@@ -48,11 +48,11 @@ export {
   countCompactionsOnCurrentBranch,
   estimatePromptTokenCost,
   getLatestAssistantText,
-  replaceBasePromptIdentity,
-  resolveMemoryFlushConfig,
-  readLastFlushedCompactionCount,
   MEMORY_FLUSH_STATE_CUSTOM_TYPE,
   type ResolvedMemoryFlushConfig,
+  readLastFlushedCompactionCount,
+  replaceBasePromptIdentity,
+  resolveMemoryFlushConfig,
 } from "./session-runner";
 
 const logger = createLogger("worker");

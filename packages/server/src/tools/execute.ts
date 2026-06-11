@@ -11,6 +11,7 @@ import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
+import { enforceRoleScopeAccess } from './access-control';
 import { recordToolInvocationAudit } from './audit';
 import { listOrganizations } from './organizations';
 import { getTool, type TokenType, type ToolContext } from './registry';
@@ -121,29 +122,18 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     );
   }
 
-  if (requiredAccess === 'admin') {
-    if (role !== 'owner' && role !== 'admin') {
-      throw new Error(
-        'This action requires admin or owner access. Ask an organization owner to grant elevated access.'
-      );
-    }
-  }
-
-  if (!hasRequiredMcpScope(requiredAccess, authCtx.scopes)) {
-    if (requiredAccess === 'read') {
-      throw new Error(
-        'This MCP session does not include read access. Reconnect with read access for this workspace.'
-      );
-    }
-    if (requiredAccess === 'write') {
-      throw new Error(
-        'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.'
-      );
-    }
-    throw new Error(
-      'This MCP session does not include admin access. Reconnect with admin access after an owner grants the role.'
-    );
-  }
+  // No `writeRole` message: missing-membership writes are already rejected by
+  // the public-readability branch above, matching the historical behavior.
+  enforceRoleScopeAccess(requiredAccess, role, authCtx.scopes, {
+    adminRole:
+      'This action requires admin or owner access. Ask an organization owner to grant elevated access.',
+    readScope:
+      'This MCP session does not include read access. Reconnect with read access for this workspace.',
+    writeScope:
+      'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.',
+    adminScope:
+      'This MCP session does not include admin access. Reconnect with admin access after an owner grants the role.',
+  });
 }
 
 /**

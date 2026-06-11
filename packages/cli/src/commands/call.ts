@@ -17,6 +17,7 @@
 
 import { readFile } from "node:fs/promises";
 
+import { printJson } from "../internal/output.js";
 import { ValidationError } from "./memory/_lib/errors.js";
 import { restGet, restToolCall } from "./memory/_lib/mcp.js";
 import {
@@ -44,11 +45,6 @@ interface ToolListEntry {
   inputSchema?: unknown;
   annotations?: { readOnlyHint?: boolean };
   internal?: boolean;
-}
-
-function printJson(data: unknown, raw: boolean): void {
-  const text = raw ? JSON.stringify(data) : JSON.stringify(data, null, 2);
-  process.stdout.write(`${text}\n`);
 }
 
 /** Parse a single `--arg key=value` or `key:=<json>` entry into a [key, value]. */

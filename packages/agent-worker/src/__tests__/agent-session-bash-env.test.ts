@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { BashOperations } from "@mariozechner/pi-coding-agent";
-import { buildAgentSession } from "../openclaw/session-builder";
+import { buildAgentSession } from "../openclaw/session-runner";
 import { createOpenClawTools } from "../openclaw/tools";
 import { SENSITIVE_WORKER_ENV_KEYS } from "../shared/worker-env-keys";
 

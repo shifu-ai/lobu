@@ -19,9 +19,9 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { OpenClawWorker } from "../openclaw/worker";
-import { buildAgentSession } from "../openclaw/session-builder";
+import { buildAgentSession } from "../openclaw/session-runner";
 import { createOpenClawTools } from "../openclaw/tools";
+import { OpenClawWorker } from "../openclaw/worker";
 import {
   callMcpTool,
   type GatewayParams,

@@ -6,6 +6,7 @@
 
 import { hasRequiredMcpScope } from "../auth/tool-access";
 import type { Env } from "../index";
+import { isSystemContext } from "../tools/access-control";
 import type { ToolContext } from "../tools/registry";
 import { raceAbort } from "../utils/race-abort";
 import {
@@ -129,10 +130,6 @@ export async function resolveOrgMembership(
   }
 
   return { orgId, slug, role, visibility };
-}
-
-function isSystemContext(ctx: ToolContext): boolean {
-  return ctx.isAuthenticated === true && ctx.userId === null && ctx.memberRole === null;
 }
 
 export interface BuildClientSDKOptions {

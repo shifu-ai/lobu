@@ -3,9 +3,9 @@ import { join } from "node:path";
 import chalk from "chalk";
 import { resolveContext } from "../../../internal/context.js";
 import { parseEnvContent } from "../../../internal/env-file.js";
+import { printError, printText } from "../../../internal/output.js";
 import { loadProjectLink } from "../../../internal/project-link.js";
 import { ApiError, ValidationError } from "../../memory/_lib/errors.js";
-import { printError, printText } from "../../memory/_lib/output.js";
 import {
   type ApplyClient,
   type RemoteAgent,
@@ -15,12 +15,6 @@ import {
   resolveApplyClient,
 } from "./client.js";
 import {
-  computeDiff,
-  type DiffPlan,
-  type DiffRow,
-  type RemoteSnapshot,
-} from "./diff.js";
-import {
   type DesiredConnectorDefinition,
   type DesiredState,
   loadDesiredStateFromConfig,
@@ -28,6 +22,12 @@ import {
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
 } from "./desired-state.js";
+import {
+  computeDiff,
+  type DiffPlan,
+  type DiffRow,
+  type RemoteSnapshot,
+} from "./diff.js";
 import {
   confirmCustomConnectors,
   confirmDeletions,
@@ -39,6 +39,7 @@ import {
   renderPostApplyPunchList,
   renderProgress,
 } from "./render.js";
+import { declaredConnectorKeys, referencedConnectorKeys } from "./shared.js";
 
 export interface ApplyOptions {
   cwd?: string;
@@ -255,6 +256,15 @@ async function confirmCustomConnectorSource(
 
 // ── Snapshot ───────────────────────────────────────────────────────────────
 
+/** True when the config declares any connector definition / auth profile / connection. */
+function hasDesiredConnectors(state: DesiredState): boolean {
+  return (
+    state.connectors.definitions.length > 0 ||
+    state.connectors.authProfiles.length > 0 ||
+    state.connectors.connections.length > 0
+  );
+}
+
 async function fetchRemoteSnapshot(
   client: ApplyClient,
   state: DesiredState,
@@ -305,10 +315,7 @@ async function fetchRemoteSnapshot(
   // also fetches them even when it declares none, so prune can delete a
   // connector definition whose last config reference was removed (otherwise an
   // empty desired-connectors set would skip the fetch entirely).
-  const hasConnectors =
-    state.connectors.definitions.length > 0 ||
-    state.connectors.authProfiles.length > 0 ||
-    state.connectors.connections.length > 0;
+  const hasConnectors = hasDesiredConnectors(state);
   const fetchConnectors = !only && (hasConnectors || prune);
   const connectorDefinitions = fetchConnectors
     ? await client.listConnectorDefinitions(true)
@@ -363,11 +370,7 @@ async function installConnectorDefinitions(
   // the server resolves at compile time — are added to this set below as soon
   // as `install_connector` returns the resolved key, so the bundled loop can't
   // race them either.)
-  const locallySuppliedKeys = new Set<string>(
-    state.connectors.definitions
-      .map((d) => d.key)
-      .filter((k): k is string => !!k)
-  );
+  const locallySuppliedKeys = locallyDeclaredConnectorKeys(state);
   let mutated = false;
 
   // Iterate the plan's connector-definition rows so progress mirrors the plan.
@@ -430,10 +433,7 @@ async function installConnectorDefinitions(
   const catalogByKey = new Map(
     catalog.filter((d) => d.installable && d.source_uri).map((d) => [d.key, d])
   );
-  const referenced = new Set<string>([
-    ...state.connectors.authProfiles.map((p) => p.connector),
-    ...state.connectors.connections.map((c) => c.connector),
-  ]);
+  const referenced = referencedConnectorKeys(state.connectors);
   for (const key of [...referenced].sort()) {
     if (installedKeys.has(key) || locallySuppliedKeys.has(key)) continue;
     const entry = catalogByKey.get(key);
@@ -540,11 +540,7 @@ export function validateConnectorState(
 // skip set; their connections are validated only after install (when the key
 // is known and the def is in the refreshed catalog).
 export function locallyDeclaredConnectorKeys(state: DesiredState): Set<string> {
-  return new Set(
-    state.connectors.definitions
-      .map((d) => d.key)
-      .filter((k): k is string => !!k)
-  );
+  return declaredConnectorKeys(state.connectors.definitions);
 }
 
 // ── Apply executor ─────────────────────────────────────────────────────────
@@ -600,11 +596,7 @@ export async function executePlan(
   //    against the now-current schemas. Doing this before any other resource
   //    means a post-install schema rejection halts apply before mutating
   //    anything unrelated.
-  const hasConnectorWork =
-    ctx.state.connectors.definitions.length > 0 ||
-    ctx.state.connectors.authProfiles.length > 0 ||
-    ctx.state.connectors.connections.length > 0;
-  if (hasConnectorWork) {
+  if (hasDesiredConnectors(ctx.state)) {
     const freshCatalog = await installConnectorDefinitions(
       ctx.client,
       ctx.state,

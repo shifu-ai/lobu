@@ -10,10 +10,11 @@ import {
   summarizeBrowserSessionAuthData,
 } from '../../../../utils/auth-profiles';
 import { getWorkspaceRole } from '../../../../utils/organization-access';
-import { createAuthRun } from '../../../../utils/queue-helpers';
+import { createAuthRun } from '../../../../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../../../utils/run-statuses';
 import type { ToolContext } from '../../../registry';
 import type { ManageConnectionsResult, ConnectionsArgs } from '../schemas';
+import { isAdminOrOwnerRole } from '../../../access-control';
 
 // ============================================
 // handleReauthenticate
@@ -66,7 +67,7 @@ export async function handleReauthenticate(
   // owner or an admin/owner. Without this gate, any org member could disrupt
   // (or hijack the pairing of) another member's interactive connection.
   const callerRole = await getWorkspaceRole(sql, organizationId, ctx.userId);
-  const callerIsAdmin = callerRole === 'admin' || callerRole === 'owner';
+  const callerIsAdmin = isAdminOrOwnerRole(callerRole);
   if (!callerIsAdmin && row.connection_created_by !== ctx.userId) {
     return { error: 'You can only re-authenticate connections you created.' };
   }

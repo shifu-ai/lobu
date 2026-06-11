@@ -23,6 +23,7 @@ import {
   persistSecretValue,
   type WritableSecretStore,
 } from "../secrets/index.js";
+import { runInBatches } from "./deployment-utils.js";
 
 const logger = createLogger("orchestrator");
 
@@ -1123,40 +1124,24 @@ export abstract class BaseDeploymentManager {
       }
 
       // Process deletions in parallel batches
-      for (let i = 0; i < toDelete.length; i += BATCH_SIZE) {
-        const batch = toDelete.slice(i, i + BATCH_SIZE);
-        const results = await Promise.allSettled(
-          batch.map((name) => this.deleteWorkerDeployment(name))
-        );
-        for (let j = 0; j < results.length; j++) {
-          if (results[j]?.status === "fulfilled") {
-            processedCount++;
-          } else {
-            logger.error(
-              `❌ Failed to delete deployment ${batch[j]}:`,
-              (results[j] as PromiseRejectedResult).reason
-            );
-          }
+      processedCount += await runInBatches(
+        toDelete,
+        BATCH_SIZE,
+        (name) => this.deleteWorkerDeployment(name),
+        (name, reason) => {
+          logger.error(`❌ Failed to delete deployment ${name}:`, reason);
         }
-      }
+      );
 
       // Process scale-downs in parallel batches
-      for (let i = 0; i < toScaleDown.length; i += BATCH_SIZE) {
-        const batch = toScaleDown.slice(i, i + BATCH_SIZE);
-        const results = await Promise.allSettled(
-          batch.map((name) => this.scaleDeployment(name, 0))
-        );
-        for (let j = 0; j < results.length; j++) {
-          if (results[j]?.status === "fulfilled") {
-            processedCount++;
-          } else {
-            logger.error(
-              `❌ Failed to scale down deployment ${batch[j]}:`,
-              (results[j] as PromiseRejectedResult).reason
-            );
-          }
+      processedCount += await runInBatches(
+        toScaleDown,
+        BATCH_SIZE,
+        (name) => this.scaleDeployment(name, 0),
+        (name, reason) => {
+          logger.error(`❌ Failed to scale down deployment ${name}:`, reason);
         }
-      }
+      );
 
       if (processedCount > 0) {
         logger.info(

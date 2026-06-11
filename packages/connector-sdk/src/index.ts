@@ -104,8 +104,19 @@ export {
   normalizeSlackUserId,
   normalizeWaJid,
 } from './identity-normalize.js';
+// HTTP client (auth + retry + 429 Retry-After)
+export type { CreateHttpClientOptions, HttpClient } from './http-client.js';
+export { createHttpClient, HttpStatusError } from './http-client.js';
 // Logger
 export { sdkLogger, sdkLogger as logger } from './logger.js';
+// Pagination generators
+export type {
+  CursorPage,
+  OffsetPage,
+  PaginateByCursorOptions,
+  PaginateByOffsetOptions,
+} from './pagination.js';
+export { paginateByCursor, paginateByOffset } from './pagination.js';
 // Retry
 export { withHttpRetry } from './retry.js';
 // Scoring

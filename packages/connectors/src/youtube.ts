@@ -10,7 +10,9 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   calculateEngagementScore,
+  createHttpClient,
   type EventEnvelope,
+  paginateByCursor,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -240,6 +242,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
   private readonly BASE_URL = 'https://www.googleapis.com/youtube/v3';
   private readonly RATE_LIMIT_MS = 200;
   private readonly COMMENT_PAGE_LIMIT = 3;
+  private readonly http = createHttpClient({ errorPrefix: 'YouTube API' });
 
   // -------------------------------------------------------------------------
   // sync
@@ -270,24 +273,31 @@ export default class YouTubeConnector extends ConnectorRuntime {
     let totalCollected = 0;
 
     // ----- Search & collect video IDs -----
-    while (totalCollected < maxResults) {
-      const pageSize = Math.min(50, maxResults - totalCollected);
-      const searchUrl = this.buildSearchUrl(searchQuery, pageSize, pageToken);
+    const searchPages = paginateByCursor<YouTubeSearchItem, string>(
+      async (cursor) => {
+        const pageSize = Math.min(50, maxResults - totalCollected);
+        const searchUrl = this.buildSearchUrl(searchQuery, pageSize, cursor ?? undefined);
 
-      const searchResponse = await this.apiGet(searchUrl, auth);
-      if (!searchResponse.ok) {
-        throw new Error(
-          `YouTube Search API error (${searchResponse.status}): ${await searchResponse.text()}`
-        );
-      }
+        const searchResponse = await this.apiGet(searchUrl, auth);
+        if (!searchResponse.ok) {
+          throw new Error(
+            `YouTube Search API error (${searchResponse.status}): ${await searchResponse.text()}`
+          );
+        }
 
-      const searchData = (await searchResponse.json()) as YouTubeSearchResponse;
+        const searchData = (await searchResponse.json()) as YouTubeSearchResponse;
+        pageToken = searchData.nextPageToken;
+        return { items: searchData.items, nextCursor: searchData.nextPageToken };
+      },
+      { initialCursor: checkpoint.next_page_token ?? null, delayMs: this.RATE_LIMIT_MS }
+    );
 
-      if (searchData.items.length === 0) break;
+    for await (const searchItems of searchPages) {
+      if (searchItems.length === 0) break;
 
       // Collect unique video IDs from this page
       const videoIds: string[] = [];
-      for (const item of searchData.items) {
+      for (const item of searchItems) {
         const videoId = item.id.videoId;
         if (videoId && !seenIds.has(videoId)) {
           seenIds.add(videoId);
@@ -296,8 +306,6 @@ export default class YouTubeConnector extends ConnectorRuntime {
       }
 
       if (videoIds.length === 0) {
-        pageToken = searchData.nextPageToken;
-        if (!pageToken) break;
         continue;
       }
 
@@ -392,11 +400,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
       }
 
       totalCollected += videoIds.length;
-      pageToken = searchData.nextPageToken;
-
-      if (!pageToken) break;
-
-      await this.sleep(this.RATE_LIMIT_MS);
+      if (totalCollected >= maxResults) break;
     }
 
     // Sort events by occurred_at descending
@@ -476,41 +480,40 @@ export default class YouTubeConnector extends ConnectorRuntime {
     videoId: string
   ): Promise<YouTubeCommentThread[]> {
     const allComments: YouTubeCommentThread[] = [];
-    let pageToken: string | undefined;
-    let pages = 0;
 
-    while (pages < this.COMMENT_PAGE_LIMIT) {
-      const params = new URLSearchParams({
-        part: 'snippet',
-        videoId,
-        maxResults: '100',
-        order: 'relevance',
-      });
-      if (pageToken) {
-        params.set('pageToken', pageToken);
-      }
+    const pages = paginateByCursor<YouTubeCommentThread, string>(
+      async (cursor) => {
+        const params = new URLSearchParams({
+          part: 'snippet',
+          videoId,
+          maxResults: '100',
+          order: 'relevance',
+        });
+        if (cursor) {
+          params.set('pageToken', cursor);
+        }
 
-      const response = await this.apiGet(
-        `${this.BASE_URL}/commentThreads?${params.toString()}`,
-        auth
-      );
-
-      if (!response.ok) {
-        // Comments may be disabled — not a fatal error
-        if (response.status === 403) break;
-        throw new Error(
-          `YouTube Comments API error (${response.status}): ${await response.text()}`
+        const response = await this.apiGet(
+          `${this.BASE_URL}/commentThreads?${params.toString()}`,
+          auth
         );
-      }
 
-      const data = (await response.json()) as YouTubeCommentThreadResponse;
-      allComments.push(...data.items);
+        if (!response.ok) {
+          // Comments may be disabled — not a fatal error
+          if (response.status === 403) return { items: [], nextCursor: null };
+          throw new Error(
+            `YouTube Comments API error (${response.status}): ${await response.text()}`
+          );
+        }
 
-      pageToken = data.nextPageToken;
-      if (!pageToken) break;
+        const data = (await response.json()) as YouTubeCommentThreadResponse;
+        return { items: data.items, nextCursor: data.nextPageToken };
+      },
+      { maxPages: this.COMMENT_PAGE_LIMIT, delayMs: this.RATE_LIMIT_MS }
+    );
 
-      pages++;
-      await this.sleep(this.RATE_LIMIT_MS);
+    for await (const items of pages) {
+      allComments.push(...items);
     }
 
     return allComments;
@@ -650,7 +653,7 @@ export default class YouTubeConnector extends ConnectorRuntime {
     if (auth.accessToken) {
       headers.Authorization = `Bearer ${auth.accessToken}`;
     }
-    return fetch(parsedUrl.toString(), { headers });
+    return this.http.raw(parsedUrl.toString(), { headers });
   }
 
   private sleep(ms: number): Promise<void> {

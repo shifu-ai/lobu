@@ -6,11 +6,14 @@
  * duplication and keeps the two classes in sync when these values change.
  */
 
+import { EGRESS_JUDGE_MODEL } from "@lobu/core";
+
 /**
  * Default Haiku model for all judge calls. Fast + cheap; invoked only when
- * a rule with `action: "judge"` matches.
+ * a rule with `action: "judge"` matches. Sourced from the centralized model
+ * ID constants in @lobu/core.
  */
-export const DEFAULT_JUDGE_MODEL = "claude-haiku-4-5-20251001";
+export const DEFAULT_JUDGE_MODEL = EGRESS_JUDGE_MODEL;
 
 /**
  * Hard ceiling on a single judge call. On expiry the call is abandoned, the

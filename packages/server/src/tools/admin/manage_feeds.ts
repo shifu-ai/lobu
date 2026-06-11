@@ -21,10 +21,10 @@ import { nextRunAt, validateSchedule } from '../../utils/cron';
 import { recordChangeEvent } from '../../utils/insert-event';
 import logger from '../../utils/logger';
 import { syncOAuthConnectionsForAuthProfile } from '../../utils/oauth-connection-state';
-import { createSyncRun } from '../../utils/queue-helpers';
+import { createSyncRun } from '../../runs/queue-service';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../../utils/run-statuses';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { action, defineActionTool } from './action-tool';
 import { getDefaultSchedule } from './helpers/connection-helpers';
 import { assertEntityIdsInOrg } from './helpers/db-helpers';
 import { resolveFeedDisplayName } from './helpers/feed-helpers';
@@ -95,15 +95,6 @@ const TriggerFeedAction = Type.Object({
   feed_id: Type.Number({ description: 'Feed ID to trigger sync for' }),
 });
 
-export const ManageFeedsSchema = Type.Union([
-  ListFeedsAction,
-  GetFeedAction,
-  CreateFeedAction,
-  UpdateFeedAction,
-  DeleteFeedAction,
-  TriggerFeedAction,
-]);
-
 // ============================================
 // Result Types
 // ============================================
@@ -118,35 +109,28 @@ type ManageFeedsResult =
   | { action: 'trigger_feed'; triggered: true; run_id: number; feed_id: number }
   | { action: 'trigger_feed'; message: string };
 
-type FeedsArgs = Static<typeof ManageFeedsSchema>;
-
 // ============================================
 // Main Function (Action Router)
 // ============================================
 
-export async function manageFeeds(
-  args: FeedsArgs,
-  env: Env,
-  ctx: ToolContext
-): Promise<ManageFeedsResult> {
-  return routeAction<ManageFeedsResult>('manage_feeds', args.action, ctx, {
-    list_feeds: () => handleListFeeds(args as Extract<FeedsArgs, { action: 'list_feeds' }>, ctx),
-    get_feed: () => handleGetFeed(args as Extract<FeedsArgs, { action: 'get_feed' }>, ctx),
-    create_feed: () =>
-      handleCreateFeed(args as Extract<FeedsArgs, { action: 'create_feed' }>, env, ctx),
-    update_feed: () => handleUpdateFeed(args as Extract<FeedsArgs, { action: 'update_feed' }>, ctx),
-    delete_feed: () => handleDeleteFeed(args as Extract<FeedsArgs, { action: 'delete_feed' }>, ctx),
-    trigger_feed: () =>
-      handleTriggerFeed(args as Extract<FeedsArgs, { action: 'trigger_feed' }>, env, ctx),
-  });
-}
+const manageFeedsTool = defineActionTool('manage_feeds', {
+  list_feeds: action(ListFeedsAction, handleListFeeds),
+  get_feed: action(GetFeedAction, handleGetFeed),
+  create_feed: action(CreateFeedAction, handleCreateFeed),
+  update_feed: action(UpdateFeedAction, handleUpdateFeed),
+  delete_feed: action(DeleteFeedAction, handleDeleteFeed),
+  trigger_feed: action(TriggerFeedAction, handleTriggerFeed),
+});
+
+export const ManageFeedsSchema = manageFeedsTool.schema;
+export const manageFeeds = manageFeedsTool.run;
 
 // ============================================
 // Action Handlers
 // ============================================
 
 async function handleListFeeds(
-  args: Extract<FeedsArgs, { action: 'list_feeds' }>,
+  args: Static<typeof ListFeedsAction>,
   ctx: ToolContext
 ): Promise<ManageFeedsResult> {
   const sql = getDb();
@@ -242,7 +226,7 @@ async function handleListFeeds(
 }
 
 async function handleGetFeed(
-  args: Extract<FeedsArgs, { action: 'get_feed' }>,
+  args: Static<typeof GetFeedAction>,
   ctx: ToolContext
 ): Promise<ManageFeedsResult> {
   const sql = getDb();
@@ -278,9 +262,9 @@ async function handleGetFeed(
 }
 
 async function handleCreateFeed(
-  args: Extract<FeedsArgs, { action: 'create_feed' }>,
-  env: Env,
-  ctx: ToolContext
+  args: Static<typeof CreateFeedAction>,
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageFeedsResult> {
   const sql = getDb();
   const { organizationId } = ctx;
@@ -386,7 +370,7 @@ async function handleCreateFeed(
 }
 
 async function handleUpdateFeed(
-  args: Extract<FeedsArgs, { action: 'update_feed' }>,
+  args: Static<typeof UpdateFeedAction>,
   ctx: ToolContext
 ): Promise<ManageFeedsResult> {
   const sql = getDb();
@@ -464,7 +448,7 @@ async function handleUpdateFeed(
 }
 
 async function handleDeleteFeed(
-  args: Extract<FeedsArgs, { action: 'delete_feed' }>,
+  args: Static<typeof DeleteFeedAction>,
   ctx: ToolContext
 ): Promise<ManageFeedsResult> {
   const sql = getDb();
@@ -512,9 +496,9 @@ async function handleDeleteFeed(
 }
 
 async function handleTriggerFeed(
-  args: Extract<FeedsArgs, { action: 'trigger_feed' }>,
-  env: Env,
-  ctx: ToolContext
+  args: Static<typeof TriggerFeedAction>,
+  ctx: ToolContext,
+  env: Env
 ): Promise<ManageFeedsResult> {
   const sql = getDb();
   const { organizationId } = ctx;

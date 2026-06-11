@@ -2,6 +2,8 @@
  * Gateway API response types shared between the server and UI consumers.
  */
 
+import type { ConnectionSettings } from "./agent-store";
+
 export interface CatalogProvider {
   id: string;
   name: string;
@@ -78,11 +80,7 @@ export interface Connection {
   platform: string;
   agentId?: string;
   config: Record<string, unknown>;
-  settings: {
-    allowFrom?: string[];
-    allowGroups?: boolean;
-    userConfigScopes?: string[];
-  };
+  settings: ConnectionSettings;
   metadata: Record<string, unknown>;
   status: "active" | "stopped" | "error";
   errorMessage?: string;

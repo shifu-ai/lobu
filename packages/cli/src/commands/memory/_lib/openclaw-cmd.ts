@@ -13,7 +13,7 @@ import {
   type MemorySession,
 } from "./openclaw-auth.js";
 import { MCP_PROTOCOL_VERSION } from "@lobu/core";
-import { printText } from "./output.js";
+import { printText } from "../../../internal/output.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;

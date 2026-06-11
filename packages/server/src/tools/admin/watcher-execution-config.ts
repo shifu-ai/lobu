@@ -1,6 +1,7 @@
 import { Type } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import { ToolUserError } from '../../utils/errors';
+import { isAdminOrOwnerRole } from '../access-control';
 
 /**
  * Per-watcher device-worker CLI execution settings (stored as the
@@ -92,7 +93,7 @@ export function assertValidExecutionConfig(value: unknown, caller: ExecutionConf
   // memberRole and already bypass action-access enforcement; don't block them.
   const isSystem =
     caller.isAuthenticated && caller.userId === null && caller.memberRole === null;
-  const isOwnerOrAdmin = caller.memberRole === 'owner' || caller.memberRole === 'admin';
+  const isOwnerOrAdmin = isAdminOrOwnerRole(caller.memberRole);
   if (mode && ELEVATED_PERMISSION_MODES.has(mode) && !isSystem && !isOwnerOrAdmin) {
     throw new ToolUserError(
       `execution_config.permission_mode '${mode}' requires an owner or admin role; members may use: default, plan, auto, acceptEdits.`

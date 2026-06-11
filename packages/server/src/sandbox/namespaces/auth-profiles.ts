@@ -14,13 +14,11 @@
 import type { Env } from "../../index";
 import { manageAuthProfiles } from "../../tools/admin/manage_auth_profiles";
 import type { ToolContext } from "../../tools/registry";
+import type { AuthProfileKind as StoredAuthProfileKind } from "../../utils/auth-profiles";
 import { createActionCaller } from "./action-call";
 
-export type AuthProfileKind =
-  | "env"
-  | "oauth_app"
-  | "oauth_account"
-  | "browser_session";
+/** Kinds manageable through the SDK — the stored kinds minus the internal-only `interactive`. */
+export type AuthProfileKind = Exclude<StoredAuthProfileKind, "interactive">;
 
 export interface AuthProfileCreateInput {
   profile_kind: AuthProfileKind;

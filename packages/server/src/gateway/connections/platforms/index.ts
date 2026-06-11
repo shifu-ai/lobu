@@ -1,0 +1,47 @@
+/**
+ * Per-platform capability registry — the successor to the manager's
+ * `ADAPTER_FACTORIES` map. Each entry merges the lazy adapter factory with
+ * the platform's optional capability hooks (routing extraction, file
+ * handlers, instruction providers, webhook/command setup, config guards).
+ *
+ * `ChatInstanceManager` consumes this registry generically:
+ * `getPlatformDescriptor(platform)?.capability?.(...)`. Adding a platform =
+ * one new module here + a registry entry; the manager needs no edits.
+ */
+
+import { discordPlatform } from "./discord.js";
+import { gchatPlatform } from "./gchat.js";
+import { slackPlatform } from "./slack.js";
+import { teamsPlatform } from "./teams.js";
+import { telegramPlatform } from "./telegram.js";
+import type { ChatPlatformDescriptor } from "./types.js";
+import { whatsappPlatform } from "./whatsapp.js";
+
+export const PLATFORM_REGISTRY: Record<string, ChatPlatformDescriptor> = {
+  telegram: telegramPlatform,
+  slack: slackPlatform,
+  discord: discordPlatform,
+  whatsapp: whatsappPlatform,
+  teams: teamsPlatform,
+  gchat: gchatPlatform,
+};
+
+/** Look up a platform's capability descriptor, or undefined when unsupported. */
+export function getPlatformDescriptor(
+  platform: string
+): ChatPlatformDescriptor | undefined {
+  return PLATFORM_REGISTRY[platform];
+}
+
+export {
+  createChatSdkFileHandler,
+  postFileToChatTarget,
+  streamToBuffer,
+} from "./shared.js";
+export type {
+  ChatPlatformDescriptor,
+  ChatPlatformInstance,
+  PlatformCommand,
+  PlatformRoutingInfo,
+  WebhookSecretDeps,
+} from "./types.js";

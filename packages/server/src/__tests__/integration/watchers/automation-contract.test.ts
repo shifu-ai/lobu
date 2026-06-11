@@ -13,7 +13,7 @@ import type { DbClient } from '../../../db/client';
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import { generateWindowToken } from '../../../utils/jwt';
-import { createWatcherRun } from '../../../utils/queue-helpers';
+import { createWatcherRun } from '../../../runs/queue-service';
 import { computePendingWindow } from '../../../utils/window-utils';
 import {
   dispatchPendingWatcherRuns,

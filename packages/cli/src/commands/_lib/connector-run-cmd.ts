@@ -24,7 +24,7 @@ import { writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { printText } from "../memory/_lib/output.js";
+import { printText } from "../../internal/output.js";
 
 import type { EventEnvelope } from "@lobu/connector-sdk";
 import { resolveContext } from "../../internal/context.js";

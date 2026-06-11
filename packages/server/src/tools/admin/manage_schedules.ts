@@ -20,8 +20,7 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
-import type { Env } from '../../index';
-import { routeAction } from './action-router';
+import { action, defineActionTool } from './action-tool';
 import {
   createScheduledJob,
   deleteScheduledJob,
@@ -107,14 +106,6 @@ const CancelAction = Type.Object({
   id: Type.String({ format: 'uuid' }),
 });
 
-export const ManageSchedulesSchema = Type.Union([
-  CreateAction,
-  ListAction,
-  PauseAction,
-  CancelAction,
-]);
-type ManageSchedulesArgs = Static<typeof ManageSchedulesSchema>;
-
 const createValidator = TypeCompiler.Compile(CreateAction);
 
 // ============================================
@@ -128,21 +119,18 @@ interface ToolResult {
   error?: string;
 }
 
-export async function manageSchedules(
-  args: ManageSchedulesArgs,
-  _env: Env,
-  ctx: ToolContext
-): Promise<ToolResult> {
-  return routeAction('manage_schedules', args.action, ctx, {
-    create: () => handleCreate(args as Extract<ManageSchedulesArgs, { action: 'create' }>, ctx),
-    list: () => handleList(args as Extract<ManageSchedulesArgs, { action: 'list' }>, ctx),
-    pause: () => handlePause(args as Extract<ManageSchedulesArgs, { action: 'pause' }>, ctx),
-    cancel: () => handleCancel(args as Extract<ManageSchedulesArgs, { action: 'cancel' }>, ctx),
-  });
-}
+const manageSchedulesTool = defineActionTool('manage_schedules', {
+  create: action(CreateAction, handleCreate),
+  list: action(ListAction, handleList),
+  pause: action(PauseAction, handlePause),
+  cancel: action(CancelAction, handleCancel),
+});
+
+export const ManageSchedulesSchema = manageSchedulesTool.schema;
+export const manageSchedules = manageSchedulesTool.run;
 
 async function handleCreate(
-  args: Extract<ManageSchedulesArgs, { action: 'create' }>,
+  args: Static<typeof CreateAction>,
   ctx: ToolContext
 ): Promise<ToolResult> {
   if (!createValidator.Check(args)) {
@@ -189,7 +177,7 @@ async function handleCreate(
 }
 
 async function handleList(
-  args: Extract<ManageSchedulesArgs, { action: 'list' }>,
+  args: Static<typeof ListAction>,
   ctx: ToolContext
 ): Promise<ToolResult> {
   const rows = await listScheduledJobs({
@@ -203,7 +191,7 @@ async function handleList(
 }
 
 async function handlePause(
-  args: Extract<ManageSchedulesArgs, { action: 'pause' }>,
+  args: Static<typeof PauseAction>,
   ctx: ToolContext
 ): Promise<ToolResult> {
   const ok = await pauseScheduledJob(ctx.organizationId, args.id, args.paused ?? true);
@@ -213,7 +201,7 @@ async function handlePause(
 }
 
 async function handleCancel(
-  args: Extract<ManageSchedulesArgs, { action: 'cancel' }>,
+  args: Static<typeof CancelAction>,
   ctx: ToolContext
 ): Promise<ToolResult> {
   const ok = await deleteScheduledJob(ctx.organizationId, args.id);

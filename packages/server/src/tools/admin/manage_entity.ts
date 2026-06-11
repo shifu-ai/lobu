@@ -42,15 +42,14 @@ import {
 } from '../../utils/relationship-validation';
 import { resolveMemberSchemaFieldsFromSchema } from '../../utils/member-entity-type';
 import { validateEntityMetadata } from '../../utils/schema-validation';
-import {
-  buildEntityUrl,
-  type EntityInfo,
-  getOrganizationSlug,
-  getPublicWebUrl,
-} from '../../utils/url-builder';
+import { buildEntityUrl } from '../../utils/url-builder';
 import { trackWatcherReaction } from '../../utils/watcher-reactions';
+import { isAdminOrOwnerRole } from '../access-control';
+import { MEMBER_ENTITY_TYPE_SLUG } from '../constants';
 import type { ToolContext } from '../registry';
-import { requireField, routeAction } from './action-router';
+import { buildEntityViewUrl, getOrgUrlContext, toEntityInfo } from '../view-urls';
+import { defineFlatActionTool, flatAction } from './action-tool';
+import { SortOrderField } from './schemas/common-fields';
 
 // ============================================
 // Typebox Schema
@@ -143,11 +142,7 @@ export const ManageEntitySchema = Type.Object({
         '[list] Sort by column (name, created_at, domain, total_content, active_connections, watchers_count, children_count)',
     })
   ),
-  sort_order: Type.Optional(
-    Type.Union([Type.Literal('asc'), Type.Literal('desc')], {
-      description: '[list] Sort order (asc or desc)',
-    })
-  ),
+  sort_order: SortOrderField('[list] Sort order (asc or desc)'),
 
   // Delete options
   force_delete_tree: Type.Optional(
@@ -345,14 +340,6 @@ type ManageEntityResult =
       metadata: { total: number; limit: number; offset: number; has_more: boolean };
     };
 
-interface ViewEntityInput {
-  id: number;
-  entity_type: string;
-  slug: string;
-  parent_entity_type?: string | null;
-  parent_slug?: string | null;
-}
-
 function toIsoStringOrNow(value: Date | string | null | undefined): string {
   if (!value) return new Date().toISOString();
   return new Date(value).toISOString();
@@ -362,45 +349,38 @@ function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-async function buildEntityViewUrl(
-  ctx: ToolContext,
-  entity: ViewEntityInput
-): Promise<string | undefined> {
-  const ownerSlug = await getOrganizationSlug(ctx.organizationId);
-  if (!ownerSlug) return undefined;
-
-  const entityInfo: EntityInfo = {
-    ownerSlug,
-    entityType: entity.entity_type,
-    slug: entity.slug,
-    parentType: entity.parent_entity_type ?? null,
-    parentSlug: entity.parent_slug ?? null,
-  };
-  return buildEntityUrl(entityInfo, getPublicWebUrl(ctx.requestUrl, ctx.baseUrl));
-}
-
 // ============================================
 // Main Function (Action Router)
 // ============================================
+
+const runManageEntity = defineFlatActionTool<ManageEntityArgs, ManageEntityResult>(
+  'manage_entity',
+  {
+    create: flatAction((args, ctx, env) => handleCreate(args, env, ctx)),
+    update: flatAction((args, ctx, env) => handleUpdate(args.entity_id!, args, env, ctx), {
+      requires: ['entity_id'],
+    }),
+    list: flatAction((args, ctx, env) => handleList(args, env, ctx)),
+    get: flatAction((args, ctx, env) => handleGet(args.entity_id!, env, ctx), {
+      requires: ['entity_id'],
+    }),
+    delete: flatAction(
+      (args, ctx, env) => handleDelete(args.entity_id!, args.force_delete_tree ?? false, env, ctx),
+      { requires: ['entity_id'] }
+    ),
+    link: flatAction((args, ctx, env) => handleLink(args, env, ctx)),
+    unlink: flatAction(handleUnlink),
+    update_link: flatAction(handleUpdateLink),
+    list_links: flatAction(handleListLinks),
+  }
+);
 
 export async function manageEntity(
   args: ManageEntityArgs,
   env: Env,
   ctx: ToolContext
 ): Promise<ManageEntityResult> {
-  const id = () => requireField(args.entity_id, 'entity_id', args.action);
-
-  const result = await routeAction('manage_entity', args.action, ctx, {
-    create: () => handleCreate(args, env, ctx),
-    update: () => handleUpdate(id(), args, env, ctx),
-    list: () => handleList(args, env, ctx),
-    get: () => handleGet(id(), env, ctx),
-    delete: () => handleDelete(id(), args.force_delete_tree ?? false, env, ctx),
-    link: () => handleLink(args, env, ctx),
-    unlink: () => handleUnlink(args, ctx),
-    update_link: () => handleUpdateLink(args, ctx),
-    list_links: () => handleListLinks(args, ctx),
-  });
+  const result = await runManageEntity(args, env, ctx);
 
   // Track watcher reaction for mutating actions
   if (args.watcher_source && 'action' in result) {
@@ -686,7 +666,7 @@ function canSeeMemberList(ctx: ToolContext): boolean {
 }
 
 function canSeeMemberEmail(ctx: ToolContext): boolean {
-  return ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+  return isAdminOrOwnerRole(ctx.memberRole);
 }
 
 function redactMemberEmail(
@@ -704,7 +684,7 @@ async function handleList(
   env: Env,
   ctx: ToolContext
 ): Promise<ManageEntityResult> {
-  if (args.entity_type === '$member' && !canSeeMemberList(ctx)) {
+  if (args.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx)) {
     throw new Error(
       'The member list is only visible to members of this workspace. Join the workspace to see members.'
     );
@@ -752,25 +732,16 @@ async function handleList(
     resolveLinkedColumns(entities, schema, ctx.organizationId),
   ]);
 
-  const baseUrl = getPublicWebUrl(ctx.requestUrl, ctx.baseUrl);
-  const ownerSlug = await getOrganizationSlug(ctx.organizationId);
+  const { ownerSlug, baseUrl } = await getOrgUrlContext(ctx);
   const hideMemberEmail = !canSeeMemberEmail(ctx);
 
   return {
     action: 'list',
     entities: entities.map((e) => {
-      const entityInfo: EntityInfo | null = ownerSlug
-        ? {
-            ownerSlug,
-            entityType: e.entity_type,
-            slug: e.slug,
-            parentType: e.parent_entity_type ?? null,
-            parentSlug: e.parent_slug ?? null,
-          }
-        : null;
+      const entityInfo = ownerSlug ? toEntityInfo(ownerSlug, e) : null;
       const rawMetadata = e.metadata ?? {};
       const metadata =
-        hideMemberEmail && e.entity_type === '$member'
+        hideMemberEmail && e.entity_type === MEMBER_ENTITY_TYPE_SLUG
           ? redactMemberEmail(rawMetadata, schema)
           : rawMetadata;
       return {
@@ -904,7 +875,7 @@ async function handleGet(
     throw new Error(`Entity with ID ${entityId} not found`);
   }
 
-  if (entity.entity_type === '$member' && !canSeeMemberList(ctx)) {
+  if (entity.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberList(ctx)) {
     throw new Error(
       'Member details are only visible to members of this workspace. Join the workspace to see members.'
     );
@@ -913,11 +884,11 @@ async function handleGet(
   const viewUrl = await buildEntityViewUrl(ctx, entity);
 
   let metadata = entity.metadata ?? {};
-  if (entity.entity_type === '$member' && !canSeeMemberEmail(ctx)) {
+  if (entity.entity_type === MEMBER_ENTITY_TYPE_SLUG && !canSeeMemberEmail(ctx)) {
     const sql = getDb();
     const rows = await sql`
       SELECT metadata_schema FROM entity_types
-      WHERE slug = '$member' AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
+      WHERE slug = ${MEMBER_ENTITY_TYPE_SLUG} AND organization_id = ${ctx.organizationId} AND deleted_at IS NULL
       LIMIT 1
     `;
     const memberSchema = (rows[0]?.metadata_schema as Record<string, unknown> | null) ?? null;

@@ -38,6 +38,7 @@
  */
 
 import { createLogger } from "@lobu/core";
+import { intervals } from "../../config/intervals.js";
 import { getDb, type DbClient } from "../../db/client.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import { TERMINAL_DELIVERY_SEND_OPTS } from "../infrastructure/queue/index.js";
@@ -54,14 +55,8 @@ const TURN_TIMEOUT_QUEUE = "internal:turn_timeout";
  *  so the UnifiedThreadResponseConsumer wakes immediately on an emitted error. */
 const THREAD_RESPONSE_CHANNEL = "runs_lobu:thread_response";
 
-/** Default turn deadline. Comfortably exceeds the worker's 20s heartbeat
- *  interval so a live worker (which extends on every heartbeat) is never
- *  falsely failed; a silent/dead worker lapses within this window of its last
- *  heartbeat (the fast path catches an observed crash instantly). */
-const DEFAULT_DEADLINE_MS = 60_000;
-
-/** How often each replica sweeps for lapsed markers. */
-const SWEEP_INTERVAL_MS = 15_000;
+// Default turn deadline and sweep cadence live in config/intervals.ts
+// (`turnDefaultDeadlineMs` / `turnLivenessSweepIntervalMs`), env-overridable.
 
 /** Routing needed to build the terminal `thread_response{error}` for a turn,
  *  stored as the marker's `action_input`. */
@@ -119,7 +114,7 @@ function turnMarkerKey(deploymentName: string, messageId: string): string {
 export async function armTurnTimeout(
   queue: IMessageQueue,
   routing: TurnRouting,
-  deadlineMs: number = DEFAULT_DEADLINE_MS
+  deadlineMs: number = intervals.turnDefaultDeadlineMs
 ): Promise<void> {
   await queue.createQueue(TURN_TIMEOUT_QUEUE);
   await queue.send(TURN_TIMEOUT_QUEUE, routing, {
@@ -135,7 +130,7 @@ export async function armTurnTimeout(
  */
 export async function extendTurnDeadlines(
   deploymentName: string,
-  deadlineMs: number = DEFAULT_DEADLINE_MS
+  deadlineMs: number = intervals.turnDefaultDeadlineMs
 ): Promise<void> {
   try {
     const sql = getDb();
@@ -152,9 +147,19 @@ export async function extendTurnDeadlines(
         AND action_input->>'deploymentName' = ${deploymentName}
     `;
   } catch (err) {
-    logger.warn(
-      { deploymentName, err: String(err) },
-      "Failed to extend turn-timeout deadline"
+    // Non-throwing by design (a heartbeat ACK must never fail the worker),
+    // but loud: if extends keep failing, the markers' deadlines lapse and the
+    // sweep emits a terminal error for a turn whose worker is still alive.
+    // Log everything needed to tie a later spurious "worker stopped
+    // responding" back to this failure.
+    logger.error(
+      {
+        deploymentName,
+        deadlineMs,
+        queue: TURN_TIMEOUT_QUEUE,
+        err: err instanceof Error ? err.message : String(err),
+      },
+      "Failed to extend turn-timeout deadline — in-flight turns for this deployment may be falsely failed by the sweep if extends keep failing"
     );
   }
 }
@@ -443,7 +448,7 @@ export function startTurnTimeoutSweep(): void {
     }
   };
   void tick();
-  sweepTimer = setInterval(tick, SWEEP_INTERVAL_MS);
+  sweepTimer = setInterval(tick, intervals.turnLivenessSweepIntervalMs);
   sweepTimer.unref?.();
 }
 

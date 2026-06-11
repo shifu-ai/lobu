@@ -9,8 +9,10 @@ import {
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
+  createHttpClient,
   type EventEnvelope,
   IDENTITY,
+  paginateByOffset,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -1008,20 +1010,24 @@ export default class GitHubConnector extends ConnectorRuntime {
     const target = this.buildRepoTarget(repo, repoInfo);
     let remainingProfileFetches = STARGAZER_PROFILE_FETCH_LIMIT;
 
-    for (let page = 1; ; page += 1) {
-      const query = new URLSearchParams({
-        per_page: '100',
-        page: String(page),
-      });
-      const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/stargazers?${query.toString()}`;
-      const stargazers = await this.requestJson<GitHubStargazerLike[]>({
-        url,
-        token,
-        accept: 'application/vnd.github.star+json',
-      });
+    const pages = paginateByOffset<GitHubStargazerLike>(
+      async (offset, pageSize) => {
+        const query = new URLSearchParams({
+          per_page: String(pageSize),
+          page: String(offset / pageSize + 1),
+        });
+        const url = `https://api.github.com/repos/${repo.owner}/${repo.repo}/stargazers?${query.toString()}`;
+        const stargazers = await this.requestJson<GitHubStargazerLike[]>({
+          url,
+          token,
+          accept: 'application/vnd.github.star+json',
+        });
+        return { items: stargazers, hasMore: stargazers.length === pageSize };
+      },
+      { pageSize: 100 }
+    );
 
-      if (stargazers.length === 0) break;
-
+    for await (const stargazers of pages) {
       for (const stargazer of stargazers) {
         const user = stargazer.user ?? stargazer;
         const login = user.login;
@@ -1075,8 +1081,6 @@ export default class GitHubConnector extends ConnectorRuntime {
           });
         }
       }
-
-      if (stargazers.length < 100) break;
     }
 
     const currentKeys = new Set(currentStargazers.map((stargazer) => stargazer.key));
@@ -1498,6 +1502,8 @@ export default class GitHubConnector extends ConnectorRuntime {
     });
   }
 
+  private readonly http = createHttpClient({ errorPrefix: 'GitHub API' });
+
   private async requestJson<T>(params: {
     url: string;
     method?: string;
@@ -1505,7 +1511,6 @@ export default class GitHubConnector extends ConnectorRuntime {
     body?: Record<string, unknown>;
     accept?: string;
   }): Promise<T> {
-    const method = params.method ?? 'GET';
     const headers: Record<string, string> = {
       Accept: params.accept ?? 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
@@ -1515,17 +1520,10 @@ export default class GitHubConnector extends ConnectorRuntime {
       headers.Authorization = `Bearer ${params.token}`;
     }
 
-    const response = await fetch(params.url, {
-      method,
+    return await this.http.json<T>(params.url, {
+      method: params.method ?? 'GET',
       headers,
       body: params.body ? JSON.stringify(params.body) : undefined,
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`GitHub API ${method} ${params.url} failed (${response.status}): ${text}`);
-    }
-
-    return (await response.json()) as T;
   }
 }

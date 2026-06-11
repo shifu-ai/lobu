@@ -11,12 +11,11 @@ import { type Static, Type } from '@sinclair/typebox';
 import type { CardElement } from 'chat';
 import { getDb, pgTextArray } from '../../db/client';
 import { emit } from '../../events/emitter';
-import type { Env } from '../../index';
 import { createNotificationForUsers } from '../../notifications/service';
 import logger from '../../utils/logger';
 import { trackWatcherReaction } from '../../utils/watcher-reactions';
 import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { action, defineActionTool } from './action-tool';
 
 // ============================================
 // Schema
@@ -71,25 +70,19 @@ const SendAction = Type.Object({
   ),
 });
 
-export const NotifySchema = Type.Union([SendAction]);
-type NotifyArgs = Static<typeof NotifySchema>;
-
 // ============================================
 // Handler
 // ============================================
 
-export async function notify(
-  args: NotifyArgs,
-  _env: Env,
-  ctx: ToolContext
-): Promise<{ notified_count: number }> {
-  return routeAction('notify', args.action, ctx, {
-    send: () => handleSend(args, ctx),
-  });
-}
+const notifyTool = defineActionTool('notify', {
+  send: action(SendAction, handleSend),
+});
+
+export const NotifySchema = notifyTool.schema;
+export const notify = notifyTool.run;
 
 async function handleSend(
-  args: Extract<NotifyArgs, { action: 'send' }>,
+  args: Static<typeof SendAction>,
   ctx: ToolContext
 ): Promise<{ notified_count: number }> {
   const sql = getDb();

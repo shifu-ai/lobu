@@ -20,9 +20,7 @@
  * - update_connector_auth: Update reusable default auth profiles for an installed org connector
  */
 
-import type { Env } from '../../index';
-import type { ToolContext } from '../registry';
-import { routeAction } from './action-router';
+import { action, defineActionTool } from './action-tool';
 import { handleList, handleGet, handleCreate, handleUpdate, handleDelete } from './manage_connections/handlers/crud';
 import { handleConnect } from './manage_connections/handlers/connect';
 import { handleReauthenticate, handleTest } from './manage_connections/handlers/auth-actions';
@@ -36,74 +34,60 @@ import {
   handleUpdateConnectorDefaultRepairAgent,
   handleSetConnectorEntityLinkOverrides,
 } from './manage_connections/handlers/connector-management';
+import {
+  ConnectAction,
+  CreateAction,
+  DeleteAction,
+  GetAction,
+  InstallConnectorAction,
+  ListAction,
+  ListConnectorDefinitionsAction,
+  ReauthenticateAction,
+  SetConnectorEntityLinkOverridesAction,
+  TestAction,
+  ToggleConnectorLoginAction,
+  UninstallConnectorAction,
+  UpdateAction,
+  UpdateConnectorAuthAction,
+  UpdateConnectorDefaultConfigAction,
+  UpdateConnectorDefaultRepairAgentAction,
+} from './manage_connections/schemas';
 
-export { ManageConnectionsSchema } from './manage_connections/schemas';
 export type { ManageConnectionsResult } from './manage_connections/schemas';
-
-import type { ConnectionsArgs, ManageConnectionsResult } from './manage_connections/schemas';
 
 // ============================================
 // Main Function (Action Router)
 // ============================================
 
-export async function manageConnections(
-  args: ConnectionsArgs,
-  env: Env,
-  ctx: ToolContext
-): Promise<ManageConnectionsResult> {
-  return routeAction<ManageConnectionsResult>('manage_connections', args.action, ctx, {
-    list_connector_definitions: () =>
-      handleListConnectorDefinitions(
-        args as Extract<ConnectionsArgs, { action: 'list_connector_definitions' }>,
-        env,
-        ctx
-      ),
-    list: () => handleList(args as Extract<ConnectionsArgs, { action: 'list' }>, ctx),
-    get: () => handleGet(args as Extract<ConnectionsArgs, { action: 'get' }>, ctx),
-    create: () => handleCreate(args as Extract<ConnectionsArgs, { action: 'create' }>, ctx),
-    connect: () => handleConnect(args as Extract<ConnectionsArgs, { action: 'connect' }>, ctx),
-    update: () => handleUpdate(args as Extract<ConnectionsArgs, { action: 'update' }>, ctx),
-    delete: () => handleDelete(args as Extract<ConnectionsArgs, { action: 'delete' }>, ctx),
-    reauthenticate: () =>
-      handleReauthenticate(args as Extract<ConnectionsArgs, { action: 'reauthenticate' }>, ctx),
-    test: () => handleTest(args as Extract<ConnectionsArgs, { action: 'test' }>, ctx),
-    install_connector: () =>
-      handleInstallConnector(
-        args as Extract<ConnectionsArgs, { action: 'install_connector' }>,
-        ctx
-      ),
-    uninstall_connector: () =>
-      handleUninstallConnector(
-        args as Extract<ConnectionsArgs, { action: 'uninstall_connector' }>,
-        ctx
-      ),
-    toggle_connector_login: () =>
-      handleToggleConnectorLogin(
-        args as Extract<ConnectionsArgs, { action: 'toggle_connector_login' }>,
-        ctx
-      ),
-    update_connector_auth: () =>
-      handleUpdateConnectorAuth(
-        args as Extract<ConnectionsArgs, { action: 'update_connector_auth' }>,
-        ctx
-      ),
-    update_connector_default_config: () =>
-      handleUpdateConnectorDefaultConfig(
-        args as Extract<ConnectionsArgs, { action: 'update_connector_default_config' }>,
-        ctx
-      ),
-    update_connector_default_repair_agent: () =>
-      handleUpdateConnectorDefaultRepairAgent(
-        args as Extract<
-          ConnectionsArgs,
-          { action: 'update_connector_default_repair_agent' }
-        >,
-        ctx
-      ),
-    set_connector_entity_link_overrides: () =>
-      handleSetConnectorEntityLinkOverrides(
-        args as Extract<ConnectionsArgs, { action: 'set_connector_entity_link_overrides' }>,
-        ctx
-      ),
-  });
-}
+const manageConnectionsTool = defineActionTool('manage_connections', {
+  list: action(ListAction, handleList),
+  list_connector_definitions: action(ListConnectorDefinitionsAction, (args, ctx, env) =>
+    handleListConnectorDefinitions(args, env, ctx)
+  ),
+  get: action(GetAction, handleGet),
+  create: action(CreateAction, handleCreate),
+  connect: action(ConnectAction, handleConnect),
+  update: action(UpdateAction, handleUpdate),
+  delete: action(DeleteAction, handleDelete),
+  reauthenticate: action(ReauthenticateAction, handleReauthenticate),
+  test: action(TestAction, handleTest),
+  install_connector: action(InstallConnectorAction, handleInstallConnector),
+  uninstall_connector: action(UninstallConnectorAction, handleUninstallConnector),
+  toggle_connector_login: action(ToggleConnectorLoginAction, handleToggleConnectorLogin),
+  update_connector_auth: action(UpdateConnectorAuthAction, handleUpdateConnectorAuth),
+  update_connector_default_config: action(
+    UpdateConnectorDefaultConfigAction,
+    handleUpdateConnectorDefaultConfig
+  ),
+  update_connector_default_repair_agent: action(
+    UpdateConnectorDefaultRepairAgentAction,
+    handleUpdateConnectorDefaultRepairAgent
+  ),
+  set_connector_entity_link_overrides: action(
+    SetConnectorEntityLinkOverridesAction,
+    handleSetConnectorEntityLinkOverrides
+  ),
+});
+
+export const ManageConnectionsSchema = manageConnectionsTool.schema;
+export const manageConnections = manageConnectionsTool.run;

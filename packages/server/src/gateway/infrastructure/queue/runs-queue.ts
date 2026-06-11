@@ -21,6 +21,7 @@
 import { randomUUID } from "node:crypto";
 import { createLogger } from "@lobu/core";
 import * as Sentry from "@sentry/node";
+import { intervals } from "../../../config/intervals.js";
 import { getDb, getDbListener, type DbClient } from "../../../db/client.js";
 import { incrementCounter } from "../../metrics/prometheus.js";
 import type {
@@ -42,7 +43,8 @@ const NOTIFY_CHANNEL_PREFIX = "runs_lobu:";
 function notifyChannelFor(queueName: string): string {
   return `${NOTIFY_CHANNEL_PREFIX}${queueName}`;
 }
-const POLL_INTERVAL_MS = 200;
+// Poll cadence lives in config/intervals.ts (`runsPollIntervalMs`),
+// env-overridable.
 /** Backoff cap (seconds) when retrying a failed run. */
 const MAX_BACKOFF_SECONDS = 300;
 /** How often the stale-claim sweeper runs. */
@@ -66,17 +68,12 @@ function queueBreadcrumb(
     // Sentry init may not be present in tests; ignore.
   }
 }
-/** Rows in `claimed` for longer than this without a heartbeat are reset to
- *  pending so a fresh claim can pick them up. The active handler heartbeats
- *  every CLAIM_HEARTBEAT_INTERVAL_MS (well under this timeout), so a live
- *  worker keeps its claim indefinitely; only crashed/wedged workers fall
- *  past the timeout. */
-const CLAIM_VISIBILITY_TIMEOUT_MS = 5 * 60 * 1000;
-
-/** How often an in-flight handler refreshes `claimed_at` to prove it's still
- *  alive. Must be << CLAIM_VISIBILITY_TIMEOUT_MS so the sweeper doesn't race
- *  a healthy handler. */
-const CLAIM_HEARTBEAT_INTERVAL_MS = 60 * 1000;
+// Claim visibility timeout + heartbeat cadence live in config/intervals.ts
+// (`runsClaimVisibilityTimeoutMs` / `runsClaimHeartbeatIntervalMs`),
+// env-overridable. Rows in `claimed` for longer than the visibility timeout
+// without a heartbeat are reset to pending so a fresh claim can pick them up;
+// the active handler heartbeats well under the timeout, so a live worker
+// keeps its claim indefinitely and only crashed/wedged workers fall past it.
 
 /** Lobu-queue run types. Inserts/claims are restricted to these so connector
  *  lanes (sync, action, embed_backfill, watcher, auth) are never disturbed. */
@@ -179,7 +176,7 @@ export class RunsQueue implements IMessageQueue {
   private async recoverStaleClaimedRowsOnStartup(): Promise<void> {
     const sql = getDb();
     try {
-      const recoveryWindowMs = CLAIM_VISIBILITY_TIMEOUT_MS * 2;
+      const recoveryWindowMs = intervals.runsClaimVisibilityTimeoutMs * 2;
       const result = await sql`
         UPDATE public.runs
         SET status = 'pending',
@@ -475,12 +472,13 @@ export class RunsQueue implements IMessageQueue {
     channelSet.add(worker);
     await this.ensureChannelListened(channel);
 
-    // Self-driving poll loop. Sleeps POLL_INTERVAL_MS between empty claims;
+    // Self-driving poll loop. Sleeps `intervals.runsPollIntervalMs` between
+    // empty claims;
     // a NOTIFY for the channel cuts the sleep short.
     const loop = async () => {
       while (!worker.stopped) {
         if (worker.paused) {
-          await this.sleep(POLL_INTERVAL_MS, worker, () => {
+          await this.sleep(intervals.runsPollIntervalMs, worker, () => {
             resolveWake = null;
           }, (resolve) => {
             resolveWake = resolve;
@@ -498,7 +496,7 @@ export class RunsQueue implements IMessageQueue {
         try {
           const claimed = await this.claimOne(worker);
           if (!claimed) {
-            await this.sleep(POLL_INTERVAL_MS, worker, () => {
+            await this.sleep(intervals.runsPollIntervalMs, worker, () => {
               resolveWake = null;
             }, (resolve) => {
               resolveWake = resolve;
@@ -511,7 +509,7 @@ export class RunsQueue implements IMessageQueue {
           });
         } catch (err) {
           logger.error(`Poll loop error for ${queueName}:`, err);
-          await this.sleep(POLL_INTERVAL_MS, worker, () => {
+          await this.sleep(intervals.runsPollIntervalMs, worker, () => {
             resolveWake = null;
           }, (resolve) => {
             resolveWake = resolve;
@@ -639,7 +637,7 @@ export class RunsQueue implements IMessageQueue {
     };
     const heartbeat = setInterval(() => {
       void this.heartbeatClaim(claimed.runId);
-    }, CLAIM_HEARTBEAT_INTERVAL_MS);
+    }, intervals.runsClaimHeartbeatIntervalMs);
     if (typeof heartbeat.unref === "function") heartbeat.unref();
     try {
       await worker.handler(job);
@@ -825,9 +823,10 @@ export class RunsQueue implements IMessageQueue {
       this.staleSweepInFlight = true;
       try {
         const sql = getDb();
-        // Threshold is a hard-coded constant, so inline it as a SQL literal —
-        // no placeholders needed.
-        const thresholdMs = CLAIM_VISIBILITY_TIMEOUT_MS;
+        // Threshold comes from intervals.ts, which guarantees a positive
+        // integer (parseEnvInt rounds and falls back on bad input), so it is
+        // safe to inline as a SQL literal — no placeholders needed.
+        const thresholdMs = intervals.runsClaimVisibilityTimeoutMs;
         const result = await sql.unsafe(
           `UPDATE public.runs
            SET status = 'pending',
@@ -844,7 +843,7 @@ export class RunsQueue implements IMessageQueue {
           // page Sentry (Seer flagged the alert super-low actionability).
           logger.warn(
             `Reclaimed ${result.count} stale runs (claimed > ${
-              CLAIM_VISIBILITY_TIMEOUT_MS / 1000
+              thresholdMs / 1000
             }s ago)`,
           );
         }

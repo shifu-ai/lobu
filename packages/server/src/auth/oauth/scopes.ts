@@ -24,6 +24,30 @@ export const AVAILABLE_SCOPES = [
 export const DEFAULT_SCOPES = ['mcp:read', 'mcp:write'] as const;
 
 /**
+ * Scopes a Personal Access Token may be minted with (POST /api/:orgSlug/tokens).
+ *
+ * `device_worker:run` is deliberately excluded — it is only granted via the
+ * device-flow consent. `connections:token` lets a PAT call
+ * POST /oauth/connection-token to fetch a managed connector's access token
+ * (the local instance's LOBU_CLOUD_PAT is minted with it); mintable here, but
+ * NOT a default scope.
+ */
+export const AVAILABLE_PAT_SCOPES = [
+  'mcp:read',
+  'mcp:write',
+  'mcp:admin',
+  'profile:read',
+  'connections:token',
+] as const;
+
+/**
+ * Default scope requested when device-authing against an external MCP server
+ * (gateway device-auth flow). Includes `profile:read` so the gateway can
+ * introspect who the credential belongs to.
+ */
+export const DEFAULT_MCP_DEVICE_SCOPE = 'mcp:read mcp:write profile:read';
+
+/**
  * The least-privilege scope a token must carry to fetch a managed connector's
  * access token via POST /oauth/connection-token.
  *

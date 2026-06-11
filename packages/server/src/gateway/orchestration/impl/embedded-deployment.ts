@@ -6,7 +6,9 @@ import {
   ErrorCode,
   type MessagePayload,
   OrchestratorError,
+  retryWithBackoff,
 } from "@lobu/core";
+import { intervals } from "../../../config/intervals.js";
 import { getDb } from "../../../db/client.js";
 import type { ModelProviderModule } from "../../modules/module-system.js";
 import {
@@ -24,8 +26,8 @@ const WORKER_DIED_MESSAGE =
 
 const logger = createLogger("orchestrator");
 
-/** Timeout (ms) to wait for graceful shutdown before SIGKILL. */
-const KILL_TIMEOUT_MS = 5_000;
+// The SIGTERM→SIGKILL grace window lives in config/intervals.ts
+// (`workerKillTimeoutMs`), env-overridable.
 
 /**
  * Detect once whether `systemd-run --user` is available. On Linux production
@@ -309,28 +311,29 @@ export async function acquireConversationLock(
   }
   return {
     async release() {
-      // Retry the unlock query up to 3× with linear-ish backoff. A
-      // transient DB hiccup mid-release would otherwise leave the
+      // Retry the unlock query up to 3× with linear backoff (100ms, 200ms).
+      // A transient DB hiccup mid-release would otherwise leave the
       // conversation locked until the gateway recycles — every
       // subsequent dispatch for that conv would `pg_try_advisory_lock`
       // → false → DEPLOYMENT_CREATE_FAILED → runs-queue retry → repeat.
       // Codex round 2 quality win E on PR #865.
       const MAX_ATTEMPTS = 3;
       const BACKOFF_MS = 100;
-      let lastErr: unknown = null;
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        try {
-          await reserved`SELECT pg_advisory_unlock(${CONV_LOCK_KEY1}, ${key2})`;
-          lastErr = null;
-          break;
-        } catch (err) {
-          lastErr = err;
-          if (attempt < MAX_ATTEMPTS) {
-            await new Promise((r) => setTimeout(r, BACKOFF_MS * attempt));
+      try {
+        await retryWithBackoff(
+          async () => {
+            await reserved`SELECT pg_advisory_unlock(${CONV_LOCK_KEY1}, ${key2})`;
+          },
+          {
+            maxRetries: MAX_ATTEMPTS - 1,
+            baseDelay: BACKOFF_MS,
+            strategy: "linear",
+            // Intermediate failures stay silent (matches the prior
+            // hand-rolled loop); only the terminal failure is logged below.
+            onRetry: () => {},
           }
-        }
-      }
-      if (lastErr) {
+        );
+      } catch (lastErr) {
         // Log loudly so an operator notices — a stuck lock blocks every
         // subsequent dispatch for the conversation. Includes the lock
         // key triple so the operator can target a manual
@@ -805,8 +808,17 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       // A spawn error is never a deliberate stop. Fail any in-flight turn(s)
       // for this deployment so the client gets a terminal error instead of a
       // hang. No-op if nothing is in flight (markers already discharged).
+      // Fire-and-forget, but never silently: a rejection here means the
+      // in-flight turn(s) were NOT failed and the client may hang until the
+      // sweep backstop catches the lapsed marker — log it loudly.
       this.intentionalExits.delete(deploymentName);
-      void failTurnsForDeployment(deploymentName, WORKER_DIED_MESSAGE);
+      failTurnsForDeployment(deploymentName, WORKER_DIED_MESSAGE).catch(
+        (failErr) => {
+          logger.error(
+            `Failed to fail in-flight turns after spawn error for ${deploymentName} (client may hang until the turn-liveness sweep): ${failErr instanceof Error ? failErr.message : String(failErr)}`
+          );
+        }
+      );
     });
 
     child.stdout?.on("data", (data: Buffer) => {
@@ -846,8 +858,16 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
       // leaves a turn un-answered is still a failure (GPT-5.5 edge #3). The
       // marker's presence is the source of truth, so this is a no-op when the
       // worker had already replied (markers discharged) or was idle.
+      // Fire-and-forget with a logging .catch — same rationale as the spawn
+      // error handler above.
       if (!wasIntentional) {
-        void failTurnsForDeployment(deploymentName, WORKER_DIED_MESSAGE);
+        failTurnsForDeployment(deploymentName, WORKER_DIED_MESSAGE).catch(
+          (failErr) => {
+            logger.error(
+              `Failed to fail in-flight turns after unexpected exit of ${deploymentName} (client may hang until the turn-liveness sweep): ${failErr instanceof Error ? failErr.message : String(failErr)}`
+            );
+          }
+        );
       }
     });
 
@@ -977,7 +997,7 @@ export class EmbeddedDeploymentManager extends BaseDeploymentManager {
         );
         child.kill("SIGKILL");
       }
-    }, KILL_TIMEOUT_MS);
+    }, intervals.workerKillTimeoutMs);
 
     try {
       await exited;

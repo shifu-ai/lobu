@@ -36,7 +36,7 @@ import {
   requireReadAccess,
 } from '../utils/organization-access';
 
-import { renderPromptPreview } from '../utils/template-renderer';
+import { renderPromptPreview } from '../watchers/template-renderer';
 import { buildWatchersUrl, type EntityInfo, getPublicWebUrl } from '../utils/url-builder';
 import {
   buildWindowsSelectClause,

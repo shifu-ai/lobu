@@ -1,5 +1,6 @@
-import { getRequiredAccessLevel, hasRequiredMcpScope } from '../../auth/tool-access';
+import { getRequiredAccessLevel } from '../../auth/tool-access';
 import logger from '../../utils/logger';
+import { enforceRoleScopeAccess, isSystemContext } from '../access-control';
 import type { ToolContext } from '../registry';
 
 /**
@@ -12,10 +13,6 @@ import type { ToolContext } from '../registry';
  *     list: () => handleList(args, env, ctx),
  *   });
  */
-function isSystemContext(ctx: ToolContext): boolean {
-  return ctx.isAuthenticated === true && ctx.userId === null && ctx.memberRole === null;
-}
-
 function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): void {
   // Watcher reactions and other in-process system calls historically run with
   // userId=null + isAuthenticated=true. Preserve that path while enforcing the
@@ -23,27 +20,13 @@ function enforceActionAccess(toolName: string, action: string, ctx: ToolContext)
   if (isSystemContext(ctx)) return;
 
   const requiredAccess = getRequiredAccessLevel(toolName, { action }, false);
-  if (requiredAccess === 'admin' && ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin') {
-    throw new Error(
-      `Action ${toolName}.${action} requires admin or owner access. Ask an organization owner to grant elevated access.`
-    );
-  }
-
-  if (requiredAccess === 'write' && !ctx.memberRole) {
-    throw new Error(
-      `Action ${toolName}.${action} requires workspace membership with write access.`
-    );
-  }
-
-  if (!hasRequiredMcpScope(requiredAccess, ctx.scopes)) {
-    if (requiredAccess === 'read') {
-      throw new Error(`Action ${toolName}.${action} requires an MCP session with read access.`);
-    }
-    if (requiredAccess === 'write') {
-      throw new Error(`Action ${toolName}.${action} requires an MCP session with write access.`);
-    }
-    throw new Error(`Action ${toolName}.${action} requires an MCP session with admin access.`);
-  }
+  enforceRoleScopeAccess(requiredAccess, ctx.memberRole, ctx.scopes, {
+    adminRole: `Action ${toolName}.${action} requires admin or owner access. Ask an organization owner to grant elevated access.`,
+    writeRole: `Action ${toolName}.${action} requires workspace membership with write access.`,
+    readScope: `Action ${toolName}.${action} requires an MCP session with read access.`,
+    writeScope: `Action ${toolName}.${action} requires an MCP session with write access.`,
+    adminScope: `Action ${toolName}.${action} requires an MCP session with admin access.`,
+  });
 }
 
 export async function routeAction<TResult>(
