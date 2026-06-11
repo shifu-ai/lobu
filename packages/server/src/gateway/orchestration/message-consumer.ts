@@ -36,6 +36,30 @@ import {
 
 const logger = createLogger("orchestrator");
 
+function getStringField(value: unknown, key: string): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const field = (value as Record<string, unknown>)[key];
+  return typeof field === "string" && field.length > 0 ? field : undefined;
+}
+
+export function mintRunJobToken(
+  data: MessagePayload,
+  effectiveConversationId: string,
+  deploymentName: string
+): string | undefined {
+  if (data.runId === undefined) return undefined;
+  return generateWorkerToken(data.userId, effectiveConversationId, deploymentName, {
+    channelId: data.channelId,
+    teamId: data.teamId || getStringField(data.platformMetadata, "teamId"),
+    agentId: data.agentId,
+    organizationId: data.organizationId,
+    platform: data.platform,
+    connectionId: getStringField(data.platformMetadata, "connectionId"),
+    traceId: extractTraceId(data),
+    runId: data.runId,
+  });
+}
+
 export class MessageConsumer {
   private queue: IMessageQueue;
   private deploymentManager: BaseDeploymentManager;
@@ -209,21 +233,11 @@ export class MessageConsumer {
       // A on PR #865. Without a parsed runId (legacy direct-enqueue
       // path) we skip the mint; the snapshot path then declines to write
       // (worker-side runId is undefined and writeSnapshot bails).
-      if (data.runId !== undefined) {
-        data.runJobToken = generateWorkerToken(
-          data.userId,
-          effectiveConversationId,
-          deploymentName,
-          {
-            channelId: data.channelId,
-            teamId: data.teamId,
-            agentId: data.agentId,
-            organizationId: data.organizationId,
-            platform: data.platform,
-            runId: data.runId,
-          }
-        );
-      }
+      data.runJobToken = mintRunJobToken(
+        data,
+        effectiveConversationId,
+        deploymentName
+      );
 
       logger.info(
         `Conversation routing - effectiveConversationId: ${effectiveConversationId}, canonicalKey: ${canonicalConversationKey}, deploymentName: ${deploymentName}`
