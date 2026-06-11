@@ -31,7 +31,7 @@ import {
   getCachedOrgBySlug,
 } from '../workspace/multi-tenant';
 import { orgContext } from './stores/org-context';
-import { provisioningRoutes } from './provisioning-routes';
+import { createProvisioningRoutes } from './provisioning-routes';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
 import {
   createPostgresAgentAccessStore,
@@ -452,7 +452,14 @@ export async function initLobuGateway(): Promise<Hono | null> {
       lobuApp.route('/worker', workerGateway.getApp());
       logger.info('[Lobu] Worker gateway routes mounted at /lobu/worker/*');
     }
-    lobuApp.route('/api/provisioning', provisioningRoutes);
+    lobuApp.route(
+      '/api/provisioning',
+      createProvisioningRoutes({
+        mcpConfigService: coreServices.getMcpConfigService(),
+        secretStore: coreServices.getSecretStore(),
+        publicGatewayUrl: coreServices.getPublicGatewayUrl(),
+      })
+    );
     lobuApp.route('/', rawLobuApp);
 
     logger.info('[Lobu] Embedded gateway initialized');

@@ -9,17 +9,25 @@
 
 import type { AgentSettings } from "@lobu/core";
 import { type Context, Hono } from "hono";
+import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
+import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
+import { getStoredCredential } from "../gateway/routes/internal/device-auth.js";
+import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
 	AGENT_ID_PATTERN,
 	createPostgresAgentConfigStore,
 } from "./stores/postgres-stores";
 
-export const provisioningRoutes = new Hono<{ Bindings: Env }>();
-
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 
 const configStore = createPostgresAgentConfigStore();
+
+interface ProvisioningRoutesOptions {
+	mcpConfigService?: McpConfigService;
+	secretStore?: WritableSecretStore;
+	publicGatewayUrl?: string;
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -57,7 +65,30 @@ function validateSettings(settings: unknown): Omit<AgentSettings, "updatedAt"> {
 	return settings as Omit<AgentSettings, "updatedAt">;
 }
 
-provisioningRoutes.post("/agents", async (c) => {
+function validateShifuAgentId(agentId: string): string | null {
+	if (
+		!AGENT_ID_PATTERN.test(agentId) ||
+		!SHIFU_USER_AGENT_ID_PATTERN.test(agentId)
+	) {
+		return "agentId must be a Lobu-safe ShiFu user agent id starting with shifu-u-";
+	}
+	return null;
+}
+
+function parseUserId(value: unknown): string {
+	return typeof value === "string" ? value.trim() : "";
+}
+
+function redirectUri(publicGatewayUrl: string): string {
+	return `${publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
+}
+
+export function createProvisioningRoutes(
+	options: ProvisioningRoutesOptions = {},
+): Hono<{ Bindings: Env }> {
+	const provisioningRoutes = new Hono<{ Bindings: Env }>();
+
+	provisioningRoutes.post("/agents", async (c) => {
 	const denied = requireAdminPat(c);
 	if (denied) return denied;
 
@@ -89,17 +120,9 @@ provisioningRoutes.post("/agents", async (c) => {
 	if (!agentId || !name) {
 		return c.json({ error: "agentId and name are required" }, 400);
 	}
-	if (
-		!AGENT_ID_PATTERN.test(agentId) ||
-		!SHIFU_USER_AGENT_ID_PATTERN.test(agentId)
-	) {
-		return c.json(
-			{
-				error:
-					"agentId must be a Lobu-safe ShiFu user agent id starting with shifu-u-",
-			},
-			400,
-		);
+	const agentIdError = validateShifuAgentId(agentId);
+	if (agentIdError) {
+		return c.json({ error: agentIdError }, 400);
 	}
 
 	let settings: Omit<AgentSettings, "updatedAt">;
@@ -135,4 +158,125 @@ provisioningRoutes.post("/agents", async (c) => {
 		},
 		created ? 201 : 200,
 	);
-});
+	});
+
+	provisioningRoutes.post(
+		"/agents/:agentId/mcp/:mcpId/oauth/start",
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
+
+			if (!options.mcpConfigService || !options.secretStore) {
+				return c.json(
+					{
+						error: "oauth_unavailable",
+						error_description:
+							"MCP OAuth provisioning requires gateway OAuth services.",
+					},
+					503,
+				);
+			}
+
+			const agentId = c.req.param("agentId")?.trim() ?? "";
+			const mcpId = c.req.param("mcpId")?.trim() ?? "";
+			const agentIdError = validateShifuAgentId(agentId);
+			if (agentIdError) return c.json({ error: agentIdError }, 400);
+			if (!mcpId) return c.json({ error: "mcpId is required" }, 400);
+
+			let body: { userId?: unknown };
+			try {
+				body = await c.req.json();
+			} catch {
+				return c.json({ error: "invalid_json" }, 400);
+			}
+			const userId = parseUserId(body.userId);
+			if (!userId) return c.json({ error: "userId is required" }, 400);
+
+			const httpServer = await options.mcpConfigService.getHttpServer(
+				mcpId,
+				agentId,
+			);
+			if (!httpServer) {
+				return c.json({ error: "mcp_not_found" }, 404);
+			}
+
+			const { authorizationUrl } = await startAuthCodeFlow({
+				secretStore: options.secretStore,
+				mcpId,
+				upstreamUrl: httpServer.upstreamUrl,
+				agentId,
+				userId,
+				scopeKey: userId,
+				wwwAuthenticate: null,
+				redirectUri: redirectUri(options.publicGatewayUrl ?? ""),
+				staticOauth: httpServer.oauth,
+				platform: "toolbox-web",
+				channelId: "",
+				conversationId: "",
+			});
+
+			return c.json({
+				ok: true,
+				agentId,
+				userId,
+				mcpId,
+				authorizationUrl,
+			});
+		},
+	);
+
+	provisioningRoutes.get(
+		"/agents/:agentId/mcp/:mcpId/oauth/status",
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
+
+			if (!options.mcpConfigService || !options.secretStore) {
+				return c.json(
+					{
+						error: "oauth_unavailable",
+						error_description:
+							"MCP OAuth provisioning requires gateway OAuth services.",
+					},
+					503,
+				);
+			}
+
+			const agentId = c.req.param("agentId")?.trim() ?? "";
+			const mcpId = c.req.param("mcpId")?.trim() ?? "";
+			const userId = parseUserId(c.req.query("userId"));
+			const agentIdError = validateShifuAgentId(agentId);
+			if (agentIdError) return c.json({ error: agentIdError }, 400);
+			if (!mcpId) return c.json({ error: "mcpId is required" }, 400);
+			if (!userId) return c.json({ error: "userId is required" }, 400);
+
+			const httpServer = await options.mcpConfigService.getHttpServer(
+				mcpId,
+				agentId,
+			);
+			if (!httpServer) {
+				return c.json({ error: "mcp_not_found" }, 404);
+			}
+
+			const credential = await getStoredCredential(
+				options.secretStore,
+				agentId,
+				userId,
+				mcpId,
+			);
+
+			return c.json({
+				ok: true,
+				agentId,
+				userId,
+				mcpId,
+				authenticated: !!credential,
+				...(credential?.expiresAt ? { expiresAt: credential.expiresAt } : {}),
+			});
+		},
+	);
+
+	return provisioningRoutes;
+}
+
+export const provisioningRoutes = createProvisioningRoutes();
