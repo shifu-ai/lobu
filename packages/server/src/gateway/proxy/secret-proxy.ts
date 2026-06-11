@@ -6,6 +6,7 @@ import type { AuthProfilesManager } from "../auth/settings/auth-profiles-manager
 import type { ProviderCredentialContext } from "../embedded.js";
 import type { ProviderUpstreamConfig } from "../modules/module-system.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
+import { readOrgSharedProviderApiKey } from "../../lobu/stores/provider-secrets.js";
 import type { SecretStore } from "../secrets/index.js";
 import { getClientIp } from "../utils/rate-limiter.js";
 
@@ -237,6 +238,43 @@ function safeDecodePathSegment(value: string | undefined): string | undefined {
   } catch {
     return value;
   }
+}
+
+/**
+ * Walk the documented provider-credential resolution chain
+ * (provider-secrets.ts) at the egress proxy:
+ *   1. per-user auth profile credential (resolved by the caller)
+ *   2. org-shared `agent_secrets` key written by `lobu apply`
+ *   3. deployment-wide system key (env)
+ *
+ * Run dispatch admits a run when `hasSystemKey() || hasCredentials()` passes
+ * (base-provider-module.ts), and `hasCredentials` covers tiers 1–2 — so the
+ * proxy MUST resolve the same tiers. Skipping tier 2 here meant an
+ * apply-provisioned org dispatched its agent only to 401 at the first
+ * provider call — found live by the Sentry red-test (LOBU-BACKEND-W).
+ *
+ * Exported for tests; dependencies are injected so the tier ORDER is testable
+ * without a database or upstream.
+ */
+export async function resolveProviderCredential(params: {
+  profileCredential: string | null;
+  providerId: string;
+  organizationId: string | undefined;
+  readOrgSharedKey: (
+    providerId: string,
+    organizationId: string
+  ) => Promise<string | null>;
+  systemKeyResolver?: (providerId: string) => string | undefined;
+}): Promise<string | null> {
+  if (params.profileCredential) return params.profileCredential;
+  if (params.organizationId) {
+    const orgKey = await params.readOrgSharedKey(
+      params.providerId,
+      params.organizationId
+    );
+    if (orgKey) return orgKey;
+  }
+  return params.systemKeyResolver?.(params.providerId) ?? null;
 }
 
 export interface SecretMapping {
@@ -739,31 +777,18 @@ export class SecretProxy {
               })
             )
           : profile?.credential;
-        if (credential) {
-          headers.authorization = `Bearer ${credential}`;
-        } else if (this.systemKeyResolver) {
-          const systemKey = this.systemKeyResolver(providerId);
-          if (systemKey) {
-            headers.authorization = `Bearer ${systemKey}`;
-          } else {
-            logger.warn(
-              `No auth profile or system key for agent ${urlAgentId}, provider ${providerId}`
-            );
-            return c.json(
-              {
-                error: {
-                  message:
-                    "No provider credentials configured. End-user provider setup is not available in chat yet. Ask an admin to connect a provider for the base agent.",
-                  type: "authentication_error",
-                  code: "no_credentials",
-                },
-              },
-              401
-            );
-          }
+        const resolvedCredential = await resolveProviderCredential({
+          profileCredential: credential ?? null,
+          providerId,
+          organizationId: expectedOrganizationId,
+          readOrgSharedKey: readOrgSharedProviderApiKey,
+          systemKeyResolver: this.systemKeyResolver,
+        });
+        if (resolvedCredential) {
+          headers.authorization = `Bearer ${resolvedCredential}`;
         } else {
           logger.warn(
-            `No auth profile for agent ${urlAgentId}, provider ${providerId}`
+            `No auth profile, org-shared key, or system key for agent ${urlAgentId}, provider ${providerId}`
           );
           return c.json(
             {
