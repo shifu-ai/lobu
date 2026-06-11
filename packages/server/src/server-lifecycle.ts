@@ -201,6 +201,21 @@ export function buildWrapperApp(
 			} catch {
 				// response wasn't JSON; ignore
 			}
+			// Readiness probes intentionally 503 `{status:"draining"}` during the
+			// graceful-shutdown drain (SHUTDOWN_READINESS_DRAIN_MS) — capturing
+			// that turns every deploy rollover into a Sentry issue
+			// (LOBU-BACKEND-X). Skip ONLY that exact shape: a health 5xx with any
+			// other body (DB unreachable, crash) is a real incident and must
+			// still report.
+			if (
+				c.req.path === "/health/ready" &&
+				c.res.status === 503 &&
+				body !== null &&
+				typeof body === "object" &&
+				(body as { status?: unknown }).status === "draining"
+			) {
+				return;
+			}
 			const message =
 				(body &&
 				typeof body === "object" &&
