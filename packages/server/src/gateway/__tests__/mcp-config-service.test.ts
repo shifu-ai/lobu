@@ -112,6 +112,62 @@ describe("McpConfigService", () => {
     expect(headers["X-Mcp-Id"]).toBe("custom-mcp");
   });
 
+  test("getAllHttpServers - resolves allowed MCP env refs", async () => {
+    const previous = process.env.TAVILY_API_KEY;
+    process.env.TAVILY_API_KEY = "tvly-test-key";
+    try {
+      const service = new McpConfigService();
+      service.registerGlobalServers({
+        tavily: {
+          url: "https://mcp.tavily.com/mcp/?tavilyApiKey=${env:TAVILY_API_KEY}",
+          type: "streamable-http",
+          headers: { "X-Test-Key": "${env:TAVILY_API_KEY}" },
+        },
+      });
+
+      const servers = await service.getAllHttpServers();
+      const tavily = servers.get("tavily");
+      expect(tavily?.upstreamUrl).toBe(
+        "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-test-key"
+      );
+      expect(tavily?.headers?.["X-Test-Key"]).toBe("tvly-test-key");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.TAVILY_API_KEY;
+      } else {
+        process.env.TAVILY_API_KEY = previous;
+      }
+    }
+  });
+
+  test("getAllHttpServers - blocks unsupported MCP env refs", async () => {
+    const previous = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "postgres://secret.example/db";
+    try {
+      const service = new McpConfigService();
+      service.registerGlobalServers({
+        unsafe: {
+          url: "https://upstream.example.com/mcp?token=${env:DATABASE_URL}",
+          type: "streamable-http",
+          headers: { Authorization: "Bearer ${env:DATABASE_URL}" },
+        },
+      });
+
+      const servers = await service.getAllHttpServers();
+      const unsafe = servers.get("unsafe");
+      expect(unsafe?.upstreamUrl).toBe(
+        "https://upstream.example.com/mcp?token="
+      );
+      expect(unsafe?.headers?.Authorization).toBe("Bearer ");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DATABASE_URL;
+      } else {
+        process.env.DATABASE_URL = previous;
+      }
+    }
+  });
+
   test("getWorkerConfig - includes stdio without rewriting", async () => {
     const service = new McpConfigService();
     service.registerGlobalServers({

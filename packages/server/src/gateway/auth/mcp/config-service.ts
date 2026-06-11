@@ -6,9 +6,11 @@ import {
 import type { ProviderConfigResolver } from "../../services/provider-config-resolver.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
+import { resolveEnv } from "./string-substitution.js";
 
 const logger = createLogger("mcp-config-service");
 const LOBU_MEMORY_MCP_ID = "lobu-memory";
+const ALLOWED_MCP_ENV_REFS = new Set(["TAVILY_API_KEY"]);
 
 interface McpInput {
   type: "promptString";
@@ -547,7 +549,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
     if (typeof cloned.url === "string" && isHttpUrl(cloned.url)) {
       httpServers.set(id, {
         id,
-        upstreamUrl: cloned.url,
+        upstreamUrl: resolveMcpEnvRefs(cloned.url),
         oauth: parseOAuthConfig(cloned),
         inputs: Array.isArray(cloned.inputs)
           ? cloned.inputs.filter(
@@ -559,7 +561,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
           : undefined,
         headers:
           cloned.headers && typeof cloned.headers === "object"
-            ? cloned.headers
+            ? resolveMcpHeaderEnvRefs(cloned.headers)
             : undefined,
         authScope: parseAuthScope(cloned),
         // Global MCP servers are never internal — the only internal server is
@@ -592,7 +594,7 @@ function toHttpServerConfig(
 
   return {
     id,
-    upstreamUrl: cloned.url,
+    upstreamUrl: resolveMcpEnvRefs(cloned.url),
     oauth: parseOAuthConfig(cloned),
     inputs: Array.isArray(cloned.inputs)
       ? cloned.inputs.filter(
@@ -602,7 +604,7 @@ function toHttpServerConfig(
       : undefined,
     headers:
       cloned.headers && typeof cloned.headers === "object"
-        ? cloned.headers
+        ? resolveMcpHeaderEnvRefs(cloned.headers)
         : undefined,
     authScope: parseAuthScope(cloned),
     internal: cloned.internal === true,
@@ -622,6 +624,31 @@ function parseAuthScope(raw: any): "user" | "channel" | undefined {
 
 function cloneConfig(config: any) {
   return JSON.parse(JSON.stringify(config));
+}
+
+function resolveMcpHeaderEnvRefs(headers: Record<string, unknown>) {
+  const resolved: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    if (typeof value !== "string") continue;
+    resolved[key] = resolveMcpEnvRefs(value);
+  }
+  return resolved;
+}
+
+function resolveMcpEnvRefs(value: string): string {
+  return value.replace(/\$\{env:([^}]+)\}/g, (_match, rawName) => {
+    const name = String(rawName).trim();
+    if (!ALLOWED_MCP_ENV_REFS.has(name)) {
+      logger.warn(`Blocked unsupported MCP env reference: ${name}`);
+      return "";
+    }
+    const resolved = resolveEnv(name);
+    if (!resolved) {
+      logger.warn(`MCP env reference is unset: ${name}`);
+      return "";
+    }
+    return resolved;
+  });
 }
 
 function buildLobuMemoryScopedMcpUrl(baseUrl: string, orgSlug: string): string {
