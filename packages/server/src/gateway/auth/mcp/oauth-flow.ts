@@ -19,6 +19,7 @@ import {
   OAuthStateStore,
   type ProviderOAuthStateData,
 } from "../oauth/state-store.js";
+import { orgContext } from "../../../lobu/stores/org-context.js";
 import { storeCredentialForScope } from "../../routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import {
@@ -48,6 +49,8 @@ interface McpOAuthStateData extends ProviderOAuthStateData {
   scope?: string;
   /** RFC 8707 resource indicator. */
   resource?: string;
+  /** Tenant that initiated the flow. Used when the public callback writes credentials. */
+  organizationId?: string;
   /** Chat context so the callback success page can deep-link back, and for auditing. */
   platform: string;
   channelId: string;
@@ -79,6 +82,7 @@ interface StartFlowOptions {
   conversationId: string;
   teamId?: string;
   connectionId?: string;
+  organizationId?: string;
 }
 
 interface StartFlowResult {
@@ -109,6 +113,7 @@ export async function startAuthCodeFlow(
     conversationId,
     teamId,
     connectionId,
+    organizationId,
   } = options;
 
   const discovery = await discoverOAuth({
@@ -154,6 +159,7 @@ export async function startAuthCodeFlow(
     conversationId,
     teamId,
     connectionId,
+    organizationId,
   });
 
   const authUrl = new URL(endpoints.authorizationEndpoint);
@@ -236,6 +242,7 @@ export async function completeAuthCodeFlow(
     conversationId,
     teamId,
     connectionId,
+    organizationId,
   } = stateData;
 
   const body: Record<string, string> = {
@@ -300,7 +307,7 @@ export async function completeAuthCodeFlow(
       ? Date.now() + tokenData.expires_in * 1000
       : Date.now() + 3_600_000; // default 1h if not reported
 
-  await storeCredentialForScope(secretStore, agentId, scopeKey, mcpId, {
+  const credential: Parameters<typeof storeCredentialForScope>[4] = {
     accessToken: tokenData.access_token,
     refreshToken: tokenData.refresh_token,
     expiresAt,
@@ -314,7 +321,15 @@ export async function completeAuthCodeFlow(
       client.tokenEndpointAuthMethod === "none"
         ? client.tokenEndpointAuthMethod
         : undefined,
-  });
+  };
+
+  if (organizationId) {
+    await orgContext.run({ organizationId }, () =>
+      storeCredentialForScope(secretStore, agentId, scopeKey, mcpId, credential)
+    );
+  } else {
+    await storeCredentialForScope(secretStore, agentId, scopeKey, mcpId, credential);
+  }
 
   logger.info("MCP OAuth auth-code flow completed", {
     mcpId,

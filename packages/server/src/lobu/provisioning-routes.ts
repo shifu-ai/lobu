@@ -191,6 +191,7 @@ export function createProvisioningRoutes(
 			}
 			const userId = parseUserId(body.userId);
 			if (!userId) return c.json({ error: "userId is required" }, 400);
+			const organizationId = c.get("organizationId") as string | null;
 
 			const httpServer = await options.mcpConfigService.getHttpServer(
 				mcpId,
@@ -213,6 +214,7 @@ export function createProvisioningRoutes(
 				platform: "toolbox-web",
 				channelId: "",
 				conversationId: "",
+				organizationId: organizationId ?? undefined,
 			});
 
 			return c.json({
