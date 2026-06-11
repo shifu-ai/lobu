@@ -11,6 +11,7 @@ import type { AgentSettings } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
+import { GrantStore } from "../gateway/permissions/grant-store.js";
 import { getStoredCredential } from "../gateway/routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
@@ -22,6 +23,7 @@ import {
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 
 const configStore = createPostgresAgentConfigStore();
+const grantStore = new GrantStore();
 
 interface ProvisioningRoutesOptions {
 	mcpConfigService?: McpConfigService;
@@ -81,6 +83,19 @@ function parseUserId(value: unknown): string {
 
 function redirectUri(publicGatewayUrl: string): string {
 	return `${publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
+}
+
+async function syncProvisioningGrants(
+	agentId: string,
+	settings: Omit<AgentSettings, "updatedAt">,
+	organizationId: string,
+): Promise<void> {
+	for (const domain of settings.networkConfig?.allowedDomains ?? []) {
+		await grantStore.grant(agentId, domain, null, undefined, organizationId);
+	}
+	for (const pattern of settings.preApprovedTools ?? []) {
+		await grantStore.grant(agentId, pattern, null, undefined, organizationId);
+	}
 }
 
 export function createProvisioningRoutes(
@@ -148,6 +163,7 @@ export function createProvisioningRoutes(
 		lastUsedAt: existing?.lastUsedAt,
 	});
 	await configStore.saveSettings(agentId, { ...settings, updatedAt: Date.now() });
+	await syncProvisioningGrants(agentId, settings, organizationId);
 
 	return c.json(
 		{

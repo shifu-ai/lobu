@@ -119,6 +119,7 @@ describe("POST /api/provisioning/agents", () => {
 					model: "anthropic/claude-sonnet-4-5",
 					identityMd: "You are ShiFu.",
 					userMd: "Ask onboarding questions.",
+					networkConfig: { allowedDomains: ["*"] },
 					mcpServers: {
 						"lobu-memory": {
 							type: "streamable-http",
@@ -137,6 +138,24 @@ describe("POST /api/provisioning/agents", () => {
 			created: true,
 			revisionRef: "lobu:shifu-u-abc123",
 		});
+
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const grants = await sql`
+			SELECT kind, pattern, denied
+			FROM grants
+			WHERE organization_id = ${ORG_ID}
+			  AND agent_id = ${"shifu-u-abc123"}
+			ORDER BY kind, pattern
+		`;
+		expect(grants).toEqual([
+			{ kind: "domain", pattern: "*", denied: false },
+			{
+				kind: "mcp_tool",
+				pattern: "/mcp/lobu-memory/tools/*",
+				denied: false,
+			},
+		]);
 
 		const second = await app.request("/api/provisioning/agents", {
 			method: "POST",
