@@ -723,6 +723,102 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(blockedCount).toBe(1);
   });
 
+  test("refreshes stored OAuth credential when tool discovery gets invalid_token", async () => {
+    const secretStore = new InMemoryWritableStore();
+    await secretStore.put(
+      "mcp-auth/agent1/user1/toolbox/credential",
+      JSON.stringify({
+        accessToken: "stale-access-token",
+        refreshToken: "refresh-token",
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        clientId: "client-id",
+        tokenUrl: "https://auth.example.com/oauth/token",
+        resource: "https://toolbox.example.com/mcp",
+        tokenEndpointAuthMethod: "none",
+      })
+    );
+
+    const configSource = createConfigSource({
+      toolbox: {
+        id: "toolbox",
+        upstreamUrl: "https://toolbox.example.com/mcp",
+        oauth: { resource: "https://toolbox.example.com/mcp" },
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore,
+      grantStore: new GrantStore(),
+    });
+
+    const upstreamAuthorizations: string[] = [];
+    let refreshCount = 0;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+
+      if (url === "https://auth.example.com/oauth/token") {
+        refreshCount++;
+        return new Response(
+          JSON.stringify({
+            access_token: "fresh-access-token",
+            refresh_token: "rotated-refresh-token",
+            expires_in: 3600,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      upstreamAuthorizations.push(
+        String((init?.headers as Record<string, string>)?.Authorization || "")
+      );
+      if (upstreamAuthorizations.length === 1) {
+        return new Response(
+          JSON.stringify({
+            error: "invalid_token",
+            error_description: "Invalid access token",
+          }),
+          { status: 401, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: { tools: [{ name: "meeting_search" }] },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const result = await proxy.fetchToolsForMcp(
+      "toolbox",
+      "agent1",
+      { userId: "user1", channelId: "ch1" },
+      agent1Token,
+      { surfaceErrors: true }
+    );
+
+    expect(refreshCount).toBe(1);
+    expect(upstreamAuthorizations[0]).toBe("Bearer stale-access-token");
+    expect(upstreamAuthorizations.slice(1)).toEqual(
+      upstreamAuthorizations.slice(1).map(() => "Bearer fresh-access-token")
+    );
+    expect(result.tools.map((tool) => tool.name)).toEqual(["meeting_search"]);
+
+    const stored = JSON.parse(
+      (await secretStore.get(
+        "secret://mcp-auth%2Fagent1%2Fuser1%2Ftoolbox%2Fcredential" as SecretRef
+      )) || "{}"
+    );
+    expect(stored.accessToken).toBe("fresh-access-token");
+    expect(stored.refreshToken).toBe("rotated-refresh-token");
+  });
+
   test("onToolBlocked receives correct agentId and tool metadata", async () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();

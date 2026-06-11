@@ -1356,6 +1356,42 @@ export class McpProxy {
       signal: upstreamTimeoutSignal(method),
     });
 
+    if (response.status === 401 && scopeKey && !httpServer.internal) {
+      await response.body?.cancel().catch(() => {
+        /* noop */
+      });
+      const refreshedToken = await this.refreshCredentialToken(
+        agentId,
+        scopeKey,
+        mcpId
+      );
+      if (refreshedToken) {
+        const retryHeaders = this.buildUpstreamHeaders(
+          sessionId,
+          httpServer.headers,
+          refreshedToken,
+          false
+        );
+        if (extraHeaders) {
+          for (const [key, value] of Object.entries(extraHeaders)) {
+            retryHeaders[key] = value;
+          }
+        }
+
+        const retryResponse = await fetch(httpServer.upstreamUrl, {
+          method,
+          headers: retryHeaders,
+          body: body || undefined,
+          signal: upstreamTimeoutSignal(method),
+        });
+        const retrySessionId = retryResponse.headers.get("Mcp-Session-Id");
+        if (retrySessionId) {
+          this.setSession(sessionKey, retrySessionId);
+        }
+        return retryResponse;
+      }
+    }
+
     // Track session
     const newSessionId = response.headers.get("Mcp-Session-Id");
     if (newSessionId) {
@@ -1363,6 +1399,29 @@ export class McpProxy {
     }
 
     return response;
+  }
+
+  private async refreshCredentialToken(
+    agentId: string,
+    scopeKey: string,
+    mcpId: string
+  ): Promise<string | null> {
+    const credential = await getStoredCredential(
+      this.secretStore,
+      agentId,
+      scopeKey,
+      mcpId
+    );
+    if (!credential) return null;
+
+    const refreshed = await refreshCredential(
+      this.secretStore,
+      agentId,
+      scopeKey,
+      mcpId,
+      credential
+    );
+    return refreshed?.accessToken ?? null;
   }
 
   /**
