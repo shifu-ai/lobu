@@ -169,15 +169,15 @@ export class UnifiedThreadResponseConsumer {
     // canHandle re-queue (handleThreadResponse) and also fixes the pre-existing
     // cross-pod success-completion drop on the API path.
     //
-    // Scoped to TERMINAL API rows only: platform replies have their own
-    // connectionId owner-routing, and deltas stay best-effort (un-gated) to
-    // avoid per-delta re-queue churn. The re-queue relies on the owning pod
-    // eventually winning the SKIP-LOCKED claim; terminal sends use a short
-    // fixed retryDelay + raised retryLimit (see TERMINAL_DELIVERY_SEND_OPTS) so
-    // the window covers both cross-pod hand-off and the client's POST→connect
-    // gap. Sufficient at the small replica counts we run; a durable
-    // SSE-session→pod registry with targeted delivery is the future hardening
-    // for very large N.
+    // Scoped to TERMINAL API rows and explicit customEvent owner-routed rows:
+    // platform replies have their own connectionId owner-routing, and deltas
+    // stay best-effort (un-gated) to avoid per-delta re-queue churn. The
+    // re-queue relies on the owning pod eventually winning the SKIP-LOCKED
+    // claim; terminal/customEvent sends use a short fixed retryDelay + raised
+    // retryLimit (see TERMINAL_DELIVERY_SEND_OPTS) so the window covers both
+    // cross-pod hand-off and the client's POST→connect gap. Sufficient at the
+    // small replica counts we run; a durable SSE-session→pod registry with
+    // targeted delivery is the future hardening for very large N.
     // Detect API rows by platform OR teamId: the worker's HTTP response carries
     // `teamId: "api"` but omits `platform`, while gateway-generated rows (e.g.
     // turn-liveness errors) set `platform: "api"`. Matching only `platform`
@@ -187,33 +187,24 @@ export class UnifiedThreadResponseConsumer {
     // (canHandle re-queues to the managing instance). Gating those on SSE
     // ownership too could re-queue a reply that was ready to deliver. The SSE
     // owner-gate is only for pure API/SSE rows, which never carry a connectionId.
-    const isApiRow =
-      (data.platform || data.teamId) === "api" &&
-      !data.platformMetadata?.connectionId;
-    if (isApiRow) {
-      const isTerminal = !!(
-        data.error ||
-        (data.processedMessageIds && data.processedMessageIds.length)
-      );
-      // Interaction cards (ask_user question, tool-approval, link-button) are
-      // pushed to the browser's SSE socket, which lives on exactly one pod.
-      // Like terminal rows they must be owner-routed: a non-owning pod
-      // re-queues so the pod holding the SSE connection (pinned by ClientIP
-      // affinity) delivers the card. Without this the card lands in a pod-local
-      // SseManager the browser is not connected to and the user never sees it,
-      // leaving the ask_user/tool-approval turn hung. The card-bearing rows are
-      // enqueued with `customEvent.requireSseOwner` set (see api/platform.ts)
-      // and the same raised-retry send opts as terminal rows so the re-queue
-      // window covers the cross-pod hand-off and the browser's POST→connect gap.
-      const requiresSseOwner =
-        isTerminal || data.customEvent?.requireSseOwner === true;
+    const hasConnectionId = !!data.platformMetadata?.connectionId;
+    const isApiRow = (data.platform || data.teamId) === "api" && !hasConnectionId;
+    const isApiTerminal = !!(
+      isApiRow &&
+      (data.error ||
+        (data.processedMessageIds && data.processedMessageIds.length))
+    );
+    // Interaction cards and work-state events are pushed to the browser's SSE
+    // socket, which lives on exactly one pod. Explicit owner-routed custom
+    // events must re-queue on a non-owning pod even when their worker routing
+    // context is a chat platform such as LINE rather than `platform: "api"`.
+    const requiresSseOwner =
+      !hasConnectionId &&
+      (isApiTerminal || data.customEvent?.requireSseOwner === true);
+    if (requiresSseOwner) {
       const sseKey =
         (data.platformMetadata?.sessionId as string) || data.conversationId;
-      if (
-        requiresSseOwner &&
-        sseKey &&
-        !this.sseManager.hasActiveConnection(sseKey)
-      ) {
+      if (sseKey && !this.sseManager.hasActiveConnection(sseKey)) {
         throw new Error(
           `API SSE session ${sseKey} not owned by this gateway instance; re-queueing for owner delivery`
         );

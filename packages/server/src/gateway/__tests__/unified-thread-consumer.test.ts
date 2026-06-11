@@ -173,6 +173,60 @@ describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
     );
     expect(renderer.handleCompletion).not.toHaveBeenCalled();
   });
+
+  test("re-queues shifu.work_state when this pod does not own the SSE", async () => {
+    const queue = {
+      start: mock(async () => undefined),
+      stop: mock(async () => undefined),
+      createQueue: mock(async () => undefined),
+      work: mock(async () => undefined),
+    };
+    const broadcast = mock(() => undefined);
+    const sseManager = {
+      broadcast,
+      hasActiveConnection: mock(() => false),
+    };
+    const platformRegistry = {
+      get: mock(() => ({
+        getResponseRenderer: () => ({
+          handleCompletion: mock(async () => undefined),
+          handleError: mock(async () => undefined),
+        }),
+      })),
+    };
+    const consumer = new UnifiedThreadResponseConsumer(
+      queue as any,
+      platformRegistry as any,
+      sseManager as any
+    ) as any;
+
+    await expect(
+      consumer.handleThreadResponse({
+        id: "job-work-state",
+        data: {
+          messageId: "decision-1",
+          channelId: "line:U1",
+          conversationId: "conv-1",
+          userId: "user-1",
+          teamId: "team-1",
+          platform: "line",
+          timestamp: 1000,
+          customEvent: {
+            name: "shifu.work_state",
+            requireSseOwner: true,
+            data: {
+              type: "human_input.requested",
+              eventId: "decision-1",
+              title: "Blocked",
+            },
+          },
+        },
+      })
+    ).rejects.toThrow(/not owned by this gateway instance/);
+
+    expect(sseManager.hasActiveConnection).toHaveBeenCalledWith("conv-1");
+    expect(broadcast).not.toHaveBeenCalled();
+  });
 });
 
 describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {

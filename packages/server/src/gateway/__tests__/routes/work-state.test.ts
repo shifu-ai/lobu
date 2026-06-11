@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
+import { TERMINAL_DELIVERY_SEND_OPTS } from "../../infrastructure/queue/types.js";
 import { createWorkStateRoutes } from "../../routes/internal/work-state.js";
 
 describe("work-state routes", () => {
@@ -96,9 +97,13 @@ describe("work-state routes", () => {
       platform: "line",
       customEvent: {
         name: "shifu.work_state",
+        requireSseOwner: true,
         data: eventBody,
       },
     });
+    expect(queueProducer.send.mock.calls[0][2]).toEqual(
+      TERMINAL_DELIVERY_SEND_OPTS
+    );
   });
 
   test("rejects malformed work-state events", async () => {
@@ -112,6 +117,88 @@ describe("work-state routes", () => {
     });
 
     expect(res.status).toBe(400);
+    expect(queueProducer.send).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    [
+      "less than three options",
+      { options: eventBody.options.slice(0, 2) },
+      /exactly 3/i,
+    ],
+    [
+      "no recommended option",
+      {
+        options: eventBody.options.map((option) => ({
+          ...option,
+          recommended: false,
+        })),
+      },
+      /exactly one/i,
+    ],
+    [
+      "two recommended options",
+      {
+        options: eventBody.options.map((option, index) => ({
+          ...option,
+          recommended: index < 2,
+        })),
+      },
+      /exactly one/i,
+    ],
+    [
+      "recommended option missing recommendation reason",
+      {
+        options: eventBody.options.map((option, index) => {
+          if (index !== 0) return option;
+          const { recommendationReason, ...withoutReason } = option;
+          void recommendationReason;
+          return withoutReason;
+        }),
+      },
+      /recommendation reason/i,
+    ],
+    [
+      "option missing tradeoff",
+      {
+        options: eventBody.options.map((option, index) =>
+          index === 1 ? { ...option, tradeoff: " " } : option
+        ),
+      },
+      /tradeoff/i,
+    ],
+    [
+      "option missing value",
+      {
+        options: eventBody.options.map((option, index) =>
+          index === 1 ? { ...option, value: "" } : option
+        ),
+      },
+      /value/i,
+    ],
+    [
+      "option missing label",
+      {
+        options: eventBody.options.map((option, index) =>
+          index === 1 ? { ...option, label: "" } : option
+        ),
+      },
+      /label/i,
+    ],
+  ])("rejects %s", async (_label, patch, errorPattern) => {
+    const res = await router.request("/internal/work-state/events", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${workerToken}`,
+      },
+      body: JSON.stringify({ ...eventBody, ...patch }),
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({
+      error: expect.stringMatching(errorPattern),
+    });
     expect(queueProducer.send).not.toHaveBeenCalled();
   });
 });
