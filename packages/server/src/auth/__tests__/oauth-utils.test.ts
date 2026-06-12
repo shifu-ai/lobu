@@ -6,6 +6,7 @@
  */
 
 import { describe, expect, test } from "vitest";
+import { AVAILABLE_PAT_SCOPES, AVAILABLE_SCOPES } from "../oauth/scopes";
 import {
   generatePAT,
   generateUserCode,
@@ -148,6 +149,16 @@ describe("parseScopes", () => {
   test("mcp:admin is a valid scope when declared", () => {
     const scopes = parseScopes("mcp:read mcp:write mcp:admin");
     expect(scopes).toContain("mcp:admin");
+  });
+
+  test("mcp:execute is a valid scope when declared", () => {
+    const scopes = parseScopes("mcp:execute");
+    expect(scopes).toEqual(["mcp:execute"]);
+  });
+
+  test("mcp:execute is canonical and mintable for PATs", () => {
+    expect(AVAILABLE_SCOPES).toContain("mcp:execute");
+    expect(AVAILABLE_PAT_SCOPES).toContain("mcp:execute");
   });
 
   test("empty string → default scopes", () => {

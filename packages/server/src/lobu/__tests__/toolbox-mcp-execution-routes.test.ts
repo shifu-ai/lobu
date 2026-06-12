@@ -135,6 +135,41 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call accepts non-admin mcp:execute bearer scope', async () => {
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:execute'] };
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer execute-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'drive_search',
+        args: { query: 'course', limit: 5 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: true,
+      content: { items: [{ id: 'doc-001', name: '技術分析全攻略課程 課綱' }] },
+    });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF,
+      'drive_search',
+      { query: 'course', limit: 5 }
+    );
+  });
+
   test('POST /mcp/tools/call rejects unauthenticated callers', async () => {
     authStash.user = null;
     authStash.organizationId = null;
