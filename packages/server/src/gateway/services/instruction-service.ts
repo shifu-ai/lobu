@@ -401,6 +401,18 @@ class ToolboxActiveContextInstructionProvider extends BaseInstructionProvider {
       .replace(/[<>()]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
+    try {
+      const parsed = new URL(normalized);
+      parsed.search = "";
+      parsed.hash = "";
+      return this.truncate(
+        `${parsed.origin}${parsed.pathname}`,
+        MAX_ACTIVE_CONTEXT_ARTIFACT_URL_CHARS
+      );
+    } catch {
+      // Keep malformed values plain and bounded; valid URLs are parsed above so
+      // signed query strings and fragments never reach the prompt.
+    }
     const truncated = this.truncate(
       normalized,
       MAX_ACTIVE_CONTEXT_ARTIFACT_URL_CHARS

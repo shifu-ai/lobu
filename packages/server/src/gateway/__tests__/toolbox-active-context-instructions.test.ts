@@ -308,6 +308,42 @@ describe("Toolbox active context instructions", () => {
     expect(sessionContext.platformInstructions).not.toContain("\u0000");
   });
 
+  test("redacts active context artifact URL query strings and fragments", async () => {
+    configureToolboxEnv();
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({
+          contextPack: {
+            title: "Project",
+            summary: "Summary",
+            confidence: "high",
+            importantArtifacts: [
+              {
+                title: "Sensitive doc",
+                preview: "Signed artifact link.",
+                source: "google_docs",
+                url: "https://docs.example/file?token=secret#frag",
+              },
+            ],
+          },
+          run: null,
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const sessionContext = await createService().getSessionContext(
+      "test",
+      context
+    );
+
+    expect(sessionContext.platformInstructions).toContain(
+      "(https://docs.example/file)"
+    );
+    expect(sessionContext.platformInstructions).not.toContain("token=secret");
+    expect(sessionContext.platformInstructions).not.toContain("#frag");
+  });
+
   test("truncates oversized active context fields", async () => {
     configureToolboxEnv();
     const longTitle = `Title ${"x".repeat(400)}`;
