@@ -31,6 +31,23 @@ interface SessionContextData {
   mcpStatus: McpStatus[];
 }
 
+interface ToolboxActiveContextResponse {
+  contextPack?: {
+    title?: unknown;
+    summary?: unknown;
+    confidence?: unknown;
+    importantArtifacts?: unknown;
+  } | null;
+  run?: unknown;
+}
+
+interface ToolboxActiveContextArtifact {
+  title: string;
+  preview: string;
+  source: string;
+  url?: string;
+}
+
 /**
  * Provides instructions from enabled skills for the agent.
  * Fetches skill content from AgentSettings and injects as instructions.
@@ -200,6 +217,108 @@ You can only access the allowed domains listed above. All other external request
   }
 }
 
+class ToolboxActiveContextInstructionProvider extends BaseInstructionProvider {
+  readonly name = "toolbox-active-context";
+  readonly priority = 25;
+
+  protected async buildInstructions(
+    context: InstructionContext
+  ): Promise<string> {
+    const baseUrl = process.env.TOOLBOX_ACTIVE_CONTEXT_URL?.trim();
+    const secret = process.env.TOOLBOX_INTERNAL_SECRET?.trim();
+    if (!baseUrl || !secret || !context.userId || !context.agentId) {
+      return "";
+    }
+
+    try {
+      const url = new URL(baseUrl);
+      url.searchParams.set("ownerUserId", context.userId);
+      url.searchParams.set("agentId", context.agentId);
+
+      const response = await fetch(url.toString(), {
+        method: "GET",
+        headers: { "X-Internal-Secret": secret },
+      });
+      if (!response.ok) {
+        return "";
+      }
+
+      const body = (await response.json()) as ToolboxActiveContextResponse;
+      const contextPack = body?.contextPack;
+      if (!contextPack || typeof contextPack !== "object") {
+        return "";
+      }
+
+      const title = this.toInstructionValue(contextPack.title);
+      const summary = this.toInstructionValue(contextPack.summary);
+      const confidence = this.toInstructionValue(contextPack.confidence);
+      if (!title && !summary) {
+        return "";
+      }
+
+      const artifacts = this.parseArtifacts(contextPack.importantArtifacts);
+      const lines = [
+        "## Active Project Context",
+        "",
+        `Project: ${title || "Untitled project"}`,
+        `Confidence: ${confidence || "unknown"}`,
+        `Summary: ${summary || "No summary provided."}`,
+      ];
+
+      if (artifacts.length > 0) {
+        lines.push("", "Important artifacts:");
+        for (const artifact of artifacts) {
+          const urlSuffix = artifact.url ? ` (${artifact.url})` : "";
+          lines.push(
+            `- ${artifact.title} [${artifact.source}]: ${artifact.preview}${urlSuffix}`
+          );
+        }
+      }
+
+      lines.push(
+        "",
+        "Use this context as the current user's active project background. If confidence is low, say so when relying on it."
+      );
+
+      return lines.join("\n");
+    } catch {
+      return "";
+    }
+  }
+
+  private parseArtifacts(value: unknown): ToolboxActiveContextArtifact[] {
+    if (!Array.isArray(value)) {
+      return [];
+    }
+
+    return value.slice(0, 5).flatMap((artifact) => {
+      if (!artifact || typeof artifact !== "object") {
+        return [];
+      }
+      const record = artifact as Record<string, unknown>;
+      const title = this.toInstructionValue(record.title);
+      const preview = this.toInstructionValue(record.preview);
+      const source = this.toInstructionValue(record.source);
+      const url = this.toInstructionValue(record.url);
+      if (!title && !preview && !source && !url) {
+        return [];
+      }
+      return [
+        {
+          title: title || "Untitled artifact",
+          preview: preview || "No preview provided.",
+          source: source || "unknown",
+          url,
+        },
+      ];
+    });
+  }
+
+  private toInstructionValue(value: unknown): string {
+    return typeof value === "string" ? value.trim() : "";
+  }
+}
+
 /**
  * Aggregates session context data for workers
  * Returns raw data (not built instructions) so workers can format as needed
@@ -269,6 +388,28 @@ export class InstructionService {
     } catch (error) {
       logger.error("Failed to get network instructions:", error);
     }
+
+    const toolboxActiveContextProvider =
+      new ToolboxActiveContextInstructionProvider();
+    let toolboxActiveContextInstructions = "";
+    try {
+      toolboxActiveContextInstructions =
+        await toolboxActiveContextProvider.getInstructions(context);
+      if (toolboxActiveContextInstructions) {
+        logger.info(
+          `Got Toolbox active context instructions (${toolboxActiveContextInstructions.length} chars)`
+        );
+      }
+    } catch (error) {
+      logger.error("Failed to get Toolbox active context instructions:", error);
+    }
+
+    platformInstructions = [
+      platformInstructions,
+      toolboxActiveContextInstructions,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     // Build agent instructions from identity/soul/user settings
     let agentInstructions = "";
