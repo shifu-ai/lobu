@@ -1,5 +1,55 @@
 # Changelog
 
+## [11.1.0](https://github.com/shifu-ai/lobu/compare/lobu-v11.0.0...lobu-v11.1.0) (2026-06-12)
+
+
+### Features
+
+* add structured human decision primitive ([376aecd](https://github.com/shifu-ai/lobu/commit/376aecdaf7684e7dd042f03395f4e0c626d34962))
+* **auth:** global login-provider baseline; drop default-org pointer ([#1183](https://github.com/shifu-ai/lobu/issues/1183)) ([a6ebbff](https://github.com/shifu-ai/lobu/commit/a6ebbffd6c3dd38c7825fbe7e23bef762870b3c9))
+* **cli:** add --org override to lobu chat ([#1185](https://github.com/shifu-ai/lobu/issues/1185)) ([38aa4ab](https://github.com/shifu-ai/lobu/commit/38aa4aba9d582fbce9d17fa263484ec776eeeaa4))
+* **connectors:** native Postgres connector — memory feeds, live pushdown, connection-backed derived entities ([#1182](https://github.com/shifu-ai/lobu/issues/1182)) ([aaebe15](https://github.com/shifu-ai/lobu/commit/aaebe152b4fbbbb5187a73bbc6de379b1f36d979))
+* derived entity types (SQL-view backing) + measure inference ([#1161](https://github.com/shifu-ai/lobu/issues/1161)) ([73abb03](https://github.com/shifu-ai/lobu/commit/73abb03b06c47bee0c3113e6f4b11aa71b96a3d6))
+* expose scoped mcp execution for toolbox discovery ([fb916b4](https://github.com/shifu-ai/lobu/commit/fb916b451659fb33dfa20b76b401ba9e3ce57832))
+* inject toolbox active project context ([5c1c143](https://github.com/shifu-ai/lobu/commit/5c1c14306fcd07504a225faeab6ec80afa9ffec7))
+* **landing:** add /schedule page + revamp 404 ([#1166](https://github.com/shifu-ai/lobu/issues/1166)) ([8812b2f](https://github.com/shifu-ai/lobu/commit/8812b2f840816159e372492a528625dc74a42111))
+* **lobu:** add PAT provisioning endpoint ([4c6cad2](https://github.com/shifu-ai/lobu/commit/4c6cad29eb95e537a1dc7c8b0e3412dffe91790e))
+* **lobu:** add toolbox mcp oauth provisioning ([5be558b](https://github.com/shifu-ai/lobu/commit/5be558b14dbab05e9a9a3de943677465c9a61030))
+* **queue:** emit a failed-run metric and a durable dead-letter retention window ([#1201](https://github.com/shifu-ai/lobu/issues/1201)) ([c7fffa5](https://github.com/shifu-ai/lobu/commit/c7fffa566fa812e4f8088e3786ea62da79e2d23b))
+* **sentry:** report worker provider/model failures + cut alert-feed noise ([#1186](https://github.com/shifu-ai/lobu/issues/1186)) ([39b8aa6](https://github.com/shifu-ai/lobu/commit/39b8aa60b63293a467d6978316cee47b97f65507))
+* **server:** query-rewrite recall mode for read_knowledge ([#1187](https://github.com/shifu-ai/lobu/issues/1187)) ([a7c7784](https://github.com/shifu-ai/lobu/commit/a7c7784dbb74d9f645a1577fd62f3c15d2d60261))
+* trigger toolbox project discovery from onboarding ([0a2ddf6](https://github.com/shifu-ai/lobu/commit/0a2ddf615ec7a4f06bb0c7079039e85ffea35c7c))
+* trigger Toolbox project discovery from onboarding ([74c3173](https://github.com/shifu-ai/lobu/commit/74c31738515140e7e761f91d68b0394241ea2617))
+
+
+### Bug Fixes
+
+* **agent-worker:** list ready mcp tools in context ([5c9a9a9](https://github.com/shifu-ai/lobu/commit/5c9a9a9a77417750c252468cc124e8a474d1f63e))
+* **agent-worker:** use run token for gateway tools ([349f3a0](https://github.com/shifu-ai/lobu/commit/349f3a0c64ec64c6a64595e388024b66dbf507cf))
+* constrain toolbox mcp execution endpoint ([e2671b6](https://github.com/shifu-ai/lobu/commit/e2671b616b4a1d05ee8f21870afcfd6a4cf8965c))
+* correctness/security bugs from multi-agent audit (rebased onto main) ([#1202](https://github.com/shifu-ai/lobu/issues/1202)) ([56dc97d](https://github.com/shifu-ai/lobu/commit/56dc97d606f422e68b70bdc31cddd92bb3bfd550))
+* **gateway:** deliver ask_user/tool-approval/link-button cards cross-replica ([#1194](https://github.com/shifu-ai/lobu/issues/1194)) ([dd47727](https://github.com/shifu-ai/lobu/commit/dd47727c0739b690f818177cf616151fe475c60b))
+* guard active context instruction inputs ([16b2310](https://github.com/shifu-ai/lobu/commit/16b23105d09523b38599c2daf86208a706f827e6))
+* **guardrails:** execute skill-declared and agent-inline guardrails (wire the dead aggregator) ([#1200](https://github.com/shifu-ai/lobu/issues/1200)) ([440e660](https://github.com/shifu-ai/lobu/commit/440e6605338e3686992e2197d4fc6847eeddf5f7))
+* harden toolbox active context instructions ([117d906](https://github.com/shifu-ai/lobu/commit/117d9062e8f8fae38de09b287d84291ac270c387))
+* **lobu:** preserve agent identity in worker prompts ([93750f2](https://github.com/shifu-ai/lobu/commit/93750f2c23809c433a32891921c4911192304c6d))
+* **lobu:** preserve connection id in run token ([714783f](https://github.com/shifu-ai/lobu/commit/714783fdcbdf68634e18bdaa67b5e86c79d264a2))
+* **lobu:** preserve org context for mcp oauth ([e40781d](https://github.com/shifu-ai/lobu/commit/e40781d32f8da53d1405e2df4e780a30fe0e65b2))
+* **lobu:** refresh mcp oauth token on upstream 401 ([78f6bdb](https://github.com/shifu-ai/lobu/commit/78f6bdbc530006598364394d75e03f205093355a))
+* **lobu:** resolve tavily mcp env references ([f459e0c](https://github.com/shifu-ai/lobu/commit/f459e0c02e97d2dd0d6a6bf88f49b10d8f6958d3))
+* **lobu:** scope internal worker routes by org ([acef3da](https://github.com/shifu-ai/lobu/commit/acef3da43c5a1e3b61fc1f09ade0de7496a95ca3))
+* **lobu:** scope mcp proxy calls by org ([bc890f7](https://github.com/shifu-ai/lobu/commit/bc890f72e37f815e7fb676905ba6b7fd8de7325a))
+* **lobu:** scope worker session context by org ([55adaf5](https://github.com/shifu-ai/lobu/commit/55adaf542636739238fc82160883804b77d1f97e))
+* **lobu:** sync provisioning pre-approved tools into grant store ([761ce17](https://github.com/shifu-ai/lobu/commit/761ce17493985b987242ab8759caebe10edadc10))
+* **lobu:** timestamp provisioned agent settings ([7e28229](https://github.com/shifu-ai/lobu/commit/7e282294da6554723aea7df95a955096d7604ed7))
+* mount toolbox mcp routes in embedded lobu api ([bb6b63d](https://github.com/shifu-ai/lobu/commit/bb6b63d15d28aaa900615ccae54271afc5887e22))
+* owner-route work state events ([5559ff5](https://github.com/shifu-ai/lobu/commit/5559ff5b3432e7e55059d972a9aa26da540930b3))
+* redact active context artifact urls ([cc92476](https://github.com/shifu-ai/lobu/commit/cc924763fcff8ce93c364c12443d078edc98868e))
+* register mcp execution scope ([d0c96b7](https://github.com/shifu-ai/lobu/commit/d0c96b79a1458eaa956a685857ffe047dc217a47))
+* **sdk:** correct search_sdk metadata + validate viewTemplates args ([#1184](https://github.com/shifu-ai/lobu/issues/1184)) ([36f41e2](https://github.com/shifu-ai/lobu/commit/36f41e2f9fac2b7301ccd6edc6813bf5dd988492))
+* **security:** close critical access-control and injection gaps from codebase audit ([#1192](https://github.com/shifu-ai/lobu/issues/1192)) ([a784560](https://github.com/shifu-ai/lobu/commit/a7845601957e6257ac4bfe3ac15fcf2cd6aff83c))
+* target work state events to api sse ([1858359](https://github.com/shifu-ai/lobu/commit/18583599bba8935897b7ee5c3209424ff5f816d3))
+
 ## [11.0.0](https://github.com/lobu-ai/lobu/compare/lobu-v10.2.0...lobu-v11.0.0) (2026-05-30)
 
 
