@@ -183,6 +183,83 @@ describe("Toolbox active context instructions", () => {
     );
   });
 
+  test("fails open when Toolbox returns invalid JSON", async () => {
+    configureToolboxEnv();
+    globalThis.fetch = mock(async () => {
+      return new Response("{not json", {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const sessionContext = await createService().getSessionContext(
+      "test",
+      context
+    );
+
+    expect(sessionContext.platformInstructions).toContain(
+      "## Platform Context"
+    );
+    expect(sessionContext.platformInstructions).not.toContain(
+      "## Active Project Context"
+    );
+  });
+
+  test("fails open when Toolbox returns a malformed response body", async () => {
+    configureToolboxEnv();
+    globalThis.fetch = mock(async () => {
+      return new Response(
+        JSON.stringify({ contextPack: "not-an-object", run: null }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }) as unknown as typeof fetch;
+
+    const sessionContext = await createService().getSessionContext(
+      "test",
+      context
+    );
+
+    expect(sessionContext.platformInstructions).not.toContain(
+      "## Active Project Context"
+    );
+  });
+
+  test("does not fetch Toolbox when user id is missing", async () => {
+    configureToolboxEnv();
+    const fetchMock = mock(async () => {
+      return new Response("{}", { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const sessionContext = await createService().getSessionContext("test", {
+      ...context,
+      userId: "",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sessionContext.platformInstructions).not.toContain(
+      "## Active Project Context"
+    );
+  });
+
+  test("does not fetch Toolbox when agent id is missing", async () => {
+    configureToolboxEnv();
+    const fetchMock = mock(async () => {
+      return new Response("{}", { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const sessionContext = await createService().getSessionContext("test", {
+      ...context,
+      agentId: "",
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sessionContext.platformInstructions).not.toContain(
+      "## Active Project Context"
+    );
+  });
+
   test("returns no active project context when env vars are missing", async () => {
     delete process.env.TOOLBOX_ACTIVE_CONTEXT_URL;
     delete process.env.TOOLBOX_INTERNAL_SECRET;
@@ -216,6 +293,29 @@ describe("Toolbox active context instructions", () => {
       context
     );
 
+    expect(sessionContext.platformInstructions).not.toContain(
+      "## Active Project Context"
+    );
+  });
+
+  test("null context with agent settings store does not throw or fetch Toolbox", async () => {
+    configureToolboxEnv();
+    const fetchMock = mock(async () => {
+      return new Response("{}", { status: 200 });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const fakeStore = {
+      getSettings: mock(async () => null),
+    };
+    const service = new InstructionService(undefined, fakeStore as any);
+
+    const sessionContext = await service.getSessionContext(
+      "test",
+      null as any
+    );
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fakeStore.getSettings).not.toHaveBeenCalled();
     expect(sessionContext.platformInstructions).not.toContain(
       "## Active Project Context"
     );

@@ -360,12 +360,20 @@ export class InstructionService {
     context: InstructionContext,
     options?: { settingsUrl?: string }
   ): Promise<SessionContextData> {
+    const safeContext = context ?? {
+      userId: "",
+      agentId: "",
+      sessionKey: "",
+      workingDirectory: "",
+    };
+
     // Get platform-specific instructions
     let platformInstructions = "";
     const platformProvider = this.platformProviders.get(platform);
     if (platformProvider) {
       try {
-        platformInstructions = await platformProvider.getInstructions(context);
+        platformInstructions =
+          await platformProvider.getInstructions(safeContext);
         logger.info(
           `Got ${platform} platform instructions (${platformInstructions.length} chars)`
         );
@@ -381,7 +389,7 @@ export class InstructionService {
     let networkInstructions = "";
     const networkProvider = new NetworkInstructionProvider();
     try {
-      networkInstructions = await networkProvider.getInstructions(context);
+      networkInstructions = await networkProvider.getInstructions(safeContext);
       logger.info(
         `Got network instructions (${networkInstructions.length} chars)`
       );
@@ -394,7 +402,7 @@ export class InstructionService {
     let toolboxActiveContextInstructions = "";
     try {
       toolboxActiveContextInstructions =
-        await toolboxActiveContextProvider.getInstructions(context);
+        await toolboxActiveContextProvider.getInstructions(safeContext);
       if (toolboxActiveContextInstructions) {
         logger.info(
           `Got Toolbox active context instructions (${toolboxActiveContextInstructions.length} chars)`
@@ -413,10 +421,10 @@ export class InstructionService {
 
     // Build agent instructions from identity/soul/user settings
     let agentInstructions = "";
-    if (this.agentSettingsStore && context.agentId) {
+    if (this.agentSettingsStore && safeContext.agentId) {
       try {
         const settings = await this.agentSettingsStore.getSettings(
-          context.agentId
+          safeContext.agentId
         );
         if (settings) {
           const sections: string[] = [];
@@ -450,7 +458,9 @@ export class InstructionService {
     // Get skills instructions (includes enabled skills from agent settings)
     let skillsInstructions = "";
     try {
-      skillsInstructions = await this.skillsProvider.getInstructions(context);
+      skillsInstructions = await this.skillsProvider.getInstructions(
+        safeContext
+      );
       logger.info(
         `Got skills instructions (${skillsInstructions.length} chars)`
       );
@@ -460,10 +470,10 @@ export class InstructionService {
 
     // Get MCP status data
     let mcpStatus: McpStatus[] = [];
-    if (this.mcpConfigService) {
+    if (this.mcpConfigService && safeContext.agentId) {
       try {
         mcpStatus =
-          (await this.mcpConfigService.getMcpStatus(context.agentId)) || [];
+          (await this.mcpConfigService.getMcpStatus(safeContext.agentId)) || [];
         logger.info(`Got MCP status for ${mcpStatus.length} MCPs`);
       } catch (error) {
         logger.error("Failed to get MCP status:", error);
