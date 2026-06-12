@@ -264,34 +264,63 @@ function requireSessionOrAdminPat(c: any): Response | null {
   return c.json({ error: 'Authentication required' }, 401);
 }
 
-function requireSessionOrMcpExecutionPat(c: any): Response | null {
+function requireSessionOrMcpExecutionPat(c: any, ownerUserId: string): Response | null {
   const authSource = c.get('authSource') as
     | 'session'
     | 'pat'
     | 'oauth'
     | null;
+  const user = c.get('user') as { id?: string } | null;
 
   if (authSource === 'session') {
-    return null;
+    if (user?.id === ownerUserId) {
+      return null;
+    }
+    return c.json(
+      {
+        error: 'forbidden',
+        error_description: 'This route requires an owner session.',
+      },
+      403
+    );
+  }
+
+  if (!user?.id) {
+    return c.json({ error: 'Authentication required' }, 401);
   }
 
   if (authSource === 'pat' || authSource === 'oauth') {
     const authInfo = c.get('mcpAuthInfo');
     const scopes: string[] = Array.isArray(authInfo?.scopes) ? authInfo.scopes : [];
-    if (scopes.includes('mcp:admin') || scopes.includes('mcp:execute')) {
+    if (scopes.includes('mcp:admin')) {
+      return null;
+    }
+    if (scopes.includes('mcp:execute') && user.id === ownerUserId) {
       return null;
     }
     return c.json(
       {
         error: 'forbidden',
         error_description:
-          'This route requires a web session or a token with mcp:admin or mcp:execute scope.',
+          'This route requires mcp:admin scope or mcp:execute scope for the owner user.',
       },
       403
     );
   }
 
   return c.json({ error: 'Authentication required' }, 401);
+}
+
+const TOOLBOX_DISCOVERY_TOOL_ALLOWLIST: Record<ToolboxMcpConnectorKey, ReadonlySet<string>> = {
+  google_workspace: new Set(['drive_search', 'docs_read', 'sheets_read']),
+  notion: new Set(['search', 'read_page', 'read_database']),
+};
+
+function isToolboxDiscoveryToolAllowed(
+  connectorKey: ToolboxMcpConnectorKey,
+  toolName: string
+): boolean {
+  return TOOLBOX_DISCOVERY_TOOL_ALLOWLIST[connectorKey].has(toolName);
 }
 
 type ToolboxMcpConnectorKey = 'notion' | 'google_workspace';
@@ -364,6 +393,18 @@ async function verifyAttachedMcpConnection(params: {
     return { status: 'not_connected' };
   }
 
+  const connectionMetadata = connection.metadata;
+  if (isPlainRecord(connectionMetadata)) {
+    const metadataOwnerUserId = connectionMetadata.ownerUserId;
+    if (
+      typeof metadataOwnerUserId === 'string' &&
+      metadataOwnerUserId.length > 0 &&
+      metadataOwnerUserId !== params.ownerUserId
+    ) {
+      return { status: 'not_connected' };
+    }
+  }
+
   if (connection.status === 'active') {
     return { status: 'ready', connection };
   }
@@ -392,9 +433,6 @@ function safeToolboxMcpError(errorCode: string, errorMessage: string) {
 // ── Toolbox-scoped MCP execution ────────────────────────────────────────────
 
 routes.post('/mcp/tools/call', async (c) => {
-  const denied = requireSessionOrMcpExecutionPat(c);
-  if (denied) return denied;
-
   let body: ToolboxMcpToolCallRequest;
   try {
     body = await c.req.json<ToolboxMcpToolCallRequest>();
@@ -423,6 +461,19 @@ routes.post('/mcp/tools/call', async (c) => {
         'ownerUserId, agentId, connectorKey, connectionRef, toolName, and object args are required'
       ),
       400
+    );
+  }
+
+  const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
+  if (denied) return denied;
+
+  if (!isToolboxDiscoveryToolAllowed(connectorKey, toolName)) {
+    return c.json(
+      safeToolboxMcpError(
+        'lobu_mcp_tool_not_allowed',
+        'MCP tool is not allowed for discovery'
+      ),
+      200
     );
   }
 
@@ -471,9 +522,6 @@ routes.post('/mcp/tools/call', async (c) => {
 });
 
 routes.get('/mcp/connections/status', async (c) => {
-  const denied = requireSessionOrMcpExecutionPat(c);
-  if (denied) return denied;
-
   const ownerUserId = c.req.query('ownerUserId')?.trim() ?? '';
   const agentId = c.req.query('agentId')?.trim() ?? '';
   const connectionRef = c.req.query('connectionRef')?.trim() ?? '';
@@ -487,6 +535,9 @@ routes.get('/mcp/connections/status', async (c) => {
   ) {
     return c.json({ status: 'error' }, 400);
   }
+
+  const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
+  if (denied) return denied;
 
   const { status } = await verifyAttachedMcpConnection({
     ownerUserId,

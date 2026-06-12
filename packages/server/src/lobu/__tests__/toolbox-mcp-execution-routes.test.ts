@@ -92,7 +92,7 @@ describe('Toolbox MCP execution routes', () => {
     authStash.authSource = 'pat';
     authStash.mcpAuthInfo = { scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] };
     executeToolDirectMock = mock(async () => ({
-      content: { items: [{ id: 'doc-001', name: '技術分析全攻略課程 課綱' }] },
+      content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
       isError: false,
     }));
     coreServicesStash.services = {
@@ -124,7 +124,7 @@ describe('Toolbox MCP execution routes', () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
       ok: true,
-      content: { items: [{ id: 'doc-001', name: '技術分析全攻略課程 課綱' }] },
+      content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
@@ -136,6 +136,12 @@ describe('Toolbox MCP execution routes', () => {
   });
 
   test('POST /mcp/tools/call accepts non-admin mcp:execute bearer scope', async () => {
+    authStash.user = {
+      id: OWNER_USER_ID,
+      name: 'Owner',
+      email: 'owner@test.local',
+      emailVerified: true,
+    };
     authStash.authSource = 'pat';
     authStash.mcpAuthInfo = { scopes: ['mcp:execute'] };
     const app = await importMountedAgentRoutes();
@@ -159,7 +165,7 @@ describe('Toolbox MCP execution routes', () => {
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({
       ok: true,
-      content: { items: [{ id: 'doc-001', name: '技術分析全攻略課程 課綱' }] },
+      content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
@@ -168,6 +174,129 @@ describe('Toolbox MCP execution routes', () => {
       'drive_search',
       { query: 'course', limit: 5 }
     );
+  });
+
+  test('POST /mcp/tools/call accepts an owner web session', async () => {
+    authStash.user = {
+      id: OWNER_USER_ID,
+      name: 'Owner',
+      email: 'owner@test.local',
+      emailVerified: true,
+    };
+    authStash.authSource = 'session';
+    authStash.mcpAuthInfo = null;
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'docs_read',
+        args: { documentId: 'doc-001' },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF,
+      'docs_read',
+      { documentId: 'doc-001' }
+    );
+  });
+
+  test('POST /mcp/tools/call rejects a session for a different owner', async () => {
+    authStash.user = {
+      id: 'different-user',
+      name: 'Different',
+      email: 'different@test.local',
+      emailVerified: true,
+    };
+    authStash.authSource = 'session';
+    authStash.mcpAuthInfo = null;
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'drive_search',
+        args: {},
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(executeToolDirectMock).not.toHaveBeenCalled();
+  });
+
+  test('POST /mcp/tools/call rejects mcp:execute bearer for a different owner', async () => {
+    authStash.user = {
+      id: 'different-user',
+      name: 'Different',
+      email: 'different@test.local',
+      emailVerified: true,
+    };
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:execute'] };
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer execute-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'drive_search',
+        args: {},
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(executeToolDirectMock).not.toHaveBeenCalled();
+  });
+
+  test('POST /mcp/tools/call rejects tools outside the discovery allowlist', async () => {
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'send_email',
+        args: { to: 'user@example.com' },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_not_allowed',
+      errorMessage: 'MCP tool is not allowed for discovery',
+    });
+    expect(executeToolDirectMock).not.toHaveBeenCalled();
   });
 
   test('POST /mcp/tools/call rejects unauthenticated callers', async () => {
@@ -212,6 +341,25 @@ describe('Toolbox MCP execution routes', () => {
 
     const res = await app.request(
       `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=missing-connection`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: 'not_connected' });
+  });
+
+  test('GET /mcp/connections/status maps owner metadata mismatch to not_connected', async () => {
+    const connection = fakeConnections.get(CONNECTION_REF);
+    fakeConnections.set(CONNECTION_REF, {
+      ...connection,
+      metadata: { ownerUserId: 'different-user' },
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
       {
         headers: { Authorization: 'Bearer admin-token' },
       }
