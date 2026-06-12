@@ -6,7 +6,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { encrypt, type AuthProfile } from '@lobu/core';
+import { encrypt, type AuthProfile, type StoredConnection } from '@lobu/core';
 import { Hono } from 'hono';
 import { mcpAuth } from '../auth/middleware';
 import { getDb } from '../db/client';
@@ -263,6 +263,239 @@ function requireSessionOrAdminPat(c: any): Response | null {
 
   return c.json({ error: 'Authentication required' }, 401);
 }
+
+function requireSessionOrMcpExecutionPat(c: any): Response | null {
+  const authSource = c.get('authSource') as
+    | 'session'
+    | 'pat'
+    | 'oauth'
+    | null;
+
+  if (authSource === 'session') {
+    return null;
+  }
+
+  if (authSource === 'pat' || authSource === 'oauth') {
+    const authInfo = c.get('mcpAuthInfo');
+    const scopes: string[] = Array.isArray(authInfo?.scopes) ? authInfo.scopes : [];
+    if (scopes.includes('mcp:admin') || scopes.includes('mcp:execute')) {
+      return null;
+    }
+    return c.json(
+      {
+        error: 'forbidden',
+        error_description:
+          'This route requires a web session or a token with mcp:admin or mcp:execute scope.',
+      },
+      403
+    );
+  }
+
+  return c.json({ error: 'Authentication required' }, 401);
+}
+
+type ToolboxMcpConnectorKey = 'notion' | 'google_workspace';
+type ToolboxMcpStatusConnectorKey = ToolboxMcpConnectorKey | 'shifu_toolbox';
+
+type ToolboxMcpToolCallRequest = {
+  ownerUserId?: unknown;
+  agentId?: unknown;
+  connectorKey?: unknown;
+  connectionRef?: unknown;
+  toolName?: unknown;
+  args?: unknown;
+};
+
+type ToolboxMcpConnectionStatus = 'ready' | 'needs_reauth' | 'not_connected' | 'error';
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isToolboxMcpConnectorKey(value: unknown): value is ToolboxMcpConnectorKey {
+  return value === 'notion' || value === 'google_workspace';
+}
+
+function isToolboxMcpStatusConnectorKey(value: unknown): value is ToolboxMcpStatusConnectorKey {
+  return isToolboxMcpConnectorKey(value) || value === 'shifu_toolbox';
+}
+
+function metadataString(
+  connection: StoredConnection,
+  field: string
+): string | undefined {
+  const sources = [connection.metadata, connection.settings, connection.config];
+  for (const source of sources) {
+    if (!isPlainRecord(source)) continue;
+    const value = source[field];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function connectionMatchesConnector(
+  connection: StoredConnection,
+  connectorKey: ToolboxMcpStatusConnectorKey
+): boolean {
+  return (
+    connection.platform === connectorKey ||
+    metadataString(connection, 'connectorKey') === connectorKey ||
+    metadataString(connection, 'provider') === connectorKey
+  );
+}
+
+async function verifyAttachedMcpConnection(params: {
+  ownerUserId: string;
+  agentId: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+  connectionRef: string;
+}): Promise<{ status: ToolboxMcpConnectionStatus; connection?: StoredConnection }> {
+  const metadata = await configStore.getMetadata(params.agentId);
+  if (!metadata || metadata.owner?.userId !== params.ownerUserId) {
+    return { status: 'not_connected' };
+  }
+
+  const connection = await connectionStore.getConnection(params.connectionRef);
+  if (
+    !connection ||
+    connection.agentId !== params.agentId ||
+    !connectionMatchesConnector(connection, params.connectorKey)
+  ) {
+    return { status: 'not_connected' };
+  }
+
+  if (connection.status === 'active') {
+    return { status: 'ready', connection };
+  }
+
+  const errorText = connection.errorMessage?.toLowerCase() ?? '';
+  if (/auth|oauth|token|credential|reauth|unauthorized|forbidden/.test(errorText)) {
+    return { status: 'needs_reauth', connection };
+  }
+
+  if (connection.status === 'error') {
+    return { status: 'error', connection };
+  }
+
+  return { status: 'not_connected', connection };
+}
+
+function safeToolboxMcpError(errorCode: string, errorMessage: string) {
+  return {
+    ok: false,
+    content: null,
+    errorCode,
+    errorMessage,
+  };
+}
+
+// ── Toolbox-scoped MCP execution ────────────────────────────────────────────
+
+routes.post('/mcp/tools/call', async (c) => {
+  const denied = requireSessionOrMcpExecutionPat(c);
+  if (denied) return denied;
+
+  let body: ToolboxMcpToolCallRequest;
+  try {
+    body = await c.req.json<ToolboxMcpToolCallRequest>();
+  } catch {
+    return c.json(safeToolboxMcpError('lobu_mcp_invalid_request', 'Invalid JSON body'), 400);
+  }
+
+  const ownerUserId = typeof body.ownerUserId === 'string' ? body.ownerUserId.trim() : '';
+  const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
+  const connectionRef = typeof body.connectionRef === 'string' ? body.connectionRef.trim() : '';
+  const toolName = typeof body.toolName === 'string' ? body.toolName.trim() : '';
+  const connectorKey = body.connectorKey;
+  const args = body.args === undefined ? {} : body.args;
+
+  if (
+    !ownerUserId ||
+    !agentId ||
+    !connectionRef ||
+    !toolName ||
+    !isToolboxMcpConnectorKey(connectorKey) ||
+    !isPlainRecord(args)
+  ) {
+    return c.json(
+      safeToolboxMcpError(
+        'lobu_mcp_invalid_request',
+        'ownerUserId, agentId, connectorKey, connectionRef, toolName, and object args are required'
+      ),
+      400
+    );
+  }
+
+  const guard = await verifyAttachedMcpConnection({
+    ownerUserId,
+    agentId,
+    connectorKey,
+    connectionRef,
+  });
+  if (guard.status !== 'ready') {
+    return c.json(
+      safeToolboxMcpError('lobu_mcp_not_ready', `MCP connection is ${guard.status}`),
+      200
+    );
+  }
+
+  const mcpProxy = getLobuCoreServices()?.getMcpProxy?.();
+  if (!mcpProxy?.executeToolDirect) {
+    return c.json(
+      safeToolboxMcpError('lobu_mcp_unavailable', 'MCP execution is unavailable'),
+      503
+    );
+  }
+
+  try {
+    const result = await mcpProxy.executeToolDirect(
+      agentId,
+      ownerUserId,
+      connectionRef,
+      toolName,
+      args
+    );
+    if (result?.isError) {
+      return c.json(
+        safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed'),
+        200
+      );
+    }
+    return c.json({ ok: true, content: result?.content ?? null });
+  } catch {
+    return c.json(
+      safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed'),
+      200
+    );
+  }
+});
+
+routes.get('/mcp/connections/status', async (c) => {
+  const denied = requireSessionOrMcpExecutionPat(c);
+  if (denied) return denied;
+
+  const ownerUserId = c.req.query('ownerUserId')?.trim() ?? '';
+  const agentId = c.req.query('agentId')?.trim() ?? '';
+  const connectionRef = c.req.query('connectionRef')?.trim() ?? '';
+  const connectorKey = c.req.query('connectorKey')?.trim();
+
+  if (
+    !ownerUserId ||
+    !agentId ||
+    !connectionRef ||
+    !isToolboxMcpStatusConnectorKey(connectorKey)
+  ) {
+    return c.json({ status: 'error' }, 400);
+  }
+
+  const { status } = await verifyAttachedMcpConnection({
+    ownerUserId,
+    agentId,
+    connectorKey,
+    connectionRef,
+  });
+  return c.json({ status });
+});
 
 /** Whitelist profile metadata down to the non-secret fields (email, expiresAt, accountId). */
 function sanitizeClientProfileMetadata(
