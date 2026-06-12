@@ -6,10 +6,22 @@ import { join } from "node:path";
 import { createOpenClawCustomTools } from "../openclaw/custom-tools";
 
 const originalFetch = globalThis.fetch;
+const originalProjectDiscoveryUrl = process.env.TOOLBOX_PROJECT_DISCOVERY_URL;
+const originalInternalSecret = process.env.TOOLBOX_INTERNAL_SECRET;
 
 describe("createOpenClawCustomTools", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    if (originalProjectDiscoveryUrl === undefined) {
+      delete process.env.TOOLBOX_PROJECT_DISCOVERY_URL;
+    } else {
+      process.env.TOOLBOX_PROJECT_DISCOVERY_URL = originalProjectDiscoveryUrl;
+    }
+    if (originalInternalSecret === undefined) {
+      delete process.env.TOOLBOX_INTERNAL_SECRET;
+    } else {
+      process.env.TOOLBOX_INTERNAL_SECRET = originalInternalSecret;
+    }
     mock.restore();
   });
 
@@ -31,6 +43,7 @@ describe("createOpenClawCustomTools", () => {
       "get_channel_history",
       "ask_user",
       "request_human_decision",
+      "start_project_context_discovery",
     ]);
   });
 
@@ -123,5 +136,139 @@ describe("createOpenClawCustomTools", () => {
 
     expect(posted).toBe(1);
     expect(result.content[0]?.text).toContain("Question posted with buttons");
+  });
+
+  test("start_project_context_discovery posts the project seed to Toolbox with internal auth", async () => {
+    process.env.TOOLBOX_PROJECT_DISCOVERY_URL =
+      "https://toolbox.example/agent-workbench/project-context/internal/discovery-runs";
+    process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
+    const fetchMock = mock(async () =>
+      Response.json({
+        run: {
+          id: "run-1",
+          status: "completed",
+          evidenceCount: 2,
+          confirmedEvidenceCount: 1,
+          memoryWriteStatus: "written",
+        },
+        contextPack: {
+          id: "pack-1",
+          title: "技術分析全攻略課程",
+          confidence: "high",
+        },
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const tool = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent-1",
+      userId: "toolbox-user-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+    }).find(
+      (candidate) => candidate.name === "start_project_context_discovery"
+    );
+
+    expect(tool).toBeDefined();
+
+    const result = await tool!.execute("tool-call-1", {
+      projectName: "技術分析全攻略課程",
+      aliases: ["技術分析全攻略"],
+      projectType: "course",
+      userRole: "負責課程內容與專案推進",
+      timeRange: { mode: "last_90_days" },
+    });
+
+    expect(result.content[0]?.text).toContain(
+      "Project context discovery started"
+    );
+    expect(result.content[0]?.text).toContain("技術分析全攻略課程");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [input, init] = fetchMock.mock.calls[0] as unknown as [
+      RequestInfo | URL,
+      RequestInit,
+    ];
+    expect(String(input)).toBe(
+      "https://toolbox.example/agent-workbench/project-context/internal/discovery-runs"
+    );
+    expect(init.method).toBe("POST");
+    expect(init.headers).toMatchObject({
+      "content-type": "application/json",
+      "X-Internal-Secret": "internal-secret",
+    });
+    expect(JSON.parse(String(init.body))).toEqual({
+      ownerUserId: "toolbox-user-1",
+      agentId: "shifu-u-agent-1",
+      projectName: "技術分析全攻略課程",
+      aliases: ["技術分析全攻略"],
+      projectType: "course",
+      userRole: "負責課程內容與專案推進",
+      timeRange: { mode: "last_90_days" },
+    });
+  });
+
+  test("start_project_context_discovery refuses to call Toolbox without current user identity", async () => {
+    process.env.TOOLBOX_PROJECT_DISCOVERY_URL =
+      "https://toolbox.example/agent-workbench/project-context/internal/discovery-runs";
+    process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
+    const fetchMock = mock(async () => Response.json({}));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const tool = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+    }).find(
+      (candidate) => candidate.name === "start_project_context_discovery"
+    );
+
+    const result = await tool!.execute("tool-call-1", {
+      projectName: "技術分析全攻略課程",
+    });
+
+    expect(result.content[0]?.text).toContain(
+      "missing the current user or agent identity"
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  test("start_project_context_discovery reports Toolbox errors without throwing", async () => {
+    process.env.TOOLBOX_PROJECT_DISCOVERY_URL =
+      "https://toolbox.example/agent-workbench/project-context/internal/discovery-runs";
+    process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
+    const fetchMock = mock(async () =>
+      Response.json({ error: "missing ownerUserId" }, { status: 400 })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const tool = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent-1",
+      userId: "toolbox-user-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+    }).find(
+      (candidate) => candidate.name === "start_project_context_discovery"
+    );
+
+    const result = await tool!.execute("tool-call-1", {
+      projectName: "技術分析全攻略課程",
+    });
+
+    expect(result.content[0]?.text).toContain(
+      "Project context discovery failed: missing ownerUserId"
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
