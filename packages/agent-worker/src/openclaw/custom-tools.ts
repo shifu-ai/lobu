@@ -13,6 +13,7 @@ import {
   getChannelHistory,
   logoutMcp,
   requestHumanDecision,
+  startProjectContextDiscovery,
   startMcpLogin,
   uploadUserFile,
 } from "../shared/tool-implementations";
@@ -49,6 +50,7 @@ export function createOpenClawCustomTools(params: {
   gatewayUrl: string;
   workerToken: string;
   agentId: string;
+  userId?: string;
   channelId: string;
   conversationId: string;
   platform?: string;
@@ -70,6 +72,7 @@ export function createOpenClawCustomTools(params: {
     gatewayUrl: params.gatewayUrl,
     workerToken: params.workerToken,
     agentId: params.agentId,
+    userId: params.userId,
     channelId: params.channelId,
     conversationId: params.conversationId,
     platform: params.platform || "slack",
@@ -255,6 +258,48 @@ export function createOpenClawCustomTools(params: {
         requestHumanDecision(gw, args, {
           onPosted: params.onAskUserPosted,
         }),
+    }),
+
+    defineTool({
+      name: "start_project_context_discovery",
+      description: getCustomToolDescription("start_project_context_discovery"),
+      parameters: Type.Object({
+        projectName: Type.String({
+          description:
+            "The confirmed project, product, campaign, or course name to search for.",
+        }),
+        aliases: Type.Optional(
+          Type.Array(Type.String(), {
+            description:
+              "Alternate names, abbreviations, or likely file/page titles for this project.",
+          })
+        ),
+        projectType: Type.Optional(
+          Type.Union([
+            Type.Literal("course"),
+            Type.Literal("product"),
+            Type.Literal("campaign"),
+            Type.Literal("internal_project"),
+            Type.Literal("unknown"),
+          ])
+        ),
+        userRole: Type.Optional(
+          Type.String({
+            description:
+              "The user's role or responsibility for this project, if known.",
+          })
+        ),
+        timeRange: Type.Optional(
+          Type.Object({
+            mode: Type.Optional(
+              Type.Union([Type.Literal("last_90_days"), Type.Literal("custom")])
+            ),
+            start: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+            end: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+          })
+        ),
+      }),
+      run: (args) => startProjectContextDiscovery(gw, args),
     }),
   ];
 

@@ -72,10 +72,14 @@ describe("WorkerGateway session context", () => {
 		expect(response.status).toBe(200);
 
 		const body = (await response.json()) as {
+			userId: string;
+			agentId: string;
 			skillsConfig: Array<{ name: string; content: string }>;
 			skillsInstructions: string;
 		};
 
+		expect(body.userId).toBe("user-1");
+		expect(body.agentId).toBe("agent-1");
 		expect(body.skillsConfig).toEqual([
 			{ name: "custom-skill", content: "# Custom Skill\n" },
 		]);

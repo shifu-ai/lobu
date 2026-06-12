@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   detectToolIntentRules,
   getCustomToolDescription,
+  renderAlwaysOnToolPolicyRules,
   renderDetectedToolIntentRules,
 } from "../agent-policy";
 
@@ -30,6 +31,17 @@ describe("agent-policy file delivery guidance", () => {
   test("upload_file description forbids local path substitutes", () => {
     expect(getCustomToolDescription("upload_file")).toContain(
       "Do not substitute local paths, workspace paths, or sandbox links"
+    );
+  });
+
+  test("always-on onboarding guidance requires confirmation before discovery", () => {
+    const instructions = renderAlwaysOnToolPolicyRules();
+
+    expect(instructions).toContain("Project Context Onboarding");
+    expect(instructions).toContain("start_project_context_discovery");
+    expect(instructions).toContain("ask the user to confirm");
+    expect(instructions).toContain(
+      "Do not call start_project_context_discovery before the user confirms"
     );
   });
 });

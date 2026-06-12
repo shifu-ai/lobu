@@ -37,6 +37,10 @@ export const CUSTOM_TOOL_METADATA: Record<string, CustomToolMetadata> = {
     description:
       "Use this for a recoverable blocker when the user needs to choose how the agent should proceed. Posts a structured ShiFu work-state event and ends the turn.",
   },
+  start_project_context_discovery: {
+    description:
+      "Start ShiFu project context discovery after onboarding has collected a confirmed project name and the user has approved searching connected Notion / Google Workspace sources. Pass the project name, aliases, project type, user role, and time range; the tool uses the current Toolbox user and Lobu agent automatically.",
+  },
 };
 
 export const TOOL_INTENT_RULES: ToolIntentRule[] = [
@@ -57,6 +61,21 @@ export const TOOL_INTENT_RULES: ToolIntentRule[] = [
     ],
     patterns: [],
     priority: 10,
+    alwaysInclude: true,
+  },
+  {
+    id: "project-context-onboarding",
+    title: "Project Context Onboarding",
+    tools: ["ask_user", "start_project_context_discovery"],
+    instructionLines: [
+      "When onboarding a user into a project, ask enough questions to identify the project name, likely aliases, project type, the user's role, and an appropriate time range.",
+      "Before searching connected workspace sources, summarize the project seed and ask the user to confirm.",
+      "After the user confirms, call start_project_context_discovery with the confirmed project seed.",
+      "Do not call start_project_context_discovery before the user confirms the project seed.",
+      "After the tool succeeds, tell the user that project context discovery has started and future turns can use the active project context.",
+    ],
+    patterns: [],
+    priority: 15,
     alwaysInclude: true,
   },
   {

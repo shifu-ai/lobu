@@ -878,6 +878,7 @@ Use it when the user references past discussions or you need context.`);
 
   const customTools = createOpenClawCustomTools({
     ...gwParams,
+    userId: context.userId,
     workspaceDir,
     onCustomEvent: async (name, data) => {
       await onProgress({

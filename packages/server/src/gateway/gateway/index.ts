@@ -632,6 +632,8 @@ export class WorkerGateway {
 				);
 
 				return c.json({
+					userId,
+					agentId: agentId || "",
 					mcpConfig,
 					agentInstructions: contextData.agentInstructions,
 					platformInstructions: contextData.platformInstructions,

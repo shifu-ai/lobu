@@ -135,6 +135,7 @@ export interface GatewayParams {
   gatewayUrl: string;
   workerToken: string;
   agentId: string;
+  userId?: string;
   channelId: string;
   conversationId: string;
   platform?: string;
@@ -144,6 +145,108 @@ export interface GatewayParams {
    * process's directory, not the per-conversation workspace).
    */
   workspaceDir?: string;
+}
+
+// ============================================================================
+// start_project_context_discovery
+// ============================================================================
+
+export async function startProjectContextDiscovery(
+  gw: GatewayParams,
+  args: {
+    projectName: string;
+    aliases?: string[];
+    projectType?:
+      | "course"
+      | "product"
+      | "campaign"
+      | "internal_project"
+      | "unknown";
+    userRole?: string;
+    timeRange?: {
+      mode?: "last_90_days" | "custom";
+      start?: string | null;
+      end?: string | null;
+    };
+  }
+): Promise<TextResult> {
+  return withErrorHandling("start_project_context_discovery", async () => {
+    const url = process.env.TOOLBOX_PROJECT_DISCOVERY_URL?.trim();
+    const secret = process.env.TOOLBOX_INTERNAL_SECRET?.trim();
+    const ownerUserId = gw.userId?.trim();
+    const agentId = gw.agentId?.trim();
+    const projectName = args.projectName?.trim();
+
+    if (!url || !secret) {
+      return textResult(
+        "Error: Project context discovery is not configured. I saved the onboarding details in this conversation, but I could not start workspace discovery."
+      );
+    }
+    if (!ownerUserId || !agentId) {
+      return textResult(
+        "Error: Project context discovery is missing the current user or agent identity."
+      );
+    }
+    if (!projectName) {
+      return textResult("Error: projectName is required.");
+    }
+
+    const payload = {
+      ownerUserId,
+      agentId,
+      projectName,
+      aliases: Array.isArray(args.aliases)
+        ? args.aliases.filter(
+            (alias): alias is string => typeof alias === "string"
+          )
+        : [],
+      ...(args.projectType ? { projectType: args.projectType } : {}),
+      ...(typeof args.userRole === "string" && args.userRole.trim()
+        ? { userRole: args.userRole.trim() }
+        : {}),
+      ...(args.timeRange ? { timeRange: args.timeRange } : {}),
+    };
+
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "X-Internal-Secret": secret,
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(60_000),
+    });
+
+    if (!response.ok) {
+      const error = await parseErrorBody(response);
+      return textResult(
+        `Error: Project context discovery failed: ${error.error || response.statusText}`
+      );
+    }
+
+    const result = (await response.json()) as {
+      run?: {
+        id?: string;
+        status?: string;
+        evidenceCount?: number;
+        confirmedEvidenceCount?: number;
+        memoryWriteStatus?: string;
+      };
+      contextPack?: {
+        id?: string;
+        title?: string;
+        confidence?: string;
+      };
+    };
+
+    const title = result.contextPack?.title || projectName;
+    const evidenceCount = result.run?.evidenceCount ?? 0;
+    const confirmedEvidenceCount = result.run?.confirmedEvidenceCount ?? 0;
+    const memoryWriteStatus = result.run?.memoryWriteStatus || "unknown";
+    return textResult(
+      `Project context discovery started for "${title}". Run status: ${result.run?.status || "unknown"}. Evidence: ${confirmedEvidenceCount}/${evidenceCount} confirmed. Memory write: ${memoryWriteStatus}.`
+    );
+  });
 }
 
 // ============================================================================
