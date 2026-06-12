@@ -27,6 +27,7 @@ import {
 import { orgContext } from './stores/org-context';
 
 const routes = new Hono<{ Bindings: Env }>();
+const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
 
 /**
  * Coerce an `array_agg` result into a real `string[]`. With the `::text` cast
@@ -432,7 +433,15 @@ function safeToolboxMcpError(errorCode: string, errorMessage: string) {
 
 // ── Toolbox-scoped MCP execution ────────────────────────────────────────────
 
-routes.post('/mcp/tools/call', async (c) => {
+toolboxMcpRoutes.use('*', mcpAuth);
+
+toolboxMcpRoutes.use('*', async (c, next) => {
+  const orgId = c.get('organizationId');
+  if (!orgId) return c.json({ error: 'Organization required' }, 401);
+  return orgContext.run({ organizationId: orgId }, next);
+});
+
+toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   let body: ToolboxMcpToolCallRequest;
   try {
     body = await c.req.json<ToolboxMcpToolCallRequest>();
@@ -521,7 +530,7 @@ routes.post('/mcp/tools/call', async (c) => {
   }
 });
 
-routes.get('/mcp/connections/status', async (c) => {
+toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
   const ownerUserId = c.req.query('ownerUserId')?.trim() ?? '';
   const agentId = c.req.query('agentId')?.trim() ?? '';
   const connectionRef = c.req.query('connectionRef')?.trim() ?? '';
@@ -547,6 +556,8 @@ routes.get('/mcp/connections/status', async (c) => {
   });
   return c.json({ status });
 });
+
+routes.route('/', toolboxMcpRoutes);
 
 /** Whitelist profile metadata down to the non-secret fields (email, expiresAt, accountId). */
 function sanitizeClientProfileMetadata(
@@ -1806,4 +1817,4 @@ routes.post('/:agentId/platforms/:platformId/stop', async (c) => {
   return changePlatformRunState(c, agentId, platformId, 'stopConnection', 'stopped');
 });
 
-export { routes as agentRoutes };
+export { routes as agentRoutes, toolboxMcpRoutes };

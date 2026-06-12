@@ -49,9 +49,9 @@ mock.module('../stores/postgres-stores', () => ({
 }));
 
 async function importMountedAgentRoutes() {
-  const { agentRoutes } = await import('../agent-routes.js');
+  const { toolboxMcpRoutes } = await import('../agent-routes.js');
   const app = new Hono();
-  app.route('/lobu/api/v1', agentRoutes);
+  app.route('/lobu/api/v1', toolboxMcpRoutes);
   return app;
 }
 

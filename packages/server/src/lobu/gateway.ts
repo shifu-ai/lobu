@@ -31,6 +31,7 @@ import {
   getCachedOrgBySlug,
 } from '../workspace/multi-tenant';
 import { orgContext } from './stores/org-context';
+import { toolboxMcpRoutes } from './agent-routes';
 import { createProvisioningRoutes } from './provisioning-routes';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
 import {
@@ -460,6 +461,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
       })
     );
+    lobuApp.route('/api/v1', toolboxMcpRoutes);
     lobuApp.route('/', rawLobuApp);
 
     logger.info('[Lobu] Embedded gateway initialized');
