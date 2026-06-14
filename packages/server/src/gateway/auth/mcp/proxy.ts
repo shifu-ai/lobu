@@ -125,7 +125,7 @@ export class McpProxy {
 		mcpId: string,
 		toolName: string,
 		args: Record<string, unknown>,
-		options?: { organizationId?: string },
+		options: { organizationId: string },
 	): Promise<{
 		content: Array<{ type: string; text: string }>;
 		isError: boolean;
@@ -586,6 +586,13 @@ export class McpProxy {
 		});
 
 		if (!this.onToolBlocked) return "blocked-no-channel";
+		if (!tokenData.organizationId) {
+			logger.error(
+				{ agentId, mcpId, toolName },
+				"Refusing to store pending MCP tool approval without organizationId",
+			);
+			return "blocked-no-channel";
+		}
 
 		const requestId = `ta_${randomUUID()}`;
 		await storePendingTool(

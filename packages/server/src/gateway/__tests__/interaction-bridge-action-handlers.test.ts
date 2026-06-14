@@ -81,6 +81,7 @@ const PENDING: PendingToolInvocation = {
   args: { title: "hi" },
   agentId: "agent-1",
   userId: "user-1",
+	organizationId: "org-1",
 };
 
 async function seedPending(requestId: string): Promise<void> {
@@ -127,6 +128,7 @@ describe("registerActionHandlers — tool approval", () => {
       "github",
       "create_issue",
       { title: "hi" },
+			{ organizationId: "org-1" },
     ]);
 
     expect(h.post).toHaveBeenCalledWith("issue #42");

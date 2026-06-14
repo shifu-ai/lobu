@@ -147,7 +147,9 @@ export function runWithOrganizationContext<T>(
 	organizationId: string | null | undefined,
 	fn: () => T,
 ): T {
-	if (!organizationId) return fn();
+	if (!organizationId) {
+		throw new Error("MCP organization context requires organizationId");
+	}
 	return orgContext.run({ organizationId }, fn);
 }
 

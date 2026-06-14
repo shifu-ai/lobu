@@ -28,7 +28,7 @@ type ExecuteToolDirectFn = (
   mcpId: string,
   toolName: string,
 	args: Record<string, unknown>,
-	options?: { organizationId?: string },
+	options: { organizationId: string },
 ) => Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -830,15 +830,24 @@ export function registerActionHandlers(
       // Execute the pending tool call
       if (executeToolDirect) {
         try {
-					const organizationId =
-						pending.organizationId ?? connection.organizationId;
+					const organizationId = pending.organizationId;
+					if (!organizationId) {
+						logger.error(
+							{ requestId, mcpId: pending.mcpId, toolName: pending.toolName },
+							"Refusing to execute approved MCP tool without organizationId",
+						);
+						await postTarget.post(
+							"This tool approval is missing organization context. Re-send your request to retry.",
+						);
+						return;
+					}
           const result = await executeToolDirect(
             pending.agentId,
             pending.userId,
             pending.mcpId,
             pending.toolName,
 						pending.args,
-						...(organizationId ? [{ organizationId }] : []),
+						{ organizationId },
           );
 
           const resultText = result.content.map((c) => c.text).join("\n");

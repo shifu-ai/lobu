@@ -15,7 +15,7 @@ export interface PendingToolInvocation {
   args: Record<string, unknown>;
   agentId: string;
   userId: string;
-	organizationId?: string;
+	organizationId: string;
   channelId?: string;
   conversationId?: string;
   teamId?: string;

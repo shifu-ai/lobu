@@ -22,6 +22,9 @@ export async function handleListTools(
 	if (!mcpId) return c.json({ error: "Missing MCP server id" }, 400);
 	const auth = await authenticateRequest(c);
 	if (!auth) return c.json({ error: "Invalid authentication token" }, 401);
+	if (!auth.tokenData.organizationId) {
+		return c.json({ error: "Worker token missing organizationId" }, 401);
+	}
 
 	return runWithWorkerOrgContext(auth.tokenData, () =>
 		handleListToolsAuthenticated(proxy, c, auth, mcpId),
@@ -81,6 +84,9 @@ export async function handleCallTool(
 	}
 	const auth = await authenticateRequest(c);
 	if (!auth) return c.json({ error: "Invalid authentication token" }, 401);
+	if (!auth.tokenData.organizationId) {
+		return c.json({ error: "Worker token missing organizationId" }, 401);
+	}
 
 	return runWithWorkerOrgContext(auth.tokenData, () =>
 		handleCallToolAuthenticated(proxy, c, auth, mcpId, toolName),
@@ -362,6 +368,9 @@ export async function handleListAllTools(
 ): Promise<Response> {
 	const auth = await authenticateRequest(c);
 	if (!auth) return c.json({ error: "Invalid authentication token" }, 401);
+	if (!auth.tokenData.organizationId) {
+		return c.json({ error: "Worker token missing organizationId" }, 401);
+	}
 
 	return runWithWorkerOrgContext(auth.tokenData, () =>
 		handleListAllToolsAuthenticated(proxy, c, auth),

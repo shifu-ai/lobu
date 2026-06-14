@@ -252,6 +252,10 @@ export async function completeAuthCodeFlow(
     connectionId,
   } = stateData;
 
+	if (!organizationId) {
+		throw new Error("OAuth state missing organizationId");
+	}
+
   const body: Record<string, string> = {
     grant_type: "authorization_code",
     code,

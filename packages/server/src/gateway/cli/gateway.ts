@@ -293,6 +293,12 @@ export function createGatewayApp(
           const pending = await takePendingTool(requestId);
           if (!pending)
             return { success: false, error: "Request not found or expired" };
+          if (!pending.organizationId) {
+            return {
+              success: false,
+              error: "Tool approval missing organization context",
+            };
+          }
           const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
           if (decision === "deny") {
             await approveGrantStore?.grant(
@@ -315,9 +321,7 @@ export function createGatewayApp(
               pending.mcpId,
               pending.toolName,
               pending.args,
-              ...(pending.organizationId
-                ? [{ organizationId: pending.organizationId }]
-                : []),
+              { organizationId: pending.organizationId },
             );
             return { success: true, result } as any;
           }

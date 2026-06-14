@@ -608,6 +608,9 @@ export function createDeviceAuthRoutes(
 
 	router.use("/internal/device-auth/*", authenticateWorker, async (c, next) => {
 		const worker = getVerifiedWorker(c);
+		if (!worker.organizationId) {
+			return errorResponse(c, "Worker token missing organizationId", 401);
+		}
 		return runWithWorkerOrgContext(worker, () => next());
 	});
 

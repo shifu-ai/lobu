@@ -119,4 +119,37 @@ describe("MCP OAuth org context", () => {
 			"oauth-access-token",
 		);
 	});
+
+	test("callback rejects OAuth state missing organizationId before token exchange", async () => {
+		const store = new OrgScopedWritableStore("org-oauth-callback-test");
+		statePayload = {
+			userId: "user-oauth",
+			agentId: "agent-oauth",
+			codeVerifier: "verifier",
+			mcpId: "oauth-mcp",
+			scopeKey: "user-oauth",
+			endpoints: { tokenEndpoint: "https://issuer.example/oauth/token" },
+			client: { clientId: "client-id", tokenEndpointAuthMethod: "none" },
+			platform: "slack",
+			channelId: "channel",
+			conversationId: "conversation",
+		};
+		const fetchMock = mock(() =>
+			Response.json({
+				access_token: "oauth-access-token",
+			}),
+		);
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+		const { completeAuthCodeFlow } = await import("../auth/mcp/oauth-flow.js");
+		await expect(
+			completeAuthCodeFlow({
+				secretStore: store,
+				state: "state-token",
+				code: "code",
+				redirectUri: "https://gateway.example/mcp/oauth/callback",
+			}),
+		).rejects.toThrow("OAuth state missing organizationId");
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
 });

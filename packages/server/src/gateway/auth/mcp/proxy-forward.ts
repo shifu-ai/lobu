@@ -44,6 +44,9 @@ export async function handleProxyRequest(
 	if (!tokenData) {
 		return sendJsonRpcError(c, -32600, "Invalid authentication token");
 	}
+	if (!tokenData.organizationId) {
+		return sendJsonRpcError(c, -32600, "Worker token missing organizationId");
+	}
 
 	return runWithWorkerOrgContext(tokenData, () =>
 		handleProxyRequestAuthenticated(proxy, c, mcpId, sessionToken, tokenData),
