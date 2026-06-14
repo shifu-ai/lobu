@@ -56,6 +56,7 @@ export class McpAuthFlows {
 		mcpId: string;
 		agentId: string;
 		userId: string;
+		organizationId?: string;
 		scopeKey: string;
 		httpServer: HttpMcpServerConfig;
 		wwwAuthenticate: string | null;
@@ -90,6 +91,7 @@ export class McpAuthFlows {
 			mcpId: params.mcpId,
 			agentId: params.agentId,
 			userId: params.userId,
+			organizationId: params.organizationId,
 			scopeKey: params.scopeKey,
 			httpServer: params.httpServer,
 			wwwAuthenticate: params.wwwAuthenticate,
@@ -163,6 +165,7 @@ export class McpAuthFlows {
 			mcpId,
 			agentId,
 			userId: tokenData?.userId || scopeKey,
+			organizationId: tokenData?.organizationId,
 			scopeKey,
 			httpServer,
 			wwwAuthenticate,
@@ -185,6 +188,7 @@ export class McpAuthFlows {
 		mcpId: string;
 		agentId: string;
 		userId: string;
+		organizationId?: string;
 		scopeKey: string;
 		httpServer: HttpMcpServerConfig;
 		wwwAuthenticate: string | null;
@@ -204,6 +208,16 @@ export class McpAuthFlows {
 			});
 			return null;
 		}
+		if (!params.organizationId) {
+			logger.warn(
+				"Auth-code flow skipped: worker token has no organizationId",
+				{
+					mcpId: params.mcpId,
+					agentId: params.agentId,
+				},
+			);
+			return null;
+		}
 
 		try {
 			const redirectUri = `${this.publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
@@ -213,6 +227,7 @@ export class McpAuthFlows {
 				upstreamUrl: params.httpServer.upstreamUrl,
 				agentId: params.agentId,
 				userId: params.userId,
+				organizationId: params.organizationId,
 				scopeKey: params.scopeKey,
 				wwwAuthenticate: params.wwwAuthenticate,
 				redirectUri,

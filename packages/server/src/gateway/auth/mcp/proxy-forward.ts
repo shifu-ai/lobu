@@ -93,7 +93,9 @@ async function handleProxyRequestAuthenticated(
 							jsonrpc: "2.0",
 							id: jsonRpc.id,
 							result: {
-								content: [{ type: "text", text: "Tool call blocked by policy." }],
+								content: [
+									{ type: "text", text: "Tool call blocked by policy." },
+								],
 								isError: true,
 							},
 						});
@@ -151,6 +153,7 @@ async function handleProxyRequestAuthenticated(
 				teamId: tokenData.teamId,
 				connectionId: tokenData.connectionId,
 				workerToken: sessionToken,
+				organizationId: tokenData.organizationId,
 			},
 		);
 	} catch (error) {
@@ -178,6 +181,7 @@ async function forwardRequest(
 		teamId?: string;
 		connectionId?: string;
 		workerToken?: string;
+		organizationId?: string;
 	},
 ): Promise<Response> {
 	const ssrfBlock = await ssrfBlockResponse(httpServer, mcpId, agentId);
@@ -267,6 +271,7 @@ async function forwardRequest(
 			mcpId,
 			agentId,
 			userId: authContext.userId,
+			organizationId: authContext.organizationId,
 			scopeKey: scopeKey ?? authContext.userId,
 			httpServer,
 			wwwAuthenticate: response.headers.get("www-authenticate"),

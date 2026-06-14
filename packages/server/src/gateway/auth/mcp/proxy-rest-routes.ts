@@ -214,6 +214,7 @@ async function handleCallToolAuthenticated(
 				mcpId,
 				agentId,
 				userId: requesterUserId,
+				organizationId: auth.tokenData.organizationId,
 				scopeKey,
 				httpServer,
 				wwwAuthenticate: response.headers.get("www-authenticate"),

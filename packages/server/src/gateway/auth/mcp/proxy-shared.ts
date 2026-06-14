@@ -140,8 +140,15 @@ export function runWithWorkerOrgContext<T>(
 	tokenData: WorkerTokenData,
 	fn: () => T,
 ): T {
-	if (!tokenData.organizationId) return fn();
-	return orgContext.run({ organizationId: tokenData.organizationId }, fn);
+	return runWithOrganizationContext(tokenData.organizationId, fn);
+}
+
+export function runWithOrganizationContext<T>(
+	organizationId: string | null | undefined,
+	fn: () => T,
+): T {
+	if (!organizationId) return fn();
+	return orgContext.run({ organizationId }, fn);
 }
 
 export function extractSessionToken(c: Context): string | null {
