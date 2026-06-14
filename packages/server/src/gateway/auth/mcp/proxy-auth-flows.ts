@@ -2,12 +2,12 @@ import { createLogger, type WorkerTokenData } from "@lobu/core";
 import { startDeviceAuth } from "../../routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { startAuthCodeFlow } from "./oauth-flow.js";
-import type {
-	AuthRequiredPayload,
-	HttpMcpServerConfig,
-	McpConfigSource,
+import {
+	runWithOrganizationContext,
+	type AuthRequiredPayload,
+	type HttpMcpServerConfig,
+	type McpConfigSource,
 } from "./proxy-shared.js";
-import { runWithOrganizationContext } from "./proxy-shared.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -48,9 +48,9 @@ export class McpAuthFlows {
 	/**
 	 * Handle an HTTP 401 from an MCP upstream: drain the response body, attempt
 	 * the OAuth 2.1 auth-code flow (RFC 9728 → 8414 → 7591 discovery), and —
-	 * when `deviceAuthFallback` is set — fall back to the legacy device-code
-	 * flow. Fires `onAuthRequired` with whichever payload succeeds and returns
-	 * it (or null when no flow could be started).
+	 * when `deviceAuthFallback` is set — fall back to device-code auth. Fires
+	 * `onAuthRequired` with whichever payload succeeds and returns it (or null
+	 * when no flow could be started).
 	 */
 	async handleUpstream401(params: {
 		response?: Response;
@@ -105,13 +105,13 @@ export class McpAuthFlows {
 		if (authCodeResult) return fire(authCodeResult);
 
 		if (params.deviceAuthFallback) {
-			const legacyAuth = await this.tryAutoDeviceAuth(
+			const deviceAuth = await this.tryAutoDeviceAuth(
 				params.mcpId,
 				params.agentId,
 				params.scopeKey,
 				params.organizationId,
 			);
-			if (legacyAuth) return fire(legacyAuth);
+			if (deviceAuth) return fire(deviceAuth);
 		}
 
 		return null;

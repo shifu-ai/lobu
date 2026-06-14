@@ -12,6 +12,7 @@ import { OAuthClient } from "../auth/oauth/client.js";
 import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
 import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
 import { SystemEnvStore } from "../auth/system-env-store.js";
+import { getMetricsText } from "../metrics/prometheus.js";
 import { getModelProviderModules } from "../modules/module-system.js";
 import { createAudioRoutes } from "../routes/internal/audio.js";
 import { createDeviceAuthRoutes } from "../routes/internal/device-auth.js";
@@ -143,7 +144,6 @@ export function createGatewayApp(
         return c.text("Unauthorized", 401);
       }
     }
-    const { getMetricsText } = await import("../metrics/prometheus.js");
     c.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
     return c.text(getMetricsText());
   });
@@ -451,8 +451,14 @@ export function createGatewayApp(
         withProviderAndAuth(
           "Failed to save API key",
           async ({ c, mod, providerId }) => {
-            const body = await c.req.json();
-            const { agentId, apiKey } = body;
+            const body = await c.req.json().catch(() => null);
+            if (!body || typeof body !== "object") {
+              return c.json({ error: "Invalid JSON body" }, 400);
+            }
+            const { agentId, apiKey } = body as {
+              agentId?: string;
+              apiKey?: string;
+            };
             if (!agentId || !apiKey) {
               return c.json({ error: "Missing agentId or apiKey" }, 400);
             }

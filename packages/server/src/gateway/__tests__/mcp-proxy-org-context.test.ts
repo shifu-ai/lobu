@@ -292,7 +292,12 @@ describe("McpProxy org context", () => {
 		);
 
 		expect(tools.map((tool) => tool.name)).toEqual(["list_repos"]);
-		expect(capturedAuthorizations.every((value) => value === "Bearer discovery-access-token")).toBe(true);
+		expect(capturedAuthorizations.length).toBeGreaterThan(0);
+		expect(
+			capturedAuthorizations.every(
+				(value) => value === "Bearer discovery-access-token",
+			),
+		).toBe(true);
 	});
 
 	test("approved tool execution resolves credentials from the pending invocation organization", async () => {
