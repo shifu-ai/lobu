@@ -10,26 +10,26 @@ import { getDb } from "../../../db/client.js";
 const SCOPE = "pending-tool";
 
 export interface PendingToolInvocation {
-	mcpId: string;
-	toolName: string;
-	args: Record<string, unknown>;
-	agentId: string;
-	userId: string;
+  mcpId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  agentId: string;
+  userId: string;
 	organizationId?: string;
-	channelId?: string;
-	conversationId?: string;
-	teamId?: string;
-	connectionId?: string;
+  channelId?: string;
+  conversationId?: string;
+  teamId?: string;
+  connectionId?: string;
 }
 
 export async function storePendingTool(
-	requestId: string,
-	invocation: PendingToolInvocation,
+  requestId: string,
+  invocation: PendingToolInvocation,
 	ttlSeconds: number,
 ): Promise<void> {
-	const sql = getDb();
-	const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-	await sql`
+  const sql = getDb();
+  const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+  await sql`
     INSERT INTO oauth_states (id, scope, payload, expires_at)
     VALUES (${requestId}, ${SCOPE}, ${sql.json(invocation as object)}, ${expiresAt})
     ON CONFLICT (id) DO UPDATE SET
@@ -48,14 +48,14 @@ export async function storePendingTool(
 export async function takePendingTool(
 	requestId: string,
 ): Promise<PendingToolInvocation | null> {
-	const sql = getDb();
-	const rows = await sql`
+  const sql = getDb();
+  const rows = await sql`
     DELETE FROM oauth_states
     WHERE id = ${requestId}
       AND scope = ${SCOPE}
       AND expires_at > now()
     RETURNING payload
   `;
-	if (rows.length === 0) return null;
+  if (rows.length === 0) return null;
 	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
 }

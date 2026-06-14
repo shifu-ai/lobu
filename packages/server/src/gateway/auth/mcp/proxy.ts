@@ -444,22 +444,22 @@ export class McpProxy {
 	}
 
 	/**
-	 * Run the agent's resolved pre-tool guardrails (built-in names + skill-
-	 * declared SKILL.md guardrails) for a `tools/call`. Returns true if a
-	 * guardrail tripped and the call must be blocked — the caller then returns a
-	 * generic, platform-shaped "blocked by policy" response (the specific reason
-	 * is never surfaced to the worker; that would be an evasion oracle).
-	 *
-	 * Shared by BOTH tool-call entrypoints — the JSON-RPC forward path
-	 * (`handleProxyRequest`) and the REST `handleCallTool` — so neither can
-	 * bypass the stage, and independent of `grantStore` so guardrails enforce
-	 * even when the approval subsystem isn't configured.
-	 *
-	 * Fails OPEN on store/registry-level errors (per-guardrail throws already
-	 * fail open in the runner); judge guardrails fail CLOSED by design.
-	 *
-	 * @internal Public only for the route-handler modules.
-	 */
+	* Run the agent's resolved pre-tool guardrails (built-in names + skill-
+	* declared SKILL.md guardrails) for a `tools/call`. Returns true if a
+	* guardrail tripped and the call must be blocked — the caller then returns a
+	* generic, platform-shaped "blocked by policy" response (the specific reason
+	* is never surfaced to the worker; that would be an evasion oracle).
+	*
+	* Shared by BOTH tool-call entrypoints — the JSON-RPC forward path
+	* (`handleProxyRequest`) and the REST `handleCallTool` — so neither can
+	* bypass the stage, and independent of `grantStore` so guardrails enforce
+	* even when the approval subsystem isn't configured.
+	*
+	* Fails OPEN on store/registry-level errors (per-guardrail throws already
+	* fail open in the runner); judge guardrails fail CLOSED by design.
+	*
+	* @internal Public only for the route-handler modules.
+	*/
 	async runPreToolGuardrails(
 		agentId: string,
 		tokenData: {
