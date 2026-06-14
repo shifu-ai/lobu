@@ -9,6 +9,7 @@ import {
 	getRequestBodyAsText,
 	type HttpMcpServerConfig,
 	MAX_BODY_SIZE,
+	runWithWorkerOrgContext,
 	sendJsonRpcError,
 	UPSTREAM_FETCH_TIMEOUT_MS,
 	upstreamTimeoutSignal,
@@ -44,6 +45,18 @@ export async function handleProxyRequest(
 		return sendJsonRpcError(c, -32600, "Invalid authentication token");
 	}
 
+	return runWithWorkerOrgContext(tokenData, () =>
+		handleProxyRequestAuthenticated(proxy, c, mcpId, sessionToken, tokenData),
+	);
+}
+
+async function handleProxyRequestAuthenticated(
+	proxy: McpProxy,
+	c: Context,
+	mcpId: string,
+	sessionToken: string,
+	tokenData: NonNullable<ReturnType<typeof verifyWorkerToken>>,
+): Promise<Response> {
 	const agentId = tokenData.agentId || tokenData.userId;
 	const httpServer = await proxy.configService.getHttpServer(mcpId, agentId);
 
