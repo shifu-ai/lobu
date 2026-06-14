@@ -129,6 +129,13 @@ export async function authenticateRequest(
 	return { tokenData, token: sessionToken };
 }
 
+/**
+ * Run MCP proxy work inside the organization bound to the worker token.
+ *
+ * The Postgres secret store resolves org-scoped credentials from
+ * AsyncLocalStorage, so authenticated MCP routes must install the token's
+ * organization context before reading OAuth credentials.
+ */
 export function runWithWorkerOrgContext<T>(
 	tokenData: WorkerTokenData,
 	fn: () => T,

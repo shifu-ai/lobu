@@ -29,6 +29,7 @@ class OrgScopedWritableStore implements WritableSecretStore {
 	}
 
 	async list(prefix?: string): Promise<SecretListEntry[]> {
+		if (tryGetOrgId() !== this.organizationId) return [];
 		return Array.from(this.entries.keys())
 			.filter((name) => !prefix || name.startsWith(prefix))
 			.map((name) => ({
