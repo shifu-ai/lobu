@@ -21,6 +21,10 @@ class OrgScopedWritableStore implements WritableSecretStore {
 		this.entries.set(name, value);
 	}
 
+	read(name: string): string | null {
+		return this.entries.get(name) ?? null;
+	}
+
 	async get(ref: SecretRef): Promise<string | null> {
 		if (tryGetOrgId() !== this.organizationId) return null;
 		if (!ref.startsWith("secret://")) return null;
@@ -63,7 +67,10 @@ function createWorkerToken(data: Omit<WorkerTokenData, "timestamp">): string {
 	return encrypt(JSON.stringify({ ...data, timestamp: Date.now() }));
 }
 
-function storedCredential(accessToken: string): string {
+function storedCredential(
+	accessToken: string,
+	overrides: Record<string, unknown> = {},
+): string {
 	return JSON.stringify({
 		accessToken,
 		refreshToken: "refresh-token",
@@ -71,6 +78,7 @@ function storedCredential(accessToken: string): string {
 		clientId: "client-id",
 		tokenUrl: "https://auth.example/token",
 		tokenEndpointAuthMethod: "none",
+		...overrides,
 	});
 }
 
@@ -298,6 +306,189 @@ describe("McpProxy org context", () => {
 				(value) => value === "Bearer discovery-access-token",
 			),
 		).toBe(true);
+	});
+
+	test("direct tool discovery refreshes and re-stores credentials inside token organization", async () => {
+		const orgId = "org-tool-refresh-test";
+		const mcpId = "refresh-mcp";
+		const agentId = "agent-refresh";
+		const userId = "user-refresh";
+		const credentialKey = `mcp-auth/${agentId}/${userId}/${mcpId}/credential`;
+		const store = new OrgScopedWritableStore(orgId);
+		store.seed(
+			credentialKey,
+			storedCredential("expired-access-token", {
+				expiresAt: Date.now() - 1,
+			}),
+		);
+		const tokenData: WorkerTokenData = {
+			userId,
+			conversationId: "conv-refresh",
+			deploymentName: "deploy-refresh",
+			channelId: "ch-refresh",
+			agentId,
+			organizationId: orgId,
+			timestamp: Date.now(),
+		};
+		const proxy = new McpProxy(
+			{
+				getHttpServer: async () => ({
+					id: mcpId,
+					upstreamUrl: "https://upstream.example/mcp",
+				}),
+				getAllHttpServers: async () => new Map(),
+			},
+			{ secretStore: store },
+		);
+
+		let refreshCalls = 0;
+		const capturedAuthorizations: Array<string | null> = [];
+		globalThis.fetch = async (url, init) => {
+			const href = String(url);
+			if (href === "https://auth.example/token") {
+				refreshCalls++;
+				const body = String(init?.body ?? "");
+				expect(body).toContain("grant_type=refresh_token");
+				expect(body).toContain("refresh_token=refresh-token");
+				return Response.json({
+					access_token: "refreshed-access-token",
+					refresh_token: "refresh-token-2",
+					expires_in: 3600,
+				});
+			}
+
+			capturedAuthorizations.push(
+				new Headers(init?.headers).get("Authorization"),
+			);
+			const body = String(init?.body ?? "");
+			if (body.includes('"method":"tools/list"')) {
+				return Response.json({
+					jsonrpc: "2.0",
+					id: 1,
+					result: { tools: [{ name: "list_repos" }] },
+				});
+			}
+			return Response.json({
+				jsonrpc: "2.0",
+				id: 0,
+				result: {},
+			});
+		};
+
+		const { tools } = await proxy.fetchToolsForMcp(
+			mcpId,
+			agentId,
+			tokenData,
+		);
+
+		expect(tools.map((tool) => tool.name)).toEqual(["list_repos"]);
+		expect(refreshCalls).toBe(1);
+		expect(capturedAuthorizations.length).toBeGreaterThan(0);
+		expect(
+			capturedAuthorizations.every(
+				(value) => value === "Bearer refreshed-access-token",
+			),
+		).toBe(true);
+		const persisted = JSON.parse(store.read(credentialKey) ?? "{}") as {
+			accessToken?: string;
+			refreshToken?: string;
+		};
+		expect(persisted.accessToken).toBe("refreshed-access-token");
+		expect(persisted.refreshToken).toBe("refresh-token-2");
+	});
+
+	test("REST tool calls without token organization fail before upstream access", async () => {
+		const mcpId = "rest-missing-org-mcp";
+		const store = new OrgScopedWritableStore("unused-org");
+		const token = createWorkerToken({
+			userId: "user-rest-missing-org",
+			conversationId: "conv-rest-missing-org",
+			deploymentName: "deploy-rest-missing-org",
+			channelId: "ch-rest-missing-org",
+			agentId: "agent-rest-missing-org",
+		});
+		const proxy = new McpProxy(
+			{
+				getHttpServer: async () => {
+					throw new Error("config lookup should not happen");
+				},
+				getAllHttpServers: async () => new Map(),
+			},
+			{ secretStore: store },
+		);
+
+		let upstreamCalled = false;
+		globalThis.fetch = async () => {
+			upstreamCalled = true;
+			throw new Error("upstream should not be called");
+		};
+
+		const res = await proxy.getApp().request(`/${mcpId}/tools/my_tool`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({ arg1: "value1" }),
+		});
+
+		expect(res.status).toBe(401);
+		expect(await res.json()).toEqual({
+			error: "Worker token missing organizationId",
+		});
+		expect(upstreamCalled).toBe(false);
+	});
+
+	test("JSON-RPC proxy calls without token organization fail before upstream access", async () => {
+		const mcpId = "proxy-missing-org-mcp";
+		const store = new OrgScopedWritableStore("unused-org");
+		const token = createWorkerToken({
+			userId: "user-proxy-missing-org",
+			conversationId: "conv-proxy-missing-org",
+			deploymentName: "deploy-proxy-missing-org",
+			channelId: "ch-proxy-missing-org",
+			agentId: "agent-proxy-missing-org",
+		});
+		const proxy = new McpProxy(
+			{
+				getHttpServer: async () => {
+					throw new Error("config lookup should not happen");
+				},
+				getAllHttpServers: async () => new Map(),
+			},
+			{ secretStore: store },
+		);
+
+		let upstreamCalled = false;
+		globalThis.fetch = async () => {
+			upstreamCalled = true;
+			throw new Error("upstream should not be called");
+		};
+
+		const res = await proxy.getApp().request(`/${mcpId}`, {
+			method: "POST",
+			headers: {
+				Authorization: `Bearer ${token}`,
+				"Content-Type": "application/json",
+			},
+			body: JSON.stringify({
+				jsonrpc: "2.0",
+				id: 1,
+				method: "tools/call",
+				params: { name: "my_tool", arguments: { arg1: "value1" } },
+			}),
+		});
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({
+			jsonrpc: "2.0",
+			id: null,
+			error: {
+				code: -32600,
+				message: "Worker token missing organizationId",
+			},
+		});
+		expect(upstreamCalled).toBe(false);
 	});
 
 	test("approved tool execution resolves credentials from the pending invocation organization", async () => {

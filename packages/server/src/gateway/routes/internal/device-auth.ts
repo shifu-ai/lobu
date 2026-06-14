@@ -8,6 +8,7 @@ import {
 import { GenericDeviceCodeClient } from "../../auth/external/device-code-client.js";
 import type { McpConfigService } from "../../auth/mcp/config-service.js";
 import { runWithWorkerOrgContext } from "../../auth/mcp/proxy-shared.js";
+import { tryGetOrgId } from "../../../lobu/stores/org-context.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
@@ -153,11 +154,12 @@ const refreshLocks = new Map<string, number>();
 const REFRESH_LOCK_TTL_MS = 30_000;
 
 function tryAcquireRefreshLock(
+	organizationId: string,
   agentId: string,
   userId: string,
 	mcpId: string,
 ): boolean {
-  const key = `${agentId}:${userId}:${mcpId}`;
+	const key = `${organizationId}:${agentId}:${userId}:${mcpId}`;
   const expiresAt = refreshLocks.get(key);
   if (expiresAt && expiresAt > Date.now()) return false;
   refreshLocks.set(key, Date.now() + REFRESH_LOCK_TTL_MS);
@@ -165,11 +167,12 @@ function tryAcquireRefreshLock(
 }
 
 function releaseRefreshLock(
+	organizationId: string,
   agentId: string,
   userId: string,
 	mcpId: string,
 ): void {
-  refreshLocks.delete(`${agentId}:${userId}:${mcpId}`);
+	refreshLocks.delete(`${organizationId}:${agentId}:${userId}:${mcpId}`);
 }
 
 function deriveOAuthBaseUrl(upstreamUrl: string): string {
@@ -282,7 +285,17 @@ export async function refreshCredential(
 ): Promise<StoredCredential | null> {
   if (!credential.refreshToken) return null;
 
-  const acquired = tryAcquireRefreshLock(agentId, userId, mcpId);
+	const organizationId = tryGetOrgId();
+	if (!organizationId) {
+		logger.error("Refusing to refresh MCP credential without org context", {
+			agentId,
+			userId,
+			mcpId,
+		});
+		return null;
+	}
+
+	const acquired = tryAcquireRefreshLock(organizationId, agentId, userId, mcpId);
 
   if (!acquired) {
     // Another request is refreshing — wait briefly and re-read
@@ -340,7 +353,7 @@ export async function refreshCredential(
     logger.error("Token refresh error", { error, agentId, userId, mcpId });
     return null;
   } finally {
-    releaseRefreshLock(agentId, userId, mcpId);
+		releaseRefreshLock(organizationId, agentId, userId, mcpId);
   }
 }
 
