@@ -1,4 +1,4 @@
-import { createLogger, type McpOAuthConfig } from "@lobu/core";
+import { createLogger, type McpOAuthConfig, type SecretRef } from "@lobu/core";
 import { Hono } from "hono";
 import { DEFAULT_MCP_DEVICE_SCOPE } from "../../../auth/oauth/scopes.js";
 import {
@@ -7,6 +7,8 @@ import {
 } from "../../../auth/oauth/token-refresh.js";
 import { GenericDeviceCodeClient } from "../../auth/external/device-code-client.js";
 import type { McpConfigService } from "../../auth/mcp/config-service.js";
+import { runWithWorkerOrgContext } from "../../auth/mcp/proxy-shared.js";
+import { tryGetOrgId } from "../../../lobu/stores/org-context.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
@@ -80,12 +82,12 @@ interface ResolvedOAuthEndpoints {
 async function getSecretJson<T>(
   secretStore: WritableSecretStore,
   name: string,
-  context: Record<string, unknown>
+	context: Record<string, unknown>,
 ): Promise<T | null> {
   // The secret store's `get` accepts a SecretRef; we always store under the
   // default `secret://` scheme so the ref form is mechanical.
-  const ref = `secret://${encodeURIComponent(name)}` as const;
-  const value = await secretStore.get(ref as any);
+	const ref = `secret://${encodeURIComponent(name)}` as SecretRef;
+	const value = await secretStore.get(ref);
   if (!value) return null;
   try {
     return JSON.parse(value) as T;
@@ -103,7 +105,7 @@ async function putSecretJson<T>(
   secretStore: WritableSecretStore,
   name: string,
   value: T,
-  ttlSeconds?: number
+	ttlSeconds?: number,
 ): Promise<void> {
   await secretStore.put(name, JSON.stringify(value), { ttlSeconds });
 }
@@ -111,7 +113,7 @@ async function putSecretJson<T>(
 async function deleteSecretJson(
   secretStore: WritableSecretStore,
   name: string,
-  _context: Record<string, unknown>
+	_context: Record<string, unknown>,
 ): Promise<boolean> {
   // delete() is idempotent for the underlying store; we don't know if a row
   // existed before, but for cleanup that doesn't matter.
@@ -126,7 +128,7 @@ async function deleteSecretJson(
 function credentialName(
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): string {
   return `mcp-auth/${agentId}/${userId}/${mcpId}/credential`;
 }
@@ -134,7 +136,7 @@ function credentialName(
 function deviceAuthName(
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): string {
   return `mcp-auth/${agentId}/${userId}/${mcpId}/device-auth`;
 }
@@ -152,11 +154,12 @@ const refreshLocks = new Map<string, number>();
 const REFRESH_LOCK_TTL_MS = 30_000;
 
 function tryAcquireRefreshLock(
+	organizationId: string,
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): boolean {
-  const key = `${agentId}:${userId}:${mcpId}`;
+	const key = `${organizationId}:${agentId}:${userId}:${mcpId}`;
   const expiresAt = refreshLocks.get(key);
   if (expiresAt && expiresAt > Date.now()) return false;
   refreshLocks.set(key, Date.now() + REFRESH_LOCK_TTL_MS);
@@ -164,11 +167,12 @@ function tryAcquireRefreshLock(
 }
 
 function releaseRefreshLock(
+	organizationId: string,
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): void {
-  refreshLocks.delete(`${agentId}:${userId}:${mcpId}`);
+	refreshLocks.delete(`${organizationId}:${agentId}:${userId}:${mcpId}`);
 }
 
 function deriveOAuthBaseUrl(upstreamUrl: string): string {
@@ -185,7 +189,7 @@ function deriveOAuthBaseUrl(upstreamUrl: string): string {
  */
 function resolveOAuthEndpoints(
   upstreamUrl: string,
-  oauth?: McpOAuthConfig
+	oauth?: McpOAuthConfig,
 ): ResolvedOAuthEndpoints {
   const issuer = deriveOAuthBaseUrl(upstreamUrl);
   return {
@@ -205,12 +209,12 @@ export async function getStoredCredential(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): Promise<StoredCredential | null> {
   return getSecretJson<StoredCredential>(
     secretStore,
     credentialName(agentId, userId, mcpId),
-    { agentId, userId, mcpId }
+		{ agentId, userId, mcpId },
   );
 }
 
@@ -219,13 +223,13 @@ async function storeCredential(
   agentId: string,
   userId: string,
   mcpId: string,
-  credential: StoredCredential
+	credential: StoredCredential,
 ): Promise<void> {
   await putSecretJson(
     secretStore,
     credentialName(agentId, userId, mcpId),
     credential,
-    90 * 24 * 60 * 60
+		90 * 24 * 60 * 60,
   );
 }
 
@@ -240,7 +244,7 @@ export async function storeCredentialForScope(
   agentId: string,
   scopeKey: string,
   mcpId: string,
-  credential: StoredCredential
+	credential: StoredCredential,
 ): Promise<void> {
   await storeCredential(secretStore, agentId, scopeKey, mcpId, credential);
 }
@@ -255,18 +259,19 @@ export async function deleteCredential(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): Promise<boolean> {
   const deleted = await deleteSecretJson(
     secretStore,
     credentialName(agentId, userId, mcpId),
-    { agentId, userId, mcpId }
+		{ agentId, userId, mcpId },
   );
-  await deleteSecretJson(
-    secretStore,
-    deviceAuthName(agentId, userId, mcpId),
-    { agentId, userId, mcpId, scope: "device-auth" }
-  );
+	await deleteSecretJson(secretStore, deviceAuthName(agentId, userId, mcpId), {
+		agentId,
+		userId,
+		mcpId,
+		scope: "device-auth",
+	});
   logger.info("Deleted MCP credential", { agentId, userId, mcpId });
   return deleted;
 }
@@ -276,11 +281,21 @@ export async function refreshCredential(
   agentId: string,
   userId: string,
   mcpId: string,
-  credential: StoredCredential
+	credential: StoredCredential,
 ): Promise<StoredCredential | null> {
   if (!credential.refreshToken) return null;
 
-  const acquired = tryAcquireRefreshLock(agentId, userId, mcpId);
+	const organizationId = tryGetOrgId();
+	if (!organizationId) {
+		logger.error("Refusing to refresh MCP credential without org context", {
+			agentId,
+			userId,
+			mcpId,
+		});
+		return null;
+	}
+
+	const acquired = tryAcquireRefreshLock(organizationId, agentId, userId, mcpId);
 
   if (!acquired) {
     // Another request is refreshing — wait briefly and re-read
@@ -338,7 +353,7 @@ export async function refreshCredential(
     logger.error("Token refresh error", { error, agentId, userId, mcpId });
     return null;
   } finally {
-    releaseRefreshLock(agentId, userId, mcpId);
+		releaseRefreshLock(organizationId, agentId, userId, mcpId);
   }
 }
 
@@ -352,12 +367,12 @@ export async function tryCompletePendingDeviceAuth(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
-  mcpId: string
+	mcpId: string,
 ): Promise<string | null> {
   const deviceState = await getSecretJson<StoredDeviceAuth>(
     secretStore,
     deviceAuthName(agentId, userId, mcpId),
-    { agentId, userId, mcpId, scope: "device-auth" }
+		{ agentId, userId, mcpId, scope: "device-auth" },
   );
   if (!deviceState) return null;
 
@@ -365,7 +380,7 @@ export async function tryCompletePendingDeviceAuth(
     await deleteSecretJson(
       secretStore,
       deviceAuthName(agentId, userId, mcpId),
-      { agentId, userId, mcpId, scope: "device-auth" }
+			{ agentId, userId, mcpId, scope: "device-auth" },
     );
     return null;
   }
@@ -387,7 +402,7 @@ export async function tryCompletePendingDeviceAuth(
 
     const pollResult = await deviceCodeClient.pollForToken(
       deviceState.deviceCode,
-      deviceState.interval
+			deviceState.interval,
     );
 
     if (pollResult.status === "pending") {
@@ -398,7 +413,7 @@ export async function tryCompletePendingDeviceAuth(
       await deleteSecretJson(
         secretStore,
         deviceAuthName(agentId, userId, mcpId),
-        { agentId, userId, mcpId, scope: "device-auth" }
+				{ agentId, userId, mcpId, scope: "device-auth" },
       );
       return null;
     }
@@ -419,7 +434,7 @@ export async function tryCompletePendingDeviceAuth(
     await deleteSecretJson(
       secretStore,
       deviceAuthName(agentId, userId, mcpId),
-      { agentId, userId, mcpId, scope: "device-auth" }
+			{ agentId, userId, mcpId, scope: "device-auth" },
     );
 
     logger.info("Device auth auto-completed by proxy", {
@@ -449,12 +464,12 @@ export async function startDeviceAuth(
   mcpConfigService: {
     getHttpServer: (
       id: string,
-      agentId?: string
+			agentId?: string,
     ) => Promise<{ upstreamUrl: string; oauth?: McpOAuthConfig } | undefined>;
   },
   mcpId: string,
   agentId: string,
-  userId: string
+	userId: string,
 ): Promise<{
   userCode: string;
   verificationUri: string;
@@ -465,7 +480,7 @@ export async function startDeviceAuth(
   const existing = await getSecretJson<StoredDeviceAuth>(
     secretStore,
     deviceAuthName(agentId, userId, mcpId),
-    { agentId, userId, mcpId, scope: "device-auth" }
+		{ agentId, userId, mcpId, scope: "device-auth" },
   );
   if (existing?.expiresAt && existing.expiresAt > Date.now()) {
     const httpServer = await mcpConfigService.getHttpServer(mcpId, agentId);
@@ -500,7 +515,7 @@ export async function startDeviceAuth(
 
   const endpoints = resolveOAuthEndpoints(
     httpServer.upstreamUrl,
-    httpServer.oauth
+		httpServer.oauth,
   );
 
   // Resolve client: use explicit config clientId, or cached registration, or register new
@@ -521,7 +536,7 @@ export async function startDeviceAuth(
     client = await getSecretJson<StoredClient>(
       secretStore,
       clientCacheName(mcpId),
-      { mcpId, scope: "device-client" }
+			{ mcpId, scope: "device-client" },
     );
 
     // Register a new client if needed
@@ -585,7 +600,7 @@ export async function startDeviceAuth(
     secretStore,
     deviceAuthName(agentId, userId, mcpId),
     deviceState,
-    started.expiresIn
+		started.expiresIn,
   );
 
   logger.info("Device auth started (auto)", { mcpId, agentId, userId });
@@ -599,13 +614,21 @@ export async function startDeviceAuth(
 }
 
 export function createDeviceAuthRoutes(
-  config: DeviceAuthConfig
+	config: DeviceAuthConfig,
 ): Hono<WorkerContext> {
   const { mcpConfigService } = config;
   const router = new Hono<WorkerContext>();
 
+	router.use("/internal/device-auth/*", authenticateWorker, async (c, next) => {
+		const worker = getVerifiedWorker(c);
+		if (!worker.organizationId) {
+			return errorResponse(c, "Worker token missing organizationId", 401);
+		}
+		return runWithWorkerOrgContext(worker, () => next());
+	});
+
   // POST /internal/device-auth/start
-  router.post("/internal/device-auth/start", authenticateWorker, async (c) => {
+	router.post("/internal/device-auth/start", async (c) => {
     const body = await c.req.json<{ mcpId: string }>();
     const mcpId = body?.mcpId;
     if (!mcpId) {
@@ -622,14 +645,14 @@ export function createDeviceAuthRoutes(
         mcpConfigService,
         mcpId,
         agentId,
-        userId
+				userId,
       );
 
       if (!result) {
         return errorResponse(
           c,
           `MCP server '${mcpId}' not found or client registration failed`,
-          404
+					404,
         );
       }
 
@@ -645,7 +668,7 @@ export function createDeviceAuthRoutes(
   });
 
   // POST /internal/device-auth/poll
-  router.post("/internal/device-auth/poll", authenticateWorker, async (c) => {
+	router.post("/internal/device-auth/poll", async (c) => {
     const body = await c.req.json<{ mcpId: string }>();
     const mcpId = body?.mcpId;
     if (!mcpId) {
@@ -659,7 +682,7 @@ export function createDeviceAuthRoutes(
     const deviceState = await getSecretJson<StoredDeviceAuth>(
       config.secretStore,
       deviceAuthName(agentId, userId, mcpId),
-      { agentId, userId, mcpId, scope: "device-auth" }
+			{ agentId, userId, mcpId, scope: "device-auth" },
     );
     if (!deviceState) {
       return c.json(
@@ -667,7 +690,7 @@ export function createDeviceAuthRoutes(
           status: "error",
           message: "No device auth in progress. Call start first.",
         },
-        400
+				400,
       );
     }
 
@@ -675,11 +698,11 @@ export function createDeviceAuthRoutes(
       await deleteSecretJson(
         config.secretStore,
         deviceAuthName(agentId, userId, mcpId),
-        { agentId, userId, mcpId, scope: "device-auth" }
+				{ agentId, userId, mcpId, scope: "device-auth" },
       );
       return c.json(
         { status: "error", message: "Device code expired. Start again." },
-        400
+				400,
       );
     }
 
@@ -700,7 +723,7 @@ export function createDeviceAuthRoutes(
 
       const pollResult = await deviceCodeClient.pollForToken(
         deviceState.deviceCode,
-        deviceState.interval
+				deviceState.interval,
       );
 
       if (pollResult.status === "pending") {
@@ -712,13 +735,13 @@ export function createDeviceAuthRoutes(
           deviceState.interval = pollResult.interval;
           const ttl = Math.max(
             Math.floor((deviceState.expiresAt - Date.now()) / 1000),
-            10
+						10,
           );
           await putSecretJson(
             config.secretStore,
             deviceAuthName(agentId, userId, mcpId),
             deviceState,
-            ttl
+						ttl,
           );
         }
         return c.json({ status: "pending" });
@@ -728,7 +751,7 @@ export function createDeviceAuthRoutes(
         await deleteSecretJson(
           config.secretStore,
           deviceAuthName(agentId, userId, mcpId),
-          { agentId, userId, mcpId, scope: "device-auth" }
+					{ agentId, userId, mcpId, scope: "device-auth" },
         );
         return c.json({ status: "error", message: pollResult.error });
       }
@@ -750,12 +773,12 @@ export function createDeviceAuthRoutes(
         agentId,
         userId,
         mcpId,
-        storedCred
+				storedCred,
       );
       await deleteSecretJson(
         config.secretStore,
         deviceAuthName(agentId, userId, mcpId),
-        { agentId, userId, mcpId, scope: "device-auth" }
+				{ agentId, userId, mcpId, scope: "device-auth" },
       );
 
       logger.info("Device auth completed", { mcpId, agentId, userId });
@@ -764,13 +787,13 @@ export function createDeviceAuthRoutes(
       logger.error("Failed to poll device auth", { mcpId, error });
       return c.json(
         { status: "error", message: "Failed to poll device auth" },
-        500
+				500,
       );
     }
   });
 
   // GET /internal/device-auth/status?mcpId=lobu
-  router.get("/internal/device-auth/status", authenticateWorker, async (c) => {
+	router.get("/internal/device-auth/status", async (c) => {
     const mcpId = c.req.query("mcpId");
     if (!mcpId) {
       return errorResponse(c, "Missing required query param: mcpId", 400);
@@ -784,17 +807,14 @@ export function createDeviceAuthRoutes(
       config.secretStore,
       agentId,
       userId,
-      mcpId
+			mcpId,
     );
     return c.json({ authenticated: !!credential });
   });
 
   // DELETE /internal/device-auth/credential?mcpId=lobu
   // Logout: revoke a stored credential + purge the underlying secret.
-  router.delete(
-    "/internal/device-auth/credential",
-    authenticateWorker,
-    async (c) => {
+	router.delete("/internal/device-auth/credential", async (c) => {
       const mcpId = c.req.query("mcpId");
       if (!mcpId) {
         return errorResponse(c, "Missing required query param: mcpId", 400);
@@ -808,11 +828,10 @@ export function createDeviceAuthRoutes(
         config.secretStore,
         agentId,
         userId,
-        mcpId
+			mcpId,
       );
       return c.json({ deleted });
-    }
-  );
+	});
 
   logger.debug("Device auth routes registered");
   return router;

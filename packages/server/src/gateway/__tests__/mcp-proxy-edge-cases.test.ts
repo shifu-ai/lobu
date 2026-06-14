@@ -134,10 +134,12 @@ beforeAll(async () => {
   agent1Token = generateWorkerToken("user1", "conv1", "deploy1", {
     channelId: "ch1",
     agentId: "agent1",
+		organizationId: "test-org",
   });
   agent2Token = generateWorkerToken("user2", "conv2", "deploy2", {
     channelId: "ch2",
     agentId: "agent2",
+		organizationId: "test-org",
   });
 });
 
@@ -964,7 +966,8 @@ describe("executeToolDirect", () => {
       "user1",
       "direct-mcp",
       "some_tool",
-      { arg1: "val1" }
+			{ arg1: "val1" },
+			{ organizationId: "org-1" },
     );
 
     expect(result.isError).toBe(false);
@@ -982,7 +985,8 @@ describe("executeToolDirect", () => {
       "user1",
       "nonexistent-mcp",
       "some_tool",
-      {}
+			{},
+			{ organizationId: "org-1" },
     );
 
     expect(result.isError).toBe(true);
@@ -1009,7 +1013,8 @@ describe("executeToolDirect", () => {
       "user1",
       "flaky-mcp",
       "any_tool",
-      {}
+			{},
+			{ organizationId: "org-1" },
     );
 
     expect(result.isError).toBe(true);

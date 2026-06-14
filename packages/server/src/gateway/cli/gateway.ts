@@ -12,6 +12,7 @@ import { OAuthClient } from "../auth/oauth/client.js";
 import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
 import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
 import { SystemEnvStore } from "../auth/system-env-store.js";
+import { getMetricsText } from "../metrics/prometheus.js";
 import { getModelProviderModules } from "../modules/module-system.js";
 import { createAudioRoutes } from "../routes/internal/audio.js";
 import { createDeviceAuthRoutes } from "../routes/internal/device-auth.js";
@@ -65,7 +66,7 @@ interface CreateGatewayAppOptions {
  * own server (embedded mode; see `src/server.ts` / `src/lobu/gateway.ts`).
  */
 export function createGatewayApp(
-  options: CreateGatewayAppOptions
+	options: CreateGatewayAppOptions,
 ): OpenAPIHono {
   const {
     secretProxy,
@@ -100,7 +101,7 @@ export function createGatewayApp(
         connectSrc: ["'self'", "ws:", "wss:"],
         fontSrc: ["'self'", "https://fonts.gstatic.com"],
       },
-    })
+		}),
   );
   app.use(
     "*",
@@ -109,7 +110,7 @@ export function createGatewayApp(
         ? process.env.ALLOWED_ORIGINS.split(",")
         : [],
       credentials: true,
-    })
+		}),
   );
 
   app.get("/health", (c) => {
@@ -143,7 +144,6 @@ export function createGatewayApp(
         return c.text("Unauthorized", 401);
       }
     }
-    const { getMetricsText } = await import("../metrics/prometheus.js");
     c.header("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
     return c.text(getMetricsText());
   });
@@ -177,7 +177,7 @@ export function createGatewayApp(
     });
     app.route("", mcpOAuthRouter);
     logger.debug(
-      "MCP OAuth callback route enabled at :8080/mcp/oauth/callback"
+			"MCP OAuth callback route enabled at :8080/mcp/oauth/callback",
     );
   }
 
@@ -197,13 +197,13 @@ export function createGatewayApp(
     const fileRouter = createFileRoutes(
       platformRegistry,
       artifactStore,
-      coreServices.getPublicGatewayUrl()
+			coreServices.getPublicGatewayUrl(),
     );
     app.route("/internal/files", fileRouter);
 
     app.route("", createPublicFileRoutes(artifactStore));
     logger.debug(
-      "File routes enabled at :8080/internal/files/* and /api/v1/files/*"
+			"File routes enabled at :8080/internal/files/* and /api/v1/files/*",
     );
   }
 
@@ -222,7 +222,7 @@ export function createGatewayApp(
       });
       app.route("", deviceAuthRouter);
       logger.debug(
-        "Device auth routes enabled at :8080/internal/device-auth/*"
+				"Device auth routes enabled at :8080/internal/device-auth/*",
       );
     }
   }
@@ -273,6 +273,18 @@ export function createGatewayApp(
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
         approveToolCall: async (requestId: string, decision: string) => {
+          const expiresMap = {
+            "1h": Date.now() + 3_600_000,
+            "24h": Date.now() + 86_400_000,
+            always: null,
+          } satisfies Record<string, number | null>;
+          const isGrantDecision = (
+            value: string,
+          ): value is keyof typeof expiresMap => value in expiresMap;
+          if (decision !== "deny" && !isGrantDecision(decision)) {
+            return { success: false, error: "Invalid decision" };
+          }
+
           // DELETE ... RETURNING atomically claims the pending invocation
           // so a retry of POST /api/v1/agents/approve (CLI re-tries,
           // double-clicks, Slack webhook retries) cannot double-execute the
@@ -281,25 +293,26 @@ export function createGatewayApp(
           const pending = await takePendingTool(requestId);
           if (!pending)
             return { success: false, error: "Request not found or expired" };
+          if (!pending.organizationId) {
+            return {
+              success: false,
+              error: "Tool approval missing organization context",
+            };
+          }
           const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
-          const expiresMap: Record<string, number | null> = {
-            "1h": Date.now() + 3_600_000,
-            "24h": Date.now() + 86_400_000,
-            always: null,
-          };
           if (decision === "deny") {
             await approveGrantStore?.grant(
               pending.agentId,
               pattern,
               null,
-              true
+              true,
             );
             return { success: true };
           }
           await approveGrantStore?.grant(
             pending.agentId,
             pattern,
-            decision in expiresMap ? expiresMap[decision]! : null
+            expiresMap[decision],
           );
           if (approveMcpProxy) {
             const result = await approveMcpProxy.executeToolDirect(
@@ -307,7 +320,8 @@ export function createGatewayApp(
               pending.userId,
               pending.mcpId,
               pending.toolName,
-              pending.args
+              pending.args,
+              { organizationId: pending.organizationId },
             );
             return { success: true, result } as any;
           }
@@ -316,7 +330,7 @@ export function createGatewayApp(
       });
       app.route("", agentApi);
       logger.debug(
-        "Agent API enabled at :8080/api/v1/agents/* with docs at :8080/api/docs"
+				"Agent API enabled at :8080/api/v1/agents/* with docs at :8080/api/docs",
       );
     }
   }
@@ -341,7 +355,7 @@ export function createGatewayApp(
 
       const verifyProviderAuth = async (
         c: any,
-        agentId: string
+				agentId: string,
       ): Promise<{ userId: string; platform: string } | null> => {
         const payload = await verifySettingsSessionOrToken(c);
         if (!payload) return null;
@@ -358,7 +372,7 @@ export function createGatewayApp(
           const owns = await userAgentsStore.ownsAgent(
             payload.platform,
             payload.userId,
-            agentId
+						agentId,
           );
           if (owns) return principal;
         }
@@ -392,13 +406,13 @@ export function createGatewayApp(
             c: any;
             mod: ReturnType<typeof getModelProviderModules>[number];
             providerId: string;
-          }) => Promise<Response>
+					}) => Promise<Response>,
         ) =>
         async (c: any): Promise<Response> => {
           try {
             const providerId = c.req.param("provider");
             const mod = getModelProviderModules().find(
-              (m) => m.providerId === providerId
+							(m) => m.providerId === providerId,
             );
             if (!mod) return c.json({ error: "Unknown provider" }, 404);
             return await handler({ c, mod, providerId });
@@ -411,7 +425,7 @@ export function createGatewayApp(
       const requireDeviceCode = (
         c: any,
         mod: ReturnType<typeof getModelProviderModules>[number],
-        method: "startDeviceCode" | "pollDeviceCode"
+				method: "startDeviceCode" | "pollDeviceCode",
       ): Response | null => {
         const supportsDeviceCode =
           mod.authType === "device-code" ||
@@ -419,7 +433,7 @@ export function createGatewayApp(
         if (!supportsDeviceCode) {
           return c.json(
             { error: "Provider does not support device code" },
-            400
+						400,
           );
         }
         if (typeof mod[method] !== "function") {
@@ -430,7 +444,7 @@ export function createGatewayApp(
                   ? "Device code start not implemented"
                   : "Device code poll not implemented",
             },
-            501
+						501,
           );
         }
         return null;
@@ -441,8 +455,14 @@ export function createGatewayApp(
         withProviderAndAuth(
           "Failed to save API key",
           async ({ c, mod, providerId }) => {
-            const body = await c.req.json();
-            const { agentId, apiKey } = body;
+            const body = await c.req.json().catch(() => null);
+            if (!body || typeof body !== "object") {
+              return c.json({ error: "Invalid JSON body" }, 400);
+            }
+            const { agentId, apiKey } = body as {
+              agentId?: string;
+              apiKey?: string;
+            };
             if (!agentId || !apiKey) {
               return c.json({ error: "Missing agentId or apiKey" }, 400);
             }
@@ -463,8 +483,8 @@ export function createGatewayApp(
             });
 
             return c.json({ success: true });
-          }
-        )
+					},
+				),
       );
 
       authRouter.post(
@@ -487,8 +507,8 @@ export function createGatewayApp(
 
             const result = await mod.startDeviceCode!(agentId);
             return c.json(result);
-          }
-        )
+					},
+				),
       );
 
       authRouter.post(
@@ -510,7 +530,7 @@ export function createGatewayApp(
             if (!agentId || !deviceAuthId || !userCode) {
               return c.json(
                 { error: "Missing agentId, deviceAuthId, or userCode" },
-                400
+								400,
               );
             }
 
@@ -519,20 +539,22 @@ export function createGatewayApp(
               return c.json({ error: "Unauthorized" }, 401);
             }
 
-            const result = await mod.pollDeviceCode!(agentId, principal.userId, {
+						const result = await mod.pollDeviceCode!(
+							agentId,
+							principal.userId,
+							{
               deviceAuthId,
               userCode,
-            });
+							},
+						);
             return c.json(result);
-          }
-        )
+					},
+				),
       );
 
       authRouter.post(
         "/:provider/logout",
-        withProviderAndAuth(
-          "Failed to logout",
-          async ({ c, providerId }) => {
+				withProviderAndAuth("Failed to logout", async ({ c, providerId }) => {
             const body = await c.req.json().catch(() => ({}));
             const agentId = body.agentId || c.req.query("agentId");
             if (!agentId) {
@@ -550,12 +572,11 @@ export function createGatewayApp(
               {
                 userId: principal.userId,
                 ...(body.profileId ? { profileId: body.profileId } : {}),
-              }
+						},
             );
 
             return c.json({ success: true });
-          }
-        )
+				}),
       );
     }
 
@@ -604,7 +625,7 @@ export function createGatewayApp(
         });
         app.route("/api/v1/agents/:agentId/history", agentHistoryRouter);
         logger.debug(
-          "Agent history routes enabled at :8080/api/v1/agents/{agentId}/history/*"
+					"Agent history routes enabled at :8080/api/v1/agents/{agentId}/history/*",
         );
       }
     }
@@ -627,7 +648,7 @@ export function createGatewayApp(
       });
       app.route("/api/v1/agents/:agentId/config", agentConfigRouter);
       logger.debug(
-        "Agent config routes enabled at :8080/api/v1/agents/{id}/config"
+				"Agent config routes enabled at :8080/api/v1/agents/{id}/config",
       );
     }
 
@@ -648,7 +669,7 @@ export function createGatewayApp(
     if (registeredProviders.length > 0) {
       app.route("/api/v1/auth", authRouter);
       logger.debug(
-        `Auth routes enabled at :8080/api/v1/auth/* for: ${registeredProviders.join(", ")}`
+				`Auth routes enabled at :8080/api/v1/auth/* for: ${registeredProviders.join(", ")}`,
       );
     }
 
@@ -661,7 +682,7 @@ export function createGatewayApp(
       });
       app.route("/api/v1/agents/:agentId/channels", channelBindingRouter);
       logger.debug(
-        "Channel binding routes enabled at :8080/api/v1/agents/{agentId}/channels/*"
+				"Channel binding routes enabled at :8080/api/v1/agents/{agentId}/channels/*",
       );
     }
 
@@ -687,10 +708,10 @@ export function createGatewayApp(
       createConnectionCrudRoutes(chatInstanceManager, {
         userAgentsStore: coreServices.getUserAgentsStore(),
         agentMetadataStore: coreServices.getConfigStore()!,
-      })
+			}),
     );
     logger.debug(
-      "Slack and connection routes enabled at :8080/slack/*, :8080/api/v1/connections/*, and :8080/api/v1/webhooks/*"
+			"Slack and connection routes enabled at :8080/slack/*, :8080/api/v1/connections/*, and :8080/api/v1/webhooks/*",
     );
   }
 
@@ -733,7 +754,7 @@ export function createGatewayApp(
         ? await agentConfigStore.getSettings(a.agentId)
         : null;
       const providers = (settings?.installedProviders || []).map(
-        (p: { providerId: string }) => p.providerId
+				(p: { providerId: string }) => p.providerId,
       );
       agentDetails.push({
         agentId: a.agentId,
@@ -763,7 +784,7 @@ export function createGatewayApp(
             : "disconnected",
           agentId: conn.agentId || null,
           botUsername: conn.metadata?.botUsername || null,
-        })
+				}),
       ),
     });
   });
@@ -871,7 +892,7 @@ Agents can be configured with custom MCP (Model Context Protocol) servers:
       theme: "kepler",
       layout: "modern",
       defaultHttpClient: { targetKey: "js", clientKey: "fetch" },
-    })
+		}),
   );
   logger.debug("API docs enabled at /api/docs");
 

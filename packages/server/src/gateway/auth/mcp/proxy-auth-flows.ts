@@ -2,10 +2,11 @@ import { createLogger, type WorkerTokenData } from "@lobu/core";
 import { startDeviceAuth } from "../../routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { startAuthCodeFlow } from "./oauth-flow.js";
-import type {
-	AuthRequiredPayload,
-	HttpMcpServerConfig,
-	McpConfigSource,
+import {
+	runWithOrganizationContext,
+	type AuthRequiredPayload,
+	type HttpMcpServerConfig,
+	type McpConfigSource,
 } from "./proxy-shared.js";
 
 const logger = createLogger("mcp-proxy");
@@ -47,15 +48,16 @@ export class McpAuthFlows {
 	/**
 	 * Handle an HTTP 401 from an MCP upstream: drain the response body, attempt
 	 * the OAuth 2.1 auth-code flow (RFC 9728 → 8414 → 7591 discovery), and —
-	 * when `deviceAuthFallback` is set — fall back to the legacy device-code
-	 * flow. Fires `onAuthRequired` with whichever payload succeeds and returns
-	 * it (or null when no flow could be started).
+	 * when `deviceAuthFallback` is set — fall back to device-code auth. Fires
+	 * `onAuthRequired` with whichever payload succeeds and returns it (or null
+	 * when no flow could be started).
 	 */
 	async handleUpstream401(params: {
 		response?: Response;
 		mcpId: string;
 		agentId: string;
 		userId: string;
+		organizationId?: string;
 		scopeKey: string;
 		httpServer: HttpMcpServerConfig;
 		wwwAuthenticate: string | null;
@@ -90,6 +92,7 @@ export class McpAuthFlows {
 			mcpId: params.mcpId,
 			agentId: params.agentId,
 			userId: params.userId,
+			organizationId: params.organizationId,
 			scopeKey: params.scopeKey,
 			httpServer: params.httpServer,
 			wwwAuthenticate: params.wwwAuthenticate,
@@ -102,12 +105,13 @@ export class McpAuthFlows {
 		if (authCodeResult) return fire(authCodeResult);
 
 		if (params.deviceAuthFallback) {
-			const legacyAuth = await this.tryAutoDeviceAuth(
+			const deviceAuth = await this.tryAutoDeviceAuth(
 				params.mcpId,
 				params.agentId,
 				params.scopeKey,
+				params.organizationId,
 			);
-			if (legacyAuth) return fire(legacyAuth);
+			if (deviceAuth) return fire(deviceAuth);
 		}
 
 		return null;
@@ -163,6 +167,7 @@ export class McpAuthFlows {
 			mcpId,
 			agentId,
 			userId: tokenData?.userId || scopeKey,
+			organizationId: tokenData?.organizationId,
 			scopeKey,
 			httpServer,
 			wwwAuthenticate,
@@ -185,6 +190,7 @@ export class McpAuthFlows {
 		mcpId: string;
 		agentId: string;
 		userId: string;
+		organizationId?: string;
 		scopeKey: string;
 		httpServer: HttpMcpServerConfig;
 		wwwAuthenticate: string | null;
@@ -204,6 +210,16 @@ export class McpAuthFlows {
 			});
 			return null;
 		}
+		if (!params.organizationId) {
+			logger.warn(
+				"Auth-code flow skipped: worker token has no organizationId",
+				{
+					mcpId: params.mcpId,
+					agentId: params.agentId,
+				},
+			);
+			return null;
+		}
 
 		try {
 			const redirectUri = `${this.publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
@@ -213,6 +229,7 @@ export class McpAuthFlows {
 				upstreamUrl: params.httpServer.upstreamUrl,
 				agentId: params.agentId,
 				userId: params.userId,
+				organizationId: params.organizationId,
 				scopeKey: params.scopeKey,
 				wwwAuthenticate: params.wwwAuthenticate,
 				redirectUri,
@@ -243,6 +260,25 @@ export class McpAuthFlows {
 	 * Returns a user-facing message with the verification URL, or null on failure.
 	 */
 	async tryAutoDeviceAuth(
+		mcpId: string,
+		agentId: string,
+		scopeKey: string,
+		organizationId?: string,
+	): Promise<AuthRequiredPayload | null> {
+		if (!organizationId) {
+			logger.warn("Device-auth flow skipped: worker token has no organizationId", {
+				mcpId,
+				agentId,
+			});
+			return null;
+		}
+
+		return runWithOrganizationContext(organizationId, () =>
+			this.tryAutoDeviceAuthScoped(mcpId, agentId, scopeKey),
+		);
+	}
+
+	private async tryAutoDeviceAuthScoped(
 		mcpId: string,
 		agentId: string,
 		scopeKey: string,

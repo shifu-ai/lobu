@@ -1,7 +1,7 @@
 import { createLogger } from "@lobu/core";
 import {
-  takePendingTool,
   type PendingToolInvocation,
+	takePendingTool,
 } from "../auth/mcp/pending-tool-store.js";
 import type {
   InteractionService,
@@ -27,7 +27,8 @@ type ExecuteToolDirectFn = (
   userId: string,
   mcpId: string,
   toolName: string,
-  args: Record<string, unknown>
+	args: Record<string, unknown>,
+	options: { organizationId: string },
 ) => Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -44,14 +45,14 @@ async function postWithFallback(
   thread: any,
   primary: { card: any; fallbackText: string },
   connectionId: string,
-  context: string
+	context: string,
 ): Promise<SentMessage | null> {
   try {
     return (await thread.post(primary)) as SentMessage;
   } catch (error) {
     logger.warn(
       { connectionId, error: String(error) },
-      `Failed to post ${context}`
+			`Failed to post ${context}`,
     );
     try {
       return (await thread.post(primary.fallbackText)) as SentMessage;
@@ -80,7 +81,7 @@ function resolveGrantExpiresAt(duration: string): number | null {
  * the payload and subsequent webhook retries see null and no-op.
  */
 async function takePendingToolInvocation(
-  requestId: string
+	requestId: string,
 ): Promise<PendingToolInvocation | null> {
   return takePendingTool(requestId);
 }
@@ -112,7 +113,7 @@ async function stripApprovalButtons(
     toolName: string;
     args: Record<string, unknown>;
   },
-  decision: string
+	decision: string,
 ): Promise<void> {
   if (!sent) return;
   const summary =
@@ -149,7 +150,7 @@ export function registerInteractionBridge(
   connection: PlatformConnection,
   chat: any,
   grantStore?: GrantStore,
-  executeToolDirect?: ExecuteToolDirectFn
+	executeToolDirect?: ExecuteToolDirectFn,
 ): () => void {
   const { id: connectionId, platform } = connection;
 
@@ -231,7 +232,7 @@ export function registerInteractionBridge(
    */
   function rememberSentMessage(
     questionId: string,
-    sent: SentMessage | undefined
+		sent: SentMessage | undefined,
   ): void {
     if (!sent) return;
     pendingSentMessages.set(questionId, {
@@ -242,17 +243,17 @@ export function registerInteractionBridge(
   async function claimQuestion(
     questionId: string,
     organizationId: string,
-    expectedUserId: string
+		expectedUserId: string,
   ): Promise<PendingQuestionEntry | undefined> {
     const stored = await claimPendingQuestion(
       questionId,
       organizationId,
       connectionId,
-      expectedUserId
+			expectedUserId,
     ).catch((error) => {
       logger.error(
         { connectionId, questionId, error: String(error) },
-        "Failed to claim pending question"
+				"Failed to claim pending question",
       );
       return null;
     });
@@ -274,14 +275,14 @@ export function registerInteractionBridge(
       if (!organizationId) {
         logger.warn(
           { connectionId, questionId: event.id },
-          "Skipping question:created — connection has no organizationId"
+					"Skipping question:created — connection has no organizationId",
         );
         return;
       }
       if (!event.userId) {
         logger.warn(
           { connectionId, questionId: event.id },
-          "Skipping question:created — event has no userId"
+					"Skipping question:created — event has no userId",
         );
         return;
       }
@@ -290,7 +291,7 @@ export function registerInteractionBridge(
         manager,
         connectionId,
         event.channelId,
-        event.conversationId
+				event.conversationId,
       );
       if (!thread) return;
 
@@ -304,12 +305,12 @@ export function registerInteractionBridge(
           organizationId,
           connectionId,
           event.userId,
-          { question: event }
+					{ question: event },
         );
       } catch (error) {
         logger.error(
           { connectionId, questionId: event.id, error: String(error) },
-          "Failed to persist pending question — not posting card"
+					"Failed to persist pending question — not posting card",
         );
         return;
       }
@@ -320,7 +321,7 @@ export function registerInteractionBridge(
           id: `question:${event.id}:${i}`,
           label: option,
           value: option,
-        })
+				}),
       );
       const card = Card({
         children: [CardText(event.question), Actions(buttons)],
@@ -330,7 +331,7 @@ export function registerInteractionBridge(
         thread,
         { card, fallbackText },
         connectionId,
-        "question interaction"
+				"question interaction",
       );
       if (!sent) {
         // Post failed entirely. The row exists but no card was rendered,
@@ -346,12 +347,12 @@ export function registerInteractionBridge(
             event.id,
             organizationId,
             connectionId,
-            event.userId
+						event.userId,
           );
         } catch (error) {
           logger.debug(
             { connectionId, questionId: event.id, error: String(error) },
-            "Failed to drop pending row after post failure"
+						"Failed to drop pending row after post failure",
           );
         }
         return;
@@ -360,7 +361,7 @@ export function registerInteractionBridge(
     } catch (error) {
       logger.error(
         { connectionId, error: String(error) },
-        "Unhandled error in question:created handler"
+				"Unhandled error in question:created handler",
       );
     }
   };
@@ -379,7 +380,7 @@ export function registerInteractionBridge(
         manager,
         connectionId,
         event.channelId,
-        event.conversationId
+				event.conversationId,
       );
       if (!thread) return;
 
@@ -387,7 +388,7 @@ export function registerInteractionBridge(
       const card = Card({
         children: [
           CardText(
-            `*Tool Approval*\n${event.mcpId} → ${event.toolName}\n${argsText}`
+						`*Tool Approval*\n${event.mcpId} → ${event.toolName}\n${argsText}`,
           ),
           Actions([
             Button({
@@ -421,7 +422,7 @@ export function registerInteractionBridge(
         thread,
         { card, fallbackText: text },
         connectionId,
-        "tool approval interaction"
+				"tool approval interaction",
       );
       if (sent) {
         trackApprovalCard(tid, sent);
@@ -429,7 +430,7 @@ export function registerInteractionBridge(
     } catch (error) {
       logger.error(
         { connectionId, error: String(error) },
-        "Unhandled error in tool:approval-needed handler"
+				"Unhandled error in tool:approval-needed handler",
       );
     }
   };
@@ -444,7 +445,7 @@ export function registerInteractionBridge(
         manager,
         connectionId,
         event.channelId,
-        event.conversationId
+				event.conversationId,
       );
       if (!thread) return;
 
@@ -471,12 +472,12 @@ export function registerInteractionBridge(
         thread,
         { card, fallbackText },
         connectionId,
-        "link button interaction"
+				"link button interaction",
       );
     } catch (error) {
       logger.error(
         { connectionId, error: String(error) },
-        "Unhandled error in link-button:created handler"
+				"Unhandled error in link-button:created handler",
       );
     }
   };
@@ -491,7 +492,7 @@ export function registerInteractionBridge(
         manager,
         connectionId,
         event.channelId,
-        event.conversationId
+				event.conversationId,
       );
       if (!thread) return;
 
@@ -500,13 +501,13 @@ export function registerInteractionBridge(
       } catch (error) {
         logger.warn(
           { connectionId, error: String(error) },
-          "Failed to post status message interaction"
+					"Failed to post status message interaction",
         );
       }
     } catch (error) {
       logger.error(
         { connectionId, error: String(error) },
-        "Unhandled error in status-message:created handler"
+				"Unhandled error in status-message:created handler",
       );
     }
   };
@@ -537,14 +538,14 @@ export function registerInteractionBridge(
       if (!organizationId) {
         logger.warn(
           { connectionId, questionId },
-          "Question click on connection with no organizationId — ignoring"
+					"Question click on connection with no organizationId — ignoring",
         );
         return;
       }
       if (!author?.userId) {
         logger.debug(
           { connectionId, questionId },
-          "Question click without author.userId — ignoring"
+					"Question click without author.userId — ignoring",
         );
         return;
       }
@@ -552,12 +553,12 @@ export function registerInteractionBridge(
       const entry = await claimQuestion(
         questionId,
         organizationId,
-        author.userId
+				author.userId,
       );
       if (!entry) {
         logger.debug(
           { connectionId, questionId, clickerUserId: author.userId },
-          "Question click did not match any pending row — ignoring"
+					"Question click did not match any pending row — ignoring",
         );
         return;
       }
@@ -566,7 +567,7 @@ export function registerInteractionBridge(
       if (!instance) {
         logger.warn(
           { connectionId },
-          "Question click: no instance for connection"
+					"Question click: no instance for connection",
         );
         return;
       }
@@ -599,7 +600,7 @@ export function registerInteractionBridge(
         if (entry.sent) {
           try {
             await entry.sent.edit(
-              `${question.question}\n\n_Answered: ${value}_`
+							`${question.question}\n\n_Answered: ${value}_`,
             );
           } catch {
             // best effort — card may be stale or un-editable
@@ -624,12 +625,12 @@ export function registerInteractionBridge(
       })().catch((error) => {
         logger.error(
           { connectionId, questionId, error: String(error) },
-          "Background question-click processing failed"
+					"Background question-click processing failed",
         );
       });
     },
     async (channelId, conversationId) =>
-      resolveThread(manager, connectionId, channelId, conversationId)
+			resolveThread(manager, connectionId, channelId, conversationId),
   );
 
   logger.info({ connectionId, platform }, "Interaction bridge registered");
@@ -665,7 +666,7 @@ type OnQuestionClickFn = (
   questionId: string,
   value: string,
   thread: any,
-  author: { userId?: string; userName?: string; fullName?: string } | undefined
+	author: { userId?: string; userName?: string; fullName?: string } | undefined,
 ) => Promise<void>;
 
 /**
@@ -688,8 +689,8 @@ export function registerActionHandlers(
   onQuestionClick?: OnQuestionClickFn,
   resolveApprovalTarget?: (
     channelId: string,
-    conversationId: string
-  ) => Promise<any | null>
+		conversationId: string,
+	) => Promise<any | null>,
 ): void {
   chat.onAction(async (event: any) => {
     const actionId: string = event.actionId ?? "";
@@ -714,25 +715,25 @@ export function registerActionHandlers(
       // pending key, and we MUST surface that to the user. Otherwise the
       // click looks like it did nothing.
       const pending = await takePendingToolInvocation(requestId).catch(
-        () => null
+				() => null,
       );
       if (!pending) {
         const sent = claimApprovalCard?.(requestId);
         if (sent) {
           logger.info(
             { requestId, decision },
-            "Tool approval click with no pending invocation — likely expired"
+						"Tool approval click with no pending invocation — likely expired",
           );
           try {
             await sent.edit(
-              "*Tool Approval*\n\n_This approval request expired before it could be acted on. Re-send your last message to retry._"
+							"*Tool Approval*\n\n_This approval request expired before it could be acted on. Re-send your last message to retry._",
             );
           } catch {
             // best effort
           }
           try {
             await thread.post(
-              "This tool approval request expired before it could be acted on. Re-send your last message to retry."
+							"This tool approval request expired before it could be acted on. Re-send your last message to retry.",
             );
           } catch {
             // best effort
@@ -740,7 +741,7 @@ export function registerActionHandlers(
         } else {
           logger.debug(
             { requestId, decision },
-            "Tool approval click with no pending invocation and no tracked card — ignoring (already handled)"
+						"Tool approval click with no pending invocation and no tracked card — ignoring (already handled)",
           );
         }
         return;
@@ -752,7 +753,7 @@ export function registerActionHandlers(
       await stripApprovalButtons(
         claimApprovalCard?.(requestId),
         pending,
-        decision
+				decision,
       );
 
       // Resolve the post target. Prefer the original conversation captured at
@@ -769,7 +770,7 @@ export function registerActionHandlers(
       ) {
         const resolved = await resolveApprovalTarget(
           pending.channelId ?? "",
-          pending.conversationId ?? ""
+					pending.conversationId ?? "",
         ).catch(() => null);
         if (resolved) postTarget = resolved;
       }
@@ -782,13 +783,13 @@ export function registerActionHandlers(
               pattern,
               null,
               true,
-              connection.organizationId
+							connection.organizationId,
             )
             .catch(() => undefined);
         }
         try {
           await postTarget.post(
-            "Tool call denied. Let me know if you'd like me to try a different approach."
+						"Tool call denied. Let me know if you'd like me to try a different approach.",
           );
         } catch {
           // best effort
@@ -806,7 +807,7 @@ export function registerActionHandlers(
             pattern,
             expiresAt,
             undefined,
-            connection.organizationId
+						connection.organizationId,
           );
           logger.info(
             {
@@ -816,12 +817,12 @@ export function registerActionHandlers(
               decision,
               expiresAt,
             },
-            "Grant stored via tool approval"
+						"Grant stored via tool approval",
           );
         } catch (error) {
           logger.error(
             { requestId, error: String(error) },
-            "Failed to store grant"
+						"Failed to store grant",
           );
         }
       }
@@ -829,17 +830,29 @@ export function registerActionHandlers(
       // Execute the pending tool call
       if (executeToolDirect) {
         try {
+					const organizationId = pending.organizationId;
+					if (!organizationId) {
+						logger.error(
+							{ requestId, mcpId: pending.mcpId, toolName: pending.toolName },
+							"Refusing to execute approved MCP tool without organizationId",
+						);
+						await postTarget.post(
+							"This tool approval is missing organization context. Re-send your request to retry.",
+						);
+						return;
+					}
           const result = await executeToolDirect(
             pending.agentId,
             pending.userId,
             pending.mcpId,
             pending.toolName,
-            pending.args
+						pending.args,
+						{ organizationId },
           );
 
           const resultText = result.content.map((c) => c.text).join("\n");
           await postTarget.post(
-            result.isError ? `Tool error: ${resultText}` : resultText
+						result.isError ? `Tool error: ${resultText}` : resultText,
           );
           logger.info(
             {
@@ -848,12 +861,12 @@ export function registerActionHandlers(
               toolName: pending.toolName,
               isError: result.isError,
             },
-            "Tool executed after approval"
+						"Tool executed after approval",
           );
         } catch (error) {
           logger.error(
             { requestId, error: String(error) },
-            "Failed to execute tool after approval"
+						"Failed to execute tool after approval",
           );
           try {
             await postTarget.post(`Failed to execute tool: ${String(error)}`);
@@ -892,7 +905,7 @@ export function registerActionHandlers(
       } catch (error) {
         logger.error(
           { connectionId: connection.id, error: String(error) },
-          "Failed to handle question click"
+					"Failed to handle question click",
         );
       }
     }
@@ -903,12 +916,12 @@ function shouldHandle(
   event: { teamId?: string; channelId: string; connectionId?: string },
   platform: string,
   connectionId: string,
-  manager: ChatInstanceManager
+	manager: ChatInstanceManager,
 ): boolean {
   if (!manager.has(connectionId)) {
     logger.debug(
       { connectionId, eventConnectionId: event.connectionId },
-      "shouldHandle: manager does not have connection"
+			"shouldHandle: manager does not have connection",
     );
     return false;
   }
@@ -929,7 +942,7 @@ function shouldHandle(
         instancePlatform: instance.connection.platform,
         eventPlatform: platform,
       },
-      "shouldHandle: platform mismatch"
+			"shouldHandle: platform mismatch",
     );
   }
   return matches;
@@ -939,7 +952,7 @@ async function resolveThread(
   manager: ChatInstanceManager,
   connectionId: string,
   channelId: string,
-  conversationId: string
+	conversationId: string,
 ): Promise<any | null> {
   const instance = manager.getInstance(connectionId);
   if (!instance) {
@@ -963,7 +976,7 @@ async function resolveThread(
       if (channel) return channel;
       logger.debug(
         { connectionId, platform, channelId, channelKey },
-        "resolveThread: chat.channel() returned null for DM"
+				"resolveThread: chat.channel() returned null for DM",
       );
       return null;
     }
@@ -981,13 +994,13 @@ async function resolveThread(
           adapter,
           conversationId,
           undefined,
-          false
+					false,
         );
         if (thread) return thread;
       } catch (error) {
         logger.debug(
           { connectionId, platform, conversationId, error: String(error) },
-          "resolveThread: createThread failed"
+					"resolveThread: createThread failed",
         );
       }
     }
@@ -998,14 +1011,14 @@ async function resolveThread(
     if (!channel) {
       logger.warn(
         { connectionId, platform, channelId, channelKey, conversationId },
-        "resolveThread: unable to resolve thread or channel — dropping interaction"
+				"resolveThread: unable to resolve thread or channel — dropping interaction",
       );
     }
     return channel ?? null;
   } catch (error) {
     logger.debug(
       { connectionId, channelId, conversationId, error: String(error) },
-      "Failed to resolve thread for interaction"
+			"Failed to resolve thread for interaction",
     );
     return null;
   }

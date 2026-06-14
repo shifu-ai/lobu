@@ -15,17 +15,18 @@ import {
   generateCodeChallenge,
   generateCodeVerifier,
 } from "../../../utils/pkce.js";
+import { storeCredentialForScope } from "../../routes/internal/device-auth.js";
+import type { WritableSecretStore } from "../../secrets/index.js";
 import {
   OAuthStateStore,
   type ProviderOAuthStateData,
 } from "../oauth/state-store.js";
-import { storeCredentialForScope } from "../../routes/internal/device-auth.js";
-import type { WritableSecretStore } from "../../secrets/index.js";
 import {
-  discoverOAuth,
-  type DiscoveredOAuthEndpoints,
   type DiscoveredClient,
+	type DiscoveredOAuthEndpoints,
+	discoverOAuth,
 } from "./oauth-discovery.js";
+import { runWithOrganizationContext } from "./proxy-shared.js";
 
 const logger = createLogger("mcp-oauth-flow");
 
@@ -38,6 +39,7 @@ const STATE_KEY_PREFIX = "mcp-oauth:state";
  */
 interface McpOAuthStateData extends ProviderOAuthStateData {
   mcpId: string;
+	organizationId: string;
   /** Opaque credential-scope key — `userId` for per-user, `channel-<id>` for channel scope. */
   scopeKey: string;
   /** Endpoints resolved at discovery time. */
@@ -59,7 +61,7 @@ interface McpOAuthStateData extends ProviderOAuthStateData {
 function getStateStore(): OAuthStateStore<McpOAuthStateData> {
   return new OAuthStateStore<McpOAuthStateData>(
     STATE_KEY_PREFIX,
-    "mcp-oauth-state"
+		"mcp-oauth-state",
   );
 }
 
@@ -69,6 +71,7 @@ interface StartFlowOptions {
   upstreamUrl: string;
   agentId: string;
   userId: string;
+	organizationId: string;
   scopeKey: string;
   wwwAuthenticate: string | null;
   /** Absolute callback URL — `{publicGatewayUrl}/mcp/oauth/callback`. */
@@ -92,7 +95,15 @@ interface StartFlowResult {
  * resumes from the `state` parameter.
  */
 export async function startAuthCodeFlow(
-  options: StartFlowOptions
+	options: StartFlowOptions,
+): Promise<StartFlowResult> {
+	return runWithOrganizationContext(options.organizationId, () =>
+		startAuthCodeFlowScoped(options),
+	);
+}
+
+async function startAuthCodeFlowScoped(
+	options: StartFlowOptions,
 ): Promise<StartFlowResult> {
   const {
     secretStore,
@@ -100,6 +111,7 @@ export async function startAuthCodeFlow(
     upstreamUrl,
     agentId,
     userId,
+		organizationId,
     scopeKey,
     wwwAuthenticate,
     redirectUri,
@@ -142,6 +154,7 @@ export async function startAuthCodeFlow(
   const state = await stateStore.create({
     userId,
     agentId,
+		organizationId,
     codeVerifier,
     mcpId,
     scopeKey,
@@ -211,7 +224,7 @@ interface CompleteFlowResult {
  * the context fields the callback page needs to render a success message.
  */
 export async function completeAuthCodeFlow(
-  options: CompleteFlowOptions
+	options: CompleteFlowOptions,
 ): Promise<CompleteFlowResult> {
   const { secretStore, state, code, redirectUri } = options;
 
@@ -225,6 +238,7 @@ export async function completeAuthCodeFlow(
     mcpId,
     agentId,
     userId,
+		organizationId,
     scopeKey,
     endpoints,
     client,
@@ -237,6 +251,10 @@ export async function completeAuthCodeFlow(
     teamId,
     connectionId,
   } = stateData;
+
+	if (!organizationId) {
+		throw new Error("OAuth state missing organizationId");
+	}
 
   const body: Record<string, string> = {
     grant_type: "authorization_code",
@@ -261,7 +279,7 @@ export async function completeAuthCodeFlow(
       body.client_secret = client.clientSecret;
     } else {
       const basic = Buffer.from(
-        `${encodeURIComponent(client.clientId)}:${encodeURIComponent(client.clientSecret)}`
+				`${encodeURIComponent(client.clientId)}:${encodeURIComponent(client.clientSecret)}`,
       ).toString("base64");
       headers.Authorization = `Basic ${basic}`;
     }
@@ -300,7 +318,8 @@ export async function completeAuthCodeFlow(
       ? Date.now() + tokenData.expires_in * 1000
       : Date.now() + 3_600_000; // default 1h if not reported
 
-  await storeCredentialForScope(secretStore, agentId, scopeKey, mcpId, {
+	await runWithOrganizationContext(organizationId, () =>
+		storeCredentialForScope(secretStore, agentId, scopeKey, mcpId, {
     accessToken: tokenData.access_token,
     refreshToken: tokenData.refresh_token,
     expiresAt,
@@ -314,7 +333,8 @@ export async function completeAuthCodeFlow(
       client.tokenEndpointAuthMethod === "none"
         ? client.tokenEndpointAuthMethod
         : undefined,
-  });
+		}),
+	);
 
   logger.info("MCP OAuth auth-code flow completed", {
     mcpId,

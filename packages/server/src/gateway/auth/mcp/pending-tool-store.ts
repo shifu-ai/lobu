@@ -15,6 +15,7 @@ export interface PendingToolInvocation {
   args: Record<string, unknown>;
   agentId: string;
   userId: string;
+	organizationId: string;
   channelId?: string;
   conversationId?: string;
   teamId?: string;
@@ -24,7 +25,7 @@ export interface PendingToolInvocation {
 export async function storePendingTool(
   requestId: string,
   invocation: PendingToolInvocation,
-  ttlSeconds: number
+	ttlSeconds: number,
 ): Promise<void> {
   const sql = getDb();
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
@@ -45,7 +46,7 @@ export async function storePendingTool(
  * click see null and no-op.
  */
 export async function takePendingTool(
-  requestId: string
+	requestId: string,
 ): Promise<PendingToolInvocation | null> {
   const sql = getDb();
   const rows = await sql`
@@ -56,5 +57,5 @@ export async function takePendingTool(
     RETURNING payload
   `;
   if (rows.length === 0) return null;
-  return ((rows[0] as { payload: PendingToolInvocation }).payload) ?? null;
+	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
 }

@@ -7,6 +7,7 @@ import {
 	type JsonRpcResponse,
 	MAX_BODY_SIZE,
 	parseJsonRpcResponse,
+	runWithWorkerOrgContext,
 } from "./proxy-shared.js";
 import { ssrfBlockResponse } from "./proxy-upstream.js";
 import type { McpTool } from "./tool-cache.js";
@@ -21,7 +22,21 @@ export async function handleListTools(
 	if (!mcpId) return c.json({ error: "Missing MCP server id" }, 400);
 	const auth = await authenticateRequest(c);
 	if (!auth) return c.json({ error: "Invalid authentication token" }, 401);
+	if (!auth.tokenData.organizationId) {
+		return c.json({ error: "Worker token missing organizationId" }, 401);
+	}
 
+	return runWithWorkerOrgContext(auth.tokenData, () =>
+		handleListToolsAuthenticated(proxy, c, auth, mcpId),
+	);
+}
+
+async function handleListToolsAuthenticated(
+	proxy: McpProxy,
+	c: Context,
+	auth: NonNullable<Awaited<ReturnType<typeof authenticateRequest>>>,
+	mcpId: string,
+): Promise<Response> {
 	const agentId = auth.tokenData.agentId || auth.tokenData.userId;
 	const requesterUserId = auth.tokenData.userId;
 	if (!agentId || !requesterUserId) {
@@ -69,7 +84,22 @@ export async function handleCallTool(
 	}
 	const auth = await authenticateRequest(c);
 	if (!auth) return c.json({ error: "Invalid authentication token" }, 401);
+	if (!auth.tokenData.organizationId) {
+		return c.json({ error: "Worker token missing organizationId" }, 401);
+	}
 
+	return runWithWorkerOrgContext(auth.tokenData, () =>
+		handleCallToolAuthenticated(proxy, c, auth, mcpId, toolName),
+	);
+}
+
+async function handleCallToolAuthenticated(
+	proxy: McpProxy,
+	c: Context,
+	auth: NonNullable<Awaited<ReturnType<typeof authenticateRequest>>>,
+	mcpId: string,
+	toolName: string,
+): Promise<Response> {
 	const agentId = auth.tokenData.agentId || auth.tokenData.userId;
 	const requesterUserId = auth.tokenData.userId;
 	if (!agentId || !requesterUserId) {
@@ -190,6 +220,7 @@ export async function handleCallTool(
 				mcpId,
 				agentId,
 				userId: requesterUserId,
+				organizationId: auth.tokenData.organizationId,
 				scopeKey,
 				httpServer,
 				wwwAuthenticate: response.headers.get("www-authenticate"),
@@ -272,6 +303,7 @@ export async function handleCallTool(
 					mcpId,
 					agentId,
 					scopeKey,
+					auth.tokenData.organizationId,
 				);
 				if (autoAuthResult) {
 					await proxy.authFlows.fireAuthRequired(
@@ -336,7 +368,20 @@ export async function handleListAllTools(
 ): Promise<Response> {
 	const auth = await authenticateRequest(c);
 	if (!auth) return c.json({ error: "Invalid authentication token" }, 401);
+	if (!auth.tokenData.organizationId) {
+		return c.json({ error: "Worker token missing organizationId" }, 401);
+	}
 
+	return runWithWorkerOrgContext(auth.tokenData, () =>
+		handleListAllToolsAuthenticated(proxy, c, auth),
+	);
+}
+
+async function handleListAllToolsAuthenticated(
+	proxy: McpProxy,
+	c: Context,
+	auth: NonNullable<Awaited<ReturnType<typeof authenticateRequest>>>,
+): Promise<Response> {
 	const agentId = auth.tokenData.agentId || auth.tokenData.userId;
 
 	const allHttpServers = await proxy.configService.getAllHttpServers(agentId);

@@ -9,6 +9,7 @@ import {
 	getRequestBodyAsText,
 	type HttpMcpServerConfig,
 	MAX_BODY_SIZE,
+	runWithWorkerOrgContext,
 	sendJsonRpcError,
 	UPSTREAM_FETCH_TIMEOUT_MS,
 	upstreamTimeoutSignal,
@@ -43,7 +44,22 @@ export async function handleProxyRequest(
 	if (!tokenData) {
 		return sendJsonRpcError(c, -32600, "Invalid authentication token");
 	}
+	if (!tokenData.organizationId) {
+		return sendJsonRpcError(c, -32600, "Worker token missing organizationId");
+	}
 
+	return runWithWorkerOrgContext(tokenData, () =>
+		handleProxyRequestAuthenticated(proxy, c, mcpId, sessionToken, tokenData),
+	);
+}
+
+async function handleProxyRequestAuthenticated(
+	proxy: McpProxy,
+	c: Context,
+	mcpId: string,
+	sessionToken: string,
+	tokenData: NonNullable<ReturnType<typeof verifyWorkerToken>>,
+): Promise<Response> {
 	const agentId = tokenData.agentId || tokenData.userId;
 	const httpServer = await proxy.configService.getHttpServer(mcpId, agentId);
 
@@ -80,7 +96,9 @@ export async function handleProxyRequest(
 							jsonrpc: "2.0",
 							id: jsonRpc.id,
 							result: {
-								content: [{ type: "text", text: "Tool call blocked by policy." }],
+								content: [
+									{ type: "text", text: "Tool call blocked by policy." },
+								],
 								isError: true,
 							},
 						});
@@ -138,6 +156,7 @@ export async function handleProxyRequest(
 				teamId: tokenData.teamId,
 				connectionId: tokenData.connectionId,
 				workerToken: sessionToken,
+				organizationId: tokenData.organizationId,
 			},
 		);
 	} catch (error) {
@@ -165,6 +184,7 @@ async function forwardRequest(
 		teamId?: string;
 		connectionId?: string;
 		workerToken?: string;
+		organizationId?: string;
 	},
 ): Promise<Response> {
 	const ssrfBlock = await ssrfBlockResponse(httpServer, mcpId, agentId);
@@ -254,6 +274,7 @@ async function forwardRequest(
 			mcpId,
 			agentId,
 			userId: authContext.userId,
+			organizationId: authContext.organizationId,
 			scopeKey: scopeKey ?? authContext.userId,
 			httpServer,
 			wwwAuthenticate: response.headers.get("www-authenticate"),

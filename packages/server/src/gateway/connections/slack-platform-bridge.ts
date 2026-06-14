@@ -1,13 +1,14 @@
 import { createLogger } from "@lobu/core";
 import type { McpConfigService } from "../auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../auth/mcp/oauth-flow.js";
+import { runWithOrganizationContext } from "../auth/mcp/proxy-shared.js";
+import type { CommandDispatcher } from "../commands/command-dispatcher.js";
+import { createChatReply } from "../commands/command-reply-adapters.js";
 import {
   deleteCredential,
   getStoredCredential,
 } from "../routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../secrets/index.js";
-import { createChatReply } from "../commands/command-reply-adapters.js";
-import type { CommandDispatcher } from "../commands/command-dispatcher.js";
 import type { PlatformConnection } from "./types.js";
 
 const logger = createLogger("slack-platform-bridge");
@@ -74,7 +75,7 @@ function parseSlackCommandText(text: string | undefined): {
 export function registerSlackPlatformHandlers(
   chat: any,
   connection: PlatformConnection,
-  commandDispatcher?: CommandDispatcher
+	commandDispatcher?: CommandDispatcher,
 ): void {
   if (connection.platform !== "slack" || !commandDispatcher) {
     return;
@@ -116,12 +117,12 @@ export function registerSlackPlatformHandlers(
         connectionId: connection.id,
         organizationId: connection.organizationId,
         reply,
-      }
+			},
     );
 
     if (!handled) {
       await reply(
-        `Unknown /lobu subcommand: ${commandName}. Try \`/lobu help\`.`
+				`Unknown /lobu subcommand: ${commandName}. Try \`/lobu help\`.`,
       );
     }
   });
@@ -131,7 +132,7 @@ export function registerSlackPlatformHandlers(
 type SlackHomeAdapter = {
   publishHomeView?: (
     userId: string,
-    view: Record<string, unknown>
+		view: Record<string, unknown>,
   ) => Promise<void>;
 };
 
@@ -167,9 +168,7 @@ interface SlackAppHomeDeps {
 const HIDDEN_HOME_INTEGRATION_IDS = new Set(["lobu-memory"]);
 
 function humanizeIntegrationName(id: string): string {
-  return id
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+	return id.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function teamIdFromRawPayload(raw: unknown): string | undefined {
@@ -186,7 +185,7 @@ type IntegrationStatus = {
 
 function integrationSection(
   status: IntegrationStatus,
-  pendingAuthUrl?: string
+	pendingAuthUrl?: string,
 ): Record<string, unknown> {
   if (!status.requiresAuth) {
     return {
@@ -249,7 +248,9 @@ interface HomeViewParams {
   pendingAuthUrls?: Record<string, string>;
 }
 
-async function buildSlackHomeBlocks(params: HomeViewParams): Promise<unknown[]> {
+async function buildSlackHomeBlocks(
+	params: HomeViewParams,
+): Promise<unknown[]> {
   const { connection, deps, userId, pendingAuthUrls } = params;
   const botName =
     (typeof connection.metadata?.botUsername === "string" &&
@@ -273,7 +274,8 @@ async function buildSlackHomeBlocks(params: HomeViewParams): Promise<unknown[]> 
       const statuses = await loadIntegrationStatusesScoped(
         connection.agentId,
         userId,
-        deps
+				connection.organizationId,
+				deps,
       );
       blocks.push({
         type: "header",
@@ -296,7 +298,7 @@ async function buildSlackHomeBlocks(params: HomeViewParams): Promise<unknown[]> 
     } catch (error) {
       logger.warn(
         { error, agentId: connection.agentId },
-        "Failed to load integrations for Slack home tab; rendering without them"
+				"Failed to load integrations for Slack home tab; rendering without them",
       );
     }
   }
@@ -319,23 +321,22 @@ async function buildSlackHomeBlocks(params: HomeViewParams): Promise<unknown[]> 
 async function loadIntegrationStatusesScoped(
   agentId: string,
   userId: string,
-  deps: SlackAppHomeDeps
+	organizationId: string | undefined,
+	deps: SlackAppHomeDeps,
 ): Promise<IntegrationStatus[]> {
   const mcpConfigService = deps.mcpConfigService;
   if (!mcpConfigService) return [];
   const statuses = (await mcpConfigService.getMcpStatus(agentId)).filter(
-    (s) => !HIDDEN_HOME_INTEGRATION_IDS.has(s.id)
+		(s) => !HIDDEN_HOME_INTEGRATION_IDS.has(s.id),
   );
   const result: IntegrationStatus[] = [];
   for (const s of statuses) {
     let connected = false;
-    if (s.requiresAuth && deps.secretStore) {
+		const secretStore = deps.secretStore;
+		if (s.requiresAuth && secretStore) {
       try {
-        connected = !!(await getStoredCredential(
-          deps.secretStore,
-          agentId,
-          userId,
-          s.id
+				connected = !!(await runWithOrganizationContext(organizationId, () =>
+					getStoredCredential(secretStore, agentId, userId, s.id),
         ));
       } catch {
         connected = false;
@@ -375,7 +376,7 @@ const HOME_FALLBACK_BLOCKS: unknown[] = [
 
 async function publishHome(
   adapter: SlackHomeAdapter | undefined,
-  params: HomeViewParams
+	params: HomeViewParams,
 ): Promise<void> {
   const publishHomeView = adapter?.publishHomeView;
   if (typeof publishHomeView !== "function") return;
@@ -389,7 +390,7 @@ async function publishHome(
         connectionId: params.connection.id,
         userId: params.userId,
       },
-      "Failed to publish Slack home tab; falling back to a minimal view"
+			"Failed to publish Slack home tab; falling back to a minimal view",
     );
     // The rich view failed (likely Block Kit validation). Don't leave the user
     // staring at a stale cached view — publish a plain text-only home tab.
@@ -405,7 +406,7 @@ async function publishHome(
           connectionId: params.connection.id,
           userId: params.userId,
         },
-        "Failed to publish fallback Slack home tab"
+				"Failed to publish fallback Slack home tab",
       );
     }
   }
@@ -420,7 +421,7 @@ async function publishHome(
 async function isKnownIntegration(
   agentId: string,
   mcpId: string,
-  deps: SlackAppHomeDeps
+	deps: SlackAppHomeDeps,
 ): Promise<boolean> {
   if (HIDDEN_HOME_INTEGRATION_IDS.has(mcpId)) return false;
   const mcpConfigService = deps.mcpConfigService;
@@ -455,6 +456,7 @@ async function startMcpConnectFlow(params: {
     upstreamUrl: httpServer.upstreamUrl,
     agentId,
     userId,
+		organizationId: connection.organizationId,
     // Home-tab connect is always per-user.
     scopeKey: userId,
     wwwAuthenticate: null,
@@ -482,7 +484,7 @@ async function startMcpConnectFlow(params: {
 export function registerSlackAppHome(
   chat: any,
   connection: PlatformConnection,
-  deps: SlackAppHomeDeps = {}
+	deps: SlackAppHomeDeps = {},
 ): void {
   if (connection.platform !== "slack") {
     return;
@@ -508,23 +510,30 @@ export function registerSlackAppHome(
       if (!(await isKnownIntegration(agentId, mcpId, deps))) {
         logger.warn(
           { agentId, userId, mcpId, actionId: event.actionId },
-          "Ignoring Slack home action for an unknown integration"
+					"Ignoring Slack home action for an unknown integration",
         );
         return;
       }
 
       if (event.actionId === HOME_ACTION_DISCONNECT) {
-        if (deps.secretStore) {
+				const secretStore = deps.secretStore;
+				if (secretStore) {
           try {
-            await deleteCredential(deps.secretStore, agentId, userId, mcpId);
+						await runWithOrganizationContext(connection.organizationId, () =>
+							deleteCredential(secretStore, agentId, userId, mcpId),
+						);
           } catch (error) {
             logger.warn(
               { error, agentId, userId, mcpId },
-              "Failed to disconnect MCP credential from Slack home tab"
+							"Failed to disconnect MCP credential from Slack home tab",
             );
           }
         }
-        await publishHome(deps.adapter ?? event.adapter, { connection, deps, userId });
+				await publishHome(deps.adapter ?? event.adapter, {
+					connection,
+					deps,
+					userId,
+				});
         return;
       }
 
@@ -542,7 +551,7 @@ export function registerSlackAppHome(
       } catch (error) {
         logger.warn(
           { error, agentId, userId, mcpId },
-          "Failed to start MCP OAuth flow from Slack home tab"
+					"Failed to start MCP OAuth flow from Slack home tab",
         );
       }
       await publishHome(deps.adapter ?? event.adapter, {
@@ -551,13 +560,13 @@ export function registerSlackAppHome(
         userId,
         pendingAuthUrls: authorizationUrl ? { [mcpId]: authorizationUrl } : {},
       });
-    }
+		},
   );
 }
 
 export function parseSlackTeamJoinEvent(
   body: string,
-  contentType: string
+	contentType: string,
 ): ParsedSlackTeamJoinEvent | null {
   if (!contentType.includes("application/json")) {
     return null;
@@ -595,7 +604,7 @@ export function parseSlackTeamJoinEvent(
 
 export async function postSlackTeamJoinWelcome(
   chat: any,
-  event: ParsedSlackTeamJoinEvent
+	event: ParsedSlackTeamJoinEvent,
 ): Promise<void> {
   const thread = await chat.openDM(event.userId);
   const greeting = event.displayName

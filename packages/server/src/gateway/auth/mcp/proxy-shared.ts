@@ -1,5 +1,6 @@
 import { verifyWorkerToken, type WorkerTokenData } from "@lobu/core";
 import type { Context } from "hono";
+import { orgContext } from "../../../lobu/stores/org-context.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
 import type { McpTool } from "./tool-cache.js";
 
@@ -126,6 +127,30 @@ export async function authenticateRequest(
 	}
 
 	return { tokenData, token: sessionToken };
+}
+
+/**
+ * Run MCP proxy work inside the organization bound to the worker token.
+ *
+ * The Postgres secret store resolves org-scoped credentials from
+ * AsyncLocalStorage, so authenticated MCP routes must install the token's
+ * organization context before reading OAuth credentials.
+ */
+export function runWithWorkerOrgContext<T>(
+	tokenData: WorkerTokenData,
+	fn: () => T,
+): T {
+	return runWithOrganizationContext(tokenData.organizationId, fn);
+}
+
+export function runWithOrganizationContext<T>(
+	organizationId: string | null | undefined,
+	fn: () => T,
+): T {
+	if (!organizationId) {
+		throw new Error("MCP organization context requires organizationId");
+	}
+	return orgContext.run({ organizationId }, fn);
 }
 
 export function extractSessionToken(c: Context): string | null {

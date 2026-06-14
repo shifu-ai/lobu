@@ -102,6 +102,7 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
       args: { title: "from slack" },
       agentId: "agent-1",
       userId: "user-1",
+			organizationId: "org-1",
     };
     await storePendingTool("req-slack-1", pending, 24 * 60 * 60);
 
@@ -184,6 +185,7 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
       args: {},
       agentId: "a",
       userId: "u",
+			organizationId: "org-1",
     };
     await storePendingTool("req-bad", pending, 24 * 60 * 60);
 

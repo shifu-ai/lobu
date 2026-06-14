@@ -7,10 +7,10 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
-import { requiresToolApproval } from "../../permissions/approval-policy.js";
-import type { GrantStore } from "../../permissions/grant-store.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
+import { requiresToolApproval } from "../../permissions/approval-policy.js";
+import type { GrantStore } from "../../permissions/grant-store.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 import { storePendingTool } from "./pending-tool-store.js";
@@ -30,6 +30,7 @@ import {
 	type JsonRpcResponse,
 	type McpConfigSource,
 	parseJsonRpcResponse,
+	runWithOrganizationContext,
 } from "./proxy-shared.js";
 import { McpUpstreamClient } from "./proxy-upstream.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
@@ -124,6 +125,22 @@ export class McpProxy {
 		mcpId: string,
 		toolName: string,
 		args: Record<string, unknown>,
+		options: { organizationId: string },
+	): Promise<{
+		content: Array<{ type: string; text: string }>;
+		isError: boolean;
+	}> {
+		return runWithOrganizationContext(options?.organizationId, () =>
+			this.executeToolDirectScoped(agentId, userId, mcpId, toolName, args),
+		);
+	}
+
+	private async executeToolDirectScoped(
+		agentId: string,
+		userId: string,
+		mcpId: string,
+		toolName: string,
+		args: Record<string, unknown>,
 	): Promise<{
 		content: Array<{ type: string; text: string }>;
 		isError: boolean;
@@ -172,7 +189,14 @@ export class McpProxy {
 				};
 			}
 
-			const json = (await parseJsonRpcResponse(response)) as any;
+			const json = (await parseJsonRpcResponse(response)) as {
+				result?: {
+					content?: Array<{ type: string; text: string }>;
+					isError?: boolean;
+				};
+				content?: Array<{ type: string; text: string }>;
+				isError?: boolean;
+			};
 			const result = json.result || json;
 			return {
 				content: result.content || [
@@ -207,6 +231,24 @@ export class McpProxy {
 	 * then fetches tool list.
 	 */
 	async fetchToolsForMcp(
+		mcpId: string,
+		agentId: string,
+		tokenData: WorkerTokenData,
+		workerToken?: string,
+		options?: { surfaceErrors?: boolean },
+	): Promise<{ tools: McpTool[]; instructions?: string }> {
+		return runWithOrganizationContext(tokenData.organizationId, () =>
+			this.fetchToolsForMcpScoped(
+				mcpId,
+				agentId,
+				tokenData,
+				workerToken,
+				options,
+			),
+		);
+	}
+
+	private async fetchToolsForMcpScoped(
 		mcpId: string,
 		agentId: string,
 		tokenData: WorkerTokenData,
@@ -426,7 +468,7 @@ export class McpProxy {
 			organizationId?: string;
 		},
 		toolName: string,
-		toolArgs: Record<string, unknown>
+		toolArgs: Record<string, unknown>,
 	): Promise<boolean> {
 		if (!this.guardrailRegistry || !this.agentSettingsStore) return false;
 		try {
@@ -434,7 +476,7 @@ export class McpProxy {
 			const resolved = resolveAgentGuardrails(
 				settings ?? { guardrails: [] },
 				(settings?.skillsConfig?.skills ?? []).filter((s) => s.enabled),
-				this.guardrailRegistry
+				this.guardrailRegistry,
 			);
 			const list = resolved.byStage["pre-tool"];
 			if (list.length === 0) return false;
@@ -463,7 +505,7 @@ export class McpProxy {
 									? lookupErr.message
 									: String(lookupErr),
 						},
-						"Pre-tool guardrail trip: orgId metadata lookup failed (audit may be skipped)"
+						"Pre-tool guardrail trip: orgId metadata lookup failed (audit may be skipped)",
 					);
 				}
 			}
@@ -479,7 +521,7 @@ export class McpProxy {
 			});
 			logger.info(
 				{ agentId, toolName, guardrail: outcome.tripped.guardrail },
-				"Pre-tool guardrail tripped — blocking tool call with generic policy message"
+				"Pre-tool guardrail tripped — blocking tool call with generic policy message",
 			);
 			return true;
 		} catch (err) {
@@ -491,7 +533,7 @@ export class McpProxy {
 					toolName,
 					err: err instanceof Error ? err.message : String(err),
 				},
-				"Pre-tool guardrail check failed — proceeding without guardrails"
+				"Pre-tool guardrail check failed — proceeding without guardrails",
 			);
 			return false;
 		}
@@ -544,6 +586,13 @@ export class McpProxy {
 		});
 
 		if (!this.onToolBlocked) return "blocked-no-channel";
+		if (!tokenData.organizationId) {
+			logger.error(
+				{ agentId, mcpId, toolName },
+				"Refusing to store pending MCP tool approval without organizationId",
+			);
+			return "blocked-no-channel";
+		}
 
 		const requestId = `ta_${randomUUID()}`;
 		await storePendingTool(
@@ -554,6 +603,7 @@ export class McpProxy {
 				args: toolArgs,
 				agentId,
 				userId: tokenData.userId,
+				organizationId: tokenData.organizationId,
 				channelId: tokenData.channelId || "",
 				conversationId: tokenData.conversationId || "",
 				teamId: tokenData.teamId,
