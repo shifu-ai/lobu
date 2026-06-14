@@ -18,6 +18,20 @@ import type { ResponseRenderer } from "./response-renderer.js";
 const logger = createLogger("unified-thread-consumer");
 
 /**
+ * `platformMetadata.source` values for turns dispatched server-side with no
+ * SSE client on any pod. These bypass the API owner-gate in routeToRenderer.
+ * Producers: routes/public/agent.ts (watcher-run/direct-api from session
+ * intent), services/agent-threads.ts (internal default), connectors/
+ * repair-agent.ts, scheduled/jobs.ts.
+ */
+const HEADLESS_SOURCES = new Set([
+  "watcher-run",
+  "connector-repair",
+  "scheduled-job",
+  "internal",
+]);
+
+/**
  * Unified consumer for thread_response queue.
  * Routes responses to the appropriate platform adapter based on payload.platform field.
  */
@@ -113,22 +127,24 @@ export class UnifiedThreadResponseConsumer {
         return;
       }
 
-      // Get platform adapter from registry
+      // Get platform adapter from registry. Throw (not return) so the row
+      // retries and then dead-letters into the failed lane where
+      // lobu_runs_failed_total makes the drop visible — a silent warn here
+      // loses the whole response. Registration races at boot make a short
+      // retry budget genuinely useful.
       const platform = this.platformRegistry.get(platformName);
       if (!platform) {
-        logger.warn(
-          `No platform adapter registered for: ${platformName}, skipping message ${data.messageId}`
+        throw new Error(
+          `No platform adapter registered for: ${platformName} (message ${data.messageId})`
         );
-        return;
       }
 
       // Get renderer from platform
       const renderer = platform.getResponseRenderer?.();
       if (!renderer) {
-        logger.warn(
-          `Platform ${platformName} does not provide a response renderer, skipping message ${data.messageId}`
+        throw new Error(
+          `Platform ${platformName} does not provide a response renderer (message ${data.messageId})`
         );
-        return;
       }
 
       // Create session key for tracking
@@ -158,11 +174,6 @@ export class UnifiedThreadResponseConsumer {
     data: ThreadResponsePayload,
     sessionKey: string
   ): Promise<void> {
-    const cliSessionId =
-      typeof data.platformMetadata?.sessionId === "string"
-        ? (data.platformMetadata.sessionId as string)
-        : null;
-
     // Owner-routing for API/SSE TERMINAL delivery (success completion OR
     // error). The SseManager is per-pod and in-memory, so a terminal event
     // only reaches the client if THIS pod holds the SSE connection. Under N>1
@@ -208,10 +219,25 @@ export class UnifiedThreadResponseConsumer {
       // enqueued with `customEvent.requireSseOwner` set (see api/platform.ts)
       // and the same raised-retry send opts as terminal rows so the re-queue
       // window covers the cross-pod hand-off and the browser's POST→connect gap.
+      //
+      // Headless rows are exempt: turns dispatched server-side (watcher runs,
+      // connector repair, scheduled jobs, internal threads) never open an SSE
+      // connection on ANY pod, so gating them re-queues 30x, dead-letters the
+      // row, and skips the renderer side-effects (watcher run resolution most
+      // critically — a failed watcher run otherwise surfaces only via the 2h
+      // stale sweep). No pod is "the owner"; the first claimer delivers, and
+      // the SSE broadcast is a harmless no-op. `source` is stamped at dispatch
+      // (routes/public/agent.ts from session intent; agent-threads/repair/
+      // scheduled set it explicitly) and echoed back by the worker.
+      const source = data.platformMetadata?.source;
+      const isHeadless =
+        typeof source === "string" && HEADLESS_SOURCES.has(source);
       const requiresSseOwner =
-        isTerminal || data.customEvent?.requireSseOwner === true;
-      const sseKey =
-        (data.platformMetadata?.sessionId as string) || data.conversationId;
+        !isHeadless &&
+        (isTerminal || data.customEvent?.requireSseOwner === true);
+      // Clients subscribe on the conversation id (GET /events keys
+      // connections by session.conversationId — see routes/public/agent.ts).
+      const sseKey = data.conversationId;
       if (
         requiresSseOwner &&
         sseKey &&
@@ -234,13 +260,6 @@ export class UnifiedThreadResponseConsumer {
         data.customEvent.name,
         eventPayload
       );
-      if (cliSessionId) {
-        this.sseManager.broadcast(
-          cliSessionId,
-          data.customEvent.name,
-          eventPayload
-        );
-      }
 
       if (
         !data.ephemeral &&
@@ -255,42 +274,18 @@ export class UnifiedThreadResponseConsumer {
 
     // Handle ephemeral messages (OAuth/auth flows)
     if (data.ephemeral && data.content && renderer.handleEphemeral) {
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "ephemeral", {
-          type: "ephemeral",
-          content: data.content,
-          messageId: data.messageId,
-          timestamp: data.timestamp,
-        });
-      }
       await renderer.handleEphemeral(data);
       return;
     }
 
     // Handle status updates (heartbeat with elapsed time)
     if (data.statusUpdate && renderer.handleStatusUpdate) {
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "status", {
-          type: "status",
-          status: data.statusUpdate,
-          messageId: data.messageId,
-          timestamp: data.timestamp,
-        });
-      }
       await renderer.handleStatusUpdate(data);
       return;
     }
 
     // Handle streaming delta
     if (data.delta && renderer.handleDelta) {
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "output", {
-          type: "delta",
-          content: data.delta,
-          timestamp: data.timestamp,
-          messageId: data.messageId,
-        });
-      }
       await renderer.handleDelta(data, sessionKey);
       // Early return if no error - delta processing is complete
       if (!data.error) {
@@ -300,38 +295,14 @@ export class UnifiedThreadResponseConsumer {
 
     // Handle error
     if (data.error) {
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "error", {
-          type: "error",
-          error: data.error,
-          messageId: data.messageId,
-          timestamp: data.timestamp,
-        });
-      }
       await renderer.handleError(data, sessionKey);
       // Also complete session on error
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "complete", {
-          type: "complete",
-          messageId: data.messageId,
-          processedMessageIds: data.processedMessageIds,
-          timestamp: data.timestamp,
-        });
-      }
       await renderer.handleCompletion(data, sessionKey);
       return;
     }
 
     // Handle completion
     if (data.processedMessageIds?.length) {
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "complete", {
-          type: "complete",
-          messageId: data.messageId,
-          processedMessageIds: data.processedMessageIds,
-          timestamp: data.timestamp,
-        });
-      }
       await renderer.handleCompletion(data, sessionKey);
     }
   }

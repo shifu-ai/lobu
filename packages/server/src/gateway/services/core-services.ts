@@ -74,8 +74,8 @@ import {
 import { ImageGenerationService } from "./image-generation-service.js";
 import { InstructionService } from "./instruction-service.js";
 import { SessionManager, StateAdapterSessionStore } from "./session-manager.js";
+import { SseFanout } from "./sse-fanout.js";
 import { SseManager } from "./sse-manager.js";
-import { WatcherRunTracker } from "../watchers/run-tracker.js";
 import { ProviderConfigResolver } from "./provider-config-resolver.js";
 import {
   ProviderRegistryService,
@@ -102,7 +102,7 @@ export class CoreServices {
   private instructionService?: InstructionService;
   private interactionService?: InteractionService;
   private sseManager?: SseManager;
-  private watcherRunTracker?: WatcherRunTracker;
+  private sseFanout?: SseFanout;
 
   // ============================================================================
   // Auth & Provider Services
@@ -349,8 +349,13 @@ export class CoreServices {
     this.sseManager = new SseManager();
     logger.debug("SSE manager initialized");
 
-    this.watcherRunTracker = new WatcherRunTracker();
-    logger.debug("Watcher run tracker initialized");
+    // Cross-replica SSE delivery: LISTEN/NOTIFY fan-out so events produced on
+    // this pod reach clients (and seed replay backlogs) on every pod. Queue is
+    // already started here, so the DB is known-reachable. Fails open to
+    // local-only on LISTEN failure.
+    this.sseFanout = new SseFanout(this.sseManager);
+    await this.sseFanout.start();
+    logger.debug("SSE fan-out initialized");
 
     // Initialize grant store for unified permissions (PG-backed)
     this.grantStore = new GrantStore();
@@ -893,6 +898,10 @@ export class CoreServices {
     // Ephemeral sweeper + token refresh have no per-instance lifecycle anymore
     // — scheduling is owned by the TaskScheduler. Nothing to stop here.
 
+    if (this.sseFanout) {
+      await this.sseFanout.stop();
+    }
+
     if (this.queueProducer) {
       await this.queueProducer.stop();
     }
@@ -1002,12 +1011,6 @@ export class CoreServices {
   getSseManager(): SseManager {
     if (!this.sseManager) throw new Error("SSE manager not initialized");
     return this.sseManager;
-  }
-
-  getWatcherRunTracker(): WatcherRunTracker {
-    if (!this.watcherRunTracker)
-      throw new Error("Watcher run tracker not initialized");
-    return this.watcherRunTracker;
   }
 
   getAgentSettingsStore(): AgentSettingsStore {
