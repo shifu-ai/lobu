@@ -43,6 +43,9 @@ class OrgScopedWritableStore implements WritableSecretStore {
 	}
 
 	async delete(nameOrRef: string): Promise<void> {
+		if (tryGetOrgId() !== this.organizationId) {
+			throw new Error("test secret delete missing org context");
+		}
 		const name = nameOrRef.startsWith("secret://")
 			? decodeURIComponent(nameOrRef.slice("secret://".length))
 			: nameOrRef;

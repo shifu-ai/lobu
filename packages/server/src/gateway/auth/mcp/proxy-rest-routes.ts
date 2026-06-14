@@ -297,6 +297,7 @@ async function handleCallToolAuthenticated(
 					mcpId,
 					agentId,
 					scopeKey,
+					auth.tokenData.organizationId,
 				);
 				if (autoAuthResult) {
 					await proxy.authFlows.fireAuthRequired(

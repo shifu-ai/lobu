@@ -273,6 +273,18 @@ export function createGatewayApp(
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
         approveToolCall: async (requestId: string, decision: string) => {
+          const expiresMap = {
+            "1h": Date.now() + 3_600_000,
+            "24h": Date.now() + 86_400_000,
+            always: null,
+          } satisfies Record<string, number | null>;
+          const isGrantDecision = (
+            value: string,
+          ): value is keyof typeof expiresMap => value in expiresMap;
+          if (decision !== "deny" && !isGrantDecision(decision)) {
+            return { success: false, error: "Invalid decision" };
+          }
+
           // DELETE ... RETURNING atomically claims the pending invocation
           // so a retry of POST /api/v1/agents/approve (CLI re-tries,
           // double-clicks, Slack webhook retries) cannot double-execute the
@@ -282,24 +294,19 @@ export function createGatewayApp(
           if (!pending)
             return { success: false, error: "Request not found or expired" };
           const pattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
-          const expiresMap: Record<string, number | null> = {
-            "1h": Date.now() + 3_600_000,
-            "24h": Date.now() + 86_400_000,
-            always: null,
-          };
           if (decision === "deny") {
             await approveGrantStore?.grant(
               pending.agentId,
               pattern,
               null,
-							true,
+              true,
             );
             return { success: true };
           }
           await approveGrantStore?.grant(
             pending.agentId,
             pattern,
-						decision in expiresMap ? expiresMap[decision]! : null,
+            expiresMap[decision],
           );
           if (approveMcpProxy) {
             const result = await approveMcpProxy.executeToolDirect(
@@ -307,10 +314,10 @@ export function createGatewayApp(
               pending.userId,
               pending.mcpId,
               pending.toolName,
-							pending.args,
-							...(pending.organizationId
-								? [{ organizationId: pending.organizationId }]
-								: []),
+              pending.args,
+              ...(pending.organizationId
+                ? [{ organizationId: pending.organizationId }]
+                : []),
             );
             return { success: true, result } as any;
           }

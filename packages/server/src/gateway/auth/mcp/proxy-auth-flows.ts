@@ -7,6 +7,7 @@ import type {
 	HttpMcpServerConfig,
 	McpConfigSource,
 } from "./proxy-shared.js";
+import { runWithOrganizationContext } from "./proxy-shared.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -108,6 +109,7 @@ export class McpAuthFlows {
 				params.mcpId,
 				params.agentId,
 				params.scopeKey,
+				params.organizationId,
 			);
 			if (legacyAuth) return fire(legacyAuth);
 		}
@@ -258,6 +260,25 @@ export class McpAuthFlows {
 	 * Returns a user-facing message with the verification URL, or null on failure.
 	 */
 	async tryAutoDeviceAuth(
+		mcpId: string,
+		agentId: string,
+		scopeKey: string,
+		organizationId?: string,
+	): Promise<AuthRequiredPayload | null> {
+		if (!organizationId) {
+			logger.warn("Device-auth flow skipped: worker token has no organizationId", {
+				mcpId,
+				agentId,
+			});
+			return null;
+		}
+
+		return runWithOrganizationContext(organizationId, () =>
+			this.tryAutoDeviceAuthScoped(mcpId, agentId, scopeKey),
+		);
+	}
+
+	private async tryAutoDeviceAuthScoped(
 		mcpId: string,
 		agentId: string,
 		scopeKey: string,
