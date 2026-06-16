@@ -14,7 +14,7 @@ import { requiresToolApproval } from "../../permissions/approval-policy.js";
 import type { GrantStore } from "../../permissions/grant-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
-import { orgContext } from "../../../lobu/stores/org-context.js";
+import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import {
   getStoredCredential,
   refreshCredential,
@@ -1952,17 +1952,21 @@ export class McpProxy {
 
   /**
    * Build a session-store key for the upstream Mcp-Session-Id associated
-   * with a specific (agent, mcp, scope) triple. Scoping by scopeKey prevents
-   * two users (or user-vs-channel credentials) from sharing a single
-   * upstream session, which would leak context across scopes.
+   * with a specific (org, agent, mcp, scope) tuple. The session store is a
+   * process-wide Map, and agentId is NOT globally unique, so the org scope
+   * prevents two tenants with the same agentId+mcpId from sharing upstream
+   * session handles. Scoping by scopeKey additionally prevents two users
+   * (or user-vs-channel credentials) within an org from sharing a single
+   * upstream session.
    */
   private buildSessionKey(
     agentId: string,
     mcpId: string,
     scopeKey?: string
   ): string {
+    const orgId = getOrgId();
     const scope = scopeKey ?? "_unscoped";
-    return `mcp:session:${agentId}:${mcpId}:${scope}`;
+    return `mcp:session:${orgId}:${agentId}:${mcpId}:${scope}`;
   }
 
   /**
