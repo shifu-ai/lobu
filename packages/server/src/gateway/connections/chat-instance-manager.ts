@@ -72,6 +72,21 @@ function telegramBotToken(config: TelegramAdapterConfig): string | undefined {
   return typeof config.botToken === "string" ? config.botToken : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isToolboxMcpMaterializedConnection(
+  connection: StoredConnection
+): boolean {
+  if (connection.id.startsWith("toolbox-mcp:")) return true;
+  if (!isRecord(connection.metadata)) return false;
+  return (
+    connection.metadata.authSource === "lobu_oauth" ||
+    typeof connection.metadata.mcpId === "string"
+  );
+}
+
 /**
  * Generate a strong (64 hex char) Telegram webhook secret token. Telegram's
  * `secret_token` allows 1-256 chars of `A-Za-z0-9_-`; hex is a safe subset.
@@ -201,6 +216,19 @@ export class ChatInstanceManager {
     );
 
     for (const stored of connections) {
+      // Toolbox MCP materialization rows live in agent_connections so the
+      // Toolbox runtime can authorize tool execution by connectionRef. They
+      // are not Chat SDK platform adapters and must not be booted as Slack,
+      // Telegram, etc. Otherwise startup marks them `error` with
+      // "No adapter factory", making valid OAuth MCP refs look broken.
+      if (isToolboxMcpMaterializedConnection(stored)) {
+        logger.debug(
+          { id: stored.id, agentId: stored.agentId, platform: stored.platform },
+          "Skipping Toolbox MCP materialized connection during chat boot"
+        );
+        continue;
+      }
+
       // StoredConnection.config holds `secret://` refs for sensitive
       // fields. startInstance() resolves them before handing config to
       // the Chat SDK adapter; if a ref is unresolvable (e.g. the
