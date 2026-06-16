@@ -1002,7 +1002,19 @@ export class McpProxy {
         const bodyText = await clonedReq.text();
         if (bodyText) {
           const jsonRpc = JSON.parse(bodyText);
-          if (jsonRpc.method === "tools/call" && jsonRpc.params?.name) {
+          if (Array.isArray(jsonRpc)) {
+            if (jsonRpc.some((message) => message?.method === "tools/call")) {
+              logger.warn(
+                { mcpId, agentId },
+                "Rejecting batched tools/call: guardrails and approval cannot be enforced on a JSON-RPC batch"
+              );
+              return this.sendJsonRpcError(
+                c,
+                -32600,
+                "Batched tools/call is not permitted; send each tool call as a single JSON-RPC request."
+              );
+            }
+          } else if (jsonRpc.method === "tools/call" && jsonRpc.params?.name) {
             const toolName = jsonRpc.params.name;
             const toolArgs = jsonRpc.params.arguments || {};
 
