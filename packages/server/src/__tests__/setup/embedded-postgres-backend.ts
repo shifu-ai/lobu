@@ -17,6 +17,7 @@ import { injectPgvector, resolveEmbeddedNativeDir } from '@lobu/pgvector-embedde
 import exitHook from 'async-exit-hook';
 import EmbeddedPostgres from 'embedded-postgres';
 import { withFreePortRetry } from './free-port';
+import { reapStaleClustersIn, STALE_CLUSTER_MS } from './reap-stale-clusters';
 
 // Importing `embedded-postgres` registers async-exit-hook, whose `beforeExit`
 // handler force-exits with code 0 (`process.nextTick(process.exit.bind(null, 0))`).
@@ -38,6 +39,25 @@ export interface EmbeddedBackend {
 }
 
 let active: EmbeddedBackend | null = null;
+let reapedStaleClusters = false;
+
+/**
+ * Reap orphaned `lobu-test-pg-*` clusters left by prior runs that were KILLED
+ * (SIGKILL / timeout / OOM / ENOSPC / `pkill`) before teardown could run — those
+ * paths skip BOTH the `beforeExit` hook and `async-exit-hook`, so the data dir
+ * (~150-400 MB each) leaks to tmp forever. A whole session of killed runs once
+ * piled up 65 GB and filled the disk; `make clean-test-pg` only freed SHM slots,
+ * never the dirs. Self-healing: every run reaps the previous runs' leaks, once
+ * per process, before adding its own — so a kill can never accumulate. The pure
+ * logic lives in ./reap-stale-clusters (no embedded-postgres import, so the
+ * no-database unit suite can test it directly).
+ */
+function reapStaleClusters(): void {
+  if (reapedStaleClusters) return;
+  reapedStaleClusters = true;
+  reapStaleClustersIn(tmpdir(), Date.now(), STALE_CLUSTER_MS);
+}
+
 let activeStopImpl: (() => Promise<void>) | null = null;
 let activeExitStopImpl: (() => void) | null = null;
 let stopPromise: Promise<void> | null = null;
@@ -97,6 +117,10 @@ export function stopActiveEmbeddedBackend(): Promise<void> {
 export async function startEmbeddedBackend(): Promise<EmbeddedBackend> {
   if (stopPromise) await stopPromise;
   if (active) return active;
+
+  // Self-heal: clear orphaned clusters from previously-killed runs before we add
+  // our own, so a kill can never accumulate disk (see reapStaleClusters).
+  reapStaleClusters();
 
   injectPgvector(resolveEmbeddedNativeDir());
 
