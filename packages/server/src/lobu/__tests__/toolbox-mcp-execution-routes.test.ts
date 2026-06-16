@@ -16,7 +16,11 @@ const SOURCE_AGENT_ID = 'source-agent';
 const CONNECTION_REF = 'google_workspace';
 const SOURCE_CONNECTION_REF = 'owner-google-workspace';
 const MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256')
-  .update(JSON.stringify([OWNER_USER_ID, AGENT_ID, 'google_workspace']))
+  .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'google_workspace']))
+  .digest('hex')}`;
+const OTHER_ORG_ID = 'org-other';
+const OTHER_ORG_MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256')
+  .update(JSON.stringify([OTHER_ORG_ID, OWNER_USER_ID, AGENT_ID, 'google_workspace']))
   .digest('hex')}`;
 const fakeAgents = new Map<string, any>();
 const fakeConnections = new Map<string, any>();
@@ -40,9 +44,14 @@ mock.module('../stores/postgres-stores', () => ({
     deleteMetadata: async () => {},
   }),
   createPostgresAgentConnectionStore: () => ({
-    getConnection: async (connectionId: string) => fakeConnections.get(connectionId) ?? null,
+    getConnection: async (connectionId: string) => {
+      const connection = fakeConnections.get(connectionId) ?? null;
+      if (!connection) return null;
+      return connection.organizationId === authStash.organizationId ? connection : null;
+    },
     listConnections: async (filter?: { agentId?: string; platform?: string }) =>
       [...fakeConnections.values()].filter((connection) => {
+        if (connection.organizationId !== authStash.organizationId) return false;
         if (filter?.agentId && connection.agentId !== filter.agentId) return false;
         if (filter?.platform && connection.platform !== filter.platform) return false;
         return true;
@@ -492,6 +501,55 @@ describe('Toolbox MCP execution routes', () => {
     expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
       agentId: 'different-agent',
       config: { credentialRef: 'lobu_secret_other_ref' },
+    });
+  });
+
+  test('POST /mcp/connections/materialize uses org-scoped refs and leaves another org row untouched', async () => {
+    seedSourceConnectionForMaterialize();
+    fakeConnections.set(OTHER_ORG_MATERIALIZED_CONNECTION_REF, {
+      id: OTHER_ORG_MATERIALIZED_CONNECTION_REF,
+      organizationId: OTHER_ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: { credentialRef: 'lobu_secret_other_org_ref' },
+      settings: { allowGroups: true },
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        materializedFromConnectionRef: 'other-org-source',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const otherOrgBefore = fakeConnections.get(OTHER_ORG_MATERIALIZED_CONNECTION_REF);
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'ready',
+      lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+    });
+    expect(MATERIALIZED_CONNECTION_REF).not.toBe(OTHER_ORG_MATERIALIZED_CONNECTION_REF);
+    expect(fakeConnections.get(OTHER_ORG_MATERIALIZED_CONNECTION_REF)).toEqual(otherOrgBefore);
+    expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      config: { credentialRef: 'lobu_secret_safe_ref' },
     });
   });
 
