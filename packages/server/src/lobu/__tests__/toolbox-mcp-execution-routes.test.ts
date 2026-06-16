@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { Hono } from 'hono';
 import {
   authStash,
@@ -14,8 +15,9 @@ const AGENT_ID = 'pm-agent';
 const SOURCE_AGENT_ID = 'source-agent';
 const CONNECTION_REF = 'google_workspace';
 const SOURCE_CONNECTION_REF = 'owner-google-workspace';
-const MATERIALIZED_CONNECTION_REF =
-  'toolbox-mcp:user-agent-001:pm-agent:google_workspace';
+const MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256')
+  .update(JSON.stringify([OWNER_USER_ID, AGENT_ID, 'google_workspace']))
+  .digest('hex')}`;
 const fakeAgents = new Map<string, any>();
 const fakeConnections = new Map<string, any>();
 let executeToolDirectMock: ReturnType<typeof mock>;
@@ -446,6 +448,102 @@ describe('Toolbox MCP execution routes', () => {
       },
       status: 'active',
     });
+  });
+
+  test('POST /mcp/connections/materialize refuses a colliding materialized ref for another agent', async () => {
+    seedSourceConnectionForMaterialize();
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: 'different-agent',
+      platform: 'google_workspace',
+      config: { credentialRef: 'lobu_secret_other_ref' },
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        materializedFromConnectionRef: SOURCE_CONNECTION_REF,
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'error',
+      lobuConnectionRef: null,
+      errorCode: 'lobu_mcp_materialize_failed',
+    });
+    expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
+      agentId: 'different-agent',
+      config: { credentialRef: 'lobu_secret_other_ref' },
+    });
+  });
+
+  test('POST /mcp/connections/materialize does not select a source that spoofs owner or connector fields', async () => {
+    fakeAgents.set(SOURCE_AGENT_ID, {
+      agentId: SOURCE_AGENT_ID,
+      name: 'Source Agent',
+      owner: { platform: 'toolbox', userId: 'different-user' },
+      organizationId: ORG_ID,
+      createdAt: Date.now(),
+    });
+    fakeConnections.delete(CONNECTION_REF);
+    fakeConnections.set(SOURCE_CONNECTION_REF, {
+      id: SOURCE_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: SOURCE_AGENT_ID,
+      platform: 'slack',
+      config: {
+        credentialRef: 'lobu_secret_wrong_owner_ref',
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+      },
+      settings: {
+        ownerUserId: OWNER_USER_ID,
+        provider: 'google_workspace',
+      },
+      metadata: {},
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'not_connected',
+      lobuConnectionRef: null,
+    });
+    expect(fakeConnections.has(MATERIALIZED_CONNECTION_REF)).toBe(false);
   });
 
   test('POST /mcp/connections/materialize is idempotent for the same owner agent connector', async () => {

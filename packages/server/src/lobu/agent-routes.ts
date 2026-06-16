@@ -4,6 +4,7 @@
  * All routes are org-scoped via mcpAuth middleware and orgContext.
  */
 
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { encrypt, type AuthProfile, type StoredConnection } from '@lobu/core';
@@ -373,11 +374,7 @@ function connectionMatchesConnector(
   connection: StoredConnection,
   connectorKey: ToolboxMcpStatusConnectorKey
 ): boolean {
-  return (
-    connection.platform === connectorKey ||
-    metadataString(connection, 'connectorKey') === connectorKey ||
-    metadataString(connection, 'provider') === connectorKey
-  );
+  return connection.platform === connectorKey;
 }
 
 async function verifyAttachedMcpConnection(params: {
@@ -433,7 +430,10 @@ function deterministicToolboxMcpConnectionRef(
   agentId: string,
   connectorKey: ToolboxMcpStatusConnectorKey
 ): string {
-  return `toolbox-mcp:${ownerUserId}:${agentId}:${connectorKey}`;
+  const digest = createHash('sha256')
+    .update(JSON.stringify([ownerUserId, agentId, connectorKey]))
+    .digest('hex');
+  return `toolbox-mcp:${digest}`;
 }
 
 function classifyMcpConnectionStatus(connection: StoredConnection): ToolboxMcpConnectionStatus {
@@ -473,6 +473,32 @@ async function connectionMatchesOwner(
   return connectionAgentOwnerMatches(connection, ownerUserId);
 }
 
+async function materializationSourceMatchesOwner(
+  connection: StoredConnection,
+  ownerUserId: string
+): Promise<boolean> {
+  return connectionAgentOwnerMatches(connection, ownerUserId);
+}
+
+function connectionIsExpectedMaterializedRow(params: {
+  connection: StoredConnection;
+  ownerUserId: string;
+  agentId: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+}): boolean {
+  const metadata = isPlainRecord(params.connection.metadata)
+    ? params.connection.metadata
+    : {};
+  return (
+    params.connection.agentId === params.agentId &&
+    params.connection.platform === params.connectorKey &&
+    metadata.ownerUserId === params.ownerUserId &&
+    metadata.connectorKey === params.connectorKey &&
+    typeof metadata.materializedFromConnectionRef === 'string' &&
+    metadata.materializedFromConnectionRef.length > 0
+  );
+}
+
 async function findMaterializableMcpConnection(params: {
   ownerUserId: string;
   agentId: string;
@@ -510,7 +536,7 @@ async function findMaterializableMcpConnection(params: {
     ) {
       continue;
     }
-    if (await connectionMatchesOwner(connection, params.ownerUserId)) {
+    if (await materializationSourceMatchesOwner(connection, params.ownerUserId)) {
       usableConnections.push(connection);
     }
   }
@@ -552,7 +578,7 @@ function buildMaterializedMcpConnection(params: {
       ...sourceMetadata,
       ownerUserId: params.ownerUserId,
       connectorKey: params.connectorKey,
-      provider: metadataString(params.source, 'provider') ?? params.connectorKey,
+      provider: params.connectorKey,
       materializedFromConnectionRef: params.source.id,
     },
     status: 'active',
@@ -703,6 +729,12 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       400
     );
   }
+  if (!AGENT_ID_PATTERN.test(agentId)) {
+    return c.json(
+      toolboxMcpMaterializeResult('error', null, 'lobu_mcp_invalid_request'),
+      400
+    );
+  }
 
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
   if (denied) return denied;
@@ -718,6 +750,19 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       agentId,
       connectorKey
     );
+    const existingMaterialized = await connectionStore.getConnection(materializedRef);
+    if (
+      existingMaterialized &&
+      !connectionIsExpectedMaterializedRow({
+        connection: existingMaterialized,
+        ownerUserId,
+        agentId,
+        connectorKey,
+      })
+    ) {
+      throw new Error('materialized connection ref collision');
+    }
+
     const match = await findMaterializableMcpConnection({
       ownerUserId,
       agentId,
@@ -745,6 +790,29 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       materializedRef,
     });
     await connectionStore.saveConnection(materialized);
+
+    const savedMaterialized = await connectionStore.getConnection(materializedRef);
+    if (
+      !savedMaterialized ||
+      !connectionIsExpectedMaterializedRow({
+        connection: savedMaterialized,
+        ownerUserId,
+        agentId,
+        connectorKey,
+      })
+    ) {
+      throw new Error('materialized connection was not attached to requested agent');
+    }
+
+    const guard = await verifyAttachedMcpConnection({
+      ownerUserId,
+      agentId,
+      connectorKey,
+      connectionRef: materializedRef,
+    });
+    if (guard.status !== 'ready') {
+      return c.json(toolboxMcpMaterializeResult(guard.status, null));
+    }
 
     return c.json(toolboxMcpMaterializeResult('ready', materializedRef));
   } catch {
