@@ -23,6 +23,7 @@ const OTHER_ORG_MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256'
   .update(JSON.stringify([OTHER_ORG_ID, OWNER_USER_ID, AGENT_ID, 'google_workspace']))
   .digest('hex')}`;
 const fakeAgents = new Map<string, any>();
+const fakeSettings = new Map<string, any>();
 const fakeConnections = new Map<string, any>();
 let executeToolDirectMock: ReturnType<typeof mock>;
 let failSaveConnection = false;
@@ -35,10 +36,41 @@ mock.module('../stores/postgres-stores', () => ({
   touchAgentLastUsed: async () => {},
   createPostgresAgentConfigStore: () => ({
     getMetadata: async (agentId: string) => fakeAgents.get(agentId) ?? null,
+    saveMetadata: async (agentId: string, metadata: any) => {
+      fakeAgents.set(agentId, metadata);
+      const { getDb } = await import('../../db/client.js');
+      const sql = getDb();
+      await sql`
+        INSERT INTO agents (
+          id, organization_id, name, description, owner_platform, owner_user_id,
+          is_workspace_agent, created_at, updated_at
+        )
+        VALUES (
+          ${agentId},
+          ${metadata.organizationId},
+          ${metadata.name ?? 'Agent'},
+          ${metadata.description ?? null},
+          ${metadata.owner?.platform ?? null},
+          ${metadata.owner?.userId ?? null},
+          ${metadata.isWorkspaceAgent ?? false},
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT (organization_id, id) DO UPDATE SET
+          name = EXCLUDED.name,
+          description = EXCLUDED.description,
+          owner_platform = EXCLUDED.owner_platform,
+          owner_user_id = EXCLUDED.owner_user_id,
+          is_workspace_agent = EXCLUDED.is_workspace_agent,
+          updated_at = NOW()
+      `;
+    },
     listAgents: async () => [...fakeAgents.values()],
     hasAgent: async (agentId: string) => fakeAgents.has(agentId),
-    getSettings: async () => null,
-    saveSettings: async () => {},
+    getSettings: async (agentId: string) => fakeSettings.get(agentId) ?? null,
+    saveSettings: async (agentId: string, settings: any) => {
+      fakeSettings.set(agentId, settings);
+    },
     updateSettings: async () => {},
     updateMetadata: async () => {},
     deleteMetadata: async () => {},
@@ -59,6 +91,40 @@ mock.module('../stores/postgres-stores', () => ({
     saveConnection: async (connection: any) => {
       if (failSaveConnection) throw new Error('save failed');
       fakeConnections.set(connection.id, connection);
+      try {
+        const { getDb } = await import('../../db/client.js');
+        const sql = getDb();
+        await sql`
+          INSERT INTO agent_connections (
+            id, organization_id, agent_id, platform, config, settings, metadata,
+            status, error_message, created_at, updated_at
+          )
+          VALUES (
+            ${connection.id},
+            ${connection.organizationId},
+            ${connection.agentId},
+            ${connection.platform},
+            ${sql.json(connection.config ?? {})},
+            ${sql.json(connection.settings ?? {})},
+            ${sql.json(connection.metadata ?? {})},
+            ${connection.status ?? 'active'},
+            ${connection.errorMessage ?? null},
+            NOW(),
+            NOW()
+          )
+          ON CONFLICT (id) DO UPDATE SET
+            platform = EXCLUDED.platform,
+            config = EXCLUDED.config,
+            settings = EXCLUDED.settings,
+            metadata = EXCLUDED.metadata,
+            status = EXCLUDED.status,
+            error_message = EXCLUDED.error_message,
+            updated_at = NOW()
+        `;
+      } catch {
+        // Some route tests intentionally use fake agents that do not exist in
+        // the SQL fixture. Keep the fake store authoritative for those tests.
+      }
     },
     updateConnection: async (connectionId: string, updates: Record<string, unknown>) => {
       const existing = fakeConnections.get(connectionId);
@@ -131,6 +197,7 @@ function seedSourceConnectionForMaterialize(overrides: Record<string, unknown> =
 describe('Toolbox MCP execution routes', () => {
   beforeEach(() => {
     fakeAgents.clear();
+    fakeSettings.clear();
     fakeConnections.clear();
     failSaveConnection = false;
     seedOrgAgentAndConnection();
@@ -260,6 +327,51 @@ describe('Toolbox MCP execution routes', () => {
       CONNECTION_REF,
       'docs_read',
       { documentId: 'doc-001' }
+    );
+  });
+
+  test('POST /mcp/tools/call executes using the materialized connection mcpId metadata', async () => {
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        mcpId: 'google_workspace',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: MATERIALIZED_CONNECTION_REF,
+        toolName: 'drive_search',
+        args: { query: 'course', limit: 5 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'google_workspace',
+      'drive_search',
+      { query: 'course', limit: 5 }
     );
   });
 
