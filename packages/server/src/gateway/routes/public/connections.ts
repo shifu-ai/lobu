@@ -188,12 +188,26 @@ export function createConnectionWebhookRoutes(
 
     // Info-level so platform webhook traffic (Slack interactivity, Telegram
     // updates, etc.) is visible in production logs without flipping LOG_LEVEL.
+    // Never log the request URL/query on this route — webhook ingest
+    // connections may carry their auth token in `?token=`.
     logger.info(
       { connectionId, platform: connection.platform },
       "Inbound platform webhook"
     );
 
     try {
+      // Ingest-only webhook connections (#1235) have no Chat SDK instance to
+      // warm — branch before handleWebhook's lazy hydration path. Pass the
+      // socket peer address so the per-source pre-auth rate limit keys on the
+      // real client even without TRUSTED_PROXY (getClientIP only trusts
+      // X-Forwarded-For behind a trusted proxy).
+      if (connection.platform === "webhook") {
+        return await manager.handleIngestWebhook(
+          connectionId,
+          c.req.raw,
+          c.var.peerRemoteAddress
+        );
+      }
       const response = await manager.handleWebhook(connectionId, c.req.raw);
       return response;
     } catch (error) {
