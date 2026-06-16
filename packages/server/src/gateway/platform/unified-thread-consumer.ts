@@ -4,8 +4,11 @@
  * via the PlatformRegistry, eliminating duplicate queue filtering logic.
  */
 
-import { createChildSpan, createLogger } from "@lobu/core";
+import { createChildSpan, createLogger, type GuardrailRegistry } from "@lobu/core";
+import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import type { ChatResponseBridge } from "../connections/chat-response-bridge.js";
+import { readPlatformMetadata } from "../connections/platform-metadata.js";
+import { OutputGuardrailScanner } from "../guardrails/output-scan.js";
 import type {
   IMessageQueue,
   QueueJob,
@@ -76,6 +79,14 @@ export class UnifiedThreadResponseConsumer {
   private chatResponseBridge?: ChatResponseBridge;
   private interactionService?: InteractionService;
   private chatInteractionFanoutCleanup?: () => void;
+  /**
+   * Output-stage guardrails for the API/SSE path. The ChatResponseBridge runs
+   * output guardrails for chat platforms, but pure API/SSE rows (web SPA +
+   * programmatic Agent API) route through ApiResponseRenderer, which has no
+   * guardrail hook — so without this, secret-scan/pii-scan configured via
+   * `defineAgent` never run on the API surface (the primary web chat surface).
+   */
+  private readonly outputGuardrail = new OutputGuardrailScanner();
 
   constructor(
     private queue: IMessageQueue,
@@ -85,6 +96,18 @@ export class UnifiedThreadResponseConsumer {
 
   setChatResponseBridge(bridge: ChatResponseBridge): void {
     this.chatResponseBridge = bridge;
+  }
+
+  /**
+   * Wire output-stage guardrails for the API/SSE path. Both args must be set
+   * for guardrails to run; with neither, the API path behaves as before. Chat
+   * rows are unaffected — the ChatResponseBridge owns their output scanning.
+   */
+  setOutputGuardrails(
+    registry?: GuardrailRegistry,
+    settingsStore?: AgentSettingsStore
+  ): void {
+    this.outputGuardrail.setGuardrails(registry, settingsStore);
   }
 
   /**
@@ -404,6 +427,51 @@ export class UnifiedThreadResponseConsumer {
         throw new Error(
           `API SSE session ${sseKey} not owned by this gateway instance; re-queueing for owner delivery`
         );
+      }
+    }
+
+    // Output-stage guardrails for the API/SSE path (see `outputGuardrail`).
+    // Scoped to API rows — chat rows route through ChatResponseBridge, which
+    // owns their output scanning, so scanning them here would double-enforce.
+    // Runs on the owning pod (terminal rows are owner-gated above), so the
+    // authoritative finalText scan is replica-safe.
+    if (isApiRow && this.outputGuardrail.enabled) {
+      const md = readPlatformMetadata(data.platformMetadata);
+      const agentId = md.agentId;
+      if (agentId) {
+        // Withhold streaming deltas for agents that configured output
+        // guardrails. Deltas are NOT owner-gated under N>1, so a secret split
+        // across deltas claimed on different pods would trip no per-pod scan and
+        // could reach a streaming SSE client before the terminal scan. We can't
+        // scan a partial cross-pod stream safely, so we don't stream at all:
+        // the full, scanned `finalText` is delivered on the terminal `complete`
+        // event instead (the SPA renders from it). Agents without output
+        // guardrails stream normally — `hasOutputGuardrails` returns false.
+        if (data.delta) {
+          if (await this.outputGuardrail.hasOutputGuardrails(agentId)) return;
+        } else if (data.error || data.processedMessageIds?.length) {
+          // Terminal row: scan the worker's authoritative finalText on this
+          // (owner-gated) pod. On a trip, replace the broadcast text with the
+          // block notice so the secret never reaches the client and never lands
+          // in stored history.
+          if (data.finalText) {
+            const trip = await this.outputGuardrail.scanFinal(data.finalText, {
+              agentId,
+              organizationId: md.organizationId,
+              userId: data.userId,
+              conversationId: data.conversationId,
+              platform: "api",
+            });
+            if (trip) {
+              data = {
+                ...data,
+                finalText: `Message blocked by guardrail: ${
+                  trip.reason ?? trip.guardrail
+                }`,
+              };
+            }
+          }
+        }
       }
     }
 
