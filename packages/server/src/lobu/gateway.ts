@@ -459,6 +459,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
         mcpConfigService: coreServices.getMcpConfigService(),
         secretStore: coreServices.getSecretStore(),
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
+        connectionManager: workerGateway?.getConnectionManager(),
       })
     );
     lobuApp.route('/api/v1', toolboxMcpRoutes);

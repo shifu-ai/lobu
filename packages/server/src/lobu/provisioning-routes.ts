@@ -14,6 +14,7 @@ import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
 import { GrantStore } from "../gateway/permissions/grant-store.js";
 import { getStoredCredential } from "../gateway/routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
+import type { SSEWriter } from "../gateway/gateway/connection-manager.js";
 import type { Env } from "../index";
 import {
 	AGENT_ID_PATTERN,
@@ -29,6 +30,11 @@ interface ProvisioningRoutesOptions {
 	mcpConfigService?: McpConfigService;
 	secretStore?: WritableSecretStore;
 	publicGatewayUrl?: string;
+	connectionManager?: {
+		getDeploymentsForAgent(agentId: string): string[];
+		getConnection(deploymentName: string): { writer: SSEWriter } | undefined;
+		sendSSE(writer: SSEWriter, event: string, data: unknown): boolean;
+	};
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -98,6 +104,23 @@ async function syncProvisioningGrants(
 	}
 }
 
+function notifyAgentSettingsChanged(
+	connectionManager: ProvisioningRoutesOptions["connectionManager"],
+	agentId: string,
+): void {
+	if (!connectionManager) return;
+
+	const deployments = connectionManager.getDeploymentsForAgent(agentId);
+	for (const deploymentName of deployments) {
+		const connection = connectionManager.getConnection(deploymentName);
+		if (!connection) continue;
+		connectionManager.sendSSE(connection.writer, "config_changed", {
+			agentId,
+			changes: [{ type: "agent_settings", agentId }],
+		});
+	}
+}
+
 export function createProvisioningRoutes(
 	options: ProvisioningRoutesOptions = {},
 ): Hono<{ Bindings: Env }> {
@@ -164,6 +187,7 @@ export function createProvisioningRoutes(
 	});
 	await configStore.saveSettings(agentId, { ...settings, updatedAt: Date.now() });
 	await syncProvisioningGrants(agentId, settings, organizationId);
+	notifyAgentSettingsChanged(options.connectionManager, agentId);
 
 	return c.json(
 		{

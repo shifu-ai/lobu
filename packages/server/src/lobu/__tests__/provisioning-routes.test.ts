@@ -64,6 +64,11 @@ async function buildApp(
 		};
 		secretStore?: ReturnType<typeof createMemorySecretStore>;
 		publicGatewayUrl?: string;
+		connectionManager?: {
+			getDeploymentsForAgent: (agentId: string) => string[];
+			getConnection: (deploymentName: string) => { writer: unknown } | undefined;
+			sendSSE: (writer: unknown, event: string, data: unknown) => boolean;
+		};
 	} = {},
 ) {
 	const { createProvisioningRoutes } = await import("../provisioning-routes.js");
@@ -94,6 +99,7 @@ async function buildApp(
 			secretStore: overrides.secretStore as never,
 			publicGatewayUrl:
 				overrides.publicGatewayUrl ?? "https://gateway.example.test/lobu",
+			connectionManager: overrides.connectionManager as never,
 		}),
 	);
 	return app;
@@ -194,6 +200,51 @@ describe("POST /api/provisioning/agents", () => {
 		expect(settings).toMatchObject({
 			userMd: "Updated onboarding copy.",
 		});
+	});
+
+	test("notifies active workers to refresh session context after settings upsert", async () => {
+		const agentId = "shifu-u-notify123";
+		const writer = {};
+		const connectionManager = {
+			getDeploymentsForAgent: mock((agentId: string) => {
+				expect(agentId).toBe("shifu-u-notify123");
+				return ["api-shifu-u-notify"];
+			}),
+			getConnection: mock((deploymentName: string) => {
+				expect(deploymentName).toBe("api-shifu-u-notify");
+				return { writer };
+			}),
+			sendSSE: mock((targetWriter: unknown, event: string, data: unknown) => {
+				expect(targetWriter).toBe(writer);
+				expect(event).toBe("config_changed");
+				expect(data).toMatchObject({
+					agentId,
+					changes: [
+						{
+							type: "agent_settings",
+							agentId,
+						},
+					],
+				});
+				return true;
+			}),
+		};
+		const app = await buildApp(["mcp:admin"], { connectionManager });
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "PM / Marketing Agent",
+				settings: { userMd: "Updated onboarding copy." },
+			}),
+		});
+
+		expect(response.status).toBe(201);
+		expect(connectionManager.getDeploymentsForAgent).toHaveBeenCalledTimes(1);
+		expect(connectionManager.getConnection).toHaveBeenCalledTimes(1);
+		expect(connectionManager.sendSSE).toHaveBeenCalledTimes(1);
 	});
 
 	test("rejects PATs without mcp:admin scope", async () => {
