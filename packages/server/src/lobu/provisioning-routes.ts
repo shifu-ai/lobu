@@ -104,76 +104,92 @@ export function createProvisioningRoutes(
 	const provisioningRoutes = new Hono<{ Bindings: Env }>();
 
 	provisioningRoutes.post("/agents", async (c) => {
-	const denied = requireAdminPat(c);
-	if (denied) return denied;
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
 
-	const user = c.get("user") as { id?: string } | null;
-	const organizationId = c.get("organizationId") as string | null;
-	if (!user?.id || !organizationId) {
-		return c.json({ error: "Authentication required" }, 401);
-	}
+		const user = c.get("user") as { id?: string } | null;
+		const organizationId = c.get("organizationId") as string | null;
+		if (!user?.id || !organizationId) {
+			return c.json({ error: "Authentication required" }, 401);
+		}
 
-	let body: {
-		agentId?: unknown;
-		name?: unknown;
-		description?: unknown;
-		settings?: unknown;
-	};
-	try {
-		body = await c.req.json();
-	} catch {
-		return c.json({ error: "invalid_json" }, 400);
-	}
+		let body: {
+			agentId?: unknown;
+			name?: unknown;
+			description?: unknown;
+			ownerUserId?: unknown;
+			settings?: unknown;
+		};
+		try {
+			body = await c.req.json();
+		} catch {
+			return c.json({ error: "invalid_json" }, 400);
+		}
 
-	const agentId = typeof body.agentId === "string" ? body.agentId.trim() : "";
-	const name = typeof body.name === "string" ? body.name.trim() : "";
-	const description =
-		typeof body.description === "string" && body.description.trim()
-			? body.description.trim()
-			: undefined;
+		const agentId = typeof body.agentId === "string" ? body.agentId.trim() : "";
+		const name = typeof body.name === "string" ? body.name.trim() : "";
+		const description =
+			typeof body.description === "string" && body.description.trim()
+				? body.description.trim()
+				: undefined;
 
-	if (!agentId || !name) {
-		return c.json({ error: "agentId and name are required" }, 400);
-	}
-	const agentIdError = validateShifuAgentId(agentId);
-	if (agentIdError) {
-		return c.json({ error: agentIdError }, 400);
-	}
+		if (!agentId || !name) {
+			return c.json({ error: "agentId and name are required" }, 400);
+		}
+		const agentIdError = validateShifuAgentId(agentId);
+		if (agentIdError) {
+			return c.json({ error: agentIdError }, 400);
+		}
+		const ownerUserId =
+			body.ownerUserId === undefined
+				? user.id
+				: typeof body.ownerUserId === "string"
+					? body.ownerUserId.trim()
+					: "";
+		if (!ownerUserId) {
+			return c.json(
+				{ error: "ownerUserId must be a non-empty string when provided" },
+				400,
+			);
+		}
 
-	let settings: Omit<AgentSettings, "updatedAt">;
-	try {
-		settings = validateSettings(body.settings);
-	} catch (error) {
-		return c.json(
-			{ error: error instanceof Error ? error.message : "Invalid settings" },
-			400,
-		);
-	}
+		let settings: Omit<AgentSettings, "updatedAt">;
+		try {
+			settings = validateSettings(body.settings);
+		} catch (error) {
+			return c.json(
+				{ error: error instanceof Error ? error.message : "Invalid settings" },
+				400,
+			);
+		}
 
-	const existing = await configStore.getMetadata(agentId);
-	const created = !existing;
-	await configStore.saveMetadata(agentId, {
-		agentId,
-		name,
-		description,
-		owner: { platform: "toolbox", userId: user.id },
-		organizationId,
-		isWorkspaceAgent: false,
-		createdAt: existing?.createdAt ?? Date.now(),
-		lastUsedAt: existing?.lastUsedAt,
-	});
-	await configStore.saveSettings(agentId, { ...settings, updatedAt: Date.now() });
-	await syncProvisioningGrants(agentId, settings, organizationId);
-
-	return c.json(
-		{
-			ok: true,
+		const existing = await configStore.getMetadata(agentId);
+		const created = !existing;
+		await configStore.saveMetadata(agentId, {
 			agentId,
-			created,
-			revisionRef: `lobu:${agentId}`,
-		},
-		created ? 201 : 200,
-	);
+			name,
+			description,
+			owner: { platform: "toolbox", userId: ownerUserId },
+			organizationId,
+			isWorkspaceAgent: false,
+			createdAt: existing?.createdAt ?? Date.now(),
+			lastUsedAt: existing?.lastUsedAt,
+		});
+		await configStore.saveSettings(agentId, {
+			...settings,
+			updatedAt: Date.now(),
+		});
+		await syncProvisioningGrants(agentId, settings, organizationId);
+
+		return c.json(
+			{
+				ok: true,
+				agentId,
+				created,
+				revisionRef: `lobu:${agentId}`,
+			},
+			created ? 201 : 200,
+		);
 	});
 
 	provisioningRoutes.post(
