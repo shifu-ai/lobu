@@ -357,6 +357,13 @@ function isToolboxMcpStatusConnectorKey(value: unknown): value is ToolboxMcpStat
   return isToolboxMcpConnectorKey(value) || value === 'shifu_toolbox';
 }
 
+function connectorKeyAliases(connectorKey: ToolboxMcpStatusConnectorKey): ReadonlySet<string> {
+  if (connectorKey === 'shifu_toolbox') {
+    return new Set(['shifu_toolbox', 'shifu-toolbox']);
+  }
+  return new Set([connectorKey]);
+}
+
 function metadataString(
   connection: StoredConnection,
   field: string
@@ -374,7 +381,14 @@ function connectionMatchesConnector(
   connection: StoredConnection,
   connectorKey: ToolboxMcpStatusConnectorKey
 ): boolean {
-  return connection.platform === connectorKey;
+  const aliases = connectorKeyAliases(connectorKey);
+  if (aliases.has(connection.platform)) return true;
+
+  const metadataMcpId = metadataString(connection, 'mcpId');
+  if (metadataMcpId && aliases.has(metadataMcpId)) return true;
+
+  const metadataConnectorKey = metadataString(connection, 'connectorKey');
+  return Boolean(metadataConnectorKey && aliases.has(metadataConnectorKey));
 }
 
 async function verifyAttachedMcpConnection(params: {
@@ -494,9 +508,10 @@ function connectionIsExpectedMaterializedRow(params: {
   return (
     params.connection.organizationId === params.organizationId &&
     params.connection.agentId === params.agentId &&
-    params.connection.platform === params.connectorKey &&
+    connectionMatchesConnector(params.connection, params.connectorKey) &&
     metadata.ownerUserId === params.ownerUserId &&
-    metadata.connectorKey === params.connectorKey &&
+    typeof metadata.connectorKey === 'string' &&
+    connectorKeyAliases(params.connectorKey).has(metadata.connectorKey) &&
     typeof metadata.materializedFromConnectionRef === 'string' &&
     metadata.materializedFromConnectionRef.length > 0
   );
