@@ -338,6 +338,12 @@ type ToolboxMcpToolCallRequest = {
 
 type ToolboxMcpConnectionStatus = 'ready' | 'needs_reauth' | 'not_connected' | 'error';
 
+type ToolboxMcpConnectionMaterializeRequest = {
+  ownerUserId?: unknown;
+  agentId?: unknown;
+  connectorKey?: unknown;
+};
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -420,6 +426,146 @@ async function verifyAttachedMcpConnection(params: {
   }
 
   return { status: 'not_connected', connection };
+}
+
+function deterministicToolboxMcpConnectionRef(
+  ownerUserId: string,
+  agentId: string,
+  connectorKey: ToolboxMcpStatusConnectorKey
+): string {
+  return `toolbox-mcp:${ownerUserId}:${agentId}:${connectorKey}`;
+}
+
+function classifyMcpConnectionStatus(connection: StoredConnection): ToolboxMcpConnectionStatus {
+  if (connection.status === 'active') return 'ready';
+
+  const errorText = connection.errorMessage?.toLowerCase() ?? '';
+  if (/auth|oauth|token|credential|reauth|unauthorized|forbidden/.test(errorText)) {
+    return 'needs_reauth';
+  }
+
+  if (connection.status === 'error') return 'error';
+  return 'not_connected';
+}
+
+function connectionMetadataOwnerMatches(
+  connection: StoredConnection,
+  ownerUserId: string
+): boolean {
+  const metadataOwnerUserId = metadataString(connection, 'ownerUserId');
+  return metadataOwnerUserId === ownerUserId;
+}
+
+async function connectionAgentOwnerMatches(
+  connection: StoredConnection,
+  ownerUserId: string
+): Promise<boolean> {
+  if (!connection.agentId) return false;
+  const metadata = await configStore.getMetadata(connection.agentId);
+  return metadata?.owner?.userId === ownerUserId;
+}
+
+async function connectionMatchesOwner(
+  connection: StoredConnection,
+  ownerUserId: string
+): Promise<boolean> {
+  if (connectionMetadataOwnerMatches(connection, ownerUserId)) return true;
+  return connectionAgentOwnerMatches(connection, ownerUserId);
+}
+
+async function findMaterializableMcpConnection(params: {
+  ownerUserId: string;
+  agentId: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+  materializedRef: string;
+}): Promise<{ status: ToolboxMcpConnectionStatus; connection?: StoredConnection }> {
+  const targetConnections = await connectionStore.listConnections({
+    agentId: params.agentId,
+  });
+  for (const connection of targetConnections) {
+    if (
+      connectionMatchesConnector(connection, params.connectorKey) &&
+      (await connectionMatchesOwner(connection, params.ownerUserId))
+    ) {
+      return {
+        status: classifyMcpConnectionStatus(connection),
+        connection,
+      };
+    }
+  }
+
+  const materialized = await connectionStore.getConnection(params.materializedRef);
+  if (
+    materialized &&
+    materialized.agentId === params.agentId &&
+    connectionMatchesConnector(materialized, params.connectorKey) &&
+    (await connectionMatchesOwner(materialized, params.ownerUserId))
+  ) {
+    return {
+      status: classifyMcpConnectionStatus(materialized),
+      connection: materialized,
+    };
+  }
+
+  const allConnections = await connectionStore.listConnections();
+  const ownerConnections: StoredConnection[] = [];
+  for (const connection of allConnections) {
+    if (
+      connection.agentId === params.agentId ||
+      !connectionMatchesConnector(connection, params.connectorKey)
+    ) {
+      continue;
+    }
+    if (await connectionMatchesOwner(connection, params.ownerUserId)) {
+      ownerConnections.push(connection);
+    }
+  }
+
+  const ready = ownerConnections.find(
+    (connection) => classifyMcpConnectionStatus(connection) === 'ready'
+  );
+  if (ready) return { status: 'ready', connection: ready };
+
+  const reauth = ownerConnections.find(
+    (connection) => classifyMcpConnectionStatus(connection) === 'needs_reauth'
+  );
+  if (reauth) return { status: 'needs_reauth', connection: reauth };
+
+  const errored = ownerConnections.find(
+    (connection) => classifyMcpConnectionStatus(connection) === 'error'
+  );
+  if (errored) return { status: 'error', connection: errored };
+
+  return { status: 'not_connected' };
+}
+
+function buildMaterializedMcpConnection(params: {
+  source: StoredConnection;
+  ownerUserId: string;
+  agentId: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+  materializedRef: string;
+}): StoredConnection {
+  const now = Date.now();
+  const sourceMetadata = isPlainRecord(params.source.metadata) ? params.source.metadata : {};
+  return {
+    ...params.source,
+    id: params.materializedRef,
+    agentId: params.agentId,
+    config: isPlainRecord(params.source.config) ? { ...params.source.config } : {},
+    settings: isPlainRecord(params.source.settings) ? { ...params.source.settings } : {},
+    metadata: {
+      ...sourceMetadata,
+      ownerUserId: params.ownerUserId,
+      connectorKey: params.connectorKey,
+      provider: metadataString(params.source, 'provider') ?? params.connectorKey,
+      materializedFromConnectionRef: params.source.id,
+    },
+    status: 'active',
+    errorMessage: undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
 }
 
 function safeToolboxMcpError(errorCode: string, errorMessage: string) {
@@ -527,6 +673,76 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed'),
       200
     );
+  }
+});
+
+toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
+  let body: ToolboxMcpConnectionMaterializeRequest;
+  try {
+    body = await c.req.json<ToolboxMcpConnectionMaterializeRequest>();
+  } catch {
+    return c.json({ status: 'error', errorCode: 'lobu_mcp_invalid_request' }, 400);
+  }
+
+  const ownerUserId = typeof body.ownerUserId === 'string' ? body.ownerUserId.trim() : '';
+  const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
+  const connectorKey = body.connectorKey;
+
+  if (!ownerUserId || !agentId || !isToolboxMcpStatusConnectorKey(connectorKey)) {
+    return c.json({ status: 'error', errorCode: 'lobu_mcp_invalid_request' }, 400);
+  }
+
+  const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
+  if (denied) return denied;
+
+  try {
+    const metadata = await configStore.getMetadata(agentId);
+    if (!metadata || metadata.owner?.userId !== ownerUserId) {
+      return c.json({ status: 'not_connected' });
+    }
+
+    const materializedRef = deterministicToolboxMcpConnectionRef(
+      ownerUserId,
+      agentId,
+      connectorKey
+    );
+    const match = await findMaterializableMcpConnection({
+      ownerUserId,
+      agentId,
+      connectorKey,
+      materializedRef,
+    });
+
+    if (match.status !== 'ready') {
+      return c.json({ status: match.status });
+    }
+
+    if (!match.connection) {
+      return c.json({ status: 'not_connected' });
+    }
+
+    if (match.connection.agentId === agentId) {
+      return c.json({
+        status: 'ready',
+        lobuConnectionRef: match.connection.id,
+      });
+    }
+
+    const materialized = buildMaterializedMcpConnection({
+      source: match.connection,
+      ownerUserId,
+      agentId,
+      connectorKey,
+      materializedRef,
+    });
+    await connectionStore.saveConnection(materialized);
+
+    return c.json({
+      status: 'ready',
+      lobuConnectionRef: materializedRef,
+    });
+  } catch {
+    return c.json({ status: 'error', errorCode: 'lobu_mcp_materialize_failed' });
   }
 });
 

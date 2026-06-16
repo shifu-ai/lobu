@@ -11,7 +11,11 @@ installRouteTestMocks();
 const ORG_ID = 'org-toolbox';
 const OWNER_USER_ID = 'user-agent-001';
 const AGENT_ID = 'pm-agent';
+const SOURCE_AGENT_ID = 'source-agent';
 const CONNECTION_REF = 'google_workspace';
+const SOURCE_CONNECTION_REF = 'owner-google-workspace';
+const MATERIALIZED_CONNECTION_REF =
+  'toolbox-mcp:user-agent-001:pm-agent:google_workspace';
 const fakeAgents = new Map<string, any>();
 const fakeConnections = new Map<string, any>();
 let executeToolDirectMock: ReturnType<typeof mock>;
@@ -74,6 +78,35 @@ function seedOrgAgentAndConnection() {
     status: 'active',
     createdAt: Date.now(),
     updatedAt: Date.now(),
+  });
+}
+
+function seedSourceConnectionForMaterialize(overrides: Record<string, unknown> = {}) {
+  fakeAgents.set(SOURCE_AGENT_ID, {
+    agentId: SOURCE_AGENT_ID,
+    name: 'Source Agent',
+    owner: { platform: 'toolbox', userId: OWNER_USER_ID },
+    organizationId: ORG_ID,
+    createdAt: Date.now(),
+  });
+  fakeConnections.delete(CONNECTION_REF);
+  fakeConnections.set(SOURCE_CONNECTION_REF, {
+    id: SOURCE_CONNECTION_REF,
+    organizationId: ORG_ID,
+    agentId: SOURCE_AGENT_ID,
+    platform: 'google_workspace',
+    config: { credentialRef: 'lobu_secret_safe_ref' },
+    settings: { allowGroups: false },
+    metadata: {
+      ownerUserId: OWNER_USER_ID,
+      connectorKey: 'google_workspace',
+      provider: 'google_workspace',
+      accountEmail: 'owner@test.local',
+    },
+    status: 'active',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    ...overrides,
   });
 }
 
@@ -367,5 +400,175 @@ describe('Toolbox MCP execution routes', () => {
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ status: 'not_connected' });
+  });
+
+  test('POST /mcp/connections/materialize returns ready and a ref for an owner connector', async () => {
+    seedSourceConnectionForMaterialize();
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'ready',
+      lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+    });
+    expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
+      id: MATERIALIZED_CONNECTION_REF,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: { credentialRef: 'lobu_secret_safe_ref' },
+      settings: { allowGroups: false },
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        provider: 'google_workspace',
+        materializedFromConnectionRef: SOURCE_CONNECTION_REF,
+      },
+      status: 'active',
+    });
+  });
+
+  test('POST /mcp/connections/materialize is idempotent for the same owner agent connector', async () => {
+    seedSourceConnectionForMaterialize();
+    const app = await importMountedAgentRoutes();
+    const request = {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    };
+
+    const first = await app.request('/lobu/api/v1/mcp/connections/materialize', request);
+    const second = await app.request('/lobu/api/v1/mcp/connections/materialize', request);
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    await expect(first.json()).resolves.toEqual({
+      status: 'ready',
+      lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+    });
+    await expect(second.json()).resolves.toEqual({
+      status: 'ready',
+      lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+    });
+    expect(
+      [...fakeConnections.values()].filter((connection) => connection.agentId === AGENT_ID)
+    ).toHaveLength(1);
+  });
+
+  test('POST /mcp/connections/materialize returns needs_reauth for an auth-failed owner connector', async () => {
+    seedSourceConnectionForMaterialize({
+      status: 'error',
+      errorMessage: 'OAuth token expired',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: 'needs_reauth' });
+    expect(fakeConnections.has(MATERIALIZED_CONNECTION_REF)).toBe(false);
+  });
+
+  test('POST /mcp/connections/materialize returns not_connected when no owner connector exists', async () => {
+    fakeConnections.delete(CONNECTION_REF);
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: 'not_connected' });
+  });
+
+  test('POST /mcp/connections/materialize rejects invalid connector keys', async () => {
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'slack',
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({
+      status: 'error',
+      errorCode: 'lobu_mcp_invalid_request',
+    });
+  });
+
+  test('POST /mcp/connections/materialize rejects mcp:execute bearer for a different owner', async () => {
+    authStash.user = {
+      id: 'different-user',
+      name: 'Different',
+      email: 'different@test.local',
+      emailVerified: true,
+    };
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:execute'] };
+    seedSourceConnectionForMaterialize();
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer execute-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(fakeConnections.has(MATERIALIZED_CONNECTION_REF)).toBe(false);
   });
 });
