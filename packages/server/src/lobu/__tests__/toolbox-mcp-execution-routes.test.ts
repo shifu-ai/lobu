@@ -500,6 +500,40 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({ status: 'ready' });
   });
 
+  test('GET /mcp/connections/status accepts shifu_toolbox for shifu-toolbox materialized rows', async () => {
+    const connectionRef = `toolbox-mcp:${createHash('sha256')
+      .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu-toolbox']))
+      .digest('hex')}`;
+    fakeConnections.set(connectionRef, {
+      id: connectionRef,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'shifu-toolbox',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'shifu-toolbox',
+        mcpId: 'shifu-toolbox',
+        authSource: 'lobu_oauth',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=shifu_toolbox&connectionRef=${connectionRef}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({ status: 'ready' });
+  });
+
   test('GET /mcp/connections/status maps unknown connections to not_connected', async () => {
     const app = await importMountedAgentRoutes();
 
