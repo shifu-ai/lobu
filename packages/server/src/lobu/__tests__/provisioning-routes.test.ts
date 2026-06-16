@@ -66,7 +66,9 @@ async function buildApp(
 		publicGatewayUrl?: string;
 	} = {},
 ) {
-	const { createProvisioningRoutes } = await import("../provisioning-routes.js");
+	const { createProvisioningRoutes } = await import(
+		"../provisioning-routes.js"
+	);
 	const app = new Hono();
 	app.use("*", async (c, next) => {
 		c.set("user", {
@@ -196,6 +198,57 @@ describe("POST /api/provisioning/agents", () => {
 		});
 	});
 
+	test("saves provided Toolbox owner user id instead of PAT user id", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-owner-override",
+				name: "Toolbox Owner Agent",
+				ownerUserId: "  toolbox-user-20a9e88f  ",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const { createPostgresAgentConfigStore } = await import(
+			"../stores/postgres-stores.js"
+		);
+		const store = createPostgresAgentConfigStore();
+		const metadata = await orgContext.run({ organizationId: ORG_ID }, () =>
+			store.getMetadata("shifu-u-owner-override"),
+		);
+
+		expect(metadata).toMatchObject({
+			agentId: "shifu-u-owner-override",
+			owner: { platform: "toolbox", userId: "toolbox-user-20a9e88f" },
+			organizationId: ORG_ID,
+		});
+	});
+
+	test("rejects blank Toolbox owner user id overrides", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-blank-owner",
+				name: "Blank Owner Agent",
+				ownerUserId: "   ",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toEqual({
+			error: "ownerUserId must be a non-empty string when provided",
+		});
+	});
+
 	test("rejects PATs without mcp:admin scope", async () => {
 		const app = await buildApp(["mcp:read", "mcp:write"]);
 		const response = await app.request("/api/provisioning/agents", {
@@ -269,8 +322,7 @@ describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/start", () => 
 			agentId: "shifu-u-abc123",
 			userId: "toolbox-user-1",
 			mcpId: "shifu-toolbox",
-			authorizationUrl:
-				"https://auth.example.test/authorize?state=test-state",
+			authorizationUrl: "https://auth.example.test/authorize?state=test-state",
 		});
 		expect(startAuthCodeFlowMock).toHaveBeenCalledTimes(1);
 		expect(startAuthCodeFlowMock.mock.calls[0]?.[0]).toMatchObject({
