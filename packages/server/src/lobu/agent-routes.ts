@@ -582,6 +582,9 @@ function buildMaterializedMcpConnection(params: {
       ownerUserId: params.ownerUserId,
       connectorKey: params.connectorKey,
       provider: params.connectorKey,
+      mcpId: typeof sourceMetadata.mcpId === 'string' && sourceMetadata.mcpId.trim()
+        ? sourceMetadata.mcpId.trim()
+        : params.connectorKey,
       materializedFromConnectionRef: params.source.id,
     },
     status: 'active',
@@ -610,6 +613,14 @@ function safeToolboxMcpError(errorCode: string, errorMessage: string) {
     errorCode,
     errorMessage,
   };
+}
+
+function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRef: string): string {
+  if (connection && isPlainRecord(connection.metadata)) {
+    const mcpId = connection.metadata.mcpId;
+    if (typeof mcpId === 'string' && mcpId.trim()) return mcpId.trim();
+  }
+  return fallbackRef;
 }
 
 // ── Toolbox-scoped MCP execution ────────────────────────────────────────────
@@ -692,7 +703,7 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     const result = await mcpProxy.executeToolDirect(
       agentId,
       ownerUserId,
-      connectionRef,
+      mcpIdForConnection(guard.connection, connectionRef),
       toolName,
       args
     );

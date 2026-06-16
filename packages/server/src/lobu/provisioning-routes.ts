@@ -7,22 +7,29 @@
  * Lobu stores them in the PAT's organization.
  */
 
-import type { AgentSettings } from "@lobu/core";
+import type { AgentSettings, StoredConnection } from "@lobu/core";
+import { createHash } from "node:crypto";
 import { type Context, Hono } from "hono";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
 import { GrantStore } from "../gateway/permissions/grant-store.js";
-import { getStoredCredential } from "../gateway/routes/internal/device-auth.js";
+import {
+	getStoredCredential,
+	refreshCredential,
+} from "../gateway/routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
 	AGENT_ID_PATTERN,
 	createPostgresAgentConfigStore,
+	createPostgresAgentConnectionStore,
 } from "./stores/postgres-stores";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
+const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 
 const configStore = createPostgresAgentConfigStore();
+const connectionStore = createPostgresAgentConnectionStore();
 const grantStore = new GrantStore();
 
 interface ProvisioningRoutesOptions {
@@ -81,8 +88,50 @@ function parseUserId(value: unknown): string {
 	return typeof value === "string" ? value.trim() : "";
 }
 
+async function isOwnedByToolboxUser(
+	agentId: string,
+	userId: string,
+): Promise<boolean> {
+	const metadata = await configStore.getMetadata(agentId);
+	return Boolean(metadata && metadata.owner?.userId === userId);
+}
+
+function deterministicProvisionedMcpConnectionRef(
+	organizationId: string,
+	userId: string,
+	agentId: string,
+	mcpId: string,
+): string {
+	const digest = createHash("sha256")
+		.update(JSON.stringify([organizationId, userId, agentId, mcpId]))
+		.digest("hex");
+	return `toolbox-mcp:${digest}`;
+}
+
 function redirectUri(publicGatewayUrl: string): string {
 	return `${publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
+}
+
+async function ensureUsableOAuthCredential(
+	secretStore: WritableSecretStore,
+	agentId: string,
+	userId: string,
+	mcpId: string,
+	credential: Awaited<ReturnType<typeof getStoredCredential>> | null,
+): Promise<Awaited<ReturnType<typeof getStoredCredential>> | null> {
+	if (!credential) return null;
+	if (credential.expiresAt > Date.now() + OAUTH_EXPIRY_BUFFER_MS) {
+		return credential;
+	}
+	if (!credential.refreshToken) return null;
+	const refreshed = await refreshCredential(
+		secretStore,
+		agentId,
+		userId,
+		mcpId,
+		credential,
+	);
+	return refreshed;
 }
 
 async function syncProvisioningGrants(
@@ -225,6 +274,10 @@ export function createProvisioningRoutes(
 			if (!userId) return c.json({ error: "userId is required" }, 400);
 			const organizationId = c.get("organizationId") as string | null;
 
+			if (!(await isOwnedByToolboxUser(agentId, userId))) {
+				return c.json({ error: "agent_owner_mismatch" }, 404);
+			}
+
 			const httpServer = await options.mcpConfigService.getHttpServer(
 				mcpId,
 				agentId,
@@ -284,6 +337,10 @@ export function createProvisioningRoutes(
 			if (!mcpId) return c.json({ error: "mcpId is required" }, 400);
 			if (!userId) return c.json({ error: "userId is required" }, 400);
 
+			if (!(await isOwnedByToolboxUser(agentId, userId))) {
+				return c.json({ error: "agent_owner_mismatch" }, 404);
+			}
+
 			const httpServer = await options.mcpConfigService.getHttpServer(
 				mcpId,
 				agentId,
@@ -298,14 +355,145 @@ export function createProvisioningRoutes(
 				userId,
 				mcpId,
 			);
+			const usableCredential = await ensureUsableOAuthCredential(
+				options.secretStore,
+				agentId,
+				userId,
+				mcpId,
+				credential,
+			);
 
 			return c.json({
 				ok: true,
 				agentId,
 				userId,
 				mcpId,
-				authenticated: !!credential,
-				...(credential?.expiresAt ? { expiresAt: credential.expiresAt } : {}),
+				authenticated: !!usableCredential,
+				...(usableCredential?.expiresAt
+					? { expiresAt: usableCredential.expiresAt }
+					: {}),
+			});
+		},
+	);
+
+	provisioningRoutes.post(
+		"/agents/:agentId/mcp/:mcpId/oauth/materialize",
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
+
+			if (!options.mcpConfigService || !options.secretStore) {
+				return c.json(
+					{
+						error: "oauth_unavailable",
+						error_description:
+							"MCP OAuth provisioning requires gateway OAuth services.",
+					},
+					503,
+				);
+			}
+
+			const agentId = c.req.param("agentId")?.trim() ?? "";
+			const mcpId = c.req.param("mcpId")?.trim() ?? "";
+			const agentIdError = validateShifuAgentId(agentId);
+			if (agentIdError) return c.json({ error: agentIdError }, 400);
+			if (!mcpId) return c.json({ error: "mcpId is required" }, 400);
+
+			let body: { userId?: unknown; connectorKey?: unknown };
+			try {
+				body = await c.req.json();
+			} catch {
+				return c.json({ error: "invalid_json" }, 400);
+			}
+			const userId = parseUserId(body.userId);
+			const connectorKey =
+				typeof body.connectorKey === "string" && body.connectorKey.trim()
+					? body.connectorKey.trim()
+					: mcpId;
+			if (!userId) return c.json({ error: "userId is required" }, 400);
+
+			const organizationId = c.get("organizationId") as string | null;
+			if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+
+			if (!(await isOwnedByToolboxUser(agentId, userId))) {
+				return c.json({ error: "agent_owner_mismatch" }, 404);
+			}
+
+			const httpServer = await options.mcpConfigService.getHttpServer(
+				mcpId,
+				agentId,
+			);
+			if (!httpServer) {
+				return c.json({ error: "mcp_not_found" }, 404);
+			}
+
+			const credential = await getStoredCredential(
+				options.secretStore,
+				agentId,
+				userId,
+				mcpId,
+			);
+			if (!credential) {
+				return c.json({
+					ok: true,
+					agentId,
+					userId,
+					mcpId,
+					status: "not_connected",
+					lobuConnectionRef: null,
+				});
+			}
+			if (!(await ensureUsableOAuthCredential(
+				options.secretStore,
+				agentId,
+				userId,
+				mcpId,
+				credential,
+			))) {
+				return c.json({
+					ok: true,
+					agentId,
+					userId,
+					mcpId,
+					status: "needs_reauth",
+					lobuConnectionRef: null,
+				});
+			}
+
+			const now = Date.now();
+			const connectionRef = deterministicProvisionedMcpConnectionRef(
+				organizationId,
+				userId,
+				agentId,
+				mcpId,
+			);
+			const connection: StoredConnection = {
+				id: connectionRef,
+				organizationId,
+				agentId,
+				platform: connectorKey,
+				config: {},
+				settings: {},
+				metadata: {
+					ownerUserId: userId,
+					connectorKey,
+					provider: connectorKey,
+					mcpId,
+					authSource: "lobu_oauth",
+				},
+				status: "active",
+				createdAt: now,
+				updatedAt: now,
+			};
+			await connectionStore.saveConnection(connection);
+
+			return c.json({
+				ok: true,
+				agentId,
+				userId,
+				mcpId,
+				status: "ready",
+				lobuConnectionRef: connectionRef,
 			});
 		},
 	);

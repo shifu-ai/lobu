@@ -101,6 +101,26 @@ async function buildApp(
 	return app;
 }
 
+async function seedPersonalAgent(
+	agentId = "shifu-u-abc123",
+	ownerUserId = "toolbox-user-1",
+) {
+	const { createPostgresAgentConfigStore } = await import(
+		"../stores/postgres-stores.js"
+	);
+	const store = createPostgresAgentConfigStore();
+	await orgContext.run({ organizationId: ORG_ID }, async () => {
+		await store.saveMetadata(agentId, {
+			agentId,
+			name: "Toolbox Owner Agent",
+			owner: { platform: "toolbox", userId: ownerUserId },
+			organizationId: ORG_ID,
+			isWorkspaceAgent: false,
+			createdAt: Date.now(),
+		});
+	});
+}
+
 describe("POST /api/provisioning/agents", () => {
 	beforeEach(async () => {
 		await resetTestDatabase();
@@ -288,6 +308,7 @@ describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/start", () => 
 	});
 
 	test("starts a browser OAuth flow for a shifu personal agent MCP", async () => {
+		await seedPersonalAgent();
 		const secretStore = createMemorySecretStore();
 		const app = await buildApp(["mcp:admin"], {
 			secretStore,
@@ -365,6 +386,32 @@ describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/start", () => 
 
 		expect(response.status).toBe(403);
 	});
+
+	test("rejects OAuth start for a mismatched Toolbox owner", async () => {
+		await seedPersonalAgent("shifu-u-abc123", "another-toolbox-user");
+		const app = await buildApp(["mcp:admin"], {
+			secretStore: createMemorySecretStore(),
+			mcpConfigService: {
+				async getHttpServer() {
+					return { id: "shifu-toolbox", upstreamUrl: "https://example.test" };
+				},
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-abc123/mcp/shifu-toolbox/oauth/start",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ userId: "toolbox-user-1" }),
+			},
+		);
+
+		expect(response.status).toBe(404);
+		await expect(response.json()).resolves.toEqual({
+			error: "agent_owner_mismatch",
+		});
+	});
 });
 
 describe("GET /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/status", () => {
@@ -374,6 +421,7 @@ describe("GET /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/status", () => 
 	});
 
 	test("reports whether the scoped MCP OAuth credential exists without exposing it", async () => {
+		await seedPersonalAgent();
 		const secretStore = createMemorySecretStore({
 			"mcp-auth/shifu-u-abc123/toolbox-user-1/shifu-toolbox/credential":
 				JSON.stringify({
@@ -408,5 +456,260 @@ describe("GET /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/status", () => 
 			expiresAt: 4_102_444_800_000,
 		});
 		expect(JSON.stringify(body)).not.toContain("secret-token");
+	});
+
+	test("reports an expired credential without refresh token as unauthenticated", async () => {
+		await seedPersonalAgent();
+		const secretStore = createMemorySecretStore({
+			"mcp-auth/shifu-u-abc123/toolbox-user-1/shifu-toolbox/credential":
+				JSON.stringify({
+					accessToken: "expired-secret-token",
+					expiresAt: Date.now() - 60_000,
+					clientId: "client-1",
+					tokenUrl: "https://auth.example.test/token",
+				}),
+		});
+		const app = await buildApp(["mcp:admin"], {
+			secretStore,
+			mcpConfigService: {
+				async getHttpServer() {
+					return { id: "shifu-toolbox", upstreamUrl: "https://example.test" };
+				},
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-abc123/mcp/shifu-toolbox/oauth/status?userId=toolbox-user-1",
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body).toMatchObject({
+			ok: true,
+			agentId: "shifu-u-abc123",
+			userId: "toolbox-user-1",
+			mcpId: "shifu-toolbox",
+			authenticated: false,
+		});
+		expect(JSON.stringify(body)).not.toContain("expired-secret-token");
+	});
+
+	test("reports an expired credential with an invalid refresh token as unauthenticated", async () => {
+		await seedPersonalAgent();
+		const fetchMock = mock(async () =>
+			new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+		);
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+		try {
+			const secretStore = createMemorySecretStore({
+				"mcp-auth/shifu-u-abc123/toolbox-user-1/shifu-toolbox/credential":
+					JSON.stringify({
+						accessToken: "expired-secret-token",
+						refreshToken: "revoked-refresh-token",
+						expiresAt: Date.now() - 60_000,
+						clientId: "client-1",
+						tokenUrl: "https://auth.example.test/token",
+					}),
+			});
+			const app = await buildApp(["mcp:admin"], {
+				secretStore,
+				mcpConfigService: {
+					async getHttpServer() {
+						return { id: "shifu-toolbox", upstreamUrl: "https://example.test" };
+					},
+				},
+			});
+
+			const response = await app.request(
+				"/api/provisioning/agents/shifu-u-abc123/mcp/shifu-toolbox/oauth/status?userId=toolbox-user-1",
+			);
+
+			expect(response.status).toBe(200);
+			await expect(response.json()).resolves.toMatchObject({
+				ok: true,
+				agentId: "shifu-u-abc123",
+				userId: "toolbox-user-1",
+				mcpId: "shifu-toolbox",
+				authenticated: false,
+			});
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+});
+
+describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/materialize", () => {
+	beforeEach(async () => {
+		await resetTestDatabase();
+		await seedOrg(ORG_ID);
+	});
+
+	test("materializes an existing Lobu OAuth credential into an agent connection ref", async () => {
+		await seedPersonalAgent();
+		const secretStore = createMemorySecretStore({
+			"mcp-auth/shifu-u-abc123/toolbox-user-1/google_workspace/credential":
+				JSON.stringify({
+					accessToken: "secret-token",
+					refreshToken: "secret-refresh",
+					expiresAt: 4_102_444_800_000,
+					clientId: "client-1",
+					tokenUrl: "https://auth.example.test/token",
+				}),
+		});
+		const app = await buildApp(["mcp:admin"], {
+			secretStore,
+			mcpConfigService: {
+				async getHttpServer(mcpId: string, agentId?: string) {
+					expect(mcpId).toBe("google_workspace");
+					expect(agentId).toBe("shifu-u-abc123");
+					return {
+						id: "google_workspace",
+						upstreamUrl: "https://mcp.google.example.test/mcp",
+					};
+				},
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-abc123/mcp/google_workspace/oauth/materialize",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					userId: "toolbox-user-1",
+					connectorKey: "google_workspace",
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body).toMatchObject({
+			ok: true,
+			agentId: "shifu-u-abc123",
+			userId: "toolbox-user-1",
+			mcpId: "google_workspace",
+			status: "ready",
+		});
+		expect(body.lobuConnectionRef).toMatch(/^toolbox-mcp:/);
+
+		const { getDb } = await import("../../db/client.js");
+		const rows = await getDb()`
+			SELECT id, agent_id, platform, config, metadata, status
+			FROM agent_connections
+			WHERE id = ${body.lobuConnectionRef}
+		`;
+		expect(rows).toHaveLength(1);
+		expect(rows[0]).toMatchObject({
+			id: body.lobuConnectionRef,
+			agent_id: "shifu-u-abc123",
+			platform: "google_workspace",
+			status: "active",
+		});
+		expect(rows[0].metadata).toMatchObject({
+			ownerUserId: "toolbox-user-1",
+			connectorKey: "google_workspace",
+			mcpId: "google_workspace",
+			authSource: "lobu_oauth",
+		});
+		expect(JSON.stringify(rows[0])).not.toContain("secret-token");
+	});
+
+	test("does not create a connection ref when the Lobu OAuth credential is missing", async () => {
+		await seedPersonalAgent();
+		const app = await buildApp(["mcp:admin"], {
+			secretStore: createMemorySecretStore(),
+			mcpConfigService: {
+				async getHttpServer() {
+					return {
+						id: "google_workspace",
+						upstreamUrl: "https://mcp.google.example.test/mcp",
+					};
+				},
+			},
+		});
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-abc123/mcp/google_workspace/oauth/materialize",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ userId: "toolbox-user-1" }),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toEqual({
+			ok: true,
+			agentId: "shifu-u-abc123",
+			userId: "toolbox-user-1",
+			mcpId: "google_workspace",
+			status: "not_connected",
+			lobuConnectionRef: null,
+		});
+	});
+
+	test("does not create a connection ref when the Lobu OAuth credential cannot refresh", async () => {
+		await seedPersonalAgent();
+		const fetchMock = mock(async () =>
+			new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 }),
+		);
+		const originalFetch = globalThis.fetch;
+		globalThis.fetch = fetchMock as unknown as typeof fetch;
+		try {
+			const secretStore = createMemorySecretStore({
+				"mcp-auth/shifu-u-abc123/toolbox-user-1/google_workspace/credential":
+					JSON.stringify({
+						accessToken: "expired-secret-token",
+						refreshToken: "revoked-refresh-token",
+						expiresAt: Date.now() - 60_000,
+						clientId: "client-1",
+						tokenUrl: "https://auth.example.test/token",
+					}),
+			});
+			const app = await buildApp(["mcp:admin"], {
+				secretStore,
+				mcpConfigService: {
+					async getHttpServer() {
+						return {
+							id: "google_workspace",
+							upstreamUrl: "https://mcp.google.example.test/mcp",
+						};
+					},
+				},
+			});
+
+			const response = await app.request(
+				"/api/provisioning/agents/shifu-u-abc123/mcp/google_workspace/oauth/materialize",
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ userId: "toolbox-user-1" }),
+				},
+			);
+
+			expect(response.status).toBe(200);
+			await expect(response.json()).resolves.toEqual({
+				ok: true,
+				agentId: "shifu-u-abc123",
+				userId: "toolbox-user-1",
+				mcpId: "google_workspace",
+				status: "needs_reauth",
+				lobuConnectionRef: null,
+			});
+
+			const { getDb } = await import("../../db/client.js");
+			const rows = await getDb()`
+				SELECT id
+				FROM agent_connections
+				WHERE agent_id = ${"shifu-u-abc123"}
+			`;
+			expect(rows).toHaveLength(0);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 });
