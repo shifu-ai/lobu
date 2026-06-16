@@ -479,6 +479,7 @@ async function findMaterializableMcpConnection(params: {
   connectorKey: ToolboxMcpStatusConnectorKey;
   materializedRef: string;
 }): Promise<{ status: ToolboxMcpConnectionStatus; connection?: StoredConnection }> {
+  const usableConnections: StoredConnection[] = [];
   const targetConnections = await connectionStore.listConnections({
     agentId: params.agentId,
   });
@@ -487,10 +488,7 @@ async function findMaterializableMcpConnection(params: {
       connectionMatchesConnector(connection, params.connectorKey) &&
       (await connectionMatchesOwner(connection, params.ownerUserId))
     ) {
-      return {
-        status: classifyMcpConnectionStatus(connection),
-        connection,
-      };
+      usableConnections.push(connection);
     }
   }
 
@@ -501,14 +499,10 @@ async function findMaterializableMcpConnection(params: {
     connectionMatchesConnector(materialized, params.connectorKey) &&
     (await connectionMatchesOwner(materialized, params.ownerUserId))
   ) {
-    return {
-      status: classifyMcpConnectionStatus(materialized),
-      connection: materialized,
-    };
+    usableConnections.push(materialized);
   }
 
   const allConnections = await connectionStore.listConnections();
-  const ownerConnections: StoredConnection[] = [];
   for (const connection of allConnections) {
     if (
       connection.agentId === params.agentId ||
@@ -517,21 +511,21 @@ async function findMaterializableMcpConnection(params: {
       continue;
     }
     if (await connectionMatchesOwner(connection, params.ownerUserId)) {
-      ownerConnections.push(connection);
+      usableConnections.push(connection);
     }
   }
 
-  const ready = ownerConnections.find(
+  const ready = usableConnections.find(
     (connection) => classifyMcpConnectionStatus(connection) === 'ready'
   );
   if (ready) return { status: 'ready', connection: ready };
 
-  const reauth = ownerConnections.find(
+  const reauth = usableConnections.find(
     (connection) => classifyMcpConnectionStatus(connection) === 'needs_reauth'
   );
   if (reauth) return { status: 'needs_reauth', connection: reauth };
 
-  const errored = ownerConnections.find(
+  const errored = usableConnections.find(
     (connection) => classifyMcpConnectionStatus(connection) === 'error'
   );
   if (errored) return { status: 'error', connection: errored };
@@ -565,6 +559,18 @@ function buildMaterializedMcpConnection(params: {
     errorMessage: undefined,
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+function toolboxMcpMaterializeResult(
+  status: ToolboxMcpConnectionStatus,
+  lobuConnectionRef: string | null,
+  errorCode?: string
+) {
+  return {
+    status,
+    lobuConnectionRef,
+    ...(errorCode ? { errorCode } : {}),
   };
 }
 
@@ -681,7 +687,10 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
   try {
     body = await c.req.json<ToolboxMcpConnectionMaterializeRequest>();
   } catch {
-    return c.json({ status: 'error', errorCode: 'lobu_mcp_invalid_request' }, 400);
+    return c.json(
+      toolboxMcpMaterializeResult('error', null, 'lobu_mcp_invalid_request'),
+      400
+    );
   }
 
   const ownerUserId = typeof body.ownerUserId === 'string' ? body.ownerUserId.trim() : '';
@@ -689,7 +698,10 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
   const connectorKey = body.connectorKey;
 
   if (!ownerUserId || !agentId || !isToolboxMcpStatusConnectorKey(connectorKey)) {
-    return c.json({ status: 'error', errorCode: 'lobu_mcp_invalid_request' }, 400);
+    return c.json(
+      toolboxMcpMaterializeResult('error', null, 'lobu_mcp_invalid_request'),
+      400
+    );
   }
 
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
@@ -698,7 +710,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
   try {
     const metadata = await configStore.getMetadata(agentId);
     if (!metadata || metadata.owner?.userId !== ownerUserId) {
-      return c.json({ status: 'not_connected' });
+      return c.json(toolboxMcpMaterializeResult('not_connected', null));
     }
 
     const materializedRef = deterministicToolboxMcpConnectionRef(
@@ -714,18 +726,15 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     });
 
     if (match.status !== 'ready') {
-      return c.json({ status: match.status });
+      return c.json(toolboxMcpMaterializeResult(match.status, null));
     }
 
     if (!match.connection) {
-      return c.json({ status: 'not_connected' });
+      return c.json(toolboxMcpMaterializeResult('not_connected', null));
     }
 
     if (match.connection.agentId === agentId) {
-      return c.json({
-        status: 'ready',
-        lobuConnectionRef: match.connection.id,
-      });
+      return c.json(toolboxMcpMaterializeResult('ready', match.connection.id));
     }
 
     const materialized = buildMaterializedMcpConnection({
@@ -737,12 +746,11 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     });
     await connectionStore.saveConnection(materialized);
 
-    return c.json({
-      status: 'ready',
-      lobuConnectionRef: materializedRef,
-    });
+    return c.json(toolboxMcpMaterializeResult('ready', materializedRef));
   } catch {
-    return c.json({ status: 'error', errorCode: 'lobu_mcp_materialize_failed' });
+    return c.json(
+      toolboxMcpMaterializeResult('error', null, 'lobu_mcp_materialize_failed')
+    );
   }
 });
 
