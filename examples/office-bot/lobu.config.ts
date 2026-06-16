@@ -1,11 +1,16 @@
 import {
+  connectorFromFile,
   defineAgent,
   defineConfig,
+  defineConnection,
   defineEntityType,
   defineWatcher,
+  reactionFromFile,
   secret,
   skillFromFile,
 } from "@lobu/cli/config";
+import type DeliverooConnector from "./deliveroo.connector.ts";
+import type lunchDeliverooReaction from "./lunch-deliveroo.reaction.ts";
 
 const foodOrdering = defineAgent({
   id: "food-ordering",
@@ -105,6 +110,21 @@ const lunchRun = defineEntityType({
   },
 });
 
+// The office's Deliveroo connection. Feedless — it exposes only on-demand
+// actions (search_restaurants / read_menu) that the lunch-finalize reaction
+// drives through the paired Owletto Chrome extension. `restaurants_url` is the
+// office's delivery-location restaurants list (set it to your office postcode's
+// Deliveroo page — the geohash pins delivery to that address).
+const deliverooConn = defineConnection({
+  slug: "deliveroo-office",
+  connector: "deliveroo",
+  name: "Deliveroo — office",
+  config: {
+    restaurants_url:
+      "https://deliveroo.co.uk/restaurants/london/the-city?fulfillment_method=DELIVERY&geohash=gcpvjcnm9jsv",
+  },
+});
+
 const lunchOpen = defineWatcher({
   agent: foodOrdering,
   slug: "lunch-open",
@@ -138,10 +158,13 @@ const lunchFinalize = defineWatcher({
   notification: { priority: "high" },
   tags: ["lunch", "daily"],
   minCooldownSeconds: 600,
+  reaction: reactionFromFile<typeof lunchDeliverooReaction>(
+    "./lunch-deliveroo.reaction.ts"
+  ),
   reactionsGuidance:
-    "When the run ends in `placed` or `manual`, store the basket link + per-head cost\nback into a `lunch:placed` event on the lunch-run entity so the next day's\nlunch-open can read the most-recent restaurant.\n",
+    "When the run ends in `placed` or `manual`, store the per-head cost back into a\n`lunch:placed` event on the lunch-run entity so the next day's lunch-open can\nread the most-recent restaurant.\n",
   prompt:
-    'Finalize today\'s office lunch run (step 2 in your instructions):\n\n1. Find today\'s `lunch-run` entity (status "collecting"). If there isn\'t one,\n   open one (step 1) and stop. If it\'s already "done"/"cancelled", do nothing.\n2. Read the run\'s thread — work out who\'s in (🍕 / "+1" / put in an order) and\n   any restaurant recommendations. If nobody\'s in: post a "skipping today 👋"\n   note, set the run to "cancelled", save a `lunch:cancelled` event, stop.\n3. Pick the restaurant (a clear thread recommendation, else a usual spot from\n   USER.md, biased away from the last couple of runs).\n4. Post the options — if the deliveroo-order skill can scrape the menu, a\n   numbered shortlist of ~5–8 popular items with prices; otherwise just name\n   the restaurant (a link to its Deliveroo page is fine). Always accept\n   free-text orders.\n5. Collect orders from replies + number reactions into items: [{person, item,\n   price?, notes}]. Ask directly about anything ambiguous — don\'t guess silently.\n6. Build the Deliveroo basket via the deliveroo-order skill (login with stored\n   cookies → add items → group-order/basket link + subtotal). If it fails for\n   any reason, fall back: basket_url = null, continue.\n7. Post the summary in the thread: restaurant; per-person list (@person — item\n   (notes)); subtotal + per-head (flag if well over budget); the basket link if\n   you have one; and the next action — "@here someone hit checkout & pay:\n   <link>" or, with no link, "@here someone needs to place this manually".\n8. Update the `lunch-run` entity (status "done", restaurant, items, subtotal,\n   basket_url) and save a `lunch:placed` event linked to it.\n\nNever complete checkout or pay. A run with no basket automation is still a\nsuccess if the order list got collected and handed off cleanly.\n',
+    'Finalize today\'s office lunch run (step 2 in your instructions):\n\n1. Find today\'s `lunch-run` entity (status "collecting"). If there isn\'t one,\n   open one (step 1) and stop. If it\'s already "done"/"cancelled", do nothing.\n2. Read the run\'s thread — work out who\'s in (🍕 / "+1" / put in an order) and\n   any restaurant recommendations. If nobody\'s in: post a "skipping today 👋"\n   note, set the run to "cancelled", save a `lunch:cancelled` event, stop.\n3. Pick the restaurant (a clear thread recommendation, else a usual spot from\n   USER.md, biased away from the last couple of runs).\n4. Post the call for orders: name the restaurant and its Deliveroo page. You do\n   NOT scrape the menu yourself — a live menu shortlist with real prices is\n   fetched and posted automatically right after this turn (the deliveroo\n   connector reads it via the office\'s Owletto extension). Just set `restaurant`\n   so that reaction knows which one. Always accept free-text orders.\n5. Collect orders from replies + number reactions into items: [{person, item,\n   price?, notes}]. Ask directly about anything ambiguous — don\'t guess silently.\n6. Post the summary in the thread: restaurant; per-person list (@person — item\n   (notes)); subtotal + per-head (flag if well over budget); and the next action\n   — "@here someone place + pay on Deliveroo: <link>". The live menu + order link\n   arrive from the reaction; you never build a basket, log in, or touch payment.\n7. Update the `lunch-run` entity (status "done", restaurant, items, subtotal)\n   and save a `lunch:placed` event linked to it. Outcome is "manual" — a human\n   places + pays on Deliveroo.\n\nNever complete checkout or pay. A run is a success once the order list is\ncollected and handed off cleanly.\n',
   extractionSchema: {
     type: "object",
     required: ["outcome"],
@@ -161,11 +184,15 @@ const lunchFinalize = defineWatcher({
 });
 
 export default defineConfig({
+  connectors: [
+    connectorFromFile<typeof DeliverooConnector>("./deliveroo.connector.ts"),
+  ],
   org: "lobu-team",
   orgName: "Lobu Team",
   orgDescription: "Office-ops agents — first up: the weekday lunch order",
   organizationId: "UdNAH1bb3csC842vhOgxAHVcfX4tYU5A",
   agents: [foodOrdering],
   entities: [lunchRun],
+  connections: [deliverooConn],
   watchers: [lunchOpen, lunchFinalize],
 });
