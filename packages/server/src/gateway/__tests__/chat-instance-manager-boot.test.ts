@@ -197,6 +197,50 @@ describe("ChatInstanceManager boot recovery", () => {
     );
   });
 
+  test("skips Toolbox MCP materialized rows during chat boot", async () => {
+    const orgId = "test-org-toolbox-mcp";
+    const agentId = "agent-toolbox-mcp";
+    const { manager, connectionStore, secretStore, orgContext } =
+      await buildManagerAndStores(orgId, agentId);
+
+    await orgContext.run({ organizationId: orgId }, async () => {
+      await connectionStore.saveConnection({
+        id: "toolbox-mcp:test-materialized-ref",
+        platform: "shifu-toolbox",
+        agentId,
+        organizationId: orgId,
+        config: {},
+        settings: {},
+        metadata: {
+          ownerUserId: "owner-user",
+          connectorKey: "shifu-toolbox",
+          mcpId: "shifu-toolbox",
+          authSource: "lobu_oauth",
+        },
+        status: "active",
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+    });
+
+    const services = {
+      getPublicGatewayUrl: () => "",
+      getSecretStore: () => secretStore,
+      getConnectionStore: () => connectionStore,
+      getChannelBindingService: () => ({ getBinding: async () => null }),
+      getCommandRegistry: () => undefined,
+    } as any;
+
+    await bootInitialize(manager, services);
+
+    const stored = await orgContext.run({ organizationId: orgId }, () =>
+      connectionStore.getConnection("toolbox-mcp:test-materialized-ref")
+    );
+    expect(stored).not.toBeNull();
+    expect(stored!.status).toBe("active");
+    expect(stored!.errorMessage).toBeUndefined();
+  });
+
   test("startInstance rebinds to the connection's org even when caller's org differs", async () => {
     // Cross-tenant isolation: an admin in org B triggering a flow that
     // ends up calling startInstance on org A's connection must still
