@@ -336,6 +336,43 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({ status: 'ready' });
   });
 
+  test('GET /mcp/connections returns ready connection refs scoped to the Toolbox owner and connector', async () => {
+    fakeConnections.set('google_wrong_owner', {
+      ...fakeConnections.get(CONNECTION_REF),
+      id: 'google_wrong_owner',
+      metadata: { ownerUserId: 'different-user' },
+    });
+    fakeConnections.set('notion_connection', {
+      ...fakeConnections.get(CONNECTION_REF),
+      id: 'notion_connection',
+      platform: 'notion',
+      metadata: { ownerUserId: OWNER_USER_ID },
+    });
+    fakeConnections.set('google_inactive', {
+      ...fakeConnections.get(CONNECTION_REF),
+      id: 'google_inactive',
+      metadata: { ownerUserId: OWNER_USER_ID },
+      status: 'pending',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      connections: [{
+        connectionRef: CONNECTION_REF,
+        connectorKey: 'google_workspace',
+        status: 'ready',
+      }],
+    });
+  });
+
   test('GET /mcp/connections/status maps unknown connections to not_connected', async () => {
     const app = await importMountedAgentRoutes();
 

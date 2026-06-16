@@ -422,6 +422,40 @@ async function verifyAttachedMcpConnection(params: {
   return { status: 'not_connected', connection };
 }
 
+async function listReadyToolboxMcpConnections(params: {
+  ownerUserId: string;
+  agentId: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+}): Promise<Array<{
+  connectionRef: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+  status: 'ready';
+}>> {
+  const metadata = await configStore.getMetadata(params.agentId);
+  if (!metadata || metadata.owner?.userId !== params.ownerUserId) return [];
+
+  const connections = await connectionStore.listConnections({ agentId: params.agentId });
+  return connections
+    .filter((connection) => {
+      if (
+        connection.agentId !== params.agentId ||
+        connection.status !== 'active' ||
+        !connectionMatchesConnector(connection, params.connectorKey)
+      ) {
+        return false;
+      }
+
+      const connectionMetadata = connection.metadata;
+      if (!isPlainRecord(connectionMetadata)) return false;
+      return connectionMetadata.ownerUserId === params.ownerUserId;
+    })
+    .map((connection) => ({
+      connectionRef: connection.id,
+      connectorKey: params.connectorKey,
+      status: 'ready' as const,
+    }));
+}
+
 function safeToolboxMcpError(errorCode: string, errorMessage: string) {
   return {
     ok: false,
@@ -528,6 +562,26 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       200
     );
   }
+});
+
+toolboxMcpRoutes.get('/mcp/connections', async (c) => {
+  const ownerUserId = c.req.query('ownerUserId')?.trim() ?? '';
+  const agentId = c.req.query('agentId')?.trim() ?? '';
+  const connectorKey = c.req.query('connectorKey')?.trim();
+
+  if (!ownerUserId || !agentId || !isToolboxMcpStatusConnectorKey(connectorKey)) {
+    return c.json({ connections: [] }, 400);
+  }
+
+  const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
+  if (denied) return denied;
+
+  const connections = await listReadyToolboxMcpConnections({
+    ownerUserId,
+    agentId,
+    connectorKey,
+  });
+  return c.json({ connections });
 });
 
 toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
