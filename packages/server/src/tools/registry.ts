@@ -102,6 +102,33 @@ export interface ToolDefinition<T = any> {
 }
 
 const READ_ONLY = { readOnlyHint: true, idempotentHint: true } as const;
+
+const stripNul = (value: string): string =>
+  value.indexOf('\u0000') === -1 ? value : value.replace(/\u0000/g, '');
+
+function sanitizeToolInput(value: unknown): unknown {
+  if (typeof value === 'string') return stripNul(value);
+  if (Array.isArray(value)) return value.map(sanitizeToolInput);
+  if (value && typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto === Object.prototype || proto === null) {
+      const out: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(value)) {
+        out[stripNul(key)] = sanitizeToolInput(entry);
+      }
+      return out;
+    }
+  }
+  return value;
+}
+
+function withSanitizedToolInput(tool: ToolDefinition): ToolDefinition {
+  return {
+    ...tool,
+    handler: (args, env, ctx) => tool.handler(sanitizeToolInput(args), env, ctx),
+  };
+}
+
 const ListOrganizationsInputSchema = {
   type: 'object',
   properties: {
@@ -203,7 +230,7 @@ const TOOLS: ToolDefinition[] = [
 
 // TOOLS is a module constant with no runtime mutation — index it once.
 const TOOLS_BY_NAME: Map<string, ToolDefinition> = new Map(
-  TOOLS.map((tool) => [tool.name, tool])
+  TOOLS.map((tool) => [tool.name, withSanitizedToolInput(tool)])
 );
 
 /**
