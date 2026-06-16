@@ -1,7 +1,10 @@
 import { verifyWorkerToken } from "@lobu/core";
 import type { Context, Next } from "hono";
 import { orgContext } from "../../lobu/stores/org-context.js";
-import { verifySettingsSession } from "../routes/public/settings-auth.js";
+import {
+  verifySettingsSession,
+  verifySettingsSessionOrToken,
+} from "../routes/public/settings-auth.js";
 import type { ExternalAuthClient } from "./external/client.js";
 import { getRevokedTokenStore } from "./revoked-token-store.js";
 
@@ -46,6 +49,16 @@ export function createApiAuthMiddleware(opts: {
   externalAuthClient?: ExternalAuthClient;
   allowWorkerToken?: boolean;
   allowSettingsSession?: boolean;
+  /**
+   * Also accept the settings session via a `?token=` query param (an encrypted,
+   * short-lived ticket) — but only for **GET** requests. Needed for the agent
+   * SSE stream: the embedded panel opens it with EventSource (always a GET),
+   * which can't send an Authorization header; without this, a header-less ticket
+   * request is 401'd here before the route's own ownership check runs. Scoped to
+   * GET so a leaked URL ticket can't drive headerless mutations (create / send /
+   * delete / approve) — those still require an Authorization header.
+   */
+  allowSettingsQueryToken?: boolean;
 }) {
   const revokedTokens = getRevokedTokenStore();
 
@@ -64,10 +77,16 @@ export function createApiAuthMiddleware(opts: {
   };
 
   return async (c: Context, next: Next) => {
-    // 1. Try settings session cookie when explicitly allowed.
-    // verifySettingsSession now enforces jti revocation internally.
+    // 1. Try settings session cookie when explicitly allowed (and, when opted
+    //    in, a `?token=` ticket for header-less EventSource SSE clients).
+    //    verifySettingsSession now enforces jti revocation internally.
     if (opts.allowSettingsSession) {
-      const session = await verifySettingsSession(c);
+      // The `?token=` ticket is accepted only for GET (EventSource SSE);
+      // mutations always require an Authorization header.
+      const session =
+        opts.allowSettingsQueryToken && c.req.method === "GET"
+          ? await verifySettingsSessionOrToken(c, "token")
+          : await verifySettingsSession(c);
       if (session) {
         return runWithContext({ userId: session.userId }, c, next);
       }
