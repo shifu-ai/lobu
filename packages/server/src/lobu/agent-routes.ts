@@ -426,12 +426,13 @@ async function verifyAttachedMcpConnection(params: {
 }
 
 function deterministicToolboxMcpConnectionRef(
+  organizationId: string,
   ownerUserId: string,
   agentId: string,
   connectorKey: ToolboxMcpStatusConnectorKey
 ): string {
   const digest = createHash('sha256')
-    .update(JSON.stringify([ownerUserId, agentId, connectorKey]))
+    .update(JSON.stringify([organizationId, ownerUserId, agentId, connectorKey]))
     .digest('hex');
   return `toolbox-mcp:${digest}`;
 }
@@ -482,6 +483,7 @@ async function materializationSourceMatchesOwner(
 
 function connectionIsExpectedMaterializedRow(params: {
   connection: StoredConnection;
+  organizationId: string;
   ownerUserId: string;
   agentId: string;
   connectorKey: ToolboxMcpStatusConnectorKey;
@@ -490,6 +492,7 @@ function connectionIsExpectedMaterializedRow(params: {
     ? params.connection.metadata
     : {};
   return (
+    params.connection.organizationId === params.organizationId &&
     params.connection.agentId === params.agentId &&
     params.connection.platform === params.connectorKey &&
     metadata.ownerUserId === params.ownerUserId &&
@@ -739,6 +742,9 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
   if (denied) return denied;
 
+  const organizationId = c.get('organizationId');
+  if (!organizationId) return c.json(toolboxMcpMaterializeResult('error', null), 401);
+
   try {
     const metadata = await configStore.getMetadata(agentId);
     if (!metadata || metadata.owner?.userId !== ownerUserId) {
@@ -746,6 +752,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     }
 
     const materializedRef = deterministicToolboxMcpConnectionRef(
+      organizationId,
       ownerUserId,
       agentId,
       connectorKey
@@ -755,6 +762,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       existingMaterialized &&
       !connectionIsExpectedMaterializedRow({
         connection: existingMaterialized,
+        organizationId,
         ownerUserId,
         agentId,
         connectorKey,
@@ -789,6 +797,8 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       connectorKey,
       materializedRef,
     });
+    // agent_connections.id is globally unique, so the deterministic id includes
+    // organizationId before saveConnection's global ON CONFLICT path can run.
     await connectionStore.saveConnection(materialized);
 
     const savedMaterialized = await connectionStore.getConnection(materializedRef);
@@ -796,6 +806,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       !savedMaterialized ||
       !connectionIsExpectedMaterializedRow({
         connection: savedMaterialized,
+        organizationId,
         ownerUserId,
         agentId,
         connectorKey,
