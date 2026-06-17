@@ -104,18 +104,18 @@ describe("createOpenClawCustomTools", () => {
       RequestInfo | URL,
       RequestInit,
     ];
-    expect(String(input)).toBe("http://gateway/mcp/tools/call");
+    expect(String(input)).toBe(
+      "http://gateway/worker/internal/toolbox-personal-agent-tools/call"
+    );
     expect(init.method).toBe("POST");
     expect(init.headers).toMatchObject({
       Authorization: "Bearer worker-token",
       "Content-Type": "application/json",
     });
     expect(JSON.parse(String(init.body))).toEqual({
-      ownerUserId: "toolbox-user",
-      agentId: "shifu-u-agent",
       connectorKey: "google_workspace",
       connectionRef: "toolbox-mcp:ref",
-      toolName: "drive_search",
+      connectorToolName: "drive_search",
       args: { query: "超級AI個體" },
     });
   });

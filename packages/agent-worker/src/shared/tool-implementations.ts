@@ -259,16 +259,8 @@ export async function callToolboxPersonalAgentTool(
   }
 ): Promise<TextResult> {
   return withErrorHandling("Toolbox personal-agent tool", async () => {
-    const ownerUserId = gw.userId?.trim();
-    const agentId = gw.agentId?.trim();
-    if (!ownerUserId || !agentId) {
-      return textResult(
-        "Error: Toolbox personal-agent tool is missing the current user or agent identity."
-      );
-    }
-
     const response = await fetch(
-      `${ensureBaseUrl(gw.gatewayUrl)}/mcp/tools/call`,
+      `${ensureBaseUrl(gw.gatewayUrl)}/worker/internal/toolbox-personal-agent-tools/call`,
       {
         method: "POST",
         headers: {
@@ -276,11 +268,9 @@ export async function callToolboxPersonalAgentTool(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          ownerUserId,
-          agentId,
           connectorKey: args.connectorKey,
           connectionRef: args.connectionRef,
-          toolName: args.connectorToolName,
+          connectorToolName: args.connectorToolName,
           args: args.toolArgs,
         }),
         signal: AbortSignal.timeout(60_000),
@@ -295,6 +285,8 @@ export async function callToolboxPersonalAgentTool(
       const error =
         body && typeof body === "object" && "error" in body
           ? String((body as { error?: unknown }).error)
+          : body && typeof body === "object" && "errorMessage" in body
+            ? String((body as { errorMessage?: unknown }).errorMessage)
           : response.statusText;
       return textResult(
         `Error: Toolbox personal-agent tool call failed (${response.status}): ${error}`

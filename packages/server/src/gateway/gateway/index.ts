@@ -100,6 +100,45 @@ function supportedToolboxPersonalAgentConnector(
 	return value === "notion" || value === "google_workspace";
 }
 
+type ToolboxPersonalAgentToolCallRequest = {
+	connectorKey?: unknown;
+	connectionRef?: unknown;
+	connectorToolName?: unknown;
+	args?: unknown;
+};
+
+function safeToolboxPersonalAgentToolError(
+	errorCode: string,
+	errorMessage: string,
+) {
+	return {
+		ok: false,
+		content: null,
+		errorCode,
+		errorMessage,
+	};
+}
+
+function isToolboxPersonalAgentConnectorToolAllowed(
+	connectorKey: ToolboxPersonalAgentToolGroup["connectorKey"],
+	connectorToolName: string,
+): boolean {
+	return TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG[connectorKey].some(
+		(tool) => tool.connectorToolName === connectorToolName,
+	);
+}
+
+function mcpIdForToolboxPersonalAgentConnection(
+	connection: StoredConnection,
+	fallbackConnectorKey: string,
+): string {
+	const metadata = isPlainRecord(connection.metadata) ? connection.metadata : {};
+	const mcpId = metadata.mcpId;
+	return typeof mcpId === "string" && mcpId.trim()
+		? mcpId.trim()
+		: fallbackConnectorKey;
+}
+
 /**
  * Worker Gateway - SSE and HTTP endpoints for worker communication
  * Workers connect via SSE to receive jobs, send responses via HTTP POST
@@ -175,6 +214,10 @@ export class WorkerGateway {
 		// Unified session context endpoint (includes MCP + instructions)
 		this.app.get("/session-context", (c) =>
 			this.handleSessionContextRequest(c),
+		);
+
+		this.app.post("/internal/toolbox-personal-agent-tools/call", (c) =>
+			this.handleToolboxPersonalAgentToolCall(c),
 		);
 
 		// Per-run transcript snapshots — backs the multi-replica unblock.
@@ -304,6 +347,175 @@ export class WorkerGateway {
 					`${b.connectorKey}:${b.connectionRef}`,
 				),
 			);
+	}
+
+	private async getReadyToolboxPersonalAgentConnection(params: {
+		organizationId: string;
+		agentId: string;
+		ownerUserId: string;
+		connectorKey: ToolboxPersonalAgentToolGroup["connectorKey"];
+		connectionRef: string;
+	}): Promise<StoredConnection | null> {
+		let connection: StoredConnection | null;
+		try {
+			connection = await this.agentConnectionStore.getConnection(
+				params.connectionRef,
+			);
+		} catch (error) {
+			logger.warn("Failed to read materialized Toolbox MCP connection", {
+				agentId: params.agentId,
+				connectionRef: params.connectionRef,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
+		if (!connection) return null;
+		if (connection.organizationId !== params.organizationId) return null;
+		if (connection.agentId !== params.agentId) return null;
+		if (connection.status !== "active") return null;
+
+		const metadata = isPlainRecord(connection.metadata)
+			? connection.metadata
+			: {};
+		if (metadata.ownerUserId !== params.ownerUserId) return null;
+		if (metadata.source !== "toolbox-personal-agent-materialized") {
+			return null;
+		}
+		if (metadata.connectorKey !== params.connectorKey) return null;
+		return connection;
+	}
+
+	private async handleToolboxPersonalAgentToolCall(
+		c: Context,
+	): Promise<Response> {
+		const auth = await this.authenticateWorker(c);
+		if (!auth) {
+			return c.json({ error: "Invalid worker token" }, 401);
+		}
+
+		const buildResponse = async (): Promise<Response> => {
+			let body: ToolboxPersonalAgentToolCallRequest;
+			try {
+				body = await c.req.json<ToolboxPersonalAgentToolCallRequest>();
+			} catch {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_invalid_request",
+						"Invalid JSON body",
+					),
+					400,
+				);
+			}
+
+			const connectionRef =
+				typeof body.connectionRef === "string"
+					? body.connectionRef.trim()
+					: "";
+			const connectorToolName =
+				typeof body.connectorToolName === "string"
+					? body.connectorToolName.trim()
+					: "";
+			const connectorKey = body.connectorKey;
+			const args = body.args === undefined ? {} : body.args;
+			const { userId, agentId, organizationId } = auth.tokenData;
+
+			if (
+				!userId ||
+				!agentId ||
+				!organizationId ||
+				!connectionRef ||
+				!connectorToolName ||
+				!supportedToolboxPersonalAgentConnector(connectorKey) ||
+				!isPlainRecord(args)
+			) {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_invalid_request",
+						"connectorKey, connectionRef, connectorToolName, object args, and worker identity are required",
+					),
+					400,
+				);
+			}
+
+			if (
+				!isToolboxPersonalAgentConnectorToolAllowed(
+					connectorKey,
+					connectorToolName,
+				)
+			) {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_tool_not_allowed",
+						"MCP tool is not allowed for personal-agent execution",
+					),
+					200,
+				);
+			}
+
+			const connection = await this.getReadyToolboxPersonalAgentConnection({
+				organizationId,
+				agentId,
+				ownerUserId: userId,
+				connectorKey,
+				connectionRef,
+			});
+			if (!connection) {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_not_ready",
+						"MCP connection is not ready",
+					),
+					200,
+				);
+			}
+
+			if (!this.mcpProxy?.executeToolDirect) {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_unavailable",
+						"MCP execution is unavailable",
+					),
+					503,
+				);
+			}
+
+			try {
+				const result = await this.mcpProxy.executeToolDirect(
+					agentId,
+					userId,
+					mcpIdForToolboxPersonalAgentConnection(connection, connectorKey),
+					connectorToolName,
+					args,
+				);
+				if (result?.isError) {
+					return c.json(
+						safeToolboxPersonalAgentToolError(
+							"lobu_mcp_tool_error",
+							"MCP tool execution failed",
+						),
+						200,
+					);
+				}
+				return c.json({ ok: true, content: result?.content ?? null });
+			} catch {
+				return c.json(
+					safeToolboxPersonalAgentToolError(
+						"lobu_mcp_tool_error",
+						"MCP tool execution failed",
+					),
+					200,
+				);
+			}
+		};
+
+		if (auth.tokenData.organizationId) {
+			return orgContext.run(
+				{ organizationId: auth.tokenData.organizationId },
+				buildResponse,
+			);
+		}
+
+		return buildResponse();
 	}
 
 	/**

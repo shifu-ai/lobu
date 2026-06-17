@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
 	generateWorkerToken,
 	type AgentConnectionStore,
@@ -58,6 +58,7 @@ describe("WorkerGateway session context", () => {
 		} else {
 			process.env.ENCRYPTION_KEY = previousEncryptionKey;
 		}
+		mock.restore();
 	});
 
 	test("syncs only agent-configured skills into skillsConfig", async () => {
@@ -294,5 +295,122 @@ describe("WorkerGateway session context", () => {
 				],
 			},
 		]);
+	});
+
+	test("executes materialized personal-agent tools through worker authentication", async () => {
+		fakeConnections.set("toolbox-mcp:ref", {
+			id: "toolbox-mcp:ref",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "google_workspace",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "google_workspace",
+				mcpId: "google_workspace",
+			},
+			status: "active",
+		});
+		const executeToolDirect = mock(async () => ({
+			content: [{ type: "text", text: "found drive files" }],
+		}));
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [],
+				}),
+			} as any,
+			{ executeToolDirect } as any,
+			undefined,
+			undefined,
+			undefined,
+			createFakeConnectionStore(),
+		);
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-1",
+		});
+
+		const response = await gateway.getApp().request(
+			"/internal/toolbox-personal-agent-tools/call",
+			{
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					connectorKey: "google_workspace",
+					connectionRef: "toolbox-mcp:ref",
+					connectorToolName: "drive_search",
+					args: { query: "超級AI個體" },
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			ok: true,
+			content: [{ type: "text", text: "found drive files" }],
+		});
+		expect(executeToolDirect).toHaveBeenCalledWith(
+			"agent-1",
+			"user-1",
+			"google_workspace",
+			"drive_search",
+			{ query: "超級AI個體" },
+		);
+	});
+
+	test("rejects materialized personal-agent tool calls without worker authentication", async () => {
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [],
+				}),
+			} as any,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createFakeConnectionStore(),
+		);
+
+		const response = await gateway.getApp().request(
+			"/internal/toolbox-personal-agent-tools/call",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					connectorKey: "google_workspace",
+					connectionRef: "toolbox-mcp:ref",
+					connectorToolName: "drive_search",
+					args: { query: "超級AI個體" },
+				}),
+			},
+		);
+
+		expect(response.status).toBe(401);
 	});
 });
