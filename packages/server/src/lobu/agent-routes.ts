@@ -597,6 +597,7 @@ function buildMaterializedMcpConnection(params: {
       ownerUserId: params.ownerUserId,
       connectorKey: params.connectorKey,
       provider: params.connectorKey,
+      source: 'toolbox-personal-agent-materialized',
       mcpId: typeof sourceMetadata.mcpId === 'string' && sourceMetadata.mcpId.trim()
         ? sourceMetadata.mcpId.trim()
         : params.connectorKey,

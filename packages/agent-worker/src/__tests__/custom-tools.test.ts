@@ -47,6 +47,79 @@ describe("createOpenClawCustomTools", () => {
     ]);
   });
 
+  test("registers materialized personal-agent connector tools and calls Toolbox MCP execution", async () => {
+    const fetchMock = mock(async () =>
+      Response.json({
+        content: [{ type: "text", text: "found drive files" }],
+      })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent",
+      userId: "toolbox-user",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      toolboxPersonalAgentTools: [
+        {
+          connectorKey: "google_workspace",
+          connectionRef: "toolbox-mcp:ref",
+          tools: [
+            {
+              name: "google_workspace_drive_search",
+              connectorToolName: "drive_search",
+              description:
+                "Search Google Drive files available to the connected Toolbox user.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  query: { type: "string" },
+                  limit: { type: "number" },
+                },
+                required: ["query"],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const searchTool = tools.find(
+      (tool) => tool.name === "google_workspace_drive_search"
+    );
+
+    expect(searchTool).toBeDefined();
+
+    const result = await searchTool!.execute("tool-call-1", {
+      query: "超級AI個體",
+    });
+
+    expect(result.content[0]?.text).toContain("found drive files");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [input, init] = fetchMock.mock.calls[0] as unknown as [
+      RequestInfo | URL,
+      RequestInit,
+    ];
+    expect(String(input)).toBe("http://gateway/mcp/tools/call");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toMatchObject({
+      Authorization: "Bearer worker-token",
+      "Content-Type": "application/json",
+    });
+    expect(JSON.parse(String(init.body))).toEqual({
+      ownerUserId: "toolbox-user",
+      agentId: "shifu-u-agent",
+      connectorKey: "google_workspace",
+      connectionRef: "toolbox-mcp:ref",
+      toolName: "drive_search",
+      args: { query: "超級AI個體" },
+    });
+  });
+
   test("upload_file emits a file-uploaded custom event after a successful upload", async () => {
     const tempDir = mkdtempSync(join(tmpdir(), "lobu-custom-tool-"));
     const filePath = join(tempDir, "proof.txt");

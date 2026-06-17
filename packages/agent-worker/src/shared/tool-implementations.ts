@@ -2,7 +2,7 @@ import * as nodeFs from "node:fs";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createLogger } from "@lobu/core";
+import { createLogger, ensureBaseUrl } from "@lobu/core";
 import FormData from "form-data";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
 import {
@@ -245,6 +245,68 @@ export async function startProjectContextDiscovery(
     const memoryWriteStatus = result.run?.memoryWriteStatus || "unknown";
     return textResult(
       `Project context discovery started for "${title}". Run status: ${result.run?.status || "unknown"}. Evidence: ${confirmedEvidenceCount}/${evidenceCount} confirmed. Memory write: ${memoryWriteStatus}.`
+    );
+  });
+}
+
+export async function callToolboxPersonalAgentTool(
+  gw: GatewayParams,
+  args: {
+    connectorKey: string;
+    connectionRef: string;
+    connectorToolName: string;
+    toolArgs: Record<string, unknown>;
+  }
+): Promise<TextResult> {
+  return withErrorHandling("Toolbox personal-agent tool", async () => {
+    const ownerUserId = gw.userId?.trim();
+    const agentId = gw.agentId?.trim();
+    if (!ownerUserId || !agentId) {
+      return textResult(
+        "Error: Toolbox personal-agent tool is missing the current user or agent identity."
+      );
+    }
+
+    const response = await fetch(
+      `${ensureBaseUrl(gw.gatewayUrl)}/mcp/tools/call`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${gw.workerToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ownerUserId,
+          agentId,
+          connectorKey: args.connectorKey,
+          connectionRef: args.connectionRef,
+          toolName: args.connectorToolName,
+          args: args.toolArgs,
+        }),
+        signal: AbortSignal.timeout(60_000),
+      }
+    );
+
+    const body = await response.json().catch(() => ({
+      error: response.statusText,
+    }));
+
+    if (!response.ok) {
+      const error =
+        body && typeof body === "object" && "error" in body
+          ? String((body as { error?: unknown }).error)
+          : response.statusText;
+      return textResult(
+        `Error: Toolbox personal-agent tool call failed (${response.status}): ${error}`
+      );
+    }
+
+    return textResult(
+      JSON.stringify(
+        body && typeof body === "object" && "content" in body
+          ? (body as { content?: unknown }).content
+          : body
+      )
     );
   });
 }

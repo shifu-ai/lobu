@@ -3,9 +3,11 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import { type TSchema, Type } from "@sinclair/typebox";
+import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 import type { GatewayParams, TextResult } from "../shared/tool-implementations";
 import {
   askUserQuestion,
+  callToolboxPersonalAgentTool,
   callMcpTool,
   checkMcpLogin,
   generateAudio,
@@ -67,6 +69,7 @@ export function createOpenClawCustomTools(params: {
    * can omit it.
    */
   onAskUserPosted?: () => void;
+  toolboxPersonalAgentTools?: ToolboxPersonalAgentToolGroup[];
 }): ToolDefinition[] {
   const gw: GatewayParams = {
     gatewayUrl: params.gatewayUrl,
@@ -302,6 +305,29 @@ export function createOpenClawCustomTools(params: {
       run: (args) => startProjectContextDiscovery(gw, args),
     }),
   ];
+
+  for (const group of params.toolboxPersonalAgentTools || []) {
+    for (const tool of group.tools) {
+      if (!tool.name?.trim()) continue;
+      tools.push({
+        name: tool.name,
+        label: tool.name,
+        description: tool.description || `Toolbox tool from ${group.connectorKey}`,
+        parameters: tool.inputSchema
+          ? Type.Unsafe(tool.inputSchema)
+          : Type.Object({}),
+        execute: async (_toolCallId, args) =>
+          toToolResult(
+            await callToolboxPersonalAgentTool(gw, {
+              connectorKey: group.connectorKey,
+              connectionRef: group.connectionRef,
+              connectorToolName: tool.connectorToolName,
+              toolArgs: (args || {}) as Record<string, unknown>,
+            })
+          ),
+      });
+    }
+  }
 
   return tools;
 }

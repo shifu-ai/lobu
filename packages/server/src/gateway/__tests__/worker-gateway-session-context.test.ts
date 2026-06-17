@@ -1,8 +1,44 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { generateWorkerToken, type SecretRef } from "@lobu/core";
+import {
+	generateWorkerToken,
+	type AgentConnectionStore,
+	type SecretRef,
+} from "@lobu/core";
 import { WorkerGateway } from "../gateway/index.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
+
+const fakeConnections = new Map<string, any>();
+
+function createFakeConnectionStore(): AgentConnectionStore {
+	return {
+		getConnection: async (connectionId: string) =>
+			fakeConnections.get(connectionId) ?? null,
+		listConnections: async (filter?: { agentId?: string; platform?: string }) =>
+			[...fakeConnections.values()].filter((connection) => {
+				if (connection.organizationId !== orgContext.getStore()?.organizationId) {
+					return false;
+				}
+				if (filter?.agentId && connection.agentId !== filter.agentId) {
+					return false;
+				}
+				if (filter?.platform && connection.platform !== filter.platform) {
+					return false;
+				}
+				return true;
+			}),
+		saveConnection: async (connection: any) => {
+			fakeConnections.set(connection.id, connection);
+		},
+		updateConnection: async (connectionId: string, updates: any) => {
+			const existing = fakeConnections.get(connectionId);
+			if (existing) fakeConnections.set(connectionId, { ...existing, ...updates });
+		},
+		deleteConnection: async (connectionId: string) => {
+			fakeConnections.delete(connectionId);
+		},
+	};
+}
 
 const TEST_ENCRYPTION_KEY = Buffer.from(
 	"12345678901234567890123456789012",
@@ -13,6 +49,7 @@ describe("WorkerGateway session context", () => {
 
 	beforeEach(() => {
 		process.env.ENCRYPTION_KEY = TEST_ENCRYPTION_KEY;
+		fakeConnections.clear();
 	});
 
 	afterEach(() => {
@@ -143,6 +180,7 @@ describe("WorkerGateway session context", () => {
 			undefined,
 			undefined,
 			new OrgAwareSecretStore(),
+			createFakeConnectionStore(),
 		);
 
 		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
@@ -172,5 +210,89 @@ describe("WorkerGateway session context", () => {
 			authenticated: true,
 			configured: true,
 		});
+	});
+
+	test("exposes ready materialized personal-agent connectors as toolboxPersonalAgentTools", async () => {
+		fakeConnections.set(
+			"toolbox-mcp:org-1:user-1:agent-1:google_workspace",
+			{
+				id: "toolbox-mcp:org-1:user-1:agent-1:google_workspace",
+				organizationId: "org-1",
+				agentId: "agent-1",
+				platform: "google_workspace",
+				config: {},
+				settings: {},
+				metadata: {
+					source: "toolbox-personal-agent-materialized",
+					ownerUserId: "user-1",
+					connectorKey: "google_workspace",
+				},
+				status: "active",
+			},
+		);
+
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [],
+				}),
+			} as any,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			createFakeConnectionStore(),
+		);
+
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-1",
+		});
+
+		const response = await gateway.getApp().request("/session-context", {
+			headers: {
+				authorization: `Bearer ${token}`,
+				host: "gateway.example.com",
+			},
+		});
+
+		expect(response.status).toBe(200);
+
+		const body = (await response.json()) as {
+			toolboxPersonalAgentTools?: unknown;
+		};
+
+		expect(body.toolboxPersonalAgentTools).toEqual([
+			{
+				connectorKey: "google_workspace",
+				connectionRef: "toolbox-mcp:org-1:user-1:agent-1:google_workspace",
+				tools: [
+					{
+						name: "google_workspace_drive_search",
+						connectorToolName: "drive_search",
+						description:
+							"Search Google Drive files available to the connected Toolbox user.",
+						inputSchema: {
+							type: "object",
+							properties: {
+								query: { type: "string" },
+								limit: { type: "number" },
+							},
+							required: ["query"],
+						},
+					},
+				],
+			},
+		]);
 	});
 });

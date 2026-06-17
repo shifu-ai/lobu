@@ -1,8 +1,10 @@
 #!/usr/bin/env bun
 
 import type {
+	AgentConnectionStore,
 	ConfigProviderMeta,
 	InstructionContext,
+	StoredConnection,
 	WorkerTokenData,
 } from "@lobu/core";
 import { createLogger, encrypt, verifyWorkerToken } from "@lobu/core";
@@ -33,8 +35,70 @@ import {
 import { WorkerJobRouter } from "./job-router.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
+import { createPostgresAgentConnectionStore } from "../../lobu/stores/postgres-stores.js";
 
 const logger = createLogger("worker-gateway");
+
+export type ToolboxPersonalAgentTool = {
+	name: string;
+	connectorToolName: string;
+	description: string;
+	inputSchema: Record<string, unknown>;
+};
+
+export type ToolboxPersonalAgentToolGroup = {
+	connectorKey: "notion" | "google_workspace";
+	connectionRef: string;
+	tools: ToolboxPersonalAgentTool[];
+};
+
+const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
+	ToolboxPersonalAgentToolGroup["connectorKey"],
+	ToolboxPersonalAgentTool[]
+> = {
+	google_workspace: [
+		{
+			name: "google_workspace_drive_search",
+			connectorToolName: "drive_search",
+			description:
+				"Search Google Drive files available to the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
+					limit: { type: "number" },
+				},
+				required: ["query"],
+			},
+		},
+	],
+	notion: [
+		{
+			name: "notion_search",
+			connectorToolName: "search",
+			description:
+				"Search Notion pages and databases available to the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
+					limit: { type: "number" },
+				},
+				required: ["query"],
+			},
+		},
+	],
+};
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function supportedToolboxPersonalAgentConnector(
+	value: unknown,
+): value is ToolboxPersonalAgentToolGroup["connectorKey"] {
+	return value === "notion" || value === "google_workspace";
+}
 
 /**
  * Worker Gateway - SSE and HTTP endpoints for worker communication
@@ -53,6 +117,7 @@ export class WorkerGateway {
 	private providerCatalogService?: ProviderCatalogService;
 	private agentSettingsStore?: AgentSettingsStore;
 	private secretStore?: WritableSecretStore;
+	private agentConnectionStore: AgentConnectionStore;
 
 	constructor(
 		queue: IMessageQueue,
@@ -63,6 +128,7 @@ export class WorkerGateway {
 		providerCatalogService?: ProviderCatalogService,
 		agentSettingsStore?: AgentSettingsStore,
 		secretStore?: WritableSecretStore,
+		agentConnectionStore: AgentConnectionStore = createPostgresAgentConnectionStore(),
 	) {
 		this.queue = queue;
 		this.publicGatewayUrl = publicGatewayUrl;
@@ -74,6 +140,7 @@ export class WorkerGateway {
 		this.providerCatalogService = providerCatalogService;
 		this.agentSettingsStore = agentSettingsStore;
 		this.secretStore = secretStore;
+		this.agentConnectionStore = agentConnectionStore;
 
 		// Setup Hono app
 		this.app = new Hono();
@@ -181,6 +248,62 @@ export class WorkerGateway {
 				};
 			}),
 		);
+	}
+
+	private async collectToolboxPersonalAgentTools(params: {
+		organizationId?: string;
+		agentId?: string;
+		ownerUserId?: string;
+	}): Promise<ToolboxPersonalAgentToolGroup[]> {
+		if (!params.organizationId || !params.agentId || !params.ownerUserId) {
+			return [];
+		}
+
+		let connections: StoredConnection[];
+		try {
+			connections = await this.agentConnectionStore.listConnections({
+				agentId: params.agentId,
+			});
+		} catch (error) {
+			logger.warn("Failed to list materialized Toolbox MCP connections", {
+				agentId: params.agentId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return [];
+		}
+
+		return connections
+			.flatMap((connection): ToolboxPersonalAgentToolGroup[] => {
+				if (connection.organizationId !== params.organizationId) return [];
+				if (connection.agentId !== params.agentId) return [];
+				if (connection.status !== "active") return [];
+
+				const metadata = isPlainRecord(connection.metadata)
+					? connection.metadata
+					: {};
+				if (metadata.ownerUserId !== params.ownerUserId) return [];
+				if (metadata.source !== "toolbox-personal-agent-materialized") {
+					return [];
+				}
+				if (!supportedToolboxPersonalAgentConnector(metadata.connectorKey)) {
+					return [];
+				}
+
+				return [
+					{
+						connectorKey: metadata.connectorKey,
+						connectionRef: connection.id,
+						tools: TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG[
+							metadata.connectorKey
+						].map((tool) => ({ ...tool })),
+					},
+				];
+			})
+			.sort((a, b) =>
+				`${a.connectorKey}:${a.connectionRef}`.localeCompare(
+					`${b.connectorKey}:${b.connectionRef}`,
+				),
+			);
 	}
 
 	/**
@@ -546,6 +669,12 @@ export class WorkerGateway {
 					agentId || userId,
 					userId,
 				);
+				const toolboxPersonalAgentTools =
+					await this.collectToolboxPersonalAgentTools({
+						organizationId: auth.tokenData.organizationId,
+						agentId,
+						ownerUserId: userId,
+					});
 
 				// Fetch tool lists and instructions for ALL MCPs (unauthenticated ones
 				// will attempt discovery without credentials)
@@ -643,6 +772,7 @@ export class WorkerGateway {
 					mcpTools,
 					mcpInstructions,
 					mcpContext,
+					toolboxPersonalAgentTools,
 					providerConfig,
 					skillsConfig,
 				});

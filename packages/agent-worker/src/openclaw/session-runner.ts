@@ -892,6 +892,7 @@ Use it when the user references past discussions or you need context.`);
         "ask-user",
         "ask_user posted — ending the turn so the model can't re-post."
       ),
+    toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
   });
 
   // Register first-class MCP tools + auth tools. Skipped entirely in CLI
