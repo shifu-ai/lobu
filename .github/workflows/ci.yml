@@ -93,13 +93,13 @@ jobs:
 
       - name: server (bun:test units)
         # The gateway code that used to live in packages/gateway is now under
-        # src/gateway/. Its DB-backed bun:test suite needs Postgres and runs
-        # in the integration job below; here we only run the pure-unit
-        # subdirectories that don't touch Postgres.
+        # src/gateway/. Its bun:test suites run in the integration job below
+        # (the gateway loop covers src/gateway/infrastructure/queue too, so it
+        # is intentionally NOT repeated here — see #1238). Here we only run the
+        # pure-unit subdirectories that don't touch Postgres.
         run: |
           bun test packages/server/src/__tests__/unit
           bun test packages/server/src/auth/__tests__/tool-access.test.ts
-          bun test packages/server/src/gateway/infrastructure/queue
 
       - name: connector-worker (bun:test)
         # openclaw-plugin e2e tests need a live backend and belong in the
@@ -357,19 +357,42 @@ jobs:
           node ../../node_modules/.bin/vitest run --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/vitest-report.json"
           node ../../scripts/assert-vitest-report-clean.mjs "$RUNNER_TEMP/vitest-report.json"
 
-      - name: server gateway suite (bun:test, needs Postgres)
-        # The gateway code that used to live in packages/gateway is now under
-        # src/gateway/__tests__/. These bun:test files are excluded from
-        # vitest (see vitest.config.ts) and need a real Postgres, so they run
-        # here in the integration job.
+      - name: server gateway suites (bun:test, needs Postgres)
+        # The gateway bun:test files are excluded from vitest (vitest.config.ts)
+        # and need a real Postgres, so they run here. We run EACH __tests__ dir
+        # in its own `bun test` process rather than one `bun test src/gateway`:
+        # bun has no per-file module isolation (unlike vitest's forks), and the
+        # gateway suites are not mutually hermetic — co-running the whole tree in
+        # one process leaks DB rows and module singletons across files (org rows,
+        # service registries) and fails. A process per dir gives each dir a clean
+        # module registry, matching why vitest uses singleFork here. `find`
+        # auto-discovers nested dirs, and check-test-runner-coverage.mjs fails CI
+        # if a gateway test file ever escapes this loop. Covers
+        # src/gateway/infrastructure/queue too (#1238). Run all dirs and fail at
+        # the end so one run reports every failing dir, not just the first.
         working-directory: packages/server
-        run: bun test src/gateway/__tests__
+        run: |
+          set -uo pipefail
+          dirs=$(find src/gateway -type d -name __tests__ | sort)
+          # Fail loudly if the glob matches nothing (path typo / restructure):
+          # an empty loop would otherwise run zero tests and exit green.
+          [ -n "$dirs" ] || { echo "no gateway __tests__ dirs found" >&2; exit 1; }
+          rc=0
+          for d in $dirs; do
+            echo "::group::bun test $d"
+            bun test "$d" || rc=1
+            echo "::endgroup::"
+          done
+          exit $rc
 
-      - name: server lobu route suite (bun:test, needs Postgres)
+      - name: server lobu/scheduled/workspace suites (bun:test, needs Postgres)
         # These bun:test files live outside src/gateway and are also excluded
-        # from vitest because they import bun:test directly.
+        # from vitest because they import bun:test directly. They co-run cleanly
+        # in one process (verified). src/lobu also holds vitest-style tests
+        # (src/lobu/stores/__tests__) that vitest owns, so we target
+        # src/lobu/__tests__ specifically rather than the whole src/lobu tree.
         working-directory: packages/server
-        run: bun test src/lobu/__tests__ src/workspace/__tests__
+        run: bun test src/lobu/__tests__ src/scheduled src/workspace/__tests__
 
   format-lint:
     runs-on: ubuntu-latest
@@ -396,6 +419,12 @@ jobs:
 
       - name: Duplication gate (jscpd)
         run: bun run dupes
+
+      - name: Test-runner coverage gate (#1238)
+        # Every packages/server *.test.ts must run in at least one runner (vitest
+        # or a bun:test job), keyed on its import. Catches files that drift into
+        # running nowhere — a skipped test is indistinguishable from a passing one.
+        run: bun scripts/check-test-runner-coverage.mjs
 
   typecheck:
     runs-on: ubuntu-latest
