@@ -479,6 +479,7 @@ export function createProvisioningRoutes(
 					connectorKey,
 					provider: connectorKey,
 					mcpId,
+					source: "toolbox-personal-agent-materialized",
 					authSource: "lobu_oauth",
 				},
 				status: "active",

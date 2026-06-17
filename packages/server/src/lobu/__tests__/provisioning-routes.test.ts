@@ -612,6 +612,7 @@ describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/materialize", 
 			ownerUserId: "toolbox-user-1",
 			connectorKey: "google_workspace",
 			mcpId: "google_workspace",
+			source: "toolbox-personal-agent-materialized",
 			authSource: "lobu_oauth",
 		});
 		expect(JSON.stringify(rows[0])).not.toContain("secret-token");
