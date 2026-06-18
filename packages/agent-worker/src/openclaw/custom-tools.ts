@@ -3,22 +3,22 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import { type TSchema, Type } from "@sinclair/typebox";
-import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 import type { GatewayParams, TextResult } from "../shared/tool-implementations";
 import {
   askUserQuestion,
-  callToolboxPersonalAgentTool,
   callMcpTool,
+  callToolboxPersonalAgentTool,
   checkMcpLogin,
   generateAudio,
   generateImage,
   getChannelHistory,
   logoutMcp,
   requestHumanDecision,
-  startProjectContextDiscovery,
   startMcpLogin,
+  startProjectContextDiscovery,
   uploadUserFile,
 } from "../shared/tool-implementations";
+import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -312,7 +312,8 @@ export function createOpenClawCustomTools(params: {
       tools.push({
         name: tool.name,
         label: tool.name,
-        description: tool.description || `Toolbox tool from ${group.connectorKey}`,
+        description:
+          tool.description || `Toolbox tool from ${group.connectorKey}`,
         parameters: tool.inputSchema
           ? Type.Unsafe(tool.inputSchema)
           : Type.Object({}),
@@ -343,6 +344,46 @@ export function createMcpToolDefinitions(
   mcpContext?: Record<string, string>
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
+  const registeredNames = new Set<string>();
+
+  const toToolDefinition = (
+    mcpId: string,
+    def: McpToolDef,
+    toolName: string,
+    upstreamToolName: string,
+    contextPrefix?: string
+  ): ToolDefinition => {
+    const schema = def.inputSchema
+      ? Type.Unsafe(def.inputSchema)
+      : Type.Object({});
+
+    const baseDescription = def.description || `MCP tool from ${mcpId}`;
+    const description = contextPrefix
+      ? `[${contextPrefix}] ${baseDescription}`
+      : baseDescription;
+
+    return {
+      name: toolName,
+      label: `${mcpId}/${upstreamToolName}`,
+      description:
+        toolName === upstreamToolName
+          ? description
+          : `${description} Alias for \`${upstreamToolName}\`.`,
+      parameters: schema,
+      execute: async (_toolCallId, args) =>
+        toToolResult(
+          await callMcpTool(
+            gw,
+            mcpId,
+            upstreamToolName,
+            (args || {}) as Record<string, unknown>
+          )
+        ),
+    };
+  };
+
+  const toSafeAlias = (name: string): string =>
+    name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
 
   for (const [mcpId, defs] of Object.entries(mcpTools)) {
     const contextPrefix = mcpContext?.[mcpId];
@@ -350,30 +391,28 @@ export function createMcpToolDefinitions(
       if (!def.name || typeof def.name !== "string" || !def.name.trim()) {
         continue;
       }
-      const schema = def.inputSchema
-        ? Type.Unsafe(def.inputSchema)
-        : Type.Object({});
+      const upstreamToolName = def.name.trim();
 
-      const baseDescription = def.description || `MCP tool from ${mcpId}`;
-      const description = contextPrefix
-        ? `[${contextPrefix}] ${baseDescription}`
-        : baseDescription;
+      if (!registeredNames.has(upstreamToolName)) {
+        tools.push(
+          toToolDefinition(
+            mcpId,
+            def,
+            upstreamToolName,
+            upstreamToolName,
+            contextPrefix
+          )
+        );
+        registeredNames.add(upstreamToolName);
+      }
 
-      tools.push({
-        name: def.name,
-        label: `${mcpId}/${def.name}`,
-        description,
-        parameters: schema,
-        execute: async (_toolCallId, args) =>
-          toToolResult(
-            await callMcpTool(
-              gw,
-              mcpId,
-              def.name,
-              (args || {}) as Record<string, unknown>
-            )
-          ),
-      });
+      const alias = toSafeAlias(upstreamToolName);
+      if (alias !== upstreamToolName && !registeredNames.has(alias)) {
+        tools.push(
+          toToolDefinition(mcpId, def, alias, upstreamToolName, contextPrefix)
+        );
+        registeredNames.add(alias);
+      }
     }
   }
 

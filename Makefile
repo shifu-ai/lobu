@@ -42,7 +42,7 @@ build-packages:
 	done
 	@echo "   📦 Building packages/server bundle..."
 	@( cd packages/server && bun run build:server ) || exit $$?
-	@if [ -f packages/owletto/package.json ]; then \
+	@if [ -f packages/owletto/package.json ] && node -e "const p=require('./packages/owletto/package.json'); process.exit(p.scripts?.build ? 0 : 1)"; then \
 		echo "   📦 Building packages/owletto (web UI)..."; \
 		( cd packages/owletto && bun run build ) || exit $$?; \
 	else \
