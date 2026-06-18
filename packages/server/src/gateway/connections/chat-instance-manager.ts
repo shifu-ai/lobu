@@ -37,6 +37,7 @@ import {
   registerMessageHandlers,
 } from "./message-handler-bridge.js";
 import { getPlatformDescriptor, PLATFORM_REGISTRY } from "./platforms/index.js";
+import { resolveChatTarget } from "./platforms/shared.js";
 import {
   handleWebhookIngest,
   prepareWebhookIngestConfig,
@@ -594,6 +595,47 @@ export class ChatInstanceManager {
     channelKey: string,
     content: AdapterPostableMessage
   ): Promise<void> {
+    // Channel-level post is a thread-less postToConversation; the colon splits
+    // `${platform}:${channelId}`. One post path, no duplicated resolution.
+    const sep = channelKey.indexOf(":");
+    const platform = sep > 0 ? channelKey.slice(0, sep) : channelKey;
+    const channelId = sep > 0 ? channelKey.slice(sep + 1) : channelKey;
+    await this.postToConversation(connectionId, {
+      platform,
+      channelKey,
+      channelId,
+      content,
+    });
+  }
+
+  /**
+   * Post to a channel — or a thread within it — and return the platform message
+   * id + thread id, so the conversations `send` tool can hand the agent a thread
+   * handle to reply into later. `threadId` (a platform thread id like
+   * `slack:{channel}:{ts}`) routes the reply into that thread; if the thread
+   * can't be resolved (e.g. a non-forum Telegram chat) resolveChatTarget falls
+   * back to a channel-level post, so the reply lands at channel level rather
+   * than in-thread instead of failing. Multi-replica safe: hydrates the
+   * connection on this pod from its row.
+   */
+  async postToConversation(
+    connectionId: string,
+    opts: {
+      platform: string;
+      channelKey: string;
+      channelId: string;
+      threadId?: string;
+      content: AdapterPostableMessage;
+      /**
+       * Subscribe to the thread this message opens/continues, so the bot
+       * RECEIVES (and captures) replies to it. Without this, a thread the bot
+       * opens proactively (e.g. a watcher's lunch thread) is invisible to it —
+       * Slack only delivers thread replies for subscribed threads. Used by
+       * send_message; a one-off notify does NOT subscribe.
+       */
+      subscribe?: boolean;
+    }
+  ): Promise<{ messageId: string; threadId: string }> {
     const running = await this.ensureConnectionRunning(connectionId);
     const instance = running ? this.instances.get(connectionId) : undefined;
     if (!instance) {
@@ -601,13 +643,171 @@ export class ChatInstanceManager {
         `No active chat instance for connection ${connectionId} (could not start it on this pod)`
       );
     }
-    const channel = instance.chat?.channel?.(channelKey);
-    if (!channel) {
+    const target = await resolveChatTarget(instance.chat, opts.platform, {
+      channelId: opts.channelId,
+      conversationId: opts.threadId,
+      responseThreadId: opts.threadId,
+    });
+    if (!target) {
       throw new Error(
-        `Could not resolve channel ${channelKey} for connection ${connectionId}`
+        `Could not resolve target ${opts.channelKey}${opts.threadId ? ` (thread ${opts.threadId})` : ""} for connection ${connectionId}`
       );
     }
-    await channel.post(content);
+    let sent: { id?: unknown; threadId?: unknown };
+    try {
+      sent = (await target.post(opts.content)) as {
+        id?: unknown;
+        threadId?: unknown;
+      };
+    } catch (err) {
+      // A thread the platform can't honor (e.g. replying into a Telegram DM,
+      // which has no message threads) must not fail the whole send — fall back
+      // to a channel-level post so the message still lands. Only retry when we
+      // actually targeted a thread; a plain channel-post failure is real.
+      if (!opts.threadId) throw err;
+      logger.debug(
+        { connectionId, threadId: opts.threadId, err: String(err) },
+        "threaded post failed; retrying at channel level"
+      );
+      const channelTarget = await resolveChatTarget(instance.chat, opts.platform, {
+        channelId: opts.channelId,
+      });
+      if (!channelTarget) throw err;
+      sent = (await channelTarget.post(opts.content)) as {
+        id?: unknown;
+        threadId?: unknown;
+      };
+    }
+    const messageId = typeof sent?.id === "string" ? sent.id : "";
+
+    // Auto-subscribe so replies to this message flow back to the bot (and get
+    // captured into the transcript). Best-effort: a subscribe failure never
+    // fails the post. Reply to an existing thread → that thread; top-level post
+    // → the thread rooted at the new message.
+    if (opts.subscribe) {
+      // Telegram's message id is `${chatId}:${n}`; strip the redundant channel
+      // prefix so the synthesized thread id is a clean `platform:channel:ref`.
+      const rootRef =
+        messageId && messageId.startsWith(`${opts.channelId}:`)
+          ? messageId.slice(opts.channelId.length + 1)
+          : messageId;
+      const subThreadId =
+        opts.threadId ??
+        (rootRef
+          ? `${opts.platform}:${opts.channelId}:${rootRef}`
+          : undefined);
+      // subscribe() lives on the Chat SDK Thread, NOT on Chat — resolve the
+      // thread first (same as the inbound mention/dm path) and subscribe on it.
+      // A channel-level target (e.g. a threadless Telegram DM) has no
+      // subscribe(), so the guard makes it a no-op there.
+      if (subThreadId) {
+        try {
+          const thread = (await resolveChatTarget(instance.chat, opts.platform, {
+            channelId: opts.channelId,
+            conversationId: subThreadId,
+            responseThreadId: subThreadId,
+          })) as { subscribe?: () => Promise<void> } | null;
+          if (thread && typeof thread.subscribe === "function") {
+            await thread.subscribe();
+          }
+        } catch (err) {
+          logger.debug(
+            { connectionId, subThreadId, err: String(err) },
+            "thread auto-subscribe failed (non-fatal)"
+          );
+        }
+      }
+    }
+
+    return {
+      messageId,
+      threadId: typeof sent?.threadId === "string" ? sent.threadId : "",
+    };
+  }
+
+  /**
+   * Live channel history for a SPECIFIC connection (the conversations
+   * read_conversation tool). Unlike the cached `getPlatformConversationHistory`
+   * (a 10-message sliding cache selected globally by platform — wrong for the
+   * authorized-connection case AND too thin to "catch up" on a channel), this:
+   *  - is scoped to the caller's authorized `connectionId` (no global
+   *    re-selection → no cross-tenant read), and
+   *  - pulls real platform history via `channel.messages` (the SDK's
+   *    `conversations.history`/`fetchChannelMessages`), not the cache.
+   * Returns newest-N in chronological (oldest-first) order. Multi-replica safe:
+   * hydrates the connection on this pod from its row.
+   */
+  async getLiveConversationHistory(
+    connectionId: string,
+    channelKey: string,
+    limit: number
+  ): Promise<{
+    messages: Array<{
+      timestamp: string;
+      user: string;
+      text: string;
+      isBot: boolean;
+    }>;
+  }> {
+    const running = await this.ensureConnectionRunning(connectionId);
+    const instance = running ? this.instances.get(connectionId) : undefined;
+    if (!instance) {
+      throw new Error(
+        `No active chat instance for connection ${connectionId} (could not start it on this pod)`
+      );
+    }
+    const collected: Array<{
+      timestamp: string;
+      user: string;
+      text: string;
+      isBot: boolean;
+    }> = [];
+    const channel = instance.chat?.channel?.(channelKey);
+    if (channel?.messages) {
+      // channel.messages iterates newest-first; take N then return oldest-first.
+      for await (const msg of channel.messages as AsyncIterable<any>) {
+        const text = (msg?.text ?? "").trim();
+        if (text) {
+          const sentAt =
+            msg?.metadata?.dateSent instanceof Date
+              ? msg.metadata.dateSent
+              : new Date();
+          collected.push({
+            timestamp: sentAt.toISOString(),
+            user: msg?.author?.fullName || msg?.author?.userId || "user",
+            text,
+            isBot: !!msg?.author?.isMe,
+          });
+        }
+        if (collected.length >= limit) break;
+      }
+      collected.reverse();
+    }
+
+    // Platforms with NO server-side history API (WhatsApp, Telegram) return
+    // nothing from channel.messages — fall back to THIS connection's local
+    // history cache (still connection-scoped, so no cross-tenant read; just
+    // limited to recently-seen messages).
+    if (collected.length === 0) {
+      const sep = channelKey.indexOf(":");
+      const channelId = sep > 0 ? channelKey.slice(sep + 1) : channelKey;
+      const entries =
+        (await instance.conversationState?.getEntries(
+          connectionId,
+          channelId,
+          channelId
+        )) ?? [];
+      for (const e of entries.slice(-limit)) {
+        if (!e.content) continue;
+        collected.push({
+          timestamp: new Date(e.timestamp).toISOString(),
+          user: e.authorName || (e.role === "assistant" ? "assistant" : "user"),
+          text: e.content,
+          isBot: e.role === "assistant",
+        });
+      }
+    }
+    return { messages: collected };
   }
 
   /**
