@@ -3,6 +3,7 @@
  */
 
 import { getDb } from '../db/client';
+import { invalidateMemberEventKindsCache } from './event-kind-validation';
 
 interface MemberSchemaProperty {
   type?: string;
@@ -69,6 +70,27 @@ const DEFAULT_MEMBER_EVENT_KINDS = {
   },
   note: { description: 'General notes and content' },
   summary: { description: 'Summaries and digests' },
+  project_profile: {
+    description: 'Product onboarding context packs and project background profiles',
+    metadataSchema: {
+      type: 'object',
+      properties: {
+        contextPackId: { type: 'string' },
+        summary: { type: 'string' },
+        projectSeedId: { type: ['string', 'null'] },
+        discoveryRunId: { type: ['string', 'null'] },
+        projectTitle: { type: 'string' },
+        confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+        generatedAt: { type: 'string' },
+        evidenceRefs: { type: 'array' },
+        candidateEvidenceRefs: { type: 'array' },
+        source: { type: 'string' },
+        owner_user_id: { type: 'string' },
+        agent_id: { type: 'string' },
+        memory_source: { type: 'string' },
+      },
+    },
+  },
   content: { description: 'Generic content' },
   change: { description: 'Entity field changes and audit trail' },
 } as const;
@@ -218,6 +240,25 @@ function mergeMemberMetadataSchema(
   return next;
 }
 
+export function mergeMemberEventKinds(
+  eventKinds: Record<string, unknown> | null | undefined
+): Record<string, unknown> {
+  if (eventKinds && (typeof eventKinds !== 'object' || Array.isArray(eventKinds))) {
+    return eventKinds;
+  }
+  return {
+    ...DEFAULT_MEMBER_EVENT_KINDS,
+    ...(eventKinds ?? {}),
+  };
+}
+
+function isMissingDefaultMemberEventKind(eventKinds: unknown): boolean {
+  if (!eventKinds || typeof eventKinds !== 'object' || Array.isArray(eventKinds)) {
+    return true;
+  }
+  return Object.keys(DEFAULT_MEMBER_EVENT_KINDS).some((kind) => !(kind in eventKinds));
+}
+
 export async function ensureMemberEntityType(organizationId: string): Promise<void> {
   const sql = getDb();
   const existingRows = await sql`
@@ -255,6 +296,7 @@ export async function ensureMemberEntityType(organizationId: string): Promise<vo
       )
       ON CONFLICT (organization_id, slug) WHERE organization_id IS NOT NULL AND deleted_at IS NULL DO NOTHING
     `;
+    invalidateMemberEventKindsCache(organizationId);
     return;
   }
 
@@ -267,19 +309,26 @@ export async function ensureMemberEntityType(organizationId: string): Promise<vo
     existingMetadataSchema,
     mergedMetadataSchema
   );
-  const shouldUpdateEventKinds = existing.event_kinds == null;
+  const mergedEventKinds = mergeMemberEventKinds(
+    (existing.event_kinds as Record<string, unknown> | null | undefined) ?? null
+  );
+  const shouldUpdateEventKinds = isMissingDefaultMemberEventKind(existing.event_kinds);
 
   if (!shouldUpdateMetadataSchema && !shouldUpdateEventKinds) {
+    invalidateMemberEventKindsCache(organizationId);
     return;
   }
 
   await sql`
     UPDATE entity_types
     SET metadata_schema = ${shouldUpdateMetadataSchema ? sql.json(mergedMetadataSchema) : existing.metadata_schema},
-        event_kinds = ${shouldUpdateEventKinds ? sql.json(DEFAULT_MEMBER_EVENT_KINDS) : existing.event_kinds},
+        event_kinds = ${shouldUpdateEventKinds ? sql.json(mergedEventKinds) : existing.event_kinds},
         updated_at = current_timestamp
     WHERE id = ${existing.id}
   `;
+  if (shouldUpdateEventKinds) {
+    invalidateMemberEventKindsCache(organizationId);
+  }
 }
 
 export function resolveMemberSchemaFieldsFromSchema(

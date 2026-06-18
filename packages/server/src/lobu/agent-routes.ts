@@ -19,6 +19,7 @@ import { createAuthProfileLabel } from '../gateway/auth/settings/auth-profiles-m
 import type { Env } from '../index';
 import { getConfiguredPublicOrigin } from '../utils/public-origin';
 import { countRuntimeMessagingClientsByAgent } from './client-routes';
+import { memoryRoutes } from './memory-routes';
 import { getChatInstanceManager, getLobuCoreServices } from './gateway';
 import {
   AGENT_ID_PATTERN,
@@ -648,6 +649,8 @@ toolboxMcpRoutes.use('*', async (c, next) => {
   if (!orgId) return c.json({ error: 'Organization required' }, 401);
   return orgContext.run({ organizationId: orgId }, next);
 });
+
+toolboxMcpRoutes.route('/memory', memoryRoutes);
 
 toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   let body: ToolboxMcpToolCallRequest;

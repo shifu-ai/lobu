@@ -82,6 +82,14 @@ interface EventKindsCacheEntry {
 
 const eventKindsCache = new Map<string, EventKindsCacheEntry>();
 
+export function clearEventKindsCacheForTests(): void {
+  eventKindsCache.clear();
+}
+
+export function invalidateMemberEventKindsCache(orgId: string): void {
+  eventKindsCache.delete(`${orgId}:$member`);
+}
+
 // ============================================
 // Event Kinds Resolution
 // ============================================

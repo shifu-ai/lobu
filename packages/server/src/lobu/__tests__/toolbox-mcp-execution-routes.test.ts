@@ -210,6 +210,7 @@ describe('Toolbox MCP execution routes', () => {
     authStash.organizationId = ORG_ID;
     authStash.authSource = 'pat';
     authStash.mcpAuthInfo = { scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] };
+    authStash.memberRole = null;
     executeToolDirectMock = mock(async () => ({
       content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
       isError: false,
