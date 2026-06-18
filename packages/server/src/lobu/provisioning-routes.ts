@@ -7,9 +7,10 @@
  * Lobu stores them in the PAT's organization.
  */
 
-import type { AgentSettings, StoredConnection } from "@lobu/core";
 import { createHash } from "node:crypto";
+import type { AgentSettings, StoredConnection } from "@lobu/core";
 import { type Context, Hono } from "hono";
+import { getDb } from "../db/client.js";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
 import { GrantStore } from "../gateway/permissions/grant-store.js";
@@ -106,6 +107,59 @@ function deterministicProvisionedMcpConnectionRef(
 		.update(JSON.stringify([organizationId, userId, agentId, mcpId]))
 		.digest("hex");
 	return `toolbox-mcp:${digest}`;
+}
+
+function deterministicMembershipId(
+	organizationId: string,
+	ownerUserId: string,
+): string {
+	const digest = createHash("sha256")
+		.update(
+			JSON.stringify(["toolbox-owner-member", organizationId, ownerUserId]),
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return `member_${digest}`;
+}
+
+async function ensureToolboxOwnerMembership(
+	organizationId: string,
+	ownerUserId: string,
+): Promise<{ ensured: true; role: string }> {
+	const sql = getDb();
+	await sql`
+		INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+		VALUES (
+			${ownerUserId},
+			${ownerUserId},
+			${`${ownerUserId}@toolbox.local`},
+			true,
+			NOW(),
+			NOW()
+		)
+		ON CONFLICT (id) DO NOTHING
+	`;
+	await sql`
+		INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+		VALUES (
+			${deterministicMembershipId(organizationId, ownerUserId)},
+			${organizationId},
+			${ownerUserId},
+			'member',
+			NOW()
+		)
+		ON CONFLICT ("organizationId", "userId") DO NOTHING
+	`;
+
+	const rows = await sql<{ role: string }[]>`
+		SELECT role
+		FROM "member"
+		WHERE "organizationId" = ${organizationId}
+		  AND "userId" = ${ownerUserId}
+		LIMIT 1
+	`;
+
+	return { ensured: true, role: String(rows[0]?.role ?? "member") };
 }
 
 function redirectUri(publicGatewayUrl: string): string {
@@ -228,6 +282,10 @@ export function createProvisioningRoutes(
 			...settings,
 			updatedAt: Date.now(),
 		});
+		const membership = await ensureToolboxOwnerMembership(
+			organizationId,
+			ownerUserId,
+		);
 		await syncProvisioningGrants(agentId, settings, organizationId);
 
 		return c.json(
@@ -235,6 +293,7 @@ export function createProvisioningRoutes(
 				ok: true,
 				agentId,
 				created,
+				membership,
 				revisionRef: `lobu:${agentId}`,
 			},
 			created ? 201 : 200,

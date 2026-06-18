@@ -249,6 +249,65 @@ describe("POST /api/provisioning/agents", () => {
 		});
 	});
 
+	test("ensures provided Toolbox owner is a member of the PAT organization", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-member-owner",
+				name: "Toolbox Owner Member Agent",
+				ownerUserId: "toolbox-user-member-1",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const members = await sql`
+			SELECT "organizationId", "userId", role
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-member-1"}
+		`;
+
+		expect(members).toEqual([
+			{
+				organizationId: ORG_ID,
+				userId: "toolbox-user-member-1",
+				role: "member",
+			},
+		]);
+	});
+
+	test("provisioned Toolbox owner can immediately satisfy memory-route membership", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-memory-member",
+				name: "Memory Ready Agent",
+				ownerUserId: "toolbox-user-memory-ready",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const { getWorkspaceRole } = await import(
+			"../../utils/organization-access.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		await expect(
+			getWorkspaceRole(getDb(), ORG_ID, "toolbox-user-memory-ready"),
+		).resolves.toBe("member");
+	});
+
 	test("rejects blank Toolbox owner user id overrides", async () => {
 		const app = await buildApp();
 
