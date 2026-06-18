@@ -162,7 +162,7 @@ async function ensureToolboxOwnerMembership(
 		ON CONFLICT ("organizationId", "userId") DO NOTHING
 	`;
 
-	const rows = await sql<{ role: string }[]>`
+	const rows = await sql<{ role: string }>`
 		SELECT role
 		FROM "member"
 		WHERE "organizationId" = ${organizationId}
