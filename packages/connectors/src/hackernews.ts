@@ -235,6 +235,17 @@ export default class HackerNewsConnector extends ConnectorRuntime {
   private readonly MAX_PAGES = 50;
   private readonly PAGE_DELAY_MS = 1000;
   private readonly FETCH_DELAY_MS = 2000;
+  // Hard wall-clock budget for a single sync. A broad query (up to 50 pages ×
+  // 1s) plus per-article content enrichment (5s timeout each) could otherwise
+  // run for many minutes — or effectively never finish on a box with blocked
+  // egress where every content fetch times out. On hitting the budget we return
+  // what we have; the next scheduled run continues (the window is re-queried,
+  // the connector isn't incremental).
+  private readonly SYNC_BUDGET_MS = 4 * 60_000;
+  // Cap external content enrichment so a large result set can't burn minutes on
+  // per-article fetches, and bail once egress is clearly down.
+  private readonly MAX_CONTENT_FETCHES = 25;
+  private readonly MAX_CONSECUTIVE_FETCH_FAILURES = 3;
   private turndownService: TurndownService;
 
   constructor() {
@@ -269,8 +280,9 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     const events: EventEnvelope[] = [];
     let page = 0;
     let hasMore = true;
+    const deadline = Date.now() + this.SYNC_BUDGET_MS;
 
-    while (hasMore && page < this.MAX_PAGES) {
+    while (hasMore && page < this.MAX_PAGES && Date.now() < deadline) {
       const url = isFrontPage
         ? `${this.BASE_URL}/search?tags=front_page&hitsPerPage=100&page=${page}` +
           (minScore > 0 ? `&numericFilters=${encodeURIComponent(`points>=${minScore}`)}` : '')
@@ -323,15 +335,23 @@ export default class HackerNewsConnector extends ConnectorRuntime {
 
       hasMore = data.page < data.nbPages - 1 && data.hits.length > 0;
       page++;
+      ctx.log?.(`HN: fetched page ${page} (${events.length} items so far)`);
 
       if (hasMore) {
         await sleep(this.PAGE_DELAY_MS);
       }
     }
 
-    // Enrich high-engagement stories with external content
+    if (hasMore && Date.now() >= deadline) {
+      ctx.log?.(
+        `HN: hit the ${Math.round(this.SYNC_BUDGET_MS / 1000)}s sync budget after ${page} page(s); returning ${events.length} items (next run continues)`
+      );
+    }
+
+    // Enrich high-engagement stories with external content (bounded by the
+    // remaining time budget + a fetch cap; skipped entirely if it's exhausted).
     if (contentType !== 'comment') {
-      await this.enrichStoriesWithExternalContent(events);
+      await this.enrichStoriesWithExternalContent(events, deadline, ctx);
     }
 
     return {
@@ -421,20 +441,50 @@ export default class HackerNewsConnector extends ConnectorRuntime {
   // External content enrichment
   // -------------------------------------------------------------------------
 
-  private async enrichStoriesWithExternalContent(events: EventEnvelope[]): Promise<void> {
+  private async enrichStoriesWithExternalContent(
+    events: EventEnvelope[],
+    deadline: number,
+    ctx: SyncContext
+  ): Promise<void> {
+    let fetches = 0;
+    let consecutiveFailures = 0;
     for (const event of events) {
+      if (fetches >= this.MAX_CONTENT_FETCHES) break;
+      if (Date.now() >= deadline) {
+        ctx.log?.(`HN: content-enrichment time budget reached after ${fetches} fetch(es)`);
+        break;
+      }
+
       const externalUrl = event.metadata?.external_url as string | undefined;
       const points = event.metadata?.score as number | undefined;
 
       if (!event.content && externalUrl && points != null && points >= this.ENGAGEMENT_THRESHOLD) {
-        const fetched = await this.fetchExternalContent(externalUrl);
-        if (fetched) {
-          event.content = fetched;
+        fetches++;
+        const res = await this.fetchExternalContent(externalUrl);
+        if (res.ok) {
+          consecutiveFailures = 0;
+          event.content = res.content;
           event.metadata = {
             ...event.metadata,
             fetched_content: true,
             original_url: externalUrl,
           };
+        } else if (res.network) {
+          // A run of genuine network/timeout failures means egress is
+          // blocked/unreachable; stop instead of burning ~5s (the fetch
+          // timeout) per remaining story.
+          consecutiveFailures++;
+          if (consecutiveFailures >= this.MAX_CONSECUTIVE_FETCH_FAILURES) {
+            ctx.log?.(
+              `HN: ${consecutiveFailures} consecutive content fetches failed (egress) — skipping enrichment for the rest`
+            );
+            break;
+          }
+        } else {
+          // Non-network skip (non-HTML, non-OK, SSRF-blocked, too short) — the
+          // story just has no usable article content. Don't let it trip the
+          // egress guard, or a few PDFs/images in a row would halt enrichment.
+          consecutiveFailures = 0;
         }
 
         await sleep(this.FETCH_DELAY_MS);
@@ -442,34 +492,46 @@ export default class HackerNewsConnector extends ConnectorRuntime {
     }
   }
 
-  private async fetchExternalContent(url: string): Promise<string | null> {
+  // Returns the article markdown on success. On failure, `network` distinguishes
+  // a genuine egress failure (timeout/abort/connection — the case that stalls a
+  // sync) from a non-network skip (SSRF-blocked, non-OK, non-HTML, too short),
+  // so only real egress failures trip the consecutive-failure short-circuit.
+  private async fetchExternalContent(
+    url: string
+  ): Promise<{ ok: true; content: string } | { ok: false; network: boolean }> {
+    // SSRF guard — `url` is supplied by whoever submitted the HN story and is
+    // therefore attacker-controllable. Refuse private/internal addresses
+    // (loopback, 169.254.169.254 cloud metadata, RFC1918, etc.). Not an egress
+    // failure.
     try {
-      // SSRF guard — `url` is supplied by whoever submitted the HN story and
-      // is therefore attacker-controllable. Refuse to fetch private/internal
-      // addresses (loopback, 169.254.169.254 cloud metadata, RFC1918, etc.).
-      try {
-        validatePublicUrl(url);
-      } catch {
-        return null;
-      }
+      validatePublicUrl(url);
+    } catch {
+      return { ok: false, network: false };
+    }
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.CONTENT_FETCH_TIMEOUT);
-
-      const response = await fetch(url, {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.CONTENT_FETCH_TIMEOUT);
+    let response: Response;
+    try {
+      response = await fetch(url, {
         signal: controller.signal,
         headers: {
           'User-Agent': 'Mozilla/5.0 (compatible; HNBot/1.0)',
           Accept: 'text/html,application/xhtml+xml',
         },
       });
-
+    } catch {
+      // Timeout/abort/DNS/connection refused — a genuine egress failure.
+      return { ok: false, network: true };
+    } finally {
       clearTimeout(timeoutId);
+    }
 
-      if (!response.ok) return null;
+    try {
+      if (!response.ok) return { ok: false, network: false };
 
       const contentType = response.headers.get('content-type') ?? '';
-      if (!contentType.includes('text/html')) return null;
+      if (!contentType.includes('text/html')) return { ok: false, network: false };
 
       const html = await response.text();
 
@@ -504,9 +566,13 @@ export default class HackerNewsConnector extends ConnectorRuntime {
       const markdown = this.turndownService.turndown(cleanHtml);
       const trimmed = markdown.trim().substring(0, 2000);
 
-      return trimmed.length >= 100 ? trimmed : null;
+      return trimmed.length >= 100
+        ? { ok: true, content: trimmed }
+        : { ok: false, network: false };
     } catch {
-      return null;
+      // A body-read/parse error after a successful response isn't an egress
+      // outage — treat as a skip, not a network failure.
+      return { ok: false, network: false };
     }
   }
 }
