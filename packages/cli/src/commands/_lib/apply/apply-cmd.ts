@@ -18,6 +18,7 @@ import {
   type DesiredConnectorDefinition,
   type DesiredState,
   loadDesiredStateFromConfig,
+  normalizeConnectionConfigScope,
   resolveConnectorSchemas,
   validateAuthProfileAgainstConnector,
   validateConnectionAgainstConnector,
@@ -488,7 +489,7 @@ export function validateConnectorState(
   state: DesiredState,
   connectorDefinitions: RemoteConnectorDefinition[],
   opts: ValidateConnectorStateOptions = {}
-): void {
+): string[] {
   const defByKey = new Map<string, RemoteConnectorDefinition>(
     connectorDefinitions.map((d) => [d.key, d])
   );
@@ -525,13 +526,32 @@ export function validateConnectorState(
   for (const profile of state.connectors.authProfiles) {
     validateAuthProfileAgainstConnector(profile, schemasFor(profile.connector));
   }
+  const warnings: string[] = [];
   for (const connection of state.connectors.connections) {
-    validateConnectionAgainstConnector(
-      connection,
-      authProfilesBySlug,
-      schemasFor(connection.connector)
-    );
+    const schemas = schemasFor(connection.connector);
+    // Mirror the server's connection/feed scope split: demote any feed-scoped
+    // key authored on the connection to a per-feed default so the server
+    // accepts the connection, instead of failing the create with a generic
+    // "Feed-scoped config belongs on feeds" rejection.
+    //
+    // Only in the pre-diff pass. The post-install pass (requireInstalled) runs
+    // AFTER computeDiff has built the create/update rows from `row.desired`, so
+    // mutating state here would not reach the plan — it would silently drop the
+    // demoted key from the applied feed rows. Locally-declared connectors
+    // (schema-skipped pre-diff, validated only post-install) therefore aren't
+    // demoted; a feed-scoped key left on such a connection still fails loudly
+    // at the server, exactly as before this feature.
+    if (!opts.requireInstalled) {
+      const demoted = normalizeConnectionConfigScope(connection, schemas);
+      if (demoted.length > 0) {
+        warnings.push(
+          `connection "${connection.slug}": feed-scoped key(s) [${demoted.join(", ")}] were set on the connection — moved to its feed config(s). Declare connector sync settings on the feed, not the connection.`
+        );
+      }
+    }
+    validateConnectionAgainstConnector(connection, authProfilesBySlug, schemas);
   }
+  return warnings;
 }
 
 // Connector keys declared locally (`*.connector.ts` / `type: connector`).
@@ -603,7 +623,11 @@ export async function executePlan(
       ctx.remote.connectorDefinitions,
       ctx.plan
     );
-    validateConnectorState(ctx.state, freshCatalog, { requireInstalled: true });
+    for (const warning of validateConnectorState(ctx.state, freshCatalog, {
+      requireInstalled: true,
+    })) {
+      printText(chalk.yellow(`Warning: ${warning}`));
+    }
   }
 
   // 1) Agents
@@ -1210,9 +1234,15 @@ export async function applyCommand(opts: ApplyOptions = {}): Promise<void> {
   // schema-validated later (post-install, against the fresh catalog) inside
   // `executePlan`. Structural checks (auth-slug existence, connector match)
   // still run here for every connection.
-  validateConnectorState(state, remote.connectorDefinitions, {
-    skipSchemaForConnectorKeys: locallyDeclaredConnectorKeys(state),
-  });
+  for (const warning of validateConnectorState(
+    state,
+    remote.connectorDefinitions,
+    {
+      skipSchemaForConnectorKeys: locallyDeclaredConnectorKeys(state),
+    }
+  )) {
+    printText(chalk.yellow(`Warning: ${warning}`));
+  }
 
   const plan = computeDiff(state, remote, {
     only: opts.only,
