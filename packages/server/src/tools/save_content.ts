@@ -21,7 +21,7 @@ import { requireWriteAccess } from '../utils/organization-access';
 import { buildEventPermalink, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import { trackWatcherReaction } from '../utils/watcher-reactions';
 import type { ToolContext } from './registry';
-import { SaveContentSchema, type SaveContentArgs } from './save_content_schema';
+import type { SaveContentArgs } from './save_content_schema';
 
 // ============================================
 // Typebox Schema

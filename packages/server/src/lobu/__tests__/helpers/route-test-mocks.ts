@@ -26,6 +26,8 @@ export interface AuthStash {
   authSource: 'session' | 'pat' | 'oauth' | null;
   mcpAuthInfo: { scopes: string[] } | null;
   memberRole: string | null;
+  mcpAuthCalls: number;
+  rejectMcpAuth: boolean;
 }
 
 /** Mutable holder the mocked `mcpAuth` middleware copies onto the Hono context. */
@@ -35,6 +37,8 @@ export const authStash: AuthStash = {
   authSource: 'session',
   mcpAuthInfo: null,
   memberRole: 'owner',
+  mcpAuthCalls: 0,
+  rejectMcpAuth: false,
 };
 
 /**
@@ -151,6 +155,10 @@ export function installRouteTestMocks(): void {
   // as `../auth/middleware`.
   mock.module('../../../auth/middleware', () => ({
     mcpAuth: async (c: any, next: any) => {
+      authStash.mcpAuthCalls += 1;
+      if (authStash.rejectMcpAuth) {
+        return c.json({ error: 'mcpAuth should not have handled this route' }, 418);
+      }
       c.set('user', authStash.user);
       c.set('organizationId', authStash.organizationId);
       c.set('authSource', authStash.authSource);

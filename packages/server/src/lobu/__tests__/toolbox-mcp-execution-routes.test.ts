@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
+import { generateWorkerToken } from '@lobu/core';
 import { Hono } from 'hono';
 import {
   authStash,
@@ -103,6 +104,8 @@ describe('Toolbox MCP execution routes', () => {
     authStash.authSource = 'pat';
     authStash.mcpAuthInfo = { scopes: ['mcp:read', 'mcp:write', 'mcp:admin'] };
     authStash.memberRole = null;
+    authStash.mcpAuthCalls = 0;
+    authStash.rejectMcpAuth = false;
     executeToolDirectMock = mock(async () => ({
       content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
       isError: false,
@@ -145,6 +148,58 @@ describe('Toolbox MCP execution routes', () => {
       'drive_search',
       { query: '"技術分析全攻略課程"', limit: 10 }
     );
+  });
+
+  test('does not intercept Agent API worker-token routes mounted after Toolbox MCP routes', async () => {
+    const { toolboxMcpRoutes } = await import('../agent-routes.js');
+    const app = new Hono();
+    app.route('/lobu/api/v1', toolboxMcpRoutes);
+    app.post('/lobu/api/v1/agents/:agentId/messages', async (c) =>
+      c.json({
+        reachedAgentApi: true,
+        agentId: c.req.param('agentId'),
+        authHeader: c.req.header('authorization')?.startsWith('Bearer ') ?? false,
+      })
+    );
+
+    const priorEncryptionKey = process.env.ENCRYPTION_KEY;
+    process.env.ENCRYPTION_KEY =
+      priorEncryptionKey ??
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    authStash.rejectMcpAuth = true;
+    try {
+      const workerToken = generateWorkerToken('toolbox-user', 'conversation-1', 'api-agent', {
+        channelId: 'api-toolbox-user',
+        agentId: AGENT_ID,
+        organizationId: ORG_ID,
+        platform: 'api',
+        sessionKey: 'toolbox-user',
+      });
+
+      const res = await app.request('/lobu/api/v1/agents/conversation-1/messages', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${workerToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ content: 'hello' }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        reachedAgentApi: true,
+        agentId: 'conversation-1',
+        authHeader: true,
+      });
+      expect(authStash.mcpAuthCalls).toBe(0);
+    } finally {
+      authStash.rejectMcpAuth = false;
+      if (priorEncryptionKey === undefined) {
+        delete process.env.ENCRYPTION_KEY;
+      } else {
+        process.env.ENCRYPTION_KEY = priorEncryptionKey;
+      }
+    }
   });
 
   test('POST /mcp/tools/call accepts non-admin mcp:execute bearer scope', async () => {
