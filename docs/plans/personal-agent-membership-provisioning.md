@@ -235,6 +235,24 @@ WHERE a.id LIKE 'shifu-u-%'
 
 Every backfilled row must be inserted with `role = 'member'` unless a role already exists.
 
+Implementation note:
+
+- Provisioning-time repair lives in `packages/server/src/lobu/provisioning-routes.ts`.
+- Offline repair is available through `packages/server/scripts/repair-toolbox-personal-agent-memberships.mjs`.
+- Dry-run is the default:
+
+```bash
+DATABASE_URL=... node packages/server/scripts/repair-toolbox-personal-agent-memberships.mjs --limit 20
+```
+
+- Apply mode performs the missing `user` and `member` inserts:
+
+```bash
+DATABASE_URL=... node packages/server/scripts/repair-toolbox-personal-agent-memberships.mjs --apply --limit 20
+```
+
+- The repair script prints only mode, counts, and per-row `agentId`, `organizationId`, `ownerUserId`, and `role`.
+
 ## Memory Route Contract Must Stay Strict
 
 `POST /lobu/api/v1/memory/context-packs` should continue enforcing:
@@ -327,4 +345,3 @@ lobu:event:<positive integer>
 - Toolbox onboarding smoke returns `memoryWriteStatus: written`.
 - Toolbox stores `lobu:event:*` in `contextPack.memoryWriteRefs`.
 - LINE can truthfully say project background submission and long-term memory/index creation completed only after the durable ref exists.
-
