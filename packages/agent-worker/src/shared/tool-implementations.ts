@@ -287,7 +287,7 @@ export async function callToolboxPersonalAgentTool(
           ? String((body as { error?: unknown }).error)
           : body && typeof body === "object" && "errorMessage" in body
             ? String((body as { errorMessage?: unknown }).errorMessage)
-          : response.statusText;
+            : response.statusText;
       return textResult(
         `Error: Toolbox personal-agent tool call failed (${response.status}): ${error}`
       );

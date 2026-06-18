@@ -9,8 +9,6 @@ describe("resolveGatewayWorkerToken", () => {
   });
 
   test("falls back to the deployment token for legacy jobs", () => {
-    expect(resolveGatewayWorkerToken(undefined, "env-token")).toBe(
-      "env-token"
-    );
+    expect(resolveGatewayWorkerToken(undefined, "env-token")).toBe("env-token");
   });
 });
