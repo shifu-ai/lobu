@@ -22,9 +22,9 @@ import type { Env } from '../index';
 import { INTERNAL_REST_TOOLS } from './admin';
 import { MetricSeriesSchema, metricSeries } from './admin/metric_series';
 import { QuerySqlSchema, querySql } from './admin/query_sql';
-import { ListOrganizationsSchema } from './organizations';
 import { ResolvePathSchema, resolvePath } from './resolve_path';
-import { SaveContentSchema, saveContent } from './save_content';
+import { saveContent } from './save_content';
+import { SaveContentSchema } from './save_content_schema';
 import { SearchSchema, search } from './search';
 import { QuerySchema, RunSchema, querySdkScript, runSdkScript } from './sdk_run';
 import { SdkSearchSchema, sdkSearch } from './sdk_search';
@@ -102,6 +102,15 @@ export interface ToolDefinition<T = any> {
 }
 
 const READ_ONLY = { readOnlyHint: true, idempotentHint: true } as const;
+const ListOrganizationsInputSchema = {
+  type: 'object',
+  properties: {
+    search: {
+      type: 'string',
+      description: 'Filter organizations by name (case-insensitive substring match)',
+    },
+  },
+} as const;
 
 const TOOLS: ToolDefinition[] = [
   // ─── Memory hot path — read ───────────────────────────────────────────────
@@ -126,7 +135,7 @@ const TOOLS: ToolDefinition[] = [
     name: 'list_organizations',
     description:
       'List organizations the authenticated user belongs to, plus any public workspaces the session can read. The response marks the bound org with `is_current: true` — that is the default target for memory and SDK calls. Use the slug with `client.org(slug)` from `query_sdk` / `run_sdk` for cross-org reads on /mcp + OAuth, or reconnect to /mcp/{slug} to pin a different default.',
-    inputSchema: ListOrganizationsSchema,
+    inputSchema: ListOrganizationsInputSchema,
     annotations: READ_ONLY,
     handler: async () => {
       throw new Error('Handled directly in executeTool');
@@ -363,4 +372,3 @@ function computeAllTools(
     })
     .filter((tool): tool is NonNullable<typeof tool> => tool !== null);
 }
-

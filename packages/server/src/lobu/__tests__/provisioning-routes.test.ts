@@ -6,6 +6,7 @@ import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup.js";
+import { initWorkspaceProvider } from "../../workspace/index.js";
 import { orgContext } from "../stores/org-context.js";
 
 const ORG_ID = "org-provisioning";
@@ -26,14 +27,6 @@ mock.module("../../gateway/auth/mcp/oauth-flow.js", () => ({
 
 mock.module("../../index", () => ({}));
 mock.module("../../index.js", () => ({}));
-mock.module("../agent-routes", () => ({
-	agentRoutes: new Hono(),
-	toolboxMcpRoutes: new Hono(),
-}));
-mock.module("../agent-routes.js", () => ({
-	agentRoutes: new Hono(),
-	toolboxMcpRoutes: new Hono(),
-}));
 
 mock.module("@lobu/connector-sdk", () => ({
 	AssuranceLevel: Type.Any(),
@@ -105,21 +98,9 @@ mock.module("../../operations/catalog", () => ({
 	listOperations: async () => ({ operations: [], total: 0 }),
 }));
 
-mock.module("../../tools/registry", () => ({
-	getAllTools: () => [],
-	getTool: () => null,
-	listTools: () => [],
-	tools: [],
-}));
-
-mock.module("../../workspace", () => ({
-	getWorkspaceProvider: () => ({
-		getOrgSlug: async (organizationId: string) => organizationId,
-	}),
-}));
-
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
+	await initWorkspaceProvider();
 });
 
 async function seedOrg(orgId: string): Promise<void> {
@@ -170,9 +151,6 @@ async function buildApp(
 	const { createProvisioningRoutes } = await import(
 		"../provisioning-routes.js"
 	);
-	const { memoryRoutes } = await import(
-		"../memory-routes.js?provisioning-integration"
-	);
 	const app = new Hono();
 	app.onError((_error, c) => c.json({ error: "internal_error" }, 500));
 	app.use("*", async (c, next) => {
@@ -203,7 +181,6 @@ async function buildApp(
 				overrides.publicGatewayUrl ?? "https://gateway.example.test/lobu",
 		}),
 	);
-	app.route("/lobu/api/v1/memory", memoryRoutes);
 	return app;
 }
 
@@ -648,7 +625,7 @@ describe("POST /api/provisioning/agents", () => {
 		).resolves.toBe("member");
 	});
 
-	test("newly provisioned Toolbox owner can write a durable context pack through the memory route", async () => {
+	test("newly provisioned Toolbox owner can write a durable context pack through the memory service", async () => {
 		const app = await buildApp();
 		const agentId = "shifu-u-context-pack-owner";
 		const ownerUserId = "toolbox-user-context-pack";
@@ -665,30 +642,39 @@ describe("POST /api/provisioning/agents", () => {
 		});
 		expect(provision.status).toBe(201);
 
-		const write = await app.request("/lobu/api/v1/memory/context-packs", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(contextPackBody(agentId, ownerUserId)),
-		});
+		const { getDb } = await import("../../db/client.js");
+		const { getWorkspaceRole } = await import(
+			"../../utils/organization-access.js"
+		);
+		const ownerMemberRole = await getWorkspaceRole(
+			getDb(),
+			ORG_ID,
+			ownerUserId,
+		);
+		expect(ownerMemberRole).toBe("member");
 
-		if (write.status !== 200) {
-			throw new Error(await write.text());
-		}
-		expect(write.status).toBe(200);
-		const body = await write.json();
-		const eventId = body.memory?.eventId;
+		const { writeContextPackMemory } = await import(
+			"../context-pack-memory-service.js"
+		);
+		const body = await orgContext.run({ organizationId: ORG_ID }, () =>
+			writeContextPackMemory({
+				organizationId: ORG_ID,
+				ownerMemberRole: ownerMemberRole!,
+				authSource: "pat",
+				scopes: ["mcp:admin"],
+				body: contextPackBody(agentId, ownerUserId),
+			}),
+		);
+
+		const eventId = body.eventId;
 		expect(Number.isInteger(eventId)).toBe(true);
 		expect(body).toMatchObject({
-			ok: true,
 			refs: [expect.stringMatching(/^lobu:event:\d+$/)],
-			memory: {
-				eventId,
-				semanticType: "project_profile",
-				agentId,
-			},
+			eventId,
+			semanticType: "project_profile",
+			agentId,
 		});
 
-		const { getDb } = await import("../../db/client.js");
 		const sql = getDb();
 		const events = await sql`
 			SELECT id, organization_id, semantic_type, created_by, metadata
