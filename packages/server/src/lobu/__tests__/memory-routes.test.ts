@@ -266,6 +266,34 @@ describe('Toolbox context pack memory route', () => {
     expect(saveContentMock).not.toHaveBeenCalled();
   });
 
+  test('rejects owners who are not organization members; provisioning must repair this', async () => {
+    // This protects the security boundary that caused the staging smoke failure:
+    // provisioning must create the member row, memory writes must not bypass it.
+    const nonMemberUserId = 'user-not-member';
+    fakeAgents.set(AGENT_ID, {
+      agentId: AGENT_ID,
+      name: 'Personal Agent',
+      owner: { platform: 'toolbox', userId: nonMemberUserId },
+      organizationId: ORG_ID,
+      createdAt: Date.now(),
+    });
+    const app = await importMountedMemoryRoutes();
+
+    const res = await app.request('/lobu/api/v1/memory/context-packs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(contextPackBody({ ownerUserId: nonMemberUserId })),
+    });
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'lobu_memory_write_forbidden',
+      errorMessage: 'ownerUserId is not a member of this organization',
+    });
+    expect(saveContentMock).not.toHaveBeenCalled();
+  });
+
   test('does not return 2xx when saveContent returns no durable id', async () => {
     saveContentMock.mockImplementationOnce(async () => ({
       id: 0,

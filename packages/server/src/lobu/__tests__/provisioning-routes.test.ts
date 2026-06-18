@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { Type } from "@sinclair/typebox";
 import { Hono } from "hono";
 import {
 	ensureDbForGatewayTests,
@@ -15,7 +16,106 @@ const startAuthCodeFlowMock = mock(async () => ({
 }));
 
 mock.module("../../gateway/auth/mcp/oauth-flow.js", () => ({
+	completeAuthCodeFlow: async () => ({
+		ok: true,
+		credentialRef: "secret://oauth-test",
+	}),
+	getOAuthCallbackCookie: () => null,
 	startAuthCodeFlow: startAuthCodeFlowMock,
+}));
+
+mock.module("../../index", () => ({}));
+mock.module("../../index.js", () => ({}));
+mock.module("../agent-routes", () => ({
+	agentRoutes: new Hono(),
+	toolboxMcpRoutes: new Hono(),
+}));
+mock.module("../agent-routes.js", () => ({
+	agentRoutes: new Hono(),
+	toolboxMcpRoutes: new Hono(),
+}));
+
+mock.module("@lobu/connector-sdk", () => ({
+	AssuranceLevel: Type.Any(),
+	AutoCreateWhenRule: Type.Any(),
+	CLAIM_COLLISION_SEMANTIC_TYPE: "claim_collision",
+	ClaimCollisionPayload: Type.Any(),
+	ConnectorFact: Type.Any(),
+	ConnectorIdentityCapability: Type.Any(),
+	DerivedFromProvenance: Type.Any(),
+	DerivedRelationshipMetadata: Type.Any(),
+	FactEventMetadata: Type.Any(),
+	IDENTITY: {},
+	IDENTITY_FACT_SEMANTIC_TYPE: "identity_fact",
+	RelationshipTypeIdentityMetadata: Type.Any(),
+	WATCHER_TIME_GRANULARITIES: ["daily"],
+	addWatcherPeriod: (date: Date) => date,
+	alignToWatcherWindowStart: (date: Date) => date,
+	assuranceMeets: () => true,
+	getAvailableWatcherGranularities: () => ["daily"],
+	getFinerWatcherGranularities: () => [],
+	normalizeAuthUserId: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeEmail: (value: string | null | undefined) =>
+		typeof value === "string" && value.includes("@")
+			? value.trim().toLowerCase()
+			: null,
+	normalizeGithubLogin: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeGithubRepoFullName: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeGoogleContactId: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	normalizeIdentifier: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeNumericId: (value: string | number | null | undefined) =>
+		value === null || value === undefined ? null : String(value).trim(),
+	normalizePhone: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	normalizeSlackUserId: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	normalizeWaJid: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	inferWatcherGranularityFromDays: () => "daily",
+	inferWatcherGranularityFromSchedule: () => "daily",
+	getNextWatcherGranularity: () => "daily",
+	getWatcherDateTruncUnit: () => "day",
+	isWatcherTimeGranularity: () => true,
+	shiftWatcherPeriod: (date: Date) => date,
+	subtractWatcherPeriod: (date: Date) => date,
+}));
+
+mock.module("../../utils/watcher-reactions", () => ({
+	getAvailableOperations: async () => [],
+	getPastReactionsSummary: async () => undefined,
+	trackWatcherReaction: async () => {},
+}));
+
+mock.module("../../operations/catalog", () => ({
+	EMPTY_SUMMARY: {
+		read: [],
+		write: [],
+	},
+	getOperationForConnection: async () => null,
+	getOperationsSummary: async () => ({
+		read: [],
+		write: [],
+	}),
+	getOperationsSummaryBatch: async () => new Map(),
+	listOperations: async () => ({ operations: [], total: 0 }),
+}));
+
+mock.module("../../tools/registry", () => ({
+	getAllTools: () => [],
+	getTool: () => null,
+	listTools: () => [],
+	tools: [],
+}));
+
+mock.module("../../workspace", () => ({
+	getWorkspaceProvider: () => ({
+		getOrgSlug: async (organizationId: string) => organizationId,
+	}),
 }));
 
 beforeAll(async () => {
@@ -70,6 +170,9 @@ async function buildApp(
 	const { createProvisioningRoutes } = await import(
 		"../provisioning-routes.js"
 	);
+	const { memoryRoutes } = await import(
+		"../memory-routes.js?provisioning-integration"
+	);
 	const app = new Hono();
 	app.onError((_error, c) => c.json({ error: "internal_error" }, 500));
 	app.use("*", async (c, next) => {
@@ -100,6 +203,7 @@ async function buildApp(
 				overrides.publicGatewayUrl ?? "https://gateway.example.test/lobu",
 		}),
 	);
+	app.route("/lobu/api/v1/memory", memoryRoutes);
 	return app;
 }
 
@@ -134,6 +238,27 @@ function deterministicMembershipId(
 		.digest("hex")
 		.slice(0, 24);
 	return `member_${digest}`;
+}
+
+function contextPackBody(agentId: string, ownerUserId: string) {
+	return {
+		ownerUserId,
+		agentId,
+		title: "Toolbox onboarding context pack",
+		summary: "Project summary",
+		content: "# Toolbox onboarding\n\nProject context.",
+		semanticType: "project_profile",
+		metadata: {
+			source: "toolbox_onboarding",
+			contextPackId: "ctx-provisioned-owner",
+			projectSeedId: null,
+			discoveryRunId: null,
+			projectTitle: "Toolbox onboarding",
+			confidence: "high",
+			generatedAt: "2026-06-18T00:00:00.000Z",
+			evidenceRefs: [],
+		},
+	};
 }
 
 describe("POST /api/provisioning/agents", () => {
@@ -521,6 +646,69 @@ describe("POST /api/provisioning/agents", () => {
 		await expect(
 			getWorkspaceRole(getDb(), ORG_ID, "toolbox-user-memory-ready"),
 		).resolves.toBe("member");
+	});
+
+	test("newly provisioned Toolbox owner can write a durable context pack through the memory route", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-context-pack-owner";
+		const ownerUserId = "toolbox-user-context-pack";
+
+		const provision = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Context Pack Owner Agent",
+				ownerUserId,
+				settings: {},
+			}),
+		});
+		expect(provision.status).toBe(201);
+
+		const write = await app.request("/lobu/api/v1/memory/context-packs", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(contextPackBody(agentId, ownerUserId)),
+		});
+
+		if (write.status !== 200) {
+			throw new Error(await write.text());
+		}
+		expect(write.status).toBe(200);
+		const body = await write.json();
+		const eventId = body.memory?.eventId;
+		expect(Number.isInteger(eventId)).toBe(true);
+		expect(body).toMatchObject({
+			ok: true,
+			refs: [expect.stringMatching(/^lobu:event:\d+$/)],
+			memory: {
+				eventId,
+				semanticType: "project_profile",
+				agentId,
+			},
+		});
+
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const events = await sql`
+			SELECT id, organization_id, semantic_type, created_by, metadata
+			FROM events
+			WHERE id = ${eventId}
+		`;
+		expect(events).toEqual([
+			expect.objectContaining({
+				id: eventId,
+				organization_id: ORG_ID,
+				semantic_type: "project_profile",
+				created_by: ownerUserId,
+				metadata: expect.objectContaining({
+					source: "toolbox_onboarding",
+					owner_user_id: ownerUserId,
+					agent_id: agentId,
+					memory_source: "toolbox_onboarding",
+				}),
+			}),
+		]);
 	});
 
 	test("rejects blank Toolbox owner user id overrides", async () => {
