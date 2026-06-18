@@ -1,4 +1,5 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import {
 	ensureDbForGatewayTests,
@@ -70,6 +71,7 @@ async function buildApp(
 		"../provisioning-routes.js"
 	);
 	const app = new Hono();
+	app.onError((_error, c) => c.json({ error: "internal_error" }, 500));
 	app.use("*", async (c, next) => {
 		c.set("user", {
 			id: "gateway-user",
@@ -119,6 +121,19 @@ async function seedPersonalAgent(
 			createdAt: Date.now(),
 		});
 	});
+}
+
+function deterministicMembershipId(
+	organizationId: string,
+	ownerUserId: string,
+): string {
+	const digest = createHash("sha256")
+		.update(
+			JSON.stringify(["toolbox-owner-member", organizationId, ownerUserId]),
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return `member_${digest}`;
 }
 
 describe("POST /api/provisioning/agents", () => {
@@ -281,6 +296,113 @@ describe("POST /api/provisioning/agents", () => {
 				role: "member",
 			},
 		]);
+	});
+
+	test("uses a hash-based placeholder email so old raw-email collisions do not block provisioning", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		await sql`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				'existing-email-user',
+				'Existing Email User',
+				'toolbox-user-email-collision@toolbox.local',
+				true,
+				NOW(),
+				NOW()
+			)
+		`;
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-email-collision",
+				name: "Email Collision Agent",
+				ownerUserId: "toolbox-user-email-collision",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const members = await sql`
+			SELECT "organizationId", "userId", role
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-email-collision"}
+		`;
+		expect(members).toEqual([
+			{
+				organizationId: ORG_ID,
+				userId: "toolbox-user-email-collision",
+				role: "member",
+			},
+		]);
+		const users = await sql<{ email: string }[]>`
+			SELECT email
+			FROM "user"
+			WHERE id = ${"toolbox-user-email-collision"}
+		`;
+		expect(users[0]?.email).toMatch(
+			/^toolbox-owner-[a-f0-9]{32}@toolbox\.local$/,
+		);
+		expect(users[0]?.email).not.toBe(
+			"toolbox-user-email-collision@toolbox.local",
+		);
+	});
+
+	test("does not persist agent metadata when owner membership cannot be ensured", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const ownerUserId = "toolbox-user-membership-fails";
+		const collidingMemberId = deterministicMembershipId(ORG_ID, ownerUserId);
+		await seedOrg("org-membership-collision");
+		await sql`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				'existing-collision-member-user',
+				'Existing Collision Member User',
+				'existing-collision-member-user@example.test',
+				true,
+				NOW(),
+				NOW()
+			)
+		`;
+		await sql`
+			INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+			VALUES (
+				${collidingMemberId},
+				'org-membership-collision',
+				'existing-collision-member-user',
+				'member',
+				NOW()
+			)
+		`;
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-membership-failure",
+				name: "Membership Failure Agent",
+				ownerUserId,
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(500);
+
+		const { createPostgresAgentConfigStore } = await import(
+			"../stores/postgres-stores.js"
+		);
+		const store = createPostgresAgentConfigStore();
+		const metadata = await orgContext.run({ organizationId: ORG_ID }, () =>
+			store.getMetadata("shifu-u-membership-failure"),
+		);
+		expect(metadata).toBeNull();
 	});
 
 	test("provisioned Toolbox owner can immediately satisfy memory-route membership", async () => {

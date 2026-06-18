@@ -122,6 +122,17 @@ function deterministicMembershipId(
 	return `member_${digest}`;
 }
 
+function deterministicToolboxOwnerEmail(
+	organizationId: string,
+	ownerUserId: string,
+): string {
+	const digest = createHash("sha256")
+		.update(JSON.stringify([organizationId, ownerUserId]))
+		.digest("hex")
+		.slice(0, 32);
+	return `toolbox-owner-${digest}@toolbox.local`;
+}
+
 async function ensureToolboxOwnerMembership(
 	organizationId: string,
 	ownerUserId: string,
@@ -132,7 +143,7 @@ async function ensureToolboxOwnerMembership(
 		VALUES (
 			${ownerUserId},
 			${ownerUserId},
-			${`${ownerUserId}@toolbox.local`},
+			${deterministicToolboxOwnerEmail(organizationId, ownerUserId)},
 			true,
 			NOW(),
 			NOW()
@@ -268,6 +279,10 @@ export function createProvisioningRoutes(
 
 		const existing = await configStore.getMetadata(agentId);
 		const created = !existing;
+		const membership = await ensureToolboxOwnerMembership(
+			organizationId,
+			ownerUserId,
+		);
 		await configStore.saveMetadata(agentId, {
 			agentId,
 			name,
@@ -282,10 +297,6 @@ export function createProvisioningRoutes(
 			...settings,
 			updatedAt: Date.now(),
 		});
-		const membership = await ensureToolboxOwnerMembership(
-			organizationId,
-			ownerUserId,
-		);
 		await syncProvisioningGrants(agentId, settings, organizationId);
 
 		return c.json(
