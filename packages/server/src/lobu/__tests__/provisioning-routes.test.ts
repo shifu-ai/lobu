@@ -248,6 +248,13 @@ describe("POST /api/provisioning/agents", () => {
 		});
 
 		expect(response.status).toBe(201);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			agentId: "shifu-u-owner-override",
+			created: true,
+			membership: { ensured: true, role: "member" },
+			revisionRef: "lobu:shifu-u-owner-override",
+		});
 
 		const { createPostgresAgentConfigStore } = await import(
 			"../stores/postgres-stores.js"
@@ -294,6 +301,92 @@ describe("POST /api/provisioning/agents", () => {
 				organizationId: ORG_ID,
 				userId: "toolbox-user-member-1",
 				role: "member",
+			},
+		]);
+	});
+
+	test("repeated provisioning creates one member row for the Toolbox owner", async () => {
+		const app = await buildApp();
+
+		for (const name of ["Idempotent Member Agent", "Updated Member Agent"]) {
+			const response = await app.request("/api/provisioning/agents", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					agentId: "shifu-u-idempotent-member",
+					name,
+					ownerUserId: "toolbox-user-idempotent",
+					settings: {},
+				}),
+			});
+
+			expect([200, 201]).toContain(response.status);
+		}
+
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const members = await sql<{ count: string }[]>`
+			SELECT COUNT(*)::text AS count
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-idempotent"}
+		`;
+
+		expect(members).toEqual([{ count: "1" }]);
+	});
+
+	test("preserves an existing Toolbox owner admin role during provisioning", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		await sql`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				'toolbox-user-admin',
+				'Toolbox Admin User',
+				'toolbox-user-admin@example.test',
+				true,
+				NOW(),
+				NOW()
+			)
+		`;
+		await sql`
+			INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+			VALUES (
+				'member_existing_admin',
+				${ORG_ID},
+				'toolbox-user-admin',
+				'admin',
+				NOW()
+			)
+		`;
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-admin-owner",
+				name: "Admin Owner Agent",
+				ownerUserId: "toolbox-user-admin",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const members = await sql`
+			SELECT id, "organizationId", "userId", role
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-admin"}
+		`;
+
+		expect(members).toEqual([
+			{
+				id: "member_existing_admin",
+				organizationId: ORG_ID,
+				userId: "toolbox-user-admin",
+				role: "admin",
 			},
 		]);
 	});
