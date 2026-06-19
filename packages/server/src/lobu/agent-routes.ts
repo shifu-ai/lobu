@@ -659,6 +659,40 @@ toolboxMcpRoutes.use('/mcp/*', runToolboxMcpOrgContext);
 
 toolboxMcpRoutes.route('/memory', memoryRoutes);
 
+toolboxMcpRoutes.post(
+  '/agents/:agentId/onboarding/discovery-jobs',
+  mcpAuth,
+  runToolboxMcpOrgContext,
+  async (c) => {
+    const denied = requireSessionOrAdminPat(c);
+    if (denied) return denied;
+
+    const { agentId } = c.req.param();
+    if (!agentId.startsWith('shifu-u-')) {
+      return c.json({ error: 'invalid_agent_id' }, 400);
+    }
+
+    const idempotencyKey = c.req.header('Idempotency-Key')?.trim();
+    if (!idempotencyKey) {
+      return c.json({ error: 'missing_idempotency_key' }, 400);
+    }
+
+    const body = await c.req.json();
+    const validation = validateOnboardingDiscoveryJobRequest(body);
+    if (!validation.ok) {
+      return c.json({ error: validation.errorCode }, 400);
+    }
+
+    return c.json(
+      buildOnboardingDiscoveryJobAcceptedResponse({
+        agentId,
+        idempotencyKey,
+      }),
+      202
+    );
+  }
+);
+
 toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   let body: ToolboxMcpToolCallRequest;
   try {
@@ -1172,37 +1206,6 @@ routes.post('/', async (c) => {
   }
 
   return c.json({ agentId, name, description }, 201);
-});
-
-// ── Queue onboarding discovery job ───────────────────────────────────────────
-
-routes.post('/:agentId/onboarding/discovery-jobs', async (c) => {
-  const denied = requireSessionOrAdminPat(c);
-  if (denied) return denied;
-
-  const { agentId } = c.req.param();
-  if (!agentId.startsWith('shifu-u-')) {
-    return c.json({ error: 'invalid_agent_id' }, 400);
-  }
-
-  const idempotencyKey = c.req.header('Idempotency-Key')?.trim();
-  if (!idempotencyKey) {
-    return c.json({ error: 'missing_idempotency_key' }, 400);
-  }
-
-  const body = await c.req.json();
-  const validation = validateOnboardingDiscoveryJobRequest(body);
-  if (!validation.ok) {
-    return c.json({ error: validation.errorCode }, 400);
-  }
-
-  return c.json(
-    buildOnboardingDiscoveryJobAcceptedResponse({
-      agentId,
-      idempotencyKey,
-    }),
-    202
-  );
 });
 
 // ── Get agent detail ─────────────────────────────────────────────────────────

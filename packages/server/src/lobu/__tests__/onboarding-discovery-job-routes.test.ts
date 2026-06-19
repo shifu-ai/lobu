@@ -35,9 +35,9 @@ function resetAuth(): void {
 async function importMountedAgentRoutes() {
   // Dynamic import after installRouteTestMocks() so agent-routes binds to the
   // shared route-test auth/store stubs.
-  const { agentRoutes } = await import('../agent-routes.js');
+  const { toolboxMcpRoutes } = await import('../agent-routes.js');
   const app = new Hono();
-  app.route('/api/v1/agents', agentRoutes);
+  app.route('/api/v1', toolboxMcpRoutes);
   return app;
 }
 
