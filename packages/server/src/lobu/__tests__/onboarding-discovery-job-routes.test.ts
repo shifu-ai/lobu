@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
+import { Buffer } from 'node:buffer';
 import { Hono } from 'hono';
 import {
   buildOnboardingDiscoveryJobAcceptedResponse,
@@ -66,6 +67,31 @@ describe('onboarding discovery job service', () => {
     });
     expect(response.jobId).toContain('onboarding_discovery_job_');
   });
+
+  test('buildOnboardingDiscoveryJobAcceptedResponse does not expose idempotency key fragments', () => {
+    const idempotencyKey = 'shared-visible-prefix-secret-token';
+    const response = buildOnboardingDiscoveryJobAcceptedResponse({
+      agentId: 'shifu-u-user-1',
+      idempotencyKey,
+    });
+    const obviousBase64Prefix = Buffer.from(idempotencyKey).toString('base64url').slice(0, 16);
+
+    expect(response.jobId).not.toContain('shared-visible-prefix');
+    expect(response.jobId).not.toContain(obviousBase64Prefix);
+  });
+
+  test('buildOnboardingDiscoveryJobAcceptedResponse avoids collisions for shared visible prefixes', () => {
+    const first = buildOnboardingDiscoveryJobAcceptedResponse({
+      agentId: 'shifu-u-user-1',
+      idempotencyKey: 'shared-visible-prefix-alpha',
+    });
+    const second = buildOnboardingDiscoveryJobAcceptedResponse({
+      agentId: 'shifu-u-user-1',
+      idempotencyKey: 'shared-visible-prefix-beta',
+    });
+
+    expect(first.jobId).not.toBe(second.jobId);
+  });
 });
 
 describe('POST /agents/:agentId/onboarding/discovery-jobs', () => {
@@ -109,5 +135,24 @@ describe('POST /agents/:agentId/onboarding/discovery-jobs', () => {
       status: 'queued',
       idempotencyKey: 'route-key-123',
     });
+  });
+
+  test('rejects malformed JSON with invalid_json', async () => {
+    const app = await importMountedAgentRoutes();
+
+    const response = await app.request(
+      '/api/v1/agents/shifu-u-user-1/onboarding/discovery-jobs',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'route-key-123',
+        },
+        body: '{"organizationId":',
+      }
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: 'invalid_json' });
   });
 });

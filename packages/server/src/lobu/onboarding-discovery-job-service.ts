@@ -1,4 +1,4 @@
-import { Buffer } from 'node:buffer';
+import { createHash } from 'node:crypto';
 
 export type OnboardingDiscoveryJobRequest = {
   organizationId: string;
@@ -68,10 +68,13 @@ export function buildOnboardingDiscoveryJobAcceptedResponse({
   agentId: string;
   idempotencyKey: string;
 }): OnboardingDiscoveryJobAcceptedResponse {
-  const encodedKey = Buffer.from(idempotencyKey).toString('base64url').slice(0, 24);
+  const digest = createHash('sha256')
+    .update(`${agentId}:${idempotencyKey}`)
+    .digest('base64url')
+    .slice(0, 24);
 
   return {
-    jobId: `onboarding_discovery_job_${agentId}_${encodedKey}`,
+    jobId: `onboarding_discovery_job_${agentId}_${digest}`,
     status: 'queued',
     idempotencyKey,
   };

@@ -677,7 +677,13 @@ toolboxMcpRoutes.post(
       return c.json({ error: 'missing_idempotency_key' }, 400);
     }
 
-    const body = await c.req.json();
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: 'invalid_json' }, 400);
+    }
+
     const validation = validateOnboardingDiscoveryJobRequest(body);
     if (!validation.ok) {
       return c.json({ error: validation.errorCode }, 400);
