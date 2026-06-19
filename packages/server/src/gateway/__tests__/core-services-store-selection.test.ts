@@ -132,7 +132,7 @@ describe("CoreServices store selection", () => {
     (coreServices as any).queue = new MockMessageQueue();
 
     // There is no default sub-store; if the host doesn't provide
-    // config/connection/access stores AND no lobu.config.ts is present,
+    // config/connection stores AND no lobu.config.ts is present,
     // initializeSessionServices throws.
     await expect(
       (coreServices as any).initializeSessionServices()
@@ -174,17 +174,6 @@ describe("CoreServices store selection", () => {
         deleteChannelBinding: async () => {},
         listChannelBindings: async () => [],
         deleteAllChannelBindings: async () => 0,
-      } as any,
-      accessStore: {
-        grant: async () => {},
-        hasGrant: async () => true,
-        isDenied: async () => false,
-        listGrants: async () => [],
-        revokeGrant: async () => {},
-        addUserAgent: async () => {},
-        removeUserAgent: async () => {},
-        listUserAgents: async () => [],
-        ownsAgent: async () => true,
       } as any,
     });
     (coreServices as any).queue = new MockMessageQueue();
