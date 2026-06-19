@@ -63,6 +63,16 @@ export const SaveContentSchema = Type.Object({
     description:
       'Structured metadata — validated against the entity type schema or semantic_type schema',
   }),
+  embedding: Type.Optional(
+    Type.Array(Type.Number(), {
+      description: 'Precomputed embedding vector for this content. Internal/server callers only.',
+    })
+  ),
+  embedding_model: Type.Optional(
+    Type.String({
+      description: 'Embedding model that produced `embedding`. Internal/server callers only.',
+    })
+  ),
   supersedes_event_id: Type.Optional(
     Type.Number({
       description:

@@ -2,6 +2,7 @@ import { hasRequiredMcpScope } from '../auth/tool-access';
 import type { Env } from '../index';
 import { saveContent } from '../tools/save_content';
 import type { ToolContext, TokenType } from '../tools/registry';
+import { generateEmbeddings, getConfiguredEmbeddingModel } from '../utils/embeddings';
 import { ToolUserError } from '../utils/errors';
 import { AGENT_ID_PATTERN } from './stores/postgres-stores';
 
@@ -49,6 +50,7 @@ export interface ContextPackMemoryResult {
 }
 
 type SaveContentImpl = typeof saveContent;
+type GenerateEmbeddingsImpl = typeof generateEmbeddings;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -181,9 +183,10 @@ export async function writeContextPackMemory(
     scopes: string[] | null | undefined;
     requestUrl?: string;
     baseUrl?: string;
+    env?: Env;
     body: unknown;
   },
-  deps: { saveContentImpl?: SaveContentImpl } = {}
+  deps: { saveContentImpl?: SaveContentImpl; generateEmbeddingsImpl?: GenerateEmbeddingsImpl } = {}
 ): Promise<ContextPackMemoryResult> {
   if (!input.organizationId) {
     throw new ContextPackMemoryError(
@@ -216,6 +219,13 @@ export async function writeContextPackMemory(
   };
 
   const saveContentImpl = deps.saveContentImpl ?? saveContent;
+  const env = input.env ?? (process.env as unknown as Env);
+  const generateEmbeddingsImpl = deps.generateEmbeddingsImpl ?? generateEmbeddings;
+  let embedding: number[] | undefined;
+  if (env.EMBEDDINGS_SERVICE_URL) {
+    const embeddings = await generateEmbeddingsImpl([parsed.content], env);
+    embedding = embeddings[0];
+  }
   let saved: Awaited<ReturnType<SaveContentImpl>>;
   try {
     saved = await saveContentImpl(
@@ -232,8 +242,12 @@ export async function writeContextPackMemory(
           agent_id: parsed.agentId,
           memory_source: parsed.source,
         },
+        ...(embedding ? {
+          embedding,
+          embedding_model: getConfiguredEmbeddingModel(),
+        } : {}),
       },
-      {} as Env,
+      env,
       ctx
     );
   } catch (error) {

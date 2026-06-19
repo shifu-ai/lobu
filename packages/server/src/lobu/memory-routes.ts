@@ -129,6 +129,7 @@ memoryRoutes.post('/context-packs', async (c) => {
       authSource,
       scopes,
       requestUrl: c.req.url,
+      env: c.env,
       body: parsed,
     });
     return c.json({

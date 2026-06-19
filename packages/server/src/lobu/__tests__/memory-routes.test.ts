@@ -297,6 +297,44 @@ describe('writeContextPackMemory', () => {
     });
   });
 
+  test('passes generated embeddings into saveContent when embeddings service is configured', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const generatedEmbedding = Array.from({ length: 768 }, (_, index) => index / 768);
+    const calls: unknown[][] = [];
+    const saveContentImpl = async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        id: 124,
+        semantic_type: 'project_profile',
+      };
+    };
+    const generateEmbeddingsImpl = async (texts: string[]) => {
+      expect(texts).toEqual(['# 超級AI個體\n\nProject context.']);
+      return [generatedEmbedding];
+    };
+
+    await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        env: { EMBEDDINGS_SERVICE_URL: 'http://embeddings.test' } as never,
+        body: contextPackBody(),
+      },
+      {
+        saveContentImpl: saveContentImpl as never,
+        generateEmbeddingsImpl: generateEmbeddingsImpl as never,
+      }
+    );
+
+    const [args] = calls[0]!;
+    expect(args).toMatchObject({
+      embedding: generatedEmbedding,
+      embedding_model: 'Xenova/bge-base-en-v1.5',
+    });
+  });
+
   test('rejects durable memory writes that return no event id', async () => {
     const { ContextPackMemoryError, writeContextPackMemory } = await import(
       '../context-pack-memory-service.js'

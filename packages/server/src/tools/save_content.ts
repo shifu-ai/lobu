@@ -214,6 +214,8 @@ export async function saveContent(
     occurredAt: args.occurred_at ?? null,
     semanticType,
     metadata: args.metadata,
+    embedding: args.embedding,
+    embeddingModel: args.embedding_model,
     createdBy: ctx.userId,
     clientId: ctx.clientId,
     supersedesEventId: args.supersedes_event_id ?? null,
