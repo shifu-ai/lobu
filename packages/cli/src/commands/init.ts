@@ -51,7 +51,7 @@ export interface InitOptions {
   otelEndpoint?: string;
   sentry?: boolean;
   noSentry?: boolean;
-  slackPreview?: boolean;
+  hostedSlack?: boolean;
   listProviders?: boolean;
   /**
    * Bootstrap a complete, re-appliable project from an existing Lobu Cloud org
@@ -555,14 +555,14 @@ export async function initCommand(
     }
   }
 
-  const enableSlackPreview = await promptBooleanOrDefault({
-    flag: options.slackPreview,
+  const enableHostedSlack = await promptBooleanOrDefault({
+    flag: options.hostedSlack,
     useDefaults,
     defaultValue: false,
     prompt: () =>
       confirm({
         message:
-          "Enable Slack Preview with the public Lobu Developer Slack bot?",
+          "Use the hosted Lobu Slack bot? (no bot token needed — link with a code)",
         default: false,
       }),
   });
@@ -690,7 +690,7 @@ export async function initCommand(
       providerId: providerId || undefined,
       providerEnvVar: selectedProvider?.providers?.[0]?.envVarName,
       providerModel: selectedProvider?.providers?.[0]?.defaultModel,
-      enableSlackPreview,
+      enableHostedSlack,
       includeLobuMemory,
       lobuOrg: includeLobuMemory ? projectName : undefined,
       lobuName: includeLobuMemory ? humanizeSlug(projectName) : undefined,
@@ -842,7 +842,10 @@ export async function initCommand(
         chalk.cyan(`  ${n++}. Wire memory clients: lobu memory init`)
       );
     }
-    if (enableSlackPreview) {
+    // Mirror the scaffold's emission condition: a `--platform slack` already
+    // owns the agent's single Slack entry, so the hosted bot is skipped and
+    // there is no link code to print.
+    if (enableHostedSlack && platformType !== "slack") {
       console.log(
         chalk.cyan(
           `  ${n++}. Link the project to Lobu Cloud and register it: lobu login && lobu org set <slug> && lobu apply`
@@ -850,7 +853,7 @@ export async function initCommand(
       );
       console.log(
         chalk.dim(
-          "       Then `lobu run` will print a short-lived Slack Preview link code."
+          "       Then `lobu run` prints a short-lived `/lobu link <code>` for the hosted Slack bot."
         )
       );
     }
@@ -924,7 +927,7 @@ function humanizeSlug(slug: string): string {
 /**
  * Scaffold the project's `lobu.config.ts` — the single TypeScript entrypoint
  * `lobu apply` (and `lobu run`) read. Emits a `defineAgent` (providers,
- * network, the chosen chat platform, optional Slack preview) and a
+ * network, the chosen chat platform, optional hosted Slack bot) and a
  * `defineConfig` default export with the org metadata. Memory-schema types
  * (entity / relationship) are added later with `defineEntityType` etc.; chat
  * platforms can also still be wired up in the `/agents` UI after apply.
@@ -937,7 +940,7 @@ async function generateLobuConfig(
     providerId?: string;
     providerEnvVar?: string;
     providerModel?: string;
-    enableSlackPreview?: boolean;
+    enableHostedSlack?: boolean;
     includeLobuMemory?: boolean;
     lobuOrg?: string;
     lobuName?: string;
@@ -990,6 +993,7 @@ async function generateLobuConfig(
     "  },"
   );
 
+  const platformEntries: string[] = [];
   if (options.platformType && options.platformConfig) {
     const configLines = Object.entries(options.platformConfig).map(([k, v]) => {
       const m = /^\$([A-Za-z_][A-Za-z0-9_]*)$/.exec(v);
@@ -997,26 +1001,28 @@ async function generateLobuConfig(
         ? `      ${k}: secret(${JSON.stringify(m[1])}),`
         : `      ${k}: ${JSON.stringify(v)},`;
     });
-    agentFields.push(
-      "  platforms: [",
+    platformEntries.push(
       "    {",
       `      type: ${JSON.stringify(options.platformType)},`,
       "      config: {",
       ...configLines,
       "      },",
-      "    },",
-      "  ],"
+      "    },"
     );
   }
 
-  if (options.enableSlackPreview) {
-    agentFields.push(
-      "  // Hosted preview — `lobu run` prints a `/lobu link <code>` you redeem",
-      "  // by DMing the hosted Lobu Slack bot.",
-      "  preview: {",
-      '    slack: { enabled: true, surfaces: ["dm"], codeTtlMinutes: 15 },',
-      "  }"
+  // Hosted Lobu Slack bot — no bot token needed. Skipped when the user already
+  // configured their own Slack app above (an agent gets one slack entry).
+  if (options.enableHostedSlack && options.platformType !== "slack") {
+    platformEntries.push(
+      "    // Hosted Lobu Slack bot — no bot token needed. `lobu run` prints a",
+      "    // `/lobu link <code>` you redeem by DMing the hosted bot.",
+      '    { type: "slack" },'
     );
+  }
+
+  if (platformEntries.length > 0) {
+    agentFields.push("  platforms: [", ...platformEntries, "  ],");
   }
 
   const configFields: string[] = [];
