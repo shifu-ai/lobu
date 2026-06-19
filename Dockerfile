@@ -7,13 +7,15 @@ FROM node:22-slim AS builder
 
 WORKDIR /app
 
+ARG BUN_VERSION=1.3.5
+
 # Bun for workspace install + tsc. git needed because some deps ship git URLs.
 # python3 + build-essential needed for isolated-vm native build (node-gyp).
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl unzip \
       python3 build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun
 
 ENV PATH="/usr/local/bin:${PATH}"
@@ -125,6 +127,8 @@ FROM node:22-slim AS runtime
 
 WORKDIR /app
 
+ARG BUN_VERSION=1.3.5
+
 # curl for health checks, dbmate for migrations, bun for tsx-equivalent, Chromium deps for connectors
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates unzip \
@@ -134,7 +138,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://github.com/amacneil/dbmate/releases/download/v2.22.0/dbmate-linux-amd64 -o /usr/local/bin/dbmate \
     && chmod +x /usr/local/bin/dbmate \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun
 
 ENV PATH="/usr/local/bin:${PATH}"
