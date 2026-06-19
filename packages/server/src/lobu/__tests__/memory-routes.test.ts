@@ -6,7 +6,13 @@ import {
 } from '../../gateway/__tests__/helpers/db-setup.js';
 import { getDb } from '../../db/client.js';
 import { initWorkspaceProvider } from '../../workspace/index.js';
+import {
+  fakeRouteAgents,
+  fakeRouteConnections,
+  fakeRouteSettings,
+} from './helpers/route-test-mocks.js';
 import { orgContext } from '../stores/org-context.js';
+import { getWorkspaceRole } from '../../utils/organization-access.js';
 
 const ORG_ID = 'org-memory';
 const OWNER_USER_ID = 'user-owner';
@@ -106,6 +112,9 @@ function contextPackBody(overrides: Record<string, unknown> = {}) {
 
 describe('Toolbox context pack memory route', () => {
   beforeEach(async () => {
+    fakeRouteAgents.clear();
+    fakeRouteSettings.clear();
+    fakeRouteConnections.clear();
     await resetTestDatabase();
     auth = {
       user: {
@@ -225,6 +234,12 @@ describe('Toolbox context pack memory route', () => {
   test('rejects owners who are not organization members; provisioning must repair this', async () => {
     await resetTestDatabase();
     await seedOrgMemberAndAgent({ includeOwnerMembership: false });
+    const sql = getDb();
+    await sql`
+      DELETE FROM "member"
+      WHERE "organizationId" = ${ORG_ID} AND "userId" = ${OWNER_USER_ID}
+    `;
+    await expect(getWorkspaceRole(sql, ORG_ID, OWNER_USER_ID)).resolves.toBeNull();
     const app = await importMountedMemoryRoutes();
 
     const res = await app.request('/lobu/api/v1/memory/context-packs', {
