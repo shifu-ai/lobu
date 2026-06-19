@@ -7,10 +7,12 @@ FROM node:22-bookworm AS builder
 
 WORKDIR /app
 
+ARG BUN_VERSION=1.3.5
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun
 
 ENV PATH="/usr/local/bin:${PATH}"
@@ -62,6 +64,8 @@ FROM node:22-bookworm-slim AS runtime
 
 WORKDIR /app
 
+ARG BUN_VERSION=1.3.5
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl unzip \
       libimage-exiftool-perl \
@@ -69,7 +73,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 \
       libcairo2 libasound2 libxshmfence1 libxfixes3 libglib2.0-0 fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
+    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun
 
 ENV PATH="/usr/local/bin:${PATH}"
