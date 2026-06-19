@@ -1,9 +1,12 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { Type } from "@sinclair/typebox";
 import { Hono } from "hono";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup.js";
+import { initWorkspaceProvider } from "../../workspace/index.js";
 import { orgContext } from "../stores/org-context.js";
 
 const ORG_ID = "org-provisioning";
@@ -14,11 +17,90 @@ const startAuthCodeFlowMock = mock(async () => ({
 }));
 
 mock.module("../../gateway/auth/mcp/oauth-flow.js", () => ({
+	completeAuthCodeFlow: async () => ({
+		ok: true,
+		credentialRef: "secret://oauth-test",
+	}),
+	getOAuthCallbackCookie: () => null,
 	startAuthCodeFlow: startAuthCodeFlowMock,
+}));
+
+mock.module("../../index", () => ({}));
+mock.module("../../index.js", () => ({}));
+
+mock.module("@lobu/connector-sdk", () => ({
+	AssuranceLevel: Type.Any(),
+	AutoCreateWhenRule: Type.Any(),
+	CLAIM_COLLISION_SEMANTIC_TYPE: "claim_collision",
+	ClaimCollisionPayload: Type.Any(),
+	ConnectorFact: Type.Any(),
+	ConnectorIdentityCapability: Type.Any(),
+	DerivedFromProvenance: Type.Any(),
+	DerivedRelationshipMetadata: Type.Any(),
+	FactEventMetadata: Type.Any(),
+	IDENTITY: {},
+	IDENTITY_FACT_SEMANTIC_TYPE: "identity_fact",
+	RelationshipTypeIdentityMetadata: Type.Any(),
+	WATCHER_TIME_GRANULARITIES: ["daily"],
+	addWatcherPeriod: (date: Date) => date,
+	alignToWatcherWindowStart: (date: Date) => date,
+	assuranceMeets: () => true,
+	getAvailableWatcherGranularities: () => ["daily"],
+	getFinerWatcherGranularities: () => [],
+	normalizeAuthUserId: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeEmail: (value: string | null | undefined) =>
+		typeof value === "string" && value.includes("@")
+			? value.trim().toLowerCase()
+			: null,
+	normalizeGithubLogin: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeGithubRepoFullName: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeGoogleContactId: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	normalizeIdentifier: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim().toLowerCase() : null,
+	normalizeNumericId: (value: string | number | null | undefined) =>
+		value === null || value === undefined ? null : String(value).trim(),
+	normalizePhone: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	normalizeSlackUserId: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	normalizeWaJid: (value: string | null | undefined) =>
+		typeof value === "string" ? value.trim() : null,
+	inferWatcherGranularityFromDays: () => "daily",
+	inferWatcherGranularityFromSchedule: () => "daily",
+	getNextWatcherGranularity: () => "daily",
+	getWatcherDateTruncUnit: () => "day",
+	isWatcherTimeGranularity: () => true,
+	shiftWatcherPeriod: (date: Date) => date,
+	subtractWatcherPeriod: (date: Date) => date,
+}));
+
+mock.module("../../utils/watcher-reactions", () => ({
+	getAvailableOperations: async () => [],
+	getPastReactionsSummary: async () => undefined,
+	trackWatcherReaction: async () => {},
+}));
+
+mock.module("../../operations/catalog", () => ({
+	EMPTY_SUMMARY: {
+		read: [],
+		write: [],
+	},
+	getOperationForConnection: async () => null,
+	getOperationsSummary: async () => ({
+		read: [],
+		write: [],
+	}),
+	getOperationsSummaryBatch: async () => new Map(),
+	listOperations: async () => ({ operations: [], total: 0 }),
 }));
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
+	await initWorkspaceProvider();
 });
 
 async function seedOrg(orgId: string): Promise<void> {
@@ -70,6 +152,7 @@ async function buildApp(
 		"../provisioning-routes.js"
 	);
 	const app = new Hono();
+	app.onError((_error, c) => c.json({ error: "internal_error" }, 500));
 	app.use("*", async (c, next) => {
 		c.set("user", {
 			id: "gateway-user",
@@ -119,6 +202,40 @@ async function seedPersonalAgent(
 			createdAt: Date.now(),
 		});
 	});
+}
+
+function deterministicMembershipId(
+	organizationId: string,
+	ownerUserId: string,
+): string {
+	const digest = createHash("sha256")
+		.update(
+			JSON.stringify(["toolbox-owner-member", organizationId, ownerUserId]),
+		)
+		.digest("hex")
+		.slice(0, 24);
+	return `member_${digest}`;
+}
+
+function contextPackBody(agentId: string, ownerUserId: string) {
+	return {
+		ownerUserId,
+		agentId,
+		title: "Toolbox onboarding context pack",
+		summary: "Project summary",
+		content: "# Toolbox onboarding\n\nProject context.",
+		semanticType: "project_profile",
+		metadata: {
+			source: "toolbox_onboarding",
+			contextPackId: "ctx-provisioned-owner",
+			projectSeedId: null,
+			discoveryRunId: null,
+			projectTitle: "Toolbox onboarding",
+			confidence: "high",
+			generatedAt: "2026-06-18T00:00:00.000Z",
+			evidenceRefs: [],
+		},
+	};
 }
 
 describe("POST /api/provisioning/agents", () => {
@@ -233,6 +350,13 @@ describe("POST /api/provisioning/agents", () => {
 		});
 
 		expect(response.status).toBe(201);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			agentId: "shifu-u-owner-override",
+			created: true,
+			membership: { ensured: true, role: "member" },
+			revisionRef: "lobu:shifu-u-owner-override",
+		});
 
 		const { createPostgresAgentConfigStore } = await import(
 			"../stores/postgres-stores.js"
@@ -247,6 +371,330 @@ describe("POST /api/provisioning/agents", () => {
 			owner: { platform: "toolbox", userId: "toolbox-user-20a9e88f" },
 			organizationId: ORG_ID,
 		});
+	});
+
+	test("ensures provided Toolbox owner is a member of the PAT organization", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-member-owner",
+				name: "Toolbox Owner Member Agent",
+				ownerUserId: "toolbox-user-member-1",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const members = await sql`
+			SELECT "organizationId", "userId", role
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-member-1"}
+		`;
+
+		expect(members).toEqual([
+			{
+				organizationId: ORG_ID,
+				userId: "toolbox-user-member-1",
+				role: "member",
+			},
+		]);
+	});
+
+	test("repeated provisioning creates one member row for the Toolbox owner", async () => {
+		const app = await buildApp();
+
+		for (const name of ["Idempotent Member Agent", "Updated Member Agent"]) {
+			const response = await app.request("/api/provisioning/agents", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					agentId: "shifu-u-idempotent-member",
+					name,
+					ownerUserId: "toolbox-user-idempotent",
+					settings: {},
+				}),
+			});
+
+			expect([200, 201]).toContain(response.status);
+		}
+
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const members = await sql<{ count: string }[]>`
+			SELECT COUNT(*)::text AS count
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-idempotent"}
+		`;
+
+		expect(members).toEqual([{ count: "1" }]);
+	});
+
+	test("preserves an existing Toolbox owner admin role during provisioning", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		await sql`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				'toolbox-user-admin',
+				'Toolbox Admin User',
+				'toolbox-user-admin@example.test',
+				true,
+				NOW(),
+				NOW()
+			)
+		`;
+		await sql`
+			INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+			VALUES (
+				'member_existing_admin',
+				${ORG_ID},
+				'toolbox-user-admin',
+				'admin',
+				NOW()
+			)
+		`;
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-admin-owner",
+				name: "Admin Owner Agent",
+				ownerUserId: "toolbox-user-admin",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const members = await sql`
+			SELECT id, "organizationId", "userId", role
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-admin"}
+		`;
+
+		expect(members).toEqual([
+			{
+				id: "member_existing_admin",
+				organizationId: ORG_ID,
+				userId: "toolbox-user-admin",
+				role: "admin",
+			},
+		]);
+	});
+
+	test("uses a hash-based placeholder email so old raw-email collisions do not block provisioning", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		await sql`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				'existing-email-user',
+				'Existing Email User',
+				'toolbox-user-email-collision@toolbox.local',
+				true,
+				NOW(),
+				NOW()
+			)
+		`;
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-email-collision",
+				name: "Email Collision Agent",
+				ownerUserId: "toolbox-user-email-collision",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const members = await sql`
+			SELECT "organizationId", "userId", role
+			FROM "member"
+			WHERE "organizationId" = ${ORG_ID}
+			  AND "userId" = ${"toolbox-user-email-collision"}
+		`;
+		expect(members).toEqual([
+			{
+				organizationId: ORG_ID,
+				userId: "toolbox-user-email-collision",
+				role: "member",
+			},
+		]);
+		const users = await sql<{ email: string }[]>`
+			SELECT email
+			FROM "user"
+			WHERE id = ${"toolbox-user-email-collision"}
+		`;
+		expect(users[0]?.email).toMatch(
+			/^toolbox-owner-[a-f0-9]{32}@toolbox\.local$/,
+		);
+		expect(users[0]?.email).not.toBe(
+			"toolbox-user-email-collision@toolbox.local",
+		);
+	});
+
+	test("does not persist agent metadata when owner membership cannot be ensured", async () => {
+		const { getDb } = await import("../../db/client.js");
+		const sql = getDb();
+		const ownerUserId = "toolbox-user-membership-fails";
+		const collidingMemberId = deterministicMembershipId(ORG_ID, ownerUserId);
+		await seedOrg("org-membership-collision");
+		await sql`
+			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+			VALUES (
+				'existing-collision-member-user',
+				'Existing Collision Member User',
+				'existing-collision-member-user@example.test',
+				true,
+				NOW(),
+				NOW()
+			)
+		`;
+		await sql`
+			INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
+			VALUES (
+				${collidingMemberId},
+				'org-membership-collision',
+				'existing-collision-member-user',
+				'member',
+				NOW()
+			)
+		`;
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-membership-failure",
+				name: "Membership Failure Agent",
+				ownerUserId,
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(500);
+
+		const { createPostgresAgentConfigStore } = await import(
+			"../stores/postgres-stores.js"
+		);
+		const store = createPostgresAgentConfigStore();
+		const metadata = await orgContext.run({ organizationId: ORG_ID }, () =>
+			store.getMetadata("shifu-u-membership-failure"),
+		);
+		expect(metadata).toBeNull();
+	});
+
+	test("provisioned Toolbox owner can immediately satisfy memory-route membership", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-memory-member",
+				name: "Memory Ready Agent",
+				ownerUserId: "toolbox-user-memory-ready",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const { getWorkspaceRole } = await import(
+			"../../utils/organization-access.js"
+		);
+		const { getDb } = await import("../../db/client.js");
+		await expect(
+			getWorkspaceRole(getDb(), ORG_ID, "toolbox-user-memory-ready"),
+		).resolves.toBe("member");
+	});
+
+	test("newly provisioned Toolbox owner can write a durable context pack through the memory service", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-context-pack-owner";
+		const ownerUserId = "toolbox-user-context-pack";
+
+		const provision = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Context Pack Owner Agent",
+				ownerUserId,
+				settings: {},
+			}),
+		});
+		expect(provision.status).toBe(201);
+
+		const { getDb } = await import("../../db/client.js");
+		const { getWorkspaceRole } = await import(
+			"../../utils/organization-access.js"
+		);
+		const ownerMemberRole = await getWorkspaceRole(
+			getDb(),
+			ORG_ID,
+			ownerUserId,
+		);
+		expect(ownerMemberRole).toBe("member");
+
+		const { writeContextPackMemory } = await import(
+			"../context-pack-memory-service.js"
+		);
+		const body = await orgContext.run({ organizationId: ORG_ID }, () =>
+			writeContextPackMemory({
+				organizationId: ORG_ID,
+				ownerMemberRole: ownerMemberRole!,
+				authSource: "pat",
+				scopes: ["mcp:admin"],
+				body: contextPackBody(agentId, ownerUserId),
+			}),
+		);
+
+		const eventId = body.eventId;
+		expect(Number.isInteger(eventId)).toBe(true);
+		expect(body).toMatchObject({
+			refs: [expect.stringMatching(/^lobu:event:\d+$/)],
+			eventId,
+			semanticType: "project_profile",
+			agentId,
+		});
+
+		const sql = getDb();
+		const events = await sql`
+			SELECT id, organization_id, semantic_type, created_by, metadata
+			FROM events
+			WHERE id = ${eventId}
+		`;
+		expect(events).toEqual([
+			expect.objectContaining({
+				id: eventId,
+				organization_id: ORG_ID,
+				semantic_type: "project_profile",
+				created_by: ownerUserId,
+				metadata: expect.objectContaining({
+					source: "toolbox_onboarding",
+					owner_user_id: ownerUserId,
+					agent_id: agentId,
+					memory_source: "toolbox_onboarding",
+				}),
+			}),
+		]);
 	});
 
 	test("rejects blank Toolbox owner user id overrides", async () => {

@@ -642,13 +642,16 @@ function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRe
 
 // ── Toolbox-scoped MCP execution ────────────────────────────────────────────
 
-toolboxMcpRoutes.use('*', mcpAuth);
-
-toolboxMcpRoutes.use('*', async (c, next) => {
+async function runToolboxMcpOrgContext(c: any, next: any) {
   const orgId = c.get('organizationId');
   if (!orgId) return c.json({ error: 'Organization required' }, 401);
   return orgContext.run({ organizationId: orgId }, next);
-});
+}
+
+toolboxMcpRoutes.use('/memory/*', mcpAuth);
+toolboxMcpRoutes.use('/memory/*', runToolboxMcpOrgContext);
+toolboxMcpRoutes.use('/mcp/*', mcpAuth);
+toolboxMcpRoutes.use('/mcp/*', runToolboxMcpOrgContext);
 
 toolboxMcpRoutes.route('/memory', memoryRoutes);
 

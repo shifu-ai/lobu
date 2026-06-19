@@ -16,56 +16,17 @@ import {
   ensureDbForGatewayTests,
   resetTestDatabase,
 } from '../../gateway/__tests__/helpers/db-setup.js';
+import {
+  authStash,
+  chatManagerStash,
+  fakeRouteAgents,
+  fakeRouteConnections,
+  fakeRouteSettings,
+  installRouteTestMocks,
+  routeStoreStash,
+} from './helpers/route-test-mocks';
 
-// Stash for the mocked `mcpAuth` middleware. Each test sets the user/org it
-// wants the route handler to see; the middleware below copies them onto the
-// Hono context. Using a mutable holder keeps the mocked module trivial — no
-// per-test re-mocking needed.
-const authStash: {
-  user: { id: string; name: string; email: string; emailVerified: boolean } | null;
-  organizationId: string | null;
-  // `authSource` mirrors the real middleware contract so admin-tier routes
-  // gated by `requireSessionOrAdminPat` see a non-null value. Default to
-  // 'session' — the existing apply tests simulate a web user.
-  authSource: 'session' | 'pat' | 'oauth' | null;
-  mcpAuthInfo: { scopes: string[] } | null;
-} = {
-  user: { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true },
-  organizationId: 'org-a',
-  authSource: 'session',
-  mcpAuthInfo: null,
-};
-
-mock.module('../../auth/middleware', () => ({
-  mcpAuth: async (c: any, next: any) => {
-    c.set('user', authStash.user);
-    c.set('organizationId', authStash.organizationId);
-    c.set('authSource', authStash.authSource);
-    c.set('mcpAuthInfo', authStash.mcpAuthInfo);
-    return next();
-  },
-  // requireAuth is referenced elsewhere in the module — provide a passthrough
-  // so importing files that destructure it still get a function.
-  requireAuth: async (_c: any, next: any) => next(),
-}));
-
-// `getChatInstanceManager` returns whatever the active test installs into
-// `chatManagerStash.manager`. The route refuses platform writes when the
-// manager is null (would otherwise persist plaintext secrets bypassing
-// secret-ref normalization), so `beforeEach` installs a thin stub that
-// just delegates persistence to the real connectionStore — enough for
-// route-level idempotency / ownership / racing tests that don't care
-// about secret-store roundtrip.
-const chatManagerStash: { manager: unknown } = { manager: null };
-
-mock.module('../gateway', () => ({
-  getChatInstanceManager: () => chatManagerStash.manager,
-  getLobuCoreServices: () => null,
-  initLobuGateway: async () => null,
-  stopLobuGateway: async () => {},
-  isLobuGatewayRunning: () => false,
-  ensureEmbeddedGatewaySecrets: () => {},
-}));
+installRouteTestMocks();
 
 /**
  * Minimal manager stub for route tests. addConnection / updateConnection
@@ -146,6 +107,21 @@ beforeAll(async () => {
   await ensureDbForGatewayTests();
 });
 
+function resetApplyAuth(): void {
+  authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
+  authStash.organizationId = ORG_A;
+  authStash.authSource = 'session';
+  authStash.mcpAuthInfo = null;
+  authStash.memberRole = 'owner';
+}
+
+function resetApplyRouteStores(): void {
+  fakeRouteAgents.clear();
+  fakeRouteSettings.clear();
+  fakeRouteConnections.clear();
+  routeStoreStash.failSaveConnection = false;
+}
+
 async function importAgentRoutes() {
   // Dynamic import after mock.module so the route module picks up the stubs.
   // ts-expect-error: dynamic import for test isolation
@@ -164,6 +140,12 @@ async function seedOrg(orgId: string): Promise<void> {
 }
 
 async function seedAgent(orgId: string, agentId: string): Promise<void> {
+  fakeRouteAgents.set(agentId, {
+    agentId,
+    name: agentId,
+    organizationId: orgId,
+    createdAt: Date.now(),
+  });
   const { getDb } = await import('../../db/client.js');
   const sql = getDb();
   await sql`
@@ -176,12 +158,10 @@ async function seedAgent(orgId: string, agentId: string): Promise<void> {
 describe('POST /agents — idempotent same-org create', () => {
   beforeEach(async () => {
     await resetTestDatabase();
+    resetApplyRouteStores();
     await seedOrg(ORG_A);
     await seedOrg(ORG_B);
-    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
-    authStash.organizationId = ORG_A;
-    authStash.authSource = 'session';
-    authStash.mcpAuthInfo = null;
+    resetApplyAuth();
   });
 
   test('first POST creates 201, second returns 200 with existing payload', async () => {
@@ -300,12 +280,10 @@ describe('POST /agents — idempotent same-org create', () => {
 describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
   beforeEach(async () => {
     await resetTestDatabase();
+    resetApplyRouteStores();
     await seedOrg(ORG_A);
     await seedAgent(ORG_A, 'host-agent');
-    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
-    authStash.organizationId = ORG_A;
-    authStash.authSource = 'session';
-    authStash.mcpAuthInfo = null;
+    resetApplyAuth();
     installDelegatingManagerStub();
   });
 
@@ -485,13 +463,11 @@ describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
 describe('platform ownership checks', () => {
   beforeEach(async () => {
     await resetTestDatabase();
+    resetApplyRouteStores();
     await seedOrg(ORG_A);
     await seedAgent(ORG_A, 'owner-agent');
     await seedAgent(ORG_A, 'other-agent');
-    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
-    authStash.organizationId = ORG_A;
-    authStash.authSource = 'session';
-    authStash.mcpAuthInfo = null;
+    resetApplyAuth();
     installDelegatingManagerStub();
   });
 
@@ -535,11 +511,9 @@ describe('platform ownership checks', () => {
 describe('concurrent-apply race fixes', () => {
   beforeEach(async () => {
     await resetTestDatabase();
+    resetApplyRouteStores();
     await seedOrg(ORG_A);
-    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
-    authStash.organizationId = ORG_A;
-    authStash.authSource = 'session';
-    authStash.mcpAuthInfo = null;
+    resetApplyAuth();
     installDelegatingManagerStub();
   });
 
@@ -688,11 +662,9 @@ describe('admin-tier auth admission (requireSessionOrAdminPat)', () => {
 
   beforeEach(async () => {
     await resetTestDatabase();
+    resetApplyRouteStores();
     await seedOrg(ORG_A);
-    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
-    authStash.organizationId = ORG_A;
-    authStash.authSource = 'session';
-    authStash.mcpAuthInfo = null;
+    resetApplyAuth();
   });
 
   test('POST /agents accepts a session caller', async () => {
@@ -848,11 +820,9 @@ describe('admin-tier auth admission (requireSessionOrAdminPat)', () => {
 describe('residual-race fixes (PR-466 follow-up)', () => {
   beforeEach(async () => {
     await resetTestDatabase();
+    resetApplyRouteStores();
     await seedOrg(ORG_A);
-    authStash.user = { id: 'u1', name: 'Test', email: 'u1@test', emailVerified: true };
-    authStash.organizationId = ORG_A;
-    authStash.authSource = 'session';
-    authStash.mcpAuthInfo = null;
+    resetApplyAuth();
     chatManagerStash.manager = null;
   });
 
