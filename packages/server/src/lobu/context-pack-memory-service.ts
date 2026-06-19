@@ -2,8 +2,10 @@ import { hasRequiredMcpScope } from '../auth/tool-access';
 import type { Env } from '../index';
 import { saveContent } from '../tools/save_content';
 import type { ToolContext, TokenType } from '../tools/registry';
+import { enqueueEmbeddingBackfillRun } from '../scheduled/trigger-embed-backfill';
 import { generateEmbeddings, getConfiguredEmbeddingModel } from '../utils/embeddings';
 import { ToolUserError } from '../utils/errors';
+import logger from '../utils/logger';
 import { AGENT_ID_PATTERN } from './stores/postgres-stores';
 
 const MAX_TITLE_LENGTH = 500;
@@ -51,6 +53,7 @@ export interface ContextPackMemoryResult {
 
 type SaveContentImpl = typeof saveContent;
 type GenerateEmbeddingsImpl = typeof generateEmbeddings;
+type EnqueueEmbeddingBackfillImpl = typeof enqueueEmbeddingBackfillRun;
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -186,7 +189,11 @@ export async function writeContextPackMemory(
     env?: Env;
     body: unknown;
   },
-  deps: { saveContentImpl?: SaveContentImpl; generateEmbeddingsImpl?: GenerateEmbeddingsImpl } = {}
+  deps: {
+    saveContentImpl?: SaveContentImpl;
+    generateEmbeddingsImpl?: GenerateEmbeddingsImpl;
+    enqueueEmbeddingBackfillImpl?: EnqueueEmbeddingBackfillImpl;
+  } = {}
 ): Promise<ContextPackMemoryResult> {
   if (!input.organizationId) {
     throw new ContextPackMemoryError(
@@ -219,6 +226,8 @@ export async function writeContextPackMemory(
   };
 
   const saveContentImpl = deps.saveContentImpl ?? saveContent;
+  const enqueueEmbeddingBackfillImpl =
+    deps.enqueueEmbeddingBackfillImpl ?? enqueueEmbeddingBackfillRun;
   const env = input.env ?? (process.env as unknown as Env);
   const generateEmbeddingsImpl = deps.generateEmbeddingsImpl ?? generateEmbeddings;
   let embedding: number[] | undefined;
@@ -261,6 +270,17 @@ export async function writeContextPackMemory(
       'Memory write did not return a durable event id',
       500
     );
+  }
+
+  if (!embedding) {
+    try {
+      await enqueueEmbeddingBackfillImpl(input.organizationId);
+    } catch (error) {
+      logger.warn(
+        { error, organizationId: input.organizationId, eventId },
+        '[ContextPackMemory] Failed to enqueue embedding backfill'
+      );
+    }
   }
 
   return {

@@ -73,7 +73,7 @@ export async function triggerEmbedBackfill(_env: Env): Promise<BackfillResult> {
 
     for (const batch of orgBatches) {
       try {
-        const created = await createBackfillRun(batch.organization_id);
+        const created = await enqueueEmbeddingBackfillRun(batch.organization_id);
         if (created) {
           runsCreated++;
           totalEvents += batch.event_count;
@@ -105,7 +105,7 @@ export async function triggerEmbedBackfill(_env: Env): Promise<BackfillResult> {
  * Create a pending embed_backfill run for an organization.
  * Skips if one is already pending/running.
  */
-async function createBackfillRun(organizationId: string): Promise<boolean> {
+export async function enqueueEmbeddingBackfillRun(organizationId: string): Promise<boolean> {
   const sql = getDb();
 
   const needsEmbedding = needsEmbeddingPredicate();

@@ -335,6 +335,35 @@ describe('writeContextPackMemory', () => {
     });
   });
 
+  test('enqueues embedding backfill after writing a context pack without inline embeddings', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const backfillCalls: string[] = [];
+    const saveContentImpl = async () => ({
+      id: 125,
+      semantic_type: 'project_profile',
+    });
+    const enqueueEmbeddingBackfillImpl = async (organizationId: string) => {
+      backfillCalls.push(organizationId);
+      return true;
+    };
+
+    await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        body: contextPackBody(),
+      },
+      {
+        saveContentImpl: saveContentImpl as never,
+        enqueueEmbeddingBackfillImpl,
+      }
+    );
+
+    expect(backfillCalls).toEqual([ORG_ID]);
+  });
+
   test('rejects durable memory writes that return no event id', async () => {
     const { ContextPackMemoryError, writeContextPackMemory } = await import(
       '../context-pack-memory-service.js'
