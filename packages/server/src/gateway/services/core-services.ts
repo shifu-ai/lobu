@@ -12,6 +12,10 @@ import {
 import { getDb } from "../../db/client.js";
 import { resolveEnv } from "../auth/mcp/string-substitution.js";
 import { PostgresSecretStore } from "../../lobu/stores/postgres-secret-store.js";
+import {
+	createPostgresSlackInstallationStore,
+	type SlackInstallationStore,
+} from "../../lobu/stores/slack-installation-store.js";
 import { AgentMetadataStore } from "../auth/agent-metadata-store.js";
 import { ApiKeyProviderModule } from "../auth/api-key-provider-module.js";
 import { BedrockProviderModule } from "../auth/bedrock/provider-module.js";
@@ -175,6 +179,7 @@ export class CoreServices {
 	// ============================================================================
 	private configStore?: AgentConfigStore;
 	private connectionStore?: AgentConnectionStore;
+	private slackInstallationStore?: SlackInstallationStore;
 
 	// SDK-embedded agents (passed via `GatewayConfig.agents`). lobu.config.ts
 	// file-declared agents have been moved out of the gateway boot path —
@@ -214,6 +219,13 @@ export class CoreServices {
 
 	getConnectionStore(): AgentConnectionStore | undefined {
 		return this.connectionStore;
+	}
+
+	getSlackInstallationStore(): SlackInstallationStore {
+		if (!this.slackInstallationStore) {
+			throw new Error("Slack installation store not initialized");
+		}
+		return this.slackInstallationStore;
 	}
 
 	/**
@@ -371,6 +383,14 @@ export class CoreServices {
 				},
 			);
 		logger.debug("Secret store initialized");
+
+		// Slack workspace installs (the "Add to Slack" OAuth path) live in their
+		// own Postgres table keyed on (org, team) — not as agent connections —
+		// with the bot token in the secret store. Always Postgres-backed; only
+		// exercised on the OAuth/webhook path, which requires a DB.
+		this.slackInstallationStore = createPostgresSlackInstallationStore(
+			this.secretStore,
+		);
 
 		this.channelBindingService = new ChannelBindingService();
 		this.userAgentsStore = new UserAgentsStore();
