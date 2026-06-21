@@ -336,6 +336,17 @@ const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<ToolboxMcpConnectorKey, Record<stri
   },
 };
 
+const SAFE_TOOL_DIAGNOSTIC_CODES = new Set([
+  'oauth_scope_denied',
+  'oauth_refresh_failed',
+  'upstream_unauthorized',
+  'upstream_forbidden',
+  'upstream_rate_limited',
+  'tool_schema_invalid',
+  'connector_unavailable',
+  'tool_not_found',
+]);
+
 function normalizeToolboxDiscoveryToolName(
   connectorKey: ToolboxMcpConnectorKey,
   toolName: string
@@ -672,13 +683,26 @@ function toolboxMcpStatusResult(
   };
 }
 
-function safeToolboxMcpError(errorCode: string, errorMessage: string) {
+function safeToolboxMcpError(
+  errorCode: string,
+  errorMessage: string,
+  diagnosticCode?: string
+) {
   return {
     ok: false,
     content: null,
     errorCode,
     errorMessage,
+    ...(diagnosticCode ? { diagnosticCode } : {}),
   };
+}
+
+function safeToolDiagnosticCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const value = 'code' in error ? (error as { code?: unknown }).code : undefined;
+  return typeof value === 'string' && SAFE_TOOL_DIAGNOSTIC_CODES.has(value)
+    ? value
+    : undefined;
 }
 
 function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRef: string): string {
@@ -820,15 +844,25 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       args
     );
     if (result?.isError) {
+      const diagnosticCode = safeToolDiagnosticCode(result);
       return c.json(
-        safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed'),
+        safeToolboxMcpError(
+          'lobu_mcp_tool_error',
+          'MCP tool execution failed',
+          diagnosticCode
+        ),
         200
       );
     }
     return c.json({ ok: true, content: result?.content ?? null });
-  } catch {
+  } catch (error) {
+    const diagnosticCode = safeToolDiagnosticCode(error);
     return c.json(
-      safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed'),
+      safeToolboxMcpError(
+        'lobu_mcp_tool_error',
+        'MCP tool execution failed',
+        diagnosticCode
+      ),
       200
     );
   }

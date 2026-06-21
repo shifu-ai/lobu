@@ -188,6 +188,121 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call returns safe diagnostic code for connector execution failure results', async () => {
+    executeToolDirectMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'private upstream body must not leak' }],
+      isError: true,
+      code: 'oauth_scope_denied',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'test', limit: 1 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_error',
+      errorMessage: 'MCP tool execution failed',
+      diagnosticCode: 'oauth_scope_denied',
+    });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF,
+      'drive_search',
+      { query: 'test', limit: 1 }
+    );
+  });
+
+  test('POST /mcp/tools/call omits non-whitelisted diagnostic codes', async () => {
+    executeToolDirectMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'sensitive provider details' }],
+      isError: true,
+      code: 'raw_provider_payload',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'test', limit: 1 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_error',
+      errorMessage: 'MCP tool execution failed',
+    });
+  });
+
+  test('POST /mcp/tools/call returns safe diagnostic code for thrown connector execution failures', async () => {
+    executeToolDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('upstream 403'), {
+        code: 'oauth_scope_denied',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'test', limit: 1 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_error',
+      errorMessage: 'MCP tool execution failed',
+      diagnosticCode: 'oauth_scope_denied',
+    });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF,
+      'drive_search',
+      { query: 'test', limit: 1 }
+    );
+  });
+
   test('does not intercept Agent API worker-token routes mounted after Toolbox MCP routes', async () => {
     const { toolboxMcpRoutes } = await import('../agent-routes.js');
     const app = new Hono();
