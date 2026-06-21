@@ -27,6 +27,14 @@ const OTHER_ORG_ID = 'org-other';
 const OTHER_ORG_MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256')
   .update(JSON.stringify([OTHER_ORG_ID, OWNER_USER_ID, AGENT_ID, 'google_workspace']))
   .digest('hex')}`;
+const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
+  'drive_search',
+  'docs_read',
+  'sheets_read',
+  'google_workspace_drive_search',
+  'google_workspace_docs_read',
+  'google_workspace_sheets_read',
+];
 let executeToolDirectMock: ReturnType<typeof mock>;
 
 async function importMountedAgentRoutes() {
@@ -147,6 +155,36 @@ describe('Toolbox MCP execution routes', () => {
       CONNECTION_REF,
       'drive_search',
       { query: '"技術分析全攻略課程"', limit: 10 }
+    );
+  });
+
+  test('POST /mcp/tools/call accepts full Toolbox discovery tool aliases', async () => {
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'course', limit: 5 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF,
+      'drive_search',
+      { query: 'course', limit: 5 }
     );
   });
 
@@ -445,7 +483,10 @@ describe('Toolbox MCP execution routes', () => {
     );
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ status: 'ready' });
+    await expect(res.json()).resolves.toEqual({
+      status: 'ready',
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
+    });
   });
 
   test('GET /mcp/connections/status accepts shifu_toolbox for shifu-toolbox materialized rows', async () => {
@@ -479,7 +520,7 @@ describe('Toolbox MCP execution routes', () => {
     );
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ status: 'ready' });
+    await expect(res.json()).resolves.toEqual({ status: 'ready', toolsDiscovered: [] });
   });
 
   test('GET /mcp/connections/status maps unknown connections to not_connected', async () => {
@@ -493,7 +534,10 @@ describe('Toolbox MCP execution routes', () => {
     );
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ status: 'not_connected' });
+    await expect(res.json()).resolves.toEqual({
+      status: 'not_connected',
+      toolsDiscovered: [],
+    });
   });
 
   test('GET /mcp/connections/status maps owner metadata mismatch to not_connected', async () => {
@@ -512,7 +556,10 @@ describe('Toolbox MCP execution routes', () => {
     );
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ status: 'not_connected' });
+    await expect(res.json()).resolves.toEqual({
+      status: 'not_connected',
+      toolsDiscovered: [],
+    });
   });
 
   test('POST /mcp/connections/materialize returns ready and a ref for an owner connector', async () => {
@@ -536,6 +583,7 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({
       status: 'ready',
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
     expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
       id: MATERIALIZED_CONNECTION_REF,
@@ -550,6 +598,58 @@ describe('Toolbox MCP execution routes', () => {
         materializedFromConnectionRef: SOURCE_CONNECTION_REF,
       },
       status: 'active',
+    });
+  });
+
+  test('POST /mcp/connections/materialize accepts an existing deterministic Lobu OAuth row without materialized metadata', async () => {
+    fakeConnections.delete(CONNECTION_REF);
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: { credentialRef: 'lobu_secret_oauth_ref' },
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        mcpId: 'google_workspace',
+        authSource: 'lobu_oauth',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'ready',
+      lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
+    });
+    expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
+      id: MATERIALIZED_CONNECTION_REF,
+      agentId: AGENT_ID,
+      status: 'active',
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        authSource: 'lobu_oauth',
+      },
     });
   });
 
@@ -636,6 +736,7 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({
       status: 'ready',
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
     expect(MATERIALIZED_CONNECTION_REF).not.toBe(OTHER_ORG_MATERIALIZED_CONNECTION_REF);
     expect(fakeConnections.get(OTHER_ORG_MATERIALIZED_CONNECTION_REF)).toEqual(otherOrgBefore);
@@ -722,10 +823,12 @@ describe('Toolbox MCP execution routes', () => {
     await expect(first.json()).resolves.toEqual({
       status: 'ready',
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
     await expect(second.json()).resolves.toEqual({
       status: 'ready',
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
     expect(
       [...fakeConnections.values()].filter((connection) => connection.agentId === AGENT_ID)
@@ -769,6 +872,7 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({
       status: 'ready',
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
     expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
       agentId: AGENT_ID,

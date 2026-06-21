@@ -323,11 +323,33 @@ const TOOLBOX_DISCOVERY_TOOL_ALLOWLIST: Record<ToolboxMcpConnectorKey, ReadonlyS
   notion: new Set(['search', 'read_page', 'read_database']),
 };
 
+const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<ToolboxMcpConnectorKey, Record<string, string>> = {
+  google_workspace: {
+    google_workspace_drive_search: 'drive_search',
+    google_workspace_docs_read: 'docs_read',
+    google_workspace_sheets_read: 'sheets_read',
+  },
+  notion: {
+    notion_search: 'search',
+    notion_read_page: 'read_page',
+    notion_read_database: 'read_database',
+  },
+};
+
+function normalizeToolboxDiscoveryToolName(
+  connectorKey: ToolboxMcpConnectorKey,
+  toolName: string
+): string {
+  return TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey][toolName] ?? toolName;
+}
+
 function isToolboxDiscoveryToolAllowed(
   connectorKey: ToolboxMcpConnectorKey,
   toolName: string
 ): boolean {
-  return TOOLBOX_DISCOVERY_TOOL_ALLOWLIST[connectorKey].has(toolName);
+  return TOOLBOX_DISCOVERY_TOOL_ALLOWLIST[connectorKey].has(
+    normalizeToolboxDiscoveryToolName(connectorKey, toolName)
+  );
 }
 
 type ToolboxMcpConnectorKey = 'notion' | 'google_workspace';
@@ -516,9 +538,7 @@ function connectionIsExpectedMaterializedRow(params: {
     connectionMatchesConnector(params.connection, params.connectorKey) &&
     metadata.ownerUserId === params.ownerUserId &&
     typeof metadata.connectorKey === 'string' &&
-    connectorKeyAliases(params.connectorKey).has(metadata.connectorKey) &&
-    typeof metadata.materializedFromConnectionRef === 'string' &&
-    metadata.materializedFromConnectionRef.length > 0
+    connectorKeyAliases(params.connectorKey).has(metadata.connectorKey)
   );
 }
 
@@ -618,12 +638,37 @@ function buildMaterializedMcpConnection(params: {
 function toolboxMcpMaterializeResult(
   status: ToolboxMcpConnectionStatus,
   lobuConnectionRef: string | null,
-  errorCode?: string
+  errorCode?: string,
+  connectorKey?: ToolboxMcpStatusConnectorKey
 ) {
   return {
     status,
     lobuConnectionRef,
+    ...(status === 'ready' && connectorKey
+      ? { toolsDiscovered: toolboxMcpToolsDiscovered(connectorKey) }
+      : {}),
     ...(errorCode ? { errorCode } : {}),
+  };
+}
+
+function toolboxMcpToolsDiscovered(connectorKey: ToolboxMcpStatusConnectorKey): string[] {
+  if (!isToolboxMcpConnectorKey(connectorKey)) return [];
+
+  return Array.from(
+    new Set([
+      ...TOOLBOX_DISCOVERY_TOOL_ALLOWLIST[connectorKey],
+      ...Object.keys(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey]),
+    ])
+  );
+}
+
+function toolboxMcpStatusResult(
+  status: ToolboxMcpConnectionStatus,
+  connectorKey: ToolboxMcpStatusConnectorKey
+) {
+  return {
+    status,
+    toolsDiscovered: status === 'ready' ? toolboxMcpToolsDiscovered(connectorKey) : [],
   };
 }
 
@@ -734,6 +779,7 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
   if (denied) return denied;
 
+  const normalizedToolName = normalizeToolboxDiscoveryToolName(connectorKey, toolName);
   if (!isToolboxDiscoveryToolAllowed(connectorKey, toolName)) {
     return c.json(
       safeToolboxMcpError(
@@ -770,7 +816,7 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       agentId,
       ownerUserId,
       mcpIdForConnection(guard.connection, connectionRef),
-      toolName,
+      normalizedToolName,
       args
     );
     if (result?.isError) {
@@ -856,7 +902,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     });
 
     if (match.status !== 'ready') {
-      return c.json(toolboxMcpMaterializeResult(match.status, null));
+      return c.json(toolboxMcpMaterializeResult(match.status, null, undefined, connectorKey));
     }
 
     if (!match.connection) {
@@ -864,7 +910,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     }
 
     if (match.connection.agentId === agentId) {
-      return c.json(toolboxMcpMaterializeResult('ready', match.connection.id));
+      return c.json(toolboxMcpMaterializeResult('ready', match.connection.id, undefined, connectorKey));
     }
 
     const materialized = buildMaterializedMcpConnection({
@@ -899,10 +945,10 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       connectionRef: materializedRef,
     });
     if (guard.status !== 'ready') {
-      return c.json(toolboxMcpMaterializeResult(guard.status, null));
+      return c.json(toolboxMcpMaterializeResult(guard.status, null, undefined, connectorKey));
     }
 
-    return c.json(toolboxMcpMaterializeResult('ready', materializedRef));
+    return c.json(toolboxMcpMaterializeResult('ready', materializedRef, undefined, connectorKey));
   } catch {
     return c.json(
       toolboxMcpMaterializeResult('error', null, 'lobu_mcp_materialize_failed')
@@ -934,7 +980,7 @@ toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
     connectorKey,
     connectionRef,
   });
-  return c.json({ status });
+  return c.json(toolboxMcpStatusResult(status, connectorKey));
 });
 
 routes.route('/', toolboxMcpRoutes);
