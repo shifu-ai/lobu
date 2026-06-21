@@ -106,8 +106,49 @@ interface JsonRpcResponse {
     tools?: McpTool[];
     content?: unknown[];
     isError?: boolean;
+    diagnosticCode?: unknown;
+    code?: unknown;
+    name?: unknown;
   };
   error?: { code: number; message: string };
+}
+
+const SAFE_MCP_TOOL_DIAGNOSTIC_CODES = new Set([
+  "oauth_scope_denied",
+  "oauth_refresh_failed",
+  "upstream_unauthorized",
+  "upstream_forbidden",
+  "upstream_rate_limited",
+  "tool_schema_invalid",
+  "connector_unavailable",
+  "tool_not_found",
+]);
+
+function diagnosticCodeForHttpStatus(status: number): string {
+  if (status === 401) return "upstream_unauthorized";
+  if (status === 403) return "upstream_forbidden";
+  if (status === 429) return "upstream_rate_limited";
+  return "connector_unavailable";
+}
+
+function safeMcpToolDiagnosticCode(value: unknown): string | undefined {
+  return typeof value === "string" && SAFE_MCP_TOOL_DIAGNOSTIC_CODES.has(value)
+    ? value
+    : undefined;
+}
+
+function diagnosticCodeFromToolResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const record = result as {
+    diagnosticCode?: unknown;
+    code?: unknown;
+    name?: unknown;
+  };
+  return (
+    safeMcpToolDiagnosticCode(record.diagnosticCode) ??
+    safeMcpToolDiagnosticCode(record.code) ??
+    safeMcpToolDiagnosticCode(record.name)
+  );
 }
 
 interface HttpMcpServerConfig {
@@ -259,12 +300,14 @@ export class McpProxy {
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
+    diagnosticCode?: string;
   }> {
     const httpServer = await this.configService.getHttpServer(mcpId, agentId);
     if (!httpServer) {
       return {
         content: [{ type: "text", text: `MCP server '${mcpId}' not found` }],
         isError: true,
+        diagnosticCode: "tool_not_found",
       };
     }
 
@@ -301,6 +344,7 @@ export class McpProxy {
             },
           ],
           isError: true,
+          diagnosticCode: diagnosticCodeForHttpStatus(response.status),
         };
       }
 
@@ -311,6 +355,7 @@ export class McpProxy {
           { type: "text", text: JSON.stringify(result) },
         ],
         isError: result.isError || false,
+        diagnosticCode: diagnosticCodeFromToolResult(result),
       };
     } catch (error) {
       return {
@@ -321,6 +366,7 @@ export class McpProxy {
           },
         ],
         isError: true,
+        diagnosticCode: "connector_unavailable",
       };
     }
   }

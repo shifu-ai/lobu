@@ -1173,6 +1173,69 @@ describe("executeToolDirect", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("error");
   });
+
+  test("executeToolDirect returns safe diagnostic code for upstream forbidden", async () => {
+    const configSource = createConfigSource({
+      "forbidden-mcp": {
+        id: "forbidden-mcp",
+        upstreamUrl: "http://forbidden.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = async () =>
+      new Response("private upstream body", { status: 403 });
+
+    const result = await proxy.executeToolDirect(
+      "agent1",
+      "user1",
+      "forbidden-mcp",
+      "any_tool",
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("upstream_forbidden");
+  });
+
+  test("executeToolDirect preserves safe JSON-RPC result diagnostic code", async () => {
+    const configSource = createConfigSource({
+      "scoped-mcp": {
+        id: "scoped-mcp",
+        upstreamUrl: "http://scoped.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "private provider details" }],
+            isError: true,
+            diagnosticCode: "oauth_scope_denied",
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+
+    const result = await proxy.executeToolDirect(
+      "agent1",
+      "user1",
+      "scoped-mcp",
+      "any_tool",
+      {}
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.diagnosticCode).toBe("oauth_scope_denied");
+  });
 });
 
 // ---------------------------------------------------------------------------

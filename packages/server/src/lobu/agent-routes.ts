@@ -699,7 +699,12 @@ function safeToolboxMcpError(
 
 function safeToolDiagnosticCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') return undefined;
-  const value = 'code' in error ? (error as { code?: unknown }).code : undefined;
+  const diagnosticValue =
+    'diagnosticCode' in error
+      ? (error as { diagnosticCode?: unknown }).diagnosticCode
+      : undefined;
+  const value =
+    diagnosticValue ?? ('code' in error ? (error as { code?: unknown }).code : undefined);
   return typeof value === 'string' && SAFE_TOOL_DIAGNOSTIC_CODES.has(value)
     ? value
     : undefined;

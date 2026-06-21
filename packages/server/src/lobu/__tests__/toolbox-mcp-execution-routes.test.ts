@@ -192,7 +192,7 @@ describe('Toolbox MCP execution routes', () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'private upstream body must not leak' }],
       isError: true,
-      code: 'oauth_scope_denied',
+      diagnosticCode: 'upstream_forbidden',
     });
     const app = await importMountedAgentRoutes();
 
@@ -218,7 +218,7 @@ describe('Toolbox MCP execution routes', () => {
       content: null,
       errorCode: 'lobu_mcp_tool_error',
       errorMessage: 'MCP tool execution failed',
-      diagnosticCode: 'oauth_scope_denied',
+      diagnosticCode: 'upstream_forbidden',
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
@@ -233,7 +233,7 @@ describe('Toolbox MCP execution routes', () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'sensitive provider details' }],
       isError: true,
-      code: 'raw_provider_payload',
+      diagnosticCode: 'raw_provider_payload',
     });
     const app = await importMountedAgentRoutes();
 
@@ -265,7 +265,7 @@ describe('Toolbox MCP execution routes', () => {
   test('POST /mcp/tools/call returns safe diagnostic code for thrown connector execution failures', async () => {
     executeToolDirectMock.mockRejectedValueOnce(
       Object.assign(new Error('upstream 403'), {
-        code: 'oauth_scope_denied',
+        diagnosticCode: 'connector_unavailable',
       })
     );
     const app = await importMountedAgentRoutes();
@@ -292,7 +292,7 @@ describe('Toolbox MCP execution routes', () => {
       content: null,
       errorCode: 'lobu_mcp_tool_error',
       errorMessage: 'MCP tool execution failed',
-      diagnosticCode: 'oauth_scope_denied',
+      diagnosticCode: 'connector_unavailable',
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
