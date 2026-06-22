@@ -41,6 +41,7 @@ import {
   resolveConnectionVisibility,
 } from '../../helpers/connection-helpers';
 import { assertEntityIdsInOrg, callerIsAdmin as resolveCallerIsAdmin } from '../../helpers/db-helpers';
+import { rejectUnboundAppInstallationCreate } from '../../helpers/app-installation-guard';
 import { type FeedDefinition, splitConfigByFeedScope } from '../../helpers/feed-helpers';
 import { getScopedConnectorDefinition } from '../../connector-definition-helpers';
 import type { ToolContext } from '../../../registry';
@@ -357,6 +358,20 @@ export async function handleCreate(
   if (!connector) {
     return { error: `Connector '${args.connector_key}' not found or not active` };
   }
+
+  // Reject a direct create of an UNBOUND app_installation connection (no
+  // installation_ref AND no other auth intent) — those are created only by the
+  // App install callback. Selection-aware: a create that supplies an auth profile
+  // / app profile / env creds / managedBy resolves to a different method and is
+  // allowed through.
+  const appInstallGuard = rejectUnboundAppInstallationCreate({
+    authSchema: connector.auth_schema,
+    config: args.config,
+    connectorKey: args.connector_key,
+    authProfileSlug: args.auth_profile_slug,
+    appAuthProfileSlug: args.app_auth_profile_slug,
+  });
+  if (appInstallGuard) return appInstallGuard;
 
   const deviceBinding = await resolveDeviceBinding({
     organizationId,

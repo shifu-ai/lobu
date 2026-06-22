@@ -200,6 +200,13 @@ function getEnvAuthMethods(authSchema: ConnectorAuthSchema): ConnectorAuthEnvKey
   );
 }
 
+/** Every env-key field key the connector declares (across all env_keys methods). */
+export function getEnvAuthFieldKeys(authSchema: ConnectorAuthSchema): string[] {
+  return getEnvAuthMethods(authSchema).flatMap((method) =>
+    method.fields.map((field) => field.key)
+  );
+}
+
 export function getOAuthAuthMethods(authSchema: ConnectorAuthSchema): ConnectorAuthOAuthMethod[] {
   return authSchema.methods.filter(
     (method): method is ConnectorAuthOAuthMethod => method.type === 'oauth'
@@ -212,6 +219,22 @@ export function getAppInstallationAuthMethods(
   return authSchema.methods.filter(
     (method): method is ConnectorAuthAppInstallation => method.type === 'app_installation'
   );
+}
+
+/**
+ * Whether the connector's PRIMARY (highest-precedence) auth method is
+ * `app_installation` — i.e. the first declared method that actually carries
+ * credentials (`none` is a no-op and skipped). When true, a connection for this
+ * connector is meant to be created ONLY by the App install callback (which sets
+ * `config.installation_ref`); a direct create with no `installation_ref` would be
+ * a dead, unbound connection. Connector-agnostic (keys on the method type, not
+ * on `github`) so it covers any future app_installation connector.
+ */
+export function isPrimaryAuthMethodAppInstallation(
+  authSchema: ConnectorAuthSchema
+): boolean {
+  const primary = authSchema.methods.find((method) => method.type !== 'none');
+  return primary?.type === 'app_installation';
 }
 
 function dedupeAuthFields(fields: ConnectorAuthEnvField[]): ConnectorAuthEnvField[] {

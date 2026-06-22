@@ -64,6 +64,40 @@ class SpyInstallationTokenProvider implements InstallationTokenProvider {
 
 let spy: SpyInstallationTokenProvider;
 
+/** A `guardrail-trip` audit row written by the tenancy guard (subset we assert). */
+interface TenancyTripEventRow {
+	semantic_type: string;
+	origin_type: string | null;
+	metadata: Record<string, unknown>;
+}
+
+/**
+ * The tenancy audit write is fire-and-forget (best-effort, never blocks
+ * resolution), so the row may land just after `resolveExecutionAuth` returns.
+ * Poll briefly for the guardrail-trip row scoped to this org + connection.
+ */
+async function waitForTenancyTripEvent(
+	sql: ReturnType<typeof getTestDb>,
+	organizationId: string,
+	connectionId: number,
+): Promise<TenancyTripEventRow | null> {
+	for (let attempt = 0; attempt < 40; attempt++) {
+		const rows = (await sql`
+			SELECT semantic_type, origin_type, metadata
+			FROM events
+			WHERE organization_id = ${organizationId}
+				AND semantic_type = 'guardrail-trip'
+				AND origin_type = 'guardrail-app-installation'
+				AND (metadata ->> 'connection_id') = ${String(connectionId)}
+			ORDER BY id DESC
+			LIMIT 1
+		`) as unknown as TenancyTripEventRow[];
+		if (rows.length > 0) return rows[0];
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	return null;
+}
+
 /**
  * Create a per-org connector definition declaring an `app_installation` auth
  * method, plus a connection in that org. `installationRef` is what we write into
@@ -251,6 +285,128 @@ describe("app-installation credential — tenancy + shape guards", () => {
 		});
 
 		expect(resolved.credentials).toBeNull();
+		expect(spy.mintCalls).toHaveLength(0);
+	});
+
+	it("AUDIT: a cross-tenant rejection emits a guardrail-trip event (security signal)", async () => {
+		const orgA = await createTestOrganization({ name: "Audit Attacker Org" });
+		const orgB = await createTestOrganization({ name: "Audit Victim Org" });
+
+		const victimInstall = await seedInstall({
+			organizationId: orgB.id,
+			externalTenantId: "audit-victim-tenant",
+		});
+		const { connectionId } = await seedAppInstallConnection({
+			organizationId: orgA.id,
+			installationRef: victimInstall.id,
+		});
+
+		const resolved = await resolveExecutionAuth({
+			organizationId: orgA.id,
+			connectionId,
+			credentialDb: getDb(),
+		});
+		expect(resolved.credentials).toBeNull();
+		expect(spy.mintCalls).toHaveLength(0);
+
+		// The audit write is best-effort/fire-and-forget — poll for the row.
+		const sql = getTestDb();
+		const event = await waitForTenancyTripEvent(sql, orgA.id, connectionId);
+		expect(event).not.toBeNull();
+		expect(event?.semantic_type).toBe("guardrail-trip");
+		expect(event?.metadata?.guardrail).toBe("app-installation-tenancy");
+		expect(event?.metadata?.reason).toBe("cross_tenant_org");
+		expect(String(event?.metadata?.install_id)).toBe(String(victimInstall.id));
+		expect(event?.metadata?.install_org).toBe(orgB.id);
+		// The audit row is left in place — `events` is append-only and the row is
+		// scoped to a throwaway test org, so it can't leak into other suites' asserts.
+	});
+
+	it("AUDIT: a provider/instance mismatch emits a guardrail-trip event", async () => {
+		const org = await createTestOrganization({ name: "Audit Mismatch Org" });
+		// Install is 'slack'; the connector method declares 'github'.
+		const install = await seedInstall({
+			organizationId: org.id,
+			provider: "slack",
+			providerInstance: PROVIDER_INSTANCE,
+			externalTenantId: "audit-slack-tenant",
+		});
+		const { connectionId } = await seedAppInstallConnection({
+			organizationId: org.id,
+			installationRef: install.id,
+			provider: PROVIDER,
+			providerInstance: PROVIDER_INSTANCE,
+		});
+
+		const resolved = await resolveExecutionAuth({
+			organizationId: org.id,
+			connectionId,
+			credentialDb: getDb(),
+		});
+		expect(resolved.credentials).toBeNull();
+		expect(spy.mintCalls).toHaveLength(0);
+
+		const sql = getTestDb();
+		const event = await waitForTenancyTripEvent(sql, org.id, connectionId);
+		expect(event).not.toBeNull();
+		expect(event?.metadata?.reason).toBe("provider_instance_mismatch");
+		expect(event?.metadata?.install_provider).toBe("slack");
+		expect(event?.metadata?.method_provider).toBe("github");
+	});
+
+	it("SECURITY: after a cross-org TRANSFER the losing org's suspended install NEVER mints", async () => {
+		const orgA = await createTestOrganization({ name: "Losing Org A" });
+		const orgB = await createTestOrganization({ name: "Winning Org B" });
+		const store = createPostgresAppInstallationStore();
+
+		// Org A installs first (active) for tenant T.
+		const aInstall = await store.upsert({
+			organizationId: orgA.id,
+			provider: PROVIDER,
+			providerInstance: PROVIDER_INSTANCE,
+			providerAppId: "demo-app",
+			externalTenantId: "transfer-tenant",
+			status: "active",
+		});
+		// Org A's connection points at A's install row.
+		const { connectionId } = await seedAppInstallConnection({
+			organizationId: orgA.id,
+			installationRef: aInstall.id,
+		});
+
+		// Sanity: while A's install is active, A mints fine.
+		const before = await resolveExecutionAuth({
+			organizationId: orgA.id,
+			connectionId,
+			credentialDb: getDb(),
+		});
+		expect(before.credentials).not.toBeNull();
+		expect(spy.mintCalls).toHaveLength(1);
+
+		// Org B re-installs the SAME tenant → transfer: A's row is demoted to
+		// 'suspended', B gets a new active row. A's connection still points at A's
+		// now-suspended row.
+		const bInstall = await store.upsert({
+			organizationId: orgB.id,
+			provider: PROVIDER,
+			providerInstance: PROVIDER_INSTANCE,
+			providerAppId: "demo-app",
+			externalTenantId: "transfer-tenant",
+			status: "active",
+		});
+		expect(bInstall.id).not.toBe(aInstall.id);
+		const aAfter = await store.getById(aInstall.id);
+		expect(aAfter?.status).toBe("suspended");
+
+		// Now the losing org A resolves its connection → the install is suspended →
+		// NULL credentials and the provider is NEVER asked to mint again.
+		spy.mintCalls = [];
+		const after = await resolveExecutionAuth({
+			organizationId: orgA.id,
+			connectionId,
+			credentialDb: getDb(),
+		});
+		expect(after.credentials).toBeNull();
 		expect(spy.mintCalls).toHaveLength(0);
 	});
 

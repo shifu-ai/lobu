@@ -48,6 +48,15 @@ interface GitHubConfig {
   lookback_days?: number;
   labels_filter?: string[];
   env_overrides?: Record<string, unknown>;
+  /**
+   * `app_installations.id` when this connection is backed by the Lobu GitHub
+   * App (written by the install callback). Its presence — NOT the connector's
+   * static `webhook.delivery` — is what marks a connection as app-installation
+   * auth: webhook deliveries for those arrive on the shared App-level endpoint,
+   * so per-connection registerWebhook/unregisterWebhook are no-ops. OAuth/PAT
+   * connections carry no `installation_ref` and DO register per connection.
+   */
+  installation_ref?: number | string;
 }
 
 interface GitHubCheckpoint {
@@ -231,9 +240,44 @@ export default class GitHubConnector extends ConnectorRuntime {
       algorithm: 'sha256',
       signaturePrefix: 'sha256=',
       dedupeHeader: 'x-github-delivery',
+      // App-installation delivery: one App-level webhook is configured ONCE on
+      // the GitHub App (not per connection), and inbound deliveries route via
+      // the shared `/api/v1/app-webhooks/github` endpoint keyed on
+      // `installation.id`. In this mode registerWebhook/unregisterWebhook are
+      // no-ops (see those methods); per-connection hook creation is the
+      // OAuth/PAT fallback path's concern, gated by a configured repo/org target.
+      delivery: 'app_installation',
+      routingKeyPath: 'installation.id',
     },
     authSchema: {
+      // Precedence (design §4.5): app_installation (primary, org-scoped GitHub
+      // App) → oauth (user-scoped) → env_keys (deployment GITHUB_TOKEN fallback).
+      // The per-org oauth_app-profile requirement no longer applies to GitHub
+      // connect because app_installation is available — orgs install the App
+      // instead of hand-creating an OAuth app profile.
       methods: [
+        {
+          type: 'app_installation',
+          provider: 'github',
+          providerInstance: 'cloud',
+          appIdKey: 'GITHUB_APP_ID',
+          privateKeyKey: 'GITHUB_APP_PRIVATE_KEY',
+          // Install URL for the Lobu GitHub App. `{{app_slug}}` is substituted
+          // by the install UI from the configured App slug; the user picks the
+          // org/repos to grant during GitHub's install flow.
+          installUrlTemplate: 'https://github.com/apps/{{app_slug}}/installations/new',
+          // NOTE: this permissions array is METADATA ONLY (declares what the App
+          // needs; it does not grant anything). 'members' (Organization → Members:
+          // read) is required by the install-callback org-admin check
+          // (GET /user/memberships/orgs/{org}). The LIVE GitHub App must ALSO be
+          // granted Organization → Members → Read in its settings (out-of-band,
+          // user action) or every real org admin's membership lookup 403s.
+          permissions: ['issues', 'pull_requests', 'contents', 'metadata', 'discussions', 'members'],
+          events: ['issues', 'pull_request', 'issue_comment', 'discussion', 'discussion_comment'],
+          required: false,
+          description:
+            'Install the Lobu GitHub App on your org to grant tenant-scoped access (no per-connection token). Repo/issue/PR reads and write actions flow through the App installation.',
+        },
         {
           type: 'oauth',
           provider: 'github',
@@ -684,9 +728,38 @@ export default class GitHubConnector extends ConnectorRuntime {
     return null;
   }
 
+  /**
+   * Whether THIS connection resolves to GitHub App-installation auth — i.e. it
+   * was bound to an install row (`config.installation_ref`) or the gateway
+   * stamped an installation context onto the registration call. Gating the
+   * webhook no-op on this (not the connector's static `webhook.delivery`) is
+   * what keeps per-connection webhook registration working for the OAuth/PAT
+   * connections, which carry no installation_ref. App-backed connections get
+   * deliveries on the shared App-level endpoint instead, so there's no
+   * per-connection hook to create or tear down.
+   */
+  private isAppInstallationConnection(
+    ctx: WebhookRegistrationContext<GitHubConfig>
+  ): boolean {
+    if (ctx.installation) return true;
+    const ref = ctx.config?.installation_ref;
+    if (typeof ref === 'number') return Number.isFinite(ref);
+    if (typeof ref === 'string') return ref.trim().length > 0;
+    return false;
+  }
+
   async registerWebhook(
     ctx: WebhookRegistrationContext<GitHubConfig>
   ): Promise<WebhookRegistration> {
+    // App-installation auth: the App-level webhook is provisioned once at install
+    // time, not per connection — so register is a no-op FOR THIS CONNECTION. Gate
+    // on the connection's resolved auth (installation_ref / installation ctx), NOT
+    // the connector's static webhook.delivery, so OAuth/PAT connections still
+    // register their own per-connection hook below.
+    if (this.isAppInstallationConnection(ctx)) {
+      return { externalId: '', metadata: { delivery: 'app_installation', noop: true } };
+    }
+
     const token = this.resolveToken(ctx.credentials?.accessToken, ctx.config);
     if (!token) {
       throw new Error('GitHub webhook registration requires OAuth or GITHUB_TOKEN.');
@@ -725,6 +798,12 @@ export default class GitHubConnector extends ConnectorRuntime {
   }
 
   async unregisterWebhook(ctx: WebhookRegistrationContext<GitHubConfig>): Promise<void> {
+    // App-installation auth: nothing to tear down per connection — the App-level
+    // webhook is removed when the org uninstalls the App, not here. Gate on this
+    // connection's resolved auth, NOT the static webhook.delivery, so OAuth/PAT
+    // connections still tear down their own per-connection hook below.
+    if (this.isAppInstallationConnection(ctx)) return;
+
     const externalId = ctx.externalId;
     if (!externalId) return;
 

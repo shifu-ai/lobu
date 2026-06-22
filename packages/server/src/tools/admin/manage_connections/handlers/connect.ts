@@ -24,6 +24,7 @@ import {
   resolveConnectionVisibility,
 } from '../../helpers/connection-helpers';
 import { assertEntityIdsInOrg } from '../../helpers/db-helpers';
+import { rejectUnboundAppInstallationCreate } from '../../helpers/app-installation-guard';
 import { type FeedDefinition, splitConfigByFeedScope } from '../../helpers/feed-helpers';
 import { getScopedConnectorDefinition } from '../../connector-definition-helpers';
 import { buildConnectionsUrl } from '../../../../utils/url-builder';
@@ -68,6 +69,20 @@ export async function handleConnect(
       setup_url: buildSetupUrl({ install: args.connector_key }),
     };
   }
+
+  // Reject a direct connect of an UNBOUND app_installation connection (no
+  // installation_ref AND no other auth intent) — those are created only by the
+  // App install callback. Selection-aware: a connect that supplies an auth
+  // profile / app profile / env creds / managedBy resolves to a different method
+  // and is allowed through.
+  const appInstallGuard = rejectUnboundAppInstallationCreate({
+    authSchema: connector.auth_schema,
+    config: args.config,
+    connectorKey: args.connector_key,
+    authProfileSlug: args.auth_profile_slug,
+    appAuthProfileSlug: args.app_auth_profile_slug,
+  });
+  if (appInstallGuard) return appInstallGuard;
 
   const deviceBinding = await resolveDeviceBinding({
     organizationId,
