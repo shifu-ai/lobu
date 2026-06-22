@@ -35,6 +35,7 @@ const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
   'google_workspace_docs_read',
   'google_workspace_sheets_read',
 ];
+const SHIFU_TOOLBOX_DISCOVERY_TOOLS = ['meeting_search'];
 let executeToolDirectMock: ReturnType<typeof mock>;
 
 async function importMountedAgentRoutes() {
@@ -635,7 +636,10 @@ describe('Toolbox MCP execution routes', () => {
     );
 
     expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ status: 'ready', toolsDiscovered: [] });
+    await expect(res.json()).resolves.toEqual({
+      status: 'ready',
+      toolsDiscovered: SHIFU_TOOLBOX_DISCOVERY_TOOLS,
+    });
   });
 
   test('GET /mcp/connections/status maps unknown connections to not_connected', async () => {
@@ -714,6 +718,56 @@ describe('Toolbox MCP execution routes', () => {
       },
       status: 'active',
     });
+  });
+
+  test('POST /mcp/connections/materialize returns shifu_toolbox discovered tools when ready', async () => {
+    fakeAgents.set(SOURCE_AGENT_ID, {
+      agentId: SOURCE_AGENT_ID,
+      name: 'Source Agent',
+      owner: { platform: 'toolbox', userId: OWNER_USER_ID },
+      organizationId: ORG_ID,
+      createdAt: Date.now(),
+    });
+    fakeConnections.delete(CONNECTION_REF);
+    fakeConnections.set('owner-shifu-toolbox', {
+      id: 'owner-shifu-toolbox',
+      organizationId: ORG_ID,
+      agentId: SOURCE_AGENT_ID,
+      platform: 'shifu-toolbox',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'shifu-toolbox',
+        mcpId: 'shifu-toolbox',
+        authSource: 'lobu_oauth',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({
+      status: 'ready',
+      toolsDiscovered: SHIFU_TOOLBOX_DISCOVERY_TOOLS,
+    });
+    expect(body.lobuConnectionRef).toEqual(expect.any(String));
   });
 
   test('POST /mcp/connections/materialize accepts an existing deterministic Lobu OAuth row without materialized metadata', async () => {

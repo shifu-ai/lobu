@@ -663,6 +663,7 @@ function toolboxMcpMaterializeResult(
 }
 
 function toolboxMcpToolsDiscovered(connectorKey: ToolboxMcpStatusConnectorKey): string[] {
+  if (connectorKey === 'shifu_toolbox') return ['meeting_search'];
   if (!isToolboxMcpConnectorKey(connectorKey)) return [];
 
   return Array.from(
