@@ -41,6 +41,7 @@ const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
 ];
 const SHIFU_TOOLBOX_DISCOVERY_TOOLS = ['meeting_search'];
 let executeToolDirectMock: ReturnType<typeof mock>;
+let getHttpServerMock: ReturnType<typeof mock>;
 
 async function importMountedAgentRoutes() {
   const { toolboxMcpRoutes } = await import('../agent-routes.js');
@@ -123,9 +124,16 @@ describe('Toolbox MCP execution routes', () => {
       content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
       isError: false,
     }));
+    getHttpServerMock = mock(async () => ({
+      id: 'google_workspace',
+      upstreamUrl: 'https://mcp.test.local/google-workspace',
+    }));
     coreServicesStash.services = {
       getMcpProxy: () => ({
         executeToolDirect: executeToolDirectMock,
+      }),
+      getMcpConfigService: () => ({
+        getHttpServer: getHttpServerMock,
       }),
     };
   });
@@ -742,6 +750,73 @@ describe('Toolbox MCP execution routes', () => {
     });
   });
 
+  test('GET /mcp/connections/status returns mcp_server_missing when no executable MCP server is configured', async () => {
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: { credentialRef: 'lobu_secret_safe_ref' },
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        provider: 'google_workspace',
+        mcpId: 'google_workspace',
+        materializedFromConnectionRef: SOURCE_CONNECTION_REF,
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    getHttpServerMock.mockResolvedValueOnce(undefined);
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${MATERIALIZED_CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'error',
+      toolsDiscovered: [],
+      errorCode: 'mcp_server_missing',
+    });
+    expect(getHttpServerMock).toHaveBeenCalledWith('google_workspace', AGENT_ID);
+  });
+
+  test('GET /mcp/connections/status uses the connection ref fallback for executable MCP server lookup', async () => {
+    const connection = fakeConnections.get(CONNECTION_REF);
+    fakeConnections.delete(CONNECTION_REF);
+    fakeConnections.set(SOURCE_CONNECTION_REF, {
+      ...connection,
+      id: SOURCE_CONNECTION_REF,
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        provider: 'google_workspace',
+      },
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${SOURCE_CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'ready',
+      toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
+    });
+    expect(getHttpServerMock).toHaveBeenCalledWith(SOURCE_CONNECTION_REF, AGENT_ID);
+  });
+
   test('GET /mcp/connections/status accepts shifu_toolbox for shifu-toolbox materialized rows', async () => {
     const connectionRef = `toolbox-mcp:${createHash('sha256')
       .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu-toolbox']))
@@ -854,6 +929,32 @@ describe('Toolbox MCP execution routes', () => {
         materializedFromConnectionRef: SOURCE_CONNECTION_REF,
       },
       status: 'active',
+    });
+  });
+
+  test('POST /mcp/connections/materialize returns normal error shape when no executable MCP server is configured', async () => {
+    seedSourceConnectionForMaterialize();
+    getHttpServerMock.mockResolvedValueOnce(undefined);
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'error',
+      lobuConnectionRef: null,
+      errorCode: 'mcp_server_missing',
     });
   });
 

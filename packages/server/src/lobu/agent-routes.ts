@@ -386,6 +386,9 @@ type ToolboxMcpToolCallRequest = {
 };
 
 type ToolboxMcpConnectionStatus = 'ready' | 'needs_reauth' | 'not_connected' | 'error';
+type ToolboxMcpExecutableReadiness =
+  | { ok: true }
+  | { ok: false; errorCode: 'mcp_server_missing' };
 
 type ToolboxMcpConnectionMaterializeRequest = {
   ownerUserId?: unknown;
@@ -721,6 +724,25 @@ function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRe
   return fallbackRef;
 }
 
+async function verifyExecutableMcpServer(params: {
+  agentId: string;
+  fallbackMcpId: string;
+  connection?: StoredConnection;
+}): Promise<ToolboxMcpExecutableReadiness> {
+  const mcpId = mcpIdForConnection(params.connection, params.fallbackMcpId);
+  const mcpConfigService = getLobuCoreServices()?.getMcpConfigService?.();
+  if (!mcpConfigService?.getHttpServer) {
+    return { ok: false, errorCode: 'mcp_server_missing' };
+  }
+
+  const httpServer = await mcpConfigService.getHttpServer(mcpId, params.agentId);
+  if (!httpServer) {
+    return { ok: false, errorCode: 'mcp_server_missing' };
+  }
+
+  return { ok: true };
+}
+
 // ── Toolbox-scoped MCP execution ────────────────────────────────────────────
 
 async function runToolboxMcpOrgContext(c: any, next: any) {
@@ -952,7 +974,28 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     }
 
     if (match.connection.agentId === agentId) {
-      return c.json(toolboxMcpMaterializeResult('ready', match.connection.id, undefined, connectorKey));
+      const guard = await verifyAttachedMcpConnection({
+        ownerUserId,
+        agentId,
+        connectorKey,
+        connectionRef: match.connection.id,
+      });
+      if (guard.status !== 'ready') {
+        return c.json(toolboxMcpMaterializeResult(guard.status, null, undefined, connectorKey));
+      }
+
+      const executable = await verifyExecutableMcpServer({
+        agentId,
+        fallbackMcpId: match.connection.id,
+        connection: guard.connection,
+      });
+      if (!executable.ok) {
+        return c.json(toolboxMcpMaterializeResult('error', null, executable.errorCode));
+      }
+
+      return c.json(
+        toolboxMcpMaterializeResult('ready', match.connection.id, undefined, connectorKey)
+      );
     }
 
     const materialized = buildMaterializedMcpConnection({
@@ -990,6 +1033,15 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       return c.json(toolboxMcpMaterializeResult(guard.status, null, undefined, connectorKey));
     }
 
+    const executable = await verifyExecutableMcpServer({
+      agentId,
+      fallbackMcpId: materializedRef,
+      connection: guard.connection,
+    });
+    if (!executable.ok) {
+      return c.json(toolboxMcpMaterializeResult('error', null, executable.errorCode));
+    }
+
     return c.json(toolboxMcpMaterializeResult('ready', materializedRef, undefined, connectorKey));
   } catch {
     return c.json(
@@ -1016,13 +1068,30 @@ toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
   if (denied) return denied;
 
-  const { status } = await verifyAttachedMcpConnection({
+  const guard = await verifyAttachedMcpConnection({
     ownerUserId,
     agentId,
     connectorKey,
     connectionRef,
   });
-  return c.json(toolboxMcpStatusResult(status, connectorKey));
+  if (guard.status !== 'ready') {
+    return c.json(toolboxMcpStatusResult(guard.status, connectorKey));
+  }
+
+  const executable = await verifyExecutableMcpServer({
+    agentId,
+    fallbackMcpId: connectionRef,
+    connection: guard.connection,
+  });
+  if (!executable.ok) {
+    return c.json({
+      status: 'error',
+      toolsDiscovered: [],
+      errorCode: executable.errorCode,
+    });
+  }
+
+  return c.json(toolboxMcpStatusResult('ready', connectorKey));
 });
 
 routes.route('/', toolboxMcpRoutes);
