@@ -316,6 +316,7 @@ export class McpProxy {
     // authScope="user" here. For channel-scoped servers, fall back to
     // userId (still correct for the requesting user's personal credential).
     const scopeKey = this.computeScopeKey(httpServer, userId, undefined);
+    const sessionKey = this.buildSessionKey(agentId, mcpId, scopeKey);
 
     const jsonRpcBody = JSON.stringify({
       jsonrpc: "2.0",
@@ -325,7 +326,11 @@ export class McpProxy {
     });
 
     try {
-      const response = await this.sendUpstreamRequest(
+      if (!this.getSession(sessionKey)) {
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+      }
+
+      let response = await this.sendUpstreamRequest(
         httpServer,
         agentId,
         mcpId,
@@ -333,6 +338,20 @@ export class McpProxy {
         jsonRpcBody,
         scopeKey
       );
+      if (!response.ok && response.status === 404 && this.getSession(sessionKey)) {
+        await response.body?.cancel().catch(() => {
+          /* noop */
+        });
+        await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
+        response = await this.sendUpstreamRequest(
+          httpServer,
+          agentId,
+          mcpId,
+          "POST",
+          jsonRpcBody,
+          scopeKey
+        );
+      }
 
       if (!response.ok) {
         const text = await response.text();
