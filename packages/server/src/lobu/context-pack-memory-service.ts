@@ -178,11 +178,42 @@ function mapSaveContentError(error: unknown): never {
   );
 }
 
-function safeErrorInfo(error: unknown): { name?: string; message?: string } {
-  if (error instanceof Error) {
-    return { name: error.name, message: error.message };
+function safeStringField(value: unknown, fallback: string): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_.:-]{1,80}$/.test(value)) {
+    return fallback;
   }
-  return { message: String(error) };
+  return value;
+}
+
+function safeStatusField(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 100 || value > 599) {
+    return undefined;
+  }
+  return value;
+}
+
+function optionalObject(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};
+}
+
+export function sanitizeContextPackMemoryWarningError(error: unknown): {
+  name: string;
+  reason: 'error_thrown' | 'non_error_throw';
+  status?: number;
+  code?: string;
+} {
+  const errorRecord = optionalObject(error);
+  const status =
+    safeStatusField(errorRecord.status) ??
+    safeStatusField(errorRecord.statusCode) ??
+    safeStatusField(errorRecord.httpStatus);
+  const code = safeStringField(errorRecord.code, '');
+  return {
+    name: safeStringField(error instanceof Error ? error.name : errorRecord.name, 'Error'),
+    reason: error instanceof Error ? 'error_thrown' : 'non_error_throw',
+    ...(status !== undefined ? { status } : {}),
+    ...(code ? { code } : {}),
+  };
 }
 
 function safeMetadataId(metadata: Record<string, unknown>, key: string): string | null {
@@ -250,7 +281,7 @@ export async function writeContextPackMemory(
     } catch (error) {
       logger.warn(
         {
-          error: safeErrorInfo(error),
+          error: sanitizeContextPackMemoryWarningError(error),
           organizationId: input.organizationId,
           ownerUserId: parsed.ownerUserId,
           agentId: parsed.agentId,
@@ -304,7 +335,7 @@ export async function writeContextPackMemory(
     } catch (error) {
       logger.warn(
         {
-          error: safeErrorInfo(error),
+          error: sanitizeContextPackMemoryWarningError(error),
           organizationId: input.organizationId,
           ownerUserId: parsed.ownerUserId,
           agentId: parsed.agentId,

@@ -420,6 +420,30 @@ describe('writeContextPackMemory', () => {
     expect(args).not.toHaveProperty('embedding_model');
   });
 
+  test('sanitizes warning error metadata without arbitrary error messages', async () => {
+    const { sanitizeContextPackMemoryWarningError } = await import(
+      '../context-pack-memory-service.js'
+    );
+    const error = new Error(
+      'downstream body: # 超級AI個體 Project context Authorization: Bearer secret-token'
+    ) as Error & { status?: number; code?: string };
+    error.name = 'EmbeddingServiceError';
+    error.status = 502;
+    error.code = 'EMBEDDING_UPSTREAM_FAILED';
+
+    const sanitized = sanitizeContextPackMemoryWarningError(error);
+
+    expect(sanitized).toEqual({
+      name: 'EmbeddingServiceError',
+      reason: 'error_thrown',
+      status: 502,
+      code: 'EMBEDDING_UPSTREAM_FAILED',
+    });
+    expect(JSON.stringify(sanitized)).not.toContain('超級AI個體');
+    expect(JSON.stringify(sanitized)).not.toContain('secret-token');
+    expect(JSON.stringify(sanitized)).not.toContain('downstream body');
+  });
+
   test('enqueues embedding backfill after writing a context pack without inline embeddings', async () => {
     const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
     const backfillCalls: string[] = [];
@@ -479,6 +503,46 @@ describe('writeContextPackMemory', () => {
       semanticType: 'project_profile',
       agentId: AGENT_ID,
     });
+  });
+
+  test('keeps saveContent failures fatal when embeddings and backfill are non-fatal', async () => {
+    const { ContextPackMemoryError, writeContextPackMemory } = await import(
+      '../context-pack-memory-service.js'
+    );
+    const saveContentImpl = async () => {
+      throw new Error('database unavailable');
+    };
+    const generateEmbeddingsImpl = async () => {
+      throw new Error('embedding response body with sensitive content');
+    };
+    const enqueueEmbeddingBackfillImpl = async () => {
+      throw new Error('backfill queue unavailable');
+    };
+
+    try {
+      await writeContextPackMemory(
+        {
+          organizationId: ORG_ID,
+          ownerMemberRole: 'member',
+          authSource: 'pat',
+          scopes: ['mcp:admin'],
+          env: { EMBEDDINGS_SERVICE_URL: 'http://embeddings.test' } as never,
+          body: contextPackBody(),
+        },
+        {
+          saveContentImpl: saveContentImpl as never,
+          generateEmbeddingsImpl: generateEmbeddingsImpl as never,
+          enqueueEmbeddingBackfillImpl,
+        }
+      );
+      throw new Error('Expected writeContextPackMemory to reject');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContextPackMemoryError);
+      expect(error).toMatchObject({
+        errorCode: 'lobu_memory_write_failed',
+        httpStatus: 500,
+      });
+    }
   });
 
   test('rejects durable memory writes that return no event id', async () => {
