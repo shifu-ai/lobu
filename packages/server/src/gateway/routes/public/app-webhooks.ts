@@ -55,6 +55,16 @@ export interface AppWebhookTenant {
 }
 
 /**
+ * `events.title` / `events.source_url` for the landed row. Extracted per
+ * provider, not via a config JSON pointer: a comment's title lives on its parent
+ * subject, so where the title/url live varies by event type.
+ */
+export interface AppWebhookContent {
+	title?: string;
+	sourceUrl?: string;
+}
+
+/**
  * Per-provider verifier + tenant extractor. New providers (Slack, Jira) add a
  * plugin without touching the router — only GitHub ships in this PR.
  */
@@ -76,6 +86,8 @@ export interface AppWebhookProvider {
 	 * installation), in which case the router acks 200 without landing.
 	 */
 	extractTenant(rawBody: Uint8Array, headers: Headers): AppWebhookTenant | null;
+	/** Optional title/source_url for the landed row; omitted → empty fields. */
+	extractContent?(rawBody: Uint8Array, headers: Headers): AppWebhookContent;
 }
 
 /** Parse the raw JSON body once; returns undefined on malformed JSON. */
@@ -85,6 +97,52 @@ function parseJson(rawBody: Uint8Array): unknown {
 	} catch {
 		return undefined;
 	}
+}
+
+/** Narrow an unknown JSON node to a string field, or undefined. */
+function strField(node: unknown, key: string): string | undefined {
+	if (node === null || typeof node !== "object") return undefined;
+	const value = (node as Record<string, unknown>)[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Project a GitHub webhook payload to a human title + source url.
+ *
+ * GitHub event payloads put the subject under one of a handful of top-level
+ * keys, each with `title` + `html_url`:
+ *   - `issues`         → `issue.{title,html_url}`
+ *   - `pull_request`   → `pull_request.{title,html_url}`
+ *   - `discussion`     → `discussion.{title,html_url}`
+ * Comment events (`issue_comment`, `pull_request_review_comment`,
+ * `discussion_comment`, `commit_comment`) carry the comment under `comment`
+ * (whose `html_url` deep-links the comment) AND the parent subject alongside it
+ * (`issue`/`pull_request`/`discussion`) — the title belongs to the PARENT, so
+ * we read the title from the parent and prefer the comment's own `html_url`.
+ * Falls back across keys so a new comment-bearing event still lands a title.
+ */
+export function extractGithubWebhookContent(rawBody: Uint8Array): AppWebhookContent {
+	const body = parseJson(rawBody);
+	if (body === null || typeof body !== "object") return {};
+	const root = body as Record<string, unknown>;
+
+	// The subject the title comes from: a comment's parent, else the subject
+	// itself. Order matters only for the parent lookup — a payload has exactly
+	// one of these for a given event.
+	const subject =
+		root.issue ?? root.pull_request ?? root.discussion ?? root.release;
+	const comment = root.comment;
+
+	const title = strField(subject, "title");
+	// Prefer the comment's deep link when this is a comment event; else the
+	// subject's own url.
+	const sourceUrl =
+		strField(comment, "html_url") ?? strField(subject, "html_url");
+
+	const content: AppWebhookContent = {};
+	if (title) content.title = title;
+	if (sourceUrl) content.sourceUrl = sourceUrl;
+	return content;
 }
 
 /**
@@ -99,6 +157,10 @@ function parseJson(rawBody: Uint8Array): unknown {
  * is the receiving GitHub App (`GITHUB_APP_ID`), and the instance is 'cloud'
  * (GHES would be the host — out of scope here). A delivery with no
  * `installation.id` (rare app-level events) has no tenant to route to → null.
+ *
+ * Content: issue/PR/discussion title + html_url (a comment's title is its
+ * parent's; its url is the comment deep-link) populate `events.title` +
+ * `events.source_url` so the landed row is legible without digging payload_data.
  */
 export function createGithubAppWebhookProvider(options: {
 	/** Receiving GitHub App id, stamped as `provider_app_id`. */
@@ -130,6 +192,9 @@ export function createGithubAppWebhookProvider(options: {
 				providerAppId: options.appId,
 				externalTenantId,
 			};
+		},
+		extractContent(rawBody) {
+			return extractGithubWebhookContent(rawBody);
 		},
 	};
 }
@@ -287,12 +352,20 @@ export function createAppWebhookRoutes(deps: AppWebhookRouterDeps): Hono {
 			body: rawBody,
 		});
 
+		// Project the delivery to a human title + source url for the landed row.
+		// Optional per provider; a miss leaves the row's title/source_url empty
+		// (the prior behaviour) rather than failing the delivery.
+		const content = provider.extractContent?.(rawBody, c.req.raw.headers);
+
 		try {
 			return await handleWebhookIngest(
 				synthesized,
 				ingestRequest,
 				deps.secretStore,
 				c.var.peerRemoteAddress,
+				content
+					? { title: content.title, sourceUrl: content.sourceUrl }
+					: undefined,
 			);
 		} catch (error) {
 			logger.error(
