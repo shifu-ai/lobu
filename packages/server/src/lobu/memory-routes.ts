@@ -14,6 +14,7 @@ import { createPostgresAgentConfigStore } from './stores/postgres-stores';
 const memoryRoutes = new Hono<{ Bindings: Env }>();
 const configStore = createPostgresAgentConfigStore();
 type MemoryContext = Context<{ Bindings: Env }>;
+const LOG_SAFE_METADATA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 
 function memoryError(
   errorCode: string,
@@ -44,9 +45,21 @@ function authSourceFromContext(c: MemoryContext): 'session' | 'pat' | 'oauth' | 
   return null;
 }
 
-function safeMetadataId(metadata: Record<string, unknown>, key: string): string | null {
+function safeMetadataId(metadata: Record<string, unknown>, key: string): string | undefined {
   const value = metadata[key];
-  return typeof value === 'string' && value.length <= 200 ? value : null;
+  return typeof value === 'string' && LOG_SAFE_METADATA_ID_PATTERN.test(value) ? value : undefined;
+}
+
+function safeMetadataLogIds(metadata: Record<string, unknown>): {
+  contextPackId?: string;
+  discoveryRunId?: string;
+} {
+  const contextPackId = safeMetadataId(metadata, 'contextPackId');
+  const discoveryRunId = safeMetadataId(metadata, 'discoveryRunId');
+  return {
+    ...(contextPackId !== undefined ? { contextPackId } : {}),
+    ...(discoveryRunId !== undefined ? { discoveryRunId } : {}),
+  };
 }
 
 function routeLogContext(
@@ -64,8 +77,7 @@ function routeLogContext(
     organizationId: input.organizationId ?? null,
     ownerUserId: input.ownerUserId ?? null,
     agentId: input.agentId ?? null,
-    contextPackId: safeMetadataId(metadata, 'contextPackId'),
-    discoveryRunId: safeMetadataId(metadata, 'discoveryRunId'),
+    ...safeMetadataLogIds(metadata),
     durationMs: Date.now() - startedAt,
     ...(input.errorCode ? { errorCode: input.errorCode } : {}),
   };

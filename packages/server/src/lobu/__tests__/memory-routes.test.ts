@@ -13,6 +13,7 @@ import {
 } from './helpers/route-test-mocks.js';
 import { orgContext } from '../stores/org-context.js';
 import { getWorkspaceRole } from '../../utils/organization-access.js';
+import logger from '../../utils/logger.js';
 
 const ORG_ID = 'org-memory';
 const OWNER_USER_ID = 'user-owner';
@@ -278,6 +279,48 @@ describe('Toolbox context pack memory route', () => {
       errorMessage: 'source must be toolbox_onboarding',
     });
   });
+
+  test('omits unsafe metadata ids from route log context', async () => {
+    const app = await importMountedMemoryRoutes();
+    const capturedLogs: unknown[] = [];
+    const mutableLogger = logger as unknown as {
+      info: (payload: unknown, message?: string) => unknown;
+    };
+    const originalInfo = mutableLogger.info;
+    mutableLogger.info = (payload: unknown, message?: string) => {
+      if (message === '[MemoryRoutes] context pack memory write started') {
+        capturedLogs.push(payload);
+      }
+    };
+
+    try {
+      const res = await app.request('/lobu/api/v1/memory/context-packs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(
+          contextPackBody({
+            metadata: {
+              source: 'toolbox_onboarding',
+              contextPackId: 'ctx-001\nAuthorization: Bearer secret-token',
+              discoveryRunId: '{"raw":"Project context"}',
+            },
+          })
+        ),
+      });
+      if (res.status !== 200) {
+        throw new Error(await res.text());
+      }
+    } finally {
+      mutableLogger.info = originalInfo;
+    }
+
+    const firstLog = capturedLogs[0] as Record<string, unknown> | undefined;
+    expect(firstLog).toBeDefined();
+    expect(firstLog).not.toHaveProperty('contextPackId');
+    expect(firstLog).not.toHaveProperty('discoveryRunId');
+    expect(JSON.stringify(firstLog)).not.toContain('secret-token');
+    expect(JSON.stringify(firstLog)).not.toContain('Project context');
+  });
 });
 
 describe('writeContextPackMemory', () => {
@@ -442,6 +485,62 @@ describe('writeContextPackMemory', () => {
     expect(JSON.stringify(sanitized)).not.toContain('超級AI個體');
     expect(JSON.stringify(sanitized)).not.toContain('secret-token');
     expect(JSON.stringify(sanitized)).not.toContain('downstream body');
+  });
+
+  test('omits unsafe metadata ids from service warning log context', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const capturedLogs: unknown[] = [];
+    const mutableLogger = logger as unknown as {
+      warn: (payload: unknown, message?: string) => unknown;
+    };
+    const originalWarn = mutableLogger.warn;
+    mutableLogger.warn = (payload: unknown, message?: string) => {
+      if (
+        message ===
+        '[ContextPackMemory] Inline embedding generation failed; continuing without embedding'
+      ) {
+        capturedLogs.push(payload);
+      }
+    };
+    const saveContentImpl = async () => ({
+      id: 128,
+      semantic_type: 'project_profile',
+    });
+    const generateEmbeddingsImpl = async () => {
+      throw new Error('embedding failed');
+    };
+
+    try {
+      await writeContextPackMemory(
+        {
+          organizationId: ORG_ID,
+          ownerMemberRole: 'member',
+          authSource: 'pat',
+          scopes: ['mcp:admin'],
+          env: { EMBEDDINGS_SERVICE_URL: 'http://embeddings.test' } as never,
+          body: contextPackBody({
+            metadata: {
+              source: 'toolbox_onboarding',
+              contextPackId: 'ctx-001\nAuthorization: Bearer secret-token',
+              discoveryRunId: '{"raw":"Project context"}',
+            },
+          }),
+        },
+        {
+          saveContentImpl: saveContentImpl as never,
+          generateEmbeddingsImpl: generateEmbeddingsImpl as never,
+        }
+      );
+    } finally {
+      mutableLogger.warn = originalWarn;
+    }
+
+    const firstLog = capturedLogs[0] as Record<string, unknown> | undefined;
+    expect(firstLog).toBeDefined();
+    expect(firstLog).not.toHaveProperty('contextPackId');
+    expect(firstLog).not.toHaveProperty('discoveryRunId');
+    expect(JSON.stringify(firstLog)).not.toContain('secret-token');
+    expect(JSON.stringify(firstLog)).not.toContain('Project context');
   });
 
   test('enqueues embedding backfill after writing a context pack without inline embeddings', async () => {

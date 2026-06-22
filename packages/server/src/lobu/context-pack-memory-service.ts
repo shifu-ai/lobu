@@ -13,6 +13,7 @@ const MAX_CONTENT_LENGTH = 200_000;
 const MAX_METADATA_JSON_LENGTH = 64_000;
 const DEFAULT_SEMANTIC_TYPE = 'project_profile';
 const TOOLBOX_ONBOARDING_SOURCE = 'toolbox_onboarding';
+const LOG_SAFE_METADATA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 
 export type ContextPackMemoryErrorCode =
   | 'lobu_memory_invalid_request'
@@ -216,9 +217,21 @@ export function sanitizeContextPackMemoryWarningError(error: unknown): {
   };
 }
 
-function safeMetadataId(metadata: Record<string, unknown>, key: string): string | null {
+function safeMetadataId(metadata: Record<string, unknown>, key: string): string | undefined {
   const value = metadata[key];
-  return typeof value === 'string' && value.length <= 200 ? value : null;
+  return typeof value === 'string' && LOG_SAFE_METADATA_ID_PATTERN.test(value) ? value : undefined;
+}
+
+function safeMetadataLogIds(metadata: Record<string, unknown>): {
+  contextPackId?: string;
+  discoveryRunId?: string;
+} {
+  const contextPackId = safeMetadataId(metadata, 'contextPackId');
+  const discoveryRunId = safeMetadataId(metadata, 'discoveryRunId');
+  return {
+    ...(contextPackId !== undefined ? { contextPackId } : {}),
+    ...(discoveryRunId !== undefined ? { discoveryRunId } : {}),
+  };
 }
 
 export async function writeContextPackMemory(
@@ -285,8 +298,7 @@ export async function writeContextPackMemory(
           organizationId: input.organizationId,
           ownerUserId: parsed.ownerUserId,
           agentId: parsed.agentId,
-          contextPackId: safeMetadataId(parsed.metadata, 'contextPackId'),
-          discoveryRunId: safeMetadataId(parsed.metadata, 'discoveryRunId'),
+          ...safeMetadataLogIds(parsed.metadata),
         },
         '[ContextPackMemory] Inline embedding generation failed; continuing without embedding'
       );
@@ -339,9 +351,8 @@ export async function writeContextPackMemory(
           organizationId: input.organizationId,
           ownerUserId: parsed.ownerUserId,
           agentId: parsed.agentId,
-          contextPackId: safeMetadataId(parsed.metadata, 'contextPackId'),
-          discoveryRunId: safeMetadataId(parsed.metadata, 'discoveryRunId'),
           eventId,
+          ...safeMetadataLogIds(parsed.metadata),
         },
         '[ContextPackMemory] Failed to enqueue embedding backfill'
       );
