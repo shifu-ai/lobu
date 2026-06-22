@@ -255,6 +255,29 @@ describe('Toolbox context pack memory route', () => {
       errorMessage: 'ownerUserId is not a member of this organization',
     });
   });
+
+  test('rejects invalid metadata source before writing memory', async () => {
+    const app = await importMountedMemoryRoutes();
+
+    const res = await app.request('/lobu/api/v1/memory/context-packs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        contextPackBody({
+          metadata: {
+            source: 'manual_upload',
+          },
+        })
+      ),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'lobu_memory_invalid_request',
+      errorMessage: 'source must be toolbox_onboarding',
+    });
+  });
 });
 
 describe('writeContextPackMemory', () => {
@@ -289,7 +312,9 @@ describe('writeContextPackMemory', () => {
       viewUrl: 'https://app.example.test/events/123',
     });
     expect(calls).toHaveLength(1);
-    const [args, _env, ctx] = calls[0]!;
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error('Expected saveContentImpl to be called');
+    const [args, _env, ctx] = firstCall;
     expect(args).toMatchObject({
       semantic_type: 'project_profile',
       title: '超級AI個體 onboarding context pack',
@@ -343,11 +368,56 @@ describe('writeContextPackMemory', () => {
       }
     );
 
-    const [args] = calls[0]!;
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error('Expected saveContentImpl to be called');
+    const [args] = firstCall;
     expect(args).toMatchObject({
       embedding: generatedEmbedding,
       embedding_model: 'Xenova/bge-base-en-v1.5',
     });
+  });
+
+  test('returns durable refs when inline embedding generation fails after saveContent can succeed', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const calls: unknown[][] = [];
+    const saveContentImpl = async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        id: 126,
+        semantic_type: 'project_profile',
+      };
+    };
+    const generateEmbeddingsImpl = async () => {
+      throw new Error('embedding service unavailable');
+    };
+
+    const result = await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        env: { EMBEDDINGS_SERVICE_URL: 'http://embeddings.test' } as never,
+        body: contextPackBody(),
+      },
+      {
+        saveContentImpl: saveContentImpl as never,
+        generateEmbeddingsImpl: generateEmbeddingsImpl as never,
+      }
+    );
+
+    expect(result).toMatchObject({
+      refs: ['lobu:event:126'],
+      eventId: 126,
+      semanticType: 'project_profile',
+      agentId: AGENT_ID,
+    });
+    expect(calls).toHaveLength(1);
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error('Expected saveContentImpl to be called');
+    const [args] = firstCall;
+    expect(args).not.toHaveProperty('embedding');
+    expect(args).not.toHaveProperty('embedding_model');
   });
 
   test('enqueues embedding backfill after writing a context pack without inline embeddings', async () => {
@@ -377,6 +447,38 @@ describe('writeContextPackMemory', () => {
     );
 
     expect(backfillCalls).toEqual([ORG_ID]);
+  });
+
+  test('returns durable refs when embedding backfill enqueue fails after saveContent succeeds', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const saveContentImpl = async () => ({
+      id: 127,
+      semantic_type: 'project_profile',
+    });
+    const enqueueEmbeddingBackfillImpl = async () => {
+      throw new Error('backfill queue unavailable');
+    };
+
+    const result = await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        body: contextPackBody(),
+      },
+      {
+        saveContentImpl: saveContentImpl as never,
+        enqueueEmbeddingBackfillImpl,
+      }
+    );
+
+    expect(result).toMatchObject({
+      refs: ['lobu:event:127'],
+      eventId: 127,
+      semanticType: 'project_profile',
+      agentId: AGENT_ID,
+    });
   });
 
   test('rejects durable memory writes that return no event id', async () => {

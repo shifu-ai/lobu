@@ -178,6 +178,18 @@ function mapSaveContentError(error: unknown): never {
   );
 }
 
+function safeErrorInfo(error: unknown): { name?: string; message?: string } {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message };
+  }
+  return { message: String(error) };
+}
+
+function safeMetadataId(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === 'string' && value.length <= 200 ? value : null;
+}
+
 export async function writeContextPackMemory(
   input: {
     organizationId: string;
@@ -232,8 +244,22 @@ export async function writeContextPackMemory(
   const generateEmbeddingsImpl = deps.generateEmbeddingsImpl ?? generateEmbeddings;
   let embedding: number[] | undefined;
   if (env.EMBEDDINGS_SERVICE_URL) {
-    const embeddings = await generateEmbeddingsImpl([parsed.content], env);
-    embedding = embeddings[0];
+    try {
+      const embeddings = await generateEmbeddingsImpl([parsed.content], env);
+      embedding = embeddings[0];
+    } catch (error) {
+      logger.warn(
+        {
+          error: safeErrorInfo(error),
+          organizationId: input.organizationId,
+          ownerUserId: parsed.ownerUserId,
+          agentId: parsed.agentId,
+          contextPackId: safeMetadataId(parsed.metadata, 'contextPackId'),
+          discoveryRunId: safeMetadataId(parsed.metadata, 'discoveryRunId'),
+        },
+        '[ContextPackMemory] Inline embedding generation failed; continuing without embedding'
+      );
+    }
   }
   let saved: Awaited<ReturnType<SaveContentImpl>>;
   try {
@@ -277,7 +303,15 @@ export async function writeContextPackMemory(
       await enqueueEmbeddingBackfillImpl(input.organizationId);
     } catch (error) {
       logger.warn(
-        { error, organizationId: input.organizationId, eventId },
+        {
+          error: safeErrorInfo(error),
+          organizationId: input.organizationId,
+          ownerUserId: parsed.ownerUserId,
+          agentId: parsed.agentId,
+          contextPackId: safeMetadataId(parsed.metadata, 'contextPackId'),
+          discoveryRunId: safeMetadataId(parsed.metadata, 'discoveryRunId'),
+          eventId,
+        },
         '[ContextPackMemory] Failed to enqueue embedding backfill'
       );
     }

@@ -1,7 +1,8 @@
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { hasRequiredMcpScope } from '../auth/tool-access';
 import { getDb } from '../db/client';
 import type { Env } from '../index';
+import logger from '../utils/logger';
 import { getWorkspaceRole } from '../utils/organization-access';
 import {
   ContextPackMemoryError,
@@ -12,6 +13,7 @@ import { createPostgresAgentConfigStore } from './stores/postgres-stores';
 
 const memoryRoutes = new Hono<{ Bindings: Env }>();
 const configStore = createPostgresAgentConfigStore();
+type MemoryContext = Context<{ Bindings: Env }>;
 
 function memoryError(
   errorCode: string,
@@ -27,7 +29,7 @@ function memoryStatus(status: number): 400 | 401 | 403 | 422 | 500 {
   return 400;
 }
 
-function scopesFromContext(c: any): string[] | null {
+function scopesFromContext(c: MemoryContext): string[] | null {
   const authInfo = c.get('mcpAuthInfo');
   return Array.isArray(authInfo?.scopes) ? authInfo.scopes : null;
 }
@@ -36,17 +38,49 @@ function hasAdminScope(scopes: string[] | null): boolean {
   return Array.isArray(scopes) && scopes.includes('mcp:admin');
 }
 
-function authSourceFromContext(c: any): 'session' | 'pat' | 'oauth' | null {
+function authSourceFromContext(c: MemoryContext): 'session' | 'pat' | 'oauth' | null {
   const source = c.get('authSource');
   if (source === 'session' || source === 'pat' || source === 'oauth') return source;
   return null;
 }
 
+function safeMetadataId(metadata: Record<string, unknown>, key: string): string | null {
+  const value = metadata[key];
+  return typeof value === 'string' && value.length <= 200 ? value : null;
+}
+
+function routeLogContext(
+  startedAt: number,
+  input: {
+    organizationId?: string | null;
+    ownerUserId?: string | null;
+    agentId?: string | null;
+    metadata?: Record<string, unknown> | null;
+    errorCode?: string;
+  }
+) {
+  const metadata = input.metadata ?? {};
+  return {
+    organizationId: input.organizationId ?? null,
+    ownerUserId: input.ownerUserId ?? null,
+    agentId: input.agentId ?? null,
+    contextPackId: safeMetadataId(metadata, 'contextPackId'),
+    discoveryRunId: safeMetadataId(metadata, 'discoveryRunId'),
+    durationMs: Date.now() - startedAt,
+    ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+  };
+}
+
 memoryRoutes.post('/context-packs', async (c) => {
+  const startedAt = Date.now();
   let body: unknown;
   try {
     body = await c.req.json();
   } catch {
+    logger.warn(
+      routeLogContext(startedAt, { errorCode: 'lobu_memory_invalid_request' }),
+      '[MemoryRoutes] context pack memory write failed'
+    );
     return c.json(
       memoryError('lobu_memory_invalid_request', 'Invalid JSON body'),
       400
@@ -58,13 +92,43 @@ memoryRoutes.post('/context-packs', async (c) => {
     parsed = parseContextPackMemoryRequest(body);
   } catch (error) {
     if (error instanceof ContextPackMemoryError) {
+      logger.warn(
+        routeLogContext(startedAt, { errorCode: error.errorCode }),
+        '[MemoryRoutes] context pack memory write failed'
+      );
       return c.json(memoryError(error.errorCode, error.message), memoryStatus(error.httpStatus));
     }
+    logger.warn(
+      routeLogContext(startedAt, { errorCode: 'lobu_memory_invalid_request' }),
+      '[MemoryRoutes] context pack memory write failed'
+    );
     return c.json(memoryError('lobu_memory_invalid_request', 'Invalid request body'), 400);
   }
 
   const organizationId = c.get('organizationId');
+  const logParsedFailure = (errorCode: string) => {
+    logger.warn(
+      routeLogContext(startedAt, {
+        organizationId,
+        ownerUserId: parsed.ownerUserId,
+        agentId: parsed.agentId,
+        metadata: parsed.metadata,
+        errorCode,
+      }),
+      '[MemoryRoutes] context pack memory write failed'
+    );
+  };
+  logger.info(
+    routeLogContext(startedAt, {
+      organizationId,
+      ownerUserId: parsed.ownerUserId,
+      agentId: parsed.agentId,
+      metadata: parsed.metadata,
+    }),
+    '[MemoryRoutes] context pack memory write started'
+  );
   if (!organizationId) {
+    logParsedFailure('lobu_memory_unauthorized');
     return c.json(
       memoryError('lobu_memory_unauthorized', 'Organization context is required'),
       401
@@ -76,6 +140,7 @@ memoryRoutes.post('/context-packs', async (c) => {
   const scopes = scopesFromContext(c);
   if (authSource === 'session') {
     if (user?.id !== parsed.ownerUserId) {
+      logParsedFailure('lobu_memory_write_forbidden');
       return c.json(
         memoryError('lobu_memory_write_forbidden', 'This route requires an owner session'),
         403
@@ -83,9 +148,11 @@ memoryRoutes.post('/context-packs', async (c) => {
     }
   } else if (authSource === 'pat' || authSource === 'oauth') {
     if (!user?.id) {
+      logParsedFailure('lobu_memory_unauthorized');
       return c.json(memoryError('lobu_memory_unauthorized', 'Authentication required'), 401);
     }
     if (!hasRequiredMcpScope('write', scopes)) {
+      logParsedFailure('lobu_memory_write_forbidden');
       return c.json(
         memoryError(
           'lobu_memory_write_forbidden',
@@ -95,6 +162,7 @@ memoryRoutes.post('/context-packs', async (c) => {
       );
     }
     if (!hasAdminScope(scopes) && user.id !== parsed.ownerUserId) {
+      logParsedFailure('lobu_memory_write_forbidden');
       return c.json(
         memoryError(
           'lobu_memory_write_forbidden',
@@ -104,18 +172,39 @@ memoryRoutes.post('/context-packs', async (c) => {
       );
     }
   } else {
+    logParsedFailure('lobu_memory_unauthorized');
     return c.json(memoryError('lobu_memory_unauthorized', 'Authentication required'), 401);
   }
 
   const agentMetadata = await configStore.getMetadata(parsed.agentId);
+  logger.info(
+    routeLogContext(startedAt, {
+      organizationId,
+      ownerUserId: parsed.ownerUserId,
+      agentId: parsed.agentId,
+      metadata: parsed.metadata,
+    }),
+    '[MemoryRoutes] context pack memory agent metadata checked'
+  );
   if (!agentMetadata || agentMetadata.owner?.userId !== parsed.ownerUserId) {
+    logParsedFailure('lobu_memory_write_forbidden');
     return c.json(
       memoryError('lobu_memory_write_forbidden', 'Agent is not owned by ownerUserId'),
       403
     );
   }
   const ownerMemberRole = await getWorkspaceRole(getDb(), organizationId, parsed.ownerUserId);
+  logger.info(
+    routeLogContext(startedAt, {
+      organizationId,
+      ownerUserId: parsed.ownerUserId,
+      agentId: parsed.agentId,
+      metadata: parsed.metadata,
+    }),
+    '[MemoryRoutes] context pack memory owner role checked'
+  );
   if (!ownerMemberRole) {
+    logParsedFailure('lobu_memory_write_forbidden');
     return c.json(
       memoryError('lobu_memory_write_forbidden', 'ownerUserId is not a member of this organization'),
       403
@@ -132,6 +221,15 @@ memoryRoutes.post('/context-packs', async (c) => {
       env: c.env,
       body: parsed,
     });
+    logger.info(
+      routeLogContext(startedAt, {
+        organizationId,
+        ownerUserId: parsed.ownerUserId,
+        agentId: parsed.agentId,
+        metadata: parsed.metadata,
+      }),
+      '[MemoryRoutes] context pack memory write done'
+    );
     return c.json({
       ok: true,
       refs: result.refs,
@@ -144,8 +242,10 @@ memoryRoutes.post('/context-packs', async (c) => {
     });
   } catch (error) {
     if (error instanceof ContextPackMemoryError) {
+      logParsedFailure(error.errorCode);
       return c.json(memoryError(error.errorCode, error.message), memoryStatus(error.httpStatus));
     }
+    logParsedFailure('lobu_memory_write_failed');
     return c.json(
       memoryError('lobu_memory_write_failed', 'Failed to write context pack memory'),
       500
