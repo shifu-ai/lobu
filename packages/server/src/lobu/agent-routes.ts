@@ -318,21 +318,33 @@ function requireSessionOrMcpExecutionPat(c: any, ownerUserId: string): Response 
   return c.json({ error: 'Authentication required' }, 401);
 }
 
-const TOOLBOX_DISCOVERY_TOOL_ALLOWLIST: Record<ToolboxMcpConnectorKey, ReadonlySet<string>> = {
-  google_workspace: new Set(['drive_search', 'docs_read', 'sheets_read']),
-  notion: new Set(['search', 'read_page', 'read_database']),
-};
-
-const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<ToolboxMcpConnectorKey, Record<string, string>> = {
+const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<
+  ToolboxMcpStatusConnectorKey,
+  Record<string, string>
+> = {
   google_workspace: {
-    google_workspace_drive_search: 'drive_search',
-    google_workspace_docs_read: 'docs_read',
-    google_workspace_sheets_read: 'sheets_read',
+    drive_search: 'gws_drive_search',
+    google_workspace_drive_search: 'gws_drive_search',
+    gws_drive_search: 'gws_drive_search',
+    docs_read: 'gws_docs_read',
+    google_workspace_docs_read: 'gws_docs_read',
+    gws_docs_read: 'gws_docs_read',
+    sheets_read: 'gws_sheets_read',
+    google_workspace_sheets_read: 'gws_sheets_read',
+    gws_sheets_read: 'gws_sheets_read',
   },
   notion: {
-    notion_search: 'search',
-    notion_read_page: 'read_page',
-    notion_read_database: 'read_database',
+    search: 'notion-search',
+    notion_search: 'notion-search',
+    'notion-search': 'notion-search',
+    read_page: 'notion-fetch',
+    notion_read_page: 'notion-fetch',
+    'notion-fetch': 'notion-fetch',
+    read_database: 'notion-fetch',
+    notion_read_database: 'notion-fetch',
+  },
+  shifu_toolbox: {
+    meeting_search: 'meeting_search',
   },
 };
 
@@ -348,19 +360,17 @@ const SAFE_TOOL_DIAGNOSTIC_CODES = new Set([
 ]);
 
 function normalizeToolboxDiscoveryToolName(
-  connectorKey: ToolboxMcpConnectorKey,
+  connectorKey: ToolboxMcpStatusConnectorKey,
   toolName: string
 ): string {
   return TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey][toolName] ?? toolName;
 }
 
 function isToolboxDiscoveryToolAllowed(
-  connectorKey: ToolboxMcpConnectorKey,
+  connectorKey: ToolboxMcpStatusConnectorKey,
   toolName: string
 ): boolean {
-  return TOOLBOX_DISCOVERY_TOOL_ALLOWLIST[connectorKey].has(
-    normalizeToolboxDiscoveryToolName(connectorKey, toolName)
-  );
+  return Object.hasOwn(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey], toolName);
 }
 
 type ToolboxMcpConnectorKey = 'notion' | 'google_workspace';
@@ -663,15 +673,7 @@ function toolboxMcpMaterializeResult(
 }
 
 function toolboxMcpToolsDiscovered(connectorKey: ToolboxMcpStatusConnectorKey): string[] {
-  if (connectorKey === 'shifu_toolbox') return ['meeting_search'];
-  if (!isToolboxMcpConnectorKey(connectorKey)) return [];
-
-  return Array.from(
-    new Set([
-      ...TOOLBOX_DISCOVERY_TOOL_ALLOWLIST[connectorKey],
-      ...Object.keys(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey]),
-    ])
-  );
+  return Object.keys(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey]);
 }
 
 function toolboxMcpStatusResult(

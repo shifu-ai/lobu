@@ -19,6 +19,7 @@ const OWNER_USER_ID = 'user-agent-001';
 const AGENT_ID = 'pm-agent';
 const SOURCE_AGENT_ID = 'source-agent';
 const CONNECTION_REF = 'google_workspace';
+const NOTION_CONNECTION_REF = 'notion';
 const SOURCE_CONNECTION_REF = 'owner-google-workspace';
 const MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256')
   .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'google_workspace']))
@@ -29,11 +30,14 @@ const OTHER_ORG_MATERIALIZED_CONNECTION_REF = `toolbox-mcp:${createHash('sha256'
   .digest('hex')}`;
 const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
   'drive_search',
-  'docs_read',
-  'sheets_read',
   'google_workspace_drive_search',
+  'gws_drive_search',
+  'docs_read',
   'google_workspace_docs_read',
+  'gws_docs_read',
+  'sheets_read',
   'google_workspace_sheets_read',
+  'gws_sheets_read',
 ];
 const SHIFU_TOOLBOX_DISCOVERY_TOOLS = ['meeting_search'];
 let executeToolDirectMock: ReturnType<typeof mock>;
@@ -154,7 +158,7 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       CONNECTION_REF,
-      'drive_search',
+      'gws_drive_search',
       { query: '"技術分析全攻略課程"', limit: 10 }
     );
   });
@@ -184,8 +188,95 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       CONNECTION_REF,
-      'drive_search',
+      'gws_drive_search',
       { query: 'course', limit: 5 }
+    );
+  });
+
+  test('POST /mcp/tools/call maps Google Workspace discovery aliases to the upstream MCP tool name', async () => {
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        mcpId: 'google_workspace',
+        source: 'toolbox-personal-agent-materialized',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: MATERIALIZED_CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: '大h line bot sheet', limit: 5 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'google_workspace',
+      'gws_drive_search',
+      { query: '大h line bot sheet', limit: 5 }
+    );
+  });
+
+  test('POST /mcp/tools/call maps Notion database read aliases to the upstream MCP tool name', async () => {
+    fakeConnections.set(NOTION_CONNECTION_REF, {
+      id: NOTION_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'notion',
+      config: {},
+      settings: {},
+      metadata: { ownerUserId: OWNER_USER_ID },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'notion',
+        connectionRef: NOTION_CONNECTION_REF,
+        toolName: 'notion_read_database',
+        args: { databaseId: 'db-001' },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      NOTION_CONNECTION_REF,
+      'notion-fetch',
+      { databaseId: 'db-001' }
     );
   });
 
@@ -225,7 +316,7 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       CONNECTION_REF,
-      'drive_search',
+      'gws_drive_search',
       { query: 'test', limit: 1 }
     );
   });
@@ -299,7 +390,7 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       CONNECTION_REF,
-      'drive_search',
+      'gws_drive_search',
       { query: 'test', limit: 1 }
     );
   });
@@ -392,7 +483,7 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       CONNECTION_REF,
-      'drive_search',
+      'gws_drive_search',
       { query: 'course', limit: 5 }
     );
   });
@@ -427,7 +518,7 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       CONNECTION_REF,
-      'docs_read',
+      'gws_docs_read',
       { documentId: 'doc-001' }
     );
   });
@@ -472,7 +563,7 @@ describe('Toolbox MCP execution routes', () => {
       AGENT_ID,
       OWNER_USER_ID,
       'google_workspace',
-      'drive_search',
+      'gws_drive_search',
       { query: 'course', limit: 5 }
     );
   });
