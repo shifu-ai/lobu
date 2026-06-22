@@ -280,7 +280,7 @@ describe("WorkerGateway session context", () => {
 				tools: [
 					{
 						name: "google_workspace_drive_search",
-						connectorToolName: "drive_search",
+						connectorToolName: "gws_drive_search",
 						description:
 							"Search Google Drive files available to the connected Toolbox user.",
 						inputSchema: {
@@ -354,7 +354,7 @@ describe("WorkerGateway session context", () => {
 				body: JSON.stringify({
 					connectorKey: "google_workspace",
 					connectionRef: "toolbox-mcp:ref",
-					connectorToolName: "drive_search",
+					connectorToolName: "gws_drive_search",
 					args: { query: "超級AI個體" },
 				}),
 			},
@@ -369,7 +369,7 @@ describe("WorkerGateway session context", () => {
 			"agent-1",
 			"user-1",
 			"google_workspace",
-			"drive_search",
+			"gws_drive_search",
 			{ query: "超級AI個體" },
 		);
 	});

@@ -59,7 +59,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 	google_workspace: [
 		{
 			name: "google_workspace_drive_search",
-			connectorToolName: "drive_search",
+			connectorToolName: "gws_drive_search",
 			description:
 				"Search Google Drive files available to the connected Toolbox user.",
 			inputSchema: {
@@ -75,7 +75,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 	notion: [
 		{
 			name: "notion_search",
-			connectorToolName: "search",
+			connectorToolName: "notion-search",
 			description:
 				"Search Notion pages and databases available to the connected Toolbox user.",
 			inputSchema: {

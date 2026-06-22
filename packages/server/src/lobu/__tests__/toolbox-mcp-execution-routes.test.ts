@@ -280,6 +280,52 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call maps materialized Notion search to the upstream MCP tool name', async () => {
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'notion',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'notion',
+        mcpId: 'notion',
+        source: 'toolbox-personal-agent-materialized',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'notion',
+        connectionRef: MATERIALIZED_CONNECTION_REF,
+        toolName: 'notion_search',
+        args: { query: '大h line bot', limit: 5 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'notion',
+      'notion-search',
+      { query: '大h line bot', limit: 5 }
+    );
+  });
+
   test('POST /mcp/tools/call returns safe diagnostic code for connector execution failure results', async () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'private upstream body must not leak' }],
