@@ -110,13 +110,35 @@ type ToolboxPersonalAgentToolCallRequest = {
 function safeToolboxPersonalAgentToolError(
 	errorCode: string,
 	errorMessage: string,
+	diagnosticCode?: string,
 ) {
 	return {
 		ok: false,
 		content: null,
 		errorCode,
 		errorMessage,
+		...(diagnosticCode ? { diagnosticCode } : {}),
 	};
+}
+
+const SAFE_TOOLBOX_PERSONAL_AGENT_TOOL_DIAGNOSTIC_CODES = new Set([
+	"oauth_scope_denied",
+	"oauth_refresh_failed",
+	"upstream_unauthorized",
+	"upstream_forbidden",
+	"upstream_rate_limited",
+	"tool_schema_invalid",
+	"connector_unavailable",
+	"tool_not_found",
+]);
+
+function safeToolboxPersonalAgentToolDiagnosticCode(
+	value: unknown,
+): string | undefined {
+	return typeof value === "string" &&
+		SAFE_TOOLBOX_PERSONAL_AGENT_TOOL_DIAGNOSTIC_CODES.has(value)
+		? value
+		: undefined;
 }
 
 function isToolboxPersonalAgentConnectorToolAllowed(
@@ -492,16 +514,26 @@ export class WorkerGateway {
 						safeToolboxPersonalAgentToolError(
 							"lobu_mcp_tool_error",
 							"MCP tool execution failed",
+							safeToolboxPersonalAgentToolDiagnosticCode(
+								result.diagnosticCode,
+							),
 						),
 						200,
 					);
 				}
 				return c.json({ ok: true, content: result?.content ?? null });
-			} catch {
+			} catch (error) {
 				return c.json(
 					safeToolboxPersonalAgentToolError(
 						"lobu_mcp_tool_error",
 						"MCP tool execution failed",
+						safeToolboxPersonalAgentToolDiagnosticCode(
+							error &&
+								typeof error === "object" &&
+								"diagnosticCode" in error
+								? (error as { diagnosticCode?: unknown }).diagnosticCode
+								: undefined,
+						),
 					),
 					200,
 				);

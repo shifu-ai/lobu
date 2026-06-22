@@ -281,6 +281,30 @@ export async function callToolboxPersonalAgentTool(
       error: response.statusText,
     }));
 
+    if (
+      body &&
+      typeof body === "object" &&
+      "ok" in body &&
+      (body as { ok?: unknown }).ok === false
+    ) {
+      const errorCode =
+        "errorCode" in body
+          ? String((body as { errorCode?: unknown }).errorCode)
+          : "unknown_error";
+      const diagnosticCode =
+        "diagnosticCode" in body &&
+        (body as { diagnosticCode?: unknown }).diagnosticCode
+          ? ` (${String((body as { diagnosticCode?: unknown }).diagnosticCode)})`
+          : "";
+      const errorMessage =
+        "errorMessage" in body
+          ? String((body as { errorMessage?: unknown }).errorMessage)
+          : "Toolbox personal-agent tool call failed";
+      return textResult(
+        `Error: ${errorCode}${diagnosticCode}: ${errorMessage}`
+      );
+    }
+
     if (!response.ok) {
       const error =
         body && typeof body === "object" && "error" in body
