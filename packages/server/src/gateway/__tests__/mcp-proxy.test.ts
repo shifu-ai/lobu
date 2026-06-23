@@ -151,6 +151,7 @@ beforeAll(async () => {
   validToken = generateWorkerToken("user1", "conv1", "deploy1", {
     channelId: "ch1",
     agentId: "agent1",
+    organizationId: "test-org",
   });
   originalFetch = globalThis.fetch;
 });
@@ -667,7 +668,9 @@ describe("McpProxy", () => {
         "test-mcp": TEST_SERVER,
       });
       const toolCache = new McpToolCache();
-      toolCache.set("test-mcp", [{ name: "old_tool" }], "agent1");
+      orgContext.run({ organizationId: "test-org" }, () => {
+        toolCache.set("test-mcp", [{ name: "old_tool" }], "agent1");
+      });
       const proxy = new McpProxy(configSource, {
         secretStore: createTestSecretStore(queue),
         toolCache,
@@ -694,7 +697,9 @@ describe("McpProxy", () => {
       expect(res.status).toBe(200);
       await res.text();
 
-      expect(toolCache.get("test-mcp", "agent1")).toBeNull();
+      orgContext.run({ organizationId: "test-org" }, () => {
+        expect(toolCache.get("test-mcp", "agent1")).toBeNull();
+      });
     });
   });
 

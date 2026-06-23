@@ -127,6 +127,17 @@ function successFetch(body: object = { jsonrpc: "2.0", id: 1, result: { tools: [
     });
 }
 
+function inTestOrg<T>(fn: () => T): T {
+  return orgContext.run({ organizationId: "test-org" }, fn);
+}
+
+function executeDirectInTestOrg(
+  proxy: McpProxy,
+  ...args: Parameters<McpProxy["executeToolDirect"]>
+): ReturnType<McpProxy["executeToolDirect"]> {
+  return inTestOrg(() => proxy.executeToolDirect(...args));
+}
+
 const TEST_ENCRYPTION_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -150,10 +161,12 @@ beforeAll(async () => {
   agent1Token = generateWorkerToken("user1", "conv1", "deploy1", {
     channelId: "ch1",
     agentId: "agent1",
+    organizationId: "test-org",
   });
   agent2Token = generateWorkerToken("user2", "conv2", "deploy2", {
     channelId: "ch2",
     agentId: "agent2",
+    organizationId: "test-org",
   });
 });
 
@@ -521,7 +534,9 @@ describe("cross-agent JWT isolation", () => {
     });
     const app = proxy.getApp();
 
-    await toolCache.set("org-mcp", [{ name: "read_report" }], "agent1");
+    inTestOrg(() => {
+      toolCache.set("org-mcp", [{ name: "read_report" }], "agent1");
+    });
 
     successFetch({
       jsonrpc: "2.0",
@@ -871,12 +886,14 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       );
     };
 
-    const result = await proxy.fetchToolsForMcp(
-      "toolbox",
-      "agent1",
-      { userId: "user1", channelId: "ch1" },
-      agent1Token,
-      { surfaceErrors: true }
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp(
+        "toolbox",
+        "agent1",
+        { userId: "user1", channelId: "ch1" },
+        agent1Token,
+        { surfaceErrors: true }
+      )
     );
 
     expect(refreshCount).toBe(1);
@@ -1059,41 +1076,45 @@ describe("in-memory session TTL", () => {
   });
 
   test("McpToolCache delete invalidates one agent or all entries for an MCP", async () => {
-    const cache = new McpToolCache();
-    cache.set("mcp-delete", [{ name: "agent1_tool" }], "agent1");
-    cache.set("mcp-delete", [{ name: "agent2_tool" }], "agent2");
-    cache.set("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", [
-      { name: "read_file" },
-    ], "agent1");
+    await inTestOrg(async () => {
+      const cache = new McpToolCache();
+      cache.set("mcp-delete", [{ name: "agent1_tool" }], "agent1");
+      cache.set("mcp-delete", [{ name: "agent2_tool" }], "agent2");
+      cache.set("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", [
+        { name: "read_file" },
+      ], "agent1");
 
-    cache.delete("mcp-delete", "agent1");
+      cache.delete("mcp-delete", "agent1");
 
-    expect(cache.get("mcp-delete", "agent1")).toBeNull();
-    expect(
-      cache.get("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", "agent1")
-    ).toBeNull();
-    expect(cache.get("mcp-delete", "agent2")?.[0]?.name).toBe("agent2_tool");
+      expect(cache.get("mcp-delete", "agent1")).toBeNull();
+      expect(
+        cache.get("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", "agent1")
+      ).toBeNull();
+      expect(cache.get("mcp-delete", "agent2")?.[0]?.name).toBe("agent2_tool");
 
-    cache.delete("mcp-delete");
-    expect(cache.get("mcp-delete", "agent2")).toBeNull();
+      cache.delete("mcp-delete");
+      expect(cache.get("mcp-delete", "agent2")).toBeNull();
+    });
   });
 
   test("McpToolCache delete does not match colon-suffix MCP ids", async () => {
-    const cache = new McpToolCache();
-    cache.set("foo:bar", [{ name: "foo_bar_tool" }], "agent1");
-    cache.set("bar", [{ name: "bar_tool" }], "agent1");
-    cache.set("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", [
-      { name: "foo_bar_read_tool" },
-    ], "agent1");
+    await inTestOrg(async () => {
+      const cache = new McpToolCache();
+      cache.set("foo:bar", [{ name: "foo_bar_tool" }], "agent1");
+      cache.set("bar", [{ name: "bar_tool" }], "agent1");
+      cache.set("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", [
+        { name: "foo_bar_read_tool" },
+      ], "agent1");
 
-    cache.delete("bar");
+      cache.delete("bar");
 
-    expect(cache.get("bar", "agent1")).toBeNull();
-    expect(cache.get("foo:bar", "agent1")?.[0]?.name).toBe("foo_bar_tool");
-    expect(
-      cache.get("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", "agent1")?.[0]
-        ?.name
-    ).toBe("foo_bar_read_tool");
+      expect(cache.get("bar", "agent1")).toBeNull();
+      expect(cache.get("foo:bar", "agent1")?.[0]?.name).toBe("foo_bar_tool");
+      expect(
+        cache.get("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", "agent1")?.[0]
+          ?.name
+      ).toBe("foo_bar_read_tool");
+    });
   });
 });
 
@@ -1176,7 +1197,7 @@ describe("executeToolDirect", () => {
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
 
-    const result = await proxy.executeToolDirect(
+    const result = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "direct-mcp",
@@ -1194,7 +1215,7 @@ describe("executeToolDirect", () => {
       secretStore: new InMemoryWritableStore(),
     });
 
-    const result = await proxy.executeToolDirect(
+    const result = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "nonexistent-mcp",
@@ -1221,7 +1242,7 @@ describe("executeToolDirect", () => {
       throw new Error("Connection refused");
     };
 
-    const result = await proxy.executeToolDirect(
+    const result = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "flaky-mcp",
@@ -1251,7 +1272,7 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 3; i++) {
-      const result = await proxy.executeToolDirect(
+      const result = await executeDirectInTestOrg(proxy,
         "agent1",
         "user1",
         "flaky-direct-mcp",
@@ -1263,7 +1284,7 @@ describe("executeToolDirect", () => {
     }
     const fetchesBeforePause = fetchCount;
 
-    const paused = await proxy.executeToolDirect(
+    const paused = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "flaky-direct-mcp",
@@ -1295,7 +1316,7 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 2; i++) {
-      const result = await proxy.executeToolDirect(
+      const result = await executeDirectInTestOrg(proxy,
         "agent1",
         "user1",
         "recover-direct-mcp",
@@ -1318,7 +1339,7 @@ describe("executeToolDirect", () => {
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
 
-    const recovered = await proxy.executeToolDirect(
+    const recovered = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "recover-direct-mcp",
@@ -1335,7 +1356,7 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 2; i++) {
-      const result = await proxy.executeToolDirect(
+      const result = await executeDirectInTestOrg(proxy,
         "agent1",
         "user1",
         "recover-direct-mcp",
@@ -1361,7 +1382,7 @@ describe("executeToolDirect", () => {
       );
     };
 
-    const stillReachable = await proxy.executeToolDirect(
+    const stillReachable = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "recover-direct-mcp",
@@ -1398,7 +1419,7 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 3; i++) {
-      const result = await proxy.executeToolDirect(
+      const result = await executeDirectInTestOrg(proxy,
         "agent1",
         "user1",
         "tool-error-direct-mcp",
@@ -1424,7 +1445,7 @@ describe("executeToolDirect", () => {
       );
     };
 
-    const result = await proxy.executeToolDirect(
+    const result = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "tool-error-direct-mcp",
@@ -1450,7 +1471,7 @@ describe("executeToolDirect", () => {
     globalThis.fetch = async () =>
       new Response("private upstream body", { status: 403 });
 
-    const result = await proxy.executeToolDirect(
+    const result = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "forbidden-mcp",
@@ -1487,7 +1508,7 @@ describe("executeToolDirect", () => {
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
 
-    const result = await proxy.executeToolDirect(
+    const result = await executeDirectInTestOrg(proxy,
       "agent1",
       "user1",
       "scoped-mcp",
