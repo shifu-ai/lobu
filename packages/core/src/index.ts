@@ -110,6 +110,7 @@ export type {
   LogLevel,
   McpOAuthConfig,
   McpServerConfig,
+  McpToolFilter,
   ModelSelectionMode,
   ModelSelectionState,
   NetworkConfig,
@@ -135,6 +136,7 @@ export type { BaseMessage } from "./types/message";
 export * from "./utils/encryption";
 export * from "./utils/env";
 export * from "./utils/json";
+export * from "./utils/mcp-tool-filter";
 export type { McpStatus, McpToolDef } from "./utils/mcp-tool-instructions";
 export * from "./utils/network-domains";
 export * from "./utils/retry";

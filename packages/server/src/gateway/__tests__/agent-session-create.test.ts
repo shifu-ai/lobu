@@ -413,6 +413,76 @@ describe("POST /api/v1/agents — default-agent resolution", () => {
   void USER_ID;
 });
 
+describe("POST /api/v1/agents — MCP config schema", () => {
+  test("preserves per-server toolFilter in submitted mcpServers", async () => {
+    const sessions = new Map<string, any>();
+    const app = createAgentApi({
+      queueProducer: {} as never,
+      sessionManager: {
+        async getSession(id: string) {
+          return sessions.get(id) ?? null;
+        },
+        async setSession(s: any) {
+          sessions.set(s.conversationId, s);
+        },
+        async touchSession() {},
+        async deleteSession(id: string) {
+          sessions.delete(id);
+        },
+      } as never,
+      sseManager: {} as never,
+      publicGatewayUrl: "http://localhost:8787",
+      agentMetadataStore: {
+        async getMetadata(id: string) {
+          return id === "agent-filter"
+            ? {
+                owner: { platform: "api", userId: "agent-filter" },
+                organizationId: "org-filter",
+              }
+            : null;
+        },
+      } as never,
+    });
+
+    const token = generateWorkerToken("agent-filter", "conv-filter", "deploy", {
+      channelId: "api_test",
+      agentId: "agent-filter",
+      organizationId: "org-filter",
+    });
+
+    const res = await app.request("/api/v1/agents", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        agentId: "agent-filter",
+        forceNew: true,
+        mcpServers: {
+          docs: {
+            url: "https://mcp.example.com",
+            type: "sse",
+            toolFilter: {
+              include: ["read_*"],
+              exclude: ["read_secret"],
+            },
+          },
+        },
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { agentId: string };
+    expect(
+      sessions.get(body.agentId)?.mcpConfig?.mcpServers?.docs?.toolFilter
+    ).toEqual({
+      include: ["read_*"],
+      exclude: ["read_secret"],
+    });
+  });
+});
+
 /**
  * Watcher session-id shape.
  *

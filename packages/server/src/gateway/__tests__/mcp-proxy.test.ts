@@ -62,6 +62,7 @@ interface HttpMcpServerConfig {
   oauth?: import("@lobu/core").McpOAuthConfig;
   inputs?: unknown[];
   headers?: Record<string, string>;
+  toolFilter?: import("@lobu/core").McpToolFilter;
 }
 
 interface McpConfigSource {
@@ -325,6 +326,58 @@ describe("McpProxy", () => {
       expect(body.tools[0].name).toBe("cached_tool");
       // fetch should NOT have been called again
       expect(fetchCount).toBe(firstFetchCount);
+    });
+
+    test("does not reuse cached catalog after toolFilter changes for the same agent and MCP", async () => {
+      const server: HttpMcpServerConfig = {
+        ...TEST_SERVER,
+        toolFilter: { include: ["read_*"] },
+      };
+      const configSource = createMockConfigSource({
+        "test-mcp": server,
+      });
+      const toolCache = new McpToolCache();
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache,
+      });
+      const app = proxy.getApp();
+
+      let fetchCount = 0;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              tools: [{ name: "read_page" }, { name: "write_page" }],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const first = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(first.status).toBe(200);
+      expect((await first.json()).tools.map((tool: any) => tool.name)).toEqual([
+        "read_page",
+      ]);
+
+      server.toolFilter = { include: ["write_*"] };
+
+      const second = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(second.status).toBe(200);
+      expect(
+        (await second.json()).tools.map((tool: any) => tool.name)
+      ).toEqual(["write_page"]);
+      expect(fetchCount).toBeGreaterThan(3);
     });
   });
 

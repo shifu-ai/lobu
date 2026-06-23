@@ -52,6 +52,11 @@ const NetworkConfigSchema = z.object({
   deniedDomains: z.array(z.string()).optional(),
 });
 
+const McpToolFilterSchema = z.object({
+  include: z.array(z.string()).optional(),
+  exclude: z.array(z.string()).optional(),
+});
+
 const McpServerConfigSchema = z.object({
   url: z.string().optional(),
   type: z.enum(["sse", "streamable-http", "stdio"]).optional(),
@@ -60,6 +65,7 @@ const McpServerConfigSchema = z.object({
   env: z.record(z.string(), z.string()).optional(),
   headers: z.record(z.string(), z.string()).optional(),
   description: z.string().optional(),
+  toolFilter: McpToolFilterSchema.optional(),
 });
 
 const NixConfigSchema = z.object({

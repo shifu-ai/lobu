@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
+  applyMcpToolFilter,
   createLogger,
   type GuardrailRegistry,
+  type McpToolFilter,
   runGuardrailInstances,
   verifyWorkerToken,
 } from "@lobu/core";
@@ -157,6 +159,7 @@ interface HttpMcpServerConfig {
   oauth?: import("@lobu/core").McpOAuthConfig;
   inputs?: unknown[];
   headers?: Record<string, string>;
+  toolFilter?: McpToolFilter;
   /** Credential scoping strategy: "user" (default) or "channel" (shared in a Slack channel). */
   authScope?: "user" | "channel";
   /** True when the upstream is the same embedded Lobu process (lobu-memory). */
@@ -181,6 +184,31 @@ export function buildMcpSessionKey(
   const orgId = getOrgId();
   const scope = scopeKey ?? "_unscoped";
   return `mcp:session:${orgId}:${agentId}:${mcpId}:${scope}`;
+}
+
+function buildToolCacheMcpId(
+  mcpId: string,
+  filter?: McpToolFilter
+): string {
+  const cacheFilter = normalizeToolFilterForCache(filter);
+  if (!cacheFilter) return mcpId;
+  return `${mcpId}:toolFilter:${JSON.stringify(cacheFilter)}`;
+}
+
+function hasActiveToolFilter(filter?: McpToolFilter): boolean {
+  return normalizeToolFilterForCache(filter) !== null;
+}
+
+function normalizeToolFilterForCache(
+  filter?: McpToolFilter
+): { include?: string[]; exclude?: string[] } | null {
+  const include = filter?.include?.filter(Boolean) ?? [];
+  const exclude = filter?.exclude?.filter(Boolean) ?? [];
+  if (include.length === 0 && exclude.length === 0) return null;
+  return {
+    ...(include.length > 0 ? { include } : {}),
+    ...(exclude.length > 0 ? { exclude } : {}),
+  };
 }
 
 async function authenticateRequest(
@@ -420,19 +448,21 @@ export class McpProxy {
     workerToken?: string,
     options?: { surfaceErrors?: boolean }
   ): Promise<{ tools: McpTool[]; instructions?: string }> {
-    if (this.toolCache) {
-      const cached = this.toolCache.getServerInfo(mcpId, agentId);
-      if (cached) return cached;
-    }
-
     const httpServer = await this.configService.getHttpServer(mcpId, agentId);
     if (!httpServer) {
       return { tools: [] };
+    }
+    const cacheMcpId = buildToolCacheMcpId(mcpId, httpServer.toolFilter);
+
+    if (this.toolCache) {
+      const cached = this.toolCache.getServerInfo(cacheMcpId, agentId);
+      if (cached) return cached;
     }
 
     const userId = tokenData?.userId;
     const channelId = tokenData?.channelId || "";
     const scopeKey = this.computeScopeKey(httpServer, userId, channelId);
+    const hasFilter = hasActiveToolFilter(httpServer.toolFilter);
 
     try {
       // Clear any stale session before fresh tool discovery
@@ -533,10 +563,14 @@ export class McpProxy {
 
       const data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
       const tools: McpTool[] = data?.result?.tools || [];
+      const filteredTools = applyMcpToolFilter(tools, httpServer.toolFilter);
 
-      const serverInfo: CachedMcpServer = { tools, instructions };
-      if (this.toolCache && tools.length > 0) {
-        this.toolCache.setServerInfo(mcpId, serverInfo, agentId);
+      const serverInfo: CachedMcpServer = {
+        tools: filteredTools,
+        instructions,
+      };
+      if (this.toolCache && (filteredTools.length > 0 || hasFilter)) {
+        this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
       }
 
       return serverInfo;
@@ -568,14 +602,18 @@ export class McpProxy {
           retryResponse
         )) as JsonRpcResponse;
         const retryTools: McpTool[] = retryData?.result?.tools || [];
-        if (retryTools.length > 0) {
-          const serverInfo: CachedMcpServer = { tools: retryTools };
+        const filteredRetryTools = applyMcpToolFilter(
+          retryTools,
+          httpServer.toolFilter
+        );
+        if (filteredRetryTools.length > 0 || hasFilter) {
+          const serverInfo: CachedMcpServer = { tools: filteredRetryTools };
           if (this.toolCache) {
-            this.toolCache.setServerInfo(mcpId, serverInfo, agentId);
+            this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
           }
           logger.info("Retry succeeded for MCP tool fetch", {
             mcpId,
-            toolCount: retryTools.length,
+            toolCount: filteredRetryTools.length,
           });
           return serverInfo;
         }
@@ -1307,24 +1345,18 @@ export class McpProxy {
     tokenData: any,
     workerToken?: string
   ): Promise<{ found: boolean; annotations?: McpTool["annotations"] }> {
-    let tools: McpTool[] | null = null;
-    if (this.toolCache) {
-      tools = this.toolCache.get(mcpId, agentId);
-    }
-
-    if (!tools) {
-      // Forward the worker JWT so internal MCPs (lobu-memory) can enumerate
-      // tools — without it the discovery call goes unauthenticated and
-      // returns an empty list, which would silently bypass the approval gate
-      // (`found=false` means "no approval needed" at call sites).
-      const result = await this.fetchToolsForMcp(
-        mcpId,
-        agentId,
-        tokenData,
-        workerToken
-      );
-      tools = result.tools;
-    }
+    // Forward the worker JWT so internal MCPs (lobu-memory) can enumerate
+    // tools — without it the discovery call goes unauthenticated and returns
+    // an empty list, which would silently bypass the approval gate
+    // (`found=false` means "no approval needed" at call sites). Tool discovery
+    // performs its own filter-aware cache lookup after loading current config.
+    const result = await this.fetchToolsForMcp(
+      mcpId,
+      agentId,
+      tokenData,
+      workerToken
+    );
+    const tools = result.tools;
 
     if (tools.length === 0) {
       return { found: false };

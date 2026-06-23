@@ -157,6 +157,12 @@ export interface SkillMcpServer {
   oauth?: McpOAuthConfig;
   inputs?: Array<{ id: string; label?: string; type?: string }>;
   headers?: Record<string, string>;
+  toolFilter?: McpToolFilter;
+}
+
+export interface McpToolFilter {
+  include?: string[];
+  exclude?: string[];
 }
 
 /**
@@ -398,6 +404,8 @@ export interface McpServerConfig {
   headers?: Record<string, string>;
   /** Optional description for the MCP */
   description?: string;
+  /** Optional per-server tool visibility filter. */
+  toolFilter?: McpToolFilter;
 }
 
 /**

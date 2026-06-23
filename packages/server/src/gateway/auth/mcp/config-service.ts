@@ -1,5 +1,6 @@
 import {
   type McpOAuthConfig,
+  type McpToolFilter,
   createLogger,
   verifyWorkerToken,
 } from "@lobu/core";
@@ -24,6 +25,7 @@ interface HttpMcpServerConfig {
   oauth?: McpOAuthConfig;
   inputs?: McpInput[];
   headers?: Record<string, string>;
+  toolFilter?: McpToolFilter;
   /**
    * Credential scope for OAuth flows.
    * - "user" (default): per-user credential — each chat user authenticates separately.
@@ -563,6 +565,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
           cloned.headers && typeof cloned.headers === "object"
             ? resolveMcpHeaderEnvRefs(cloned.headers)
             : undefined,
+        toolFilter: parseMcpToolFilter(cloned),
         authScope: parseAuthScope(cloned),
         // Global MCP servers are never internal — the only internal server is
         // the per-agent derived lobu-memory entry, which does not flow through
@@ -606,6 +609,7 @@ function toHttpServerConfig(
       cloned.headers && typeof cloned.headers === "object"
         ? resolveMcpHeaderEnvRefs(cloned.headers)
         : undefined,
+    toolFilter: parseMcpToolFilter(cloned),
     authScope: parseAuthScope(cloned),
     internal: cloned.internal === true,
   };
@@ -620,6 +624,27 @@ function parseAuthScope(raw: any): "user" | "channel" | undefined {
         : undefined;
   if (value === "user" || value === "channel") return value;
   return undefined;
+}
+
+function parseMcpToolFilter(raw: any): McpToolFilter | undefined {
+  const value = raw.toolFilter;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const filter: McpToolFilter = {};
+  if (Array.isArray(value.include)) {
+    filter.include = value.include.filter(
+      (pattern: unknown): pattern is string => typeof pattern === "string"
+    );
+  }
+  if (Array.isArray(value.exclude)) {
+    filter.exclude = value.exclude.filter(
+      (pattern: unknown): pattern is string => typeof pattern === "string"
+    );
+  }
+
+  return filter.include || filter.exclude ? filter : undefined;
 }
 
 function cloneConfig(config: any) {

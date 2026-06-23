@@ -171,7 +171,7 @@ Direct promote policy:
 - Modify: `packages/agent-worker/src/openclaw/custom-tools.ts`
 - Modify: `packages/agent-worker/src/openclaw/session-runner.ts`
 
-- [ ] **Step 1: Write the failing projection tests**
+- [x] **Step 1: Write the failing projection tests**
 
 Create `packages/agent-worker/src/__tests__/mcp-tool-projection.test.ts`:
 
@@ -269,7 +269,7 @@ describe("projectMcpToolsForProvider", () => {
 });
 ```
 
-- [ ] **Step 2: Run the failing test**
+- [x] **Step 2: Run the failing test**
 
 Run:
 
@@ -279,7 +279,7 @@ bun test packages/agent-worker/src/__tests__/mcp-tool-projection.test.ts
 
 Expected: FAIL because `mcp-tool-projection.ts` does not exist.
 
-- [ ] **Step 3: Implement the minimal projection module**
+- [x] **Step 3: Implement the minimal projection module**
 
 Create `packages/agent-worker/src/openclaw/mcp-tool-projection.ts`:
 
@@ -441,7 +441,7 @@ export function projectMcpToolsForProvider(
 }
 ```
 
-- [ ] **Step 4: Run the projection test until green**
+- [x] **Step 4: Run the projection test until green**
 
 Run:
 
@@ -451,7 +451,7 @@ bun test packages/agent-worker/src/__tests__/mcp-tool-projection.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Wire projection into session runner**
+- [x] **Step 5: Wire projection into session runner**
 
 In `packages/agent-worker/src/openclaw/session-runner.ts`, after provider resolution and before `createMcpToolDefinitions()`, compute:
 
@@ -471,7 +471,7 @@ const projectedMcp = projectMcpToolsForProvider(context.mcpTools, {
 
 Then pass `projectedMcp.tools` to `createMcpToolDefinitions()`. Log `projectedMcp.quarantined`, `projectedMcp.projected`, and `projectedMcp.omittedForCap` by counts and tool names.
 
-- [ ] **Step 6: Commit the tracer bullet**
+- [x] **Step 6: Commit the tracer bullet**
 
 Run:
 
@@ -490,7 +490,7 @@ git commit -m "feat(worker): project mcp schemas before direct exposure"
 - Modify: `packages/server/src/gateway/auth/mcp/config-service.ts`
 - Modify: `packages/server/src/gateway/auth/mcp/proxy.ts`
 
-- [ ] **Step 1: Write filter tests**
+- [x] **Step 1: Write filter tests**
 
 Create `packages/server/src/gateway/__tests__/mcp-tool-filter.test.ts`:
 
@@ -526,7 +526,7 @@ describe("applyMcpToolFilter", () => {
 });
 ```
 
-- [ ] **Step 2: Run the failing test**
+- [x] **Step 2: Run the failing test**
 
 Run:
 
@@ -536,7 +536,7 @@ bun test packages/server/src/gateway/__tests__/mcp-tool-filter.test.ts
 
 Expected: FAIL because `applyMcpToolFilter` is not exported.
 
-- [ ] **Step 3: Implement and export the filter**
+- [x] **Step 3: Implement and export the filter**
 
 Create `packages/core/src/utils/mcp-tool-filter.ts`:
 
@@ -576,7 +576,7 @@ export function applyMcpToolFilter<T extends { name: string }>(
 
 Export it from `packages/core/src/index.ts` and add `toolFilter?: McpToolFilter` to both `McpServerConfig` and `SkillMcpServer`.
 
-- [ ] **Step 4: Preserve filter in config-service normalization**
+- [x] **Step 4: Preserve filter in config-service normalization**
 
 In `packages/server/src/gateway/auth/mcp/config-service.ts`, include `toolFilter` when normalizing MCP server configs into `HttpMcpServerConfig`. Add a local type field:
 
@@ -584,7 +584,7 @@ In `packages/server/src/gateway/auth/mcp/config-service.ts`, include `toolFilter
 toolFilter?: McpToolFilter;
 ```
 
-- [ ] **Step 5: Apply filter in proxy discovery**
+- [x] **Step 5: Apply filter in proxy discovery**
 
 In `fetchToolsForMcp()`, after `const tools: McpTool[] = data?.result?.tools || [];`, compute:
 
@@ -594,7 +594,7 @@ const filteredTools = applyMcpToolFilter(tools, httpServer.toolFilter);
 
 Cache and return `filteredTools`, not raw `tools`.
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 Run:
 
@@ -604,7 +604,7 @@ bun test packages/server/src/gateway/__tests__/mcp-tool-filter.test.ts packages/
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add packages/core/src/types.ts packages/core/src/index.ts packages/core/src/utils/mcp-tool-filter.ts packages/server/src/gateway/auth/mcp/config-service.ts packages/server/src/gateway/auth/mcp/proxy.ts packages/server/src/gateway/__tests__/mcp-tool-filter.test.ts
