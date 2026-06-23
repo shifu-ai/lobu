@@ -93,6 +93,41 @@ function mockUpstreamFetch(responseData: any) {
   };
 }
 
+async function withImmediateRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((handler: TimerHandler) =>
+    originalSetTimeout(handler, 0)) as typeof setTimeout;
+  try {
+    return await fn();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+}
+
+function jsonRpcToolsResponse(
+  tools: Array<{ name: string; description?: string }> = []
+): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { tools },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+}
+
+function jsonRpcErrorResponse(message: string, code = -32603): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      error: { code, message },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+}
+
 const TEST_SERVER: HttpMcpServerConfig = {
   id: "test-mcp",
   upstreamUrl: "http://upstream:9000/mcp",
@@ -379,6 +414,288 @@ describe("McpProxy", () => {
       ).toEqual(["write_page"]);
       expect(fetchCount).toBeGreaterThan(3);
     });
+
+    test(
+      "skips upstream discovery while server health is paused",
+      async () => {
+        const configSource = createMockConfigSource({
+          "test-mcp": TEST_SERVER,
+        });
+        const proxy = new McpProxy(configSource, {
+          secretStore: createTestSecretStore(queue),
+        });
+        const app = proxy.getApp();
+
+        let fetchCount = 0;
+        globalThis.fetch = async () => {
+          fetchCount++;
+          throw new Error(`boom ${fetchCount}`);
+        };
+
+        for (let i = 0; i < 3; i++) {
+          const res = await app.request("/test-mcp/tools", {
+            method: "GET",
+            headers: { Authorization: `Bearer ${validToken}` },
+          });
+          expect(res.status).toBe(502);
+        }
+        const fetchesBeforePause = fetchCount;
+
+        const paused = await app.request("/test-mcp/tools", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${validToken}` },
+        });
+        expect(paused.status).toBe(200);
+        expect(await paused.json()).toEqual({ tools: [] });
+        expect(fetchCount).toBe(fetchesBeforePause);
+      },
+      10_000
+    );
+
+    test("does not pause when tools/list retry returns 401 or 403", async () => {
+      for (const retryStatus of [401, 403]) {
+        const configSource = createMockConfigSource({
+          "test-mcp": TEST_SERVER,
+        });
+        const proxy = new McpProxy(configSource, {
+          secretStore: createTestSecretStore(queue),
+        });
+        const app = proxy.getApp();
+
+        let fetchCount = 0;
+        globalThis.fetch = async () => {
+          fetchCount++;
+          const phase = fetchCount % 4;
+          if (phase === 1 || phase === 2) return jsonRpcToolsResponse();
+          if (phase === 3) throw new Error("list failed before retry");
+          return new Response("auth or approval required", {
+            status: retryStatus,
+          });
+        };
+
+        await withImmediateRetry(async () => {
+          for (let i = 0; i < 3; i++) {
+            const res = await app.request("/test-mcp/tools", {
+              method: "GET",
+              headers: { Authorization: `Bearer ${validToken}` },
+            });
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ tools: [] });
+          }
+        });
+
+        const fetchesBeforeSuccess = fetchCount;
+        globalThis.fetch = async () => {
+          fetchCount++;
+          return jsonRpcToolsResponse([{ name: `after_${retryStatus}` }]);
+        };
+
+        const res = await app.request("/test-mcp/tools", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${validToken}` },
+        });
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.tools[0].name).toBe(`after_${retryStatus}`);
+        expect(fetchCount).toBeGreaterThan(fetchesBeforeSuccess);
+      }
+    });
+
+    test("retry success with zero tools clears prior health failures", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      const app = proxy.getApp();
+
+      let failFetchCount = 0;
+      globalThis.fetch = async () => {
+        failFetchCount++;
+        throw new Error(`before clear ${failFetchCount}`);
+      };
+
+      await withImmediateRetry(async () => {
+        for (let i = 0; i < 2; i++) {
+          const res = await app.request("/test-mcp/tools", {
+            method: "GET",
+            headers: { Authorization: `Bearer ${validToken}` },
+          });
+          expect(res.status).toBe(502);
+        }
+      });
+
+      let zeroRetryFetchCount = 0;
+      globalThis.fetch = async () => {
+        zeroRetryFetchCount++;
+        if (zeroRetryFetchCount <= 3) {
+          if (zeroRetryFetchCount <= 2) return jsonRpcToolsResponse();
+          throw new Error("list failed before zero-tool retry");
+        }
+        return jsonRpcToolsResponse([]);
+      };
+
+      const zero = await withImmediateRetry(() =>
+        app.request("/test-mcp/tools", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${validToken}` },
+        })
+      );
+      expect(zero.status).toBe(200);
+      expect(await zero.json()).toEqual({ tools: [] });
+
+      let afterClearFetchCount = 0;
+      globalThis.fetch = async () => {
+        afterClearFetchCount++;
+        throw new Error(`after clear ${afterClearFetchCount}`);
+      };
+
+      await withImmediateRetry(async () => {
+        for (let i = 0; i < 2; i++) {
+          const res = await app.request("/test-mcp/tools", {
+            method: "GET",
+            headers: { Authorization: `Bearer ${validToken}` },
+          });
+          expect(res.status).toBe(502);
+        }
+      });
+      const beforeSuccess = afterClearFetchCount;
+
+      globalThis.fetch = async () => {
+        afterClearFetchCount++;
+        return jsonRpcToolsResponse([{ name: "still_not_paused" }]);
+      };
+
+      const success = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(success.status).toBe(200);
+      expect((await success.json()).tools[0].name).toBe("still_not_paused");
+      expect(afterClearFetchCount).toBeGreaterThan(beforeSuccess);
+    });
+
+    test("repeated JSON-RPC tools/list errors pause discovery", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      const app = proxy.getApp();
+
+      let fetchCount = 0;
+      globalThis.fetch = async (_input, init) => {
+        fetchCount++;
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          return jsonRpcErrorResponse("catalog exploded");
+        }
+        return jsonRpcToolsResponse();
+      };
+
+      await withImmediateRetry(async () => {
+        for (let i = 0; i < 3; i++) {
+          const res = await app.request("/test-mcp/tools", {
+            method: "GET",
+            headers: { Authorization: `Bearer ${validToken}` },
+          });
+          expect(res.status).toBe(502);
+        }
+      });
+      const fetchesBeforePause = fetchCount;
+
+      const paused = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(paused.status).toBe(200);
+      expect(await paused.json()).toEqual({ tools: [] });
+      expect(fetchCount).toBe(fetchesBeforePause);
+    });
+
+    test("auth-style JSON-RPC tools/list errors do not pause discovery", async () => {
+      for (const message of ["unauthorized", "forbidden"]) {
+        const configSource = createMockConfigSource({
+          "test-mcp": TEST_SERVER,
+        });
+        const proxy = new McpProxy(configSource, {
+          secretStore: createTestSecretStore(queue),
+        });
+        const app = proxy.getApp();
+
+        let fetchCount = 0;
+        globalThis.fetch = async (_input, init) => {
+          fetchCount++;
+          const body = String(init?.body ?? "");
+          if (body.includes("tools/list")) {
+            return jsonRpcErrorResponse(message);
+          }
+          return jsonRpcToolsResponse();
+        };
+
+        await withImmediateRetry(async () => {
+          for (let i = 0; i < 3; i++) {
+            const res = await app.request("/test-mcp/tools", {
+              method: "GET",
+              headers: { Authorization: `Bearer ${validToken}` },
+            });
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ tools: [] });
+          }
+        });
+
+        const fetchesBeforeSuccess = fetchCount;
+        globalThis.fetch = async () => {
+          fetchCount++;
+          return jsonRpcToolsResponse([{ name: `after_${message}` }]);
+        };
+
+        const res = await app.request("/test-mcp/tools", {
+          method: "GET",
+          headers: { Authorization: `Bearer ${validToken}` },
+        });
+        expect(res.status).toBe(200);
+        expect((await res.json()).tools[0].name).toBe(`after_${message}`);
+        expect(fetchCount).toBeGreaterThan(fetchesBeforeSuccess);
+      }
+    });
+
+    test("deletes cached tools when streamable HTTP announces tools/list_changed", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const toolCache = new McpToolCache();
+      toolCache.set("test-mcp", [{ name: "old_tool" }], "agent1");
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache,
+      });
+      const app = proxy.getApp();
+
+      globalThis.fetch = async () =>
+        new Response(
+          [
+            "event: message",
+            'data: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}',
+            "",
+          ].join("\n"),
+          {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          }
+        );
+
+      const res = await app.request("/test-mcp", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(res.status).toBe(200);
+      await res.text();
+
+      expect(toolCache.get("test-mcp", "agent1")).toBeNull();
+    });
   });
 
   // ---------- POST /:mcpId/tools/:toolName ----------
@@ -481,6 +798,121 @@ describe("McpProxy", () => {
       expect(res.status).toBe(502);
       const body = await res.json();
       expect(body.error).toContain("Failed to connect");
+    });
+
+    test("repeated tool call failures pause later tool and discovery requests", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      const app = proxy.getApp();
+
+      let fetchCount = 0;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        throw new Error(`tool boom ${fetchCount}`);
+      };
+
+      for (let i = 0; i < 3; i++) {
+        const res = await app.request("/test-mcp/tools/my_tool", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({}),
+        });
+        expect(res.status).toBe(502);
+      }
+      const fetchesBeforePause = fetchCount;
+
+      const pausedTool = await app.request("/test-mcp/tools/my_tool", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${validToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      expect(pausedTool.status).toBe(503);
+      expect(fetchCount).toBe(fetchesBeforePause);
+
+      const pausedDiscovery = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(pausedDiscovery.status).toBe(200);
+      expect(await pausedDiscovery.json()).toEqual({ tools: [] });
+      expect(fetchCount).toBe(fetchesBeforePause);
+    });
+
+    test("repeated JSON-RPC tool call errors do not pause later tool or discovery requests", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      const app = proxy.getApp();
+
+      let fetchCount = 0;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        return jsonRpcErrorResponse("Invalid params", -32602);
+      };
+
+      for (let i = 0; i < 3; i++) {
+        const res = await app.request("/test-mcp/tools/my_tool", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({}),
+        });
+        expect(res.status).toBe(502);
+      }
+
+      const fetchesBeforeSuccess = fetchCount;
+      globalThis.fetch = async (_input, init) => {
+        fetchCount++;
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          return jsonRpcToolsResponse([{ name: "still_discoverable" }]);
+        }
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: {
+              content: [{ type: "text", text: "still callable" }],
+              isError: false,
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      };
+
+      const tool = await app.request("/test-mcp/tools/my_tool", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${validToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({}),
+      });
+      expect(tool.status).toBe(200);
+      expect((await tool.json()).content[0].text).toBe("still callable");
+
+      const discovery = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(discovery.status).toBe(200);
+      expect((await discovery.json()).tools[0].name).toBe("still_discoverable");
+      expect(fetchCount).toBeGreaterThan(fetchesBeforeSuccess);
     });
   });
 

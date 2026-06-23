@@ -619,7 +619,7 @@ git commit -m "feat(gateway): filter mcp tools before worker projection"
 - Modify: `packages/server/src/gateway/auth/mcp/tool-cache.ts`
 - Modify: `packages/server/src/gateway/auth/mcp/proxy.ts`
 
-- [ ] **Step 1: Write health-state tests**
+- [x] **Step 1: Write health-state tests**
 
 Create `packages/server/src/gateway/__tests__/mcp-server-health.test.ts`:
 
@@ -644,7 +644,7 @@ describe("McpServerHealth", () => {
 });
 ```
 
-- [ ] **Step 2: Implement server health**
+- [x] **Step 2: Implement server health**
 
 Create `packages/server/src/gateway/auth/mcp/server-health.ts`:
 
@@ -689,7 +689,7 @@ export class McpServerHealth {
 }
 ```
 
-- [ ] **Step 3: Add explicit cache invalidation**
+- [x] **Step 3: Add explicit cache invalidation**
 
 In `McpToolCache`, add:
 
@@ -699,7 +699,7 @@ delete(mcpId: string, agentId?: string): void {
 }
 ```
 
-- [ ] **Step 4: Wire health into proxy**
+- [x] **Step 4: Wire health into proxy**
 
 In `McpProxy`, instantiate `private readonly serverHealth = new McpServerHealth();`. At the top of `fetchToolsForMcp()`, after cache lookup:
 
@@ -714,7 +714,7 @@ if (pause) {
 
 Call `recordSuccess(healthKey)` after successful `tools/list`; call `recordFailure(healthKey, message)` after discovery failures except 401 and 403.
 
-- [ ] **Step 5: Invalidate on dynamic tool-list notification**
+- [x] **Step 5: Invalidate on dynamic tool-list notification**
 
 In the MCP streamable HTTP response handling path, detect JSON-RPC method `notifications/tools/list_changed`. When seen:
 
@@ -723,7 +723,7 @@ this.toolCache?.delete(mcpId, agentId);
 logger.info("Invalidated MCP tool cache after tools/list_changed", { mcpId, agentId });
 ```
 
-- [ ] **Step 6: Run focused tests**
+- [x] **Step 6: Run focused tests**
 
 ```bash
 bun test packages/server/src/gateway/__tests__/mcp-server-health.test.ts packages/server/src/gateway/__tests__/mcp-proxy.test.ts packages/server/src/gateway/__tests__/mcp-proxy-edge-cases.test.ts
@@ -731,7 +731,7 @@ bun test packages/server/src/gateway/__tests__/mcp-server-health.test.ts package
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add packages/server/src/gateway/auth/mcp/server-health.ts packages/server/src/gateway/auth/mcp/tool-cache.ts packages/server/src/gateway/auth/mcp/proxy.ts packages/server/src/gateway/__tests__/mcp-server-health.test.ts

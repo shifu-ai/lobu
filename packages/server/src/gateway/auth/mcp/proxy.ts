@@ -26,6 +26,7 @@ import {
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { isInternalUrl } from "../../proxy/ssrf-guard.js";
 import { startAuthCodeFlow } from "./oauth-flow.js";
+import { McpServerHealth } from "./server-health.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
 
 const logger = createLogger("mcp-proxy");
@@ -113,6 +114,26 @@ interface JsonRpcResponse {
     name?: unknown;
   };
   error?: { code: number; message: string };
+}
+
+class McpHttpStatusError extends Error {
+  constructor(
+    public readonly status: number,
+    message = `MCP upstream returned HTTP ${status}`
+  ) {
+    super(message);
+    this.name = "McpHttpStatusError";
+  }
+}
+
+class McpJsonRpcError extends Error {
+  constructor(
+    public readonly code: number | undefined,
+    message = "MCP upstream returned a JSON-RPC error"
+  ) {
+    super(message);
+    this.name = "McpJsonRpcError";
+  }
 }
 
 const SAFE_MCP_TOOL_DIAGNOSTIC_CODES = new Set([
@@ -261,6 +282,7 @@ export class McpProxy {
   private readonly publicGatewayUrl?: string;
   private readonly agentSettingsStore?: AgentSettingsStore;
   private readonly guardrailRegistry?: GuardrailRegistry;
+  private readonly serverHealth = new McpServerHealth();
 
   /** Callback invoked when a tool call is blocked for approval. */
   public onToolBlocked?: (
@@ -355,6 +377,28 @@ export class McpProxy {
     // userId (still correct for the requesting user's personal credential).
     const scopeKey = this.computeScopeKey(httpServer, userId, undefined);
     const sessionKey = this.buildSessionKey(agentId, mcpId, scopeKey);
+    const healthKey = this.buildServerHealthKey(agentId, mcpId);
+
+    const pause = this.serverHealth.getPause(healthKey);
+    if (pause) {
+      logger.warn("Direct MCP tool execution paused after repeated failures", {
+        mcpId,
+        agentId,
+        toolName,
+        pausedUntil: pause.pausedUntil,
+        lastError: pause.lastError,
+      });
+      return {
+        content: [
+          {
+            type: "text",
+            text: `MCP server '${mcpId}' is temporarily paused after repeated failures.`,
+          },
+        ],
+        isError: true,
+        diagnosticCode: "connector_unavailable",
+      };
+    }
 
     const jsonRpcBody = JSON.stringify({
       jsonrpc: "2.0",
@@ -364,6 +408,7 @@ export class McpProxy {
     });
 
     try {
+      let lastResponseStatus: number | undefined;
       if (!this.getSession(sessionKey)) {
         await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey);
       }
@@ -376,6 +421,7 @@ export class McpProxy {
         jsonRpcBody,
         scopeKey
       );
+      lastResponseStatus = response.status;
       if (!response.ok && response.status === 404 && this.getSession(sessionKey)) {
         await response.body?.cancel().catch(() => {
           /* noop */
@@ -389,10 +435,20 @@ export class McpProxy {
           jsonRpcBody,
           scopeKey
         );
+        lastResponseStatus = response.status;
       }
 
       if (!response.ok) {
         const text = await response.text();
+        if (response.status >= 500) {
+          this.recordServerFailure(
+            healthKey,
+            mcpId,
+            new McpHttpStatusError(response.status),
+            response.status,
+            "direct tool execution"
+          );
+        }
         return {
           content: [
             {
@@ -406,7 +462,15 @@ export class McpProxy {
       }
 
       const json = (await parseJsonRpcResponse(response)) as any;
+      if (json?.error) {
+        return {
+          content: [],
+          isError: true,
+          diagnosticCode: diagnosticCodeForHttpStatus(lastResponseStatus ?? 502),
+        };
+      }
       const result = json.result || json;
+      this.serverHealth.recordSuccess(healthKey);
       return {
         content: result.content || [
           { type: "text", text: JSON.stringify(result) },
@@ -415,6 +479,13 @@ export class McpProxy {
         diagnosticCode: diagnosticCodeFromToolResult(result),
       };
     } catch (error) {
+      this.recordServerFailure(
+        healthKey,
+        mcpId,
+        error,
+        this.statusFromError(error),
+        "direct tool execution"
+      );
       return {
         content: [
           {
@@ -453,11 +524,26 @@ export class McpProxy {
       return { tools: [] };
     }
     const cacheMcpId = buildToolCacheMcpId(mcpId, httpServer.toolFilter);
+    const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
+    let cached: CachedMcpServer | null = null;
     if (this.toolCache) {
-      const cached = this.toolCache.getServerInfo(cacheMcpId, agentId);
-      if (cached) return cached;
+      cached = this.toolCache.getServerInfo(cacheMcpId, agentId);
     }
+
+    const pause = this.serverHealth.getPause(healthKey);
+    if (pause) {
+      logger.warn("MCP discovery paused after repeated failures", {
+        mcpId,
+        agentId,
+        pausedUntil: pause.pausedUntil,
+        lastError: pause.lastError,
+        cacheHit: !!cached,
+      });
+      return cached ?? { tools: [] };
+    }
+
+    if (cached) return cached;
 
     const userId = tokenData?.userId;
     const channelId = tokenData?.channelId || "";
@@ -561,9 +647,28 @@ export class McpProxy {
         return { tools: [] };
       }
 
+      if (!response.ok) {
+        if (response.status === 403) {
+          await response.body?.cancel().catch(() => {
+            /* noop */
+          });
+          return { tools: [] };
+        }
+        throw new McpHttpStatusError(response.status);
+      }
+
       const data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+      if (data?.error) {
+        const errorMsg =
+          data.error.message || "MCP tools/list returned a JSON-RPC error";
+        if (this.isAuthStyleToolError(errorMsg)) {
+          return { tools: [] };
+        }
+        throw new McpJsonRpcError(data.error.code, errorMsg);
+      }
       const tools: McpTool[] = data?.result?.tools || [];
       const filteredTools = applyMcpToolFilter(tools, httpServer.toolFilter);
+      this.serverHealth.recordSuccess(healthKey);
 
       const serverInfo: CachedMcpServer = {
         tools: filteredTools,
@@ -582,6 +687,7 @@ export class McpProxy {
 
       // Retry once after a short delay (upstream may still be starting)
       await new Promise((r) => setTimeout(r, 2000));
+      let recordedFailure = false;
       try {
         const retryBody = JSON.stringify({
           jsonrpc: "2.0",
@@ -598,25 +704,59 @@ export class McpProxy {
           scopeKey,
           workerToken
         );
+        if (retryResponse.status === 401) {
+          const wwwAuth = retryResponse.headers.get("www-authenticate");
+          await retryResponse.body?.cancel().catch(() => {
+            /* noop */
+          });
+          await this.fireAuthCodeFlowFromDiscovery({
+            mcpId,
+            agentId,
+            httpServer,
+            wwwAuthenticate: wwwAuth,
+            scopeKey,
+            tokenData,
+          });
+          return { tools: [] };
+        }
+        if (retryResponse.status === 403) {
+          await retryResponse.body?.cancel().catch(() => {
+            /* noop */
+          });
+          return { tools: [] };
+        }
+        if (!retryResponse.ok) {
+          throw new McpHttpStatusError(retryResponse.status);
+        }
         const retryData = (await parseJsonRpcResponse(
           retryResponse
         )) as JsonRpcResponse;
+        if (retryData?.error) {
+          const errorMsg =
+            retryData.error.message ||
+            "MCP tools/list retry returned a JSON-RPC error";
+          if (this.isAuthStyleToolError(errorMsg)) {
+            return { tools: [] };
+          }
+          throw new McpJsonRpcError(retryData.error.code, errorMsg);
+        }
         const retryTools: McpTool[] = retryData?.result?.tools || [];
         const filteredRetryTools = applyMcpToolFilter(
           retryTools,
           httpServer.toolFilter
         );
+        this.serverHealth.recordSuccess(healthKey);
+        const serverInfo: CachedMcpServer = { tools: filteredRetryTools };
         if (filteredRetryTools.length > 0 || hasFilter) {
-          const serverInfo: CachedMcpServer = { tools: filteredRetryTools };
           if (this.toolCache) {
             this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
           }
-          logger.info("Retry succeeded for MCP tool fetch", {
-            mcpId,
-            toolCount: filteredRetryTools.length,
-          });
-          return serverInfo;
         }
+        logger.info("Retry succeeded for MCP tool fetch", {
+          mcpId,
+          toolCount: filteredRetryTools.length,
+        });
+        return serverInfo;
       } catch (retryError) {
         logger.error("Retry also failed for MCP tool fetch", {
           mcpId,
@@ -625,10 +765,25 @@ export class McpProxy {
               ? retryError.message
               : String(retryError),
         });
+        this.recordDiscoveryFailure(
+          healthKey,
+          mcpId,
+          retryError,
+          this.statusFromError(retryError)
+        );
+        recordedFailure = true;
         // The curl-facing REST endpoint surfaces upstream failures as 502;
         // agent-boot discovery (the default) fails soft so one unreachable
         // MCP doesn't block the worker from starting.
         if (options?.surfaceErrors) throw retryError;
+      }
+      if (!recordedFailure) {
+        this.recordDiscoveryFailure(
+          healthKey,
+          mcpId,
+          error,
+          this.statusFromError(error)
+        );
       }
       if (options?.surfaceErrors) throw error;
       return { tools: [] };
@@ -728,6 +883,7 @@ export class McpProxy {
       requesterUserId,
       channelId
     );
+    const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     // Parse body early so tool arguments are available for the approval message.
     let toolArguments: Record<string, unknown> = {};
@@ -798,6 +954,31 @@ export class McpProxy {
       );
     }
 
+    const pause = this.serverHealth.getPause(healthKey);
+    if (pause) {
+      logger.warn("MCP tool call paused after repeated failures", {
+        mcpId,
+        agentId,
+        toolName,
+        pausedUntil: pause.pausedUntil,
+        lastError: pause.lastError,
+      });
+      return c.json(
+        {
+          content: [
+            {
+              type: "text",
+              text: `MCP server '${mcpId}' is temporarily paused after repeated failures.`,
+            },
+          ],
+          isError: true,
+          diagnosticCode: "connector_unavailable",
+        },
+        503
+      );
+    }
+
+    let lastResponseStatus: number | undefined;
     try {
       const jsonRpcBody = JSON.stringify({
         jsonrpc: "2.0",
@@ -826,6 +1007,7 @@ export class McpProxy {
         auth.token,
         extraHeaders
       );
+      lastResponseStatus = response.status;
 
       // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
       // This path runs before JSON-RPC parsing because most compliant MCP
@@ -894,7 +1076,28 @@ export class McpProxy {
           scopeKey,
           auth.token
         );
+        lastResponseStatus = response.status;
         data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
+      }
+
+      if (!response.ok && !data?.error) {
+        if (response.status >= 500) {
+          this.recordServerFailure(
+            healthKey,
+            mcpId,
+            new McpHttpStatusError(response.status),
+            response.status,
+            "tool call"
+          );
+        }
+        return c.json(
+          {
+            content: [],
+            isError: true,
+            error: `Upstream returned HTTP ${response.status}`,
+          },
+          502
+        );
       }
 
       if (data?.error) {
@@ -954,11 +1157,19 @@ export class McpProxy {
       }
 
       const result = data?.result || {};
+      this.serverHealth.recordSuccess(healthKey);
       return c.json({
         content: result.content || [],
         isError: result.isError || false,
       });
     } catch (error) {
+      this.recordServerFailure(
+        healthKey,
+        mcpId,
+        error,
+        this.statusFromError(error) ?? lastResponseStatus,
+        "tool call"
+      );
       logger.error("Failed to call tool", { mcpId, toolName, error });
       return c.json(
         {
@@ -1618,6 +1829,7 @@ export class McpProxy {
 
     const sessionKey = this.buildSessionKey(agentId, mcpId, scopeKey);
     let sessionId = this.getSession(sessionKey);
+    const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     const bodyText = await this.getRequestBodyAsText(c);
 
@@ -1640,6 +1852,21 @@ export class McpProxy {
     } else if (scopeKey) {
       const token = await this.resolveCredentialToken(agentId, scopeKey, mcpId);
       if (token) credentialToken = token;
+    }
+
+    const pause = this.serverHealth.getPause(healthKey);
+    if (pause) {
+      logger.warn("MCP proxy request paused after repeated failures", {
+        mcpId,
+        agentId,
+        pausedUntil: pause.pausedUntil,
+        lastError: pause.lastError,
+      });
+      return this.sendJsonRpcError(
+        c,
+        -32000,
+        `MCP server '${mcpId}' is temporarily paused after repeated failures.`
+      );
     }
 
     // If no active session exists, re-initialize before forwarding
@@ -1670,12 +1897,24 @@ export class McpProxy {
       httpServer.internal === true
     );
 
-    let response = await fetch(httpServer.upstreamUrl, {
-      method: c.req.method,
-      headers,
-      body: bodyText || undefined,
-      signal: upstreamTimeoutSignal(c.req.method),
-    });
+    let response: Response;
+    try {
+      response = await fetch(httpServer.upstreamUrl, {
+        method: c.req.method,
+        headers,
+        body: bodyText || undefined,
+        signal: upstreamTimeoutSignal(c.req.method),
+      });
+    } catch (error) {
+      this.recordServerFailure(
+        healthKey,
+        mcpId,
+        error,
+        undefined,
+        "proxy request"
+      );
+      throw error;
+    }
 
     // Detect HTTP 401 + WWW-Authenticate → start MCP OAuth 2.1 auth-code flow.
     if (response.status === 401 && authContext) {
@@ -1734,19 +1973,42 @@ export class McpProxy {
           credentialToken,
           httpServer.internal === true
         );
-        response = await fetch(httpServer.upstreamUrl, {
-          method: c.req.method,
-          headers: retryHeaders,
-          body: bodyText,
-          // Retry path is POST-only (guarded above) — always bounded.
-          signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
-        });
+        try {
+          response = await fetch(httpServer.upstreamUrl, {
+            method: c.req.method,
+            headers: retryHeaders,
+            body: bodyText,
+            // Retry path is POST-only (guarded above) — always bounded.
+            signal: AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS),
+          });
+        } catch (error) {
+          this.recordServerFailure(
+            healthKey,
+            mcpId,
+            error,
+            undefined,
+            "proxy request"
+          );
+          throw error;
+        }
       } catch (error) {
         logger.warn("Stale-session recovery failed on forward", {
           mcpId,
           error: error instanceof Error ? error.message : String(error),
         });
       }
+    }
+
+    if (response.ok) {
+      this.serverHealth.recordSuccess(healthKey);
+    } else if (!this.isAuthOrApprovalStatus(response.status)) {
+      this.recordServerFailure(
+        healthKey,
+        mcpId,
+        new McpHttpStatusError(response.status),
+        response.status,
+        "proxy request"
+      );
     }
 
     const newSessionId = response.headers.get("Mcp-Session-Id");
@@ -1768,10 +2030,55 @@ export class McpProxy {
       responseHeaders.set("Mcp-Session-Id", newSessionId);
     }
 
-    return new Response(response.body, {
+    const body = this.wrapStreamableResponseBody(
+      response.body,
+      mcpId,
+      agentId
+    );
+
+    return new Response(body, {
       status: response.status,
       headers: responseHeaders,
     });
+  }
+
+  private wrapStreamableResponseBody(
+    body: ReadableStream<Uint8Array> | null,
+    mcpId: string,
+    agentId: string
+  ): ReadableStream<Uint8Array> | null {
+    if (!body || !this.toolCache) return body;
+
+    const decoder = new TextDecoder();
+    let rolling = "";
+    let invalidated = false;
+    const invalidate = () => {
+      if (invalidated) return;
+      invalidated = true;
+      this.toolCache?.delete(mcpId, agentId);
+      logger.info("Invalidated MCP tool cache after tools/list_changed", {
+        mcpId,
+        agentId,
+      });
+    };
+    const inspect = (text: string) => {
+      rolling = `${rolling}${text}`.slice(-8192);
+      if (rolling.includes("notifications/tools/list_changed")) {
+        invalidate();
+      }
+    };
+
+    return body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          inspect(decoder.decode(chunk, { stream: true }));
+          controller.enqueue(chunk);
+        },
+        flush() {
+          inspect(decoder.decode());
+        },
+      })
+    );
   }
 
   private async getRequestBodyAsText(c: Context): Promise<string> {
@@ -1784,6 +2091,56 @@ export class McpProxy {
     } catch {
       return "";
     }
+  }
+
+  private buildServerHealthKey(agentId: string, mcpId: string): string {
+    return `${agentId}:${mcpId}`;
+  }
+
+  private recordDiscoveryFailure(
+    healthKey: string,
+    mcpId: string,
+    error: unknown,
+    status?: number
+  ): void {
+    this.recordServerFailure(healthKey, mcpId, error, status, "discovery");
+  }
+
+  private recordServerFailure(
+    healthKey: string,
+    mcpId: string,
+    error: unknown,
+    status: number | undefined,
+    operation: string
+  ): void {
+    if (status && this.isAuthOrApprovalStatus(status)) return;
+    const snapshot = this.serverHealth.recordFailure(
+      healthKey,
+      error,
+      Date.now(),
+      status
+    );
+    if (snapshot.pausedUntil) {
+      logger.warn("MCP server paused after repeated failures", {
+        mcpId,
+        operation,
+        failures: snapshot.failures,
+        pausedUntil: snapshot.pausedUntil,
+        lastError: snapshot.lastError,
+      });
+    }
+  }
+
+  private statusFromError(error: unknown): number | undefined {
+    return error instanceof McpHttpStatusError ? error.status : undefined;
+  }
+
+  private isAuthOrApprovalStatus(status: number): boolean {
+    return status === 401 || status === 403;
+  }
+
+  private isAuthStyleToolError(message: string): boolean {
+    return /unauthorized|unauthenticated|forbidden/i.test(message);
   }
 
   /** Send the MCP `initialize` request to an upstream and return the raw response. */

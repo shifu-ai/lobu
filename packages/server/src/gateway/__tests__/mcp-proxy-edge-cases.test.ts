@@ -1057,6 +1057,44 @@ describe("in-memory session TTL", () => {
       expect(noAgent).toBeNull();
     });
   });
+
+  test("McpToolCache delete invalidates one agent or all entries for an MCP", async () => {
+    const cache = new McpToolCache();
+    cache.set("mcp-delete", [{ name: "agent1_tool" }], "agent1");
+    cache.set("mcp-delete", [{ name: "agent2_tool" }], "agent2");
+    cache.set("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", [
+      { name: "read_file" },
+    ], "agent1");
+
+    cache.delete("mcp-delete", "agent1");
+
+    expect(cache.get("mcp-delete", "agent1")).toBeNull();
+    expect(
+      cache.get("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", "agent1")
+    ).toBeNull();
+    expect(cache.get("mcp-delete", "agent2")?.[0]?.name).toBe("agent2_tool");
+
+    cache.delete("mcp-delete");
+    expect(cache.get("mcp-delete", "agent2")).toBeNull();
+  });
+
+  test("McpToolCache delete does not match colon-suffix MCP ids", async () => {
+    const cache = new McpToolCache();
+    cache.set("foo:bar", [{ name: "foo_bar_tool" }], "agent1");
+    cache.set("bar", [{ name: "bar_tool" }], "agent1");
+    cache.set("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", [
+      { name: "foo_bar_read_tool" },
+    ], "agent1");
+
+    cache.delete("bar");
+
+    expect(cache.get("bar", "agent1")).toBeNull();
+    expect(cache.get("foo:bar", "agent1")?.[0]?.name).toBe("foo_bar_tool");
+    expect(
+      cache.get("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", "agent1")?.[0]
+        ?.name
+    ).toBe("foo_bar_read_tool");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1193,6 +1231,209 @@ describe("executeToolDirect", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("error");
+  });
+
+  test("executeToolDirect repeated failures pause subsequent direct execution", async () => {
+    const configSource = createConfigSource({
+      "flaky-direct-mcp": {
+        id: "flaky-direct-mcp",
+        upstreamUrl: "http://flaky-direct.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    let fetchCount = 0;
+    globalThis.fetch = async () => {
+      fetchCount++;
+      throw new Error(`direct boom ${fetchCount}`);
+    };
+
+    for (let i = 0; i < 3; i++) {
+      const result = await proxy.executeToolDirect(
+        "agent1",
+        "user1",
+        "flaky-direct-mcp",
+        "any_tool",
+        {}
+      );
+      expect(result.isError).toBe(true);
+      expect(result.diagnosticCode).toBe("connector_unavailable");
+    }
+    const fetchesBeforePause = fetchCount;
+
+    const paused = await proxy.executeToolDirect(
+      "agent1",
+      "user1",
+      "flaky-direct-mcp",
+      "any_tool",
+      {}
+    );
+
+    expect(paused.isError).toBe(true);
+    expect(paused.diagnosticCode).toBe("connector_unavailable");
+    expect(paused.content[0].text).toContain("temporarily paused");
+    expect(fetchCount).toBe(fetchesBeforePause);
+  });
+
+  test("executeToolDirect success clears direct failure health", async () => {
+    const configSource = createConfigSource({
+      "recover-direct-mcp": {
+        id: "recover-direct-mcp",
+        upstreamUrl: "http://recover-direct.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    let fetchCount = 0;
+    globalThis.fetch = async () => {
+      fetchCount++;
+      throw new Error(`before recovery ${fetchCount}`);
+    };
+
+    for (let i = 0; i < 2; i++) {
+      const result = await proxy.executeToolDirect(
+        "agent1",
+        "user1",
+        "recover-direct-mcp",
+        "any_tool",
+        {}
+      );
+      expect(result.isError).toBe(true);
+    }
+
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "recovered" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+
+    const recovered = await proxy.executeToolDirect(
+      "agent1",
+      "user1",
+      "recover-direct-mcp",
+      "any_tool",
+      {}
+    );
+    expect(recovered.isError).toBe(false);
+    expect(recovered.content[0].text).toBe("recovered");
+
+    let afterRecoveryFetchCount = 0;
+    globalThis.fetch = async () => {
+      afterRecoveryFetchCount++;
+      throw new Error(`after recovery ${afterRecoveryFetchCount}`);
+    };
+
+    for (let i = 0; i < 2; i++) {
+      const result = await proxy.executeToolDirect(
+        "agent1",
+        "user1",
+        "recover-direct-mcp",
+        "any_tool",
+        {}
+      );
+      expect(result.isError).toBe(true);
+    }
+    const beforeFinalSuccess = afterRecoveryFetchCount;
+
+    globalThis.fetch = async () => {
+      afterRecoveryFetchCount++;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "still reachable" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const stillReachable = await proxy.executeToolDirect(
+      "agent1",
+      "user1",
+      "recover-direct-mcp",
+      "any_tool",
+      {}
+    );
+    expect(stillReachable.isError).toBe(false);
+    expect(stillReachable.content[0].text).toBe("still reachable");
+    expect(afterRecoveryFetchCount).toBeGreaterThan(beforeFinalSuccess);
+  });
+
+  test("executeToolDirect JSON-RPC tool errors do not pause direct execution", async () => {
+    const configSource = createConfigSource({
+      "tool-error-direct-mcp": {
+        id: "tool-error-direct-mcp",
+        upstreamUrl: "http://tool-error-direct.example.com/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    let fetchCount = 0;
+    globalThis.fetch = async () => {
+      fetchCount++;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          error: { code: -32602, message: "Invalid params" },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    for (let i = 0; i < 3; i++) {
+      const result = await proxy.executeToolDirect(
+        "agent1",
+        "user1",
+        "tool-error-direct-mcp",
+        "any_tool",
+        {}
+      );
+      expect(result.isError).toBe(true);
+    }
+    const fetchesBeforeSuccess = fetchCount;
+
+    globalThis.fetch = async () => {
+      fetchCount++;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "direct still callable" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const result = await proxy.executeToolDirect(
+      "agent1",
+      "user1",
+      "tool-error-direct-mcp",
+      "any_tool",
+      {}
+    );
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toBe("direct still callable");
+    expect(fetchCount).toBeGreaterThan(fetchesBeforeSuccess);
   });
 
   test("executeToolDirect returns safe diagnostic code for upstream forbidden", async () => {

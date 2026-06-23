@@ -28,6 +28,7 @@ export interface CachedMcpServer {
  * probes upstream itself on miss.
  */
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const CACHE_KEY_PREFIX = "mcp:tools:v2:";
 
 interface CacheEntry {
   info: CachedMcpServer;
@@ -44,6 +45,19 @@ export class McpToolCache {
 
   set(mcpId: string, tools: McpTool[], agentId?: string): void {
     this.setServerInfo(mcpId, { tools }, agentId);
+  }
+
+  delete(mcpId: string, agentId?: string): void {
+    const orgId = getOrgId();
+    for (const key of this.entries.keys()) {
+      const parsed = this.parseKey(key);
+      if (!parsed) continue;
+      if (parsed.orgId !== orgId) continue;
+      if (agentId && parsed.agentId !== agentId) continue;
+      if (this.matchesMcpIdOrFilterVariant(parsed.mcpId, mcpId)) {
+        this.entries.delete(key);
+      }
+    }
   }
 
   getServerInfo(
@@ -96,9 +110,37 @@ export class McpToolCache {
    */
   private buildKey(mcpId: string, agentId?: string): string {
     const orgId = getOrgId();
-    if (agentId) {
-      return `mcp:tools:${orgId}:${agentId}:${mcpId}`;
-    }
-    return `mcp:tools:${orgId}:${mcpId}`;
+    const orgPart = encodeURIComponent(orgId);
+    const agentPart = encodeURIComponent(agentId ?? "");
+    const mcpPart = encodeURIComponent(mcpId);
+    return `${CACHE_KEY_PREFIX}${orgPart}:${agentPart}:${mcpPart}`;
+  }
+
+  private parseKey(
+    key: string
+  ): { orgId: string; agentId?: string; mcpId: string } | null {
+    if (!key.startsWith(CACHE_KEY_PREFIX)) return null;
+    const rest = key.slice(CACHE_KEY_PREFIX.length);
+    const firstSeparator = rest.indexOf(":");
+    if (firstSeparator < 0) return null;
+    const secondSeparator = rest.indexOf(":", firstSeparator + 1);
+    if (secondSeparator < 0) return null;
+    const orgPart = rest.slice(0, firstSeparator);
+    const agentPart = rest.slice(firstSeparator + 1, secondSeparator);
+    const mcpPart = rest.slice(secondSeparator + 1);
+    if (!orgPart) return null;
+    if (!mcpPart) return null;
+    return {
+      orgId: decodeURIComponent(orgPart),
+      agentId: agentPart ? decodeURIComponent(agentPart) : undefined,
+      mcpId: decodeURIComponent(mcpPart),
+    };
+  }
+
+  private matchesMcpIdOrFilterVariant(
+    candidate: string,
+    mcpId: string
+  ): boolean {
+    return candidate === mcpId || candidate.startsWith(`${mcpId}:toolFilter:`);
   }
 }
