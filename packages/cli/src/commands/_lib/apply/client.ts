@@ -993,7 +993,7 @@ export class ApplyClient {
   async listConnectors(
     includeInstallable = true
   ): Promise<RemoteConnectorDefinition[]> {
-    const installedBody = await this.catalogTool<{
+    const body = await this.catalogTool<{
       installed?: {
         connectors?: {
           items?: Array<{
@@ -1006,46 +1006,10 @@ export class ApplyClient {
     }>({
       action: "list_installed",
       kinds: ["connectors"],
+      include_catalog: includeInstallable,
     });
-    const installedItems = installedBody.installed?.connectors?.items ?? [];
-    const installed = installedItems.map((item) =>
-      mapInstalledConnectorDefinition(item)
-    );
-
-    if (!includeInstallable) {
-      return installed;
-    }
-
-    const catalogBody = await this.catalogTool<{
-      catalogs?: {
-        connectors?: {
-          entries?: Array<{
-            id: string;
-            name: string;
-            version?: string;
-            description?: string | null;
-            detail?: Record<string, unknown>;
-          }>;
-        };
-      };
-    }>({
-      action: "list_catalog",
-      kinds: ["connectors"],
-    });
-    const catalogEntries = catalogBody.catalogs?.connectors?.entries ?? [];
-    const merged = new Map<string, RemoteConnectorDefinition>();
-    for (const entry of installed) {
-      merged.set(entry.key, entry);
-    }
-    for (const entry of catalogEntries) {
-      if (merged.has(entry.id)) continue;
-      merged.set(entry.id, mapCatalogConnectorDefinition(entry));
-    }
-    return [...merged.values()].sort((a, b) => {
-      if (a.installed && !b.installed) return -1;
-      if (!a.installed && b.installed) return 1;
-      return String(a.name ?? a.key).localeCompare(String(b.name ?? b.key));
-    });
+    const items = body.installed?.connectors?.items ?? [];
+    return items.map((item) => mapConnectorDefinitionItem(item));
   }
 
   /**
@@ -1316,12 +1280,13 @@ export class ApplyClient {
   }
 }
 
-function mapInstalledConnectorDefinition(item: {
+function mapConnectorDefinitionItem(item: {
   id: string;
   name: string;
   detail?: Record<string, unknown>;
 }): RemoteConnectorDefinition {
   const detail = item.detail ?? {};
+  const installed = detail.installed !== false;
   return {
     key: item.id,
     name: item.name,
@@ -1338,41 +1303,14 @@ function mapInstalledConnectorDefinition(item: {
       detail.auth_schema && typeof detail.auth_schema === "object"
         ? (detail.auth_schema as Record<string, unknown>)
         : null,
-    installed: true,
-    installable: false,
-    catalog_origin: "org",
-    source_uri:
-      typeof detail.source_uri === "string" ? detail.source_uri : null,
-  };
-}
-
-function mapCatalogConnectorDefinition(entry: {
-  id: string;
-  name: string;
-  version?: string;
-  description?: string | null;
-  detail?: Record<string, unknown>;
-}): RemoteConnectorDefinition {
-  const detail = entry.detail ?? {};
-  return {
-    key: entry.id,
-    name: entry.name,
-    version: entry.version,
-    options_schema:
-      detail.options_schema && typeof detail.options_schema === "object"
-        ? (detail.options_schema as Record<string, unknown>)
-        : null,
-    feeds_schema:
-      detail.feeds_schema && typeof detail.feeds_schema === "object"
-        ? (detail.feeds_schema as Record<string, unknown>)
-        : null,
-    auth_schema:
-      detail.auth_schema && typeof detail.auth_schema === "object"
-        ? (detail.auth_schema as Record<string, unknown>)
-        : null,
-    installed: false,
-    installable: true,
-    catalog_origin: "catalog",
+    installed,
+    installable: Boolean(detail.installable ?? !installed),
+    catalog_origin:
+      detail.catalog_origin === "catalog" || detail.catalog_origin === "org"
+        ? detail.catalog_origin
+        : installed
+          ? "org"
+          : "catalog",
     source_uri:
       typeof detail.source_uri === "string" ? detail.source_uri : null,
   };
