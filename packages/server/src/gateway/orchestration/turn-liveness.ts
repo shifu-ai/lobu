@@ -25,9 +25,10 @@
  *  - Backstop (deadline): {@link sweepExpiredTurns} runs periodically on every
  *    replica and fails markers whose deadline has lapsed. Covers a hung worker
  *    (alive, never replies) and a worker-pod death (the marker outlives the pod
- *    and another replica sweeps it). The deadline is pushed forward by the
- *    worker's 20s heartbeat ({@link extendTurnDeadlines}), so a live-but-slow
- *    worker is never falsely failed, while a silent one lapses.
+ *    and another replica sweeps it). The deadline is pushed forward by any
+ *    worker-driven liveness signal ({@link extendTurnDeadlines}), primarily
+ *    the worker's 20s status_update plus heartbeat/delivery ACKs, so a
+ *    live-but-slow worker is never falsely failed, while a silent one lapses.
  *
  * ## Multi-replica
  * Arming/extending/discharging all happen on the worker's owning pod (worker
@@ -130,8 +131,9 @@ export async function armTurnTimeout(
 
 /**
  * Push the deadline forward for all in-flight turns of a deployment. Called on
- * the worker's heartbeat ACK — a worker-driven liveness signal, so a live but
- * slow worker keeps its markers fresh while a silent one lapses.
+ * worker-driven liveness signals — primarily status_update plus heartbeat and
+ * delivery ACKs — so a live but slow worker keeps its markers fresh while a
+ * silent one lapses.
  */
 export async function extendTurnDeadlines(
   deploymentName: string,

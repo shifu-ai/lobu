@@ -370,6 +370,10 @@ export async function initLobuGateway(): Promise<Hono | null> {
     );
     logger.info('[Lobu] Embedded orchestrator injected core services');
 
+    coreServices
+      .getWorkerGateway()
+      ?.setDeploymentActivityTracker(orchestrator.getDeploymentManager());
+
     // Initialize Chat SDK connection manager for platform connections
     chatInstanceManager = new ChatInstanceManager();
     try {

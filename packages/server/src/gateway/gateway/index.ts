@@ -39,6 +39,15 @@ import { createPostgresAgentConnectionStore } from "../../lobu/stores/postgres-s
 
 const logger = createLogger("worker-gateway");
 
+/**
+ * Minimal interface onto the deployment manager's idle clock. Any worker-driven
+ * signal must refresh the deployment's lastActivity so the idle reaper does
+ * not scale a long-running active worker to 0 mid-turn.
+ */
+export interface DeploymentActivityTracker {
+	updateDeploymentActivity(deploymentName: string): Promise<void>;
+}
+
 export type ToolboxPersonalAgentTool = {
 	name: string;
 	connectorToolName: string;
@@ -179,6 +188,7 @@ export class WorkerGateway {
 	private agentSettingsStore?: AgentSettingsStore;
 	private secretStore?: WritableSecretStore;
 	private agentConnectionStore: AgentConnectionStore;
+	private deploymentActivityTracker?: DeploymentActivityTracker;
 
 	constructor(
 		queue: IMessageQueue,
@@ -220,6 +230,10 @@ export class WorkerGateway {
 	 */
 	getConnectionManager(): WorkerConnectionManager {
 		return this.connectionManager;
+	}
+
+	setDeploymentActivityTracker(tracker: DeploymentActivityTracker): void {
+		this.deploymentActivityTracker = tracker;
 	}
 
 	/**
@@ -734,8 +748,19 @@ export class WorkerGateway {
 
 		const { deploymentName } = auth.tokenData;
 
-		// Update connection activity
+		// Update connection activity (SSE stale-cleanup clock).
 		this.connectionManager.touchConnection(deploymentName);
+		// Also refresh the deployment manager's idle clock. touchConnection()
+		// only feeds the connection manager; idle cleanup reads deployment
+		// lastActivity, which otherwise stays frozen at the last dispatch during
+		// one long-running turn.
+		void this.deploymentActivityTracker
+			?.updateDeploymentActivity(deploymentName)
+			.catch((error) => {
+				logger.warn(
+					`[WORKER-GATEWAY] Failed to refresh deployment activity for ${deploymentName}: ${error}`,
+				);
+			});
 
 		try {
 			const body = await c.req.json();
@@ -781,6 +806,10 @@ export class WorkerGateway {
 				// but slow worker is never falsely failed by the sweep. Best-effort.
 				void extendTurnDeadlines(deploymentName);
 				return c.json({ success: true });
+			}
+
+			if (enrichedResponse.statusUpdate) {
+				void extendTurnDeadlines(deploymentName);
 			}
 
 			// Log for debugging
