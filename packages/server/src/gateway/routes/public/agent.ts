@@ -215,6 +215,22 @@ function normalizeNetworkConfig(config: NetworkConfig): NetworkConfig {
   };
 }
 
+function getSafeDirectApiPlatformMetadata(
+  value: unknown
+): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+
+  const metadata = value as Record<string, unknown>;
+  const safeMetadata: Record<string, unknown> = {};
+  if (typeof metadata.sessionReset === "boolean") {
+    safeMetadata.sessionReset = metadata.sessionReset;
+  }
+  if (typeof metadata.lineCommand === "string") {
+    safeMetadata.lineCommand = metadata.lineCommand;
+  }
+  return safeMetadata;
+}
+
 function validateMcpServerConfig(
   id: string,
   config: McpServerConfig
@@ -1281,6 +1297,11 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     try {
       const channelId = session.channelId || `api_${session.userId}`;
+      const requestPlatformMetadata = getSafeDirectApiPlatformMetadata(
+        body.platformMetadata
+      );
+      const defaultSource =
+        session.intent?.kind === "watcher_run" ? "watcher-run" : "direct-api";
 
       const baseOptions: Record<string, any> = {
         provider: session.provider || "claude",
@@ -1312,8 +1333,9 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         platform: "api",
         messageText: messageContent,
         platformMetadata: {
+          ...requestPlatformMetadata,
           agentId: realAgentId,
-          source: session.intent?.kind === "watcher_run" ? "watcher-run" : "direct-api",
+          source: defaultSource,
           traceparent: traceparent || undefined,
           dryRun: session.dryRun || false,
           intent: session.intent,
