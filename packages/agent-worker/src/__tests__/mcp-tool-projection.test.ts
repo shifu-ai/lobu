@@ -26,6 +26,45 @@ function countDefaultRegisteredDirectToolDefinitions(
   return registeredNames.size;
 }
 
+function walkSchema(
+  value: unknown,
+  visit: (node: Record<string, unknown>) => void
+): void {
+  if (Array.isArray(value)) {
+    for (const entry of value) walkSchema(entry, visit);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  visit(record);
+  for (const child of Object.values(record)) {
+    walkSchema(child, visit);
+  }
+}
+
+function expectGeminiSafeToolSurface(
+  mcpTools: Record<string, McpToolDef[]>,
+  limit: number
+): void {
+  const projected = projectMcpToolsForProvider(mcpTools, {
+    provider: "gemini",
+    directToolLimit: limit,
+  });
+  const tools = Object.values(projected.tools).flat();
+
+  expect(tools.length).toBeLessThanOrEqual(limit);
+  for (const tool of tools) {
+    expect(tool.name).toMatch(/^[A-Za-z_][A-Za-z0-9_]*$/);
+    expect(tool.name.length).toBeLessThanOrEqual(64);
+    expect(tool.inputSchema?.type).toBe("object");
+    walkSchema(tool.inputSchema, (node) => {
+      expect(node.anyOf).toBeUndefined();
+      expect(node.oneOf).toBeUndefined();
+      expect(node.allOf).toBeUndefined();
+    });
+  }
+}
+
 describe("projectMcpToolsForProvider", () => {
   test("keeps healthy object schemas and quarantines root array schemas", () => {
     const mcpTools: Record<string, McpToolDef[]> = {
@@ -293,5 +332,84 @@ describe("projectMcpToolsForProvider", () => {
     );
     expect(projected.tools.notion?.[0]?.upstreamToolName).toBe(longName);
     expect(projected.tools.notion?.[1]?.upstreamToolName).toBe(collidingName);
+  });
+
+  test("keeps Gemini direct MCP tool surface below 400-prone schema and naming limits", () => {
+    const longName = `tool_${"a".repeat(80)}`;
+    const collidingLongName = `tool_${"a".repeat(80)}!`;
+    const mcpTools: Record<string, McpToolDef[]> = {
+      google_workspace: [
+        {
+          name: "bad-root-array",
+          inputSchema: { type: "array", items: { type: "string" } },
+        },
+        {
+          name: "bad-root-anyof",
+          inputSchema: {
+            type: "object",
+            anyOf: [{ properties: { q: { type: "string" } } }],
+          },
+        },
+        {
+          name: "123-search-docs",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: {
+                anyOf: [{ type: "string" }, { type: "number" }],
+              },
+            },
+          },
+        },
+        {
+          name: longName,
+          inputSchema: { type: "object", properties: {} },
+        },
+        {
+          name: collidingLongName,
+          inputSchema: { type: "object", properties: {} },
+        },
+        {
+          name: "healthy",
+          inputSchema: { type: "object", properties: {} },
+        },
+      ],
+    };
+
+    expectGeminiSafeToolSurface(mcpTools, 3);
+
+    const projected = projectMcpToolsForProvider(mcpTools, {
+      provider: "gemini",
+      directToolLimit: 3,
+    });
+    const names = Object.values(projected.tools)
+      .flat()
+      .map((tool) => tool.name);
+
+    expect(names).toEqual([
+      "mcp_123_search_docs",
+      "healthy",
+      "tool_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_01xnxmrc",
+    ]);
+    expect(projected.projected).toContainEqual({
+      mcpId: "google_workspace",
+      toolName: "123-search-docs",
+      reason: "removed unsupported keyword anyOf",
+    });
+    expect(projected.quarantined).toEqual([
+      {
+        mcpId: "google_workspace",
+        toolName: "bad-root-array",
+        reason: "root schema must be an object",
+      },
+      {
+        mcpId: "google_workspace",
+        toolName: "bad-root-anyof",
+        reason: "root schema uses unsupported keyword anyOf",
+      },
+    ]);
+    expect(projected.omittedForCap).toEqual([
+      { mcpId: "google_workspace", omitted: 1, limit: 3 },
+    ]);
   });
 });
