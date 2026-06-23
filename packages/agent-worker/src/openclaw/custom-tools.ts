@@ -18,6 +18,11 @@ import {
   startProjectContextDiscovery,
   uploadUserFile,
 } from "../shared/tool-implementations";
+import {
+  buildMcpAuthToolNames,
+  type McpAuthToolNames,
+  type ProjectedMcpToolDef,
+} from "./mcp-tool-projection";
 import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
@@ -385,6 +390,32 @@ export function createMcpToolDefinitions(
   const toSafeAlias = (name: string): string =>
     name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
 
+  const getProjectedSafeOnlyTool = (
+    def: McpToolDef
+  ):
+    | {
+        providerToolName: string;
+        upstreamToolName: string;
+      }
+    | null => {
+    const projected = def as ProjectedMcpToolDef;
+    if (projected.providerSafeNameOnly !== true) {
+      return null;
+    }
+    const providerToolName =
+      typeof projected.providerToolName === "string"
+        ? projected.providerToolName.trim()
+        : "";
+    const upstreamToolName =
+      typeof projected.upstreamToolName === "string"
+        ? projected.upstreamToolName.trim()
+        : "";
+    if (!providerToolName || !upstreamToolName) {
+      return null;
+    }
+    return { providerToolName, upstreamToolName };
+  };
+
   for (const [mcpId, defs] of Object.entries(mcpTools)) {
     const contextPrefix = mcpContext?.[mcpId];
     for (const def of defs) {
@@ -392,6 +423,23 @@ export function createMcpToolDefinitions(
         continue;
       }
       const upstreamToolName = def.name.trim();
+      const projectedSafeOnly = getProjectedSafeOnlyTool(def);
+
+      if (projectedSafeOnly) {
+        if (!registeredNames.has(projectedSafeOnly.providerToolName)) {
+          tools.push(
+            toToolDefinition(
+              mcpId,
+              def,
+              projectedSafeOnly.providerToolName,
+              projectedSafeOnly.upstreamToolName,
+              contextPrefix
+            )
+          );
+          registeredNames.add(projectedSafeOnly.providerToolName);
+        }
+        continue;
+      }
 
       if (!registeredNames.has(upstreamToolName)) {
         tools.push(
@@ -429,7 +477,11 @@ export function createMcpAuthToolDefinitions(
     configured?: boolean;
   }>,
   gw: GatewayParams,
-  existingToolNames: Set<string> = new Set()
+  existingToolNames: Set<string> = new Set(),
+  options: {
+    providerSafeNames?: boolean;
+    authToolNames?: Record<string, McpAuthToolNames>;
+  } = {}
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
 
@@ -438,7 +490,14 @@ export function createMcpAuthToolDefinitions(
       continue;
     }
 
-    const loginToolName = `${mcp.id}_login`;
+    const authToolNames =
+      options.authToolNames?.[mcp.id] ??
+      buildMcpAuthToolNames(mcp.id, {
+        providerSafeNames: options.providerSafeNames,
+        reservedNames: new Set(existingToolNames),
+      });
+
+    const loginToolName = authToolNames.login;
     if (!existingToolNames.has(loginToolName)) {
       tools.push(
         defineTool({
@@ -451,7 +510,7 @@ export function createMcpAuthToolDefinitions(
       existingToolNames.add(loginToolName);
     }
 
-    const checkToolName = `${mcp.id}_login_check`;
+    const checkToolName = authToolNames.loginCheck;
     if (!existingToolNames.has(checkToolName)) {
       tools.push(
         defineTool({
@@ -464,7 +523,7 @@ export function createMcpAuthToolDefinitions(
       existingToolNames.add(checkToolName);
     }
 
-    const logoutToolName = `${mcp.id}_logout`;
+    const logoutToolName = authToolNames.logout;
     if (!existingToolNames.has(logoutToolName)) {
       tools.push(
         defineTool({

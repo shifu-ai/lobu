@@ -1,4 +1,9 @@
 import {
+  buildMcpAuthToolNames,
+  requiresProviderSafeToolNames,
+} from "./mcp-tool-projection";
+
+import {
   type ConfigProviderMeta,
   createLogger,
   ensureBaseUrl,
@@ -106,7 +111,8 @@ export function invalidateSessionContextCache(): void {
 function buildMcpInstructions(
   mcpStatus: McpStatus[],
   mcpToolIds: Set<string>,
-  mcpExposure: "tools" | "cli" = "tools"
+  mcpExposure: "tools" | "cli" = "tools",
+  provider = ""
 ): string {
   if (!mcpStatus || mcpStatus.length === 0) {
     return "";
@@ -131,14 +137,18 @@ function buildMcpInstructions(
   const lines: string[] = ["## MCP Tools Requiring Setup"];
 
   for (const mcp of needsAuthentication) {
+    const authToolNames = buildMcpAuthToolNames(mcp.id, {
+      providerSafeNames:
+        mcpExposure === "tools" && requiresProviderSafeToolNames(provider),
+    });
     const loginCmd =
       mcpExposure === "cli"
         ? `run \`${mcp.id} auth login\` in Bash`
-        : `call \`${mcp.id}_login\``;
+        : `call \`${authToolNames.login}\``;
     const checkCmd =
       mcpExposure === "cli"
         ? `run \`${mcp.id} auth check\``
-        : `call \`${mcp.id}_login_check\``;
+        : `call \`${authToolNames.loginCheck}\``;
     lines.push(
       `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Authentication is required. To start login, ${loginCmd}. After the user completes login, ${checkCmd}. Newly available MCP tools will refresh on the next message.`
     );
@@ -327,7 +337,8 @@ export async function getOpenClawSessionContext(
     const mcpSetupInstructions = buildMcpInstructions(
       data.mcpStatus,
       toolMcpIds,
-      mcpExposure
+      mcpExposure,
+      data.providerConfig?.defaultProvider || ""
     );
     // Include MCP server instructions for all servers (with or without tools).
     // These provide workspace context (available connectors, entity schemas, etc.)

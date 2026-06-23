@@ -12,6 +12,8 @@ import * as path from "node:path";
 import {
   createLogger,
   getOptionalEnv,
+  type McpStatus,
+  type McpToolDef,
   type PluginsConfig,
   type ToolsConfig,
 } from "@lobu/core";
@@ -40,6 +42,12 @@ import {
   registerDynamicProvider,
   resolveModelRef,
 } from "./model-resolver";
+import {
+  buildMcpAuthToolNames,
+  type McpAuthToolNames,
+  projectMcpToolsForProvider,
+  requiresProviderSafeToolNames,
+} from "./mcp-tool-projection";
 import {
   loadPlugins,
   runPluginHooks,
@@ -86,6 +94,8 @@ const DEFAULT_MEMORY_FLUSH_CONFIG: ResolvedMemoryFlushConfig = {
   prompt:
     "Write any lasting notes to memory using available memory tools. Reply with NO_REPLY if nothing to store.",
 };
+const GEMINI_DIRECT_MCP_TOOL_LIMIT = 24;
+const DEFAULT_DIRECT_MCP_TOOL_LIMIT = 64;
 
 function readStringOrFallback(value: unknown, fallback: string): string {
   if (typeof value !== "string") {
@@ -106,6 +116,194 @@ function readNonNegativeNumberOrFallback(
     return fallback;
   }
   return value;
+}
+
+function readOptionalNonNegativeInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return Math.floor(value);
+}
+
+function readConfiguredDirectMcpToolLimit(
+  rawOptions: Record<string, unknown>
+): number | undefined {
+  const toolsConfig = isRecord(rawOptions.toolsConfig)
+    ? rawOptions.toolsConfig
+    : undefined;
+  return (
+    readOptionalNonNegativeInteger(toolsConfig?.mcpDirectToolLimit) ??
+    readOptionalNonNegativeInteger(toolsConfig?.directToolLimit) ??
+    readOptionalNonNegativeInteger(rawOptions.mcpDirectToolLimit)
+  );
+}
+
+function resolveProviderDirectMcpToolLimit(
+  rawProvider: string,
+  provider: string,
+  configuredLimit: number | undefined
+): number {
+  const isGemini =
+    rawProvider.toLowerCase() === "gemini" ||
+    provider.toLowerCase() === "gemini" ||
+    rawProvider.toLowerCase() === "google" ||
+    provider.toLowerCase() === "google";
+  if (isGemini) {
+    return Math.min(
+      configuredLimit ?? GEMINI_DIRECT_MCP_TOOL_LIMIT,
+      GEMINI_DIRECT_MCP_TOOL_LIMIT
+    );
+  }
+  return configuredLimit ?? DEFAULT_DIRECT_MCP_TOOL_LIMIT;
+}
+
+function toSafeMcpToolAlias(name: string): string {
+  return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
+}
+
+function removeInstructionSection(instructions: string, heading: string): string {
+  const lines = instructions.split("\n");
+  const kept: string[] = [];
+  let skippingSection = false;
+
+  for (const line of lines) {
+    if (line.trim() === heading) {
+      skippingSection = true;
+      continue;
+    }
+    if (skippingSection && line.startsWith("## ")) {
+      skippingSection = false;
+    }
+    if (!skippingSection) {
+      kept.push(line);
+    }
+  }
+
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function buildProjectedMcpToolInventoryInstructions(
+  mcpTools: Record<string, McpToolDef[]>,
+  mcpStatus: McpStatus[]
+): string {
+  const entries = Object.entries(mcpTools)
+    .map(([mcpId, tools]) => {
+      const toolNames = tools
+        .map((tool) => tool.name?.trim())
+        .filter((name): name is string => Boolean(name));
+      if (toolNames.length === 0) return null;
+      const displayName = mcpStatus.find((mcp) => mcp.id === mcpId)?.name;
+      const label = displayName ? `${displayName} (${mcpId})` : mcpId;
+      const renderedTools = toolNames.map((name) => {
+        const alias = toSafeMcpToolAlias(name);
+        return alias === name ? `\`${name}\`` : `\`${name}\` (alias \`${alias}\`)`;
+      });
+      return `- ${label}: ${renderedTools.join(", ")}`;
+    })
+    .filter((entry): entry is string => Boolean(entry));
+
+  if (entries.length === 0) return "";
+
+  return [
+    "## Available MCP Tools",
+    "These provider-safe MCP tools are registered as first-class tools. Use only the exact tool names below; omitted or quarantined MCP tools are not registered for this run.",
+    ...entries,
+  ].join("\n");
+}
+
+function replaceMcpToolInventoryInstructions(
+  instructions: string,
+  mcpTools: Record<string, McpToolDef[]>,
+  mcpStatus: McpStatus[]
+): string {
+  return [
+    removeInstructionSection(instructions, "## Available MCP Tools"),
+    buildProjectedMcpToolInventoryInstructions(mcpTools, mcpStatus),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function buildMcpAuthToolNameMap(
+  mcpStatus: McpStatus[],
+  reservedNames: Set<string>,
+  providerSafeNames: boolean
+): Record<string, McpAuthToolNames> {
+  const names: Record<string, McpAuthToolNames> = {};
+  const reserved = new Set(reservedNames);
+  for (const mcp of mcpStatus) {
+    if (!mcp.requiresAuth) continue;
+    names[mcp.id] = buildMcpAuthToolNames(mcp.id, {
+      providerSafeNames,
+      reservedNames: reserved,
+    });
+  }
+  return names;
+}
+
+function buildProjectedMcpSetupInstructions(
+  mcpStatus: McpStatus[],
+  mcpTools: Record<string, McpToolDef[]>,
+  authToolNames: Record<string, McpAuthToolNames>
+): string {
+  if (!mcpStatus || mcpStatus.length === 0) {
+    return "";
+  }
+
+  const mcpToolIds = new Set(Object.keys(mcpTools));
+  const needsAuthentication = mcpStatus.filter(
+    (mcp) => mcp.requiresAuth && !mcp.authenticated
+  );
+  const needsConfiguration = mcpStatus.filter(
+    (mcp) => mcp.requiresInput && !mcp.configured
+  );
+  const undiscoveredMcps = mcpStatus.filter((mcp) => !mcpToolIds.has(mcp.id));
+
+  if (
+    needsAuthentication.length === 0 &&
+    needsConfiguration.length === 0 &&
+    undiscoveredMcps.length === 0
+  ) {
+    return "";
+  }
+
+  const lines: string[] = ["## MCP Tools Requiring Setup"];
+
+  for (const mcp of needsAuthentication) {
+    const names = authToolNames[mcp.id] ?? buildMcpAuthToolNames(mcp.id);
+    lines.push(
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Authentication is required. To start login, call \`${names.login}\`. After the user completes login, call \`${names.loginCheck}\`. Newly available MCP tools will refresh on the next message.`
+    );
+  }
+
+  for (const mcp of needsConfiguration) {
+    lines.push(
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Additional MCP input is required before this server can be used. Tell the user an admin must configure the MCP inputs in settings.`
+    );
+  }
+
+  for (const mcp of undiscoveredMcps) {
+    if (mcp.requiresAuth || mcp.requiresInput) continue;
+    lines.push(
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): No tools were discovered for this MCP in the current session. Do not assume a login tool exists unless it is actually registered.`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+function replaceMcpSetupInstructions(
+  instructions: string,
+  mcpStatus: McpStatus[],
+  mcpTools: Record<string, McpToolDef[]>,
+  authToolNames: Record<string, McpAuthToolNames>
+): string {
+  return [
+    removeInstructionSection(instructions, "## MCP Tools Requiring Setup"),
+    buildProjectedMcpSetupInstructions(mcpStatus, mcpTools, authToolNames),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export function resolveMemoryFlushConfig(
@@ -514,6 +712,11 @@ export async function runAISession(
   // Map gateway slug to model-registry provider name (e.g. "z-ai" → "zai")
   const provider = PROVIDER_REGISTRY_ALIASES[rawProvider] || rawProvider;
   onModelResolved(provider, modelId);
+  const providerDirectToolLimit = resolveProviderDirectMcpToolLimit(
+    rawProvider,
+    provider,
+    readConfiguredDirectMcpToolLimit(rawOptions)
+  );
 
   // Dynamic provider base URL from agentOptions.providerBaseUrlMappings
   let providerBaseUrl: string | undefined;
@@ -900,13 +1103,54 @@ Use it when the user references past discussions or you need context.`);
   // mode — MCP tools are instead reachable via the per-server just-bash CLI
   // wired in above, and `<server> auth login|check|logout` supersedes the
   // `<id>_login` / `<id>_login_check` / `<id>_logout` trio.
+  let registeredDirectMcpTools: Record<string, McpToolDef[]> = context.mcpTools;
   if (mcpExposure === "cli") {
     logger.info(
       "mcpExposure='cli' — skipping first-class MCP tool registration (tools reachable via <server> <tool> in Bash)."
     );
   } else {
+    const projectedMcp = projectMcpToolsForProvider(context.mcpTools, {
+      provider: rawProvider,
+      directToolLimit: providerDirectToolLimit,
+    });
+    registeredDirectMcpTools = projectedMcp.tools;
+    instructionParts[0] = replaceMcpToolInventoryInstructions(
+      context.gatewayInstructions,
+      projectedMcp.tools,
+      context.mcpStatus
+    );
+    if (projectedMcp.quarantined.length > 0) {
+      logger.warn(
+        `Quarantined ${projectedMcp.quarantined.length} MCP tool(s) before direct registration: ${projectedMcp.quarantined
+          .map(
+            (notice) =>
+              `${notice.mcpId}/${notice.toolName} (${notice.reason})`
+          )
+          .join(", ")}`
+      );
+    }
+    if (projectedMcp.projected.length > 0) {
+      logger.warn(
+        `Projected ${projectedMcp.projected.length} MCP schema node(s) before direct registration: ${projectedMcp.projected
+          .map(
+            (notice) =>
+              `${notice.mcpId}/${notice.toolName} (${notice.reason})`
+          )
+          .join(", ")}`
+      );
+    }
+    if (projectedMcp.omittedForCap.length > 0) {
+      logger.warn(
+        `Applied ${rawProvider} direct MCP tool cap: ${projectedMcp.omittedForCap
+          .map(
+            (notice) =>
+              `${notice.mcpId} omitted ${notice.omitted} over limit ${notice.limit}`
+          )
+          .join(", ")})`
+      );
+    }
     const mcpToolDefs = createMcpToolDefinitions(
-      context.mcpTools,
+      projectedMcp.tools,
       gwParams,
       context.mcpContext
     );
@@ -937,10 +1181,27 @@ Use it when the user references past discussions or you need context.`);
   }
 
   if (mcpExposure !== "cli") {
+    const existingToolNames = new Set(customTools.map((tool) => tool.name));
+    const providerSafeAuthToolNames = requiresProviderSafeToolNames(rawProvider);
+    const authToolNames = buildMcpAuthToolNameMap(
+      context.mcpStatus,
+      existingToolNames,
+      providerSafeAuthToolNames
+    );
+    instructionParts[0] = replaceMcpSetupInstructions(
+      instructionParts[0] ?? context.gatewayInstructions,
+      context.mcpStatus,
+      registeredDirectMcpTools,
+      authToolNames
+    );
     const authToolDefs = createMcpAuthToolDefinitions(
       context.mcpStatus,
       gwParams,
-      new Set(customTools.map((tool) => tool.name))
+      existingToolNames,
+      {
+        providerSafeNames: providerSafeAuthToolNames,
+        authToolNames,
+      }
     );
     if (authToolDefs.length > 0) {
       customTools.push(...authToolDefs);

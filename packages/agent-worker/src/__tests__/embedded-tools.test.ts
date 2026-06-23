@@ -13,6 +13,7 @@ import {
   createMcpAuthToolDefinitions,
   createMcpToolDefinitions,
 } from "../openclaw/custom-tools";
+import { projectMcpToolsForProvider } from "../openclaw/mcp-tool-projection";
 import {
   getOpenClawSessionContext,
   invalidateSessionContextCache,
@@ -493,6 +494,76 @@ describe("createMcpAuthToolDefinitions", () => {
     expect(parsed.user_code).toBe("CODE-123");
     expect(parsed.interaction_posted).toBe(true);
   });
+
+  test("provider-safe auth tools expose safe names and call raw MCP ids", async () => {
+    const capturedUrls: string[] = [];
+    globalThis.fetch = async (input, init) => {
+      const url = typeof input === "string" ? input : input.url;
+      capturedUrls.push(url);
+      if (url.endsWith("/internal/device-auth/status?mcpId=google-drive")) {
+        return new Response(JSON.stringify({ authenticated: false }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (
+        url.endsWith("/internal/device-auth/start") &&
+        init?.method === "POST"
+      ) {
+        const body = JSON.parse(String(init.body ?? "{}"));
+        expect(body.mcpId).toBe("google-drive");
+        return new Response(
+          JSON.stringify({
+            userCode: "CODE-456",
+            verificationUri: "https://example.com/device",
+            verificationUriComplete: "https://example.com/device?code=CODE-456",
+            expiresIn: 600,
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }
+        );
+      }
+      if (
+        url.endsWith("/internal/interactions/create") &&
+        init?.method === "POST"
+      ) {
+        return new Response(JSON.stringify({ id: "link-456" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected fetch: ${url}`);
+    };
+
+    const tools = createMcpAuthToolDefinitions(
+      [
+        {
+          id: "google-drive",
+          name: "Google Drive",
+          requiresAuth: true,
+          authenticated: false,
+          configured: true,
+        },
+      ] as any,
+      gw,
+      new Set(),
+      { providerSafeNames: true }
+    );
+
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "google_drive_login",
+      "google_drive_login_check",
+      "google_drive_logout",
+    ]);
+    expect(tools.map((tool) => tool.name)).not.toContain("google-drive_login");
+
+    await tools[0]!.execute("call-1", {}, undefined, undefined);
+    expect(capturedUrls).toContain(
+      "http://gateway:8080/internal/device-auth/status?mcpId=google-drive"
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -684,6 +755,72 @@ describe("createMcpToolDefinitions", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  test("projected Gemini MCP tools register safe names while calling upstream names", async () => {
+    const originalFetch = globalThis.fetch;
+    const capturedUrls: string[] = [];
+    globalThis.fetch = async (url: Parameters<typeof fetch>[0]) => {
+      capturedUrls.push(typeof url === "string" ? url : url.toString());
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "notion result" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [{ name: "notion-search", description: "Search Notion" }],
+      },
+      { provider: "gemini", directToolLimit: 3 }
+    );
+
+    try {
+      const defs = createMcpToolDefinitions(projected.tools, gw);
+      expect(defs.map((def) => def.name)).toEqual(["notion_search"]);
+      expect(defs.map((def) => def.name)).not.toContain("notion-search");
+
+      await defs[0].execute(
+        "call-id",
+        { query: "budget" },
+        undefined,
+        undefined,
+        {} as any
+      );
+
+      expect(capturedUrls).toEqual([
+        "http://gateway:8080/mcp/notion/tools/notion-search",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("projected Gemini MCP cap counts actual registered safe definitions", () => {
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [
+          { name: "notion-search", description: "Search Notion" },
+          { name: "notion-fetch", description: "Fetch Notion page" },
+          { name: "notion-list", description: "List Notion pages" },
+        ],
+      },
+      { provider: "gemini", directToolLimit: 2 }
+    );
+
+    const defs = createMcpToolDefinitions(projected.tools, gw);
+    expect(defs).toHaveLength(2);
+    expect(defs.map((def) => def.name)).toEqual([
+      "notion_fetch",
+      "notion_list",
+    ]);
+    expect(defs.map((def) => def.name)).not.toContain("notion-fetch");
+    expect(defs.map((def) => def.name)).not.toContain("notion-list");
+    expect(projected.omittedForCap).toEqual([
+      { mcpId: "notion", omitted: 1, limit: 2 },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -829,5 +966,39 @@ describe("session context cache TTL", () => {
     expect(context.gatewayInstructions).toContain("shifu-toolbox");
     expect(context.gatewayInstructions).toContain("meeting_search");
     expect(context.gatewayInstructions).toContain("transcript_list");
+  });
+
+  test("uses provider-safe MCP auth tool names in tools-mode setup instructions", async () => {
+    globalThis.fetch = async () =>
+      new Response(
+        JSON.stringify(
+          makeSessionResponse({
+            providerConfig: { defaultProvider: "gemini" },
+            mcpStatus: [
+              {
+                id: "google-drive",
+                name: "Google Drive",
+                requiresAuth: true,
+                authenticated: false,
+                configured: true,
+              },
+            ],
+            mcpTools: {},
+          })
+        ),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }
+      );
+
+    const context = await getOpenClawSessionContext({ mcpExposure: "tools" });
+
+    expect(context.gatewayInstructions).toContain("`google_drive_login`");
+    expect(context.gatewayInstructions).toContain("`google_drive_login_check`");
+    expect(context.gatewayInstructions).not.toContain("`google-drive_login`");
+    expect(context.gatewayInstructions).not.toContain(
+      "`google-drive_login_check`"
+    );
   });
 });
