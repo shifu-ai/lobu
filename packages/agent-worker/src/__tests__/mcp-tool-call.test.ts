@@ -99,6 +99,21 @@ describe("callMcpTool", () => {
     expect(extractText(result)).toContain("not allowed");
   });
 
+  test("isError=true from proxy: normalizes non-text content before Error prefix", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({
+        content: [{ type: "image", mimeType: "image/jpeg", data: "YWJj" }],
+        isError: true,
+      })
+    ) as unknown as typeof fetch;
+
+    const result = await callMcpTool(gw, "vision", "read_image", {});
+
+    expect(extractText(result)).toBe(
+      "Error: [image result omitted: image/jpeg, 3 bytes]"
+    );
+  });
+
   test("non-200 HTTP status: error message surfaced", async () => {
     globalThis.fetch = mock(async () =>
       Response.json(
@@ -179,11 +194,17 @@ describe("callMcpTool", () => {
     expect(text).toContain("line two");
   });
 
-  test("non-text content items are filtered from output", async () => {
+  test("non-text content items are normalized before output", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
         content: [
-          { type: "image", data: "base64..." },
+          { type: "image", mimeType: "image/png", data: "YWJjZA==" },
+          {
+            type: "resource_link",
+            name: "docs",
+            uri: "https://example.com/docs",
+          },
+          { type: "audio", mimeType: "audio/mpeg", data: "YWJj" },
           { type: "text", text: "the text" },
         ],
         isError: false,
@@ -192,8 +213,35 @@ describe("callMcpTool", () => {
 
     const result = await callMcpTool(gw, "lobu", "mixed_content", {});
 
-    // Only the text item should appear
-    expect(extractText(result)).toBe("the text");
+    expect(extractText(result)).toBe(
+      [
+        "[image result omitted: image/png, 4 bytes]",
+        "[resource: docs](https://example.com/docs)",
+        "[audio result omitted: audio/mpeg, 3 bytes]",
+        "the text",
+      ].join("\n")
+    );
+  });
+
+  test("successful normalized content is returned as one joined text block", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({
+        content: [
+          { type: "text", text: "line one" },
+          { type: "image", mimeType: "image/png", data: "YWJj" },
+        ],
+        isError: false,
+      })
+    ) as unknown as typeof fetch;
+
+    const result = await callMcpTool(gw, "lobu", "joined_content", {});
+
+    expect(result.content).toEqual([
+      {
+        type: "text",
+        text: "line one\n[image result omitted: image/png, 3 bytes]",
+      },
+    ]);
   });
 
   test("sends correct Content-Type header", async () => {

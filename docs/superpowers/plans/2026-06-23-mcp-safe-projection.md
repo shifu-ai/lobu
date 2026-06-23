@@ -746,7 +746,7 @@ git commit -m "feat(gateway): pause broken mcp servers during discovery"
 - Modify: `packages/agent-worker/src/shared/tool-implementations.ts`
 - Modify: `packages/agent-worker/src/__tests__/mcp-tool-call.test.ts`
 
-- [ ] **Step 1: Write normalizer tests**
+- [x] **Step 1: Write normalizer tests**
 
 Create `packages/agent-worker/src/__tests__/mcp-result-normalizer.test.ts`:
 
@@ -781,7 +781,7 @@ describe("normalizeMcpResultContent", () => {
 });
 ```
 
-- [ ] **Step 2: Implement normalizer**
+- [x] **Step 2: Implement normalizer**
 
 Create `packages/agent-worker/src/openclaw/mcp-result-normalizer.ts`:
 
@@ -827,7 +827,7 @@ export function normalizeMcpResultContent(content: unknown): NormalizedTextBlock
 }
 ```
 
-- [ ] **Step 3: Use the normalizer in `callMcpTool()`**
+- [x] **Step 3: Use the normalizer in `callMcpTool()`**
 
 In `packages/agent-worker/src/shared/tool-implementations.ts`, import `normalizeMcpResultContent` and replace manual `data.content.filter((c) => c.type === "text")` handling with:
 
@@ -838,7 +838,7 @@ const contentText = normalizedContent.map((c) => c.text).join("\n");
 
 Return `content: normalizedContent.length > 0 ? normalizedContent : [{ type: "text", text: `${toolName} completed.` }]`.
 
-- [ ] **Step 4: Run focused tests**
+- [x] **Step 4: Run focused tests**
 
 ```bash
 bun test packages/agent-worker/src/__tests__/mcp-result-normalizer.test.ts packages/agent-worker/src/__tests__/mcp-tool-call.test.ts
@@ -846,7 +846,7 @@ bun test packages/agent-worker/src/__tests__/mcp-result-normalizer.test.ts packa
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/agent-worker/src/openclaw/mcp-result-normalizer.ts packages/agent-worker/src/shared/tool-implementations.ts packages/agent-worker/src/__tests__/mcp-result-normalizer.test.ts packages/agent-worker/src/__tests__/mcp-tool-call.test.ts

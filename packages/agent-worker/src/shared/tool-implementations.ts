@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createLogger, ensureBaseUrl } from "@lobu/core";
 import FormData from "form-data";
+import { normalizeMcpResultContent } from "../openclaw/mcp-result-normalizer";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
 import {
   assertRecoverableDecisionOptions,
@@ -1240,13 +1241,13 @@ export async function callMcpTool(
     // with "Unexpected token < in JSON". Treat parse failure as a transport
     // error message instead of letting it bubble out as an unhandled throw.
     let data: {
-      content?: Array<{ type: string; text: string }>;
+      content?: unknown;
       error?: string;
       isError?: boolean;
     };
     try {
       data = (await response.json()) as {
-        content?: Array<{ type: string; text: string }>;
+        content?: unknown;
         error?: string;
         isError?: boolean;
       };
@@ -1258,20 +1259,15 @@ export async function callMcpTool(
       );
     }
 
+    const normalizedContent = normalizeMcpResultContent(data.content);
+    const contentText = normalizedContent.map((c) => c.text).join("\n");
+
     if (!response.ok || data.isError) {
-      const contentText = data.content
-        ?.filter((c) => c.type === "text")
-        .map((c) => c.text)
-        .join("\n");
       const errorMsg =
         data.error || contentText || `${toolName} failed (${response.status})`;
       return textResult(`Error: ${errorMsg}`);
     }
 
-    const text = data.content
-      ?.filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("\n");
-    return textResult(text || `${toolName} completed.`);
+    return textResult(contentText || `${toolName} completed.`);
   });
 }
