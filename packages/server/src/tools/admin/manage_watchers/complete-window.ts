@@ -230,12 +230,12 @@ export async function handleCompleteWindow(
     SELECT
       cc.id,
       cc.slug,
-      ccv.id as version_id,
-      ccv.extraction_config
-    FROM event_classifiers cc
-    JOIN event_classifier_versions ccv ON cc.id = ccv.classifier_id AND ccv.is_current = true
+      cc.id as version_id,
+      cc.extraction_config
+    FROM classify_facet cc
     WHERE cc.watcher_id = ${watcherId}
-      AND ccv.extraction_config IS NOT NULL
+      AND cc.status = 'active'
+      AND cc.extraction_config IS NOT NULL
   `;
 
   const timeGranularity = granularity || 'weekly';
