@@ -10,13 +10,14 @@ WORKDIR /app
 ARG BUN_VERSION=1.3.5
 
 # Bun for workspace install + tsc. git needed because some deps ship git URLs.
-# python3 + build-essential needed for isolated-vm native build (node-gyp).
+# python3 + build-essential + node-gyp needed for native install fallbacks.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl unzip \
       python3 build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
-    && chmod +x /usr/local/bin/bun
+    && chmod +x /usr/local/bin/bun \
+    && npm install -g node-gyp
 
 ENV PATH="/usr/local/bin:${PATH}"
 
