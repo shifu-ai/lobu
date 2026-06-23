@@ -17,7 +17,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { orgContext } from "../../lobu/stores/org-context.js";
-import { buildSessionKey } from "../auth/mcp/proxy-shared.js";
+import { buildMcpSessionKey } from "../auth/mcp/proxy.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
 
 const ORG_A = "org-aaaaaaaa";
@@ -82,8 +82,8 @@ describe("McpToolCache org isolation (#5)", () => {
 describe("MCP upstream session key org isolation (#6)", () => {
   test("two orgs with the same (agentId, mcpId, scope) get DIFFERENT session keys", () => {
     const scope = "user-1";
-    const keyA = inOrg(ORG_A, () => buildSessionKey(AGENT, MCP, scope));
-    const keyB = inOrg(ORG_B, () => buildSessionKey(AGENT, MCP, scope));
+    const keyA = inOrg(ORG_A, () => buildMcpSessionKey(AGENT, MCP, scope));
+    const keyB = inOrg(ORG_B, () => buildMcpSessionKey(AGENT, MCP, scope));
 
     expect(keyA).not.toBe(keyB);
     expect(keyA).toContain(ORG_A);
@@ -92,8 +92,8 @@ describe("MCP upstream session key org isolation (#6)", () => {
 
   test("same org + same triple is stable (still shares a session within the org)", () => {
     const scope = "user-1";
-    const first = inOrg(ORG_A, () => buildSessionKey(AGENT, MCP, scope));
-    const second = inOrg(ORG_A, () => buildSessionKey(AGENT, MCP, scope));
+    const first = inOrg(ORG_A, () => buildMcpSessionKey(AGENT, MCP, scope));
+    const second = inOrg(ORG_A, () => buildMcpSessionKey(AGENT, MCP, scope));
     expect(first).toBe(second);
   });
 });

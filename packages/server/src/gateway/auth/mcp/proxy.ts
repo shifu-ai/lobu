@@ -173,6 +173,16 @@ interface McpConfigSource {
   ): Promise<Map<string, HttpMcpServerConfig>>;
 }
 
+export function buildMcpSessionKey(
+  agentId: string,
+  mcpId: string,
+  scopeKey?: string
+): string {
+  const orgId = getOrgId();
+  const scope = scopeKey ?? "_unscoped";
+  return `mcp:session:${orgId}:${agentId}:${mcpId}:${scope}`;
+}
+
 async function authenticateRequest(
   c: Context
 ): Promise<{ tokenData: any; token: string } | null> {
@@ -1976,9 +1986,7 @@ export class McpProxy {
     mcpId: string,
     scopeKey?: string
   ): string {
-    const orgId = getOrgId();
-    const scope = scopeKey ?? "_unscoped";
-    return `mcp:session:${orgId}:${agentId}:${mcpId}:${scope}`;
+    return buildMcpSessionKey(agentId, mcpId, scopeKey);
   }
 
   /**
