@@ -147,13 +147,18 @@ export function buildDynamicOpenAIModel(args: {
 
 export function resolveModelRef(
   rawModelRef: string,
-  overrides?: { defaultModel?: string; defaultProvider?: string }
+  overrides?: {
+    defaultModel?: string;
+    defaultProvider?: string;
+    defaultProviderSlug?: string;
+  }
 ): {
   provider: string;
   modelId: string;
 } {
   const defaultModelRef = overrides?.defaultModel || "";
   const defaultProvider = overrides?.defaultProvider || "";
+  const defaultProviderSlug = overrides?.defaultProviderSlug || "";
 
   const normalizedRaw = rawModelRef?.trim();
   let modelRef = normalizedRaw || defaultModelRef;
@@ -202,6 +207,12 @@ export function resolveModelRef(
     // Runs after the auto-resolution above so a prefixed default is covered too.
     if (modelId.startsWith(`${defaultProvider}/`)) {
       modelId = modelId.slice(defaultProvider.length + 1);
+    } else if (
+      defaultProviderSlug &&
+      defaultProviderSlug !== defaultProvider &&
+      modelId.startsWith(`${defaultProviderSlug}/`)
+    ) {
+      modelId = modelId.slice(defaultProviderSlug.length + 1);
     }
     return { provider: defaultProvider, modelId };
   }

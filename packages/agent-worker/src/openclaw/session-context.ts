@@ -11,6 +11,7 @@ const logger = createLogger("openclaw-session-context");
 interface ProviderConfig {
   credentialEnvVarName?: string;
   defaultProvider?: string;
+  defaultProviderSlug?: string;
   defaultModel?: string;
   cliBackends?: Array<{
     providerId: string;

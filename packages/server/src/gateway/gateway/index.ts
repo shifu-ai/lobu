@@ -1128,6 +1128,7 @@ export class WorkerGateway {
 	): Promise<{
 		credentialEnvVarName?: string;
 		defaultProvider?: string;
+		defaultProviderSlug?: string;
 		defaultModel?: string;
 		cliBackends?: Array<{
 			providerId: string;
@@ -1229,6 +1230,7 @@ export class WorkerGateway {
 		const result: {
 			credentialEnvVarName?: string;
 			defaultProvider?: string;
+			defaultProviderSlug?: string;
 			defaultModel?: string;
 			cliBackends?: typeof cliBackends;
 			providerBaseUrlMappings?: Record<string, string>;
@@ -1240,6 +1242,9 @@ export class WorkerGateway {
 			result.credentialEnvVarName = primaryProvider.getCredentialEnvVarName();
 			const upstream = primaryProvider.getUpstreamConfig?.();
 			result.defaultProvider = upstream?.slug || primaryProvider.providerId;
+			if (upstream?.slug && upstream.slug !== primaryProvider.providerId) {
+				result.defaultProviderSlug = primaryProvider.providerId;
+			}
 		}
 
 		if (agentModel) {

@@ -174,6 +174,18 @@ export class ProviderCatalogService {
         return provider;
       }
     }
+    // Fallback: a "<providerId>/<model>" ref names its provider directly, so
+    // match by the leading segment even when the provider's option list did not
+    // contain an exact value. This is essential for providers whose models are
+    // fetched live and may be empty in this resolution context.
+    const slashIndex = model.indexOf("/");
+    if (slashIndex > 0) {
+      const prefix = model.slice(0, slashIndex);
+      const byProviderId = candidates.find((p) => p.providerId === prefix);
+      if (byProviderId) {
+        return byProviderId;
+      }
+    }
     return undefined;
   }
 

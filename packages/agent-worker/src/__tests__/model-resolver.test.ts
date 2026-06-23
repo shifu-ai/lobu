@@ -33,6 +33,33 @@ describe("resolveModelRef", () => {
     expect(result.modelId).toBe("gpt-4.1");
   });
 
+  test("strips the Lobu slug prefix when it differs from the upstream defaultProvider", () => {
+    const result = resolveModelRef("claude/claude-opus-4-8", {
+      defaultProvider: "anthropic",
+      defaultProviderSlug: "claude",
+    });
+    expect(result.provider).toBe("anthropic");
+    expect(result.modelId).toBe("claude-opus-4-8");
+  });
+
+  test("still strips the upstream slug prefix when a model uses it directly", () => {
+    const result = resolveModelRef("anthropic/claude-opus-4-8", {
+      defaultProvider: "anthropic",
+      defaultProviderSlug: "claude",
+    });
+    expect(result.provider).toBe("anthropic");
+    expect(result.modelId).toBe("claude-opus-4-8");
+  });
+
+  test("leaves a foreign namespace model intact for a configured provider", () => {
+    const result = resolveModelRef("anthropic/claude-sonnet-4", {
+      defaultProvider: "openrouter",
+      defaultProviderSlug: "openrouter",
+    });
+    expect(result.provider).toBe("openrouter");
+    expect(result.modelId).toBe("anthropic/claude-sonnet-4");
+  });
+
   test("falls back to overrides.defaultModel when rawModelRef is empty", () => {
     const result = resolveModelRef("", {
       defaultModel: "anthropic/claude-sonnet-4-20250514",
