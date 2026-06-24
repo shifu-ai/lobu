@@ -32,6 +32,10 @@ import type { SseManager } from "../../services/sse-manager.js";
 import type { ISessionManager, ThreadSession } from "../../session.js";
 import { verifyOwnedAgentAccess } from "../shared/agent-ownership.js";
 import { errorResponse } from "../shared/helpers.js";
+import {
+  type DirectMultipartFile,
+  ingestDirectMultipartFiles,
+} from "./agent-attachments.js";
 import { verifySettingsSession } from "./settings-auth.js";
 
 const logger = createLogger("agent-api");
@@ -1084,7 +1088,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     // Parse body — multipart for file uploads, JSON otherwise
     const contentType = c.req.header("content-type") || "";
     let body: Record<string, any>;
-    let files: Array<{ buffer: Buffer; filename: string }> | undefined;
+    let files: DirectMultipartFile[] | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const formData = await c.req.formData();
@@ -1128,7 +1132,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         );
       }
       if (fileEntries.length > 0) {
-        const fileResults: Array<{ buffer: Buffer; filename: string }> = [];
+        const fileResults: DirectMultipartFile[] = [];
         let totalSize = 0;
         for (const entry of fileEntries) {
           if (entry instanceof File) {
@@ -1155,6 +1159,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             fileResults.push({
               buffer: Buffer.from(arrayBuffer),
               filename: entry.name,
+              contentType: entry.type,
             });
           }
         }
@@ -1287,6 +1292,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     try {
       const channelId = session.channelId || `api_${session.userId}`;
+      const directFiles = await ingestDirectMultipartFiles(files, pubUrl);
 
       const baseOptions: Record<string, any> = {
         provider: session.provider || "claude",
@@ -1323,6 +1329,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           traceparent: traceparent || undefined,
           dryRun: session.dryRun || false,
           intent: session.intent,
+          ...(directFiles.length > 0 ? { files: directFiles } : {}),
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,
