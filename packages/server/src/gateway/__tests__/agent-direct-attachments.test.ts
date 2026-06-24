@@ -183,11 +183,11 @@ function makeGatewayApp(overrides: Record<string, unknown> = {}) {
 }
 
 describe("direct API multipart attachments", () => {
-	test("publishes an image file and forwards it as platformMetadata.files", async () => {
+	test("accepts an attachment-only image and forwards it as platformMetadata.files", async () => {
 		const { app, enqueued } = makeApp();
 		const imageBytes = Buffer.from("png-bytes");
 		const form = new FormData();
-		form.set("content", "User sent an image.");
+		form.set("content", "");
 		form.append(
 			"files",
 			new File([imageBytes], "line_msg_image.png", {
@@ -206,7 +206,7 @@ describe("direct API multipart attachments", () => {
 
 		expect(res.status).toBe(200);
 		expect(enqueued).toHaveLength(1);
-		expect(enqueued[0].messageText).toBe("User sent an image.");
+		expect(enqueued[0].messageText).toBe("");
 		expect(enqueued[0].platformMetadata.files).toHaveLength(1);
 		expect(enqueued[0].platformMetadata.files[0]).toMatchObject({
 			name: "line_msg_image.png",
@@ -221,7 +221,7 @@ describe("direct API multipart attachments", () => {
 		);
 	});
 
-	test("transcribes audio uploads and preserves artifact metadata", async () => {
+	test("accepts attachment-only audio, transcribes it, and preserves artifact metadata", async () => {
 		const audioBytes = Buffer.from("ogg-audio-bytes");
 		const transcriptionService = {
 			transcribe: mock(
@@ -235,7 +235,6 @@ describe("direct API multipart attachments", () => {
 		};
 		const { app, enqueued } = makeApp({ transcriptionService });
 		const form = new FormData();
-		form.set("content", "User sent a voice note.");
 		form.append(
 			"files",
 			new File([audioBytes], "line_voice.ogg", {
@@ -256,7 +255,7 @@ describe("direct API multipart attachments", () => {
 		expect(transcriptionService.transcribe).toHaveBeenCalledTimes(1);
 		expect(enqueued).toHaveLength(1);
 		expect(enqueued[0].messageText).toBe(
-			"User sent a voice note.\n\n[Voice message]: please review my schedule",
+			"[Voice message]: please review my schedule",
 		);
 		expect(enqueued[0].platformMetadata.files).toHaveLength(1);
 		expect(enqueued[0].platformMetadata.files[0]).toMatchObject({
@@ -300,6 +299,51 @@ describe("direct API multipart attachments", () => {
 			"User sent a voice note.\n\n[Voice message]: gateway routed transcript",
 		);
 		expect(enqueued[0].platformMetadata.files).toHaveLength(1);
+	});
+
+	test("still rejects JSON requests without content", async () => {
+		const { app, enqueued } = makeApp();
+
+		const res = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${AUTH_TOKEN}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({}),
+			},
+		);
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toMatchObject({
+			success: false,
+			error: "content is required",
+		});
+		expect(enqueued).toHaveLength(0);
+	});
+
+	test("still rejects empty multipart requests without files", async () => {
+		const { app, enqueued } = makeApp();
+		const form = new FormData();
+		form.set("content", "");
+
+		const res = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+				body: form,
+			},
+		);
+
+		expect(res.status).toBe(400);
+		expect(await res.json()).toMatchObject({
+			success: false,
+			error: "content is required",
+		});
+		expect(enqueued).toHaveLength(0);
 	});
 
 	test("warns and keeps original text plus artifacts when transcription returns an error", async () => {

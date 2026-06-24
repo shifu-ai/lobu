@@ -1097,10 +1097,11 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     // Parse body — multipart for file uploads, JSON otherwise
     const contentType = c.req.header("content-type") || "";
+    const isMultipartRequest = contentType.includes("multipart/form-data");
     let body: Record<string, any>;
     let files: DirectMultipartFile[] | undefined;
 
-    if (contentType.includes("multipart/form-data")) {
+    if (isMultipartRequest) {
       const formData = await c.req.formData();
       body = {
         content: formData.get("content") as string | null,
@@ -1179,14 +1180,28 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       body = c.req.valid("json");
     }
 
-    const messageContent = body.content || body.message;
+    const messageContent = body.content ?? body.message;
     const messageId = body.messageId || randomUUID();
+    const platform = body.platform as string | undefined;
+    const hasMultipartFiles = (files?.length ?? 0) > 0;
+    const allowsAttachmentOnlyDirectMessage =
+      isMultipartRequest && !platform && hasMultipartFiles;
 
-    if (!messageContent || typeof messageContent !== "string") {
+    if (
+      typeof messageContent !== "string" &&
+      !allowsAttachmentOnlyDirectMessage
+    ) {
+      return c.json({ success: false, error: "content is required" }, 400);
+    }
+    if (
+      typeof messageContent === "string" &&
+      !messageContent &&
+      !allowsAttachmentOnlyDirectMessage
+    ) {
       return c.json({ success: false, error: "content is required" }, 400);
     }
 
-    const platform = body.platform as string | undefined;
+    const messageText = typeof messageContent === "string" ? messageContent : "";
 
     // ── Platform-routed path ──────────────────────────────────────────────────
     // When platform is specified, delegate to the platform adapter which handles
@@ -1263,7 +1278,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       );
 
       try {
-        const result = await adapter.sendMessage(rawToken, messageContent, {
+        const result = await adapter.sendMessage(rawToken, messageText, {
           agentId,
           channelId,
           conversationId,
@@ -1304,7 +1319,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       const channelId = session.channelId || `api_${session.userId}`;
       const { files: directFiles, audioAttachments } =
         await ingestDirectMultipartFiles(files, pubUrl);
-      let directMessageText = messageContent;
+      let directMessageText = messageText;
       if (transcriptionService && audioAttachments.length > 0) {
         for (const audio of audioAttachments) {
           try {
