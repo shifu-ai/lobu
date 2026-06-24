@@ -18,6 +18,7 @@ let tempDir = "";
 let previousEncryptionKey: string | undefined;
 
 interface EnqueuedMessage {
+	messageId: string;
 	messageText: string;
 	platformMetadata: {
 		files?: Array<{
@@ -26,6 +27,10 @@ interface EnqueuedMessage {
 			size: number;
 			downloadUrl: string;
 		}>;
+		line?: {
+			messageId?: string;
+			mediaType?: string;
+		};
 	};
 }
 
@@ -188,6 +193,9 @@ describe("direct API multipart attachments", () => {
 		const imageBytes = Buffer.from("png-bytes");
 		const form = new FormData();
 		form.set("content", "");
+		form.set("messageId", "lobu-msg-image");
+		form.set("line.messageId", "line-msg-image");
+		form.set("line.mediaType", "image");
 		form.append(
 			"files",
 			new File([imageBytes], "line_msg_image.png", {
@@ -206,7 +214,12 @@ describe("direct API multipart attachments", () => {
 
 		expect(res.status).toBe(200);
 		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0]).toMatchObject({ messageId: "lobu-msg-image" });
 		expect(enqueued[0].messageText).toBe("");
+		expect(enqueued[0].platformMetadata.line).toEqual({
+			messageId: "line-msg-image",
+			mediaType: "image",
+		});
 		expect(enqueued[0].platformMetadata.files).toHaveLength(1);
 		expect(enqueued[0].platformMetadata.files[0]).toMatchObject({
 			name: "line_msg_image.png",

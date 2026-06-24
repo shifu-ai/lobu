@@ -1109,6 +1109,14 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         messageId: formData.get("messageId") as string | null,
         platform: formData.get("platform") as string | null,
       };
+      const lineMessageId = formData.get("line.messageId") as string | null;
+      const lineMediaType = formData.get("line.mediaType") as string | null;
+      if (lineMessageId || lineMediaType) {
+        body.line = {
+          messageId: lineMessageId || undefined,
+          mediaType: lineMediaType || undefined,
+        };
+      }
 
       // Extract nested platform routing from form fields
       const slackChannel = formData.get("slack.channel") as string;
@@ -1384,6 +1392,14 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           dryRun: session.dryRun || false,
           intent: session.intent,
           ...(directFiles.length > 0 ? { files: directFiles } : {}),
+          ...(body.line?.messageId || body.line?.mediaType
+            ? {
+                line: {
+                  ...(body.line.messageId ? { messageId: body.line.messageId } : {}),
+                  ...(body.line.mediaType ? { mediaType: body.line.mediaType } : {}),
+                },
+              }
+            : {}),
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,
