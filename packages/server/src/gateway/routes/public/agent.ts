@@ -28,6 +28,8 @@ import type { ExternalAuthClient } from "../../auth/external/client.js";
 import type { AgentSettingsStore } from "../../auth/settings/agent-settings-store.js";
 import type { SettingsTokenPayload } from "../../auth/settings/token-service.js";
 import type { UserAgentsStore } from "../../auth/user-agents-store.js";
+import { ingestInboundAttachments } from "../../connections/message-handler-bridge.js";
+import type { ArtifactStore } from "../../files/artifact-store.js";
 import type { QueueProducer } from "../../infrastructure/queue/queue-producer.js";
 import type { PlatformRegistry } from "../../platform.js";
 import { buildApiConversationId } from "../../services/api-conversation-id.js";
@@ -428,6 +430,7 @@ interface AgentApiConfig {
   sessionManager: ISessionManager;
   sseManager: SseManager;
   publicGatewayUrl: string;
+  artifactStore: ArtifactStore;
   externalAuthClient?: ExternalAuthClient;
   agentSettingsStore?: AgentSettingsStore;
   agentConfigStore?: Pick<
@@ -456,6 +459,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
   const sessMgr = config.sessionManager;
   const sseManager = config.sseManager;
   const pubUrl = config.publicGatewayUrl;
+  const artifactStore = config.artifactStore;
   const app = new OpenAPIHono();
 
   // Unified auth middleware for all agent API routes
@@ -1278,7 +1282,9 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     // Parse body — multipart for file uploads, JSON otherwise
     const contentType = c.req.header("content-type") || "";
     let body: Record<string, any>;
-    let files: Array<{ buffer: Buffer; filename: string }> | undefined;
+    let files:
+      | Array<{ buffer: Buffer; filename: string; mimeType: string }>
+      | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const formData = await c.req.formData();
@@ -1322,7 +1328,11 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         );
       }
       if (fileEntries.length > 0) {
-        const fileResults: Array<{ buffer: Buffer; filename: string }> = [];
+        const fileResults: Array<{
+          buffer: Buffer;
+          filename: string;
+          mimeType: string;
+        }> = [];
         let totalSize = 0;
         for (const entry of fileEntries) {
           if (entry instanceof File) {
@@ -1349,6 +1359,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             fileResults.push({
               buffer: Buffer.from(arrayBuffer),
               filename: entry.name,
+              mimeType: entry.type || "application/octet-stream",
             });
           }
         }
@@ -1503,6 +1514,46 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       const applyEphemeralContext =
         rawEphemeralContext.length > 0 && (session.turnCount ?? 0) === 0;
 
+      // Inbound attachments: publish each uploaded file as a signed gateway
+      // artifact and forward the worker-facing `files` array in
+      // platformMetadata — the same multi-replica-safe path used by the
+      // platform adapters (`ingestInboundAttachments`). The worker downloads
+      // these into its `input/` dir and embeds images for visual analysis.
+      // Local-disk staging would break under N>1 replicas (the worker pod is
+      // routinely not the pod that received the upload).
+      const ingestedFiles = files
+        ? (
+            await ingestInboundAttachments(
+              files.map((f) => ({
+                data: f.buffer,
+                name: f.filename,
+                mimeType: f.mimeType,
+              })),
+              artifactStore,
+              pubUrl
+            )
+          ).files
+        : [];
+
+      // Persist each attachment as a tokenless artifact-route reference appended
+      // to the user's message text. The pi-ai transcript only carries text +
+      // images, so non-image files would otherwise vanish on reload; this is the
+      // table-free durable record. The web lifts `/api/v1/files/` links back into
+      // native attachment chips, and the history read path re-signs them with a
+      // fresh download token (the tokenless form keeps the transcript portable
+      // and never embeds an expiring credential). Images already survive as
+      // inline transcript blocks, so they're skipped here to avoid a duplicate
+      // chip alongside the rendered image.
+      const persistedFileRefs = ingestedFiles
+        .filter((f) => !f.mimetype?.startsWith("image/"))
+        .map((f) => `[${f.name}](/api/v1/files/${f.id})`);
+      const messageTextForTranscript =
+        persistedFileRefs.length > 0
+          ? [messageContent, persistedFileRefs.join("\n")]
+              .filter((part) => part.length > 0)
+              .join("\n\n")
+          : messageContent;
+
       const jobId = await queueProducer.enqueueMessage({
         userId: session.userId,
         conversationId: session.conversationId || agentId,
@@ -1515,7 +1566,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           : {}),
         botId: "lobu-api",
         platform: "api",
-        messageText: messageContent,
+        messageText: messageTextForTranscript,
         ...(applyEphemeralContext
           ? { ephemeralContext: rawEphemeralContext.slice(0, 2048) }
           : {}),
@@ -1531,6 +1582,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           traceparent: traceparent || undefined,
           dryRun: session.dryRun || false,
           intent: session.intent,
+          ...(ingestedFiles.length > 0 ? { files: ingestedFiles } : {}),
         },
         agentOptions: remainingOptions,
         networkConfig: session.networkConfig || settingsNetwork,

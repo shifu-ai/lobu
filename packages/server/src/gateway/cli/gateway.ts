@@ -294,6 +294,7 @@ export function createGatewayApp(
         sessionManager: sessionMgr,
         sseManager: coreServices.getSseManager(),
         publicGatewayUrl: publicUrl,
+        artifactStore: coreServices.getArtifactStore(),
         externalAuthClient: coreServices.getExternalAuthClient(),
         agentSettingsStore: coreServices.getAgentSettingsStore(),
         agentConfigStore: coreServices.getConfigStore(),
@@ -649,6 +650,8 @@ export function createGatewayApp(
           connectionManager,
           agentConfigStore: coreServices.getConfigStore(),
           userAgentsStore: coreServices.getUserAgentsStore(),
+          artifactStore: coreServices.getArtifactStore(),
+          publicGatewayUrl: coreServices.getPublicGatewayUrl(),
         });
         app.route("/api/v1/agents/:agentId/history", agentHistoryRouter);
         logger.debug(
