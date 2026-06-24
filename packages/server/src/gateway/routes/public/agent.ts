@@ -1318,6 +1318,11 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
               directMessageText = directMessageText
                 ? `${directMessageText}\n\n${voiceMessage}`
                 : voiceMessage;
+            } else if ("error" in result && result.error) {
+              logger.warn(
+                { error: result.error, messageId },
+                "Direct API audio transcription returned an error"
+              );
             }
           } catch (error) {
             logger.warn(

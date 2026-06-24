@@ -281,6 +281,7 @@ export function createGatewayApp(
         userAgentsStore: coreServices.getUserAgentsStore(),
         agentMetadataStore: coreServices.getAgentMetadataStore(),
         platformRegistry,
+        transcriptionService: coreServices.getTranscriptionService(),
         approveToolCall: async (requestId: string, decision: string) => {
           // DELETE ... RETURNING atomically claims the pending invocation
           // so a retry of POST /api/v1/agents/approve (CLI re-tries,

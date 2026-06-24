@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createGatewayApp } from "../cli/gateway.js";
 import { createAgentApi } from "../routes/public/agent.js";
 import { setAuthProvider } from "../routes/public/settings-auth.js";
 
@@ -103,6 +104,84 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 	return { app, enqueued };
 }
 
+function makeGatewayApp(overrides: Record<string, unknown> = {}) {
+	const enqueued: EnqueuedMessage[] = [];
+	const transcriptionService = overrides.transcriptionService;
+	const sessions = new Map<string, Record<string, unknown>>([
+		[
+			CONVERSATION_ID,
+			{
+				agentId: AGENT_ID,
+				conversationId: CONVERSATION_ID,
+				userId: "user-test",
+				channelId: "api_user-test",
+				organizationId: "org-test",
+				provider: "claude",
+			},
+		],
+	]);
+	const coreServices = {
+		getPublicGatewayUrl: () => "https://lobu.example",
+		getQueueProducer: () => ({
+			enqueueMessage: mock(async (payload: EnqueuedMessage) => {
+				enqueued.push(payload);
+				return `job-${randomUUID()}`;
+			}),
+		}),
+		getSessionManager: () => ({
+			getSession: mock(async (id: string) => sessions.get(id) || null),
+			touchSession: mock(async () => undefined),
+		}),
+		getInteractionService: () => ({}),
+		getSseManager: () => ({}),
+		getAgentMetadataStore: () => ({
+			getMetadata: mock(async () => ({
+				owner: { platform: "api", userId: "user-test" },
+				organizationId: "org-test",
+			})),
+		}),
+		getTranscriptionService: () => transcriptionService,
+		getBedrockOpenAIService: () => undefined,
+		getSecretStore: () => undefined,
+		getMcpConfigService: () => undefined,
+		getImageGenerationService: () => undefined,
+		getGrantStore: () => undefined,
+		getMcpProxy: () => undefined,
+		getExternalAuthClient: () => undefined,
+		getAgentSettingsStore: () => undefined,
+		getConfigStore: () => undefined,
+		getUserAgentsStore: () => undefined,
+		getAuthProfilesManager: () => undefined,
+		getOAuthStateStore: () => undefined,
+		getProviderRegistryService: () => undefined,
+		getWorkerGateway: () => undefined,
+		getQueue: () => undefined,
+		getProviderCatalogService: () => undefined,
+		getChannelBindingService: () => undefined,
+	};
+	const app = createGatewayApp({
+		secretProxy: null,
+		workerGateway: null,
+		mcpProxy: null,
+		coreServices,
+		authProvider: (c) => {
+			const authHeader = c.req.header("Authorization");
+			const token = authHeader?.startsWith("Bearer ")
+				? authHeader.substring(7)
+				: null;
+			if (token !== AUTH_TOKEN) return null;
+			return {
+				userId: "user-test",
+				organizationId: "org-test",
+				platform: "api",
+				exp: Date.now() + 60_000,
+			};
+		},
+	});
+
+	return { app, enqueued };
+}
+
 describe("direct API multipart attachments", () => {
 	test("publishes an image file and forwards it as platformMetadata.files", async () => {
 		const { app, enqueued } = makeApp();
@@ -185,5 +264,88 @@ describe("direct API multipart attachments", () => {
 			mimetype: "audio/ogg",
 			size: audioBytes.length,
 		});
+	});
+
+	test("uses the gateway core transcription service for direct audio uploads", async () => {
+		const audioBytes = Buffer.from("gateway-ogg-audio-bytes");
+		const transcriptionService = {
+			transcribe: mock(async () => ({
+				text: "gateway routed transcript",
+				provider: "openai",
+			})),
+		};
+		const { app, enqueued } = makeGatewayApp({ transcriptionService });
+		const form = new FormData();
+		form.set("content", "User sent a voice note.");
+		form.append(
+			"files",
+			new File([audioBytes], "gateway_voice.ogg", {
+				type: "audio/ogg",
+			}),
+		);
+
+		const res = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+				body: form,
+			},
+		);
+
+		expect(res.status).toBe(200);
+		expect(transcriptionService.transcribe).toHaveBeenCalledTimes(1);
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0].messageText).toBe(
+			"User sent a voice note.\n\n[Voice message]: gateway routed transcript",
+		);
+		expect(enqueued[0].platformMetadata.files).toHaveLength(1);
+	});
+
+	test("warns and keeps original text plus artifacts when transcription returns an error", async () => {
+		const warnSpy = mock(() => {});
+		const previousWarn = console.warn;
+		console.warn = warnSpy as never;
+		try {
+			const audioBytes = Buffer.from("ogg-audio-bytes");
+			const transcriptionService = {
+				transcribe: mock(async () => ({ error: "No provider configured" })),
+			};
+			const { app, enqueued } = makeApp({ transcriptionService });
+			const form = new FormData();
+			form.set("content", "Original voice note caption.");
+			form.append(
+				"files",
+				new File([audioBytes], "line_voice.ogg", {
+					type: "audio/ogg",
+				}),
+			);
+
+			const res = await app.request(
+				`/api/v1/agents/${CONVERSATION_ID}/messages`,
+				{
+					method: "POST",
+					headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+					body: form,
+				},
+			);
+
+			expect(res.status).toBe(200);
+			expect(transcriptionService.transcribe).toHaveBeenCalledTimes(1);
+			expect(enqueued).toHaveLength(1);
+			expect(enqueued[0].messageText).toBe("Original voice note caption.");
+			expect(enqueued[0].platformMetadata.files).toHaveLength(1);
+			expect(enqueued[0].platformMetadata.files[0]).toMatchObject({
+				name: "line_voice.ogg",
+				mimetype: "audio/ogg",
+				size: audioBytes.length,
+			});
+			expect(warnSpy).toHaveBeenCalled();
+			expect(String(warnSpy.mock.calls[0]?.[0])).toContain(
+				"Direct API audio transcription returned an error",
+			);
+		} finally {
+			console.warn = previousWarn;
+		}
 	});
 });
