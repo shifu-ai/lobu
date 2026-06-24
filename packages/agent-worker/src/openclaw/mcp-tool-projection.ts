@@ -56,6 +56,63 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function typeOfConstValue(value: unknown): string | null {
+  if (typeof value === "string") return "string";
+  if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
+  if (typeof value === "boolean") return "boolean";
+  return null;
+}
+
+function projectUnionSchema(
+  value: Record<string, unknown>,
+  notice: (keyword: string) => void
+): Record<string, unknown> {
+  const keyword = [...UNION_KEYWORDS].find((entry) =>
+    Object.hasOwn(value, entry)
+  );
+  if (!keyword) {
+    return value;
+  }
+
+  notice(keyword);
+  const variants = Array.isArray(value[keyword]) ? value[keyword] : [];
+  const literalValues: unknown[] = [];
+  let literalType: string | null = null;
+  let allVariantsAreSameTypedLiterals = variants.length > 0;
+
+  for (const variant of variants) {
+    if (!isRecord(variant) || !Object.hasOwn(variant, "const")) {
+      allVariantsAreSameTypedLiterals = false;
+      break;
+    }
+    const constValue = variant.const;
+    const constType = typeOfConstValue(constValue);
+    if (!constType) {
+      allVariantsAreSameTypedLiterals = false;
+      break;
+    }
+    literalType ??= constType;
+    if (literalType !== constType) {
+      allVariantsAreSameTypedLiterals = false;
+      break;
+    }
+    literalValues.push(constValue);
+  }
+
+  if (allVariantsAreSameTypedLiterals && literalType) {
+    return {
+      type: literalType,
+      enum: literalValues,
+      description:
+        typeof value.description === "string"
+          ? value.description
+          : PROJECTED_UNION_SCHEMA.description,
+    };
+  }
+
+  return { ...PROJECTED_UNION_SCHEMA };
+}
+
 function projectSchemaNode(
   value: unknown,
   notice: (keyword: string) => void
@@ -70,9 +127,25 @@ function projectSchemaNode(
 
   for (const keyword of UNION_KEYWORDS) {
     if (Object.hasOwn(value, keyword)) {
-      notice(keyword);
-      return { ...PROJECTED_UNION_SCHEMA };
+      return projectUnionSchema(value, notice);
     }
+  }
+
+  if (Object.hasOwn(value, "const")) {
+    notice("const");
+    const constValue = value.const;
+    const constType = typeOfConstValue(constValue);
+    if (constType) {
+      return {
+        type: constType,
+        enum: [constValue],
+        description:
+          typeof value.description === "string"
+            ? value.description
+            : "Projected from unsupported MCP schema const.",
+      };
+    }
+    return { ...PROJECTED_UNION_SCHEMA };
   }
 
   let changed = false;
@@ -224,6 +297,25 @@ function normalizeInputSchema(
     return { ...EMPTY_OBJECT_SCHEMA };
   }
   return inputSchema;
+}
+
+export function projectToolParametersForProvider<
+  T extends { parameters?: unknown },
+>(tools: T[], provider: string): T[] {
+  if (!requiresProviderSafeToolNames(provider)) {
+    return tools;
+  }
+
+  return tools.map((tool) => {
+    if (!isRecord(tool.parameters)) {
+      return tool;
+    }
+    const projected = projectSchemaNode(tool.parameters, () => {});
+    if (projected === tool.parameters || !isRecord(projected)) {
+      return tool;
+    }
+    return { ...tool, parameters: projected };
+  });
 }
 
 export function projectMcpToolsForProvider(

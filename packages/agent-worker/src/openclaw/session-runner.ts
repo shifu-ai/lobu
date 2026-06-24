@@ -47,6 +47,7 @@ import {
   buildMcpAuthToolNames,
   type McpAuthToolNames,
   projectMcpToolsForProvider,
+  projectToolParametersForProvider,
   requiresProviderSafeToolNames,
 } from "./mcp-tool-projection";
 import {
@@ -1094,7 +1095,7 @@ Use it when the user references past discussions or you need context.`);
     },
   });
 
-  const customTools = createOpenClawCustomTools({
+  let customTools = createOpenClawCustomTools({
     ...gwParams,
     userId: context.userId,
     workspaceDir,
@@ -1224,6 +1225,9 @@ Use it when the user references past discussions or you need context.`);
       );
     }
   }
+
+  tools = projectToolParametersForProvider(tools, rawProvider);
+  customTools = projectToolParametersForProvider(customTools, rawProvider);
 
   // Apply plugin provider registrations to ModelRegistry
   const modelRegistry = new ModelRegistry(authStorage);

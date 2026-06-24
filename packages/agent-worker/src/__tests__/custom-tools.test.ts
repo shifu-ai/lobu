@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createOpenClawCustomTools } from "../openclaw/custom-tools";
+import { projectToolParametersForProvider } from "../openclaw/mcp-tool-projection";
 
 const originalFetch = globalThis.fetch;
 const originalProjectDiscoveryUrl = process.env.TOOLBOX_PROJECT_DISCOVERY_URL;
@@ -45,6 +46,38 @@ describe("createOpenClawCustomTools", () => {
       "request_human_decision",
       "start_project_context_discovery",
     ]);
+  });
+
+  test("built-in Lobu tool schemas can be projected for Gemini function declarations", () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "telegram",
+      workspaceDir: "/tmp/test-workspace",
+    });
+
+    const projected = projectToolParametersForProvider(tools, "gemini");
+
+    const walk = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const entry of value) walk(entry);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      const node = value as Record<string, unknown>;
+      expect(node.anyOf).toBeUndefined();
+      expect(node.oneOf).toBeUndefined();
+      expect(node.allOf).toBeUndefined();
+      expect(node.const).toBeUndefined();
+      for (const child of Object.values(node)) walk(child);
+    };
+
+    for (const tool of projected) {
+      walk(tool.parameters);
+    }
   });
 
   test("registers materialized personal-agent connector tools and calls Toolbox MCP execution", async () => {

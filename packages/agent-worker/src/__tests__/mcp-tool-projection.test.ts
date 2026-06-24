@@ -61,6 +61,7 @@ function expectGeminiSafeToolSurface(
       expect(node.anyOf).toBeUndefined();
       expect(node.oneOf).toBeUndefined();
       expect(node.allOf).toBeUndefined();
+      expect(node.const).toBeUndefined();
     });
   }
 }
@@ -140,6 +141,55 @@ describe("projectMcpToolsForProvider", () => {
       mcpId: "google_workspace",
       toolName: "union_heavy",
       reason: "removed unsupported keyword anyOf",
+    });
+  });
+
+  test("projects TypeBox literal unions away from Gemini-unsupported const schemas", () => {
+    const mcpTools: Record<string, McpToolDef[]> = {
+      lobu: [
+        {
+          name: "start_project_context_discovery",
+          inputSchema: {
+            type: "object",
+            properties: {
+              projectType: {
+                anyOf: [
+                  { const: "course", type: "string" },
+                  { const: "product", type: "string" },
+                  { const: "campaign", type: "string" },
+                ],
+              },
+              start: {
+                anyOf: [{ type: "string" }, { const: null, type: "null" }],
+              },
+            },
+          },
+        },
+      ],
+    };
+
+    const projected = projectMcpToolsForProvider(mcpTools, {
+      provider: "google",
+      directToolLimit: 24,
+    });
+
+    expect(projected.tools.lobu?.[0]?.inputSchema).toEqual({
+      type: "object",
+      properties: {
+        projectType: {
+          type: "string",
+          enum: ["course", "product", "campaign"],
+          description: "Projected from unsupported MCP schema union.",
+        },
+        start: {
+          type: "string",
+          description: "Projected from unsupported MCP schema union.",
+        },
+      },
+    });
+    walkSchema(projected.tools.lobu?.[0]?.inputSchema, (node) => {
+      expect(node.anyOf).toBeUndefined();
+      expect(node.const).toBeUndefined();
     });
   });
 
