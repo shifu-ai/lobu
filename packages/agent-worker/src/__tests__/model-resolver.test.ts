@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import {
   buildDynamicOpenAIModel,
+  buildProviderProxyAuthHeaders,
   DEFAULT_PROVIDER_BASE_URL_ENV,
   DEFAULT_PROVIDER_MODELS,
   PROVIDER_REGISTRY_ALIASES,
@@ -138,6 +139,37 @@ describe("resolveModelRef", () => {
     const result = resolveModelRef("groq/llama-x");
     expect(result.provider).toBe("groq");
     expect(result.modelId).toBe("llama-x");
+  });
+});
+
+describe("buildProviderProxyAuthHeaders", () => {
+  test("adds worker bearer auth for Lobu agent-scoped provider proxy URLs", () => {
+    const headers = buildProviderProxyAuthHeaders(
+      "http://gateway.internal:8787/api/proxy/gemini/a/shifu-u-123",
+      "worker-token-123"
+    );
+
+    expect(headers).toEqual({
+      Authorization: "Bearer worker-token-123",
+    });
+  });
+
+  test("does not add worker auth for direct upstream provider URLs", () => {
+    const headers = buildProviderProxyAuthHeaders(
+      "https://generativelanguage.googleapis.com/v1beta",
+      "worker-token-123"
+    );
+
+    expect(headers).toBeUndefined();
+  });
+
+  test("does not add an empty worker token", () => {
+    const headers = buildProviderProxyAuthHeaders(
+      "http://gateway.internal:8787/api/proxy/gemini/a/shifu-u-123",
+      ""
+    );
+
+    expect(headers).toBeUndefined();
   });
 });
 

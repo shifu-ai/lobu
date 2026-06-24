@@ -36,6 +36,7 @@ import {
 import { TurnController, wrapToolsWithTurnGuard } from "./turn-controller";
 import {
   buildDynamicOpenAIModel,
+  buildProviderProxyAuthHeaders,
   DEFAULT_PROVIDER_BASE_URL_ENV,
   openOrCreateSessionManager,
   PROVIDER_REGISTRY_ALIASES,
@@ -777,6 +778,19 @@ export async function runAISession(
   const resolvedModel = providerBaseUrl
     ? { ...baseModel, baseUrl: providerBaseUrl }
     : baseModel;
+  const providerProxyAuthHeaders = buildProviderProxyAuthHeaders(
+    providerBaseUrl,
+    process.env.WORKER_TOKEN
+  );
+  const providerModel = providerProxyAuthHeaders
+    ? {
+        ...resolvedModel,
+        headers: {
+          ...(resolvedModel.headers ?? {}),
+          ...providerProxyAuthHeaders,
+        },
+      }
+    : resolvedModel;
 
   // Defensive: any `openai-completions` model whose baseUrl is not real
   // OpenAI is a third-party compat endpoint (Gemini, Nvidia, Together, z.ai,
@@ -788,15 +802,15 @@ export async function runAISession(
   // like `https://api.openai.com.evil.example/v1` doesn't get mistaken for
   // real OpenAI. Malformed URLs are treated as third-party (safer default).
   const isThirdPartyOpenAICompat =
-    resolvedModel.api === "openai-completions" &&
-    typeof resolvedModel.baseUrl === "string" &&
-    !isRealOpenAIBaseUrl(resolvedModel.baseUrl);
+    providerModel.api === "openai-completions" &&
+    typeof providerModel.baseUrl === "string" &&
+    !isRealOpenAIBaseUrl(providerModel.baseUrl);
   const model = isThirdPartyOpenAICompat
     ? {
-        ...resolvedModel,
-        compat: { ...(resolvedModel.compat ?? {}), supportsStore: false },
+        ...providerModel,
+        compat: { ...(providerModel.compat ?? {}), supportsStore: false },
       }
-    : resolvedModel;
+    : providerModel;
 
   await fs.mkdir(path.join(workspaceDir, ".openclaw"), { recursive: true });
 

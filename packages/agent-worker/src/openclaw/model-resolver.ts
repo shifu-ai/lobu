@@ -145,6 +145,24 @@ export function buildDynamicOpenAIModel(args: {
   };
 }
 
+export function buildProviderProxyAuthHeaders(
+  providerBaseUrl: string | undefined,
+  workerToken: string | undefined
+): Record<string, string> | undefined {
+  const token = workerToken?.trim();
+  if (!providerBaseUrl || !token) return undefined;
+
+  let isLobuProxyUrl = false;
+  try {
+    isLobuProxyUrl = new URL(providerBaseUrl).pathname.includes("/api/proxy");
+  } catch {
+    isLobuProxyUrl = providerBaseUrl.includes("/api/proxy");
+  }
+  if (!isLobuProxyUrl) return undefined;
+
+  return { Authorization: `Bearer ${token}` };
+}
+
 export function resolveModelRef(
   rawModelRef: string,
   overrides?: {
