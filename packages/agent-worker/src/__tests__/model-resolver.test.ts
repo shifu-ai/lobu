@@ -184,6 +184,16 @@ describe("registerDynamicProvider", () => {
     expect(PROVIDER_REGISTRY_ALIASES[testProviderId]).toBe("custom");
   });
 
+  test("supports native Gemini via explicit google registry alias", () => {
+    registerDynamicProvider(testProviderId, {
+      baseUrlEnvVar: "TEST_BASE_URL",
+      defaultModel: "gemini-2.5-flash",
+      registryAlias: "google",
+    });
+    expect(PROVIDER_REGISTRY_ALIASES[testProviderId]).toBe("google");
+    expect(DEFAULT_PROVIDER_MODELS[testProviderId]).toBe("gemini-2.5-flash");
+  });
+
   test("skips already-registered provider", () => {
     DEFAULT_PROVIDER_BASE_URL_ENV[testProviderId] = "EXISTING";
     registerDynamicProvider(testProviderId, {

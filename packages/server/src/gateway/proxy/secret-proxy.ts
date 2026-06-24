@@ -669,6 +669,7 @@ export class SecretProxy {
       "transfer-encoding",
       "authorization",
       "x-api-key",
+      "x-goog-api-key",
     ]);
     for (const [key, val] of Object.entries(c.req.header())) {
       if (val && !skip.has(key.toLowerCase())) {
@@ -767,6 +768,15 @@ export class SecretProxy {
       if (apiKey) {
         headers["x-api-key"] = await this.swap(
           apiKey,
+          source,
+          expectedOrganizationId
+        );
+      }
+
+      const googleApiKey = c.req.header("x-goog-api-key");
+      if (googleApiKey) {
+        headers["x-goog-api-key"] = await this.swap(
+          googleApiKey,
           source,
           expectedOrganizationId
         );

@@ -575,6 +575,49 @@ describe("secret-proxy swap — x-api-key header", () => {
 });
 
 // ---------------------------------------------------------------------------
+// x-goog-api-key is used by Google's native Gemini SDK.
+// ---------------------------------------------------------------------------
+
+describe("secret-proxy swap — x-goog-api-key header", () => {
+  test("placeholder in x-goog-api-key header is resolved to real secret", async () => {
+    const secretRef = createBuiltinSecretRef("agents/gemini/api-key");
+    const realKey = "gemini-real-api-key";
+    const secretStore = makeSecretStore({ [secretRef]: realKey });
+
+    const uuid = "12345678-0000-0000-0000-000000000002";
+    storeSecretMapping(uuid, {
+      agentId: "agent-gemini",
+      envVarName: "GEMINI_API_KEY",
+      secretRef,
+      deploymentName: "deploy-gemini",
+    });
+
+    const proxy = buildProxy(secretStore);
+    let forwardedApiKey: string | null = null;
+
+    await withFetch(async (_input, init) => {
+      forwardedApiKey =
+        (init?.headers as Record<string, string>)?.["x-goog-api-key"] ?? null;
+      return new Response("{}", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, async () => {
+      await proxy.getApp().request("/v1beta/models/gemini:streamGenerateContent", {
+        method: "POST",
+        headers: {
+          "x-goog-api-key": `lobu_secret_${uuid}`,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      });
+    });
+
+    expect(forwardedApiKey).toBe(realKey);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Resolution failure limiter: throttle after repeated failures
 // ---------------------------------------------------------------------------
 
