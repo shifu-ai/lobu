@@ -14,14 +14,32 @@ export interface DirectApiFileMetadata {
 	downloadUrl: string;
 }
 
+export interface DirectApiAudioAttachment {
+	buffer: Buffer;
+	mimeType: string;
+}
+
+export interface DirectApiAttachmentIngestResult {
+	files: DirectApiFileMetadata[];
+	audioAttachments: DirectApiAudioAttachment[];
+}
+
+function isAudioMimeType(mimeType: string | undefined): boolean {
+	return (
+		!!mimeType &&
+		(mimeType.startsWith("audio/") || mimeType === "application/ogg")
+	);
+}
+
 export async function ingestDirectMultipartFiles(
 	files: DirectMultipartFile[] | undefined,
 	publicGatewayUrl: string,
 	artifactStore = new ArtifactStore(),
-): Promise<DirectApiFileMetadata[]> {
-	if (!files?.length) return [];
+): Promise<DirectApiAttachmentIngestResult> {
+	if (!files?.length) return { files: [], audioAttachments: [] };
 
 	const publishedFiles: DirectApiFileMetadata[] = [];
+	const audioAttachments: DirectApiAudioAttachment[] = [];
 	for (const file of files) {
 		const published = await artifactStore.publish({
 			buffer: file.buffer,
@@ -36,7 +54,13 @@ export async function ingestDirectMultipartFiles(
 			size: published.size,
 			downloadUrl: published.downloadUrl,
 		});
+		if (isAudioMimeType(published.contentType)) {
+			audioAttachments.push({
+				buffer: file.buffer,
+				mimeType: published.contentType,
+			});
+		}
 	}
 
-	return publishedFiles;
+	return { files: publishedFiles, audioAttachments };
 }

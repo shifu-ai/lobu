@@ -40,6 +40,14 @@ import { verifySettingsSession } from "./settings-auth.js";
 
 const logger = createLogger("agent-api");
 
+interface DirectTranscriptionService {
+  transcribe(
+    audioBuffer: Buffer,
+    agentId: string,
+    mimeType?: string
+  ): Promise<{ text: string } | { error: string }>;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -433,6 +441,7 @@ export interface AgentApiConfig {
   userAgentsStore?: UserAgentsStore;
   agentMetadataStore?: Pick<AgentMetadataStore, "getMetadata">;
   platformRegistry?: PlatformRegistry;
+  transcriptionService?: DirectTranscriptionService;
   approveToolCall?: (
     requestId: string,
     decision: string
@@ -448,6 +457,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     userAgentsStore,
     agentMetadataStore,
     platformRegistry,
+    transcriptionService,
   } = config;
   const sessMgr = config.sessionManager;
   const sseManager = config.sseManager;
@@ -1292,7 +1302,31 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
 
     try {
       const channelId = session.channelId || `api_${session.userId}`;
-      const directFiles = await ingestDirectMultipartFiles(files, pubUrl);
+      const { files: directFiles, audioAttachments } =
+        await ingestDirectMultipartFiles(files, pubUrl);
+      let directMessageText = messageContent;
+      if (transcriptionService && audioAttachments.length > 0) {
+        for (const audio of audioAttachments) {
+          try {
+            const result = await transcriptionService.transcribe(
+              audio.buffer,
+              realAgentId,
+              audio.mimeType
+            );
+            if ("text" in result && result.text) {
+              const voiceMessage = `[Voice message]: ${result.text}`;
+              directMessageText = directMessageText
+                ? `${directMessageText}\n\n${voiceMessage}`
+                : voiceMessage;
+            }
+          } catch (error) {
+            logger.warn(
+              { error: String(error), messageId },
+              "Direct API audio transcription failed"
+            );
+          }
+        }
+      }
 
       const baseOptions: Record<string, any> = {
         provider: session.provider || "claude",
@@ -1322,7 +1356,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           : {}),
         botId: "lobu-api",
         platform: "api",
-        messageText: messageContent,
+        messageText: directMessageText,
         platformMetadata: {
           agentId: realAgentId,
           source: session.intent?.kind === "watcher_run" ? "watcher-run" : "direct-api",

@@ -141,4 +141,49 @@ describe("direct API multipart attachments", () => {
 			"token=",
 		);
 	});
+
+	test("transcribes audio uploads and preserves artifact metadata", async () => {
+		const audioBytes = Buffer.from("ogg-audio-bytes");
+		const transcriptionService = {
+			transcribe: mock(
+				async (buffer: Buffer, agentId: string, mimeType: string) => {
+					expect(buffer.equals(audioBytes)).toBe(true);
+					expect(agentId).toBe(AGENT_ID);
+					expect(mimeType).toBe("audio/ogg");
+					return { text: "please review my schedule", provider: "openai" };
+				},
+			),
+		};
+		const { app, enqueued } = makeApp({ transcriptionService });
+		const form = new FormData();
+		form.set("content", "User sent a voice note.");
+		form.append(
+			"files",
+			new File([audioBytes], "line_voice.ogg", {
+				type: "audio/ogg",
+			}),
+		);
+
+		const res = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: { Authorization: `Bearer ${AUTH_TOKEN}` },
+				body: form,
+			},
+		);
+
+		expect(res.status).toBe(200);
+		expect(transcriptionService.transcribe).toHaveBeenCalledTimes(1);
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0].messageText).toBe(
+			"User sent a voice note.\n\n[Voice message]: please review my schedule",
+		);
+		expect(enqueued[0].platformMetadata.files).toHaveLength(1);
+		expect(enqueued[0].platformMetadata.files[0]).toMatchObject({
+			name: "line_voice.ogg",
+			mimetype: "audio/ogg",
+			size: audioBytes.length,
+		});
+	});
 });
