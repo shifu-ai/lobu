@@ -375,6 +375,100 @@ describe("secret-proxy agentId binding", () => {
     // Must proceed (200), NOT 401 — the binding is best-effort, not a gate.
     expect(status).toBe(200);
   });
+
+  test("Google/Gemini provider credentials are forwarded as x-goog-api-key, not Bearer auth", async () => {
+    const secretStore = makeSecretStore({});
+    const proxy = new SecretProxy(
+      { defaultUpstreamUrl: "https://upstream.example.com" },
+      secretStore
+    );
+    proxy.registerUpstream(
+      {
+        slug: "google",
+        upstreamBaseUrl: "https://generativelanguage.googleapis.com/v1beta",
+      },
+      "gemini"
+    );
+    proxy.setAuthProfilesManager({
+      getBestProfile: async () => ({
+        id: "p-google",
+        provider: "gemini",
+        credential: "google-api-key",
+        authType: "api-key",
+        label: "Gemini",
+        createdAt: Date.now(),
+      }),
+      ensureFreshCredential: async (profile: { credential?: string }) =>
+        profile.credential,
+    } as any);
+
+    let forwardedHeaders: Record<string, string> = {};
+    await withFetch(async (_input, init) => {
+      forwardedHeaders = init?.headers as Record<string, string>;
+      return new Response("{}", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, async () => {
+      const res = await proxy.getApp().request(
+        "/api/proxy/google/a/agent-google/models/gemini-2.5-flash:generateContent",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer not-a-verifiable-worker-token",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        }
+      );
+      expect(res.status).toBe(200);
+    });
+
+    expect(forwardedHeaders.authorization).toBeUndefined();
+    expect(forwardedHeaders["x-goog-api-key"]).toBe("google-api-key");
+  });
+
+  test("non-Google provider credentials still forward as Bearer auth", async () => {
+    const secretStore = makeSecretStore({});
+    const proxy = buildProxy(secretStore);
+    proxy.setAuthProfilesManager({
+      getBestProfile: async () => ({
+        id: "p-mock",
+        provider: "mock-provider",
+        credential: "mock-api-key",
+        authType: "api-key",
+        label: "Mock",
+        createdAt: Date.now(),
+      }),
+      ensureFreshCredential: async (profile: { credential?: string }) =>
+        profile.credential,
+    } as any);
+
+    let forwardedHeaders: Record<string, string> = {};
+    await withFetch(async (_input, init) => {
+      forwardedHeaders = init?.headers as Record<string, string>;
+      return new Response("{}", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, async () => {
+      const res = await proxy.getApp().request(
+        "/api/proxy/mock/a/agent-mock/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer not-a-verifiable-worker-token",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        }
+      );
+      expect(res.status).toBe(200);
+    });
+
+    expect(forwardedHeaders.authorization).toBe("Bearer mock-api-key");
+    expect(forwardedHeaders["x-goog-api-key"]).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

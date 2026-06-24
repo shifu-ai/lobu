@@ -260,6 +260,40 @@ interface SecretProxyConfig {
   providerUpstreams?: ProviderUpstreamConfig[];
 }
 
+function usesGoogleApiKeyHeader(params: {
+  providerId?: string;
+  resolvedSlug?: string;
+  upstreamBaseUrl: string;
+}): boolean {
+  const provider = params.providerId?.toLowerCase() ?? "";
+  const slug = params.resolvedSlug?.toLowerCase() ?? "";
+  if (provider === "gemini" || provider === "google") return true;
+  if (slug === "google" || slug === "gemini") return true;
+  try {
+    return new URL(params.upstreamBaseUrl).hostname ===
+      "generativelanguage.googleapis.com";
+  } catch {
+    return false;
+  }
+}
+
+function applyProviderCredentialHeader(
+  headers: Record<string, string>,
+  credential: string,
+  params: {
+    providerId?: string;
+    resolvedSlug?: string;
+    upstreamBaseUrl: string;
+  }
+): void {
+  if (usesGoogleApiKeyHeader(params)) {
+    headers["x-goog-api-key"] = credential;
+    delete headers.authorization;
+    return;
+  }
+  headers.authorization = `Bearer ${credential}`;
+}
+
 /**
  * Generic secret injection proxy.
  *
@@ -714,11 +748,19 @@ export class SecretProxy {
             )
           : profile?.credential;
         if (credential) {
-          headers.authorization = `Bearer ${credential}`;
+          applyProviderCredentialHeader(headers, credential, {
+            providerId,
+            resolvedSlug,
+            upstreamBaseUrl,
+          });
         } else if (this.systemKeyResolver) {
           const systemKey = this.systemKeyResolver(providerId);
           if (systemKey) {
-            headers.authorization = `Bearer ${systemKey}`;
+            applyProviderCredentialHeader(headers, systemKey, {
+              providerId,
+              resolvedSlug,
+              upstreamBaseUrl,
+            });
           } else {
             logger.warn(
               `No auth profile or system key for agent ${urlAgentId}, provider ${providerId}`
