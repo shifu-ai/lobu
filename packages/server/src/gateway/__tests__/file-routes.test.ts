@@ -21,20 +21,25 @@ describe("file routes", () => {
   afterEach(() => env.cleanup());
 
   /** Build an in-memory app wired to the given (optional) platform handler. */
-  function buildApp(handler?: IFileHandler) {
+  function buildApp(handler?: IFileHandler, publicGatewayUrl = TEST_GATEWAY_URL) {
     const app = new Hono();
     const platformRegistry = {
       get: () => ({ getFileHandler: () => handler }),
     } as unknown as PlatformRegistry;
     app.route(
       "/internal/files",
-      createFileRoutes(platformRegistry, env.artifactStore, TEST_GATEWAY_URL)
+      createFileRoutes(platformRegistry, env.artifactStore, publicGatewayUrl)
     );
     app.route("", createPublicFileRoutes(env.artifactStore));
     return app;
   }
 
-  async function uploadProof(app: Hono, filename: string, contents: string) {
+  async function uploadProof(
+    app: Hono,
+    filename: string,
+    contents: string,
+    path = "/internal/files/upload"
+  ) {
     const token = generateWorkerToken("user-1", "conv-1", "worker-1", {
       channelId: "channel-1",
       platform: "telegram",
@@ -42,7 +47,7 @@ describe("file routes", () => {
     const form = new FormData();
     form.set("file", new File([contents], filename, { type: "text/plain" }));
     form.set("filename", filename);
-    return app.request("/internal/files/upload", {
+    return app.request(path, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -125,5 +130,33 @@ describe("file routes", () => {
       `filename="${filename}"`
     );
     expect(await downloadResponse.text()).toBe(contents);
+  });
+
+  test("preserves embedded gateway base path in artifact download URLs", async () => {
+    const innerApp = buildApp(undefined, `${TEST_GATEWAY_URL}/lobu`);
+    const outerApp = new Hono();
+    outerApp.route("/lobu", innerApp);
+
+    const uploadResponse = await uploadProof(
+      outerApp,
+      "embedded.txt",
+      "embedded artifact",
+      "/lobu/internal/files/upload"
+    );
+    expect(uploadResponse.status).toBe(200);
+    const uploadBody = (await uploadResponse.json()) as {
+      permalink: string;
+      delivery: string;
+    };
+
+    expect(uploadBody.delivery).toBe("artifact-url");
+    const downloadUrl = new URL(uploadBody.permalink);
+    expect(downloadUrl.pathname).toMatch(/^\/lobu\/api\/v1\/files\//);
+
+    const downloadResponse = await outerApp.request(
+      `${downloadUrl.pathname}${downloadUrl.search}`
+    );
+    expect(downloadResponse.status).toBe(200);
+    expect(await downloadResponse.text()).toBe("embedded artifact");
   });
 });

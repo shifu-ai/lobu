@@ -38,6 +38,11 @@ function normalizeBaseUrl(publicGatewayUrl: string): string {
   return trimmed.replace(/\/$/, "");
 }
 
+function buildArtifactPath(baseUrl: URL, artifactId: string): string {
+  const basePath = baseUrl.pathname.replace(/\/+$/, "");
+  return `${basePath}/api/v1/files/${encodeURIComponent(artifactId)}`;
+}
+
 export class ArtifactStore {
   constructor(
     private readonly baseDir = process.env.LOBU_ARTIFACTS_DIR ||
@@ -163,11 +168,10 @@ export class ArtifactStore {
     artifactId: string,
     ttlMs = this.defaultTtlMs
   ): string {
-    const baseUrl = normalizeBaseUrl(publicGatewayUrl);
-    const url = new URL(
-      `/api/v1/files/${encodeURIComponent(artifactId)}`,
-      baseUrl
-    );
+    const url = new URL(normalizeBaseUrl(publicGatewayUrl));
+    url.pathname = buildArtifactPath(url, artifactId);
+    url.search = "";
+    url.hash = "";
     url.searchParams.set("token", this.createDownloadToken(artifactId, ttlMs));
     return url.toString();
   }
