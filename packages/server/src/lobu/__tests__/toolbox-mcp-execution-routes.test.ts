@@ -247,6 +247,59 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call maps Google Workspace calendar aliases to the upstream MCP tool name', async () => {
+    fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
+      id: MATERIALIZED_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'google_workspace',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'google_workspace',
+        mcpId: 'google_workspace',
+        source: 'toolbox-personal-agent-materialized',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const args = {
+      calendarId: 'primary',
+      timeMin: '2026-06-25T00:00:00+08:00',
+      timeMax: '2026-06-26T00:00:00+08:00',
+      maxResults: 10,
+    };
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: MATERIALIZED_CONNECTION_REF,
+        toolName: 'google_workspace_calendar_events_list',
+        args,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'google_workspace',
+      'gws_calendar_events_list',
+      args
+    );
+  });
+
   test('POST /mcp/tools/call maps Notion database read aliases to the upstream MCP tool name', async () => {
     fakeConnections.set(NOTION_CONNECTION_REF, {
       id: NOTION_CONNECTION_REF,
