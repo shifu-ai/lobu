@@ -797,6 +797,50 @@ describe("createMcpToolDefinitions", () => {
     }
   });
 
+  test("executes upstream MCP name when Gemini projection is suffixed by reserved names", async () => {
+    const originalFetch = globalThis.fetch;
+    const capturedUrls: string[] = [];
+    globalThis.fetch = async (url: Parameters<typeof fetch>[0]) => {
+      capturedUrls.push(typeof url === "string" ? url : url.toString());
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "notion result" }],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [{ name: "notion-search", description: "Search Notion" }],
+      },
+      {
+        provider: "gemini",
+        directToolLimit: 3,
+        reservedProviderToolNames: new Set(["notion_search"]),
+      }
+    );
+
+    try {
+      const defs = createMcpToolDefinitions(projected.tools, gw);
+      expect(defs.map((def) => def.name)).toEqual(["notion_search_2"]);
+
+      await defs[0].execute(
+        "call-id",
+        { query: "budget" },
+        undefined,
+        undefined,
+        {} as any
+      );
+
+      expect(capturedUrls).toEqual([
+        "http://gateway:8080/mcp/notion/tools/notion-search",
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("projected Gemini MCP cap counts actual registered safe definitions", () => {
     const projected = projectMcpToolsForProvider(
       {
