@@ -4,6 +4,7 @@ import {
   type GrantStore,
 } from "../../permissions/grant-store.js";
 import { orgContext } from "../../../lobu/stores/org-context.js";
+import type { UserAgentsStore } from "../user-agents-store.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
 
@@ -61,6 +62,7 @@ interface McpProxyDirectExecution {
 export interface ToolApprovalServiceDeps {
   grantStore: Pick<GrantStore, "grant" | "hasGrant" | "revoke">;
   mcpProxy: McpProxyDirectExecution;
+  userAgentsStore?: Pick<UserAgentsStore, "ownsAgent">;
   organizationId?: string;
 }
 
@@ -72,6 +74,20 @@ function organizationIdFor(
 }
 
 export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
+  const ownsToolboxAgent = async (input: {
+    toolboxUserId: string;
+    agentId: string;
+    organizationId?: string;
+  }): Promise<boolean> => {
+    if (!deps.userAgentsStore) return false;
+    return deps.userAgentsStore.ownsAgent(
+      "toolbox",
+      input.toolboxUserId,
+      input.agentId,
+      organizationIdFor(input, deps.organizationId)
+    );
+  };
+
   return {
     async submit(
       input: ToolApprovalSubmitInput
@@ -142,7 +158,11 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
 
     async revokeGlobal(
       input: ToolApprovalRevokeGlobalInput
-    ): Promise<{ status: "revoked" }> {
+    ): Promise<{ status: "revoked" } | { status: "forbidden" }> {
+      if (!(await ownsToolboxAgent(input))) {
+        return { status: "forbidden" };
+      }
+
       await deps.grantStore.revoke(
         input.agentId,
         GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
@@ -153,7 +173,11 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
 
     async getGlobalStatus(
       input: ToolApprovalGlobalStatusInput
-    ): Promise<{ enabled: boolean }> {
+    ): Promise<{ enabled: boolean } | { status: "forbidden" }> {
+      if (!(await ownsToolboxAgent(input))) {
+        return { status: "forbidden" };
+      }
+
       const enabled = await deps.grantStore.hasGrant(
         input.agentId,
         GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,

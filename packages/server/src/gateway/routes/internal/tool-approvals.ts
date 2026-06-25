@@ -11,10 +11,10 @@ type ToolApprovalService = {
   submit(input: ToolApprovalSubmitInput): Promise<ToolApprovalSubmitResult>;
   revokeGlobal(
     input: ToolApprovalRevokeGlobalInput
-  ): Promise<{ status: "revoked" }>;
+  ): Promise<{ status: "revoked" } | { status: "forbidden" }>;
   getGlobalStatus(
     input: ToolApprovalGlobalStatusInput
-  ): Promise<{ enabled: boolean }>;
+  ): Promise<{ enabled: boolean } | { status: "forbidden" }>;
 };
 
 interface ToolApprovalRoutesConfig {
@@ -155,6 +155,9 @@ export function createToolApprovalRoutes(
       agentId,
       organizationId,
     });
+    if (result.status === "forbidden") {
+      return c.json({ error: "forbidden" }, 403);
+    }
     return c.json(result);
   });
 
@@ -180,6 +183,9 @@ export function createToolApprovalRoutes(
       agentId,
       organizationId,
     });
+    if ("status" in result && result.status === "forbidden") {
+      return c.json({ error: "forbidden" }, 403);
+    }
     return c.json(result);
   });
 

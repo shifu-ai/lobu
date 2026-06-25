@@ -261,6 +261,7 @@ export function createGatewayApp(
       const toolApprovalService = createToolApprovalService({
         grantStore,
         mcpProxy: approveMcpProxy,
+        userAgentsStore: coreServices.getUserAgentsStore(),
       });
       app.route(
         "/api/v1/internal/tool-approvals",

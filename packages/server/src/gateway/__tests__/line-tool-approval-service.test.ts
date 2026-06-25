@@ -209,6 +209,9 @@ describe("createToolApprovalService", () => {
     const service = createToolApprovalService({
       grantStore,
       mcpProxy,
+      userAgentsStore: {
+        ownsAgent: mock(async () => true),
+      },
       organizationId: "org-1",
     });
 
@@ -226,6 +229,44 @@ describe("createToolApprovalService", () => {
     );
   });
 
+  test("wrong toolbox user cannot revoke global auto-approval", async () => {
+    const grantStore = {
+      grant: mock(async () => undefined),
+      hasGrant: mock(async () => true),
+      revoke: mock(async () => undefined),
+    };
+    const mcpProxy = {
+      executeToolDirect: mock(async () => ({
+        content: [{ type: "text", text: "created" }],
+        isError: false,
+      })),
+    };
+    const userAgentsStore = {
+      ownsAgent: mock(async () => false),
+    };
+    const service = createToolApprovalService({
+      grantStore,
+      mcpProxy,
+      userAgentsStore,
+      organizationId: "org-1",
+    });
+
+    const result = await service.revokeGlobal({
+      toolboxUserId: "toolbox-user-wrong",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
+    });
+
+    expect(result).toEqual({ status: "forbidden" });
+    expect(userAgentsStore.ownsAgent).toHaveBeenCalledWith(
+      "toolbox",
+      "toolbox-user-wrong",
+      "shifu-u-1",
+      "org-1"
+    );
+    expect(grantStore.revoke).not.toHaveBeenCalled();
+  });
+
   test("returns whether global auto-approval is enabled", async () => {
     const grantStore = {
       grant: mock(async () => undefined),
@@ -241,6 +282,9 @@ describe("createToolApprovalService", () => {
     const service = createToolApprovalService({
       grantStore,
       mcpProxy,
+      userAgentsStore: {
+        ownsAgent: mock(async () => true),
+      },
       organizationId: "org-1",
     });
 
@@ -255,5 +299,42 @@ describe("createToolApprovalService", () => {
       GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
       "org-1"
     );
+  });
+
+  test("wrong toolbox user cannot read global auto-approval status", async () => {
+    const grantStore = {
+      grant: mock(async () => undefined),
+      hasGrant: mock(async () => true),
+      revoke: mock(async () => undefined),
+    };
+    const mcpProxy = {
+      executeToolDirect: mock(async () => ({
+        content: [{ type: "text", text: "created" }],
+        isError: false,
+      })),
+    };
+    const userAgentsStore = {
+      ownsAgent: mock(async () => false),
+    };
+    const service = createToolApprovalService({
+      grantStore,
+      mcpProxy,
+      userAgentsStore,
+      organizationId: "org-1",
+    });
+
+    const result = await service.getGlobalStatus({
+      toolboxUserId: "toolbox-user-wrong",
+      agentId: "shifu-u-1",
+    });
+
+    expect(result).toEqual({ status: "forbidden" });
+    expect(userAgentsStore.ownsAgent).toHaveBeenCalledWith(
+      "toolbox",
+      "toolbox-user-wrong",
+      "shifu-u-1",
+      "org-1"
+    );
+    expect(grantStore.hasGrant).not.toHaveBeenCalled();
   });
 });

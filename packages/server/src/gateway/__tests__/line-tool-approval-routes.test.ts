@@ -112,6 +112,31 @@ describe("LINE tool approval routes", () => {
     });
   });
 
+  test("returns 403 when global auto-approval revoke is forbidden", async () => {
+    const service = {
+      submit: mock(async () => ({ status: "executed" })),
+      revokeGlobal: mock(async () => ({ status: "forbidden" })),
+      getGlobalStatus: mock(async () => ({ enabled: true })),
+    };
+    const app = createAuthedApp(service);
+
+    const res = await app.request(
+      "/internal/tool-approvals/global-auto-approval",
+      {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          toolboxUserId: "toolbox-user-wrong",
+          lineUserId: "line-user-1",
+          agentId: "shifu-u-1",
+        }),
+      }
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
+  });
+
   test("returns global auto-approval status", async () => {
     const service = {
       submit: mock(async () => ({ status: "executed" })),
@@ -139,6 +164,30 @@ describe("LINE tool approval routes", () => {
       agentId: "shifu-u-1",
       organizationId: "org-1",
     });
+  });
+
+  test("returns 403 when global auto-approval status is forbidden", async () => {
+    const service = {
+      submit: mock(async () => ({ status: "executed" })),
+      revokeGlobal: mock(async () => ({ status: "revoked" })),
+      getGlobalStatus: mock(async () => ({ status: "forbidden" })),
+    };
+    const app = createAuthedApp(service);
+
+    const res = await app.request(
+      "/internal/tool-approvals/global-auto-approval/status",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          toolboxUserId: "toolbox-user-wrong",
+          agentId: "shifu-u-1",
+        }),
+      }
+    );
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "forbidden" });
   });
 
   test("rejects non-admin callers", async () => {
