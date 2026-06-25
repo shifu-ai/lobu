@@ -449,6 +449,104 @@ describe("Slack platform bridge", () => {
     );
   });
 
+  test("renders personal notifications with absolute links and an unread count", async () => {
+    const h = makeHomeChat();
+    const resolveUserInbox = mock(async () => ({
+      unreadCount: 2,
+      orgSlug: "acme",
+      items: [
+        { title: "Series B closed", url: "/acme/companies/1", isRead: false },
+        { title: "Synced", url: "https://x.test/full", isRead: true },
+        { title: "No link", url: null, isRead: true },
+      ],
+    }));
+    registerSlackAppHome(h.chat, connection(), {
+      publicGatewayUrl: "https://gw.example/",
+      resolveUserInbox,
+    });
+    const publishHomeView = mock(async () => undefined);
+    await h.open("U123", publishHomeView);
+
+    // resolveUserInbox is called with (slackUserId, teamId). The connection()
+    // helper has no metadata.teamId, so teamId falls back to '' (preview/unknown).
+    expect(resolveUserInbox).toHaveBeenCalledWith("U123", "");
+    const text = blocksText(publishHomeView.mock.calls[0]![1] as any);
+    expect(text).toContain("Notifications");
+    expect(text).toContain("2 unread");
+    // relative resource_url made absolute against the web origin
+    expect(text).toContain("<https://gw.example/acme/companies/1|Series B closed>");
+    // already-absolute url left as-is
+    expect(text).toContain("<https://x.test/full|Synced>");
+    // unread vs read markers present
+    expect(text).toContain(":large_blue_circle:");
+    expect(text).toContain(":white_circle:");
+  });
+
+  test("passes the connection team_id to resolveUserInbox for workspace installs", async () => {
+    const h = makeHomeChat();
+    const resolveUserInbox = mock(async () => null);
+    registerSlackAppHome(
+      h.chat,
+      connection({ metadata: { botUsername: "Lobster", teamId: "T_WORKSPACE" } }),
+      { publicGatewayUrl: "https://gw.example/", resolveUserInbox },
+    );
+    const publishHomeView = mock(async () => undefined);
+    await h.open("U123", publishHomeView);
+    // Must be scoped to the connection's workspace — a different workspace's
+    // identity row with the same platform_user_id must NOT be returned.
+    expect(resolveUserInbox).toHaveBeenCalledWith("U123", "T_WORKSPACE");
+  });
+
+  test("omits the notifications section when the user has no linked inbox", async () => {
+    const h = makeHomeChat();
+    registerSlackAppHome(h.chat, connection(), {
+      publicGatewayUrl: "https://gw.example",
+      resolveUserInbox: mock(async () => null),
+    });
+    const publishHomeView = mock(async () => undefined);
+    await h.open("U123", publishHomeView);
+    expect(blocksText(publishHomeView.mock.calls[0]![1] as any)).not.toContain(
+      "Notifications"
+    );
+  });
+
+  test("preview home shows a 'Set up your agent' button plus the link-code hint", async () => {
+    const h = makeHomeChat();
+    registerSlackAppHome(
+      h.chat,
+      connection({ settings: { previewMode: true } }),
+      { publicGatewayUrl: "https://gw.example/" }
+    );
+    const publishHomeView = mock(async () => undefined);
+    await h.open("U123", publishHomeView);
+    const text = blocksText(publishHomeView.mock.calls[0]![1] as any);
+    expect(text).toContain("Set up your agent");
+    // No resolved identity → no org → setup button points at the web root.
+    expect(text).toContain('"url":"https://gw.example"');
+    expect(text).toContain("/lobu link");
+  });
+
+  test("preview setup button deep-links to the user's org home when known", async () => {
+    const h = makeHomeChat();
+    registerSlackAppHome(
+      h.chat,
+      connection({ settings: { previewMode: true } }),
+      {
+        publicGatewayUrl: "https://gw.example",
+        resolveUserInbox: mock(async () => ({
+          unreadCount: 0,
+          orgSlug: "acme",
+          items: [],
+        })),
+      }
+    );
+    const publishHomeView = mock(async () => undefined);
+    await h.open("U123", publishHomeView);
+    const text = blocksText(publishHomeView.mock.calls[0]![1] as any);
+    // /{org} (the Builder home), NOT /{org}/agents — the latter redirects.
+    expect(text).toContain('"url":"https://gw.example/acme"');
+  });
+
   test("falls back to a minimal home view if the rich view is rejected", async () => {
     const h = makeHomeChat();
     registerSlackAppHome(h.chat, connection(), {});
@@ -490,7 +588,7 @@ describe("Slack platform bridge", () => {
         blocks?: Array<Record<string, unknown>>;
       }
     );
-    expect(text).toContain("preview");
+    expect(text).toContain("Set up your agent");
     expect(text).toContain("/lobu link");
   });
 

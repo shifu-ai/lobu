@@ -159,12 +159,32 @@ export interface SlackHomeRecentItem {
   ts: number;
 }
 
+/** A single per-user notification row for the home tab. */
+export interface SlackHomeNotification {
+  /** Notification title. */
+  title: string;
+  /** Absolute deep link to the resource, or null when none. */
+  url: string | null;
+  /** Whether the user has already read it. */
+  isRead: boolean;
+}
+
+/**
+ * The viewing user's personal notification inbox (from `notification_targets`),
+ * resolved by mapping their Slack user id → Lobu user id. Null when the user
+ * hasn't linked an agent yet (no identity) — they see the setup prompt instead.
+ */
+export interface SlackHomeInbox {
+  unreadCount: number;
+  items: SlackHomeNotification[];
+  /** The user's primary org slug, for deep-linking the setup button to their org home. */
+  orgSlug: string | null;
+}
+
 /**
  * Glanceable, org-scoped context for the home tab's dashboard card. `events`
  * has no per-agent or per-user attribution column, so every count here is
- * organization-wide — never present it as "your" items. (Per-user delivery
- * lives in `notification_targets`, but it's keyed on Lobu user ids and is
- * empty for unlinked Slack users, so it isn't surfaced here.)
+ * organization-wide — never present it as "your" items.
  */
 export interface SlackHomeContext {
   /** Org slug for the dashboard deep link, or null if it can't be resolved. */
@@ -200,6 +220,16 @@ interface SlackAppHomeDeps {
   resolveHomeContext?: (
     organizationId: string,
   ) => Promise<SlackHomeContext | null>;
+  /**
+   * Resolves the viewing Slack user's personal notification inbox, or null when
+   * they have no linked Lobu identity. `teamId` scopes the lookup to the
+   * correct Slack workspace (empty string for hosted-preview connections, which
+   * write identity rows with team_id=''). Read-only; failures degrade to no inbox.
+   */
+  resolveUserInbox?: (
+    slackUserId: string,
+    teamId: string,
+  ) => Promise<SlackHomeInbox | null>;
 }
 
 // Internal plumbing MCPs (e.g. the Lobu memory backend) — not user integrations.
@@ -364,6 +394,84 @@ function dashboardBlocks(
   return blocks;
 }
 
+/**
+ * The viewing user's notifications, newest first, each linking to its resource.
+ * Relative `resource_url`s are made absolute against the web origin so Slack can
+ * link them. Returns `[]` when the inbox is empty/absent.
+ */
+function notificationBlocks(
+  webBaseUrl: string | undefined,
+  inbox: SlackHomeInbox | null,
+): Record<string, unknown>[] {
+  if (!inbox || inbox.items.length === 0) return [];
+  const base = webBaseUrl ? trimTrailingSlash(webBaseUrl) : undefined;
+  const absolute = (url: string): string =>
+    /^https?:\/\//.test(url) || !base
+      ? url
+      : `${base}/${url.replace(/^\/+/, "")}`;
+
+  const lines = inbox.items.map((item) => {
+    const dot = item.isRead ? ":white_circle:" : ":large_blue_circle:";
+    const title = escapeMrkdwn(item.title);
+    return item.url
+      ? `${dot} <${absolute(item.url)}|${title}>`
+      : `${dot} ${title}`;
+  });
+  const header =
+    inbox.unreadCount > 0
+      ? `*Notifications* · ${inbox.unreadCount} unread`
+      : "*Notifications*";
+  return [
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: `${header}\n${lines.join("\n")}` },
+    },
+    { type: "divider" },
+  ];
+}
+
+/**
+ * Preview-workspace onboarding: a button to set up an agent for this DM in the
+ * web app, alongside the `/lobu link <code>` CLI path. Deep-links to the user's
+ * org home `/{slug}` (the Builder — where agents are created/configured and a
+ * channel is connected per agent) when we know their org, else the web root
+ * (which logs them in and routes there). `/{slug}/agents` is intentionally NOT
+ * used — it redirects to `/{slug}`. Returns `[]` with no web URL.
+ */
+function setupBlocks(
+  webBaseUrl: string | undefined,
+  orgSlug: string | null,
+): Record<string, unknown>[] {
+  if (!webBaseUrl) return [];
+  const base = trimTrailingSlash(webBaseUrl);
+  const setupUrl = orgSlug ? `${base}/${orgSlug}` : base;
+  return [
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: "*Set up your own agent*\nConnect an agent to this DM so I can answer from your own data.",
+      },
+      accessory: {
+        type: "button",
+        text: { type: "plain_text", text: "Set up your agent ↗" },
+        url: setupUrl,
+        style: "primary",
+      },
+    },
+    {
+      type: "context",
+      elements: [
+        {
+          type: "mrkdwn",
+          text: "Already have a code? Run `/lobu link <code>` here. Get a code from your dashboard or `lobu run`.",
+        },
+      ],
+    },
+    { type: "divider" },
+  ];
+}
+
 interface HomeViewParams {
   connection: PlatformConnection;
   deps: SlackAppHomeDeps;
@@ -393,6 +501,25 @@ async function buildSlackHomeBlocks(
     },
     { type: "divider" },
   ];
+
+  // Personal notifications, for users who've linked a Lobu identity (both
+  // preview and BYO connections). Scoped by teamId to prevent cross-workspace
+  // leaks when platform_user_id collides across Slack workspaces. Preview
+  // connections write identity rows with team_id='', so we pass '' there.
+  const teamId =
+    typeof connection.metadata?.teamId === "string"
+      ? connection.metadata.teamId
+      : "";
+  let inbox: SlackHomeInbox | null = null;
+  try {
+    inbox = (await deps.resolveUserInbox?.(userId, teamId)) ?? null;
+  } catch (error) {
+    logger.warn(
+      { error, userId },
+      "Failed to resolve Slack home notifications; rendering without them",
+    );
+  }
+  blocks.push(...notificationBlocks(deps.publicGatewayUrl, inbox));
 
   if (!isPreview && connection.organizationId) {
     let context: SlackHomeContext | null = null;
@@ -443,12 +570,16 @@ async function buildSlackHomeBlocks(
     }
   }
 
+  if (isPreview) {
+    blocks.push(...setupBlocks(deps.publicGatewayUrl, inbox?.orgSlug ?? null));
+  }
+
   blocks.push({
     type: "section",
     text: {
       type: "mrkdwn",
       text: isPreview
-        ? "This is a *preview* workspace. Run `lobu run`, then use `/lobu link <code>` in a channel to connect your own agent."
+        ? "Mention me in a channel or DM me to start a thread. `/lobu help` lists the commands."
         : "*Tips*\n• Mention me in a channel, or DM me directly.\n• `/lobu help` lists the built-in commands.\n• Integrations that need you to sign in will also prompt you with a button right in the thread.",
     },
   });

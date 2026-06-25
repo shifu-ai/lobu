@@ -56,6 +56,7 @@ import {
   registerSlackAppHome,
   registerSlackPlatformHandlers,
   type SlackHomeContext,
+  type SlackHomeInbox,
 } from "./slack-platform-bridge.js";
 import { createGatewayStateAdapter } from "./state-adapter.js";
 import {
@@ -164,6 +165,87 @@ async function resolveSlackHomeContext(
     logger.warn(
       { error, organizationId },
       "Failed to load Slack home dashboard context",
+    );
+    return null;
+  }
+}
+
+/** Newest notifications shown on the Slack App Home tab. */
+const SLACK_HOME_NOTIFICATION_LIMIT = 5;
+
+/**
+ * The viewing Slack user's personal notification inbox for the App Home tab.
+ *
+ * `app_home_opened` carries no team_id, so the team_id must come from the
+ * connection's own metadata. For workspace installs this is the real Slack team
+ * id; for the hosted-preview connection (no OAuth, single workspace) it is the
+ * empty string, which is how the preview path writes identity rows. Scoping by
+ * team_id prevents a platform_user_id collision across workspaces from leaking
+ * one workspace user's inbox onto another. Returns null when the user has no
+ * linked identity — the home tab then shows the setup prompt instead.
+ * Notifications are the user's own, so they span all their orgs; `resource_url`
+ * already carries each item's org slug for the deep link.
+ */
+export async function resolveSlackHomeUserInbox(
+  slackUserId: string,
+  teamId: string,
+): Promise<SlackHomeInbox | null> {
+  try {
+    const db = getDb();
+    const idRows = (await db`
+      SELECT lobu_user_id FROM chat_user_identities
+      WHERE platform = 'slack' AND team_id = ${teamId} AND platform_user_id = ${slackUserId}
+      LIMIT 2
+    `) as unknown as { lobu_user_id: string }[];
+    if (idRows.length !== 1) return null;
+    const lobuUserId = idRows[0].lobu_user_id;
+
+    const [itemRows, unreadRows, orgRows] = await Promise.all([
+      db`
+        SELECT
+          e.title,
+          e.metadata->>'resource_url' AS resource_url,
+          (t.read_at IS NOT NULL) AS is_read
+        FROM notification_targets t
+        JOIN events e ON e.id = t.event_id
+        WHERE t.user_id = ${lobuUserId}
+        ORDER BY e.id DESC
+        LIMIT ${SLACK_HOME_NOTIFICATION_LIMIT}
+      `,
+      db`
+        SELECT count(*)::int AS c
+        FROM notification_targets
+        WHERE user_id = ${lobuUserId} AND read_at IS NULL
+      `,
+      // The user's primary org slug, for the setup deep link to /{slug} (home).
+      db`
+        SELECT o.slug
+        FROM member m
+        JOIN organization o ON o.id = m."organizationId"
+        WHERE m."userId" = ${lobuUserId}
+        ORDER BY m."createdAt" ASC
+        LIMIT 1
+      `,
+    ]);
+    const items = (
+      itemRows as {
+        title: string | null;
+        resource_url: string | null;
+        is_read: boolean;
+      }[]
+    ).map((r) => ({
+      title: r.title?.trim() || "(untitled)",
+      url: r.resource_url,
+      isRead: Boolean(r.is_read),
+    }));
+    const unreadCount =
+      Number((unreadRows as { c: number | string }[])[0]?.c) || 0;
+    const orgSlug = (orgRows as { slug: string }[])[0]?.slug ?? null;
+    return { unreadCount, items, orgSlug };
+  } catch (error) {
+    logger.warn(
+      { error, slackUserId },
+      "Failed to load Slack home notifications",
     );
     return null;
   }
@@ -1277,6 +1359,7 @@ export class ChatInstanceManager {
         secretStore: this.services.getSecretStore(),
         publicGatewayUrl: this.publicGatewayUrl,
         resolveHomeContext: resolveSlackHomeContext,
+        resolveUserInbox: resolveSlackHomeUserInbox,
       });
 
       chat.registerSingleton();
