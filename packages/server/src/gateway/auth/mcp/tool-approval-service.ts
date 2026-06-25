@@ -15,6 +15,7 @@ export interface ToolApprovalSubmitInput {
   toolboxUserId: string;
   lineUserId: string;
   agentId: string;
+  organizationId?: string;
 }
 
 export type ToolApprovalSubmitResult =
@@ -29,6 +30,19 @@ export type ToolApprovalSubmitResult =
         diagnosticCode?: string;
       };
     };
+
+export interface ToolApprovalRevokeGlobalInput {
+  toolboxUserId: string;
+  lineUserId: string;
+  agentId: string;
+  organizationId?: string;
+}
+
+export interface ToolApprovalGlobalStatusInput {
+  toolboxUserId: string;
+  agentId: string;
+  organizationId?: string;
+}
 
 interface McpProxyDirectExecution {
   executeToolDirect(
@@ -45,9 +59,16 @@ interface McpProxyDirectExecution {
 }
 
 export interface ToolApprovalServiceDeps {
-  grantStore: Pick<GrantStore, "grant" | "hasGrant">;
+  grantStore: Pick<GrantStore, "grant" | "hasGrant" | "revoke">;
   mcpProxy: McpProxyDirectExecution;
   organizationId?: string;
+}
+
+function organizationIdFor(
+  input: { organizationId?: string },
+  fallback?: string
+): string | undefined {
+  return input.organizationId ?? fallback;
 }
 
 export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
@@ -80,6 +101,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       }
 
       const specificPattern = `/mcp/${pending.mcpId}/tools/${pending.toolName}`;
+      const organizationId = organizationIdFor(input, deps.organizationId);
 
       if (input.action === "deny") {
         await deps.grantStore.grant(
@@ -87,7 +109,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
           specificPattern,
           null,
           true,
-          deps.organizationId
+          organizationId
         );
         return { status: "denied" };
       }
@@ -101,7 +123,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         pattern,
         null,
         undefined,
-        deps.organizationId
+        organizationId
       );
 
       const execute = () =>
@@ -112,10 +134,32 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
           pending.toolName,
           pending.args
         );
-      const result = deps.organizationId
-        ? await orgContext.run({ organizationId: deps.organizationId }, execute)
+      const result = organizationId
+        ? await orgContext.run({ organizationId }, execute)
         : await execute();
       return { status: "executed", result };
+    },
+
+    async revokeGlobal(
+      input: ToolApprovalRevokeGlobalInput
+    ): Promise<{ status: "revoked" }> {
+      await deps.grantStore.revoke(
+        input.agentId,
+        GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+        organizationIdFor(input, deps.organizationId)
+      );
+      return { status: "revoked" };
+    },
+
+    async getGlobalStatus(
+      input: ToolApprovalGlobalStatusInput
+    ): Promise<{ enabled: boolean }> {
+      const enabled = await deps.grantStore.hasGrant(
+        input.agentId,
+        GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+        organizationIdFor(input, deps.organizationId)
+      );
+      return { enabled };
     },
   };
 }

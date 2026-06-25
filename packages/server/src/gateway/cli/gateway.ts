@@ -8,6 +8,7 @@ import { secureHeaders } from "hono/secure-headers";
 import type { AgentMetadata } from "../auth/agent-metadata-store.js";
 import { takePendingTool } from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
+import { createToolApprovalService } from "../auth/mcp/tool-approval-service.js";
 import { OAuthClient } from "../auth/oauth/client.js";
 import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
 import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
@@ -19,6 +20,7 @@ import { createFileRoutes } from "../routes/internal/files.js";
 import { createHistoryRoutes } from "../routes/internal/history.js";
 import { createImageRoutes } from "../routes/internal/images.js";
 import { createInteractionRoutes } from "../routes/internal/interactions.js";
+import { createToolApprovalRoutes } from "../routes/internal/tool-approvals.js";
 import { createWorkStateRoutes } from "../routes/internal/work-state.js";
 import { registerAutoOpenApiRoutes } from "../routes/openapi-auto.js";
 import { createAgentApi } from "../routes/public/agent.js";
@@ -250,6 +252,22 @@ export function createGatewayApp(
     const internalRouter = createInteractionRoutes(interactionService);
     app.route("", internalRouter);
     logger.debug("Internal interaction routes enabled");
+  }
+
+  if (coreServices) {
+    const grantStore = coreServices.getGrantStore();
+    const approveMcpProxy = coreServices.getMcpProxy();
+    if (grantStore && approveMcpProxy) {
+      const toolApprovalService = createToolApprovalService({
+        grantStore,
+        mcpProxy: approveMcpProxy,
+      });
+      app.route(
+        "/api/v1/internal/tool-approvals",
+        createToolApprovalRoutes({ service: toolApprovalService })
+      );
+      logger.debug("Internal tool approval routes enabled");
+    }
   }
 
   if (coreServices) {

@@ -9,6 +9,7 @@ type OpenApiDefinition =
 const INTERNAL_PREFIXES = [
   "/api/proxy",
   "/api/internal",
+  "/api/v1/internal",
   "/internal",
   "/worker",
   "/mcp",
