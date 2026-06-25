@@ -89,6 +89,22 @@ export interface ResolvedMemoryFlushConfig {
 export const MEMORY_FLUSH_STATE_CUSTOM_TYPE = "lobu.memory_flush_state";
 const APPROX_IMAGE_TOKENS = 1200;
 
+export function findDuplicateToolNames(
+  tools: Array<{ name?: string }>
+): Array<{ name: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const tool of tools) {
+    const name = typeof tool.name === "string" ? tool.name.trim() : "";
+    if (!name) {
+      continue;
+    }
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return Array.from(counts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([name, count]) => ({ name, count }));
+}
+
 const DEFAULT_MEMORY_FLUSH_CONFIG: ResolvedMemoryFlushConfig = {
   enabled: true,
   softThresholdTokens: 4000,
@@ -163,7 +179,10 @@ function toSafeMcpToolAlias(name: string): string {
   return name.replace(/[^A-Za-z0-9_]/g, "_").replace(/_+/g, "_");
 }
 
-function removeInstructionSection(instructions: string, heading: string): string {
+function removeInstructionSection(
+  instructions: string,
+  heading: string
+): string {
   const lines = instructions.split("\n");
   const kept: string[] = [];
   let skippingSection = false;
@@ -181,7 +200,10 @@ function removeInstructionSection(instructions: string, heading: string): string
     }
   }
 
-  return kept.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return kept
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function buildProjectedMcpToolInventoryInstructions(
@@ -198,7 +220,9 @@ function buildProjectedMcpToolInventoryInstructions(
       const label = displayName ? `${displayName} (${mcpId})` : mcpId;
       const renderedTools = toolNames.map((name) => {
         const alias = toSafeMcpToolAlias(name);
-        return alias === name ? `\`${name}\`` : `\`${name}\` (alias \`${alias}\`)`;
+        return alias === name
+          ? `\`${name}\``
+          : `\`${name}\` (alias \`${alias}\`)`;
       });
       return `- ${label}: ${renderedTools.join(", ")}`;
     })
@@ -1139,8 +1163,7 @@ Use it when the user references past discussions or you need context.`);
       logger.warn(
         `Quarantined ${projectedMcp.quarantined.length} MCP tool(s) before direct registration: ${projectedMcp.quarantined
           .map(
-            (notice) =>
-              `${notice.mcpId}/${notice.toolName} (${notice.reason})`
+            (notice) => `${notice.mcpId}/${notice.toolName} (${notice.reason})`
           )
           .join(", ")}`
       );
@@ -1149,8 +1172,7 @@ Use it when the user references past discussions or you need context.`);
       logger.warn(
         `Projected ${projectedMcp.projected.length} MCP schema node(s) before direct registration: ${projectedMcp.projected
           .map(
-            (notice) =>
-              `${notice.mcpId}/${notice.toolName} (${notice.reason})`
+            (notice) => `${notice.mcpId}/${notice.toolName} (${notice.reason})`
           )
           .join(", ")}`
       );
@@ -1198,7 +1220,8 @@ Use it when the user references past discussions or you need context.`);
 
   if (mcpExposure !== "cli") {
     const existingToolNames = new Set(customTools.map((tool) => tool.name));
-    const providerSafeAuthToolNames = requiresProviderSafeToolNames(rawProvider);
+    const providerSafeAuthToolNames =
+      requiresProviderSafeToolNames(rawProvider);
     const authToolNames = buildMcpAuthToolNameMap(
       context.mcpStatus,
       existingToolNames,
@@ -1229,6 +1252,16 @@ Use it when the user references past discussions or you need context.`);
 
   tools = projectToolParametersForProvider(tools, rawProvider);
   customTools = projectToolParametersForProvider(customTools, rawProvider);
+
+  const duplicateToolNames = findDuplicateToolNames([...tools, ...customTools]);
+  if (duplicateToolNames.length > 0) {
+    const summary = duplicateToolNames
+      .map((entry) => `${entry.name} x${entry.count}`)
+      .join(", ");
+    throw new Error(
+      `Duplicate provider tool names after projection: ${summary}`
+    );
+  }
 
   // Apply plugin provider registrations to ModelRegistry
   const modelRegistry = new ModelRegistry(authStorage);

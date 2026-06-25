@@ -11,6 +11,7 @@ import {
   projectMcpToolsForProvider,
   projectToolParametersForProvider,
 } from "../openclaw/mcp-tool-projection";
+import { findDuplicateToolNames } from "../openclaw/session-runner";
 
 const originalFetch = globalThis.fetch;
 const originalProjectDiscoveryUrl = process.env.TOOLBOX_PROJECT_DISCOVERY_URL;
@@ -84,6 +85,16 @@ describe("createOpenClawCustomTools", () => {
     for (const tool of projected) {
       walk(tool.parameters);
     }
+  });
+
+  test("detects duplicate provider tool names before model request construction", () => {
+    expect(
+      findDuplicateToolNames([
+        { name: "notion_search" },
+        { name: "trial_sessions_list" },
+        { name: "notion_search" },
+      ])
+    ).toEqual([{ name: "notion_search", count: 2 }]);
   });
 
   test("registers materialized personal-agent connector tools and calls Toolbox MCP execution", async () => {
