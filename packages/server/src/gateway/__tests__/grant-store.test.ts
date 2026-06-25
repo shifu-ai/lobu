@@ -1,6 +1,9 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { orgContext } from "../../lobu/stores/org-context.js";
-import { GrantStore } from "../permissions/grant-store.js";
+import {
+  GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+  GrantStore,
+} from "../permissions/grant-store.js";
 import {
   ensureDbForGatewayTests,
   resetTestDatabase,
@@ -100,6 +103,22 @@ describe("GrantStore (PG-backed)", () => {
         await store.grant("agent-1", "/mcp/gmail/tools/*", null);
         expect(
           await store.hasGrant("agent-1", "/mcp/gmail/tools/send_email")
+        ).toBe(true);
+      });
+    });
+
+    test("matches global MCP tool auto-approval wildcard across MCP servers", async () => {
+      await withOrg(async () => {
+        await store.grant("agent-1", GLOBAL_TOOL_AUTO_APPROVAL_PATTERN, null);
+
+        expect(
+          await store.hasGrant(
+            "agent-1",
+            "/mcp/google_workspace/tools/gws_calendar_events_create"
+          )
+        ).toBe(true);
+        expect(
+          await store.hasGrant("agent-1", "/mcp/notion/tools/create_page")
         ).toBe(true);
       });
     });

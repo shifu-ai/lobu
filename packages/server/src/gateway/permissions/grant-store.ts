@@ -10,6 +10,12 @@ import { tryGetOrgId } from "../../lobu/stores/org-context.js";
 
 const logger = createLogger("grant-store");
 
+export const GLOBAL_TOOL_AUTO_APPROVAL_PATTERN = "/mcp/*/tools/*";
+
+export function isGlobalToolAutoApprovalPattern(pattern: string): boolean {
+  return normalizeDomainPattern(pattern) === GLOBAL_TOOL_AUTO_APPROVAL_PATTERN;
+}
+
 function getDomainGrantCandidates(pattern: string): string[] {
   const normalized = normalizeDomainPattern(pattern);
   if (normalized.startsWith("/")) {
@@ -40,6 +46,9 @@ function buildGrantCandidates(pattern: string, kind: GrantKind): string[] {
     const lastSlash = pattern.lastIndexOf("/");
     if (lastSlash > 0) {
       candidates.push(`${pattern.substring(0, lastSlash)}/*`);
+    }
+    if (!isGlobalToolAutoApprovalPattern(pattern)) {
+      candidates.push(GLOBAL_TOOL_AUTO_APPROVAL_PATTERN);
     }
   }
 
