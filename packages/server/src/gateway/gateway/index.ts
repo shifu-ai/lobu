@@ -80,6 +80,191 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 				required: ["query"],
 			},
 		},
+		{
+			name: "google_workspace_docs_read",
+			connectorToolName: "gws_docs_read",
+			description:
+				"Read a Google Docs document available to the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: { documentId: { type: "string" } },
+				required: ["documentId"],
+			},
+		},
+		{
+			name: "google_workspace_docs_create",
+			connectorToolName: "gws_docs_create",
+			description:
+				"Create a Google Docs document as the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: { title: { type: "string" } },
+				required: ["title"],
+			},
+		},
+		{
+			name: "google_workspace_docs_batch_update",
+			connectorToolName: "gws_docs_batch_update",
+			description: "Apply Google Docs API batchUpdate requests.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					documentId: { type: "string" },
+					requests: { type: "array", items: { type: "object" } },
+				},
+				required: ["documentId", "requests"],
+			},
+		},
+		{
+			name: "google_workspace_sheets_read",
+			connectorToolName: "gws_sheets_read",
+			description: "Read values from a Google Sheets range.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					spreadsheetId: { type: "string" },
+					range: { type: "string" },
+				},
+				required: ["spreadsheetId", "range"],
+			},
+		},
+		{
+			name: "google_workspace_sheets_create",
+			connectorToolName: "gws_sheets_create",
+			description:
+				"Create a Google Sheets spreadsheet as the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: { title: { type: "string" } },
+				required: ["title"],
+			},
+		},
+		{
+			name: "google_workspace_sheets_values_update",
+			connectorToolName: "gws_sheets_values_update",
+			description: "Update values in a Google Sheets range.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					spreadsheetId: { type: "string" },
+					range: { type: "string" },
+					values: {
+						type: "array",
+						items: { type: "array", items: {} },
+					},
+					valueInputOption: { type: "string", enum: ["RAW", "USER_ENTERED"] },
+				},
+				required: ["spreadsheetId", "range", "values"],
+			},
+		},
+		{
+			name: "google_workspace_sheets_batch_update",
+			connectorToolName: "gws_sheets_batch_update",
+			description: "Apply Google Sheets API batchUpdate requests.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					spreadsheetId: { type: "string" },
+					requests: { type: "array", items: { type: "object" } },
+				},
+				required: ["spreadsheetId", "requests"],
+			},
+		},
+		{
+			name: "google_workspace_slides_read",
+			connectorToolName: "gws_slides_read",
+			description: "Read a Google Slides presentation.",
+			inputSchema: {
+				type: "object",
+				properties: { presentationId: { type: "string" } },
+				required: ["presentationId"],
+			},
+		},
+		{
+			name: "google_workspace_slides_create",
+			connectorToolName: "gws_slides_create",
+			description:
+				"Create a Google Slides presentation as the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: { title: { type: "string" } },
+				required: ["title"],
+			},
+		},
+		{
+			name: "google_workspace_slides_batch_update",
+			connectorToolName: "gws_slides_batch_update",
+			description: "Apply Google Slides API batchUpdate requests.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					presentationId: { type: "string" },
+					requests: { type: "array", items: { type: "object" } },
+				},
+				required: ["presentationId", "requests"],
+			},
+		},
+		{
+			name: "google_workspace_calendar_events_list",
+			connectorToolName: "gws_calendar_events_list",
+			description:
+				"List Google Calendar events for the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					timeMin: { type: "string" },
+					timeMax: { type: "string" },
+					maxResults: { type: "number" },
+					query: { type: "string" },
+					pageToken: { type: "string" },
+				},
+			},
+		},
+		{
+			name: "google_workspace_chat_spaces_list",
+			connectorToolName: "gws_chat_spaces_list",
+			description:
+				"List Google Chat spaces visible to the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					pageSize: { type: "number" },
+					pageToken: { type: "string" },
+					filter: { type: "string" },
+				},
+			},
+		},
+		{
+			name: "google_workspace_chat_messages_list",
+			connectorToolName: "gws_chat_messages_list",
+			description: "Read messages from a Google Chat space.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					parent: { type: "string" },
+					pageSize: { type: "number" },
+					pageToken: { type: "string" },
+					filter: { type: "string" },
+					orderBy: { type: "string" },
+				},
+				required: ["parent"],
+			},
+		},
+		{
+			name: "google_workspace_chat_messages_create",
+			connectorToolName: "gws_chat_messages_create",
+			description: "Send a Google Chat message as the connected Toolbox user.",
+			inputSchema: {
+				type: "object",
+				properties: {
+					parent: { type: "string" },
+					text: { type: "string" },
+					threadKey: { type: "string" },
+				},
+				required: ["parent", "text"],
+			},
+		},
 	],
 	notion: [
 		{

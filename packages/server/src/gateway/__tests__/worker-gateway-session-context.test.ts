@@ -270,31 +270,30 @@ describe("WorkerGateway session context", () => {
 		expect(response.status).toBe(200);
 
 		const body = (await response.json()) as {
-			toolboxPersonalAgentTools?: unknown;
+			toolboxPersonalAgentTools?: Array<{
+				connectorKey: string;
+				connectionRef: string;
+				tools: Array<{ name: string; connectorToolName: string }>;
+			}>;
 		};
 
-		expect(body.toolboxPersonalAgentTools).toEqual([
-			{
-				connectorKey: "google_workspace",
-				connectionRef: "toolbox-mcp:org-1:user-1:agent-1:google_workspace",
-				tools: [
-					{
-						name: "google_workspace_drive_search",
-						connectorToolName: "gws_drive_search",
-						description:
-							"Search Google Drive files available to the connected Toolbox user.",
-						inputSchema: {
-							type: "object",
-							properties: {
-								query: { type: "string" },
-								limit: { type: "number" },
-							},
-							required: ["query"],
-						},
-					},
-				],
-			},
-		]);
+		const [googleWorkspaceTools] = body.toolboxPersonalAgentTools ?? [];
+		expect(googleWorkspaceTools?.connectorKey).toBe("google_workspace");
+		expect(googleWorkspaceTools?.connectionRef).toBe(
+			"toolbox-mcp:org-1:user-1:agent-1:google_workspace",
+		);
+		expect(googleWorkspaceTools?.tools).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "google_workspace_drive_search",
+					connectorToolName: "gws_drive_search",
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_list",
+					connectorToolName: "gws_calendar_events_list",
+				}),
+			]),
+		);
 	});
 
 	test("executes materialized personal-agent tools through worker authentication", async () => {
