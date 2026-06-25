@@ -288,13 +288,25 @@ describe("WorkerGateway session context", () => {
 					name: "google_workspace_drive_search",
 					connectorToolName: "gws_drive_search",
 				}),
-				expect.objectContaining({
-					name: "google_workspace_calendar_events_list",
-					connectorToolName: "gws_calendar_events_list",
-				}),
-			]),
-		);
-	});
+					expect.objectContaining({
+						name: "google_workspace_calendar_events_list",
+						connectorToolName: "gws_calendar_events_list",
+					}),
+					expect.objectContaining({
+						name: "google_workspace_calendar_events_create",
+						connectorToolName: "gws_calendar_events_create",
+					}),
+					expect.objectContaining({
+						name: "google_workspace_calendar_events_update",
+						connectorToolName: "gws_calendar_events_update",
+					}),
+					expect.objectContaining({
+						name: "google_workspace_calendar_events_delete",
+						connectorToolName: "gws_calendar_events_delete",
+					}),
+				]),
+			);
+		});
 
 	test("executes materialized personal-agent tools through worker authentication", async () => {
 		fakeConnections.set("toolbox-mcp:ref", {
