@@ -59,7 +59,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function typeOfConstValue(value: unknown): string | null {
   if (typeof value === "string") return "string";
-  if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
+  if (typeof value === "number")
+    return Number.isInteger(value) ? "integer" : "number";
   if (typeof value === "boolean") return "boolean";
   return null;
 }
@@ -245,7 +246,9 @@ export function buildMcpAuthToolNames(
   };
 }
 
-function rootUnsupportedKeyword(schema: Record<string, unknown>): string | null {
+function rootUnsupportedKeyword(
+  schema: Record<string, unknown>
+): string | null {
   for (const keyword of UNION_KEYWORDS) {
     if (Object.hasOwn(schema, keyword)) {
       return keyword;
@@ -320,7 +323,7 @@ export function projectToolParametersForProvider<
     if (!isRecord(tool.parameters)) {
       return tool;
     }
-    const projected = projectSchemaNode(tool.parameters, () => {});
+    const projected = projectSchemaNode(tool.parameters, () => undefined);
     if (projected === tool.parameters || !isRecord(projected)) {
       return tool;
     }
