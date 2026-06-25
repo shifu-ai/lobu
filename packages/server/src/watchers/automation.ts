@@ -810,6 +810,7 @@ const WATCHER_REQUIRED_TOOLS = ['read_knowledge', 'manage_watchers'];
 
 async function preflightWatcherMemoryTools(params: {
   port: string;
+  organizationId: string;
   agentId: string;
   runId: number;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -817,6 +818,7 @@ async function preflightWatcherMemoryTools(params: {
   const token = generateWorkerToken(params.agentId, conversationId, `watcher-${params.runId}`, {
     channelId: `api_watcher_${params.runId}`,
     agentId: params.agentId,
+    organizationId: params.organizationId,
     platform: 'api',
     sessionKey: `watcher_${params.runId}`,
   });
@@ -900,6 +902,7 @@ async function dispatchWatcherRun(
   const port = process.env.PORT || '8787';
   const preflight = await preflightWatcherMemoryTools({
     port,
+    organizationId: run.organization_id,
     agentId: payload.agent_id,
     runId: run.id,
   });

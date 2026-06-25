@@ -18,6 +18,7 @@ import {
   storePendingQuestion,
 } from "./pending-interaction-store.js";
 import type { PlatformConnection } from "./types.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
 
 const logger = createLogger("chat-interaction-bridge");
 
@@ -829,13 +830,20 @@ export function registerActionHandlers(
       // Execute the pending tool call
       if (executeToolDirect) {
         try {
-          const result = await executeToolDirect(
-            pending.agentId,
-            pending.userId,
-            pending.mcpId,
-            pending.toolName,
-            pending.args
-          );
+          const execute = () =>
+            executeToolDirect(
+              pending.agentId,
+              pending.userId,
+              pending.mcpId,
+              pending.toolName,
+              pending.args
+            );
+          const result = connection.organizationId
+            ? await orgContext.run(
+                { organizationId: connection.organizationId },
+                execute
+              )
+            : await execute();
 
           const resultText = result.content.map((c) => c.text).join("\n");
           await postTarget.post(
