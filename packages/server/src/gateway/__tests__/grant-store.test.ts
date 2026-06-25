@@ -123,6 +123,14 @@ describe("GrantStore (PG-backed)", () => {
       });
     });
 
+    test("global MCP tool auto-approval wildcard does not match non-MCP paths", async () => {
+      await withOrg(async () => {
+        await store.grant("agent-1", GLOBAL_TOOL_AUTO_APPROVAL_PATTERN, null);
+
+        expect(await store.hasGrant("agent-1", "/some/other/path")).toBe(false);
+      });
+    });
+
     test("matches exact MCP path with original casing", async () => {
       await withOrg(async () => {
         await store.grant("agent-1", "/mcp/Gmail/tools/SendEmail", null);

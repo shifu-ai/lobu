@@ -39,6 +39,26 @@ export async function storePendingTool(
 }
 
 /**
+ * Fetch a pending tool invocation without claiming it. Approval services use
+ * this to validate caller identity before the destructive `takePendingTool`.
+ */
+export async function getPendingTool(
+  requestId: string
+): Promise<PendingToolInvocation | null> {
+  const sql = getDb();
+  const rows = await sql`
+    SELECT payload
+    FROM oauth_states
+    WHERE id = ${requestId}
+      AND scope = ${SCOPE}
+      AND expires_at > now()
+    LIMIT 1
+  `;
+  if (rows.length === 0) return null;
+  return ((rows[0] as { payload: PendingToolInvocation }).payload) ?? null;
+}
+
+/**
  * Atomically fetch and delete a pending tool invocation. Used by the
  * interaction bridge / CLI approve handler to claim the row exactly
  * once — Slack/Telegram webhook retries that arrive after the first

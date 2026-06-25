@@ -16,6 +16,21 @@ export function isGlobalToolAutoApprovalPattern(pattern: string): boolean {
   return normalizeDomainPattern(pattern) === GLOBAL_TOOL_AUTO_APPROVAL_PATTERN;
 }
 
+function isSpecificMcpToolPattern(pattern: string): boolean {
+  const normalized = normalizeDomainPattern(pattern);
+  const parts = normalized.split("/");
+  return (
+    parts.length === 5 &&
+    parts[0] === "" &&
+    parts[1] === "mcp" &&
+    parts[2] !== "" &&
+    parts[3] === "tools" &&
+    parts[4] !== "" &&
+    parts[2] !== "*" &&
+    parts[4] !== "*"
+  );
+}
+
 function getDomainGrantCandidates(pattern: string): string[] {
   const normalized = normalizeDomainPattern(pattern);
   if (normalized.startsWith("/")) {
@@ -47,7 +62,7 @@ function buildGrantCandidates(pattern: string, kind: GrantKind): string[] {
     if (lastSlash > 0) {
       candidates.push(`${pattern.substring(0, lastSlash)}/*`);
     }
-    if (!isGlobalToolAutoApprovalPattern(pattern)) {
+    if (isSpecificMcpToolPattern(pattern)) {
       candidates.push(GLOBAL_TOOL_AUTO_APPROVAL_PATTERN);
     }
   }
