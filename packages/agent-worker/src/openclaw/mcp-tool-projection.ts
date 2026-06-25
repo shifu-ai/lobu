@@ -27,6 +27,7 @@ export interface McpAuthToolNames {
 export interface ProjectMcpToolsOptions {
   provider: string;
   directToolLimit: number;
+  reservedProviderToolNames?: Set<string>;
 }
 
 export interface ProjectedMcpTools {
@@ -188,6 +189,12 @@ function withStableSuffix(baseName: string, sourceName: string): string {
   return `${baseName.slice(0, maxBaseLength)}_${suffix}`;
 }
 
+function withNumericSuffix(baseName: string, index: number): string {
+  const suffix = `_${index}`;
+  const maxBaseLength = MAX_PROVIDER_TOOL_NAME_LENGTH - suffix.length;
+  return `${baseName.slice(0, maxBaseLength)}${suffix}`;
+}
+
 export function buildProviderSafeToolName(
   name: string,
   reservedNames: Set<string>
@@ -200,8 +207,11 @@ export function buildProviderSafeToolName(
   if (safeName.length > MAX_PROVIDER_TOOL_NAME_LENGTH) {
     safeName = withStableSuffix(safeName, name);
   }
-  if (reservedNames.has(safeName)) {
-    safeName = withStableSuffix(safeName, name);
+  const baseSafeName = safeName;
+  let duplicateIndex = 2;
+  while (reservedNames.has(safeName)) {
+    safeName = withNumericSuffix(baseSafeName, duplicateIndex);
+    duplicateIndex += 1;
   }
   return safeName;
 }
@@ -325,7 +335,9 @@ export function projectMcpToolsForProvider(
   const projected: ProjectionNotice[] = [];
   const quarantined: ProjectionNotice[] = [];
   const flattened: FlattenedTool[] = [];
-  const reservedProviderToolNames = new Set<string>();
+  const reservedProviderToolNames = new Set(
+    options.reservedProviderToolNames ?? []
+  );
   let originalIndex = 0;
 
   for (const [mcpId, tools] of Object.entries(mcpTools)) {
