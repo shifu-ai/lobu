@@ -1152,6 +1152,7 @@ Use it when the user references past discussions or you need context.`);
       provider: rawProvider,
       directToolLimit: providerDirectToolLimit,
       reservedProviderToolNames: new Set(customTools.map((tool) => tool.name)),
+      selectionHint: userPrompt,
     });
     registeredDirectMcpTools = projectedMcp.tools;
     instructionParts[0] = replaceMcpToolInventoryInstructions(
