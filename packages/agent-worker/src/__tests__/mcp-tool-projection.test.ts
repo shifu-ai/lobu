@@ -489,4 +489,41 @@ describe("projectMcpToolsForProvider", () => {
       { mcpId: "google_workspace", omitted: 1, limit: 3 },
     ]);
   });
+
+  test("prioritizes prompt-relevant tools before applying the Gemini direct tool cap", () => {
+    const alphabeticalToolFlood: McpToolDef[] = Array.from(
+      { length: 24 },
+      (_, index) => ({
+        name: `card_studio_tool_${String(index).padStart(2, "0")}`,
+        description: "Card studio course utility",
+        inputSchema: { type: "object", properties: {} },
+      })
+    );
+    const mcpTools: Record<string, McpToolDef[]> = {
+      "shifu-toolbox": [
+        ...alphabeticalToolFlood,
+        {
+          name: "trial_sessions_list",
+          description: "列出體驗課 webinar 場次",
+          inputSchema: {
+            type: "object",
+            properties: { limit: { type: "integer" } },
+          },
+        },
+      ],
+    };
+
+    const projected = projectMcpToolsForProvider(mcpTools, {
+      provider: "gemini",
+      directToolLimit: 24,
+      selectionHint: "列出三場體驗課場次",
+    });
+
+    const names =
+      projected.tools["shifu-toolbox"]?.map((tool) => tool.name) ?? [];
+    expect(names).toContain("trial_sessions_list");
+    expect(projected.omittedForCap).toEqual([
+      { mcpId: "shifu-toolbox", omitted: 1, limit: 24 },
+    ]);
+  });
 });

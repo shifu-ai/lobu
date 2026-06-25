@@ -28,6 +28,7 @@ export interface ProjectMcpToolsOptions {
   provider: string;
   directToolLimit: number;
   reservedProviderToolNames?: Set<string>;
+  selectionHint?: string;
 }
 
 export interface ProjectedMcpTools {
@@ -51,6 +52,7 @@ interface FlattenedTool {
   tool: ProjectedMcpToolDef;
   sortName: string;
   originalIndex: number;
+  relevanceScore: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -312,6 +314,34 @@ function normalizeInputSchema(
   return inputSchema;
 }
 
+function buildSelectionTerms(value: string | undefined): Set<string> {
+  const terms = new Set<string>();
+  const normalized = (value ?? "").toLowerCase();
+  for (const match of normalized.matchAll(/[a-z0-9_]{2,}/g)) {
+    terms.add(match[0]);
+  }
+  const cjkChars = [...normalized.replace(/[^\p{Script=Han}]/gu, "")];
+  for (let i = 0; i < cjkChars.length - 1; i += 1) {
+    terms.add(`${cjkChars[i]}${cjkChars[i + 1]}`);
+  }
+  return terms;
+}
+
+function scoreToolRelevance(
+  tool: McpToolDef,
+  selectionTerms: Set<string>
+): number {
+  if (selectionTerms.size === 0) return 0;
+  const haystack = `${tool.name} ${tool.description ?? ""}`.toLowerCase();
+  let score = 0;
+  for (const term of selectionTerms) {
+    if (haystack.includes(term)) {
+      score += term.includes("_") ? 2 : 1;
+    }
+  }
+  return score;
+}
+
 export function projectToolParametersForProvider<
   T extends { parameters?: unknown },
 >(tools: T[], provider: string): T[] {
@@ -341,6 +371,7 @@ export function projectMcpToolsForProvider(
   const reservedProviderToolNames = new Set(
     options.reservedProviderToolNames ?? []
   );
+  const selectionTerms = buildSelectionTerms(options.selectionHint);
   let originalIndex = 0;
 
   for (const [mcpId, tools] of Object.entries(mcpTools)) {
@@ -394,12 +425,17 @@ export function projectMcpToolsForProvider(
         ),
         sortName: toolName,
         originalIndex,
+        relevanceScore: scoreToolRelevance(normalizedTool, selectionTerms),
       });
       originalIndex += 1;
     }
   }
 
   const sorted = flattened.sort((a, b) => {
+    const relevanceCompare = b.relevanceScore - a.relevanceScore;
+    if (relevanceCompare !== 0) {
+      return relevanceCompare;
+    }
     const mcpCompare = a.mcpId.localeCompare(b.mcpId);
     if (mcpCompare !== 0) {
       return mcpCompare;
