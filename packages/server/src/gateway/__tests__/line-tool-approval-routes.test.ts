@@ -81,6 +81,29 @@ describe("LINE tool approval routes", () => {
     expect(service.submit).not.toHaveBeenCalled();
   });
 
+  test("returns 403 when approval submit is forbidden", async () => {
+    const service = {
+      submit: mock(async () => ({ status: "forbidden" })),
+      revokeGlobal: mock(async () => ({ status: "revoked" })),
+      getGlobalStatus: mock(async () => ({ enabled: true })),
+    };
+    const app = createAuthedApp(service);
+
+    const res = await app.request("/internal/tool-approvals/ta-1/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "approve_all",
+        toolboxUserId: "toolbox-user-wrong",
+        lineUserId: "line-user-1",
+        agentId: "shifu-u-1",
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ status: "forbidden" });
+  });
+
   test("revokes global auto-approval", async () => {
     const service = {
       submit: mock(async () => ({ status: "executed" })),

@@ -128,6 +128,9 @@ export function createToolApprovalRoutes(
       agentId,
       organizationId,
     });
+    if (result.status === "forbidden") {
+      return c.json(result, 403);
+    }
     return c.json(result);
   });
 
