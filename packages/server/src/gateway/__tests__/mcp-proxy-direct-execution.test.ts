@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { SecretRef } from "@lobu/core";
 import { McpProxy } from "../auth/mcp/proxy.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
 import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
 
 class InMemoryWritableStore implements WritableSecretStore {
@@ -82,12 +83,16 @@ describe("McpProxy executeToolDirect", () => {
     };
 
     try {
-      const result = await proxy.executeToolDirect(
-        "agent1",
-        "user1",
-        "sessionful-mcp",
-        "some_tool",
-        { arg1: "val1" }
+      const result = await orgContext.run(
+        { organizationId: "test-org" },
+        () =>
+          proxy.executeToolDirect(
+            "agent1",
+            "user1",
+            "sessionful-mcp",
+            "some_tool",
+            { arg1: "val1" }
+          )
       );
 
       expect(result.isError).toBe(false);

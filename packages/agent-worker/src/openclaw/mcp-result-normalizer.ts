@@ -12,7 +12,12 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 function removeControls(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f]/g, "");
+  return Array.from(value)
+    .filter((char) => {
+      const code = char.charCodeAt(0);
+      return code > 0x1f && code !== 0x7f;
+    })
+    .join("");
 }
 
 function escapeMarkdownLabel(value: string): string {
@@ -68,8 +73,7 @@ function normalizeImage(block: Record<string, unknown>): NormalizedTextBlock {
   const mimeType = sanitizeMimeType(block.mimeType);
   const data = block.data;
   if (
-    !mimeType ||
-    !mimeType.toLowerCase().startsWith("image/") ||
+    !mimeType?.toLowerCase().startsWith("image/") ||
     !isNonEmptyString(data)
   ) {
     return { type: "text", text: "[malformed image result omitted]" };
@@ -90,8 +94,7 @@ function normalizeAudio(block: Record<string, unknown>): NormalizedTextBlock {
   const mimeType = sanitizeMimeType(block.mimeType);
   const data = block.data;
   if (
-    !mimeType ||
-    !mimeType.toLowerCase().startsWith("audio/") ||
+    !mimeType?.toLowerCase().startsWith("audio/") ||
     !isNonEmptyString(data)
   ) {
     return { type: "text", text: "[malformed audio result omitted]" };

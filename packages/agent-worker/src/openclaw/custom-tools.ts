@@ -392,12 +392,10 @@ export function createMcpToolDefinitions(
 
   const getProjectedSafeOnlyTool = (
     def: McpToolDef
-  ):
-    | {
-        providerToolName: string;
-        upstreamToolName: string;
-      }
-    | null => {
+  ): {
+    providerToolName: string;
+    upstreamToolName: string;
+  } | null => {
     const projected = def as ProjectedMcpToolDef;
     if (projected.providerSafeNameOnly !== true) {
       return null;

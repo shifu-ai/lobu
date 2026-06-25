@@ -27,6 +27,7 @@ export interface McpAuthToolNames {
 export interface ProjectMcpToolsOptions {
   provider: string;
   directToolLimit: number;
+  reservedProviderToolNames?: Set<string>;
 }
 
 export interface ProjectedMcpTools {
@@ -58,7 +59,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function typeOfConstValue(value: unknown): string | null {
   if (typeof value === "string") return "string";
-  if (typeof value === "number") return Number.isInteger(value) ? "integer" : "number";
+  if (typeof value === "number")
+    return Number.isInteger(value) ? "integer" : "number";
   if (typeof value === "boolean") return "boolean";
   return null;
 }
@@ -188,6 +190,12 @@ function withStableSuffix(baseName: string, sourceName: string): string {
   return `${baseName.slice(0, maxBaseLength)}_${suffix}`;
 }
 
+function withNumericSuffix(baseName: string, index: number): string {
+  const suffix = `_${index}`;
+  const maxBaseLength = MAX_PROVIDER_TOOL_NAME_LENGTH - suffix.length;
+  return `${baseName.slice(0, maxBaseLength)}${suffix}`;
+}
+
 export function buildProviderSafeToolName(
   name: string,
   reservedNames: Set<string>
@@ -200,8 +208,11 @@ export function buildProviderSafeToolName(
   if (safeName.length > MAX_PROVIDER_TOOL_NAME_LENGTH) {
     safeName = withStableSuffix(safeName, name);
   }
-  if (reservedNames.has(safeName)) {
-    safeName = withStableSuffix(safeName, name);
+  const baseSafeName = safeName;
+  let duplicateIndex = 2;
+  while (reservedNames.has(safeName)) {
+    safeName = withNumericSuffix(baseSafeName, duplicateIndex);
+    duplicateIndex += 1;
   }
   return safeName;
 }
@@ -235,7 +246,9 @@ export function buildMcpAuthToolNames(
   };
 }
 
-function rootUnsupportedKeyword(schema: Record<string, unknown>): string | null {
+function rootUnsupportedKeyword(
+  schema: Record<string, unknown>
+): string | null {
   for (const keyword of UNION_KEYWORDS) {
     if (Object.hasOwn(schema, keyword)) {
       return keyword;
@@ -310,7 +323,7 @@ export function projectToolParametersForProvider<
     if (!isRecord(tool.parameters)) {
       return tool;
     }
-    const projected = projectSchemaNode(tool.parameters, () => {});
+    const projected = projectSchemaNode(tool.parameters, () => undefined);
     if (projected === tool.parameters || !isRecord(projected)) {
       return tool;
     }
@@ -325,7 +338,9 @@ export function projectMcpToolsForProvider(
   const projected: ProjectionNotice[] = [];
   const quarantined: ProjectionNotice[] = [];
   const flattened: FlattenedTool[] = [];
-  const reservedProviderToolNames = new Set<string>();
+  const reservedProviderToolNames = new Set(
+    options.reservedProviderToolNames ?? []
+  );
   let originalIndex = 0;
 
   for (const [mcpId, tools] of Object.entries(mcpTools)) {

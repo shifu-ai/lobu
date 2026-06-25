@@ -3,8 +3,15 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createOpenClawCustomTools } from "../openclaw/custom-tools";
-import { projectToolParametersForProvider } from "../openclaw/mcp-tool-projection";
+import {
+  createMcpToolDefinitions,
+  createOpenClawCustomTools,
+} from "../openclaw/custom-tools";
+import {
+  projectMcpToolsForProvider,
+  projectToolParametersForProvider,
+} from "../openclaw/mcp-tool-projection";
+import { findDuplicateToolNames } from "../openclaw/session-runner";
 
 const originalFetch = globalThis.fetch;
 const originalProjectDiscoveryUrl = process.env.TOOLBOX_PROJECT_DISCOVERY_URL;
@@ -80,6 +87,16 @@ describe("createOpenClawCustomTools", () => {
     }
   });
 
+  test("detects duplicate provider tool names before model request construction", () => {
+    expect(
+      findDuplicateToolNames([
+        { name: "notion_search" },
+        { name: "trial_sessions_list" },
+        { name: "notion_search" },
+      ])
+    ).toEqual([{ name: "notion_search", count: 2 }]);
+  });
+
   test("registers materialized personal-agent connector tools and calls Toolbox MCP execution", async () => {
     const fetchMock = mock(async () =>
       Response.json({
@@ -151,6 +168,74 @@ describe("createOpenClawCustomTools", () => {
       connectorToolName: "drive_search",
       args: { query: "超級AI個體" },
     });
+  });
+
+  test("keeps Toolbox personal Notion tool and first-class MCP Notion tool globally unique for Gemini", () => {
+    const gw = {
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent",
+      userId: "toolbox-user",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+    };
+
+    const customTools = createOpenClawCustomTools({
+      ...gw,
+      toolboxPersonalAgentTools: [
+        {
+          connectorKey: "notion",
+          connectionRef: "toolbox-mcp:ref",
+          tools: [
+            {
+              name: "notion_search",
+              connectorToolName: "notion-search",
+              description:
+                "Search Notion pages and databases available to the connected Toolbox user.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  query: { type: "string" },
+                  limit: { type: "number" },
+                },
+                required: ["query"],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const projectedMcp = projectMcpToolsForProvider(
+      {
+        notion: [
+          {
+            name: "notion-search",
+            description: "Search Notion MCP",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" } },
+              required: ["query"],
+            },
+          },
+        ],
+      },
+      {
+        provider: "gemini",
+        directToolLimit: 100,
+        reservedProviderToolNames: new Set(
+          customTools.map((tool) => tool.name)
+        ),
+      }
+    );
+
+    const mcpToolDefs = createMcpToolDefinitions(projectedMcp.tools, gw);
+    const names = [...customTools, ...mcpToolDefs].map((tool) => tool.name);
+    expect(names.filter((name) => name === "notion_search")).toHaveLength(1);
+    expect(names).toContain("notion_search_2");
+    expect(new Set(names).size).toBe(names.length);
   });
 
   test("upload_file emits a file-uploaded custom event after a successful upload", async () => {
