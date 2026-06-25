@@ -41,6 +41,10 @@ export interface WorkerTokenData {
    * codex round 2, finding A on PR #865.
    */
   runId?: number;
+  /** Originating user message ID for per-run worker actions. */
+  messageId?: string;
+  /** Message IDs processed by the originating run. */
+  processedMessageIds?: string[];
 }
 
 export function generateWorkerToken(
@@ -64,6 +68,8 @@ export function generateWorkerToken(
      * for the consumption contract.
      */
     runId?: number;
+    messageId?: string;
+    processedMessageIds?: string[];
   }
 ): string {
   if (!options.channelId) {
@@ -85,6 +91,8 @@ export function generateWorkerToken(
     traceId: options.traceId,
     jti: randomUUID(),
     runId: options.runId,
+    messageId: options.messageId,
+    processedMessageIds: options.processedMessageIds,
   };
 
   return encrypt(JSON.stringify(payload));
@@ -144,6 +152,26 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
         data.runId <= 0
       ) {
         logger.error("Worker token rejected: runId must be a positive integer");
+        return null;
+      }
+    }
+    if (
+      data.messageId !== undefined &&
+      (typeof data.messageId !== "string" || !data.messageId)
+    ) {
+      logger.error(
+        "Worker token rejected: messageId must be a non-empty string"
+      );
+      return null;
+    }
+    if (data.processedMessageIds !== undefined) {
+      if (
+        !Array.isArray(data.processedMessageIds) ||
+        data.processedMessageIds.some((id) => typeof id !== "string" || !id)
+      ) {
+        logger.error(
+          "Worker token rejected: processedMessageIds must be non-empty strings"
+        );
         return null;
       }
     }

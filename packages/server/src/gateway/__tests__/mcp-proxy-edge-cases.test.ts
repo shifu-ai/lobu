@@ -963,6 +963,93 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     expect(typeof captured[0]!.requestId).toBe("string");
     expect((captured[0]!.requestId as string).startsWith("ta_")).toBe(true);
   });
+
+  test("onToolBlocked receives origin message ids from the worker token", async () => {
+    const toolCache = new McpToolCache();
+    const grantStore = new GrantStore();
+    orgContext.run({ organizationId: "test-org" }, () => {
+      toolCache.set("line-mcp", [{ name: "send_campaign" }], "agent1");
+    });
+
+    const token = generateWorkerToken("user1", "conv1", "deploy1", {
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      connectionId: "line-connection-1",
+      platform: "line",
+      messageId: "line-message-1",
+      processedMessageIds: ["line-message-1"],
+    });
+
+    const configSource = createConfigSource({
+      "line-mcp": { id: "line-mcp", upstreamUrl: "http://line.example.com/mcp" },
+    });
+
+    const captured: Record<string, unknown>[] = [];
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      toolCache,
+      grantStore,
+    });
+    proxy.onToolBlocked = async (
+      requestId,
+      agentId,
+      userId,
+      mcpId,
+      toolName,
+      args,
+      grantPattern,
+      channelId,
+      conversationId,
+      teamId,
+      connectionId,
+      platform,
+      originMessageId,
+      processedMessageIds
+    ) => {
+      captured.push({
+        requestId,
+        agentId,
+        userId,
+        mcpId,
+        toolName,
+        args,
+        grantPattern,
+        channelId,
+        conversationId,
+        connectionId,
+        platform,
+        originMessageId,
+        processedMessageIds,
+      });
+    };
+
+    const res = await proxy.getApp().request("/line-mcp/tools/send_campaign", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ text: "approve?" }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({
+      agentId: "agent1",
+      userId: "user1",
+      mcpId: "line-mcp",
+      toolName: "send_campaign",
+      args: { text: "approve?" },
+      grantPattern: "/mcp/line-mcp/tools/send_campaign",
+      channelId: "ch1",
+      conversationId: "conv1",
+      connectionId: "line-connection-1",
+      platform: "line",
+      originMessageId: "line-message-1",
+      processedMessageIds: ["line-message-1"],
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

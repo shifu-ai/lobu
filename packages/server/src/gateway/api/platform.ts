@@ -96,6 +96,8 @@ export class ApiPlatform implements PlatformAdapter {
         args: event.args,
         grantPattern: event.grantPattern,
         durationOptions: ["1h", "24h", "always"],
+        originMessageId: event.originMessageId,
+        processedMessageIds: event.processedMessageIds,
       });
     });
 
@@ -118,12 +120,12 @@ export class ApiPlatform implements PlatformAdapter {
    */
   private enqueueInteractionCard(
     queue: IMessageQueue,
-    event: { conversationId: string; userId?: string },
+    event: { conversationId: string; userId?: string; originMessageId?: string },
     name: string,
     data: Record<string, unknown>
   ): void {
     const payload: ThreadResponsePayload = {
-      messageId: randomUUID(),
+      messageId: event.originMessageId ?? randomUUID(),
       conversationId: event.conversationId,
       // For the API platform channelId == conversationId == the SSE key.
       channelId: event.conversationId,

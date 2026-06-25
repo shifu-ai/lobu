@@ -1,4 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
+import { EventEmitter } from "node:events";
+import { ApiPlatform } from "../api/platform.js";
 import { UnifiedThreadResponseConsumer } from "../platform/unified-thread-consumer.js";
 
 const basePayload = {
@@ -318,6 +320,59 @@ describe("UnifiedThreadResponseConsumer interaction card owner-routing", () => {
       questionId: "q_1",
       messageId: "m-int-1",
       timestamp: 1234,
+    });
+  });
+});
+
+describe("ApiPlatform tool approval interaction queueing", () => {
+  test("uses origin message id as queued payload messageId and SSE data correlation fields", async () => {
+    const interactionService = new EventEmitter();
+    const send = mock(async () => undefined);
+    const platform = new ApiPlatform();
+
+    await platform.initialize({
+      getSseManager: () => ({
+        broadcast: mock(() => undefined),
+        hasActiveConnection: mock(() => true),
+      }),
+      getWatcherRunTracker: () => undefined,
+      getInteractionService: () => interactionService,
+      getQueue: () => ({ send }),
+    } as any);
+
+    interactionService.emit("tool:approval-needed", {
+      id: "ta_approval_1",
+      agentId: "agent-1",
+      userId: "user-1",
+      conversationId: "conv-1",
+      channelId: "ch-1",
+      teamId: "line",
+      connectionId: "line-connection-1",
+      platform: "api",
+      mcpId: "line-tools",
+      toolName: "send_reply",
+      args: { text: "Hello" },
+      grantPattern: "/mcp/line-tools/tools/send_reply",
+      originMessageId: "line-message-1",
+      processedMessageIds: ["line-message-1"],
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const [queueName, payload] = send.mock.calls[0] as any[];
+    expect(queueName).toBe("thread_response");
+    expect(payload).toMatchObject({
+      messageId: "line-message-1",
+      conversationId: "conv-1",
+      customEvent: {
+        name: "tool-approval",
+        requireSseOwner: true,
+        data: {
+          type: "tool-approval",
+          requestId: "ta_approval_1",
+          originMessageId: "line-message-1",
+          processedMessageIds: ["line-message-1"],
+        },
+      },
     });
   });
 });

@@ -57,6 +57,8 @@ export function mintRunJobToken(
     connectionId: getStringField(data.platformMetadata, "connectionId"),
     traceId: extractTraceId(data),
     runId: data.runId,
+    messageId: data.messageId,
+    processedMessageIds: [data.messageId],
   });
 }
 

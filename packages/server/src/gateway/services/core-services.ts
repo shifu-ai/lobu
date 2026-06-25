@@ -764,7 +764,9 @@ export class CoreServices {
       conversationId,
       teamId,
       connectionId,
-      platform
+      platform,
+      originMessageId,
+      processedMessageIds
     ) => {
       await this.interactionService?.postToolApproval(
         requestId,
@@ -778,7 +780,9 @@ export class CoreServices {
         mcpId,
         toolName,
         args,
-        grantPattern
+        grantPattern,
+        originMessageId,
+        processedMessageIds
       );
     };
     this.mcpProxy.onAuthRequired = async (

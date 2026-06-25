@@ -297,7 +297,9 @@ export class McpProxy {
     conversationId: string,
     teamId: string | undefined,
     connectionId: string | undefined,
-    platform: string | undefined
+    platform: string | undefined,
+    originMessageId: string | undefined,
+    processedMessageIds: string[] | undefined
   ) => Promise<void>;
 
   /** Callback invoked when an MCP auth flow is started or already pending. */
@@ -1505,6 +1507,17 @@ export class McpProxy {
     if (!this.onToolBlocked) return "blocked-no-channel";
 
     const requestId = `ta_${randomUUID()}`;
+    const originMessageId =
+      typeof tokenData.messageId === "string" && tokenData.messageId.length > 0
+        ? tokenData.messageId
+        : undefined;
+    const processedMessageIds = Array.isArray(tokenData.processedMessageIds)
+      ? tokenData.processedMessageIds.filter(
+          (id: unknown): id is string => typeof id === "string" && id.length > 0
+        )
+      : originMessageId
+        ? [originMessageId]
+        : undefined;
     await storePendingTool(
       requestId,
       {
@@ -1517,6 +1530,8 @@ export class McpProxy {
         conversationId: tokenData.conversationId || "",
         teamId: tokenData.teamId,
         connectionId: tokenData.connectionId,
+        originMessageId,
+        processedMessageIds,
       },
       this.PENDING_TOOL_TTL
     ).catch((err: unknown) =>
@@ -1538,7 +1553,9 @@ export class McpProxy {
       tokenData.conversationId || "",
       tokenData.teamId,
       tokenData.connectionId,
-      tokenData.platform
+      tokenData.platform,
+      originMessageId,
+      processedMessageIds
     ).catch((err) =>
       logger.error(
         { requestId, error: String(err) },

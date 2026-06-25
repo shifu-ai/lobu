@@ -308,6 +308,23 @@ describe("InteractionService — platform field on emitted events", () => {
     expect(received[0].platform).toBe("discord");
   });
 
+  test("postToolApproval carries origin message ids", async () => {
+    const svc = new InteractionService();
+    const received: any[] = [];
+    svc.on("tool:approval-needed", (e) => received.push(e));
+
+    await svc.postToolApproval("req-1", "agent-1", "u", "conv", "ch", undefined,
+      "conn-1", "line", "mcp-id", "tool_name", {}, "/mcp/mcp-id/tools/tool_name",
+      "line-message-1", ["line-message-1"]);
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      id: "req-1",
+      originMessageId: "line-message-1",
+      processedMessageIds: ["line-message-1"],
+    });
+  });
+
   test("postStatusMessage carries platform", async () => {
     const svc = new InteractionService();
     const received: any[] = [];

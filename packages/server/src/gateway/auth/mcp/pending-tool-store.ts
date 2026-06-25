@@ -19,6 +19,8 @@ export interface PendingToolInvocation {
   conversationId?: string;
   teamId?: string;
   connectionId?: string;
+  originMessageId?: string;
+  processedMessageIds?: string[];
 }
 
 export async function storePendingTool(

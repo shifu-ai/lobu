@@ -90,6 +90,8 @@ export interface PostedToolApproval extends BaseMessage {
   toolName: string;
   args: Record<string, unknown>;
   grantPattern: string;
+  originMessageId?: string;
+  processedMessageIds?: string[];
 }
 
 /**
@@ -180,7 +182,9 @@ export class InteractionService extends EventEmitter {
     mcpId: string,
     toolName: string,
     args: Record<string, unknown>,
-    grantPattern: string
+    grantPattern: string,
+    originMessageId?: string,
+    processedMessageIds?: string[]
   ): Promise<PostedToolApproval> {
     assertConnectionId(connectionId, "tool approval");
     if (this.beforeCreateHook) {
@@ -200,6 +204,8 @@ export class InteractionService extends EventEmitter {
       toolName,
       args,
       grantPattern,
+      originMessageId,
+      processedMessageIds,
     };
 
     logger.info(

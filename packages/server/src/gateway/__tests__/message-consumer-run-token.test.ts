@@ -37,6 +37,8 @@ describe("mintRunJobToken", () => {
     expect(decoded?.connectionId).toBe("line-connection-1");
     expect(decoded?.teamId).toBe("team-from-metadata");
     expect(decoded?.runId).toBe(123);
+    expect(decoded?.messageId).toBe("msg-1");
+    expect(decoded?.processedMessageIds).toEqual(["msg-1"]);
   });
 
   test("does not mint a token for legacy payloads without runId", () => {
