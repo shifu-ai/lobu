@@ -29,6 +29,7 @@ import {
 } from "./instructions";
 import { OpenClawProgressProcessor } from "./processor";
 import { checkSandboxLeak } from "./sandbox-leak";
+import { evaluateTaskCompletion } from "./task-completion-guard";
 import type { buildAgentSession } from "./session-builder";
 import type { openOrCreateSessionManager } from "./model-resolver";
 import { type TerminalStatus, writeSnapshot } from "./transcript-snapshot";
@@ -278,6 +279,14 @@ export class OpenClawWorker implements WorkerExecutor {
         // Snapshot writer in cleanup() reads this to discriminate the row.
         // Hydrate skips non-completed snapshots, so getting this right is
         // what stops a failed turn from poisoning the next attempt.
+        const passedTaskCompletionGuard =
+          await this.applyTaskCompletionGuard(userPrompt);
+        if (!passedTaskCompletionGuard) {
+          logger.warn(
+            "Task completion guard rejected successful OpenClaw session"
+          );
+          return;
+        }
         this.terminalStatus = "completed";
         await this.deliverFinalResult(sawUploadedFileEvent);
         await this.workerTransport.signalDone();
@@ -764,6 +773,36 @@ ${fileListing}
     }
 
     return results;
+  }
+
+  private async applyTaskCompletionGuard(
+    latestUserText: string
+  ): Promise<boolean> {
+    const finalResult = this.progressProcessor.getFinalResult();
+    const finalVisibleText =
+      finalResult?.text ?? this.progressProcessor.getOutputSnapshot();
+    const decision = evaluateTaskCompletion({
+      latestUserText,
+      finalVisibleText,
+      toolExecutions: this.progressProcessor.getToolExecutionSnapshot(),
+    });
+
+    if (decision.outcome === "completed") {
+      this.progressProcessor.setFinalResult({
+        text: finalVisibleText,
+        isFinal: finalResult?.isFinal ?? true,
+      });
+      return true;
+    }
+
+    this.terminalStatus = "failed";
+    const message =
+      decision.outcome === "failed_incomplete"
+        ? decision.userVisibleMessage
+        : "任務尚未完成，因此沒有把這輪標成完成。請重新指示或稍後再試。";
+    await this.workerTransport.sendStreamDelta(message, true, true);
+    await this.workerTransport.signalError(new Error(decision.reason));
+    return false;
   }
 
   /**
