@@ -428,6 +428,58 @@ describe("secret-proxy agentId binding", () => {
     expect(forwardedHeaders["x-goog-api-key"]).toBe("google-api-key");
   });
 
+  test("Anthropic api-key credentials are forwarded as x-api-key, not Bearer auth", async () => {
+    const secretStore = makeSecretStore({});
+    const proxy = new SecretProxy(
+      { defaultUpstreamUrl: "https://upstream.example.com" },
+      secretStore
+    );
+    proxy.registerUpstream(
+      {
+        slug: "anthropic",
+        upstreamBaseUrl: "https://api.anthropic.com",
+      },
+      "claude"
+    );
+    proxy.setAuthProfilesManager({
+      getBestProfile: async () => ({
+        id: "p-anthropic",
+        provider: "claude",
+        credential: "sk-ant-test",
+        authType: "api-key",
+        label: "Anthropic",
+        createdAt: Date.now(),
+      }),
+      ensureFreshCredential: async (profile: { credential?: string }) =>
+        profile.credential,
+    } as any);
+
+    let forwardedHeaders: Record<string, string> = {};
+    await withFetch(async (_input, init) => {
+      forwardedHeaders = init?.headers as Record<string, string>;
+      return new Response("{}", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }, async () => {
+      const res = await proxy.getApp().request(
+        "/api/proxy/anthropic/a/agent-claude/v1/messages",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer not-a-verifiable-worker-token",
+            "content-type": "application/json",
+          },
+          body: "{}",
+        }
+      );
+      expect(res.status).toBe(200);
+    });
+
+    expect(forwardedHeaders.authorization).toBeUndefined();
+    expect(forwardedHeaders["x-api-key"]).toBe("sk-ant-test");
+  });
+
   test("non-Google provider credentials still forward as Bearer auth", async () => {
     const secretStore = makeSecretStore({});
     const proxy = buildProxy(secretStore);

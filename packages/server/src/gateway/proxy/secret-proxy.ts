@@ -277,6 +277,24 @@ function usesGoogleApiKeyHeader(params: {
   }
 }
 
+function usesAnthropicApiKeyHeader(params: {
+  providerId?: string;
+  resolvedSlug?: string;
+  upstreamBaseUrl: string;
+  authType?: string;
+}): boolean {
+  if (params.authType === "oauth") return false;
+  const provider = params.providerId?.toLowerCase() ?? "";
+  const slug = params.resolvedSlug?.toLowerCase() ?? "";
+  if (provider === "claude" || provider === "anthropic") return true;
+  if (slug === "anthropic" || slug === "claude") return true;
+  try {
+    return new URL(params.upstreamBaseUrl).hostname === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
 function applyProviderCredentialHeader(
   headers: Record<string, string>,
   credential: string,
@@ -284,10 +302,16 @@ function applyProviderCredentialHeader(
     providerId?: string;
     resolvedSlug?: string;
     upstreamBaseUrl: string;
+    authType?: string;
   }
 ): void {
   if (usesGoogleApiKeyHeader(params)) {
     headers["x-goog-api-key"] = credential;
+    delete headers.authorization;
+    return;
+  }
+  if (usesAnthropicApiKeyHeader(params)) {
+    headers["x-api-key"] = credential;
     delete headers.authorization;
     return;
   }
@@ -752,6 +776,7 @@ export class SecretProxy {
             providerId,
             resolvedSlug,
             upstreamBaseUrl,
+            authType: profile?.authType,
           });
         } else if (this.systemKeyResolver) {
           const systemKey = this.systemKeyResolver(providerId);
