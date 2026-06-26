@@ -21,6 +21,10 @@ import {
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
+	validateExpectedGrantPatterns,
+	verifyRuntimeGrantPatterns,
+} from "./runtime-grant-verifier.js";
+import {
 	AGENT_ID_PATTERN,
 	createPostgresAgentConfigStore,
 	createPostgresAgentConnectionStore,
@@ -310,6 +314,71 @@ export function createProvisioningRoutes(
 			created ? 201 : 200,
 		);
 	});
+
+	provisioningRoutes.post(
+		"/agents/:agentId/runtime-grants/verify",
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
+
+			const agentId = c.req.param("agentId")?.trim() ?? "";
+			const agentIdError = validateShifuAgentId(agentId);
+			if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+			let body: {
+				userId?: unknown;
+				revisionId?: unknown;
+				expectedGrantPatterns?: unknown;
+			};
+			try {
+				body = await c.req.json();
+			} catch {
+				return c.json({ error: "invalid_json" }, 400);
+			}
+
+			const userId = parseUserId(body.userId);
+			if (userId && !(await isOwnedByToolboxUser(agentId, userId))) {
+				return c.json({ error: "agent_owner_mismatch" }, 404);
+			}
+
+			const revisionId =
+				typeof body.revisionId === "string" && body.revisionId.trim()
+					? body.revisionId.trim()
+					: "runtime_grants";
+
+			let expectedGrantPatterns: string[];
+			try {
+				expectedGrantPatterns = validateExpectedGrantPatterns(
+					body.expectedGrantPatterns,
+				);
+			} catch (error) {
+				return c.json(
+					{
+						ok: false,
+						errorCode: "invalid_expected_grant_patterns",
+						userVisibleSummary:
+							error instanceof Error
+								? error.message
+								: "Invalid expected grant patterns",
+					},
+					400,
+				);
+			}
+
+			const organizationId = c.get("organizationId") as string | null;
+			if (!organizationId)
+				return c.json({ error: "Authentication required" }, 401);
+
+			const result = await verifyRuntimeGrantPatterns({
+				grantStore,
+				agentId,
+				organizationId,
+				revisionId,
+				expectedGrantPatterns,
+			});
+			return c.json(result, 200);
+		},
+	);
 
 	provisioningRoutes.post(
 		"/agents/:agentId/mcp/:mcpId/oauth/start",

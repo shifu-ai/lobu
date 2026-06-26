@@ -6,7 +6,6 @@ import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup.js";
-import { initWorkspaceProvider } from "../../workspace/index.js";
 import { orgContext } from "../stores/org-context.js";
 
 const ORG_ID = "org-provisioning";
@@ -84,6 +83,123 @@ mock.module("../../utils/watcher-reactions", () => ({
 	trackWatcherReaction: async () => {},
 }));
 
+mock.module("../../gateway/routes/internal/device-auth.js", () => {
+	function credentialName(
+		agentId: string,
+		userId: string,
+		mcpId: string,
+	): string {
+		return `mcp-auth/${agentId}/${userId}/${mcpId}/credential`;
+	}
+
+	async function getSecretCredential(
+		secretStore: ReturnType<typeof createMemorySecretStore>,
+		agentId: string,
+		userId: string,
+		mcpId: string,
+	) {
+		const raw = await secretStore.get(
+			`secret://${encodeURIComponent(credentialName(agentId, userId, mcpId))}`,
+		);
+		return raw ? JSON.parse(raw) : null;
+	}
+
+	async function putSecretCredential(
+		secretStore: ReturnType<typeof createMemorySecretStore>,
+		agentId: string,
+		userId: string,
+		mcpId: string,
+		credential: unknown,
+	) {
+		await secretStore.put(
+			credentialName(agentId, userId, mcpId),
+			JSON.stringify(credential),
+		);
+	}
+
+	return {
+		createDeviceAuthRoutes: () => new Hono(),
+		deleteCredential: async (
+			secretStore: ReturnType<typeof createMemorySecretStore>,
+			agentId: string,
+			userId: string,
+			mcpId: string,
+		) => {
+			await secretStore.delete(credentialName(agentId, userId, mcpId));
+			return true;
+		},
+		getStoredCredential: getSecretCredential,
+		refreshCredential: async (
+			secretStore: ReturnType<typeof createMemorySecretStore>,
+			agentId: string,
+			userId: string,
+			mcpId: string,
+			credential: {
+				refreshToken?: string;
+				clientId: string;
+				clientSecret?: string;
+				tokenUrl: string;
+				resource?: string;
+			},
+		) => {
+			if (!credential.refreshToken) return null;
+			const response = await fetch(credential.tokenUrl, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					grant_type: "refresh_token",
+					client_id: credential.clientId,
+					client_secret: credential.clientSecret,
+					refresh_token: credential.refreshToken,
+					resource: credential.resource,
+				}),
+			});
+			if (!response.ok) return null;
+			const token = await response.json();
+			const refreshed = {
+				...credential,
+				accessToken: String(token.access_token ?? ""),
+				refreshToken: token.refresh_token
+					? String(token.refresh_token)
+					: credential.refreshToken,
+				expiresAt: Date.now() + Number(token.expires_in ?? 3600) * 1000,
+			};
+			await putSecretCredential(secretStore, agentId, userId, mcpId, refreshed);
+			return refreshed;
+		},
+		startDeviceAuth: async () => null,
+		storeCredentialForScope: async (
+			secretStore: ReturnType<typeof createMemorySecretStore>,
+			agentId: string,
+			scopeKey: string,
+			mcpId: string,
+			credential: unknown,
+		) => putSecretCredential(secretStore, agentId, scopeKey, mcpId, credential),
+		tryCompletePendingDeviceAuth: async () => null,
+	};
+});
+
+mock.module("@lobu/connector-worker/compile", () => ({
+	EXTERNAL_RUNTIME_DEPS: [],
+	assertExternalDepsResolvable: () => {},
+	createConnectorCompiler: () => ({
+		compile: async () => ({
+			code: "",
+			metadata: {},
+			warnings: [],
+		}),
+	}),
+	findBundledConnectorFile: () => null,
+}));
+
+mock.module("@lobu/connector-worker/executor/runtime", () => ({
+	executeCompiledConnector: async () => ({
+		mode: "query",
+		rows: [],
+		columns: [],
+	}),
+}));
+
 mock.module("../../operations/catalog", () => ({
 	EMPTY_SUMMARY: {
 		read: [],
@@ -100,6 +216,7 @@ mock.module("../../operations/catalog", () => ({
 
 beforeAll(async () => {
 	await ensureDbForGatewayTests();
+	const { initWorkspaceProvider } = await import("../../workspace/index.js");
 	await initWorkspaceProvider();
 });
 
@@ -745,6 +862,210 @@ describe("POST /api/provisioning/agents", () => {
 		});
 
 		expect(response.status).toBe(400);
+	});
+});
+
+describe("POST /api/provisioning/agents/:agentId/runtime-grants/verify", () => {
+	beforeEach(async () => {
+		await resetTestDatabase();
+		await seedOrg(ORG_ID);
+	});
+
+	test("verifies expected MCP grant patterns against the Lobu runtime grant store", async () => {
+		const app = await buildApp();
+
+		const provision = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-grant-verify",
+				name: "Grant Verify Agent",
+				ownerUserId: "toolbox-user-1",
+				settings: {
+					preApprovedTools: ["/mcp/google_workspace/tools/gws_docs_read"],
+				},
+			}),
+		});
+		expect(provision.status).toBe(201);
+
+		const verified = await app.request(
+			"/api/provisioning/agents/shifu-u-grant-verify/runtime-grants/verify",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					userId: "toolbox-user-1",
+					revisionId: "mcp_revision_test",
+					expectedGrantPatterns: ["/mcp/google_workspace/tools/gws_docs_read"],
+				}),
+			},
+		);
+
+		expect(verified.status).toBe(200);
+		await expect(verified.json()).resolves.toMatchObject({
+			ok: true,
+			sidecarRevisionRef: "lobu:shifu-u-grant-verify:mcp_revision_test",
+			runtime: {
+				agentId: "shifu-u-grant-verify",
+				grantChecks: [
+					{
+						pattern: "/mcp/google_workspace/tools/gws_docs_read",
+						kind: "mcp_tool",
+						present: true,
+						matchedPattern: "/mcp/google_workspace/tools/gws_docs_read",
+					},
+				],
+			},
+		});
+	});
+
+	test("verifies expected MCP grant patterns through wildcard runtime grants", async () => {
+		const app = await buildApp();
+
+		const provision = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-wildcard-grant",
+				name: "Wildcard Grant Agent",
+				ownerUserId: "toolbox-user-1",
+				settings: {
+					preApprovedTools: ["/mcp/google_workspace/tools/*"],
+				},
+			}),
+		});
+		expect(provision.status).toBe(201);
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-wildcard-grant/runtime-grants/verify",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					userId: "toolbox-user-1",
+					revisionId: "mcp_revision_wildcard",
+					expectedGrantPatterns: [
+						"/mcp/google_workspace/tools/gws_calendar_events_list",
+					],
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			sidecarRevisionRef: "lobu:shifu-u-wildcard-grant:mcp_revision_wildcard",
+			runtime: {
+				agentId: "shifu-u-wildcard-grant",
+				grantChecks: [
+					{
+						pattern: "/mcp/google_workspace/tools/gws_calendar_events_list",
+						kind: "mcp_tool",
+						present: true,
+						matchedPattern: "/mcp/google_workspace/tools/*",
+					},
+				],
+			},
+		});
+	});
+
+	test("returns runtime_grants_missing when expected tool grants are absent", async () => {
+		const app = await buildApp();
+		const provision = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-missing-grant",
+				name: "Missing Grant Agent",
+				ownerUserId: "toolbox-user-1",
+				settings: { preApprovedTools: [] },
+			}),
+		});
+		expect(provision.status).toBe(201);
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-missing-grant/runtime-grants/verify",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					userId: "toolbox-user-1",
+					revisionId: "mcp_revision_missing",
+					expectedGrantPatterns: ["/mcp/google_workspace/tools/gws_docs_read"],
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toEqual({
+			ok: false,
+			errorCode: "runtime_grants_missing",
+			userVisibleSummary:
+				"Lobu runtime has not applied the expected MCP tool grants yet.",
+			missingGrantPatterns: ["/mcp/google_workspace/tools/gws_docs_read"],
+		});
+	});
+
+	test("rejects invalid expected MCP grant patterns", async () => {
+		const app = await buildApp();
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-invalid-patterns/runtime-grants/verify",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					expectedGrantPatterns: ["google_workspace.gws_docs_read"],
+				}),
+			},
+		);
+
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: false,
+			errorCode: "invalid_expected_grant_patterns",
+		});
+	});
+
+	test("rejects runtime grant verification for a mismatched Toolbox owner", async () => {
+		const app = await buildApp();
+		await seedPersonalAgent("shifu-u-owner-check", "toolbox-user-owner");
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-owner-check/runtime-grants/verify",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					userId: "toolbox-user-other",
+					expectedGrantPatterns: ["/mcp/google_workspace/tools/*"],
+				}),
+			},
+		);
+
+		expect(response.status).toBe(404);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_owner_mismatch",
+		});
+	});
+
+	test("rejects runtime grant verification for PATs without mcp:admin", async () => {
+		const app = await buildApp(["mcp:read"]);
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-no-admin/runtime-grants/verify",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					expectedGrantPatterns: ["/mcp/google_workspace/tools/*"],
+				}),
+			},
+		);
+
+		expect(response.status).toBe(403);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "forbidden",
+		});
 	});
 });
 
