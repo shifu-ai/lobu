@@ -4,6 +4,11 @@ import { formatToolExecution } from "../shared/processor-utils";
 
 const logger = createLogger("openclaw-processor");
 
+export interface ProcessorToolExecutionSummary {
+  toolName: string;
+  isError: boolean;
+}
+
 /**
  * Processes Pi agent streaming events and extracts user-friendly content.
  * Implements chronological display with tool progress and mixed text/tool output.
@@ -15,6 +20,7 @@ export class OpenClawProgressProcessor {
   private finalResult: { text: string; isFinal: boolean } | null = null;
   private hasStreamedText = false;
   private fatalErrorMessage: string | null = null;
+  private toolExecutions: ProcessorToolExecutionSummary[] = [];
 
   setVerboseLogging(enabled: boolean): void {
     this.verboseLogging = enabled;
@@ -105,6 +111,14 @@ export class OpenClawProgressProcessor {
         return false;
       }
 
+      case "tool_execution_end": {
+        this.toolExecutions.push({
+          toolName: event.toolName,
+          isError: event.isError === true,
+        });
+        return false;
+      }
+
       case "auto_compaction_start": {
         this.chronologicalOutput += "🗜️ *Compacting context...*\n";
         return true;
@@ -182,11 +196,16 @@ export class OpenClawProgressProcessor {
     return this.chronologicalOutput.trim();
   }
 
+  getToolExecutionSnapshot(): ProcessorToolExecutionSummary[] {
+    return [...this.toolExecutions];
+  }
+
   reset(): void {
     this.lastSentContent = "";
     this.chronologicalOutput = "";
     this.finalResult = null;
     this.hasStreamedText = false;
     this.fatalErrorMessage = null;
+    this.toolExecutions = [];
   }
 }

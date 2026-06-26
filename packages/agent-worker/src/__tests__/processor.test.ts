@@ -215,3 +215,47 @@ describe("reset", () => {
     expect(p.consumeFatalErrorMessage()).toBeNull();
   });
 });
+
+describe("tool execution snapshot", () => {
+  test("records tool execution end events with tool name and error status", () => {
+    const p = new OpenClawProgressProcessor();
+
+    p.processEvent(
+      makeEvent("tool_execution_end", {
+        toolName: "google_workspace_docs_read",
+        toolCallId: "call_1",
+        isError: false,
+        result: { content: [{ type: "text", text: "ok" }] },
+      })
+    );
+    p.processEvent(
+      makeEvent("tool_execution_end", {
+        toolName: "gws_docs_batch_update",
+        toolCallId: "call_2",
+        isError: true,
+        result: { content: [{ type: "text", text: "permission denied" }] },
+      })
+    );
+
+    expect(p.getToolExecutionSnapshot()).toEqual([
+      { toolName: "google_workspace_docs_read", isError: false },
+      { toolName: "gws_docs_batch_update", isError: true },
+    ]);
+  });
+
+  test("reset clears tool execution snapshot", () => {
+    const p = new OpenClawProgressProcessor();
+
+    p.processEvent(
+      makeEvent("tool_execution_end", {
+        toolName: "gws_docs_batch_update",
+        toolCallId: "call_1",
+        isError: false,
+        result: {},
+      })
+    );
+    p.reset();
+
+    expect(p.getToolExecutionSnapshot()).toEqual([]);
+  });
+});
