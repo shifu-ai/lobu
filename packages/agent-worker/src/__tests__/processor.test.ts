@@ -258,4 +258,25 @@ describe("tool execution snapshot", () => {
 
     expect(p.getToolExecutionSnapshot()).toEqual([]);
   });
+
+  test("snapshot entries cannot mutate processor state", () => {
+    const p = new OpenClawProgressProcessor();
+
+    p.processEvent(
+      makeEvent("tool_execution_end", {
+        toolName: "gws_docs_batch_update",
+        toolCallId: "call_1",
+        isError: false,
+        result: {},
+      })
+    );
+    const snapshot = p.getToolExecutionSnapshot();
+
+    snapshot[0]!.toolName = "tampered";
+    snapshot[0]!.isError = true;
+
+    expect(p.getToolExecutionSnapshot()).toEqual([
+      { toolName: "gws_docs_batch_update", isError: false },
+    ]);
+  });
 });

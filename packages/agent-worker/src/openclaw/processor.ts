@@ -197,7 +197,7 @@ export class OpenClawProgressProcessor {
   }
 
   getToolExecutionSnapshot(): ProcessorToolExecutionSummary[] {
-    return [...this.toolExecutions];
+    return this.toolExecutions.map((entry) => ({ ...entry }));
   }
 
   reset(): void {
