@@ -139,3 +139,35 @@ describe("evaluateTaskCompletion write intent guard", () => {
     });
   });
 });
+
+describe("2026-06-25 Google Doc rewrite regression", () => {
+  test("blocks completed status when doc rewrite task only reads docs and slides", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText:
+        "那可以幫我修改超級AI個體商品頁嗎？是一份google doc我想要根據銷講簡報v5的內容調整 可以直接幫我改",
+      finalVisibleText: "我現在會開始讀取文件內容。",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+        { toolName: "google_workspace_slides_read", isError: false },
+      ],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+
+  test("blocks completed status when same task ends thinking-only with no visible text", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText:
+        "那可以幫我修改超級AI個體商品頁嗎？是一份google doc我想要根據銷講簡報v5的內容調整 可以直接幫我改",
+      finalVisibleText: "",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+        { toolName: "google_workspace_slides_read", isError: false },
+      ],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_empty_final");
+  });
+});

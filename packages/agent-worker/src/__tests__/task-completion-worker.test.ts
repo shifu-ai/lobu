@@ -110,13 +110,14 @@ describe("OpenClawWorker task completion guard", () => {
   });
 
   test("fails loud when write intent has no successful write evidence", async () => {
-    const { sent, errors, applyTaskCompletionGuard, processor } =
+    const { worker, sent, errors, applyTaskCompletionGuard, processor } =
       buildWorkerWithRecorder();
     processor.setFinalResult({ text: "我已經讀完文件。", isFinal: true });
 
     const result = await applyTaskCompletionGuard("請直接幫我修改 Google Doc");
 
     expect(result).toBe(false);
+    expect((worker as any).terminalStatus).toBe("failed");
     expect(sent).toEqual([
       {
         delta:
