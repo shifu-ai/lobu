@@ -41,3 +41,65 @@ describe("evaluateTaskCompletion empty final guard", () => {
     });
   });
 });
+
+describe("evaluateTaskCompletion write intent guard", () => {
+  test("fails when Chinese write-intent task only executed read tools", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText:
+        "那可以幫我修改超級AI個體商品頁嗎？是一份google doc我想要根據銷講簡報v5的內容調整 可以直接幫我改",
+      finalVisibleText: "我已經讀完文件。",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+        { toolName: "google_workspace_slides_read", isError: false },
+      ],
+    });
+
+    expect(result).toEqual({
+      outcome: "failed_incomplete",
+      reason: "task_completion_write_intent_without_write",
+      userVisibleMessage:
+        "我讀到了任務需要的資料，但這輪沒有成功執行寫入工具，因此沒有把任務標成完成。我沒有把任何變更寫入外部文件。",
+    });
+  });
+
+  test("allows write-intent task when a docs batch update succeeds", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "請直接幫我修改 Google Doc",
+      finalVisibleText: "我已經完成 Google Doc 修改。",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+        { toolName: "gws_docs_batch_update", isError: false },
+      ],
+    });
+
+    expect(result).toEqual({
+      outcome: "completed",
+      reason: "ok",
+    });
+  });
+
+  test("does not count failed write tool as write evidence", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "update the Google Doc",
+      finalVisibleText: "I tried to update it.",
+      toolExecutions: [{ toolName: "docs_batch_update", isError: true }],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+
+  test("allows write-intent task when final text asks for missing permission", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "幫我改這份 Google Doc",
+      finalVisibleText:
+        "我目前沒有 Google Docs 寫入權限，請先授權後我才能修改。",
+      toolExecutions: [{ toolName: "google_workspace_docs_read", isError: false }],
+    });
+
+    expect(result).toEqual({
+      outcome: "completed",
+      reason: "ok",
+    });
+  });
+});
