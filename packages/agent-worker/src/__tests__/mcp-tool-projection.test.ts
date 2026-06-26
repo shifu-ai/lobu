@@ -369,6 +369,33 @@ describe("projectMcpToolsForProvider", () => {
     expect(projected.omittedForCap).toEqual([]);
   });
 
+  test("reserves existing provider tool names before projecting Anthropic MCP names", () => {
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [
+          {
+            name: "notion-search",
+            description: "Search Notion",
+            inputSchema: { type: "object" },
+          },
+        ],
+      },
+      {
+        provider: "anthropic",
+        directToolLimit: 3,
+        reservedProviderToolNames: new Set(["notion_search"]),
+      }
+    );
+
+    expect(projected.tools.notion?.[0]).toMatchObject({
+      name: "notion_search_2",
+      upstreamToolName: "notion-search",
+      providerToolName: "notion_search_2",
+      providerSafeNameOnly: true,
+    });
+    expect(projected.omittedForCap).toEqual([]);
+  });
+
   test("prefixes Gemini tool names that do not start with a letter or underscore", () => {
     const projected = projectMcpToolsForProvider(
       {

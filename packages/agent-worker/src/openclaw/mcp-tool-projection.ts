@@ -221,7 +221,12 @@ export function buildProviderSafeToolName(
 
 export function requiresProviderSafeToolNames(provider: string): boolean {
   const normalized = provider.toLowerCase();
-  return normalized === "gemini" || normalized === "google";
+  return (
+    normalized === "anthropic" ||
+    normalized === "claude" ||
+    normalized === "gemini" ||
+    normalized === "google"
+  );
 }
 
 export function buildMcpAuthToolNames(
