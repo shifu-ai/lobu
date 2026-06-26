@@ -43,23 +43,22 @@ const WRITE_INTENT_WITHOUT_WRITE_MESSAGE =
 
 const WRITE_INTENT_PATTERNS = [
   /直接.*幫我.*改/i,
-  /幫我.*(?:改|修改|更新|寫入|建立|新增|刪除|寄出|發送)/i,
-  /(?:改|修改|更新|寫入|建立|新增|刪除|寄出|發送).*(?:文件|doc|sheet|slide|簡報|訊息|email|郵件)/i,
-  /\b(?:update|edit|write|send|create|delete|modify)\b/i,
+  /幫我.*(?:改|修改|更新|寫入|建立|新增|刪除|寄出|發送|調整|編輯|補上|套用|插入|替換)/i,
+  /(?:改|修改|更新|寫入|建立|新增|刪除|寄出|發送|調整|編輯|補上|套用|插入|替換).*(?:文件|doc|sheet|slide|簡報|訊息|email|郵件)/i,
+  /\b(?:update|edit|write|send|create|delete|modify|revise|add|append|insert|replace)\b/i,
 ];
 
 const BLOCKER_PATTERNS = [
   /(?:沒有|缺少|需要|無法|不能).*(?:權限|授權|確認|資訊|連結|存取)/i,
   /(?:請|需要).*(?:確認|授權|提供|補充)/i,
-  /\b(?:cannot|can't|unable|need|missing|permission|authorize|approval|confirm)\b/i,
+  /\b(?:cannot|can't|unable)\b.*\b(?:access|write|update|edit|modify|send|create|delete|permission|authorize|approval)\b/i,
+  /\b(?:need|missing|lack|lacking|without)\b.*\b(?:permission|authorization|approval|access|confirmation|information|link)\b/i,
+  /\b(?:please|need you to)\b.*\b(?:authorize|approve|confirm|provide|grant|share|send)\b/i,
 ];
 
 const WRITE_TOOL_PATTERNS = [
   /_batch_update$/i,
   /_values_update$/i,
-  /_create$/i,
-  /_delete$/i,
-  /_send$/i,
   /_messages_create$/i,
   /^docs_batch_update$/i,
   /^gws_docs_batch_update$/i,

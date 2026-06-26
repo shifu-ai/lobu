@@ -89,6 +89,42 @@ describe("evaluateTaskCompletion write intent guard", () => {
     expect(result.reason).toBe("task_completion_write_intent_without_write");
   });
 
+  test("does not treat 'I updated what you need' as a visible blocker", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "update the Google Doc",
+      finalVisibleText: "I updated what you need",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+
+  test("does not treat 'I can confirm it is updated' as a visible blocker", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "update the Google Doc",
+      finalVisibleText: "I can confirm it is updated",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+
+  test("fails when Chinese adjust-doc task only executed read tools", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "請根據銷講簡報調整 Google Doc",
+      finalVisibleText: "我已經讀完文件。",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+        { toolName: "google_workspace_slides_read", isError: false },
+      ],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+
   test("allows write-intent task when final text asks for missing permission", () => {
     const result = evaluateTaskCompletion({
       latestUserText: "幫我改這份 Google Doc",
