@@ -1,12 +1,17 @@
 import { createLogger } from "@lobu/core";
 import type { AgentSessionEvent } from "@mariozechner/pi-coding-agent";
 import { formatToolExecution } from "../shared/processor-utils";
+import {
+  buildToolUseEventPayload,
+  type ToolUseResultSummary,
+} from "./tool-use-events";
 
 const logger = createLogger("openclaw-processor");
 
 export interface ProcessorToolExecutionSummary {
   toolName: string;
   isError: boolean;
+  resultSummary?: ToolUseResultSummary;
 }
 
 /**
@@ -112,9 +117,16 @@ export class OpenClawProgressProcessor {
       }
 
       case "tool_execution_end": {
+        const payload = buildToolUseEventPayload({
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          result: event.result,
+          isError: event.isError,
+        });
         this.toolExecutions.push({
           toolName: event.toolName,
           isError: event.isError === true,
+          ...(payload.result_summary ? { resultSummary: payload.result_summary } : {}),
         });
         return false;
       }

@@ -130,4 +130,33 @@ describe("OpenClawWorker task completion guard", () => {
       "task_completion_write_intent_without_write",
     ]);
   });
+
+  test("fails loud when Google Docs writeback is not verified", async () => {
+    const { worker, sent, errors, applyTaskCompletionGuard, processor } =
+      buildWorkerWithRecorder();
+    processor.setFinalResult({ text: "我已經完成 Google Doc 修改。", isFinal: true });
+    processor.processEvent({
+      type: "tool_execution_end",
+      toolName: "gws_docs_batch_update",
+      toolCallId: "call_1",
+      isError: false,
+      result: { replies: [{}] },
+    } as any);
+
+    const result = await applyTaskCompletionGuard("請直接幫我修改 Google Doc");
+
+    expect(result).toBe(false);
+    expect((worker as any).terminalStatus).toBe("failed");
+    expect(sent).toEqual([
+      {
+        delta:
+          "我有呼叫寫入工具，但這輪沒有取得外部文件確實被修改的證據，因此沒有把任務標成完成。請確認文件內容或重新指示我用可驗證的方式修改。",
+        isFullReplacement: true,
+        isFinal: true,
+      },
+    ]);
+    expect(errors.map((error) => error.message)).toEqual([
+      "task_completion_unverified_writeback",
+    ]);
+  });
 });

@@ -68,7 +68,11 @@ describe("evaluateTaskCompletion write intent guard", () => {
       finalVisibleText: "我已經完成 Google Doc 修改。",
       toolExecutions: [
         { toolName: "google_workspace_docs_read", isError: false },
-        { toolName: "gws_docs_batch_update", isError: false },
+        {
+          toolName: "gws_docs_batch_update",
+          isError: false,
+          resultSummary: { effect_verified: true, effect_status: "verified" },
+        },
       ],
     });
 
@@ -87,6 +91,27 @@ describe("evaluateTaskCompletion write intent guard", () => {
 
     expect(result.outcome).toBe("failed_incomplete");
     expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+
+  test("blocks Google Docs write-intent task when batch update effect is unknown", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "請直接幫我修改 Google Doc",
+      finalVisibleText: "我已經完成 Google Doc 修改。",
+      toolExecutions: [
+        {
+          toolName: "gws_docs_batch_update",
+          isError: false,
+          resultSummary: { effect_verified: false, effect_status: "unknown" },
+        },
+      ],
+    });
+
+    expect(result).toEqual({
+      outcome: "failed_incomplete",
+      reason: "task_completion_unverified_writeback",
+      userVisibleMessage:
+        "我有呼叫寫入工具，但這輪沒有取得外部文件確實被修改的證據，因此沒有把任務標成完成。請確認文件內容或重新指示我用可驗證的方式修改。",
+    });
   });
 
   test("does not treat 'I updated what you need' as a visible blocker", () => {

@@ -21,7 +21,7 @@ interface ToolUseEventPayload {
   result_summary?: ToolUseResultSummary;
 }
 
-interface ToolUseResultSummary {
+export interface ToolUseResultSummary {
   /** Event IDs the tool returned (search_memory etc). */
   event_ids?: number[];
   /** Inline snippet text keyed by event id — populated by retrieval tools so
@@ -131,16 +131,16 @@ function summarizeGoogleDocsBatchUpdate(
   const replies = extractReplies(rawReply);
   const occurrencesChanged = sumOccurrencesChanged(replies);
   const effectVerified = occurrencesChanged > 0;
+  const documentId =
+    typeof input.documentId === "string"
+      ? input.documentId
+      : typeof input.document_id === "string"
+        ? input.document_id
+        : undefined;
+  const requestCount = Array.isArray(input.requests) ? input.requests.length : undefined;
 
-  return {
+  const summary: ToolUseResultSummary = {
     operation: "google_docs_batch_update",
-    document_id:
-      typeof input.documentId === "string"
-        ? input.documentId
-        : typeof input.document_id === "string"
-          ? input.document_id
-          : undefined,
-    request_count: Array.isArray(input.requests) ? input.requests.length : undefined,
     reply_count: replies.length,
     effect_verified: effectVerified,
     effect_status: effectVerified ? "verified" : "unknown",
@@ -148,6 +148,9 @@ function summarizeGoogleDocsBatchUpdate(
     raw_reply_preserved: true,
     raw_reply: rawReply,
   };
+  if (documentId) summary.document_id = documentId;
+  if (requestCount !== undefined) summary.request_count = requestCount;
+  return summary;
 }
 
 function extractReplies(value: unknown): unknown[] {

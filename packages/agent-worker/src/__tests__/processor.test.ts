@@ -276,7 +276,19 @@ describe("tool execution snapshot", () => {
     snapshot[0]!.isError = true;
 
     expect(p.getToolExecutionSnapshot()).toEqual([
-      { toolName: "gws_docs_batch_update", isError: false },
+      {
+        toolName: "gws_docs_batch_update",
+        isError: false,
+        resultSummary: {
+          operation: "google_docs_batch_update",
+          reply_count: 0,
+          effect_verified: false,
+          effect_status: "unknown",
+          occurrences_changed: 0,
+          raw_reply_preserved: true,
+          raw_reply: {},
+        },
+      },
     ]);
   });
 });

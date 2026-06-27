@@ -6,11 +6,16 @@ export type TaskCompletionOutcome =
 export type TaskCompletionReason =
   | "ok"
   | "task_completion_empty_final"
-  | "task_completion_write_intent_without_write";
+  | "task_completion_write_intent_without_write"
+  | "task_completion_unverified_writeback";
 
 export interface ToolExecutionSummary {
   toolName: string;
   isError: boolean;
+  resultSummary?: {
+    effect_verified?: boolean;
+    effect_status?: string;
+  };
 }
 
 export interface TaskCompletionInput {
@@ -40,6 +45,8 @@ const EMPTY_FINAL_MESSAGE =
 
 const WRITE_INTENT_WITHOUT_WRITE_MESSAGE =
   "我讀到了任務需要的資料，但這輪沒有成功執行寫入工具，因此沒有把任務標成完成。我沒有把任何變更寫入外部文件。";
+const UNVERIFIED_WRITEBACK_MESSAGE =
+  "我有呼叫寫入工具，但這輪沒有取得外部文件確實被修改的證據，因此沒有把任務標成完成。請確認文件內容或重新指示我用可驗證的方式修改。";
 
 const WRITE_INTENT_PATTERNS = [
   /直接.*幫我.*改/i,
@@ -67,6 +74,11 @@ const WRITE_TOOL_PATTERNS = [
   /^slides_batch_update$/i,
   /^chat_messages_create$/i,
 ];
+const GOOGLE_DOCS_WRITE_TOOL_PATTERNS = [
+  /^docs_batch_update$/i,
+  /^gws_docs_batch_update$/i,
+  /^google_workspace_docs_batch_update$/i,
+];
 
 export function evaluateTaskCompletion(
   input: TaskCompletionInput
@@ -78,6 +90,18 @@ export function evaluateTaskCompletion(
       outcome: "failed_incomplete",
       reason: "task_completion_empty_final",
       userVisibleMessage: EMPTY_FINAL_MESSAGE,
+    };
+  }
+
+  if (
+    hasWriteIntent(input.latestUserText) &&
+    hasUnverifiedWriteEvidence(input.toolExecutions) &&
+    !hasVisibleBlocker(finalText)
+  ) {
+    return {
+      outcome: "failed_incomplete",
+      reason: "task_completion_unverified_writeback",
+      userVisibleMessage: UNVERIFIED_WRITEBACK_MESSAGE,
     };
   }
 
@@ -109,8 +133,25 @@ export function hasSuccessfulWriteEvidence(
   return toolExecutions.some(
     (tool) =>
       !tool.isError &&
+      (!isGoogleDocsWriteTool(tool.toolName) ||
+        tool.resultSummary?.effect_verified === true) &&
       WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName))
   );
+}
+
+export function hasUnverifiedWriteEvidence(
+  toolExecutions: ToolExecutionSummary[]
+): boolean {
+  return toolExecutions.some(
+    (tool) =>
+      !tool.isError &&
+      isGoogleDocsWriteTool(tool.toolName) &&
+      tool.resultSummary?.effect_verified !== true
+  );
+}
+
+function isGoogleDocsWriteTool(toolName: string): boolean {
+  return GOOGLE_DOCS_WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(toolName));
 }
 
 export function hasVisibleBlocker(finalVisibleText: string): boolean {
