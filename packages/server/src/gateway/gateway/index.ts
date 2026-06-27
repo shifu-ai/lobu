@@ -36,6 +36,7 @@ import { WorkerJobRouter } from "./job-router.js";
 import { createTranscriptRoutes } from "./transcript-routes.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { createPostgresAgentConnectionStore } from "../../lobu/stores/postgres-stores.js";
+import { createExecutionTaskStatusRoutes } from "../routes/public/execution-tasks.js";
 
 const logger = createLogger("worker-gateway");
 
@@ -513,6 +514,8 @@ export class WorkerGateway {
 		// a new snapshot on every terminal state. The routes themselves are
 		// always mounted (gated by the JWT scope check inside).
 		this.app.route("/transcript", createTranscriptRoutes());
+
+		this.app.route("", createExecutionTaskStatusRoutes());
 
 		logger.debug("Worker gateway routes registered");
 	}

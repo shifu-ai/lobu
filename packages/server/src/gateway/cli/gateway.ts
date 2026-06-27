@@ -33,6 +33,7 @@ import {
   createConnectionCrudRoutes,
   createConnectionWebhookRoutes,
 } from "../routes/public/connections.js";
+import { createExecutionTaskStatusRoutes } from "../routes/public/execution-tasks.js";
 import { createPublicFileRoutes } from "../routes/public/files.js";
 import { createLandingRoutes } from "../routes/public/landing.js";
 import { createMcpOAuthRoutes } from "../routes/public/mcp-oauth.js";
@@ -280,6 +281,16 @@ export function createGatewayApp(
   }
 
   if (coreServices) {
+    app.route(
+      "",
+      createExecutionTaskStatusRoutes({
+        externalAuthClient: coreServices.getExternalAuthClient?.(),
+      })
+    );
+    logger.debug(
+      "Execution task status route enabled at :8080/api/v1/execution-tasks/{taskId}/status"
+    );
+
     const queueProducer = coreServices.getQueueProducer();
     const sessionMgr = coreServices.getSessionManager();
     const interactionSvc = coreServices.getInteractionService();
