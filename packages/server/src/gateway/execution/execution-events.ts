@@ -45,6 +45,7 @@ export interface ExecutionTaskStatusSnapshot extends ExecutionTask {
    * replay them in display order without reversing the array.
    */
   events: ExecutionEvent[];
+  hasMore: boolean;
   hasMoreEvents: boolean;
   eventsTruncated: boolean;
   nextCursor: number | null;
@@ -350,6 +351,7 @@ export async function getExecutionTaskStatus(
   return {
     ...mapTaskRow(taskRows[0]),
     events: eventRows.map(mapEventRow),
+    hasMore: hasMoreEvents,
     hasMoreEvents,
     eventsTruncated,
     nextCursor: eventRows.at(-1)?.id ?? null,

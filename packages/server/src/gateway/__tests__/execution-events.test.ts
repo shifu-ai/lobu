@@ -73,6 +73,7 @@ describe("execution event store", () => {
       "tool.wait",
     ]);
     expect(status).toMatchObject({
+      hasMore: false,
       hasMoreEvents: false,
       eventsTruncated: false,
       nextCursor: expect.any(Number),
@@ -179,6 +180,7 @@ describe("execution event store", () => {
       3,
     ]);
     expect(firstPage).toMatchObject({
+      hasMore: true,
       hasMoreEvents: true,
       eventsTruncated: true,
       nextCursor: firstPage?.events[1]?.id,
@@ -190,6 +192,7 @@ describe("execution event store", () => {
     });
     expect(nextPage?.events.map((event) => event.payload.step)).toEqual([3]);
     expect(nextPage).toMatchObject({
+      hasMore: false,
       hasMoreEvents: false,
       eventsTruncated: false,
       nextCursor: nextPage?.events[0]?.id,

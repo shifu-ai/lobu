@@ -1,5 +1,8 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
+import { PersonalAccessTokenService } from "../../../auth/tokens.js";
+import { getDb } from "../../../db/client.js";
+import { orgContext } from "../../../lobu/stores/org-context.js";
 import { createApiAuthMiddleware } from "../../auth/api-auth-middleware.js";
 import type { ExternalAuthClient } from "../../auth/external/client.js";
 import {
@@ -32,6 +35,28 @@ function hasAdminServiceScope(c: Context): boolean {
   );
 }
 
+async function verifyAdminServicePat(c: Context): Promise<"authorized" | "forbidden" | null> {
+  const authHeader = c.req.header("Authorization");
+  if (!authHeader?.startsWith("Bearer ")) return null;
+
+  const token = authHeader.slice(7);
+  if (!token.startsWith("owl_pat_")) return null;
+
+  const authInfo = await new PersonalAccessTokenService(getDb()).verify(token);
+  if (!authInfo) return null;
+
+  c.set("mcpAuthInfo" as never, authInfo as never);
+  c.set("mcpIsAuthenticated" as never, true as never);
+  c.set("organizationId" as never, authInfo.organizationId as never);
+  c.set("authSource" as never, "pat" as never);
+  c.set(
+    "session" as never,
+    { id: `pat:${authInfo.clientId}`, userId: authInfo.userId } as never
+  );
+
+  return authInfo.scopes.includes("mcp:admin") ? "authorized" : "forbidden";
+}
+
 function parsePositiveInteger(value: string | undefined): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);
@@ -54,6 +79,28 @@ export function createExecutionTaskStatusRoutes(
 
     if (hasAdminServiceScope(c)) {
       return next();
+    }
+
+    const patAuth = await verifyAdminServicePat(c);
+    if (patAuth === "authorized") {
+      const organizationId = (
+        c.get("organizationId" as never) as string | null | undefined
+      ) ?? null;
+      if (organizationId) {
+        return orgContext.run({ organizationId }, () => next());
+      }
+      return next();
+    }
+    if (patAuth === "forbidden") {
+      return c.json(
+        {
+          success: false,
+          error: "Forbidden",
+          error_description:
+            "Execution task status requires an admin service token.",
+        },
+        403
+      );
     }
 
     let authenticated = false;

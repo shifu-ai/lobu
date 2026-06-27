@@ -8,8 +8,17 @@ import {
   test,
 } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
+import { PersonalAccessTokenService } from "../../auth/tokens.js";
+import { getDb } from "../../db/client.js";
+import {
+  createTestOrganization,
+  createTestUser,
+} from "../../__tests__/setup/test-fixtures.js";
 import { createExecutionTaskStatusRoutes } from "../routes/public/execution-tasks.js";
-import { ensureDbForGatewayTests } from "./helpers/db-setup.js";
+import {
+  ensureDbForGatewayTests,
+  resetTestDatabase,
+} from "./helpers/db-setup.js";
 
 describe("execution task status route", () => {
   let originalEncryptionKey: string | undefined;
@@ -18,7 +27,8 @@ describe("execution task status route", () => {
     await ensureDbForGatewayTests();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    await resetTestDatabase();
     originalEncryptionKey = process.env.ENCRYPTION_KEY;
     process.env.ENCRYPTION_KEY =
       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -82,7 +92,7 @@ describe("execution task status route", () => {
     expect(getStatus).not.toHaveBeenCalled();
   });
 
-  test("returns compact task status JSON for admin service callers", async () => {
+  test("returns compact task status JSON for real mcp:admin PAT callers", async () => {
     const getStatus = mock(async (taskId: string) => ({
       id: taskId,
       agentId: "agent-1",
@@ -97,6 +107,7 @@ describe("execution task status route", () => {
       finalSummary: null,
       error: null,
       metadata: {},
+      hasMore: false,
       hasMoreEvents: false,
       eventsTruncated: false,
       nextCursor: 1,
@@ -110,13 +121,22 @@ describe("execution task status route", () => {
         },
       ],
     }));
-    const router = createExecutionTaskStatusRoutes({
-      authorize: async () => true,
-      getStatus,
+    const org = await createTestOrganization({
+      slug: "execution-task-admin-pat",
     });
+    const user = await createTestUser({
+      email: "execution-task-admin-pat@test.example.com",
+    });
+    const { token } = await new PersonalAccessTokenService(getDb()).create(
+      user.id,
+      org.id,
+      "execution status admin",
+      { scope: "mcp:read mcp:admin" }
+    );
+    const router = createExecutionTaskStatusRoutes({ getStatus });
 
     const res = await router.request("/api/v1/execution-tasks/task-1/status", {
-      headers: { Authorization: "Bearer admin-service-token" },
+      headers: { Authorization: `Bearer ${token}` },
     });
 
     expect(res.status).toBe(200);
@@ -136,6 +156,7 @@ describe("execution task status route", () => {
         finalSummary: null,
         error: null,
         metadata: {},
+        hasMore: false,
         hasMoreEvents: false,
         eventsTruncated: false,
         nextCursor: 1,
@@ -156,6 +177,36 @@ describe("execution task status route", () => {
     });
   });
 
+  test("returns 403 for real PAT callers without mcp:admin scope", async () => {
+    const getStatus = mock(async () => null);
+    const org = await createTestOrganization({
+      slug: "execution-task-readonly-pat",
+    });
+    const user = await createTestUser({
+      email: "execution-task-readonly-pat@test.example.com",
+    });
+    const { token } = await new PersonalAccessTokenService(getDb()).create(
+      user.id,
+      org.id,
+      "execution status read only",
+      { scope: "mcp:read" }
+    );
+    const router = createExecutionTaskStatusRoutes({ getStatus });
+
+    const res = await router.request("/api/v1/execution-tasks/task-1/status", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toEqual({
+      success: false,
+      error: "Forbidden",
+      error_description:
+        "Execution task status requires an admin service token.",
+    });
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
   test("passes cursor and bounded limit query params to status retrieval", async () => {
     const getStatus = mock(async (taskId: string) => ({
       id: taskId,
@@ -171,6 +222,7 @@ describe("execution task status route", () => {
       finalSummary: null,
       error: null,
       metadata: {},
+      hasMore: true,
       hasMoreEvents: true,
       eventsTruncated: false,
       nextCursor: 42,
