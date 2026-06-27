@@ -29,11 +29,26 @@ interface ToolUseResultSummary {
   snippets?: Array<{ id: number; text: string }>;
   /** Tools may also include a short error string. */
   error?: string;
+  /** Tool-specific writeback effect metadata. */
+  operation?: string;
+  document_id?: string;
+  request_count?: number;
+  reply_count?: number;
+  effect_verified?: boolean;
+  effect_status?: "verified" | "unknown" | "failed";
+  occurrences_changed?: number;
+  raw_reply_preserved?: boolean;
+  raw_reply?: unknown;
 }
 
 const SEARCH_MEMORY_TOOL_NAMES = new Set([
   "search_memory",
   "lobu_search_memory",
+]);
+const GOOGLE_DOCS_BATCH_UPDATE_TOOL_NAMES = new Set([
+  "docs_batch_update",
+  "gws_docs_batch_update",
+  "google_workspace_docs_batch_update",
 ]);
 
 /**
@@ -71,6 +86,8 @@ export function buildToolUseEventPayload(event: {
     if (summary) {
       payload.result_summary = summary;
     }
+  } else if (GOOGLE_DOCS_BATCH_UPDATE_TOOL_NAMES.has(event.toolName)) {
+    payload.result_summary = summarizeGoogleDocsBatchUpdate(event.args, event.result);
   }
 
   return payload;
@@ -104,6 +121,59 @@ function summarizeSearchMemoryResult(
   return Object.keys(summary).length > 0 ? summary : null;
 }
 
+function summarizeGoogleDocsBatchUpdate(
+  args: unknown,
+  raw: unknown
+): ToolUseResultSummary {
+  const input = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const result = extractMcpJsonBody(raw);
+  const rawReply = result ?? raw;
+  const replies = extractReplies(rawReply);
+  const occurrencesChanged = sumOccurrencesChanged(replies);
+  const effectVerified = occurrencesChanged > 0;
+
+  return {
+    operation: "google_docs_batch_update",
+    document_id:
+      typeof input.documentId === "string"
+        ? input.documentId
+        : typeof input.document_id === "string"
+          ? input.document_id
+          : undefined,
+    request_count: Array.isArray(input.requests) ? input.requests.length : undefined,
+    reply_count: replies.length,
+    effect_verified: effectVerified,
+    effect_status: effectVerified ? "verified" : "unknown",
+    occurrences_changed: occurrencesChanged,
+    raw_reply_preserved: true,
+    raw_reply: rawReply,
+  };
+}
+
+function extractReplies(value: unknown): unknown[] {
+  if (!value || typeof value !== "object") return [];
+  const replies = (value as { replies?: unknown }).replies;
+  return Array.isArray(replies) ? replies : [];
+}
+
+function sumOccurrencesChanged(value: unknown): number {
+  if (Array.isArray(value)) {
+    return value.reduce((sum, item) => sum + sumOccurrencesChanged(item), 0);
+  }
+  if (!value || typeof value !== "object") {
+    return 0;
+  }
+  let total = 0;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (key === "occurrencesChanged" && typeof child === "number") {
+      total += child;
+      continue;
+    }
+    total += sumOccurrencesChanged(child);
+  }
+  return total;
+}
+
 /**
  * MCP tool results from the gateway proxy land here as
  *   { content: [{ type: 'text', text: '<json>' }], isError: false }
@@ -111,6 +181,10 @@ function summarizeSearchMemoryResult(
  * both shapes.
  */
 function extractSearchMemoryBody(raw: unknown): unknown {
+  return extractMcpJsonBody(raw);
+}
+
+function extractMcpJsonBody(raw: unknown): unknown {
   if (!raw || typeof raw !== "object") return null;
 
   // MCP CallToolResult shape — text content holds a JSON-stringified payload.

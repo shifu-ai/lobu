@@ -105,4 +105,71 @@ describe("buildToolUseEventPayload", () => {
     expect(payload.isError).toBe(true);
     expect(payload.result_summary?.error).toBe("authentication required");
   });
+
+  test("summarizes Google Docs batchUpdate empty replies as unknown effect", () => {
+    const rawReply = {
+      documentId: "doc-1",
+      replies: [{}, {}, {}, {}, {}],
+    };
+    const payload = buildToolUseEventPayload({
+      toolCallId: "docs_1",
+      toolName: "gws_docs_batch_update",
+      args: {
+        documentId: "doc-1",
+        requests: [
+          { replaceAllText: { containsText: { text: "old" }, replaceText: "new" } },
+          { replaceAllText: { containsText: { text: "a" }, replaceText: "b" } },
+          { replaceAllText: { containsText: { text: "c" }, replaceText: "d" } },
+          { replaceAllText: { containsText: { text: "e" }, replaceText: "f" } },
+          { replaceAllText: { containsText: { text: "g" }, replaceText: "h" } },
+        ],
+      },
+      result: {
+        content: [{ type: "text", text: JSON.stringify(rawReply) }],
+        isError: false,
+      },
+      isError: false,
+    });
+
+    expect(payload.result_summary).toMatchObject({
+      operation: "google_docs_batch_update",
+      document_id: "doc-1",
+      request_count: 5,
+      reply_count: 5,
+      occurrences_changed: 0,
+      effect_verified: false,
+      effect_status: "unknown",
+      raw_reply_preserved: true,
+      raw_reply: rawReply,
+    });
+  });
+
+  test("summarizes Google Docs replaceAllText occurrences as verified effect", () => {
+    const payload = buildToolUseEventPayload({
+      toolCallId: "docs_2",
+      toolName: "google_workspace_docs_batch_update",
+      args: {
+        documentId: "doc-2",
+        requests: [
+          { replaceAllText: { containsText: { text: "old" }, replaceText: "new" } },
+        ],
+      },
+      result: {
+        documentId: "doc-2",
+        replies: [{ replaceAllText: { occurrencesChanged: 3 } }],
+      },
+      isError: false,
+    });
+
+    expect(payload.result_summary).toMatchObject({
+      operation: "google_docs_batch_update",
+      document_id: "doc-2",
+      request_count: 1,
+      reply_count: 1,
+      occurrences_changed: 3,
+      effect_verified: true,
+      effect_status: "verified",
+      raw_reply_preserved: true,
+    });
+  });
 });
