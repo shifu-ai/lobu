@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS public.execution_tasks (
   conversation_id text,
   user_id text,
   source text NOT NULL DEFAULT 'unknown',
-  status text NOT NULL DEFAULT 'running',
+  status text NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'waiting_for_tool', 'completed', 'failed', 'cancelled')),
   started_at timestamptz NOT NULL DEFAULT now(),
   last_event_at timestamptz NOT NULL DEFAULT now(),
   completed_at timestamptz,

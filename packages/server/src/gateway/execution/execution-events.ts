@@ -13,6 +13,7 @@ const TERMINAL_STATUSES = new Set<ExecutionTaskStatus>([
   "failed",
   "cancelled",
 ]);
+const MAX_OBSERVABILITY_JSON_BYTES = 32 * 1024;
 
 export interface ExecutionTask {
   id: string;
@@ -44,6 +45,9 @@ export interface ExecutionTaskStatusSnapshot extends ExecutionTask {
    * replay them in display order without reversing the array.
    */
   events: ExecutionEvent[];
+  hasMoreEvents: boolean;
+  eventsTruncated: boolean;
+  nextCursor: number | null;
 }
 
 export interface CreateExecutionTaskInput {
@@ -133,6 +137,31 @@ function isTerminalStatus(status: ExecutionTaskStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }
 
+function jsonByteLength(value: unknown): number | null {
+  try {
+    return Buffer.byteLength(JSON.stringify(value), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function boundedJson(value: unknown): unknown {
+  const bytes = jsonByteLength(value);
+  if (bytes == null) {
+    return { truncated: true, unserializable: true };
+  }
+  if (bytes <= MAX_OBSERVABILITY_JSON_BYTES) {
+    return value;
+  }
+  return { truncated: true, originalBytes: bytes };
+}
+
+function boundedPayload(
+  value: Record<string, unknown> | undefined
+): Record<string, unknown> {
+  return boundedJson(value ?? {}) as Record<string, unknown>;
+}
+
 export async function createExecutionTask(
   input: CreateExecutionTaskInput,
   sql: DbClient = getDb()
@@ -171,22 +200,43 @@ export async function updateExecutionTaskStatus(
   sql: DbClient = getDb()
 ): Promise<ExecutionTask> {
   const completedAt = isTerminalStatus(status) ? new Date() : null;
+  const statusIsTerminal = isTerminalStatus(status);
+  const finalSummary =
+    updates.finalSummary === undefined
+      ? undefined
+      : boundedJson(updates.finalSummary ?? null);
+  const error =
+    updates.error === undefined ? undefined : boundedJson(updates.error ?? null);
   const rows = await sql<ExecutionTaskRow>`
     UPDATE public.execution_tasks
     SET
-      status = ${status},
+      status = CASE
+        WHEN status IN ('completed', 'failed', 'cancelled')
+          AND ${statusIsTerminal}::boolean = false
+          THEN status
+        ELSE ${status}
+      END,
       last_event_at = now(),
       completed_at = CASE
+        WHEN status IN ('completed', 'failed', 'cancelled')
+          AND ${statusIsTerminal}::boolean = false
+          THEN completed_at
         WHEN ${completedAt}::timestamptz IS NULL THEN completed_at
         ELSE COALESCE(completed_at, ${completedAt}::timestamptz)
       END,
       final_summary = CASE
-        WHEN ${updates.finalSummary === undefined}::boolean THEN final_summary
-        ELSE ${sql.json(updates.finalSummary ?? null)}::jsonb
+        WHEN status IN ('completed', 'failed', 'cancelled')
+          AND ${statusIsTerminal}::boolean = false
+          THEN final_summary
+        WHEN ${finalSummary === undefined}::boolean THEN final_summary
+        ELSE ${sql.json(finalSummary ?? null)}::jsonb
       END,
       error = CASE
-        WHEN ${updates.error === undefined}::boolean THEN error
-        ELSE ${sql.json(updates.error ?? null)}::jsonb
+        WHEN status IN ('completed', 'failed', 'cancelled')
+          AND ${statusIsTerminal}::boolean = false
+          THEN error
+        WHEN ${error === undefined}::boolean THEN error
+        ELSE ${sql.json(error ?? null)}::jsonb
       END
     WHERE id = ${taskId}
     RETURNING *
@@ -223,7 +273,7 @@ export async function recordExecutionEvent(
         ${input.taskId},
         ${input.type},
         ${input.message ?? null},
-        ${tx.json(input.payload ?? {})}
+        ${tx.json(boundedPayload(input.payload))}
       )
       RETURNING id, type, message, payload, created_at
     `;
@@ -252,7 +302,7 @@ export async function recordExecutionEvent(
 
 export async function getExecutionTaskStatus(
   taskId: string,
-  options: { limit?: number } = {},
+  options: { afterEventId?: number; limit?: number } = {},
   sql: DbClient = getDb()
 ): Promise<ExecutionTaskStatusSnapshot | null> {
   const limit = Math.min(Math.max(options.limit ?? 50, 1), 200);
@@ -264,20 +314,44 @@ export async function getExecutionTaskStatus(
   `;
   if (!taskRows[0]) return null;
 
-  const eventRows = await sql<ExecutionEventRow>`
-    SELECT id, type, message, payload, created_at
-    FROM (
+  let rawEventRows: ExecutionEventRow[];
+  let eventsTruncated = false;
+
+  if (options.afterEventId !== undefined) {
+    rawEventRows = await sql<ExecutionEventRow>`
       SELECT id, type, message, payload, created_at
       FROM public.execution_events
       WHERE task_id = ${taskId}
-      ORDER BY id DESC
-      LIMIT ${limit}
-    ) recent_events
-    ORDER BY id ASC
-  `;
+        AND id > ${options.afterEventId}
+      ORDER BY id ASC
+      LIMIT ${limit + 1}
+    `;
+  } else {
+    rawEventRows = await sql<ExecutionEventRow>`
+      SELECT id, type, message, payload, created_at
+      FROM (
+        SELECT id, type, message, payload, created_at
+        FROM public.execution_events
+        WHERE task_id = ${taskId}
+        ORDER BY id DESC
+        LIMIT ${limit + 1}
+      ) recent_events
+      ORDER BY id ASC
+    `;
+    eventsTruncated = rawEventRows.length > limit;
+  }
+
+  const hasMoreEvents = rawEventRows.length > limit;
+  const eventRows =
+    options.afterEventId === undefined && hasMoreEvents
+      ? rawEventRows.slice(1)
+      : rawEventRows.slice(0, limit);
 
   return {
     ...mapTaskRow(taskRows[0]),
     events: eventRows.map(mapEventRow),
+    hasMoreEvents,
+    eventsTruncated,
+    nextCursor: eventRows.at(-1)?.id ?? null,
   };
 }

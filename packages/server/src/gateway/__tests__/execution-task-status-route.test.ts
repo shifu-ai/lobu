@@ -59,7 +59,30 @@ describe("execution task status route", () => {
     });
   });
 
-  test("returns compact task status JSON", async () => {
+  test("returns 403 for authenticated worker tokens without admin service scope", async () => {
+    const getStatus = mock(async () => null);
+    const router = createExecutionTaskStatusRoutes({ getStatus });
+    const token = generateWorkerToken("user-1", "conversation-1", "deploy-1", {
+      agentId: "agent-1",
+      channelId: "line:U1",
+      organizationId: "org-1",
+    });
+
+    const res = await router.request("/api/v1/execution-tasks/task-1/status", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toEqual({
+      success: false,
+      error: "Forbidden",
+      error_description:
+        "Execution task status requires an admin service token.",
+    });
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  test("returns compact task status JSON for admin service callers", async () => {
     const getStatus = mock(async (taskId: string) => ({
       id: taskId,
       agentId: "agent-1",
@@ -74,6 +97,9 @@ describe("execution task status route", () => {
       finalSummary: null,
       error: null,
       metadata: {},
+      hasMoreEvents: false,
+      eventsTruncated: false,
+      nextCursor: 1,
       events: [
         {
           id: 1,
@@ -85,16 +111,12 @@ describe("execution task status route", () => {
       ],
     }));
     const router = createExecutionTaskStatusRoutes({
+      authorize: async () => true,
       getStatus,
-    });
-    const token = generateWorkerToken("user-1", "conversation-1", "deploy-1", {
-      agentId: "agent-1",
-      channelId: "line:U1",
-      organizationId: "org-1",
     });
 
     const res = await router.request("/api/v1/execution-tasks/task-1/status", {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: "Bearer admin-service-token" },
     });
 
     expect(res.status).toBe(200);
@@ -114,6 +136,9 @@ describe("execution task status route", () => {
         finalSummary: null,
         error: null,
         metadata: {},
+        hasMoreEvents: false,
+        eventsTruncated: false,
+        nextCursor: 1,
         events: [
           {
             id: 1,
@@ -125,6 +150,46 @@ describe("execution task status route", () => {
         ],
       },
     });
-    expect(getStatus).toHaveBeenCalledWith("task-1");
+    expect(getStatus).toHaveBeenCalledWith("task-1", {
+      afterEventId: undefined,
+      limit: undefined,
+    });
+  });
+
+  test("passes cursor and bounded limit query params to status retrieval", async () => {
+    const getStatus = mock(async (taskId: string) => ({
+      id: taskId,
+      agentId: "agent-1",
+      sessionId: null,
+      conversationId: null,
+      userId: null,
+      source: "line",
+      status: "running" as const,
+      startedAt: "2026-06-27T00:00:00.000Z",
+      lastEventAt: "2026-06-27T00:00:01.000Z",
+      completedAt: null,
+      finalSummary: null,
+      error: null,
+      metadata: {},
+      hasMoreEvents: true,
+      eventsTruncated: false,
+      nextCursor: 42,
+      events: [],
+    }));
+    const router = createExecutionTaskStatusRoutes({
+      authorize: async () => true,
+      getStatus,
+    });
+
+    const res = await router.request(
+      "/api/v1/execution-tasks/task-1/status?afterEventId=17&limit=500",
+      { headers: { Authorization: "Bearer admin-service-token" } }
+    );
+
+    expect(res.status).toBe(200);
+    expect(getStatus).toHaveBeenCalledWith("task-1", {
+      afterEventId: 17,
+      limit: 200,
+    });
   });
 });
