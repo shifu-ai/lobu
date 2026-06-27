@@ -37,6 +37,7 @@ import { createTranscriptRoutes } from "./transcript-routes.js";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { createPostgresAgentConnectionStore } from "../../lobu/stores/postgres-stores.js";
 import { createExecutionTaskStatusRoutes } from "../routes/public/execution-tasks.js";
+import { createExecutionEventRoutes } from "../routes/internal/execution-events.js";
 
 const logger = createLogger("worker-gateway");
 
@@ -513,11 +514,12 @@ export class WorkerGateway {
 		// Workers hydrate from the latest completed snapshot on boot and POST
 		// a new snapshot on every terminal state. The routes themselves are
 		// always mounted (gated by the JWT scope check inside).
-		this.app.route("/transcript", createTranscriptRoutes());
+			this.app.route("/transcript", createTranscriptRoutes());
 
-		this.app.route("", createExecutionTaskStatusRoutes());
+			this.app.route("", createExecutionEventRoutes());
+			this.app.route("", createExecutionTaskStatusRoutes());
 
-		logger.debug("Worker gateway routes registered");
+			logger.debug("Worker gateway routes registered");
 	}
 
 	private async enrichMcpStatus(

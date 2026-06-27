@@ -16,6 +16,7 @@ import { SystemEnvStore } from "../auth/system-env-store.js";
 import { getModelProviderModules } from "../modules/module-system.js";
 import { createAudioRoutes } from "../routes/internal/audio.js";
 import { createDeviceAuthRoutes } from "../routes/internal/device-auth.js";
+import { createExecutionEventRoutes } from "../routes/internal/execution-events.js";
 import { createFileRoutes } from "../routes/internal/files.js";
 import { createHistoryRoutes } from "../routes/internal/history.js";
 import { createImageRoutes } from "../routes/internal/images.js";
@@ -281,6 +282,9 @@ export function createGatewayApp(
   }
 
   if (coreServices) {
+    app.route("", createExecutionEventRoutes());
+    logger.debug("Internal execution event routes enabled");
+
     app.route(
       "",
       createExecutionTaskStatusRoutes({

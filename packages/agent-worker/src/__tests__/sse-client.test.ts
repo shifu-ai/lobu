@@ -118,6 +118,7 @@ describe("GatewayClient heartbeat ACKs", () => {
       runId: 67890,
       runJobToken: "per-run-jwt-xyz",
     });
+    expect(config.messageId).toBe("6570514069:29");
     expect(config.runId).toBe(67890);
     expect(config.runJobToken).toBe("per-run-jwt-xyz");
   });

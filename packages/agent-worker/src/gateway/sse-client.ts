@@ -914,6 +914,7 @@ export class GatewayClient {
       agentId: payload.agentId,
       channelId: payload.channelId,
       conversationId,
+      messageId: payload.messageId,
       userPrompt: Buffer.from(payload.messageText).toString("base64"),
       responseChannel: String(
         platformMetadata.responseChannel || payload.channelId

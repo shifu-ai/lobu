@@ -26,6 +26,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import type { ProgressUpdate, SessionExecutionResult } from "../core/types";
 import type { GatewayParams } from "../shared/tool-implementations";
+import { createExecutionReporter } from "./execution-reporter";
 import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
 import { isRecord } from "../shared/type-guards";
 import {
@@ -546,6 +547,7 @@ export interface RunAISessionParams {
   sessionKey: string;
   channelId: string;
   conversationId: string;
+  messageId?: string;
   platform: string;
   /** Arbitrary platform-level metadata (e.g. { sessionReset: true, files: [...] }). */
   platformMetadata: unknown;
@@ -619,6 +621,7 @@ export async function runAISession(
     sessionKey,
     channelId,
     conversationId,
+    messageId,
     platform,
     platformMetadata,
     agentId,
@@ -997,6 +1000,35 @@ export async function runAISession(
     platform,
     workspaceDir,
   };
+  const executionReporter = createExecutionReporter({
+    gatewayUrl: gwParams.gatewayUrl,
+    workerToken: gwParams.workerToken,
+    agentId: agentId || "",
+    sessionId: sessionKey,
+    messageId,
+    conversationId,
+    userId: context.userId,
+    source: platform,
+  });
+  await executionReporter.createTask({
+    metadata: {
+      provider: rawProvider,
+      model: modelId,
+      sessionKey,
+      channelId,
+      platform,
+    },
+  });
+  await executionReporter.record({
+    type: "agent.started",
+    message: "Agent run started.",
+    payload: {
+      provider: rawProvider,
+      model: modelId,
+      taskId: executionReporter.taskId,
+    },
+    status: "running",
+  });
 
   // Dynamic import is justified: just-bash-bootstrap transitively pulls in
   // the embedded MCP server and its heavy deps (child_process, fs watchers).
@@ -1469,6 +1501,18 @@ Use it when the user references past discussions or you need context.`);
       // turns behind real execution.)
       if (event.type === "tool_execution_start") {
         pendingToolArgs.set(event.toolCallId, event.args);
+        const promise = executionReporter.record({
+          type: "tool.started",
+          message: `Tool started: ${event.toolName}`,
+          payload: {
+            toolCallId: event.toolCallId,
+            name: event.toolName,
+            input: event.args ?? null,
+          },
+          status: "waiting_for_tool",
+        });
+        inFlightToolUse.add(promise);
+        promise.finally(() => inFlightToolUse.delete(promise));
       }
 
       // Surface tool-use traces to SSE clients (promptfoo provider, CLI eval,
@@ -1484,6 +1528,16 @@ Use it when the user references past discussions or you need context.`);
           result: event.result,
           isError: event.isError,
         });
+        const executionEventPromise = executionReporter.record({
+          type: event.isError ? "tool.failed" : "tool.completed",
+          message: `${event.isError ? "Tool failed" : "Tool completed"}: ${event.toolName}`,
+          payload: payload as unknown as Record<string, unknown>,
+          status: "running",
+        });
+        inFlightToolUse.add(executionEventPromise);
+        executionEventPromise.finally(() =>
+          inFlightToolUse.delete(executionEventPromise)
+        );
         const promise = onProgress({
           type: "custom_event",
           data: {
@@ -1542,6 +1596,12 @@ Use it when the user references past discussions or you need context.`);
           state: "is running..",
         },
         timestamp: Date.now(),
+      });
+      await executionReporter.record({
+        type: "agent.heartbeat",
+        message: `Agent still running after ${seconds}s.`,
+        payload: { elapsedSeconds: seconds },
+        status: "running",
       });
     };
 
@@ -1624,6 +1684,12 @@ Use it when the user references past discussions or you need context.`);
         type: "output",
         data: "Context saved. Starting fresh.",
         timestamp: Date.now(),
+      });
+      await executionReporter.record({
+        type: "agent.completed",
+        message: "Session reset completed.",
+        status: "completed",
+        finalSummary: { reason: "session_reset" },
       });
 
       if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -1720,6 +1786,12 @@ Use it when the user references past discussions or you need context.`);
         rawProvider,
         modelId
       );
+      await executionReporter.record({
+        type: "agent.failed",
+        message: "Agent run failed.",
+        status: "failed",
+        error: { message: errorWithHint },
+      });
       return {
         success: false,
         exitCode: 1,
@@ -1747,6 +1819,15 @@ Use it when the user references past discussions or you need context.`);
       text: progressProcessor.getOutputSnapshot(),
       isFinal: true,
     });
+    await executionReporter.record({
+      type: "agent.completed",
+      message: "Agent run completed.",
+      status: "completed",
+      finalSummary: {
+        outputChars: progressProcessor.getOutputSnapshot().length,
+        taskId: executionReporter.taskId,
+      },
+    });
 
     return {
       success: true,
@@ -1773,6 +1854,12 @@ Use it when the user references past discussions or you need context.`);
       provider,
       modelId
     );
+    await executionReporter.record({
+      type: "agent.failed",
+      message: "Agent run failed.",
+      status: "failed",
+      error: { message: errorWithHint },
+    });
 
     return {
       success: false,

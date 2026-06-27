@@ -531,6 +531,7 @@ export class OpenClawWorker implements WorkerExecutor {
       sessionKey: this.config.sessionKey,
       channelId: this.config.channelId,
       conversationId: this.config.conversationId,
+      messageId: this.config.messageId,
       platform: this.config.platform,
       platformMetadata: this.config.platformMetadata,
       agentId: this.config.agentId,

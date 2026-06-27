@@ -17,6 +17,7 @@ export interface WorkerConfig {
   agentId: string; // Space identifier for multi-tenant isolation
   channelId: string;
   conversationId: string;
+  messageId?: string;
   userPrompt: string; // Base64 encoded
   responseChannel: string; // Platform-agnostic response channel
   responseId: string; // Platform-agnostic response message ID
