@@ -12,7 +12,10 @@ const MIN_INTERVAL_MS = 60_000; // 1 minute minimum between runs
  * Returns an ISO string suitable for storing in `next_run_at`.
  */
 export function nextRunAt(schedule: string, from: Date = new Date()): string {
-  const interval = CronExpressionParser.parse(schedule, { currentDate: from });
+  const interval = CronExpressionParser.parse(schedule, {
+    currentDate: from,
+    tz: 'UTC',
+  });
   return interval.next().toDate().toISOString();
 }
 
@@ -21,7 +24,7 @@ export function nextRunAt(schedule: string, from: Date = new Date()): string {
  */
 export function validateSchedule(schedule: string): string | null {
   try {
-    const interval = CronExpressionParser.parse(schedule);
+    const interval = CronExpressionParser.parse(schedule, { tz: 'UTC' });
     // Check minimum interval (at least 1 minute apart)
     const first = interval.next().toDate();
     const second = interval.next().toDate();
