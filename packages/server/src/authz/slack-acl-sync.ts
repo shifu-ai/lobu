@@ -40,7 +40,7 @@ const logger = createLogger('slack-acl-sync');
 /** Injectable seams so tests drive the real graph build + gate with a stubbed
  * Slack API and token resolver, and the live tick wires the real ones. */
 export interface SlackAclSyncDeps {
-  slackWeb: Pick<SlackWebApi, 'conversationMembers'>;
+  slackWeb: Pick<SlackWebApi, 'conversationMembers' | 'conversationInfo'>;
   /** Resolve the bot token for a workspace, or null if none is available
    * (no active install / unresolvable secret) — null is treated fail-closed. */
   resolveBotToken: (params: {
@@ -116,6 +116,19 @@ export async function syncSlackConnectionAcl(
     return { ok: true, teamsSynced: 0, channelsSynced: 0 };
   }
 
+  // The bot is itself a member of every channel it's in, so `conversations.members`
+  // includes it. Drop it: a bot is not an audience and must never gain a
+  // `member_of` edge (it would inflate "who can recall" AND, via the gate, count
+  // as a member). The bot's own Slack user id is backfilled onto the connection
+  // metadata at adapter init; absent it, we simply don't filter (no regression).
+  const connRow = await sql<{ bot_user_id: string | null }>`
+		SELECT metadata->>'botUserId' AS bot_user_id
+		FROM agent_connections
+		WHERE id = ${connectionId} AND organization_id = ${organizationId}
+		LIMIT 1
+	`;
+  const botUserId = connRow[0]?.bot_user_id ?? null;
+
   // Group channels by workspace/team — one graph build per team.
   const byTeam = new Map<string, string[]>();
   for (const r of slackRows) {
@@ -135,11 +148,29 @@ export async function syncSlackConnectionAcl(
       }
       const channels: SlackChannelInput[] = [];
       for (const channelId of channelIds) {
-        const memberSlackUserIds = await deps.slackWeb.conversationMembers(
+        const rawMembers = await deps.slackWeb.conversationMembers(
           token,
           channelId,
         );
-        channels.push({ channelId, memberSlackUserIds });
+        const memberSlackUserIds = botUserId
+          ? rawMembers.filter((u) => u !== botUserId)
+          : rawMembers;
+        // Channel name + privacy are BEST-EFFORT display metadata — a failure
+        // here must NOT fail-close the whole sync (membership is the contract),
+        // so swallow and fall back to the id-as-name in buildSlackChannelGraph.
+        let name: string | undefined;
+        let isPrivate: boolean | undefined;
+        try {
+          const info = await deps.slackWeb.conversationInfo(token, channelId);
+          name = info.name ?? undefined;
+          isPrivate = info.isPrivate;
+        } catch (error) {
+          logger.warn(
+            { organization_id: organizationId, channel_id: channelId, error: String(error) },
+            'Slack conversations.info failed — syncing channel without a name',
+          );
+        }
+        channels.push({ channelId, name, isPrivate, memberSlackUserIds });
       }
       await buildSlackChannelGraph({
         organizationId,
