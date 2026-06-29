@@ -91,6 +91,22 @@ const DEFAULT_MEMBER_EVENT_KINDS = {
       },
     },
   },
+  course_pm_profile: {
+    description: 'canonical course PM onboarding profile synced from Toolbox',
+    metadataSchema: {
+      type: 'object',
+      properties: {
+        ...BASE_MEMBER_EVENT_METADATA_SCHEMA.properties,
+        memoryKind: { type: 'string', enum: ['course_pm_profile'] },
+        toolboxUserId: { type: 'string' },
+        agentId: { type: 'string' },
+        profileId: { type: 'string' },
+        profileVersion: { type: 'number' },
+        courseCount: { type: 'number' },
+        source: { type: 'string', enum: ['toolbox_onboarding'] },
+      },
+    },
+  },
   content: { description: 'Generic content' },
   change: { description: 'Entity field changes and audit trail' },
 } as const;

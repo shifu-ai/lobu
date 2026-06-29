@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { cleanupTestDatabase, getTestDb } from '../../__tests__/setup/test-db';
 import { createTestOrganization } from '../../__tests__/setup/test-fixtures';
-import { clearEventKindsCacheForTests } from '../event-kind-validation';
+import {
+  clearEventKindsCacheForTests,
+  validateSaveContentSemanticType,
+} from '../event-kind-validation';
 import { ensureMemberEntityType, mergeMemberEventKinds } from '../member-entity-type';
 
 const describeWithDb = process.env.DATABASE_URL ? describe : describe.skip;
@@ -12,7 +15,7 @@ describeWithDb('ensureMemberEntityType event kinds', () => {
     clearEventKindsCacheForTests();
   });
 
-  it('seeds project_profile for new member entity types', async () => {
+  it('seeds project_profile and course_pm_profile for new member entity types', async () => {
     const org = await createTestOrganization({ name: 'Project Profile Defaults Org' });
     await ensureMemberEntityType(org.id);
 
@@ -28,6 +31,7 @@ describeWithDb('ensureMemberEntityType event kinds', () => {
 
     expect(rows).toHaveLength(1);
     expect(rows[0].event_kinds).toHaveProperty('project_profile');
+    expect(rows[0].event_kinds).toHaveProperty('course_pm_profile');
   });
 
   it('merges missing built-in kinds without dropping custom kinds', async () => {
@@ -63,13 +67,47 @@ describeWithDb('ensureMemberEntityType event kinds', () => {
     `;
     const eventKinds = rows[0].event_kinds as Record<string, unknown>;
     expect(eventKinds).toHaveProperty('project_profile');
+    expect(eventKinds).toHaveProperty('course_pm_profile');
     expect(eventKinds).toHaveProperty('custom_kind');
     expect(eventKinds.note).toEqual({ description: 'Custom note definition' });
+  });
+
+  it('accepts course_pm_profile save content metadata and still rejects unknown kinds', async () => {
+    const org = await createTestOrganization({ name: 'Course PM Profile Validation Org' });
+    await ensureMemberEntityType(org.id);
+
+    const validResult = await validateSaveContentSemanticType(
+      'course_pm_profile',
+      {
+        memoryKind: 'course_pm_profile',
+        source: 'toolbox_onboarding',
+        toolboxUserId: 'user-1',
+        agentId: 'shifu-u-1',
+        profileId: 'course_pm_profile_1',
+        profileVersion: 1,
+        courseCount: 1,
+      },
+      org.id
+    );
+    expect(validResult.valid).toBe(true);
+
+    const invalidResult = await validateSaveContentSemanticType(
+      'unknown_course_pm_profile',
+      {},
+      org.id
+    );
+    expect(invalidResult.valid).toBe(false);
   });
 });
 
 describe('mergeMemberEventKinds', () => {
-  it('does not overwrite a custom project_profile definition', () => {
+  it('includes course_pm_profile in default event kinds', () => {
+    const merged = mergeMemberEventKinds(null);
+
+    expect(merged).toHaveProperty('course_pm_profile');
+  });
+
+  it('does not overwrite custom project_profile or course_pm_profile definitions', () => {
     const customProjectProfile = {
       description: 'Custom project profile',
       metadataSchema: {
@@ -79,11 +117,22 @@ describe('mergeMemberEventKinds', () => {
         },
       },
     };
+    const customCoursePmProfile = {
+      description: 'Custom course PM profile',
+      metadataSchema: {
+        type: 'object',
+        properties: {
+          customCoursePmField: { type: 'string' },
+        },
+      },
+    };
 
     const merged = mergeMemberEventKinds({
       project_profile: customProjectProfile,
+      course_pm_profile: customCoursePmProfile,
     });
 
     expect(merged.project_profile).toEqual(customProjectProfile);
+    expect(merged.course_pm_profile).toEqual(customCoursePmProfile);
   });
 });
