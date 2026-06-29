@@ -32,7 +32,7 @@ import {
 } from '../workspace/multi-tenant';
 import { orgContext } from './stores/org-context';
 import { toolboxMcpRoutes } from './agent-routes';
-import { createProvisioningRoutes } from './provisioning-routes';
+import { createProvisioningRoutes } from '../gateway/routes/provisioning';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
 import {
   createPostgresAgentAccessStore,
