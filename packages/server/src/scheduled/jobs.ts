@@ -222,6 +222,7 @@ function registerMaintenanceTasks(
       __created_by_user?: string | null;
       __created_by_agent?: string | null;
       __scheduled_job_id?: string;
+      __scheduled_job_tick?: string;
       organization_id?: string;
       agent_id?: string;
       prompt?: string;
@@ -277,9 +278,32 @@ function registerMaintenanceTasks(
       { sessionManager, queueProducer },
       {
         threadId,
-        messageText: p.prompt,
+        messageText: renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
         source: 'scheduled-job',
       }
     );
   });
+}
+
+function renderScheduledWakePrompt(prompt: string, scheduledJobTick?: string): string {
+  if (!prompt.includes('{{salesTalkDate}}')) return prompt;
+  if (!scheduledJobTick) return prompt.replaceAll('{{salesTalkDate}}', 'UNKNOWN_SCHEDULED_TICK');
+  const salesTalkDate = salesTalkDateFromScheduledTick(scheduledJobTick);
+  return prompt.replaceAll('{{salesTalkDate}}', salesTalkDate);
+}
+
+function salesTalkDateFromScheduledTick(scheduledJobTick: string): string {
+  const tick = new Date(scheduledJobTick);
+  if (Number.isNaN(tick.getTime())) return 'INVALID_SCHEDULED_TICK';
+  const taipeiParts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Taipei',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(tick);
+  const part = (type: 'year' | 'month' | 'day') =>
+    taipeiParts.find((item) => item.type === type)?.value ?? '';
+  const taipeiDate = new Date(`${part('year')}-${part('month')}-${part('day')}T00:00:00.000Z`);
+  taipeiDate.setUTCDate(taipeiDate.getUTCDate() - 1);
+  return taipeiDate.toISOString().slice(0, 10);
 }

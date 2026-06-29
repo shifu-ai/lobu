@@ -112,14 +112,13 @@ function cronForTaipeiMidnightAfterSalesTalk(weekday: number): string {
 function buildWakePrompt(params: {
 	displayName: string;
 	toolboxScheduleId: string;
-	trialSessionAgentId: string;
 }): string {
 	return [
 		`Run the Toolbox sales battle report schedule for ${params.displayName}.`,
 		"Call the Toolbox MCP tool sales_battle_report_run_now with these exact MCP arguments:",
 		`scheduleId: ${params.toolboxScheduleId}`,
-		`trialSessionAgentId: ${params.trialSessionAgentId}`,
-		"salesTalkDate: compute as the Asia/Taipei calendar date one day before the current scheduled run time / current date at execution.",
+		"salesTalkDate: {{salesTalkDate}}",
+		"Do not add extra MCP arguments.",
 		"Important: do not send LINE directly; Toolbox/Gateway handles report generation, sending, and logging.",
 	].join("\n");
 }
@@ -137,7 +136,6 @@ export function buildSalesBattleReportScheduledJobs(
 				prompt: buildWakePrompt({
 					displayName: body.displayName,
 					toolboxScheduleId: body.toolboxScheduleId,
-					trialSessionAgentId: body.trialSessionAgentId,
 				}),
 				reason: SALES_BATTLE_REPORT_REASON,
 				toolboxScheduleId: body.toolboxScheduleId,
