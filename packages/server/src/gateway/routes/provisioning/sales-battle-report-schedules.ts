@@ -113,14 +113,13 @@ function buildWakePrompt(params: {
 	displayName: string;
 	toolboxScheduleId: string;
 	trialSessionAgentId: string;
-	salesTalkWeekday: number;
 }): string {
 	return [
 		`Run the Toolbox sales battle report schedule for ${params.displayName}.`,
-		"Call the Toolbox MCP tool sales_battle_report_run_now with these exact identifiers:",
-		`toolboxScheduleId: ${params.toolboxScheduleId}`,
+		"Call the Toolbox MCP tool sales_battle_report_run_now with these exact MCP arguments:",
+		`scheduleId: ${params.toolboxScheduleId}`,
 		`trialSessionAgentId: ${params.trialSessionAgentId}`,
-		`salesTalkWeekday: ${params.salesTalkWeekday}`,
+		"salesTalkDate: compute as the Asia/Taipei calendar date one day before the current scheduled run time / current date at execution.",
 		"Important: do not send LINE directly; Toolbox/Gateway handles report generation, sending, and logging.",
 	].join("\n");
 }
@@ -139,7 +138,6 @@ export function buildSalesBattleReportScheduledJobs(
 					displayName: body.displayName,
 					toolboxScheduleId: body.toolboxScheduleId,
 					trialSessionAgentId: body.trialSessionAgentId,
-					salesTalkWeekday: weekday,
 				}),
 				reason: SALES_BATTLE_REPORT_REASON,
 				toolboxScheduleId: body.toolboxScheduleId,

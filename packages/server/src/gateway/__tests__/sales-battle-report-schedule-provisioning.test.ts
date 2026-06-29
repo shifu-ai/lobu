@@ -74,16 +74,17 @@ describe("sales battle report schedule provisioning", () => {
 			trialSessionAgentId: "trial-session-agent-1",
 			salesTalkWeekday: 0,
 		});
-		expect(String(jobs[0].actionArgs.prompt)).toContain(
-			"sales_battle_report_run_now",
+		const prompt = String(jobs[0].actionArgs.prompt);
+		expect(prompt).toContain("sales_battle_report_run_now");
+		expect(prompt).toContain("scheduleId: sales_battle_report_schedule_abc123");
+		expect(prompt).toContain("salesTalkDate");
+		expect(prompt).toContain(
+			"Asia/Taipei calendar date one day before the current scheduled run time / current date at execution",
 		);
-		expect(String(jobs[0].actionArgs.prompt)).toContain(
-			"toolboxScheduleId: sales_battle_report_schedule_abc123",
-		);
-		expect(String(jobs[0].actionArgs.prompt)).toContain(
-			"trialSessionAgentId: trial-session-agent-1",
-		);
-		expect(String(jobs[0].actionArgs.prompt)).toContain("do not send LINE");
+		expect(prompt).toContain("trialSessionAgentId: trial-session-agent-1");
+		expect(prompt).toContain("do not send LINE directly");
+		expect(prompt).not.toContain("toolboxScheduleId:");
+		expect(prompt).not.toContain("salesTalkWeekday:");
 	});
 
 	test("requires an organization PAT with mcp:admin scope", async () => {
