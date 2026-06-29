@@ -157,7 +157,7 @@ async function findExistingJob(
 	toolboxScheduleId: string,
 	weekday: number,
 ): Promise<ScheduledJobRow | null> {
-	const rows = await sql<ScheduledJobRow[]>`
+	const rows = (await sql`
 		SELECT *
 		FROM scheduled_jobs
 		WHERE organization_id = ${organizationId}
@@ -166,7 +166,7 @@ async function findExistingJob(
 		  AND action_args->>'salesTalkWeekday' = ${String(weekday)}
 		ORDER BY created_at ASC
 		LIMIT 1
-	`;
+	`) as unknown as ScheduledJobRow[];
 	return rows[0] ?? null;
 }
 
@@ -196,7 +196,7 @@ export async function ensureSalesBattleReportScheduledJobs(
 				refs.push(existing.id);
 				continue;
 			}
-			const rows = await db<ScheduledJobRow[]>`
+			const rows = (await db`
 				INSERT INTO scheduled_jobs (
 					organization_id, action_type, action_args, cron, next_run_at,
 					description,
@@ -210,7 +210,7 @@ export async function ensureSalesBattleReportScheduledJobs(
 					${job.sourceRunId ?? null}, ${job.sourceEventId ?? null}, ${job.sourceThreadId ?? null}
 				)
 				RETURNING *
-			`;
+			`) as unknown as ScheduledJobRow[];
 			createdCount += 1;
 			refs.push(rows[0].id);
 		}
