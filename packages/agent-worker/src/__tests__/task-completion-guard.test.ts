@@ -155,7 +155,9 @@ describe("evaluateTaskCompletion write intent guard", () => {
       latestUserText: "幫我改這份 Google Doc",
       finalVisibleText:
         "我目前沒有 Google Docs 寫入權限，請先授權後我才能修改。",
-      toolExecutions: [{ toolName: "google_workspace_docs_read", isError: false }],
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+      ],
     });
 
     expect(result).toEqual({

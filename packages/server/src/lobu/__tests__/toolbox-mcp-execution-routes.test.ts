@@ -38,6 +38,18 @@ const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
   'sheets_read',
   'google_workspace_sheets_read',
   'gws_sheets_read',
+  'slides_read',
+  'google_workspace_slides_read',
+  'gws_slides_read',
+  'calendar_events_list',
+  'google_workspace_calendar_events_list',
+  'gws_calendar_events_list',
+  'chat_spaces_list',
+  'google_workspace_chat_spaces_list',
+  'gws_chat_spaces_list',
+  'chat_messages_list',
+  'google_workspace_chat_messages_list',
+  'gws_chat_messages_list',
 ];
 const SHIFU_TOOLBOX_DISCOVERY_TOOLS = ['meeting_search'];
 let executeToolDirectMock: ReturnType<typeof mock>;
@@ -385,6 +397,46 @@ describe('Toolbox MCP execution routes', () => {
       'notion-search',
       { query: '大h line bot', limit: 5 }
     );
+  });
+
+  test('POST /mcp/tools/call keeps provider write tools out of the direct discovery route', async () => {
+    const app = await importMountedAgentRoutes();
+
+    for (const request of [
+      {
+        connectorKey: 'notion',
+        connectionRef: NOTION_CONNECTION_REF,
+        toolName: 'notion-create-pages',
+        args: { parent: { page_id: 'page-1' }, pages: [] },
+      },
+      {
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'docs_create',
+        args: { title: 'PM summary' },
+      },
+    ] as const) {
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          ...request,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'lobu_mcp_tool_not_allowed',
+      });
+    }
+
+    expect(executeToolDirectMock).not.toHaveBeenCalled();
   });
 
   test('POST /mcp/tools/call returns safe diagnostic code for connector execution failure results', async () => {

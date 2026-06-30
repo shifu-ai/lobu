@@ -134,7 +134,10 @@ describe("OpenClawWorker task completion guard", () => {
   test("fails loud when Google Docs writeback is not verified", async () => {
     const { worker, sent, errors, applyTaskCompletionGuard, processor } =
       buildWorkerWithRecorder();
-    processor.setFinalResult({ text: "我已經完成 Google Doc 修改。", isFinal: true });
+    processor.setFinalResult({
+      text: "我已經完成 Google Doc 修改。",
+      isFinal: true,
+    });
     processor.processEvent({
       type: "tool_execution_end",
       toolName: "gws_docs_batch_update",

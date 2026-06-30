@@ -117,7 +117,12 @@ describe("buildToolUseEventPayload", () => {
       args: {
         documentId: "doc-1",
         requests: [
-          { replaceAllText: { containsText: { text: "old" }, replaceText: "new" } },
+          {
+            replaceAllText: {
+              containsText: { text: "old" },
+              replaceText: "new",
+            },
+          },
           { replaceAllText: { containsText: { text: "a" }, replaceText: "b" } },
           { replaceAllText: { containsText: { text: "c" }, replaceText: "d" } },
           { replaceAllText: { containsText: { text: "e" }, replaceText: "f" } },
@@ -151,7 +156,12 @@ describe("buildToolUseEventPayload", () => {
       args: {
         documentId: "doc-2",
         requests: [
-          { replaceAllText: { containsText: { text: "old" }, replaceText: "new" } },
+          {
+            replaceAllText: {
+              containsText: { text: "old" },
+              replaceText: "new",
+            },
+          },
         ],
       },
       result: {

@@ -350,9 +350,99 @@ export class McpProxy {
   }
 
   /**
-   * Execute an MCP tool call directly (internal use, no HTTP auth).
-   * Used by the interaction bridge to execute tool calls after user approval.
+   * Execute an MCP tool call through guardrails and approval checks before
+   * falling through to direct execution.
    */
+  async callToolWithApproval(
+    agentId: string,
+    userId: string,
+    mcpId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+    tokenContext: {
+      token?: string;
+      channelId?: string;
+      conversationId?: string;
+      organizationId?: string;
+      messageId?: string;
+      processedMessageIds?: string[];
+      connectionId?: string;
+      teamId?: string;
+      platform?: string;
+    } = {}
+  ): Promise<{
+    status: "executed" | "blocked-notified" | "blocked-no-channel";
+    content: Array<{ type: string; text: string }>;
+    isError: boolean;
+    diagnosticCode?: string;
+  }> {
+    const tokenData = {
+      userId,
+      agentId,
+      channelId: tokenContext.channelId,
+      conversationId: tokenContext.conversationId,
+      organizationId: tokenContext.organizationId,
+      messageId: tokenContext.messageId,
+      processedMessageIds: tokenContext.processedMessageIds,
+      connectionId: tokenContext.connectionId,
+      teamId: tokenContext.teamId,
+      platform: tokenContext.platform,
+    };
+    const token = tokenContext.token ?? "";
+
+    if (await this.runPreToolGuardrails(agentId, tokenData, toolName, args)) {
+      return {
+        status: "executed",
+        content: [{ type: "text", text: "Tool call blocked by policy." }],
+        isError: true,
+      };
+    }
+
+    const approval = await this.evaluateToolApproval(
+      mcpId,
+      toolName,
+      args,
+      agentId,
+      tokenData,
+      token
+    );
+
+    if (approval === "blocked-notified") {
+      return {
+        status: "blocked-notified",
+        content: [
+          {
+            type: "text",
+            text: "Tool call requires approval. The user has been asked to approve.",
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    if (approval === "blocked-no-channel") {
+      return {
+        status: "blocked-no-channel",
+        content: [
+          {
+            type: "text",
+            text: `Tool call requires approval. Request access approval in chat for: ${mcpId} → ${toolName}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+
+    const result = await this.executeToolDirect(
+      agentId,
+      userId,
+      mcpId,
+      toolName,
+      args
+    );
+    return { status: "executed", ...result };
+  }
+
   async executeToolDirect(
     agentId: string,
     userId: string,

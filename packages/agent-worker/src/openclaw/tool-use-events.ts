@@ -87,7 +87,10 @@ export function buildToolUseEventPayload(event: {
       payload.result_summary = summary;
     }
   } else if (GOOGLE_DOCS_BATCH_UPDATE_TOOL_NAMES.has(event.toolName)) {
-    payload.result_summary = summarizeGoogleDocsBatchUpdate(event.args, event.result);
+    payload.result_summary = summarizeGoogleDocsBatchUpdate(
+      event.args,
+      event.result
+    );
   }
 
   return payload;
@@ -125,7 +128,8 @@ function summarizeGoogleDocsBatchUpdate(
   args: unknown,
   raw: unknown
 ): ToolUseResultSummary {
-  const input = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const input =
+    args && typeof args === "object" ? (args as Record<string, unknown>) : {};
   const result = extractMcpJsonBody(raw);
   const rawReply = result ?? raw;
   const replies = extractReplies(rawReply);
@@ -137,7 +141,9 @@ function summarizeGoogleDocsBatchUpdate(
       : typeof input.document_id === "string"
         ? input.document_id
         : undefined;
-  const requestCount = Array.isArray(input.requests) ? input.requests.length : undefined;
+  const requestCount = Array.isArray(input.requests)
+    ? input.requests.length
+    : undefined;
 
   const summary: ToolUseResultSummary = {
     operation: "google_docs_batch_update",

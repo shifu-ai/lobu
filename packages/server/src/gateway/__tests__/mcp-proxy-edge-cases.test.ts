@@ -658,6 +658,106 @@ describe("tool registry collision — same tool name on two MCPs", () => {
 // ---------------------------------------------------------------------------
 
 describe("tool approval — onToolBlocked and wildcard grants", () => {
+  test("callToolWithApproval blocks provider write tools through the real approval gate", async () => {
+    const toolCache = new McpToolCache();
+    const grantStore = new GrantStore();
+    inTestOrg(() => {
+      toolCache.set("google_workspace", [{ name: "gws_docs_create" }], "agent-1");
+    });
+
+    const configSource = createConfigSource({
+      google_workspace: {
+        id: "google_workspace",
+        upstreamUrl: "http://gws.example.com/mcp",
+      },
+    });
+
+    const captured: Record<string, unknown>[] = [];
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      toolCache,
+      grantStore,
+    });
+    proxy.onToolBlocked = async (
+      requestId,
+      agentId,
+      userId,
+      mcpId,
+      toolName,
+      args,
+      grantPattern,
+      channelId,
+      conversationId,
+      teamId,
+      connectionId,
+      platform
+    ) => {
+      captured.push({
+        requestId,
+        agentId,
+        userId,
+        mcpId,
+        toolName,
+        args,
+        grantPattern,
+        channelId,
+        conversationId,
+        teamId,
+        connectionId,
+        platform,
+      });
+    };
+
+    let upstreamCallCount = 0;
+    globalThis.fetch = async () => {
+      upstreamCallCount++;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "created doc" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const result = await inTestOrg(() =>
+      proxy.callToolWithApproval(
+        "agent-1",
+        "user-1",
+        "google_workspace",
+        "gws_docs_create",
+        { title: "PM weekly summary" },
+        {
+          channelId: "channel-1",
+          conversationId: "conv-1",
+          organizationId: "org-1",
+          platform: "line",
+          token: "worker-token",
+        }
+      )
+    );
+
+    expect(result.status).toBe("blocked-notified");
+    expect(result.isError).toBe(true);
+    expect(upstreamCallCount).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({
+      agentId: "agent-1",
+      userId: "user-1",
+      mcpId: "google_workspace",
+      toolName: "gws_docs_create",
+      args: { title: "PM weekly summary" },
+      grantPattern: "/mcp/google_workspace/tools/gws_docs_create",
+      channelId: "channel-1",
+      conversationId: "conv-1",
+      platform: "line",
+    });
+  });
+
   test("onToolBlocked fires once; subsequent blocked-no-channel when no handler", async () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();

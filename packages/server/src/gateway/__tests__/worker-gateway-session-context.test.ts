@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
+	encrypt,
 	generateWorkerToken,
 	type AgentConnectionStore,
 	type SecretRef,
@@ -231,6 +232,20 @@ describe("WorkerGateway session context", () => {
 				status: "active",
 			},
 		);
+		fakeConnections.set("toolbox-mcp:org-1:user-1:agent-1:notion", {
+			id: "toolbox-mcp:org-1:user-1:agent-1:notion",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "notion",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "notion",
+			},
+			status: "active",
+		});
 
 		const gateway = new WorkerGateway(
 			{ send: async () => undefined } as any,
@@ -273,11 +288,17 @@ describe("WorkerGateway session context", () => {
 			toolboxPersonalAgentTools?: Array<{
 				connectorKey: string;
 				connectionRef: string;
-				tools: Array<{ name: string; connectorToolName: string }>;
+				tools: Array<{
+					name: string;
+					connectorToolName: string;
+					approvalRequired: boolean;
+				}>;
 			}>;
 		};
 
-		const [googleWorkspaceTools] = body.toolboxPersonalAgentTools ?? [];
+		const googleWorkspaceTools = body.toolboxPersonalAgentTools?.find(
+			(group) => group.connectorKey === "google_workspace",
+		);
 		expect(googleWorkspaceTools?.connectorKey).toBe("google_workspace");
 		expect(googleWorkspaceTools?.connectionRef).toBe(
 			"toolbox-mcp:org-1:user-1:agent-1:google_workspace",
@@ -287,26 +308,63 @@ describe("WorkerGateway session context", () => {
 				expect.objectContaining({
 					name: "google_workspace_drive_search",
 					connectorToolName: "gws_drive_search",
+					approvalRequired: false,
 				}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_list",
-						connectorToolName: "gws_calendar_events_list",
-					}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_create",
-						connectorToolName: "gws_calendar_events_create",
-					}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_update",
-						connectorToolName: "gws_calendar_events_update",
-					}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_delete",
-						connectorToolName: "gws_calendar_events_delete",
-					}),
-				]),
-			);
-		});
+				expect.objectContaining({
+					name: "google_workspace_docs_create",
+					connectorToolName: "gws_docs_create",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_list",
+					connectorToolName: "gws_calendar_events_list",
+					approvalRequired: false,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_create",
+					connectorToolName: "gws_calendar_events_create",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_update",
+					connectorToolName: "gws_calendar_events_update",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_delete",
+					connectorToolName: "gws_calendar_events_delete",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_chat_messages_create",
+					connectorToolName: "gws_chat_messages_create",
+					approvalRequired: true,
+				}),
+			]),
+		);
+		const notionTools = body.toolboxPersonalAgentTools?.find(
+			(group) => group.connectorKey === "notion",
+		);
+		expect(notionTools?.tools).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "notion_search",
+					connectorToolName: "notion-search",
+					approvalRequired: false,
+				}),
+				expect.objectContaining({
+					name: "notion_create_pages",
+					connectorToolName: "notion-create-pages",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "notion_update_page",
+					connectorToolName: "notion-update-page",
+					approvalRequired: true,
+				}),
+			]),
+		);
+	});
 
 	test("executes materialized personal-agent tools through worker authentication", async () => {
 		fakeConnections.set("toolbox-mcp:ref", {
@@ -383,6 +441,116 @@ describe("WorkerGateway session context", () => {
 			"gws_drive_search",
 			{ query: "超級AI個體" },
 		);
+	});
+
+	test("approval-blocks materialized personal-agent write tools before direct execution", async () => {
+		fakeConnections.set("toolbox-mcp:ref", {
+			id: "toolbox-mcp:ref",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "google_workspace",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "google_workspace",
+				mcpId: "google_workspace",
+			},
+			status: "active",
+		});
+
+		const executeToolDirect = mock(async () => ({
+			content: [{ type: "text", text: "created doc" }],
+			isError: false,
+		}));
+		const callToolWithApproval = mock(async () => ({
+			status: "blocked-notified" as const,
+			content: [
+				{
+					type: "text",
+					text: "Tool call requires approval. The user has been asked to approve.",
+				},
+			],
+			isError: true,
+		}));
+
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{ getWorkerConfig: async () => ({ mcpServers: {} }) } as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [],
+				}),
+			} as any,
+			{ executeToolDirect, callToolWithApproval } as any,
+			undefined,
+			undefined,
+			undefined,
+			createFakeConnectionStore(),
+		);
+
+		const token = encrypt(
+			JSON.stringify({
+				userId: "user-1",
+				conversationId: "conv-1",
+				deploymentName: "worker-a",
+				channelId: "channel-1",
+				agentId: "agent-1",
+				organizationId: "org-1",
+				platform: "line",
+				timestamp: Date.now(),
+			}),
+		);
+
+		const response = await gateway.getApp().request(
+			"/internal/toolbox-personal-agent-tools/call",
+			{
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					connectorKey: "google_workspace",
+					connectionRef: "toolbox-mcp:ref",
+					connectorToolName: "gws_docs_create",
+					args: { title: "PM weekly summary" },
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			ok: false,
+			content: [
+				{
+					type: "text",
+					text: "Tool call requires approval. The user has been asked to approve.",
+				},
+			],
+			errorCode: "lobu_mcp_approval_required",
+			errorMessage: "MCP tool call requires approval",
+		});
+		expect(callToolWithApproval).toHaveBeenCalledWith(
+			"agent-1",
+			"user-1",
+			"google_workspace",
+			"gws_docs_create",
+			{ title: "PM weekly summary" },
+			expect.objectContaining({
+				channelId: "channel-1",
+				conversationId: "conv-1",
+				organizationId: "org-1",
+				platform: "line",
+			}),
+		);
+		expect(executeToolDirect).not.toHaveBeenCalled();
 	});
 
 	test("rejects materialized personal-agent tool calls without worker authentication", async () => {
