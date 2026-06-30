@@ -38,6 +38,18 @@ const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
   'sheets_read',
   'google_workspace_sheets_read',
   'gws_sheets_read',
+  'slides_read',
+  'google_workspace_slides_read',
+  'gws_slides_read',
+  'calendar_events_list',
+  'google_workspace_calendar_events_list',
+  'gws_calendar_events_list',
+  'chat_spaces_list',
+  'google_workspace_chat_spaces_list',
+  'gws_chat_spaces_list',
+  'chat_messages_list',
+  'google_workspace_chat_messages_list',
+  'gws_chat_messages_list',
 ];
 const SHIFU_TOOLBOX_DISCOVERY_TOOLS = ['meeting_search'];
 let executeToolDirectMock: ReturnType<typeof mock>;
