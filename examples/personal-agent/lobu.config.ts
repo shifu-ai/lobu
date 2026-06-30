@@ -47,6 +47,32 @@ const person = defineEntityType({
     company: { type: "string" },
     session_prefix: { type: "string" },
   },
+  // WhatsApp message metric (already live in prod). Declared here so `apply`
+  // preserves it rather than pruning it — a person aliases their `sender_jid`,
+  // and inbound messages on the local WhatsApp connector resolve to them.
+  eventSets: {
+    wa_messages: {
+      by: "alias",
+      field: "metadata->>'sender_jid'",
+      against: "aliases",
+      where: "connector_key='whatsapp.local'",
+    },
+  },
+  measures: {
+    messages_received: {
+      eventSet: "wa_messages",
+      agg: "count",
+      where: "metadata->>'from_me'='false'",
+      description: "WhatsApp messages received from this person.",
+      tier: "silver",
+    },
+  },
+  dimensions: {
+    chat: {
+      expr: "metadata->>'chat_jid'",
+      description: "WhatsApp chat the message belongs to.",
+    },
+  },
 });
 
 const company = defineEntityType({
@@ -104,6 +130,35 @@ const company = defineEntityType({
   },
 });
 
+// GBP-equivalent of a transaction amount, using ONLY exact, Revolut-booked
+// values — never a fuzzy FX-rate lookup:
+//   • native GBP                       → the amount itself
+//   • foreign card payment converted   → `counterpart_amount` (the GBP side
+//     Revolut actually moved; present when `counterpart_currency = 'GBP'`)
+//   • multi-currency pocket spend      → NULL. There is no GBP figure on the
+//     transaction (the pocket was funded earlier by a GBP→ccy EXCHANGE); the
+//     GBP cost is realised on that exchange, so we deliberately don't guess
+//     here. `SUM(gbp)` therefore ignores these rows rather than double-counting
+//     or inventing a rate. The stored per-transaction `fx_rate` is NOT used —
+//     its direction is inconsistent across currencies (USD stores ccy→GBP,
+//     VND stores GBP→ccy), so `amount * fx_rate` is unsafe.
+const gbpAmountSql = `CASE
+    WHEN metadata->>'currency' = 'GBP' THEN nullif(metadata->>'amount', '')::numeric
+    WHEN metadata->>'counterpart_currency' = 'GBP' THEN nullif(metadata->>'counterpart_amount', '')::numeric
+    ELSE NULL
+  END`;
+
+// Spend rows we treat as real consumption: a COMPLETED outbound CARD_PAYMENT.
+// This single predicate removes the three classes that polluted the old views:
+//   • DECLINED / FAILED / REVERTED / DELETED states (money never moved — e.g.
+//     the "Hydra" £600k was 12 DECLINED charge attempts), and
+//   • TRANSFER / EXCHANGE / ATM / FEE / SAVINGS types (own-money movement, not
+//     spend — e.g. "Personal → Joint", "Bought GBP with USD", "Ultra Plan Fee").
+const completedCardSpendWhere = `semantic_type = 'transaction'
+    AND metadata->>'state' = 'COMPLETED'
+    AND metadata->>'transaction_type' = 'CARD_PAYMENT'
+    AND metadata->>'direction' = 'out'`;
+
 const asset = defineEntityType({
   key: "asset",
   name: "Asset",
@@ -136,71 +191,130 @@ const asset = defineEntityType({
       description: "When acquired",
     },
   },
+  // Governed spend metrics over the Revolut transaction stream. The eventSet
+  // resolves a transaction to an account by matching its `currency` against the
+  // account asset's aliases. The buremba org runs a single consolidated Revolut
+  // account, so that one asset is aliased with EVERY currency it transacts in
+  // (GBP, USD, EUR, …) and owns all transactions; `currency` is then a
+  // dimension, not a separate entity per pocket. Because the measure is
+  // GBP-normalised, the per-account roll-up is a valid single GBP total. Aliases
+  // are entity data, not schema — seed them with
+  // examples/personal-agent/seed-asset-aliases.sql.
+  eventSets: {
+    transactions: {
+      by: "alias",
+      field: "metadata->>'currency'",
+      reads: "current",
+    },
+  },
+  segments: {
+    card_spend: {
+      description:
+        "Completed outbound card payments only (excludes declined/reverted charges and transfers/exchanges/ATM/fees).",
+      where: completedCardSpendWhere,
+      on: "event",
+    },
+  },
+  measures: {
+    spend: {
+      eventSet: "transactions",
+      agg: "sum",
+      expr: gbpAmountSql,
+      segments: ["card_spend"],
+      description:
+        "Total card spend in GBP. Exact only (native GBP + Revolut-booked GBP counterpart); foreign pocket spend is excluded here and accounted at the funding exchange.",
+      tier: "gold",
+    },
+    transaction_count: {
+      eventSet: "transactions",
+      agg: "count",
+      segments: ["card_spend"],
+      description: "Number of completed card payments.",
+      tier: "gold",
+    },
+  },
+  dimensions: {
+    category: {
+      expr: "metadata->>'category'",
+      description:
+        "Revolut spend category (restaurants, groceries, travel, services, …).",
+    },
+    month: {
+      expr: "to_char(occurred_at, 'YYYY-MM')",
+      description: "Calendar month of the transaction (YYYY-MM).",
+    },
+    currency: {
+      expr: "metadata->>'currency'",
+      description: "Transaction currency (ISO 4217).",
+    },
+    merchant_country: {
+      expr: "metadata->>'merchant_country'",
+      description: "Merchant country (ISO 3166-1 alpha-2).",
+    },
+  },
 });
 
+// Subscriptions are derived from repeated COMPLETED card payments. We trust two
+// signals, OR'd: (1) Revolut's own `is_subscription` mandate flag (high
+// precision, but only on recently-detected mandates), and (2) a recurrence
+// heuristic for older history — a stable monthly charge (low amount variance)
+// in a subscription-like category. The category exclusion + low-variance test
+// keep frequent restaurants/groceries (which the old blocklist chased by hand)
+// from masquerading as subscriptions.
 const subscriptionBackingSql = `
-SELECT
-  s.id,
-  s.name,
-  s.slug,
-  CASE
-    WHEN s.last_seen_date >= s.data_as_of - interval '45 days' THEN 'active'
-    WHEN s.last_seen_date >= s.data_as_of - interval '120 days' THEN 'changed'
-    ELSE 'cancelled'
-  END AS status,
-  s.category,
-  s.currency,
-  s.frequency,
-  s.amount,
-  s.first_seen_date::text AS first_seen,
-  s.last_seen_date::text AS last_seen,
-  s.billing_day,
-  s.total_spent,
-  s.charge_count,
-  s.active_months
-FROM (
+WITH card AS (
   SELECT
-  'subscription:' || md5(tx.merchant_key || ':' || tx.currency) AS id,
-  regexp_replace(initcap(max(tx.merchant_name)), '\\s+', ' ', 'g') AS name,
-  'subscription-' || md5(tx.merchant_key || ':' || tx.currency) AS slug,
-  'subscription' AS category,
-  tx.currency,
-  CASE
-    WHEN count(*) <= count(distinct date_trunc('month', tx.occurred_at)) + 2 THEN 'monthly'
-    ELSE 'periodic'
-  END AS frequency,
-  round((array_agg(tx.amount ORDER BY tx.occurred_at DESC))[1], 2) AS amount,
-  min(tx.tx_date) AS first_seen_date,
-  max(tx.tx_date) AS last_seen_date,
-  round(avg(extract(day from tx.occurred_at)))::int AS billing_day,
-  round(sum(tx.amount), 2) AS total_spent,
-  count(*)::int AS charge_count,
-  count(distinct date_trunc('month', tx.occurred_at))::int AS active_months,
-  max(tx.data_as_of) AS data_as_of
-FROM (
-  SELECT
-    id,
     occurred_at,
     occurred_at::date AS tx_date,
     max(occurred_at::date) OVER () AS data_as_of,
-    lower(regexp_replace(coalesce(metadata->>'description', payload_text, 'unknown'), '[^a-z0-9]+', ' ', 'g')) AS merchant_key,
+    coalesce(
+      nullif(metadata->>'merchant_brand_id', ''),
+      lower(regexp_replace(coalesce(metadata->>'description', payload_text, 'unknown'), '[^a-z0-9]+', ' ', 'g'))
+    ) AS merchant_key,
     coalesce(metadata->>'description', payload_text, 'Unknown') AS merchant_name,
     nullif(metadata->>'amount', '')::numeric AS amount,
-    coalesce(metadata->>'currency', 'GBP') AS currency
+    coalesce(metadata->>'currency', 'GBP') AS currency,
+    metadata->>'category' AS category,
+    (metadata->>'is_subscription') = 'true' AS flagged,
+    ${gbpAmountSql} AS gbp
   FROM events
-  WHERE semantic_type = 'transaction'
-    AND metadata->>'direction' = 'out'
+  WHERE ${completedCardSpendWhere}
     AND nullif(metadata->>'amount', '') IS NOT NULL
-    AND lower(coalesce(metadata->>'description', payload_text, 'unknown')) !~ '^(to|from|transfer from|transfer to|exchanged to|cash withdrawal|withdrawing savings|withdrawing)'
-    AND lower(coalesce(metadata->>'description', payload_text, 'unknown')) !~ '(aldi|amazon fresh|antepliler|b\\s*&\\s*m|bar|bolt|boots|british airways|buns from home|camden chippy|chipotle|co-?op|coco di mama|coffee|deliveroo|dishoom|dostlar|five guys|fortnum|galata|gokyuzu|grocery|hair studio|kolkati|marks\\s*&\\s*spencer|m&s|netil|nisa|ocakbasi|porte|pub|rave coffee|redemption roasters|resident advisor|restaurant|sainsbury|santander cycles|sushi|the constitution|trainline|uber|umut|waitrose|wasabi|whsmith)'
-) tx
-GROUP BY tx.merchant_key, tx.currency
-HAVING count(distinct date_trunc('month', tx.occurred_at)) >= 3
-   AND max(tx.amount) <= greatest(avg(tx.amount) * 3, 50)
-   AND count(*) <= count(distinct date_trunc('month', tx.occurred_at)) * 2
-   AND sum(tx.amount) >= 20
-) s
-ORDER BY s.total_spent DESC
+)
+SELECT
+  'subscription:' || md5(merchant_key || ':' || currency) AS id,
+  regexp_replace(initcap(max(merchant_name)), '\\s+', ' ', 'g') AS name,
+  'subscription-' || md5(merchant_key || ':' || currency) AS slug,
+  CASE
+    WHEN max(tx_date) >= max(data_as_of) - interval '45 days' THEN 'active'
+    WHEN max(tx_date) >= max(data_as_of) - interval '120 days' THEN 'changed'
+    ELSE 'cancelled'
+  END AS status,
+  'subscription' AS category,
+  currency,
+  CASE
+    WHEN count(*) <= count(distinct date_trunc('month', occurred_at)) + 2 THEN 'monthly'
+    ELSE 'periodic'
+  END AS frequency,
+  round((array_agg(amount ORDER BY occurred_at DESC))[1], 2) AS amount,
+  min(tx_date)::text AS first_seen,
+  max(tx_date)::text AS last_seen,
+  round(avg(extract(day from occurred_at)))::int AS billing_day,
+  round(sum(amount), 2) AS total_spent,
+  round(sum(gbp), 2) AS total_spent_gbp,
+  count(*)::int AS charge_count,
+  count(distinct date_trunc('month', occurred_at))::int AS active_months
+FROM card
+GROUP BY merchant_key, currency
+HAVING bool_or(flagged)
+   OR (
+     count(distinct date_trunc('month', occurred_at)) >= 4
+     AND max(category) NOT IN ('restaurants', 'groceries', 'transport', 'cash', 'general')
+     AND coalesce(stddev_pop(amount), 0) <= avg(amount) * 0.2
+     AND count(*) <= count(distinct date_trunc('month', occurred_at)) + 2
+     AND sum(amount) >= 20
+   )
+ORDER BY total_spent DESC
 `;
 
 const subscription = defineEntityType({
@@ -248,9 +362,15 @@ const subscription = defineEntityType({
     },
     total_spent: {
       type: "number",
-      description: "Total spent over tracked period",
+      description:
+        "Total charged over the tracked period, in the charge currency",
       "x-table-column": true,
       "x-table-label": "Total",
+    },
+    total_spent_gbp: {
+      type: "number",
+      description:
+        "Total in GBP where exactly known (native GBP + Revolut-booked GBP counterpart); null portion = USD/EUR-pocket charges funded at an earlier exchange",
     },
     charge_count: { type: "integer" },
     active_months: { type: "integer" },
@@ -268,46 +388,75 @@ const topic = defineEntityType({
   },
 });
 
+// Trips are clusters of COMPLETED card payments in a NON-home country,
+// concentrated in time. We key on `merchant_country` (a single trip mixes
+// VND/USD/GBP, so the old currency-clustering was wrong) per calendar month.
+// The country denylist drops home (GB/GBR) plus the online-merchant domiciles
+// (IE/LU/EE) that surface as bogus "trips" spread across years.
+//
+// A real trip is a SHORT, VARIED burst — so beyond the >= 6 transaction count
+// we require span <= 16 days and >= 3 distinct categories. That distinguishes
+// travel (concentrated, restaurants + transport + shopping in a couple of
+// weeks) from steady online spend billed abroad (US-domiciled SaaS: spread
+// across the whole month, one or two service categories) which otherwise
+// surfaced as a monthly "US trip".
+//
+// GBP cost is the sum of two exact sources, never a guessed FX rate:
+//   • gbp_known  — native GBP + Revolut-booked GBP counterpart on the trip's
+//                  own card payments.
+//   • gbp_funded — GBP exchanged INTO the trip's local currency around the trip
+//                  window (a Revolut "Exchanged to <ccy>" event). This recovers
+//                  the cost of pocket spend, which carries no per-transaction
+//                  GBP (e.g. a VND-pocket Vietnam trip: £688 on cards + £1,500
+//                  exchanged to VND). gbp_cost = gbp_known + gbp_funded.
 const tripBackingSql = `
+WITH tx AS (
+  SELECT
+    metadata->>'merchant_country' AS country,
+    date_trunc('month', occurred_at) AS mon,
+    coalesce(metadata->>'currency', 'GBP') AS currency,
+    metadata->>'category' AS category,
+    nullif(metadata->>'amount', '')::numeric AS amount,
+    ${gbpAmountSql} AS gbp,
+    occurred_at::date AS d
+  FROM events
+  WHERE ${completedCardSpendWhere}
+    AND nullif(metadata->>'amount', '') IS NOT NULL
+    AND metadata->>'merchant_country' IS NOT NULL
+    AND metadata->>'merchant_country' NOT IN ('', 'GB', 'GBR', 'IE', 'LU', 'EE')
+)
 SELECT
-  'trip:' || md5(date_trunc('month', occurred_at)::date::text || ':' || coalesce(metadata->>'currency', 'GBP')) AS id,
-  CASE coalesce(metadata->>'currency', 'GBP')
-    WHEN 'VND' THEN 'Vietnam trip'
-    WHEN 'EUR' THEN 'Europe trip'
-    WHEN 'USD' THEN 'US or international trip'
-    WHEN 'TRY' THEN 'Turkey trip'
-    WHEN 'JPY' THEN 'Japan trip'
-    WHEN 'KRW' THEN 'Korea trip'
-    ELSE coalesce(metadata->>'currency', 'GBP') || ' trip'
-  END || ' (' || min(occurred_at::date)::text || ' to ' || max(occurred_at::date)::text || ')' AS name,
-  'trip-' || date_trunc('month', occurred_at)::date::text || '-' || lower(coalesce(metadata->>'currency', 'GBP')) AS slug,
-  CASE coalesce(metadata->>'currency', 'GBP')
-    WHEN 'VND' THEN 'Vietnam'
-    WHEN 'EUR' THEN 'Europe'
-    WHEN 'USD' THEN 'US or international'
-    WHEN 'TRY' THEN 'Turkey'
-    WHEN 'JPY' THEN 'Japan'
-    WHEN 'KRW' THEN 'Korea'
-    ELSE coalesce(metadata->>'currency', 'GBP')
-  END AS destination,
-  min(occurred_at::date)::text AS start_date,
-  max(occurred_at::date)::text AS end_date,
-  coalesce(metadata->>'currency', 'GBP') AS currency,
-  round(sum(nullif(metadata->>'amount', '')::numeric), 2) AS total_cost,
+  'trip:' || country || ':' || to_char(mon, 'YYYY-MM') AS id,
+  country || ' trip (' || min(d)::text || ' to ' || max(d)::text || ')' AS name,
+  'trip-' || lower(country) || '-' || to_char(mon, 'YYYY-MM') AS slug,
+  country AS destination,
+  min(d)::text AS start_date,
+  max(d)::text AS end_date,
+  mode() WITHIN GROUP (ORDER BY currency) AS local_currency,
+  round(sum(gbp), 2) AS gbp_known,
+  nullif(
+    round(
+      coalesce(sum(gbp), 0)
+      + (
+        SELECT coalesce(sum(nullif(e.metadata->>'amount', '')::numeric), 0)
+        FROM events e
+        WHERE e.semantic_type = 'transaction'
+          AND e.metadata->>'transaction_type' = 'EXCHANGE'
+          AND e.metadata->>'state' = 'COMPLETED'
+          AND e.metadata->>'currency' = 'GBP'
+          AND e.metadata->>'direction' = 'out'
+          AND e.metadata->>'description' = 'Exchanged to ' || mode() WITHIN GROUP (ORDER BY tx.currency)
+          AND e.occurred_at::date BETWEEN min(tx.d) - 21 AND max(tx.d) + 3
+      ), 2
+    ),
+    0
+  ) AS gbp_cost,
+  string_agg(DISTINCT currency, ',' ORDER BY currency) AS currencies,
   count(*)::int AS transaction_count,
-  count(*)::int AS foreign_transaction_count,
-  CASE
-    WHEN count(*) >= 5 THEN 'high'
-    WHEN count(*) >= 3 THEN 'medium'
-    ELSE 'low'
-  END AS confidence
-FROM events
-WHERE semantic_type = 'transaction'
-  AND metadata->>'direction' = 'out'
-  AND coalesce(metadata->>'currency', 'GBP') <> 'GBP'
-  AND nullif(metadata->>'amount', '') IS NOT NULL
-GROUP BY date_trunc('month', occurred_at)::date, coalesce(metadata->>'currency', 'GBP')
-HAVING count(*) >= 2
+  CASE WHEN (max(d) - min(d)) <= 10 AND count(*) >= 12 THEN 'high' ELSE 'medium' END AS confidence
+FROM tx
+GROUP BY country, mon
+HAVING count(*) >= 6 AND (max(d) - min(d)) <= 16 AND count(DISTINCT category) >= 3
 ORDER BY start_date DESC
 `;
 
@@ -315,16 +464,15 @@ const trip = defineEntityType({
   key: "trip",
   name: "Trip",
   description:
-    "Travel experiences derived from foreign-currency transaction clusters",
+    "Travel derived from time-concentrated card spend in a non-home country",
   metadata: { icon: "✈️", color: "#F59E0B" },
   backing: { sql: tripBackingSql },
   properties: {
-    currency: { type: "string" },
-    end_date: {
+    destination: {
       type: "string",
-      format: "date",
+      description: "Merchant country code (ISO 3166-1 alpha-2)",
       "x-table-column": true,
-      "x-table-label": "End",
+      "x-table-label": "Destination",
     },
     start_date: {
       type: "string",
@@ -332,20 +480,128 @@ const trip = defineEntityType({
       "x-table-column": true,
       "x-table-label": "Start",
     },
-    total_cost: {
-      type: "number",
-      "x-table-column": true,
-      "x-table-label": "Total",
-    },
-    destination: {
+    end_date: {
       type: "string",
-      description: "Primary destination",
+      format: "date",
       "x-table-column": true,
-      "x-table-label": "Destination",
+      "x-table-label": "End",
+    },
+    local_currency: {
+      type: "string",
+      description: "Dominant currency spent on the trip",
+    },
+    local_spend: {
+      type: "number",
+      description: "Spend in the dominant local currency (exact)",
+      "x-table-column": true,
+      "x-table-label": "Local spend",
+    },
+    gbp_cost: {
+      type: "number",
+      description:
+        "Best GBP estimate of the trip: exact card GBP plus GBP exchanged into the local currency around the trip",
+      "x-table-column": true,
+      "x-table-label": "GBP cost",
+    },
+    gbp_known: {
+      type: "number",
+      description:
+        "GBP spent directly on cards, known exactly (native GBP + GBP counterpart)",
+    },
+    gbp_funded: {
+      type: "number",
+      description:
+        "GBP exchanged into the local currency around the trip window (funds pocket spend)",
+    },
+    currencies: {
+      type: "string",
+      description: "All currencies spent on the trip, comma-separated",
     },
     transaction_count: { type: "integer" },
-    foreign_transaction_count: { type: "integer" },
     confidence: { type: "string", enum: ["low", "medium", "high"] },
+  },
+});
+
+// Goals and learnings are agent-curated, not derived from a feed: the agent
+// writes them with save_memory and updates them as it observes the user. They
+// are stored entity types (no `backing`). The human-AI field-ownership loop
+// (a human edit pinning a field the agent must then respect) is a later layer;
+// for now these capture the agent's working model of what the user is trying to
+// do and what it has learned about them.
+const goal = defineEntityType({
+  key: "goal",
+  name: "Goal",
+  description:
+    "A personal objective the agent tracks and helps make progress on",
+  metadata: { icon: "🎯", color: "#0EA5E9" },
+  properties: {
+    status: {
+      type: "string",
+      enum: ["active", "achieved", "paused", "abandoned"],
+      description: "Current status",
+      "x-table-column": true,
+      "x-table-label": "Status",
+    },
+    category: {
+      type: "string",
+      description:
+        "Area of life (finance, health, career, travel, learning, …)",
+    },
+    target_date: {
+      type: "string",
+      format: "date",
+      description: "When the user wants to reach it",
+      "x-table-column": true,
+      "x-table-label": "Target",
+    },
+    progress: {
+      type: "number",
+      minimum: 0,
+      maximum: 100,
+      description: "Percent complete (0–100)",
+      "x-table-column": true,
+      "x-table-label": "Progress",
+    },
+    metric: {
+      type: "string",
+      description:
+        "How progress is measured — ideally a declared metric (e.g. asset.spend) the agent can query",
+    },
+    description: { type: "string" },
+  },
+});
+
+const learning = defineEntityType({
+  key: "learning",
+  name: "Learning",
+  description:
+    "Something the agent has learned about the user or their world worth retaining",
+  metadata: { icon: "💡", color: "#A855F7" },
+  properties: {
+    topic: {
+      type: "string",
+      description: "What the learning is about",
+      "x-table-column": true,
+      "x-table-label": "Topic",
+    },
+    source: {
+      type: "string",
+      description: "Where it was learned (conversation, watcher, observation)",
+    },
+    learned_date: {
+      type: "string",
+      format: "date",
+      "x-table-column": true,
+      "x-table-label": "Date",
+    },
+    confidence: {
+      type: "string",
+      enum: ["low", "medium", "high"],
+      "x-table-column": true,
+      "x-table-label": "Confidence",
+    },
+    tags: { type: "array", items: { type: "string" } },
+    description: { type: "string" },
   },
 });
 
@@ -379,6 +635,6 @@ export default defineConfig({
   orgDescription:
     "Personal agent tracking finances, people, companies, subscriptions, trips, and topics.",
   agents: [personalAgent],
-  entities: [person, company, asset, subscription, topic, trip],
+  entities: [person, company, asset, subscription, topic, trip, goal, learning],
   connections: [revolutConnection],
 });
