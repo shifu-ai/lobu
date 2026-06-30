@@ -823,6 +823,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             organizationId: tokenOrganizationId,
             platform: "api",
             sessionKey: userId,
+            tokenKind: "session",
           }
         );
 
@@ -853,6 +854,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       organizationId: tokenOrganizationId,
       platform: "api",
       sessionKey: userId,
+      tokenKind: "session",
     });
 
     const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;

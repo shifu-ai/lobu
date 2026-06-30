@@ -59,6 +59,7 @@ export function mintRunJobToken(
     runId: data.runId,
     messageId: data.messageId,
     processedMessageIds: [data.messageId],
+    tokenKind: "run",
   });
 }
 
