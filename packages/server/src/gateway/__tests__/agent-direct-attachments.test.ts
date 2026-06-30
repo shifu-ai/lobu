@@ -21,6 +21,9 @@ interface EnqueuedMessage {
 	messageId: string;
 	messageText: string;
 	platformMetadata: {
+		agentId?: string;
+		source?: string;
+		sessionReset?: boolean;
 		files?: Array<{
 			name: string;
 			mimetype: string;
@@ -188,6 +191,41 @@ function makeGatewayApp(overrides: Record<string, unknown> = {}) {
 }
 
 describe("direct API multipart attachments", () => {
+	test("forwards direct API platformMetadata for session reset messages", async () => {
+		const { app, enqueued } = makeApp();
+
+		const res = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${AUTH_TOKEN}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					content: "Reset this LINE conversation context.",
+					messageId: "lobu-msg-clear",
+					platformMetadata: {
+						source: "line-clear-command",
+						sessionReset: true,
+					},
+				}),
+			},
+		);
+
+		expect(res.status).toBe(200);
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0]).toMatchObject({
+			messageId: "lobu-msg-clear",
+			messageText: "Reset this LINE conversation context.",
+		});
+		expect(enqueued[0].platformMetadata).toMatchObject({
+			agentId: AGENT_ID,
+			source: "line-clear-command",
+			sessionReset: true,
+		});
+	});
+
 	test("accepts an attachment-only image and forwards it as platformMetadata.files", async () => {
 		const { app, enqueued } = makeApp();
 		const imageBytes = Buffer.from("png-bytes");

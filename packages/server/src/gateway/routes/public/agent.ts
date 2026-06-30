@@ -1317,6 +1317,12 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     await sessMgr.touchSession(agentId);
 
     const realAgentId = session.agentId || agentId;
+    const requestPlatformMetadata =
+      body.platformMetadata &&
+      typeof body.platformMetadata === "object" &&
+      !Array.isArray(body.platformMetadata)
+        ? body.platformMetadata
+        : {};
 
     const { span: rootSpan, traceparent } = createRootSpan("message_received", {
       "lobu.agent_id": realAgentId,
@@ -1386,8 +1392,14 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         platform: "api",
         messageText: directMessageText,
         platformMetadata: {
+          ...requestPlatformMetadata,
           agentId: realAgentId,
-          source: session.intent?.kind === "watcher_run" ? "watcher-run" : "direct-api",
+          source:
+            typeof requestPlatformMetadata.source === "string"
+              ? requestPlatformMetadata.source
+              : session.intent?.kind === "watcher_run"
+                ? "watcher-run"
+                : "direct-api",
           traceparent: traceparent || undefined,
           dryRun: session.dryRun || false,
           intent: session.intent,
