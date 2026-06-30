@@ -151,7 +151,9 @@ export function hasUnverifiedWriteEvidence(
 }
 
 function isGoogleDocsWriteTool(toolName: string): boolean {
-  return GOOGLE_DOCS_WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(toolName));
+  return GOOGLE_DOCS_WRITE_TOOL_PATTERNS.some((pattern) =>
+    pattern.test(toolName)
+  );
 }
 
 export function hasVisibleBlocker(finalVisibleText: string): boolean {

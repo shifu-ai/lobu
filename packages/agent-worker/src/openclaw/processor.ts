@@ -126,7 +126,9 @@ export class OpenClawProgressProcessor {
         this.toolExecutions.push({
           toolName: event.toolName,
           isError: event.isError === true,
-          ...(payload.result_summary ? { resultSummary: payload.result_summary } : {}),
+          ...(payload.result_summary
+            ? { resultSummary: payload.result_summary }
+            : {}),
         });
         return false;
       }

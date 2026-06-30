@@ -9,7 +9,12 @@ export interface ExecutionReporter {
     type: string;
     message?: string;
     payload?: Record<string, unknown>;
-    status?: "running" | "waiting_for_tool" | "completed" | "failed" | "cancelled";
+    status?:
+      | "running"
+      | "waiting_for_tool"
+      | "completed"
+      | "failed"
+      | "cancelled";
     finalSummary?: unknown;
     error?: unknown;
   }) => Promise<void>;
@@ -58,23 +63,32 @@ export function deriveExecutionTaskId(
 export function createExecutionReporter(
   params: ExecutionReporterParams
 ): ExecutionReporter {
-  const enabled = Boolean(params.gatewayUrl && params.workerToken && params.agentId);
+  const enabled = Boolean(
+    params.gatewayUrl && params.workerToken && params.agentId
+  );
   const taskId = enabled
-    ? deriveExecutionTaskId(params.workerToken, params.sessionId, params.messageId)
+    ? deriveExecutionTaskId(
+        params.workerToken,
+        params.sessionId,
+        params.messageId
+      )
     : null;
 
   const post = async (body: Record<string, unknown>): Promise<void> => {
     if (!enabled || !taskId) return;
     try {
-      const response = await fetch(`${params.gatewayUrl}/internal/execution-events`, {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${params.workerToken}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ taskId, ...body }),
-        signal: AbortSignal.timeout(10_000),
-      });
+      const response = await fetch(
+        `${params.gatewayUrl}/internal/execution-events`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${params.workerToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ taskId, ...body }),
+          signal: AbortSignal.timeout(10_000),
+        }
+      );
       if (!response.ok) {
         logger.warn(
           `Execution event report failed: ${response.status} ${response.statusText}`
