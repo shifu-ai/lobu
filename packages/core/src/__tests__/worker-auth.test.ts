@@ -13,7 +13,11 @@ import {
 const TEST_KEY =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-const ENV_KEYS = ["ENCRYPTION_KEY", "WORKER_TOKEN_TTL_MS"] as const;
+const ENV_KEYS = [
+  "ENCRYPTION_KEY",
+  "WORKER_TOKEN_TTL_MS",
+  "WORKER_DEPLOYMENT_TOKEN_TTL_MS",
+] as const;
 
 describe("worker auth token", () => {
   let saved: Record<string, string | undefined> = {};
@@ -316,5 +320,34 @@ describe("worker auth token: explicit expiry", () => {
     // Fresh token under the same custom TTL should still verify.
     const fresh = generateWorkerToken("u", "c", "d", { channelId: "ch" });
     expect(verifyWorkerToken(fresh)).not.toBeNull();
+  });
+
+  test("deployment tokens use deployment TTL instead of short run-token TTL", async () => {
+    const { encrypt } = await import("../utils/encryption");
+    process.env.WORKER_TOKEN_TTL_MS = String(60 * 60 * 1000);
+
+    const staleDeploymentToken = encrypt(
+      JSON.stringify({
+        userId: "u",
+        conversationId: "c",
+        channelId: "ch",
+        deploymentName: "d",
+        timestamp: Date.now() - 2 * 60 * 60 * 1000,
+        tokenKind: "deployment",
+      })
+    );
+    expect(verifyWorkerToken(staleDeploymentToken)).not.toBeNull();
+
+    const staleRunToken = encrypt(
+      JSON.stringify({
+        userId: "u",
+        conversationId: "c",
+        channelId: "ch",
+        deploymentName: "d",
+        timestamp: Date.now() - 2 * 60 * 60 * 1000,
+        tokenKind: "run",
+      })
+    );
+    expect(verifyWorkerToken(staleRunToken)).toBeNull();
   });
 });

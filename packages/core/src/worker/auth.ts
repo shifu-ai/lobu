@@ -45,6 +45,11 @@ export interface WorkerTokenData {
   messageId?: string;
   /** Message IDs processed by the originating run. */
   processedMessageIds?: string[];
+  /**
+   * Distinguishes long-lived worker deployment credentials from short-lived
+   * run/session credentials. Older tokens omit this and keep the short TTL.
+   */
+  tokenKind?: "deployment" | "session" | "run";
 }
 
 export function generateWorkerToken(
@@ -70,6 +75,7 @@ export function generateWorkerToken(
     runId?: number;
     messageId?: string;
     processedMessageIds?: string[];
+    tokenKind?: WorkerTokenData["tokenKind"];
   }
 ): string {
   if (!options.channelId) {
@@ -93,6 +99,7 @@ export function generateWorkerToken(
     runId: options.runId,
     messageId: options.messageId,
     processedMessageIds: options.processedMessageIds,
+    tokenKind: options.tokenKind,
   };
 
   return encrypt(JSON.stringify(payload));
@@ -175,13 +182,28 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
         return null;
       }
     }
+    if (
+      data.tokenKind !== undefined &&
+      data.tokenKind !== "deployment" &&
+      data.tokenKind !== "session" &&
+      data.tokenKind !== "run"
+    ) {
+      logger.error("Worker token rejected: invalid tokenKind");
+      return null;
+    }
 
     // Default TTL 2h (was 24h — a leaked token had no revocation path for a
     // full day). Override via WORKER_TOKEN_TTL_MS. Clock-skew tolerance via
     // WORKER_TOKEN_CLOCK_SKEW_MS. Tokens timestamped further in the future
     // than the skew are rejected too — otherwise forward drift would grant
     // an unbounded validity window.
-    const ttl = parsePositiveIntEnv("WORKER_TOKEN_TTL_MS", 2 * 60 * 60 * 1000);
+    const ttl =
+      data.tokenKind === "deployment"
+        ? parsePositiveIntEnv(
+            "WORKER_DEPLOYMENT_TOKEN_TTL_MS",
+            7 * 24 * 60 * 60 * 1000
+          )
+        : parsePositiveIntEnv("WORKER_TOKEN_TTL_MS", 2 * 60 * 60 * 1000);
     const skewMs = parsePositiveIntEnv(
       "WORKER_TOKEN_CLOCK_SKEW_MS",
       30 * 1000,

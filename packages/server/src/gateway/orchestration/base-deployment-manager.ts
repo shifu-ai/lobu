@@ -871,6 +871,7 @@ export abstract class BaseDeploymentManager {
             ? platformMetadata.connectionId
             : undefined,
         traceId,
+        tokenKind: "deployment",
       }
     );
 

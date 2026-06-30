@@ -83,6 +83,7 @@ export async function createThreadForAgent(
     organizationId,
     platform: "api",
     sessionKey: userId,
+    tokenKind: "session",
   });
   const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
 
