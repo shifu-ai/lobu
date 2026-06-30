@@ -22,11 +22,34 @@ import logger from '../utils/logger';
 import type { TaskScheduler } from './task-scheduler';
 import { errorMessage } from '../utils/errors';
 
+export interface ScheduledDeliveryContext {
+  platform: string;
+  conversationId: string;
+  channelId: string;
+  teamId?: string | null;
+  connectionId: string;
+  userId?: string | null;
+}
+
+/**
+ * Chat platforms a scheduled wake can post its reply back into. Single source
+ * of truth shared by the create-time gate (`manage_schedules`) and the
+ * fire-time dispatch (`scheduled/jobs.ts`) so the two can never drift — a
+ * platform accepted at creation but unhandled at execution would store a dead
+ * `delivery_context` and silently fall back to the api path.
+ */
+export const DELIVERABLE_CHAT_PLATFORMS = ['slack', 'telegram'] as const;
+
+export function isDeliverableChatPlatform(platform: string): boolean {
+  return (DELIVERABLE_CHAT_PLATFORMS as readonly string[]).includes(platform);
+}
+
 export interface ScheduledJobRow {
   id: string;
   organization_id: string;
   action_type: string;
   action_args: Record<string, unknown>;
+  delivery_context: ScheduledDeliveryContext | null;
   cron: string | null;
   next_run_at: string;
   last_fired_at: string | null;
@@ -46,6 +69,7 @@ interface CreateScheduledJobParams {
   organizationId: string;
   actionType: string;
   actionArgs: Record<string, unknown>;
+  deliveryContext?: ScheduledDeliveryContext | null;
   description: string;
   cron?: string | null;
   runAt: Date;
@@ -65,13 +89,13 @@ export async function createScheduledJob(
   const sql = getDb();
   const rows = (await sql`
     INSERT INTO scheduled_jobs (
-      organization_id, action_type, action_args, cron, next_run_at,
+      organization_id, action_type, action_args, delivery_context, cron, next_run_at,
       description,
       created_by_user, created_by_agent,
       source_run_id, source_event_id, source_thread_id
     ) VALUES (
       ${params.organizationId}, ${params.actionType},
-      ${sql.json(params.actionArgs)}, ${params.cron ?? null}, ${params.runAt},
+      ${sql.json(params.actionArgs)}, ${params.deliveryContext ? sql.json(params.deliveryContext) : null}, ${params.cron ?? null}, ${params.runAt},
       ${params.description},
       ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
       ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null},
@@ -177,6 +201,7 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
           await scheduler.spawn(row.action_type, {
             ...row.action_args,
             __scheduled_job_id: row.id,
+            __delivery_context: row.delivery_context,
             __scheduled_job_tick: tickIso,
             __organization_id: row.organization_id,
             __created_by_user: row.created_by_user,

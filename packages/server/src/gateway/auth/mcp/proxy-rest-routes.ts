@@ -245,6 +245,7 @@ async function handleCallToolAuthenticated(
 				jsonRpcBody,
 				scopeKey,
 				auth.token,
+				extraHeaders,
 			);
 			data = (await parseJsonRpcResponse(response)) as JsonRpcResponse;
 		}
