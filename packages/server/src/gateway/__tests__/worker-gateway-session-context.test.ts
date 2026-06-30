@@ -321,6 +321,21 @@ describe("WorkerGateway session context", () => {
 					approvalRequired: false,
 				}),
 				expect.objectContaining({
+					name: "google_workspace_calendar_events_create",
+					connectorToolName: "gws_calendar_events_create",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_update",
+					connectorToolName: "gws_calendar_events_update",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_delete",
+					connectorToolName: "gws_calendar_events_delete",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
 					name: "google_workspace_chat_messages_create",
 					connectorToolName: "gws_chat_messages_create",
 					approvalRequired: true,

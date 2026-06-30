@@ -236,6 +236,76 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			},
 		},
 		{
+			name: "google_workspace_calendar_events_create",
+			connectorToolName: "gws_calendar_events_create",
+			description:
+				"Create a Google Calendar event as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					summary: { type: "string" },
+					description: { type: "string" },
+					location: { type: "string" },
+					startDateTime: { type: "string" },
+					endDateTime: { type: "string" },
+					timeZone: { type: "string" },
+					attendees: { type: "array", items: { type: "string" } },
+					sendUpdates: {
+						type: "string",
+						enum: ["all", "externalOnly", "none"],
+					},
+				},
+				required: ["summary", "startDateTime", "endDateTime"],
+			},
+		},
+		{
+			name: "google_workspace_calendar_events_update",
+			connectorToolName: "gws_calendar_events_update",
+			description:
+				"Update a Google Calendar event as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					eventId: { type: "string" },
+					summary: { type: "string" },
+					description: { type: "string" },
+					location: { type: "string" },
+					startDateTime: { type: "string" },
+					endDateTime: { type: "string" },
+					timeZone: { type: "string" },
+					attendees: { type: "array", items: { type: "string" } },
+					sendUpdates: {
+						type: "string",
+						enum: ["all", "externalOnly", "none"],
+					},
+				},
+				required: ["eventId"],
+			},
+		},
+		{
+			name: "google_workspace_calendar_events_delete",
+			connectorToolName: "gws_calendar_events_delete",
+			description:
+				"Delete a Google Calendar event as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					eventId: { type: "string" },
+					sendUpdates: {
+						type: "string",
+						enum: ["all", "externalOnly", "none"],
+					},
+				},
+				required: ["eventId"],
+			},
+		},
+		{
 			name: "google_workspace_chat_spaces_list",
 			connectorToolName: "gws_chat_spaces_list",
 			description:
