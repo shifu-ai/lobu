@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
+	encrypt,
 	generateWorkerToken,
 	type AgentConnectionStore,
 	type SecretRef,
@@ -437,11 +438,18 @@ describe("WorkerGateway session context", () => {
 			createFakeConnectionStore(),
 		);
 
-		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
-			channelId: "channel-1",
-			agentId: "agent-1",
-			organizationId: "org-1",
-		});
+		const token = encrypt(
+			JSON.stringify({
+				userId: "user-1",
+				conversationId: "conv-1",
+				deploymentName: "worker-a",
+				channelId: "channel-1",
+				agentId: "agent-1",
+				organizationId: "org-1",
+				platform: "line",
+				timestamp: Date.now(),
+			}),
+		);
 
 		const response = await gateway.getApp().request(
 			"/internal/toolbox-personal-agent-tools/call",
@@ -482,6 +490,7 @@ describe("WorkerGateway session context", () => {
 				channelId: "channel-1",
 				conversationId: "conv-1",
 				organizationId: "org-1",
+				platform: "line",
 			}),
 		);
 		expect(executeToolDirect).not.toHaveBeenCalled();

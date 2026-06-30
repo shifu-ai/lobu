@@ -350,8 +350,8 @@ export class McpProxy {
   }
 
   /**
-   * Execute an MCP tool call directly (internal use, no HTTP auth).
-   * Used by the interaction bridge to execute tool calls after user approval.
+   * Execute an MCP tool call through guardrails and approval checks before
+   * falling through to direct execution.
    */
   async callToolWithApproval(
     agentId: string,
@@ -368,6 +368,7 @@ export class McpProxy {
       processedMessageIds?: string[];
       connectionId?: string;
       teamId?: string;
+      platform?: string;
     } = {}
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -385,6 +386,7 @@ export class McpProxy {
       processedMessageIds: tokenContext.processedMessageIds,
       connectionId: tokenContext.connectionId,
       teamId: tokenContext.teamId,
+      platform: tokenContext.platform,
     };
     const token = tokenContext.token ?? "";
 

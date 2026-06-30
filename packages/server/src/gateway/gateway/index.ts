@@ -394,6 +394,7 @@ type ToolboxPersonalAgentMcpProxy = {
 			processedMessageIds?: string[];
 			connectionId?: string;
 			teamId?: string;
+			platform?: string;
 		},
 	) => Promise<ToolboxPersonalAgentToolExecutionResult>;
 };
@@ -825,6 +826,7 @@ export class WorkerGateway {
 									processedMessageIds: auth.tokenData.processedMessageIds,
 									connectionId: auth.tokenData.connectionId,
 									teamId: auth.tokenData.teamId,
+									platform: auth.tokenData.platform,
 								},
 							)
 						: await mcpProxy.executeToolDirect!(
