@@ -17,14 +17,15 @@ import { resolveConnectorCode } from '../utils/ensure-connector-installed';
 import { resolveExecutionAuth } from '../utils/execution-context';
 
 interface ConnectorQueryParams {
-  organizationId: string;
+  /** The ACL gate — tenant + principal. Its `organizationId`/`principal` drive
+   * the same connection visibility as manage_connections. */
+  scope: AuthzScope;
   /** Connection slug (org-scoped). */
   connectionSlug: string;
   /** Read-only SQL to push down (a derived entity's backing_sql, or a feed query). */
   query: string;
-  /** Caller identity — enforces the same connection visibility as manage_connections. */
-  userId: string | null;
-  /** Owner/admin callers see every connection; members only org-visible or their own. */
+  /** Owner/admin callers see every connection; members only org-visible or their
+   * own. Not part of the gate — AuthzScope has no admin dimension. */
   isAdmin: boolean;
   feedKey?: string;
   config?: Record<string, unknown>;
@@ -46,11 +47,11 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
   const connRows = await sql`
     SELECT id, connector_key, auth_profile_id, app_auth_profile_id
     FROM connections
-    WHERE organization_id = ${p.organizationId}
+    WHERE organization_id = ${p.scope.organizationId}
       AND slug = ${p.connectionSlug}
       AND deleted_at IS NULL
       AND status = 'active'
-      AND (${p.isAdmin} OR visibility = 'org' OR created_by = ${p.userId})
+      AND (${p.isAdmin} OR visibility = 'org' OR created_by = ${p.scope.principal})
     LIMIT 1
   `;
   if (connRows.length === 0) {
@@ -77,7 +78,7 @@ export async function runConnectorQuery(p: ConnectorQueryParams): Promise<Connec
   const compiledCode = await resolveConnectorCode(conn.connector_key, rawCode);
 
   const { credentials, connectionCredentials, sessionState } = await resolveExecutionAuth({
-    organizationId: p.organizationId,
+    organizationId: p.scope.organizationId,
     connectionId: conn.id,
     authProfileId: Number(conn.auth_profile_id) || null,
     appAuthProfileId: Number(conn.app_auth_profile_id) || null,

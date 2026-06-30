@@ -7,6 +7,7 @@
  */
 
 import { type Static, Type } from '@sinclair/typebox';
+import { authzScopeFromToolContext } from '../../authz/scope';
 import { getDb } from '../../db/client';
 import { runConnectorQuery } from '../../lib/connector-pushdown';
 import { validateAndScopeQuery } from '../../utils/execute-data-sources';
@@ -238,11 +239,10 @@ export async function querySqlImpl(
     const { limit, offset } = bounds;
     try {
       const r = await runConnectorQuery({
-        organizationId: targetOrgId,
+        scope: authzScopeFromToolContext({ organizationId: targetOrgId, userId: ctx.userId }),
+        isAdmin: callerIsAdmin,
         connectionSlug: args.connection,
         query: baseSql,
-        userId: ctx.userId,
-        isAdmin: callerIsAdmin,
         limit,
         offset,
         sort: args.sort_by
