@@ -51,7 +51,14 @@ const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
   'google_workspace_chat_messages_list',
   'gws_chat_messages_list',
 ];
-const SHIFU_TOOLBOX_DISCOVERY_TOOLS = ['meeting_search'];
+const SHIFU_TOOLBOX_DISCOVERY_TOOLS = [
+  'meeting_search',
+  'meeting_get',
+  'subtitle_get',
+  'transcript_get',
+  'meeting_transcribe_audio',
+  'submit_course_pm_profile',
+];
 let executeToolDirectMock: ReturnType<typeof mock>;
 let getHttpServerMock: ReturnType<typeof mock>;
 
@@ -437,6 +444,61 @@ describe('Toolbox MCP execution routes', () => {
     }
 
     expect(executeToolDirectMock).not.toHaveBeenCalled();
+  });
+
+  test('POST /mcp/tools/call executes a shifu_toolbox course PM profile tool call', async () => {
+    const connectionRef = `toolbox-mcp:${createHash('sha256')
+      .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu-toolbox']))
+      .digest('hex')}`;
+    fakeConnections.set(connectionRef, {
+      id: connectionRef,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'shifu-toolbox',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'shifu-toolbox',
+        mcpId: 'shifu-toolbox',
+        authSource: 'lobu_oauth',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    const args = {
+      toolboxUserId: OWNER_USER_ID,
+      agentId: AGENT_ID,
+      courses: [{ courseName: '超級AI個體' }],
+    };
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+        connectionRef,
+        toolName: 'submit_course_pm_profile',
+        args,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox',
+      'submit_course_pm_profile',
+      args
+    );
   });
 
   test('POST /mcp/tools/call returns safe diagnostic code for connector execution failure results', async () => {

@@ -357,6 +357,11 @@ const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<
   },
   shifu_toolbox: {
     meeting_search: 'meeting_search',
+    meeting_get: 'meeting_get',
+    subtitle_get: 'subtitle_get',
+    transcript_get: 'transcript_get',
+    meeting_transcribe_audio: 'meeting_transcribe_audio',
+    submit_course_pm_profile: 'submit_course_pm_profile',
   },
 };
 
@@ -385,8 +390,8 @@ function isToolboxDiscoveryToolAllowed(
   return Object.hasOwn(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey], toolName);
 }
 
-type ToolboxMcpConnectorKey = 'notion' | 'google_workspace';
-type ToolboxMcpStatusConnectorKey = ToolboxMcpConnectorKey | 'shifu_toolbox';
+type ToolboxMcpConnectorKey = 'notion' | 'google_workspace' | 'shifu_toolbox';
+type ToolboxMcpStatusConnectorKey = ToolboxMcpConnectorKey;
 
 type ToolboxMcpToolCallRequest = {
   ownerUserId?: unknown;
@@ -413,7 +418,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isToolboxMcpConnectorKey(value: unknown): value is ToolboxMcpConnectorKey {
-  return value === 'notion' || value === 'google_workspace';
+  return value === 'notion' || value === 'google_workspace' || value === 'shifu_toolbox';
 }
 
 function isToolboxMcpStatusConnectorKey(value: unknown): value is ToolboxMcpStatusConnectorKey {
