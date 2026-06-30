@@ -59,7 +59,7 @@ export type ToolboxPersonalAgentTool = {
 };
 
 export type ToolboxPersonalAgentToolGroup = {
-	connectorKey: "notion" | "google_workspace";
+	connectorKey: "notion" | "google_workspace" | "shifu_toolbox";
 	connectionRef: string;
 	tools: ToolboxPersonalAgentTool[];
 };
@@ -413,6 +413,24 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			},
 		},
 	],
+	shifu_toolbox: [
+		{
+			name: "submit_course_pm_profile",
+			connectorToolName: "submit_course_pm_profile",
+			description:
+				"Submit or update the connected Toolbox user's course PM onboarding profile after the required course context has been collected.",
+			approvalRequired: false,
+			inputSchema: {
+				type: "object",
+				properties: {
+					payloadKind: { type: "string" },
+					pmDisplayName: { type: "string" },
+					courses: { type: "array", items: { type: "object" } },
+				},
+				required: ["payloadKind", "courses"],
+			},
+		},
+	],
 };
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
@@ -422,7 +440,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function supportedToolboxPersonalAgentConnector(
 	value: unknown,
 ): value is ToolboxPersonalAgentToolGroup["connectorKey"] {
-	return value === "notion" || value === "google_workspace";
+	return (
+		value === "notion" ||
+		value === "google_workspace" ||
+		value === "shifu_toolbox"
+	);
 }
 
 type ToolboxPersonalAgentToolCallRequest = {

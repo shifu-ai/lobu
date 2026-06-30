@@ -47,7 +47,7 @@ export interface ToolboxPersonalAgentTool {
 }
 
 export interface ToolboxPersonalAgentToolGroup {
-  connectorKey: "notion" | "google_workspace";
+  connectorKey: "notion" | "google_workspace" | "shifu_toolbox";
   connectionRef: string;
   tools: ToolboxPersonalAgentTool[];
 }

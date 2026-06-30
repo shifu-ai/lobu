@@ -100,7 +100,7 @@ describe("createOpenClawCustomTools", () => {
   test("registers materialized personal-agent connector tools and calls Toolbox MCP execution", async () => {
     const fetchMock = mock(async () =>
       Response.json({
-        content: [{ type: "text", text: "found drive files" }],
+        content: [{ type: "text", text: "tool executed" }],
       })
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -135,6 +135,25 @@ describe("createOpenClawCustomTools", () => {
             },
           ],
         },
+        {
+          connectorKey: "shifu_toolbox",
+          connectionRef: "toolbox-mcp:profile",
+          tools: [
+            {
+              name: "submit_course_pm_profile",
+              connectorToolName: "submit_course_pm_profile",
+              description: "Submit a course PM onboarding profile.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  payloadKind: { type: "string", const: "course_pm_profile" },
+                  courses: { type: "array", items: { type: "object" } },
+                },
+                required: ["payloadKind", "courses"],
+              },
+            },
+          ],
+        },
       ],
     });
 
@@ -148,7 +167,7 @@ describe("createOpenClawCustomTools", () => {
       query: "超級AI個體",
     });
 
-    expect(result.content[0]?.text).toContain("found drive files");
+    expect(result.content[0]?.text).toContain("tool executed");
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [input, init] = fetchMock.mock.calls[0] as unknown as [
       RequestInfo | URL,
@@ -167,6 +186,31 @@ describe("createOpenClawCustomTools", () => {
       connectionRef: "toolbox-mcp:ref",
       connectorToolName: "drive_search",
       args: { query: "超級AI個體" },
+    });
+
+    const profileTool = tools.find(
+      (tool) => tool.name === "submit_course_pm_profile"
+    );
+    expect(profileTool).toBeDefined();
+
+    await profileTool!.execute("tool-call-2", {
+      payloadKind: "course_pm_profile",
+      courses: [{ courseName: "超級AI個體" }],
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, profileInit] = fetchMock.mock.calls[1] as unknown as [
+      RequestInfo | URL,
+      RequestInit,
+    ];
+    expect(JSON.parse(String(profileInit.body))).toEqual({
+      connectorKey: "shifu_toolbox",
+      connectionRef: "toolbox-mcp:profile",
+      connectorToolName: "submit_course_pm_profile",
+      args: {
+        payloadKind: "course_pm_profile",
+        courses: [{ courseName: "超級AI個體" }],
+      },
     });
   });
 

@@ -246,6 +246,21 @@ describe("WorkerGateway session context", () => {
 			},
 			status: "active",
 		});
+		fakeConnections.set("toolbox-mcp:org-1:user-1:agent-1:shifu_toolbox", {
+			id: "toolbox-mcp:org-1:user-1:agent-1:shifu_toolbox",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "shifu-toolbox",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "shifu_toolbox",
+				mcpId: "shifu-toolbox",
+			},
+			status: "active",
+		});
 
 		const gateway = new WorkerGateway(
 			{ send: async () => undefined } as any,
@@ -361,6 +376,21 @@ describe("WorkerGateway session context", () => {
 					name: "notion_update_page",
 					connectorToolName: "notion-update-page",
 					approvalRequired: true,
+				}),
+			]),
+		);
+		const shifuToolboxTools = body.toolboxPersonalAgentTools?.find(
+			(group) => group.connectorKey === "shifu_toolbox",
+		);
+		expect(shifuToolboxTools?.connectionRef).toBe(
+			"toolbox-mcp:org-1:user-1:agent-1:shifu_toolbox",
+		);
+		expect(shifuToolboxTools?.tools).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "submit_course_pm_profile",
+					connectorToolName: "submit_course_pm_profile",
+					approvalRequired: false,
 				}),
 			]),
 		);
