@@ -387,6 +387,46 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call keeps provider write tools out of the direct discovery route', async () => {
+    const app = await importMountedAgentRoutes();
+
+    for (const request of [
+      {
+        connectorKey: 'notion',
+        connectionRef: NOTION_CONNECTION_REF,
+        toolName: 'notion-create-pages',
+        args: { parent: { page_id: 'page-1' }, pages: [] },
+      },
+      {
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'docs_create',
+        args: { title: 'PM summary' },
+      },
+    ] as const) {
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          ...request,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        ok: false,
+        errorCode: 'lobu_mcp_tool_not_allowed',
+      });
+    }
+
+    expect(executeToolDirectMock).not.toHaveBeenCalled();
+  });
+
   test('POST /mcp/tools/call returns safe diagnostic code for connector execution failure results', async () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'private upstream body must not leak' }],

@@ -54,6 +54,7 @@ export type ToolboxPersonalAgentTool = {
 	name: string;
 	connectorToolName: string;
 	description: string;
+	approvalRequired: boolean;
 	inputSchema: Record<string, unknown>;
 };
 
@@ -73,6 +74,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			connectorToolName: "gws_drive_search",
 			description:
 				"Search Google Drive files available to the connected Toolbox user.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -87,6 +89,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			connectorToolName: "gws_docs_read",
 			description:
 				"Read a Google Docs document available to the connected Toolbox user.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: { documentId: { type: "string" } },
@@ -98,6 +101,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			connectorToolName: "gws_docs_create",
 			description:
 				"Create a Google Docs document as the connected Toolbox user.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: { title: { type: "string" } },
@@ -108,6 +112,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_docs_batch_update",
 			connectorToolName: "gws_docs_batch_update",
 			description: "Apply Google Docs API batchUpdate requests.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -121,6 +126,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_sheets_read",
 			connectorToolName: "gws_sheets_read",
 			description: "Read values from a Google Sheets range.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -135,6 +141,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			connectorToolName: "gws_sheets_create",
 			description:
 				"Create a Google Sheets spreadsheet as the connected Toolbox user.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: { title: { type: "string" } },
@@ -145,6 +152,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_sheets_values_update",
 			connectorToolName: "gws_sheets_values_update",
 			description: "Update values in a Google Sheets range.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -163,6 +171,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_sheets_batch_update",
 			connectorToolName: "gws_sheets_batch_update",
 			description: "Apply Google Sheets API batchUpdate requests.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -176,6 +185,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_slides_read",
 			connectorToolName: "gws_slides_read",
 			description: "Read a Google Slides presentation.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: { presentationId: { type: "string" } },
@@ -187,6 +197,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			connectorToolName: "gws_slides_create",
 			description:
 				"Create a Google Slides presentation as the connected Toolbox user.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: { title: { type: "string" } },
@@ -197,6 +208,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_slides_batch_update",
 			connectorToolName: "gws_slides_batch_update",
 			description: "Apply Google Slides API batchUpdate requests.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -206,11 +218,11 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 				required: ["presentationId", "requests"],
 			},
 		},
-			{
-				name: "google_workspace_calendar_events_list",
-				connectorToolName: "gws_calendar_events_list",
-				description:
-					"List Google Calendar events for the connected Toolbox user.",
+		{
+			name: "google_workspace_calendar_events_list",
+			connectorToolName: "gws_calendar_events_list",
+			description: "List Google Calendar events for the connected Toolbox user.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -220,81 +232,85 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 					maxResults: { type: "number" },
 					query: { type: "string" },
 					pageToken: { type: "string" },
-					},
 				},
 			},
-			{
-				name: "google_workspace_calendar_events_create",
-				connectorToolName: "gws_calendar_events_create",
-				description:
-					"Create a Google Calendar event as the connected Toolbox user.",
-				inputSchema: {
-					type: "object",
-					properties: {
-						calendarId: { type: "string" },
-						summary: { type: "string" },
-						description: { type: "string" },
-						location: { type: "string" },
-						startDateTime: { type: "string" },
-						endDateTime: { type: "string" },
-						timeZone: { type: "string" },
-						attendees: { type: "array", items: { type: "string" } },
-						sendUpdates: {
-							type: "string",
-							enum: ["all", "externalOnly", "none"],
-						},
+		},
+		{
+			name: "google_workspace_calendar_events_create",
+			connectorToolName: "gws_calendar_events_create",
+			description:
+				"Create a Google Calendar event as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					summary: { type: "string" },
+					description: { type: "string" },
+					location: { type: "string" },
+					startDateTime: { type: "string" },
+					endDateTime: { type: "string" },
+					timeZone: { type: "string" },
+					attendees: { type: "array", items: { type: "string" } },
+					sendUpdates: {
+						type: "string",
+						enum: ["all", "externalOnly", "none"],
 					},
-					required: ["summary", "startDateTime", "endDateTime"],
 				},
+				required: ["summary", "startDateTime", "endDateTime"],
 			},
-			{
-				name: "google_workspace_calendar_events_update",
-				connectorToolName: "gws_calendar_events_update",
-				description:
-					"Update a Google Calendar event as the connected Toolbox user.",
-				inputSchema: {
-					type: "object",
-					properties: {
-						calendarId: { type: "string" },
-						eventId: { type: "string" },
-						summary: { type: "string" },
-						description: { type: "string" },
-						location: { type: "string" },
-						startDateTime: { type: "string" },
-						endDateTime: { type: "string" },
-						timeZone: { type: "string" },
-						attendees: { type: "array", items: { type: "string" } },
-						sendUpdates: {
-							type: "string",
-							enum: ["all", "externalOnly", "none"],
-						},
+		},
+		{
+			name: "google_workspace_calendar_events_update",
+			connectorToolName: "gws_calendar_events_update",
+			description:
+				"Update a Google Calendar event as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					eventId: { type: "string" },
+					summary: { type: "string" },
+					description: { type: "string" },
+					location: { type: "string" },
+					startDateTime: { type: "string" },
+					endDateTime: { type: "string" },
+					timeZone: { type: "string" },
+					attendees: { type: "array", items: { type: "string" } },
+					sendUpdates: {
+						type: "string",
+						enum: ["all", "externalOnly", "none"],
 					},
-					required: ["eventId"],
 				},
+				required: ["eventId"],
 			},
-			{
-				name: "google_workspace_calendar_events_delete",
-				connectorToolName: "gws_calendar_events_delete",
-				description:
-					"Delete a Google Calendar event as the connected Toolbox user.",
-				inputSchema: {
-					type: "object",
-					properties: {
-						calendarId: { type: "string" },
-						eventId: { type: "string" },
-						sendUpdates: {
-							type: "string",
-							enum: ["all", "externalOnly", "none"],
-						},
+		},
+		{
+			name: "google_workspace_calendar_events_delete",
+			connectorToolName: "gws_calendar_events_delete",
+			description:
+				"Delete a Google Calendar event as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					calendarId: { type: "string" },
+					eventId: { type: "string" },
+					sendUpdates: {
+						type: "string",
+						enum: ["all", "externalOnly", "none"],
 					},
-					required: ["eventId"],
 				},
+				required: ["eventId"],
 			},
-			{
-				name: "google_workspace_chat_spaces_list",
+		},
+		{
+			name: "google_workspace_chat_spaces_list",
 			connectorToolName: "gws_chat_spaces_list",
 			description:
 				"List Google Chat spaces visible to the connected Toolbox user.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -308,6 +324,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_chat_messages_list",
 			connectorToolName: "gws_chat_messages_list",
 			description: "Read messages from a Google Chat space.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -324,6 +341,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			name: "google_workspace_chat_messages_create",
 			connectorToolName: "gws_chat_messages_create",
 			description: "Send a Google Chat message as the connected Toolbox user.",
+			approvalRequired: true,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -341,6 +359,7 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 			connectorToolName: "notion-search",
 			description:
 				"Search Notion pages and databases available to the connected Toolbox user.",
+			approvalRequired: false,
 			inputSchema: {
 				type: "object",
 				properties: {
@@ -348,6 +367,49 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 					limit: { type: "number" },
 				},
 				required: ["query"],
+			},
+		},
+		{
+			name: "notion_create_pages",
+			connectorToolName: "notion-create-pages",
+			description: "Create Notion pages as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					parent: { type: "object" },
+					pages: { type: "array", items: { type: "object" } },
+				},
+				required: ["parent", "pages"],
+			},
+		},
+		{
+			name: "notion_update_page",
+			connectorToolName: "notion-update-page",
+			description: "Update a Notion page as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					page_id: { type: "string" },
+					properties: { type: "object" },
+					archived: { type: "boolean" },
+				},
+				required: ["page_id"],
+			},
+		},
+		{
+			name: "notion_create_comment",
+			connectorToolName: "notion-create-comment",
+			description: "Create a Notion comment as the connected Toolbox user.",
+			approvalRequired: true,
+			inputSchema: {
+				type: "object",
+				properties: {
+					parent: { type: "object" },
+					rich_text: { type: "array", items: { type: "object" } },
+				},
+				required: ["parent", "rich_text"],
 			},
 		},
 	],

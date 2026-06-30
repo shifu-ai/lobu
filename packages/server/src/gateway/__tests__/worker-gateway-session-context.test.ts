@@ -232,6 +232,20 @@ describe("WorkerGateway session context", () => {
 				status: "active",
 			},
 		);
+		fakeConnections.set("toolbox-mcp:org-1:user-1:agent-1:notion", {
+			id: "toolbox-mcp:org-1:user-1:agent-1:notion",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "notion",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "notion",
+			},
+			status: "active",
+		});
 
 		const gateway = new WorkerGateway(
 			{ send: async () => undefined } as any,
@@ -274,11 +288,17 @@ describe("WorkerGateway session context", () => {
 			toolboxPersonalAgentTools?: Array<{
 				connectorKey: string;
 				connectionRef: string;
-				tools: Array<{ name: string; connectorToolName: string }>;
+				tools: Array<{
+					name: string;
+					connectorToolName: string;
+					approvalRequired: boolean;
+				}>;
 			}>;
 		};
 
-		const [googleWorkspaceTools] = body.toolboxPersonalAgentTools ?? [];
+		const googleWorkspaceTools = body.toolboxPersonalAgentTools?.find(
+			(group) => group.connectorKey === "google_workspace",
+		);
 		expect(googleWorkspaceTools?.connectorKey).toBe("google_workspace");
 		expect(googleWorkspaceTools?.connectionRef).toBe(
 			"toolbox-mcp:org-1:user-1:agent-1:google_workspace",
@@ -288,26 +308,58 @@ describe("WorkerGateway session context", () => {
 				expect.objectContaining({
 					name: "google_workspace_drive_search",
 					connectorToolName: "gws_drive_search",
+					approvalRequired: false,
 				}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_list",
-						connectorToolName: "gws_calendar_events_list",
-					}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_create",
-						connectorToolName: "gws_calendar_events_create",
-					}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_update",
-						connectorToolName: "gws_calendar_events_update",
-					}),
-					expect.objectContaining({
-						name: "google_workspace_calendar_events_delete",
-						connectorToolName: "gws_calendar_events_delete",
-					}),
-				]),
-			);
-		});
+				expect.objectContaining({
+					name: "google_workspace_docs_create",
+					connectorToolName: "gws_docs_create",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_list",
+					connectorToolName: "gws_calendar_events_list",
+					approvalRequired: false,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_create",
+					connectorToolName: "gws_calendar_events_create",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_update",
+					connectorToolName: "gws_calendar_events_update",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "google_workspace_calendar_events_delete",
+					connectorToolName: "gws_calendar_events_delete",
+					approvalRequired: true,
+				}),
+			]),
+		);
+		const notionTools = body.toolboxPersonalAgentTools?.find(
+			(group) => group.connectorKey === "notion",
+		);
+		expect(notionTools?.tools).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "notion_search",
+					connectorToolName: "notion-search",
+					approvalRequired: false,
+				}),
+				expect.objectContaining({
+					name: "notion_create_pages",
+					connectorToolName: "notion-create-pages",
+					approvalRequired: true,
+				}),
+				expect.objectContaining({
+					name: "notion_update_page",
+					connectorToolName: "notion-update-page",
+					approvalRequired: true,
+				}),
+			]),
+		);
+	});
 
 	test("executes materialized personal-agent tools through worker authentication", async () => {
 		fakeConnections.set("toolbox-mcp:ref", {
