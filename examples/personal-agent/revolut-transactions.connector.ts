@@ -2,23 +2,31 @@
  * Revolut Connector
  *
  * Revolut has no public personal-banking API, so this connector reads the
- * user's transactions by INTERCEPTING the retail API JSON the Revolut web app
- * (`app.revolut.com`) already fetches — not by scraping the rendered DOM. It
- * runs inside the user's real signed-in Chrome via the paired Owletto
- * extension: open the transactions view in a background tab, attach the CDP
- * Network domain, scroll to make the app paginate, and parse the
- * `GET /api/retail/user/current/transactions/last` responses.
+ * user's transactions by REPLAYING the retail API the Revolut web app
+ * (`app.revolut.com`) already calls — not by scraping the rendered DOM. It runs
+ * inside the user's real signed-in Chrome via the paired Owletto extension:
+ * reuse the persistent window the user signs into once, capture the app's own
+ * `transactions/last` request headers, then page the FULL history in-page by
+ * walking the `?to=<cursor>` parameter and parsing each
+ * `GET /api/retail/user/current/transactions/last` JSON page.
  *
- * Why intercept, not scrape: the previous DOM-scrape path parsed amounts out of
+ * Why replay, not scrape: the previous DOM-scrape path parsed amounts out of
  * rendered row text, which broke against Revolut's virtualized SPA and produced
  * corrupt amounts (a coffee read as £180,611). The retail API returns `amount`
  * as a signed integer in MINOR units (−£23.45 = `-2345`); dividing by
  * 10^exponent is exact and kills the decimal-parse corruption entirely.
  *
- * Why intercept, not replay: the retail API authenticates via an app-added
- * header (NOT cookies) bound to the browser that minted it, so an in-page
- * `fetch()` or a replay from any other context 401s. Intercepting the app's OWN
- * request captures its real headers + response for free.
+ * Why replay, not scroll: Revolut's list only fetches older `?to=` pages on a
+ * real wheel scroll, which a non-rendered/automated tab can't reproduce (the CDP
+ * wheel is frame-throttled and never acks). But the retail API is plain JSON
+ * paginated by a `?to=<epoch_ms>` cursor — so once we have the app's request
+ * headers we can fetch every older page directly, in-page, no scrolling. The one
+ * non-reconstructible header (`x-device-id`, an in-memory app token — NOT the
+ * localStorage tracker id) is captured by wrapping fetch/XHR and forcing one
+ * real app request via a SPA route remount; the captured set replays cleanly on
+ * new `?to=` URLs (the API is not per-request signed). A same-origin in-page
+ * `fetch` carries cookies (`credentials:"include"`) plus those headers, so it
+ * authenticates where a header-less raw fetch 401s (`{code:9001}`).
  *
  * Auth is implicit but two-layered: SSO login ≠ retail-API auth. The app-level
  * passcode (rwa flow) must be entered in app.revolut.com or the retail API 401s
@@ -36,7 +44,6 @@ import {
   type ConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
-  extensionNetworkSync,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
@@ -86,6 +93,34 @@ export interface RevolutTransaction {
   fee?: number;
   /** FX rate applied (1 when same-currency). */
   fxRate?: number;
+  /** Original foreign amount (major units) before conversion, from `counterpart`. */
+  counterpartAmount?: number;
+  /** Currency of the original foreign amount, e.g. "THB". */
+  counterpartCurrency?: string;
+  /** Merchant city/locality, when present. */
+  merchantCity?: string;
+  /** Last 4 digits of the card used (card transactions only). */
+  cardLastFour?: string;
+  /** Card label/nickname, e.g. "Amazon" (card transactions only). */
+  cardLabel?: string;
+  /** Internal pocket/account id this transaction belongs to (`account.id`). */
+  accountId?: string;
+  /** True when Revolut classifies the payment as a subscription. */
+  isSubscription?: boolean;
+  /** Reason string for non-completed states, e.g. "merchant_blocked_manually". */
+  reason?: string;
+  /** Free-form Revolut tag, e.g. "shopping". */
+  tag?: string;
+  /** True for an online / internet (e-commerce) payment, false for in-person. */
+  ecommerce?: boolean;
+  /** True when the cardholder was physically present (card-present terminal). */
+  cardholderPresent?: boolean;
+  /** Groups the legs of one logical transaction (e.g. both sides of a transfer). */
+  groupKey?: string;
+  /** True when the card used is a credit card (vs debit). */
+  isCreditCard?: boolean;
+  /** Canonical merchant brand id — same across a brand's varying merchant ids. */
+  merchantBrandId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,12 +165,23 @@ interface RawRevolutTxn {
   countryCode?: unknown;
   fee?: unknown;
   rate?: unknown;
+  reason?: unknown;
+  tag?: unknown;
+  paymentInitiationType?: unknown;
+  eCommerce?: unknown;
+  cardholderPresent?: unknown;
+  groupKey?: unknown;
   merchant?: {
     name?: unknown;
     mcc?: unknown;
     category?: unknown;
     country?: unknown;
+    city?: unknown;
+    brandId?: unknown;
   } | null;
+  counterpart?: { amount?: unknown; currency?: unknown } | null;
+  card?: { lastFour?: unknown; label?: unknown; credit?: unknown } | null;
+  account?: { id?: unknown; type?: unknown } | null;
 }
 
 /** Read a string field, returning undefined for anything else. */
@@ -221,6 +267,49 @@ export function parseTransactionsResponse(json: unknown): RevolutTransaction[] {
       ...(typeof raw.rate === "number" && Number.isFinite(raw.rate)
         ? { fxRate: raw.rate }
         : {}),
+      // counterpart = original foreign leg (amount in ITS own currency's minor units).
+      ...(raw.counterpart &&
+      typeof raw.counterpart.amount === "number" &&
+      Number.isFinite(raw.counterpart.amount) &&
+      str(raw.counterpart.currency)
+        ? {
+            counterpartAmount: Math.abs(
+              minorToMajor(
+                raw.counterpart.amount,
+                str(raw.counterpart.currency) as string
+              )
+            ),
+            counterpartCurrency: (
+              str(raw.counterpart.currency) as string
+            ).toUpperCase(),
+          }
+        : {}),
+      ...(str(raw.merchant?.city)
+        ? { merchantCity: str(raw.merchant?.city) }
+        : {}),
+      ...(str(raw.card?.lastFour)
+        ? { cardLastFour: str(raw.card?.lastFour) }
+        : {}),
+      ...(str(raw.card?.label) ? { cardLabel: str(raw.card?.label) } : {}),
+      ...(str(raw.account?.id) ? { accountId: str(raw.account?.id) } : {}),
+      ...(raw.paymentInitiationType === "SUBSCRIPTION"
+        ? { isSubscription: true }
+        : {}),
+      ...(str(raw.reason) ? { reason: str(raw.reason) } : {}),
+      ...(str(raw.tag) ? { tag: str(raw.tag) } : {}),
+      ...(typeof raw.eCommerce === "boolean"
+        ? { ecommerce: raw.eCommerce }
+        : {}),
+      ...(typeof raw.cardholderPresent === "boolean"
+        ? { cardholderPresent: raw.cardholderPresent }
+        : {}),
+      ...(str(raw.groupKey) ? { groupKey: str(raw.groupKey) } : {}),
+      ...(typeof raw.card?.credit === "boolean"
+        ? { isCreditCard: raw.card.credit }
+        : {}),
+      ...(str(raw.merchant?.brandId)
+        ? { merchantBrandId: str(raw.merchant?.brandId) }
+        : {}),
     });
   }
   return out;
@@ -299,6 +388,28 @@ export function transactionToEvent(t: RevolutTransaction): EventEnvelope {
       ...(t.merchantCountry ? { merchant_country: t.merchantCountry } : {}),
       ...(t.fee !== undefined ? { fee: t.fee } : {}),
       ...(t.fxRate !== undefined ? { fx_rate: t.fxRate } : {}),
+      ...(t.counterpartAmount !== undefined
+        ? { counterpart_amount: t.counterpartAmount }
+        : {}),
+      ...(t.counterpartCurrency
+        ? { counterpart_currency: t.counterpartCurrency }
+        : {}),
+      ...(t.merchantCity ? { merchant_city: t.merchantCity } : {}),
+      ...(t.cardLastFour ? { card_last_four: t.cardLastFour } : {}),
+      ...(t.cardLabel ? { card_label: t.cardLabel } : {}),
+      ...(t.accountId ? { account_id: t.accountId } : {}),
+      ...(t.isSubscription ? { is_subscription: true } : {}),
+      ...(t.reason ? { reason: t.reason } : {}),
+      ...(t.tag ? { tag: t.tag } : {}),
+      ...(t.ecommerce !== undefined ? { ecommerce: t.ecommerce } : {}),
+      ...(t.cardholderPresent !== undefined
+        ? { cardholder_present: t.cardholderPresent }
+        : {}),
+      ...(t.groupKey ? { group_key: t.groupKey } : {}),
+      ...(t.isCreditCard !== undefined
+        ? { is_credit_card: t.isCreditCard }
+        : {}),
+      ...(t.merchantBrandId ? { merchant_brand_id: t.merchantBrandId } : {}),
     },
   };
 }
@@ -368,10 +479,6 @@ async function notifyRevolutAuthWall(
 // second feed's `start_url` there to sync a non-default currency pocket.
 const DEFAULT_START_URL = "https://app.revolut.com/transactions";
 
-// The retail endpoint the SPA fetches as you scroll the transaction list. We
-// intercept its response body rather than scraping the rendered rows.
-const TRANSACTIONS_LAST_PATTERN = "api/retail/user/current/transactions/last";
-
 const REVOLUT_ALLOWED_ORIGINS = ["revolut.com", "*.revolut.com"];
 
 // Generic "retry the crawl while it returns no data" mechanism. The blocking
@@ -384,6 +491,204 @@ const EMPTY_RETRY_POLL_MS = 10_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// In-page expressions shipped to the `evaluate` op. They are self-contained
+// (the op only carries a string) and use plain string matching — NO regex
+// literals — to avoid template-literal escaping pitfalls.
+
+// 1. Auth-check + capture the app's real `transactions/last` request headers.
+// A fresh tab can't inherit Revolut's rwa auth, so headers are only obtainable
+// in the signed-in persistent window. The on-load request fires before our
+// wrappers install, so after wrapping fetch + XHR we force ONE fresh app
+// request by remounting the SPA route (away + back). The captured header set
+// (notably the in-memory `x-device-id` app token) + a paging cursor are stored
+// in page globals consumed by PAGE_BATCH_EXPR.
+const SETUP_EXPR = `(async () => {
+  const isTx = (u) => typeof u === "string" && u.indexOf("transactions/last") >= 0;
+  if (location.host.indexOf("sso.") >= 0 || location.pathname.indexOf("signin") >= 0) {
+    return { authed: false };
+  }
+  if (!window.__lobuCap) {
+    window.__lobuHdrs = [];
+    const of = window.fetch;
+    window.fetch = function (i, n) {
+      try {
+        const u = typeof i === "string" ? i : (i && i.url) || "";
+        if (isTx(u)) {
+          const h = {}; const hs = (n && n.headers) || (i && i.headers);
+          if (hs) { try { new Headers(hs).forEach((v, k) => { h[k] = v; }); } catch (e) {} }
+          window.__lobuHdrs.push(h);
+        }
+      } catch (e) {}
+      return of.apply(this, arguments);
+    };
+    const oOpen = XMLHttpRequest.prototype.open;
+    const oSet = XMLHttpRequest.prototype.setRequestHeader;
+    const oSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.open = function (m, u) { this.__lu = u; this.__lh = {}; return oOpen.apply(this, arguments); };
+    XMLHttpRequest.prototype.setRequestHeader = function (k, v) { try { this.__lh[k] = v; } catch (e) {} return oSet.apply(this, arguments); };
+    XMLHttpRequest.prototype.send = function () { try { if (isTx(this.__lu)) window.__lobuHdrs.push(this.__lh); } catch (e) {} return oSend.apply(this, arguments); };
+    window.__lobuCap = 1;
+  }
+  try {
+    history.pushState({}, "", "/home"); window.dispatchEvent(new PopStateEvent("popstate"));
+    await new Promise((r) => setTimeout(r, 1200));
+    history.pushState({}, "", "/transactions"); window.dispatchEvent(new PopStateEvent("popstate"));
+    await new Promise((r) => setTimeout(r, 2500));
+  } catch (e) {}
+  const caps = (window.__lobuHdrs || []).filter((h) => h && h["x-device-id"]);
+  if (!caps.length) return { authed: true, captured: false };
+  window.__lobuHeaders = caps[caps.length - 1];
+  window.__lobuSeen = {}; window.__lobuCursor = null;
+  window.__lobuDone = false; window.__lobuStop = null;
+  return { authed: true, captured: true };
+})()`;
+
+// 2. Page older history in-page using the captured headers and RETURN the raw
+// rows fetched this call (no separate read-out phase — keeps the run well under
+// the device-worker's ~95s budget). Each call walks up to PAGES_PER_BATCH
+// `?to=<cursor>` pages, dedups against `__lobuSeen`, advances `__lobuCursor` to
+// the oldest `startedDate`, and returns the new rows. `__lobuDone` flips when a
+// page returns nothing new/older (start of history reached) or on an error.
+// PAGES_PER_BATCH is small so each return stays modest (~125 rows/page).
+// `internalPocketId` scopes paging to one account/pocket (omit for the primary
+// account). A short inter-fetch delay + a single 5xx retry avoid Revolut's
+// rate-limit 500s under back-to-back paging.
+const pageBatchExpr = (internalPocketId: string): string => {
+  const pocket = JSON.stringify(internalPocketId || "");
+  return `(async () => {
+  if (!window.__lobuHeaders) return { done: true, rows: [], stop: "no_headers" };
+  if (window.__lobuDone) return { done: true, rows: [], stop: window.__lobuStop };
+  const h = window.__lobuHeaders;
+  const pocket = ${pocket};
+  const base = "/api/retail/user/current/transactions/last";
+  const rows = [];
+  // Retry transient 5xx / network errors with exponential backoff so a brief
+  // rate-limit burst doesn't abort the whole crawl mid-history (which would
+  // silently stop a backfill partway and report "success"). Non-5xx errors
+  // (401/404) fail fast.
+  const fetchPage = async (url) => {
+    let lastErr = "retry_exhausted";
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) await new Promise(x => setTimeout(x, 400 * attempt * attempt));
+      let r;
+      try { r = await fetch(url, { credentials: "include", headers: h }); }
+      catch (e) { lastErr = "neterr"; continue; }
+      if (r.status >= 500) { lastErr = "http_" + r.status; continue; }
+      if (!r.ok) return { err: "http_" + r.status };
+      try { return { page: await r.json() }; } catch (e) { return { err: "parseerr" }; }
+    }
+    return { err: lastErr };
+  };
+  for (let k = 0; k < 4; k++) {
+    const url = base + "?count=200"
+      + (pocket ? ("&internalPocketId=" + pocket) : "")
+      + (window.__lobuCursor ? ("&to=" + window.__lobuCursor) : "");
+    const res = await fetchPage(url);
+    if (res.err) { window.__lobuDone = true; window.__lobuStop = res.err; break; }
+    const page = res.page;
+    if (!Array.isArray(page) || page.length === 0) { window.__lobuDone = true; window.__lobuStop = "empty"; break; }
+    let oldest = Infinity; let added = 0;
+    for (const t of page) {
+      const id = t && t.id; const sd = Number(t && t.startedDate);
+      if (Number.isFinite(sd) && sd < oldest) oldest = sd;
+      if (typeof id === "string" && !window.__lobuSeen[id]) { window.__lobuSeen[id] = 1; rows.push(t); added++; }
+    }
+    const prevCursor = window.__lobuCursor == null ? Infinity : window.__lobuCursor;
+    if (!Number.isFinite(oldest) || !(oldest < prevCursor)) { window.__lobuDone = true; window.__lobuStop = "no_progress"; break; }
+    window.__lobuCursor = oldest;
+    if (added === 0) { window.__lobuDone = true; window.__lobuStop = "no_new"; break; }
+    await new Promise(x => setTimeout(x, 80));
+  }
+  return { done: window.__lobuDone, rows: rows, stop: window.__lobuStop };
+})()`;
+};
+
+/**
+ * Crawl the FULL retail transaction history by replaying the `transactions/last`
+ * API in-page, walking its `?to=<epoch_ms>` cursor — no scrolling.
+ *
+ * Reuses the ONE persistent window the user signs into once: a fresh background
+ * tab bounces to sso.revolut.com (rwa auth is bound to the signed-in tab), so
+ * the persistent window is the only context where the retail API authenticates.
+ * We capture the app's own request headers there (SETUP_EXPR), then page the
+ * whole history in batches that RETURN their raw rows (PAGE_BATCH_EXPR), parsing
+ * each batch with the same `parseTransactionsResponse` used for intercepted
+ * bodies. Inlining the rows (vs a read-out phase) keeps total dispatch time
+ * under the device-worker's ~95s ceiling.
+ */
+async function crawlFetchPaging(
+  dispatcher: ChromeActionDispatcher,
+  startUrl: string,
+  maxBatches: number,
+  internalPocketId: string
+): Promise<{ items: RevolutTransaction[]; apiCallCount: number }> {
+  const allowed = REVOLUT_ALLOWED_ORIGINS;
+  const PAGE_BATCH_EXPR = pageBatchExpr(internalPocketId);
+  // Open / reuse the single persistent window in the BACKGROUND (not focused) so
+  // a routine authed sync never pops the window to the foreground. We only
+  // surface it below if the run actually needs the user to sign in.
+  const nav = await dispatcher.dispatch<{ tab_id: number }>("navigate", {
+    url: startUrl,
+    persistent: true,
+    window_focused: false,
+    wait_for_load: true,
+    allowed_origins: allowed,
+  });
+  const tabId = nav.tab_id;
+
+  // Capture headers / auth-check. On a miss (SSO wall / capture fail), FOCUS the
+  // persistent window so the user can complete the passcode in place, then return
+  // no items so the upstream wait-poll fires the sign-in notice and retries.
+  const setup = await dispatcher.dispatch<{
+    value?: { authed?: boolean; captured?: boolean };
+  }>("evaluate", {
+    tab_id: tabId,
+    expression: SETUP_EXPR,
+    allowed_origins: allowed,
+  });
+  const s = setup.value ?? {};
+  if (!s.authed || !s.captured) {
+    await dispatcher
+      .dispatch("navigate", {
+        url: startUrl,
+        persistent: true,
+        window_focused: true,
+        wait_for_load: false,
+        allowed_origins: allowed,
+      })
+      .catch(() => undefined);
+    return { items: [], apiCallCount: 0 };
+  }
+
+  // Page the full history in-page, batch by batch, parsing each batch's returned
+  // raw rows inline until done. The cross-batch `seen` set is belt-and-braces;
+  // the in-page `__lobuSeen` already dedups across batches.
+  const items: RevolutTransaction[] = [];
+  const seen = new Set<string>();
+  let apiCallCount = 0;
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const b = await dispatcher.dispatch<{
+      value?: { done?: boolean; rows?: unknown };
+    }>("evaluate", {
+      tab_id: tabId,
+      expression: PAGE_BATCH_EXPR,
+      allowed_origins: allowed,
+    });
+    const v = b.value ?? {};
+    if (Array.isArray(v.rows) && v.rows.length > 0) {
+      apiCallCount += 1;
+      for (const t of parseTransactionsResponse(v.rows)) {
+        if (!seen.has(t.id)) {
+          seen.add(t.id);
+          items.push(t);
+        }
+      }
+    }
+    if (v.done) break;
+  }
+  return { items, apiCallCount };
 }
 
 const configSchema = {
@@ -400,13 +705,18 @@ const configSchema = {
       description:
         'If set, keep only transactions in this ISO 4217 currency (e.g. "GBP").',
     },
+    internal_pocket_id: {
+      type: "string",
+      description:
+        "Scope this feed to one account/pocket by its `internalPocketId` (the `id` from the wallet, e.g. the USD or EUR current account). Omit to sync the primary account. Add one feed per pocket to cover every currency account; each keeps its own checkpoint.",
+    },
     max_scrolls: {
       type: "integer",
       minimum: 1,
       maximum: 200,
       default: 20,
       description:
-        "Maximum scroll iterations to make the app paginate older transactions. Each page is ~125 rows, so 20 covers normal incremental syncs; raise it (e.g. 200) for a deep first backfill spanning years of history.",
+        "Maximum paging batches (each fetches up to 4 `?to=` cursor pages of ~125 rows). 20 covers normal incremental syncs; raise it (e.g. 200) for a deep first backfill spanning years of history. (Name kept for config compatibility; the connector no longer scrolls.)",
     },
     backfill: {
       type: "boolean",
@@ -417,10 +727,10 @@ const configSchema = {
     wait_for_data_seconds: {
       type: "integer",
       minimum: 0,
-      maximum: 600,
-      default: 180,
+      maximum: 80,
+      default: 30,
       description:
-        "If the crawl returns no data, keep retrying every 10s for this many seconds before failing. For Revolut the empty result means the passcode/sign-in wall (the sign-in notification fires once), so a run triggered before sign-in still completes once you authenticate. 0 = fail fast.",
+        "If the crawl returns no data, keep retrying every 10s for this many seconds before failing. For Revolut the empty result means the passcode/sign-in wall (the sign-in notification fires once), so a run triggered before sign-in still completes once you authenticate. Capped at 80s because the device worker has a hard ~95s per-run budget. 0 = fail fast.",
     },
   },
 };
@@ -442,6 +752,20 @@ const transactionMetadataSchema = {
     merchant_country: { type: "string" },
     fee: { type: "number" },
     fx_rate: { type: "number" },
+    counterpart_amount: { type: "number" },
+    counterpart_currency: { type: "string" },
+    merchant_city: { type: "string" },
+    card_last_four: { type: "string" },
+    card_label: { type: "string" },
+    account_id: { type: "string" },
+    is_subscription: { type: "boolean" },
+    reason: { type: "string" },
+    tag: { type: "string" },
+    ecommerce: { type: "boolean" },
+    cardholder_present: { type: "boolean" },
+    group_key: { type: "string" },
+    is_credit_card: { type: "boolean" },
+    merchant_brand_id: { type: "string" },
   },
 };
 
@@ -451,7 +775,7 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     name: "Revolut",
     description:
       "Syncs Revolut account transactions by intercepting the retail API JSON the Revolut web app fetches (no public API), through your paired Owletto Chrome session — no separate login, exact amounts (no DOM parsing).",
-    version: "4.2.0",
+    version: "4.5.2",
     faviconDomain: "app.revolut.com",
     authSchema: {
       // Auth is implicit via the paired Owletto extension's signed-in Chrome —
@@ -493,7 +817,17 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
       config.currency_filter.trim()
         ? config.currency_filter.trim().toUpperCase()
         : null;
-    const maxScrolls = Math.max(
+    // Scope paging to one account/pocket (its `internalPocketId` from the wallet).
+    // Omit to sync the primary account. Use one feed per pocket to cover every
+    // currency account / savings vault — each keeps its own simple checkpoint.
+    const internalPocketId =
+      typeof config.internal_pocket_id === "string" &&
+      config.internal_pocket_id.trim()
+        ? config.internal_pocket_id.trim()
+        : "";
+    // Each "batch" pages up to 8 `?to=` cursor pages (~125 rows each), so the
+    // default 20 covers ~20k rows; a deep backfill raises it for full history.
+    const maxBatches = Math.max(
       1,
       Math.min(200, Number(config.max_scrolls ?? 20) || 20)
     );
@@ -503,47 +837,19 @@ export default class RevolutTransactionsConnector extends ConnectorRuntime {
     const backfill = config.backfill === true;
 
     // How long to wait for the user to enter their passcode before giving up.
-    // Revolut's rwa session is short-lived, so rather than failing the instant
-    // we hit the auth wall, we fire the sign-in notification and keep retrying
-    // the crawl every `EMPTY_RETRY_POLL_MS` — the moment the user signs in, the next
-    // attempt succeeds and proceeds straight into the backfill within the fresh
-    // session window. 0 disables the wait (fail fast).
+    // The device worker has a HARD ~95s per-run budget, so the wait MUST stay
+    // short — a long wait gets the whole run killed mid-paging. We fire the
+    // sign-in notification and retry the crawl every `EMPTY_RETRY_POLL_MS`; for a
+    // reliable backfill the user should sign in BEFORE triggering (then the first
+    // attempt is authed and no wait is consumed). 0 disables the wait (fail fast).
     const dataWaitMs =
-      Math.max(0, Math.min(600, Number(config.wait_for_data_seconds ?? 180))) *
+      Math.max(0, Math.min(80, Number(config.wait_for_data_seconds ?? 30))) *
       1000;
 
-    // One crawl attempt: intercept the retail API the SPA fetches on scroll.
-    // The helper opens an about:blank tab, starts the Network listener BEFORE
-    // navigating (so the initial render's XHRs aren't missed), then
-    // scroll-paginates with the real CDP wheel and drains.
+    // One crawl attempt: capture headers in the persistent signed-in window and
+    // page the full history in-page via the `?to=` cursor (see crawlFetchPaging).
     const runCrawl = () =>
-      extensionNetworkSync<RevolutTransaction>({
-        dispatcher,
-        url: startUrl,
-        config: {
-          interceptPatterns: [{ regex: TRANSACTIONS_LAST_PATTERN }],
-          allowedOrigins: REVOLUT_ALLOWED_ORIGINS,
-          maxScrolls,
-          scrollDelayMs: 2500,
-          responseTimeoutMs: 8000,
-        },
-        parseResponse: (_url, json) => parseTransactionsResponse(json),
-        // Revolut's transaction list is virtualized with NO scrollable overflow
-        // container (document height == viewport), so `scrollTo` is a no-op and
-        // DOM-synthesized wheel events (isTrusted=false) are ignored — the list
-        // only fetches older `?to=` pages on a REAL scroll. We use the
-        // extension's `scroll` op (CDP Input.dispatchMouseEvent type:mouseWheel),
-        // a trusted wheel the page honours, firing several ticks over the list.
-        triggerNextPage: async (tabId, d) => {
-          await d.dispatch("scroll", {
-            tab_id: tabId,
-            delta_y: 1500,
-            steps: 6,
-            step_delay_ms: 250,
-            allowed_origins: REVOLUT_ALLOWED_ORIGINS,
-          });
-        },
-      });
+      crawlFetchPaging(dispatcher, startUrl, maxBatches, internalPocketId);
 
     let result = await runCrawl();
 
