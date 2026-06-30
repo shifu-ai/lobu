@@ -370,6 +370,34 @@ type ToolboxPersonalAgentToolCallRequest = {
 	args?: unknown;
 };
 
+type ToolboxPersonalAgentToolExecutionResult = {
+	status?: "executed" | "blocked-notified" | "blocked-no-channel";
+	content: Array<{ type: string; text: string }>;
+	isError?: boolean;
+	diagnosticCode?: string;
+};
+
+type ToolboxPersonalAgentMcpProxy = {
+	executeToolDirect?: McpProxy["executeToolDirect"];
+	callToolWithApproval?: (
+		agentId: string,
+		userId: string,
+		mcpId: string,
+		toolName: string,
+		args: Record<string, unknown>,
+		tokenContext?: {
+			token?: string;
+			channelId?: string;
+			conversationId?: string;
+			organizationId?: string;
+			messageId?: string;
+			processedMessageIds?: string[];
+			connectionId?: string;
+			teamId?: string;
+		},
+	) => Promise<ToolboxPersonalAgentToolExecutionResult>;
+};
+
 function safeToolboxPersonalAgentToolError(
 	errorCode: string,
 	errorMessage: string,
@@ -762,7 +790,10 @@ export class WorkerGateway {
 				);
 			}
 
-			if (!this.mcpProxy?.executeToolDirect) {
+			const mcpProxy = this.mcpProxy as
+				| ToolboxPersonalAgentMcpProxy
+				| undefined;
+			if (!mcpProxy?.callToolWithApproval && !mcpProxy?.executeToolDirect) {
 				return c.json(
 					safeToolboxPersonalAgentToolError(
 						"lobu_mcp_unavailable",
@@ -773,13 +804,51 @@ export class WorkerGateway {
 			}
 
 			try {
-				const result = await this.mcpProxy.executeToolDirect(
-					agentId,
-					userId,
-					mcpIdForToolboxPersonalAgentConnection(connection, connectorKey),
-					connectorToolName,
-					args,
+				const mcpId = mcpIdForToolboxPersonalAgentConnection(
+					connection,
+					connectorKey,
 				);
+				const result: ToolboxPersonalAgentToolExecutionResult =
+					mcpProxy.callToolWithApproval
+						? await mcpProxy.callToolWithApproval(
+								agentId,
+								userId,
+								mcpId,
+								connectorToolName,
+								args,
+								{
+									token: auth.token,
+									channelId: auth.tokenData.channelId,
+									conversationId: auth.tokenData.conversationId,
+									organizationId: auth.tokenData.organizationId,
+									messageId: auth.tokenData.messageId,
+									processedMessageIds: auth.tokenData.processedMessageIds,
+									connectionId: auth.tokenData.connectionId,
+									teamId: auth.tokenData.teamId,
+								},
+							)
+						: await mcpProxy.executeToolDirect!(
+								agentId,
+								userId,
+								mcpId,
+								connectorToolName,
+								args,
+							);
+				if (
+					result?.status === "blocked-notified" ||
+					result?.status === "blocked-no-channel"
+				) {
+					return c.json(
+						{
+							...safeToolboxPersonalAgentToolError(
+								"lobu_mcp_approval_required",
+								"MCP tool call requires approval",
+							),
+							content: result.content ?? null,
+						},
+						200,
+					);
+				}
 				if (result?.isError) {
 					return c.json(
 						safeToolboxPersonalAgentToolError(

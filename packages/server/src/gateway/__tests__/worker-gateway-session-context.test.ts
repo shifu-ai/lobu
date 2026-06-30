@@ -385,6 +385,108 @@ describe("WorkerGateway session context", () => {
 		);
 	});
 
+	test("approval-blocks materialized personal-agent write tools before direct execution", async () => {
+		fakeConnections.set("toolbox-mcp:ref", {
+			id: "toolbox-mcp:ref",
+			organizationId: "org-1",
+			agentId: "agent-1",
+			platform: "google_workspace",
+			config: {},
+			settings: {},
+			metadata: {
+				source: "toolbox-personal-agent-materialized",
+				ownerUserId: "user-1",
+				connectorKey: "google_workspace",
+				mcpId: "google_workspace",
+			},
+			status: "active",
+		});
+
+		const executeToolDirect = mock(async () => ({
+			content: [{ type: "text", text: "created doc" }],
+			isError: false,
+		}));
+		const callToolWithApproval = mock(async () => ({
+			status: "blocked-notified" as const,
+			content: [
+				{
+					type: "text",
+					text: "Tool call requires approval. The user has been asked to approve.",
+				},
+			],
+			isError: true,
+		}));
+
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{ getWorkerConfig: async () => ({ mcpServers: {} }) } as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [],
+				}),
+			} as any,
+			{ executeToolDirect, callToolWithApproval } as any,
+			undefined,
+			undefined,
+			undefined,
+			createFakeConnectionStore(),
+		);
+
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+			organizationId: "org-1",
+		});
+
+		const response = await gateway.getApp().request(
+			"/internal/toolbox-personal-agent-tools/call",
+			{
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${token}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({
+					connectorKey: "google_workspace",
+					connectionRef: "toolbox-mcp:ref",
+					connectorToolName: "gws_docs_create",
+					args: { title: "PM weekly summary" },
+				}),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			ok: false,
+			content: [
+				{
+					type: "text",
+					text: "Tool call requires approval. The user has been asked to approve.",
+				},
+			],
+			errorCode: "lobu_mcp_approval_required",
+			errorMessage: "MCP tool call requires approval",
+		});
+		expect(callToolWithApproval).toHaveBeenCalledWith(
+			"agent-1",
+			"user-1",
+			"google_workspace",
+			"gws_docs_create",
+			{ title: "PM weekly summary" },
+			expect.objectContaining({
+				channelId: "channel-1",
+				conversationId: "conv-1",
+				organizationId: "org-1",
+			}),
+		);
+		expect(executeToolDirect).not.toHaveBeenCalled();
+	});
+
 	test("rejects materialized personal-agent tool calls without worker authentication", async () => {
 		const gateway = new WorkerGateway(
 			{ send: async () => undefined } as any,
