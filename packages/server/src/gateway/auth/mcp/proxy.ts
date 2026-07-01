@@ -599,6 +599,20 @@ export class McpProxy {
     return !!c.req.header("x-mcp-id");
   }
 
+  async listToolsDirect(
+    agentId: string,
+    userId: string,
+    mcpId: string
+  ): Promise<{ tools: McpTool[]; instructions?: string }> {
+    return this.fetchToolsForMcp(
+      mcpId,
+      agentId,
+      { userId, channelId: "" },
+      undefined,
+      { surfaceErrors: true }
+    );
+  }
+
   /**
    * Fetch tools and instructions for a specific MCP server.
    * Performs MCP initialize handshake first to capture server instructions,

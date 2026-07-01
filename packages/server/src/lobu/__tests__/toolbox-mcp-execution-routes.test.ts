@@ -60,6 +60,7 @@ const SHIFU_TOOLBOX_DISCOVERY_TOOLS = [
   'submit_course_pm_profile',
 ];
 let executeToolDirectMock: ReturnType<typeof mock>;
+let listToolsDirectMock: ReturnType<typeof mock>;
 let getHttpServerMock: ReturnType<typeof mock>;
 
 async function importMountedAgentRoutes() {
@@ -143,6 +144,12 @@ describe('Toolbox MCP execution routes', () => {
       content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
       isError: false,
     }));
+    listToolsDirectMock = mock(async (_agentId: string, _userId: string, mcpId: string) => ({
+      tools: (mcpId === 'shifu-toolbox'
+        ? SHIFU_TOOLBOX_DISCOVERY_TOOLS
+        : GOOGLE_WORKSPACE_DISCOVERY_TOOLS
+      ).map((name) => ({ name })),
+    }));
     getHttpServerMock = mock(async () => ({
       id: 'google_workspace',
       upstreamUrl: 'https://mcp.test.local/google-workspace',
@@ -150,6 +157,7 @@ describe('Toolbox MCP execution routes', () => {
     coreServicesStash.services = {
       getMcpProxy: () => ({
         executeToolDirect: executeToolDirectMock,
+        listToolsDirect: listToolsDirectMock,
       }),
       getMcpConfigService: () => ({
         getHttpServer: getHttpServerMock,
@@ -915,6 +923,11 @@ describe('Toolbox MCP execution routes', () => {
       status: 'ready',
       toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF
+    );
   });
 
   test('GET /mcp/connections/status returns mcp_server_missing when no executable MCP server is configured', async () => {
@@ -1083,6 +1096,11 @@ describe('Toolbox MCP execution routes', () => {
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
       toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'google_workspace'
+    );
     expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
       id: MATERIALIZED_CONNECTION_REF,
       agentId: AGENT_ID,
@@ -1173,6 +1191,11 @@ describe('Toolbox MCP execution routes', () => {
       toolsDiscovered: SHIFU_TOOLBOX_DISCOVERY_TOOLS,
     });
     expect(body.lobuConnectionRef).toEqual(expect.any(String));
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox'
+    );
   });
 
   test('POST /mcp/connections/materialize accepts an existing deterministic Lobu OAuth row without materialized metadata', async () => {
