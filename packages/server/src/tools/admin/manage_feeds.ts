@@ -214,6 +214,7 @@ async function handleListFeeds(
     )
     SELECT p.*, c.connector_key, c.display_name AS connection_name,
            c.status AS connection_status,
+           c.external_tenant_id AS external_tenant_id,
            c.device_worker_id,
            dw.label AS device_label,
            dw.platform AS device_platform,
@@ -233,6 +234,14 @@ async function handleListFeeds(
              WHERE ent.id = ANY(p.entity_ids)
            ) AS entity_names,
            (SELECT COUNT(*) FROM runs r WHERE r.feed_id = p.id AND r.status = ANY(${runStatusLiteral(ACTIVE_RUN_STATUSES)}::text[]))::int AS active_runs,
+           -- Agent this feed's channel is bound to (streaming feeds only), so the
+           -- Behaviors Listen picker can hide channels already owned by another
+           -- agent instead of silently reassigning them on bind.
+           (SELECT b.agent_id FROM agent_channel_bindings b
+             WHERE b.organization_id = p.organization_id
+               AND b.connection_id = p.connection_id
+               AND b.channel_id = p.feed_key
+             LIMIT 1) AS target_agent_id,
            COALESCE(ec.event_count, 0)::int AS event_count
     FROM page p
     JOIN connections c ON c.id = p.connection_id

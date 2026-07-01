@@ -25,6 +25,7 @@ import {
   ErrorResponseSchema,
   errorResponses,
 } from "../shared/openapi-responses.js";
+import { listConnectionFeeds } from "../../../feeds/connection-feeds.js";
 
 const logger = createLogger("connection-routes");
 const TAG = "Connections";
@@ -152,6 +153,46 @@ const GetConnectionRoute = createRoute({
       content: {
         "application/json": {
           schema: PlatformConnectionSchema,
+        },
+      },
+    },
+    ...errorResponses(ErrorResponseSchema, {
+      401: "Unauthorized",
+      403: "Forbidden",
+      404: "Connection not found",
+    }),
+  },
+});
+
+const FeedSpecSchema = z.object({
+  id: z.string(),
+  feedKey: z.string(),
+  kind: z.enum(["collected", "streaming", "virtual"]),
+  connectionId: z.string(),
+  label: z.string(),
+  status: z.enum(["active", "paused", "error"]),
+  virtual: z.boolean(),
+  lastSyncAt: z.string().nullable(),
+  itemsCollected: z.number(),
+  targetAgentId: z.string().nullable().optional(),
+});
+
+const ListConnectionFeedsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/connections/{id}/feeds",
+  tags: [TAG],
+  summary: "List a connection's feeds",
+  description:
+    "Lists every feed (all kinds) on a connection, fenced to its organization.",
+  request: {
+    params: ConnectionIdParamsSchema,
+  },
+  responses: {
+    200: {
+      description: "Feeds",
+      content: {
+        "application/json": {
+          schema: z.object({ feeds: z.array(FeedSpecSchema) }),
         },
       },
     },
@@ -331,6 +372,37 @@ export function createConnectionCrudRoutes(
     }
 
     return c.json(connection);
+  });
+
+  app.openapi(ListConnectionFeedsRoute, async (c): Promise<any> => {
+    const session = await requireSession(c);
+    if (session instanceof Response) return session;
+
+    const { id } = c.req.valid("param");
+    const connection = await manager.getConnection(id);
+    if (!connection) {
+      return c.json({ error: "Connection not found" }, 404);
+    }
+    // Same ACL as GetConnection: owned-agent access, else admin-only for an
+    // unbound connection (a global lookup with no per-agent ACL).
+    if (connection.agentId) {
+      const access = await verifyOwnedAgentAccess(
+        session,
+        connection.agentId,
+        accessConfig
+      );
+      if (!access.authorized) {
+        return c.json({ error: "Forbidden" }, 403);
+      }
+    } else if (!session.isAdmin && session.settingsMode !== "admin") {
+      return c.json({ error: "Forbidden" }, 403);
+    }
+
+    if (!connection.organizationId) {
+      return c.json({ feeds: [] });
+    }
+    const feeds = await listConnectionFeeds(connection.organizationId, id);
+    return c.json({ feeds });
   });
 
   // Revoke a MANAGED install (e.g. an "Add to Slack" workspace). Unlike the
