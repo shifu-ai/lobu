@@ -136,6 +136,16 @@ class McpJsonRpcError extends Error {
   }
 }
 
+class McpDiscoveryAuthError extends Error {
+  constructor(
+    public readonly diagnosticCode: "upstream_unauthorized" | "upstream_forbidden",
+    message = "MCP tools/list requires authentication"
+  ) {
+    super(message);
+    this.name = "McpDiscoveryAuthError";
+  }
+}
+
 const SAFE_MCP_TOOL_DIAGNOSTIC_CODES = new Set([
   "oauth_scope_denied",
   "oauth_refresh_failed",
@@ -750,6 +760,9 @@ export class McpProxy {
           scopeKey,
           tokenData,
         });
+        if (options?.surfaceErrors) {
+          throw new McpDiscoveryAuthError("upstream_unauthorized");
+        }
         return { tools: [] };
       }
 
@@ -758,6 +771,9 @@ export class McpProxy {
           await response.body?.cancel().catch(() => {
             /* noop */
           });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryAuthError("upstream_forbidden");
+          }
           return { tools: [] };
         }
         throw new McpHttpStatusError(response.status);
@@ -768,6 +784,12 @@ export class McpProxy {
         const errorMsg =
           data.error.message || "MCP tools/list returned a JSON-RPC error";
         if (this.isAuthStyleToolError(errorMsg)) {
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryAuthError(
+              this.authDiagnosticCodeFromMessage(errorMsg),
+              errorMsg
+            );
+          }
           return { tools: [] };
         }
         throw new McpJsonRpcError(data.error.code, errorMsg);
@@ -823,12 +845,18 @@ export class McpProxy {
             scopeKey,
             tokenData,
           });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryAuthError("upstream_unauthorized");
+          }
           return { tools: [] };
         }
         if (retryResponse.status === 403) {
           await retryResponse.body?.cancel().catch(() => {
             /* noop */
           });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryAuthError("upstream_forbidden");
+          }
           return { tools: [] };
         }
         if (!retryResponse.ok) {
@@ -842,6 +870,12 @@ export class McpProxy {
             retryData.error.message ||
             "MCP tools/list retry returned a JSON-RPC error";
           if (this.isAuthStyleToolError(errorMsg)) {
+            if (options?.surfaceErrors) {
+              throw new McpDiscoveryAuthError(
+                this.authDiagnosticCodeFromMessage(errorMsg),
+                errorMsg
+              );
+            }
             return { tools: [] };
           }
           throw new McpJsonRpcError(retryData.error.code, errorMsg);
@@ -2262,6 +2296,14 @@ export class McpProxy {
 
   private isAuthStyleToolError(message: string): boolean {
     return /unauthorized|unauthenticated|forbidden/i.test(message);
+  }
+
+  private authDiagnosticCodeFromMessage(
+    message: string
+  ): "upstream_unauthorized" | "upstream_forbidden" {
+    return /forbidden/i.test(message)
+      ? "upstream_forbidden"
+      : "upstream_unauthorized";
   }
 
   /** Send the MCP `initialize` request to an upstream and return the raw response. */

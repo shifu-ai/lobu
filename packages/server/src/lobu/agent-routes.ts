@@ -408,7 +408,11 @@ type ToolboxMcpExecutableReadiness =
   | { ok: false; errorCode: 'mcp_server_missing' };
 type ToolboxMcpToolsDiscovery =
   | { ok: true; toolsDiscovered: string[] }
-  | { ok: false; errorCode: 'lobu_mcp_unavailable' | 'lobu_mcp_tools_discovery_failed' };
+  | {
+      ok: false;
+      status: Exclude<ToolboxMcpConnectionStatus, 'ready'>;
+      errorCode?: 'lobu_mcp_unavailable' | 'lobu_mcp_tools_discovery_failed';
+    };
 
 type ToolboxMcpConnectionMaterializeRequest = {
   ownerUserId?: unknown;
@@ -730,6 +734,10 @@ function safeToolDiagnosticCode(error: unknown): string | undefined {
     : undefined;
 }
 
+function isMcpAuthDiagnosticCode(value: unknown): boolean {
+  return value === 'upstream_unauthorized' || value === 'upstream_forbidden';
+}
+
 function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRef: string): string {
   if (connection && isPlainRecord(connection.metadata)) {
     const mcpId = connection.metadata.mcpId;
@@ -775,7 +783,7 @@ async function discoverMcpToolNames(params: {
 }): Promise<ToolboxMcpToolsDiscovery> {
   const mcpProxy = getLobuCoreServices()?.getMcpProxy?.();
   if (!mcpProxy?.listToolsDirect) {
-    return { ok: false, errorCode: 'lobu_mcp_unavailable' };
+    return { ok: false, status: 'error', errorCode: 'lobu_mcp_unavailable' };
   }
 
   try {
@@ -785,8 +793,15 @@ async function discoverMcpToolNames(params: {
       params.mcpId
     );
     return { ok: true, toolsDiscovered: extractMcpToolNames(result) };
-  } catch {
-    return { ok: false, errorCode: 'lobu_mcp_tools_discovery_failed' };
+  } catch (error) {
+    if (isMcpAuthDiagnosticCode(safeToolDiagnosticCode(error))) {
+      return { ok: false, status: 'needs_reauth' };
+    }
+    return {
+      ok: false,
+      status: 'error',
+      errorCode: 'lobu_mcp_tools_discovery_failed',
+    };
   }
 }
 
@@ -1046,7 +1061,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
         mcpId: mcpIdForConnection(guard.connection, match.connection.id),
       });
       if (!tools.ok) {
-        return c.json(toolboxMcpMaterializeResult('error', null, tools.errorCode));
+        return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode));
       }
 
       return c.json(
@@ -1109,7 +1124,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       mcpId: mcpIdForConnection(guard.connection, materializedRef),
     });
     if (!tools.ok) {
-      return c.json(toolboxMcpMaterializeResult('error', null, tools.errorCode));
+      return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode));
     }
 
     return c.json(
@@ -1169,6 +1184,9 @@ toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
     mcpId: mcpIdForConnection(guard.connection, connectionRef),
   });
   if (!tools.ok) {
+    if (tools.status !== 'error') {
+      return c.json(toolboxMcpStatusResult(tools.status));
+    }
     return c.json({
       status: 'error',
       toolsDiscovered: [],

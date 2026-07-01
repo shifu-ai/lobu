@@ -1073,6 +1073,28 @@ describe('Toolbox MCP execution routes', () => {
     });
   });
 
+  test('GET /mcp/connections/status maps tools/list auth failures to needs_reauth', async () => {
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP tools/list requires authentication'), {
+        diagnosticCode: 'upstream_unauthorized',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'needs_reauth',
+      toolsDiscovered: [],
+    });
+  });
+
   test('POST /mcp/connections/materialize returns ready and a ref for an owner connector', async () => {
     seedSourceConnectionForMaterialize();
     const app = await importMountedAgentRoutes();
@@ -1247,6 +1269,35 @@ describe('Toolbox MCP execution routes', () => {
         connectorKey: 'google_workspace',
         authSource: 'lobu_oauth',
       },
+    });
+  });
+
+  test('POST /mcp/connections/materialize maps tools/list auth failures to needs_reauth', async () => {
+    seedSourceConnectionForMaterialize();
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP tools/list requires authentication'), {
+        diagnosticCode: 'upstream_forbidden',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'needs_reauth',
+      lobuConnectionRef: null,
     });
   });
 
