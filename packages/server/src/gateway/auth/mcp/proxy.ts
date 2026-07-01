@@ -697,6 +697,19 @@ export class McpProxy {
             scopeKey,
             tokenData,
           });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryAuthError("upstream_unauthorized");
+          }
+          return { tools: [] };
+        }
+
+        if (initResponse.status === 403) {
+          await initResponse.body?.cancel().catch(() => {
+            /* noop */
+          });
+          if (options?.surfaceErrors) {
+            throw new McpDiscoveryAuthError("upstream_forbidden");
+          }
           return { tools: [] };
         }
 
@@ -722,6 +735,9 @@ export class McpProxy {
           workerToken
         );
       } catch (initError) {
+        if (options?.surfaceErrors && initError instanceof McpDiscoveryAuthError) {
+          throw initError;
+        }
         logger.warn("MCP initialize failed (continuing with tools/list)", {
           mcpId,
           error:
@@ -2287,6 +2303,9 @@ export class McpProxy {
   }
 
   private statusFromError(error: unknown): number | undefined {
+    if (error instanceof McpDiscoveryAuthError) {
+      return error.diagnosticCode === "upstream_unauthorized" ? 401 : 403;
+    }
     return error instanceof McpHttpStatusError ? error.status : undefined;
   }
 
