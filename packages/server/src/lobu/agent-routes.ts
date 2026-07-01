@@ -439,6 +439,10 @@ function connectorKeyAliases(connectorKey: ToolboxMcpStatusConnectorKey): Readon
   return new Set([connectorKey]);
 }
 
+function canonicalMcpIdForConnector(connectorKey: ToolboxMcpStatusConnectorKey): string {
+  return connectorKey === 'shifu_toolbox' ? 'shifu-toolbox' : connectorKey;
+}
+
 function metadataString(
   connection: StoredConnection,
   field: string
@@ -675,6 +679,36 @@ function buildMaterializedMcpConnection(params: {
         ? sourceMetadata.mcpId.trim()
         : params.connectorKey,
       materializedFromConnectionRef: params.source.id,
+    },
+    status: 'active',
+    errorMessage: undefined,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function buildDirectMaterializedMcpConnection(params: {
+  organizationId: string;
+  ownerUserId: string;
+  agentId: string;
+  connectorKey: ToolboxMcpStatusConnectorKey;
+  materializedRef: string;
+}): StoredConnection {
+  const now = Date.now();
+  const mcpId = canonicalMcpIdForConnector(params.connectorKey);
+  return {
+    id: params.materializedRef,
+    organizationId: params.organizationId,
+    agentId: params.agentId,
+    platform: mcpId,
+    config: {},
+    settings: {},
+    metadata: {
+      ownerUserId: params.ownerUserId,
+      connectorKey: params.connectorKey,
+      provider: mcpId,
+      source: 'toolbox-personal-agent-materialized',
+      mcpId,
     },
     status: 'active',
     errorMessage: undefined,
@@ -1028,6 +1062,46 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     });
 
     if (match.status !== 'ready') {
+      if (match.status === 'not_connected' && connectorKey === 'shifu_toolbox') {
+        const mcpId = canonicalMcpIdForConnector(connectorKey);
+        const executable = await verifyExecutableMcpServer({
+          agentId,
+          fallbackMcpId: mcpId,
+          connection: buildDirectMaterializedMcpConnection({
+            organizationId,
+            ownerUserId,
+            agentId,
+            connectorKey,
+            materializedRef,
+          }),
+        });
+        if (!executable.ok) {
+          return c.json(toolboxMcpMaterializeResult('error', null, executable.errorCode));
+        }
+
+        const tools = await discoverMcpToolNames({
+          agentId,
+          ownerUserId,
+          mcpId,
+        });
+        if (!tools.ok) {
+          return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode));
+        }
+
+        const materialized = buildDirectMaterializedMcpConnection({
+          organizationId,
+          ownerUserId,
+          agentId,
+          connectorKey,
+          materializedRef,
+        });
+        await connectionStore.saveConnection(materialized);
+
+        return c.json(
+          toolboxMcpMaterializeResult('ready', materializedRef, undefined, tools.toolsDiscovered)
+        );
+      }
+
       return c.json(toolboxMcpMaterializeResult(match.status, null));
     }
 

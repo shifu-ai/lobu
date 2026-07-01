@@ -1220,6 +1220,67 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/connections/materialize creates a ready shifu_toolbox row when only the agent MCP server exists', async () => {
+    const shifuToolboxConnectionRef = `toolbox-mcp:${createHash('sha256')
+      .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu_toolbox']))
+      .digest('hex')}`;
+    fakeConnections.delete(CONNECTION_REF);
+    for (const [connectionRef, connection] of fakeConnections) {
+      if (connection.agentId === AGENT_ID && connection.platform === 'shifu-toolbox') {
+        fakeConnections.delete(connectionRef);
+      }
+    }
+    fakeSettings.set(AGENT_ID, {
+      mcpServers: {
+        'shifu-toolbox': {
+          type: 'http',
+          url: 'https://mcp.shifu-ai.org/mcp',
+        },
+      },
+      preApprovedTools: [],
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('ready');
+    expect(body.lobuConnectionRef).toEqual(expect.any(String));
+    expect(body.toolsDiscovered).toContain('meeting_search');
+    expect(body.toolsDiscovered).toContain('submit_course_pm_profile');
+    expect(body.lobuConnectionRef).toBe(shifuToolboxConnectionRef);
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox'
+    );
+    expect(fakeConnections.get(shifuToolboxConnectionRef)).toMatchObject({
+      id: shifuToolboxConnectionRef,
+      agentId: AGENT_ID,
+      platform: 'shifu-toolbox',
+      status: 'active',
+      metadata: {
+        connectorKey: 'shifu_toolbox',
+        mcpId: 'shifu-toolbox',
+        provider: 'shifu-toolbox',
+        ownerUserId: OWNER_USER_ID,
+        source: 'toolbox-personal-agent-materialized',
+      },
+    });
+  });
+
   test('POST /mcp/connections/materialize accepts an existing deterministic Lobu OAuth row without materialized metadata', async () => {
     fakeConnections.delete(CONNECTION_REF);
     fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
