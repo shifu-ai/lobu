@@ -531,6 +531,44 @@ describe("POST /api/provisioning/agents", () => {
 		]);
 	});
 
+	test("repeated provisioning keeps one current Toolbox owner row", async () => {
+		const app = await buildApp();
+
+		for (const ownerUserId of [
+			"toolbox-user-old",
+			"toolbox-user-new",
+			"toolbox-user-new",
+		]) {
+			const response = await app.request("/api/provisioning/agents", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					agentId: "shifu-u-owner-reassign",
+					name: "Owner Reassignment Agent",
+					ownerUserId,
+					settings: {},
+				}),
+			});
+
+			expect([200, 201]).toContain(response.status);
+		}
+
+		const { getDb } = await import("../../db/client.js");
+		const rows = await getDb()`
+			SELECT platform, user_id, COUNT(*)::int AS count
+			FROM agent_users
+			WHERE organization_id = ${ORG_ID}
+			  AND agent_id = ${"shifu-u-owner-reassign"}
+			GROUP BY platform, user_id
+			ORDER BY platform, user_id
+		`;
+
+		expect(rows).toEqual([
+			{ platform: "external", user_id: "gateway-user", count: 1 },
+			{ platform: "toolbox", user_id: "toolbox-user-new", count: 1 },
+		]);
+	});
+
 	test("ensures provided Toolbox owner is a member of the PAT organization", async () => {
 		const app = await buildApp();
 
