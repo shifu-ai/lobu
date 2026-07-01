@@ -469,6 +469,7 @@ export function createProvisioningRoutes(
 				platform: "toolbox-web",
 				channelId: "",
 				conversationId: "",
+				resumeMode: "none",
 				organizationId: organizationId ?? undefined,
 			});
 

@@ -1209,6 +1209,7 @@ describe("POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/start", () => 
 			platform: "toolbox-web",
 			channelId: "",
 			conversationId: "",
+			resumeMode: "none",
 			organizationId: ORG_ID,
 		});
 	});
