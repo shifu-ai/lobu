@@ -1220,6 +1220,66 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/connections/materialize maps shifu_toolbox tools/list auth failures to needs_reauth', async () => {
+    fakeAgents.set(SOURCE_AGENT_ID, {
+      agentId: SOURCE_AGENT_ID,
+      name: 'Source Agent',
+      owner: { platform: 'toolbox', userId: OWNER_USER_ID },
+      organizationId: ORG_ID,
+      createdAt: Date.now(),
+    });
+    fakeConnections.delete(CONNECTION_REF);
+    fakeConnections.set('owner-shifu-toolbox', {
+      id: 'owner-shifu-toolbox',
+      organizationId: ORG_ID,
+      agentId: SOURCE_AGENT_ID,
+      platform: 'shifu-toolbox',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'shifu-toolbox',
+        mcpId: 'shifu-toolbox',
+        authSource: 'lobu_oauth',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP tools/list requires authentication'), {
+        diagnosticCode: 'upstream_unauthorized',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'needs_reauth',
+      lobuConnectionRef: null,
+      toolsDiscovered: [],
+      errorCode: 'upstream_unauthorized',
+    });
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox'
+    );
+  });
+
   test('POST /mcp/connections/materialize creates a ready shifu_toolbox row when only the agent MCP server exists', async () => {
     const shifuToolboxConnectionRef = `toolbox-mcp:${createHash('sha256')
       .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu_toolbox']))
@@ -1390,6 +1450,8 @@ describe('Toolbox MCP execution routes', () => {
     await expect(res.json()).resolves.toEqual({
       status: 'needs_reauth',
       lobuConnectionRef: null,
+      toolsDiscovered: [],
+      errorCode: 'upstream_forbidden',
     });
   });
 

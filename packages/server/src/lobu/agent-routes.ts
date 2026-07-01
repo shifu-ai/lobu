@@ -411,7 +411,11 @@ type ToolboxMcpToolsDiscovery =
   | {
       ok: false;
       status: Exclude<ToolboxMcpConnectionStatus, 'ready'>;
-      errorCode?: 'lobu_mcp_unavailable' | 'lobu_mcp_tools_discovery_failed';
+      errorCode?:
+        | 'lobu_mcp_unavailable'
+        | 'lobu_mcp_tools_discovery_failed'
+        | 'upstream_unauthorized'
+        | 'upstream_forbidden';
     };
 
 type ToolboxMcpConnectionMaterializeRequest = {
@@ -738,7 +742,7 @@ function toolboxMcpMaterializeResult(
   return {
     status,
     lobuConnectionRef,
-    ...(status === 'ready' ? { toolsDiscovered: toolsDiscovered ?? [] } : {}),
+    ...(status === 'ready' || toolsDiscovered ? { toolsDiscovered: toolsDiscovered ?? [] } : {}),
     ...(errorCode ? { errorCode } : {}),
   };
 }
@@ -780,7 +784,9 @@ function safeToolDiagnosticCode(error: unknown): string | undefined {
     : undefined;
 }
 
-function isMcpAuthDiagnosticCode(value: unknown): boolean {
+function isMcpAuthDiagnosticCode(
+  value: unknown
+): value is 'upstream_unauthorized' | 'upstream_forbidden' {
   return value === 'upstream_unauthorized' || value === 'upstream_forbidden';
 }
 
@@ -840,8 +846,13 @@ async function discoverMcpToolNames(params: {
     );
     return { ok: true, toolsDiscovered: extractMcpToolNames(result) };
   } catch (error) {
-    if (isMcpAuthDiagnosticCode(safeToolDiagnosticCode(error))) {
-      return { ok: false, status: 'needs_reauth' };
+    const diagnosticCode = safeToolDiagnosticCode(error);
+    if (isMcpAuthDiagnosticCode(diagnosticCode)) {
+      return {
+        ok: false,
+        status: 'needs_reauth',
+        errorCode: diagnosticCode,
+      };
     }
     return {
       ok: false,
@@ -1101,7 +1112,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
           mcpId,
         });
         if (!tools.ok) {
-          return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode));
+          return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode, []));
         }
 
         const materialized = buildDirectMaterializedMcpConnection({
@@ -1151,7 +1162,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
         mcpId: mcpIdForConnection(guard.connection, match.connection.id),
       });
       if (!tools.ok) {
-        return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode));
+        return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode, []));
       }
 
       return c.json(
@@ -1214,7 +1225,7 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
       mcpId: mcpIdForConnection(guard.connection, materializedRef),
     });
     if (!tools.ok) {
-      return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode));
+      return c.json(toolboxMcpMaterializeResult(tools.status, null, tools.errorCode, []));
     }
 
     return c.json(
