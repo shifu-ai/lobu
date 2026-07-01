@@ -415,6 +415,21 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 	],
 	shifu_toolbox: [
 		{
+			name: "meeting_search",
+			connectorToolName: "meeting_search",
+			description:
+				"Search meeting records available to the connected Toolbox user.",
+			approvalRequired: false,
+			inputSchema: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
+					limit: { type: "number" },
+				},
+				required: ["query"],
+			},
+		},
+		{
 			name: "submit_course_pm_profile",
 			connectorToolName: "submit_course_pm_profile",
 			description:

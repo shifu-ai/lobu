@@ -392,6 +392,11 @@ describe("WorkerGateway session context", () => {
 					connectorToolName: "submit_course_pm_profile",
 					approvalRequired: false,
 				}),
+				expect.objectContaining({
+					name: "meeting_search",
+					connectorToolName: "meeting_search",
+					approvalRequired: false,
+				}),
 			]),
 		);
 	});
