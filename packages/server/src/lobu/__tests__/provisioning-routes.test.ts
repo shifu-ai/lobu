@@ -490,6 +490,47 @@ describe("POST /api/provisioning/agents", () => {
 		});
 	});
 
+	test("syncs agent_users for Toolbox owner and Gateway PAT owner", async () => {
+		const app = await buildApp();
+
+		const response = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: "shifu-u-agent-users",
+				name: "Agent Users Ready Agent",
+				ownerUserId: "toolbox-user-agent-users",
+				settings: {},
+			}),
+		});
+
+		expect(response.status).toBe(201);
+
+		const { getDb } = await import("../../db/client.js");
+		const rows = await getDb()`
+			SELECT organization_id, agent_id, platform, user_id
+			FROM agent_users
+			WHERE organization_id = ${ORG_ID}
+			  AND agent_id = ${"shifu-u-agent-users"}
+			ORDER BY platform, user_id
+		`;
+
+		expect(rows).toEqual([
+			{
+				organization_id: ORG_ID,
+				agent_id: "shifu-u-agent-users",
+				platform: "external",
+				user_id: "gateway-user",
+			},
+			{
+				organization_id: ORG_ID,
+				agent_id: "shifu-u-agent-users",
+				platform: "toolbox",
+				user_id: "toolbox-user-agent-users",
+			},
+		]);
+	});
+
 	test("ensures provided Toolbox owner is a member of the PAT organization", async () => {
 		const app = await buildApp();
 
