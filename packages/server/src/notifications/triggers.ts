@@ -67,9 +67,9 @@ export async function notifyActionApprovalNeeded(params: {
     const connLabel = params.connectionName ? ` on ${params.connectionName}` : '';
     const resourceUrl =
       params.eventId && orgSlug
-        ? `/${orgSlug}/events/${params.eventId}`
+        ? `/${orgSlug}/memory?content_ids=${params.eventId}`
         : orgSlug
-          ? `/${orgSlug}/events?run=${params.runId}`
+          ? `/${orgSlug}/memory?run_ids=${params.runId}`
           : undefined;
     const urlLine = params.approvalUrl ? `\n\nReview: ${params.approvalUrl}` : '';
     return {
@@ -97,7 +97,7 @@ export async function notifyConnectionPermissionRequest(params: {
       body: `A new connection was created and requires OAuth authorization.${urlLine}`,
       resourceType: 'connection',
       resourceId: String(params.connectionId),
-      resourceUrl: orgSlug ? `/${orgSlug}/connections` : undefined,
+      resourceUrl: orgSlug ? `/${orgSlug}/connectors` : undefined,
     };
   });
 }

@@ -5,10 +5,19 @@
 const OWNER_ROUTE_SEGMENTS = [
   'agents',
   'connectors',
-  'events',
+  'devices',
+  'environments',
+  'memory',
   'members',
   'settings',
+] as const;
+
+/** Legacy page slugs removed from the UI router. */
+const REMOVED_OWNER_SEGMENTS = [
+  'events',
   'watchers',
+  'connections',
+  'sources',
 ] as const;
 
 /**
@@ -26,6 +35,7 @@ const OWNER_ROUTE_SEGMENTS = [
  */
 export const RESERVED_PATHS = [
   ...OWNER_ROUTE_SEGMENTS,
+  ...REMOVED_OWNER_SEGMENTS,
   'auth',
   'api',
   'inbox',
@@ -38,7 +48,6 @@ export const RESERVED_PATHS = [
   'logout',
   'signup',
   'register',
-  'sources',
   'contents',
   'entity-types',
   'www',
@@ -60,13 +69,11 @@ export const RESERVED_PATHS_SET: ReadonlySet<string> = new Set(RESERVED_PATHS);
  */
 export const RESERVED_ENTITY_TYPES = [
   ...OWNER_ROUTE_SEGMENTS,
+  ...REMOVED_OWNER_SEGMENTS,
   'organization',
   'user',
   'watcher',
   'content',
   'source',
-  'sources',
-  'connections',
   'connector',
 ];
-
