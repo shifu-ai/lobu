@@ -717,6 +717,18 @@ function buildDirectMaterializedMcpConnection(params: {
   };
 }
 
+async function agentHasExplicitMcpServer(
+  agentId: string,
+  mcpIds: Iterable<string>
+): Promise<boolean> {
+  const settings = await configStore.getSettings(agentId);
+  if (!settings || !isPlainRecord(settings.mcpServers)) return false;
+  for (const mcpId of mcpIds) {
+    if (isPlainRecord(settings.mcpServers[mcpId])) return true;
+  }
+  return false;
+}
+
 function toolboxMcpMaterializeResult(
   status: ToolboxMcpConnectionStatus,
   lobuConnectionRef: string | null,
@@ -1064,6 +1076,10 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
     if (match.status !== 'ready') {
       if (match.status === 'not_connected' && connectorKey === 'shifu_toolbox') {
         const mcpId = canonicalMcpIdForConnector(connectorKey);
+        if (!(await agentHasExplicitMcpServer(agentId, connectorKeyAliases(connectorKey)))) {
+          return c.json(toolboxMcpMaterializeResult('not_connected', null));
+        }
+
         const executable = await verifyExecutableMcpServer({
           agentId,
           fallbackMcpId: mcpId,

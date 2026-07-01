@@ -1281,6 +1281,37 @@ describe('Toolbox MCP execution routes', () => {
     });
   });
 
+  test('POST /mcp/connections/materialize does not create shifu_toolbox row from global-only MCP config', async () => {
+    const shifuToolboxConnectionRef = `toolbox-mcp:${createHash('sha256')
+      .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu_toolbox']))
+      .digest('hex')}`;
+    fakeConnections.delete(CONNECTION_REF);
+    fakeSettings.delete(AGENT_ID);
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(['not_connected', 'error']).toContain(body.status);
+    if (body.status === 'error') {
+      expect(body.errorCode).toBe('mcp_server_missing');
+    }
+    expect(body.lobuConnectionRef).toBe(null);
+    expect(fakeConnections.has(shifuToolboxConnectionRef)).toBe(false);
+  });
+
   test('POST /mcp/connections/materialize accepts an existing deterministic Lobu OAuth row without materialized metadata', async () => {
     fakeConnections.delete(CONNECTION_REF);
     fakeConnections.set(MATERIALIZED_CONNECTION_REF, {
