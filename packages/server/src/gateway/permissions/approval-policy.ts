@@ -20,17 +20,18 @@ interface McpToolAnnotations {
  *
  * Returns false (no approval needed) when:
  *   - readOnlyHint is explicitly true
- *   - destructiveHint is explicitly false
  *
  * Returns true (approval required) otherwise, including when:
  *   - No annotations provided (conservative default)
  *   - destructiveHint is true (default per MCP spec)
+ *   - destructiveHint is explicitly false (self-declared non-destructive is
+ *     not trusted as an approval exemption; readOnlyHint is the only signal
+ *     that bypasses approval)
  */
 export function requiresToolApproval(
   annotations?: McpToolAnnotations
 ): boolean {
   if (!annotations) return true;
   if (annotations.readOnlyHint === true) return false;
-  if (annotations.destructiveHint === false) return false;
   return true;
 }
