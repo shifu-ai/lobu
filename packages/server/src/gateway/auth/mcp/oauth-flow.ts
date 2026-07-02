@@ -32,6 +32,8 @@ const logger = createLogger("mcp-oauth-flow");
 
 const STATE_KEY_PREFIX = "mcp-oauth:state";
 
+type McpOAuthResumeMode = "prompt" | "none";
+
 /**
  * Persisted state associated with a pending OAuth authorization-code flow.
  * Bound to `state` (CSRF) and loaded by the callback handler to exchange the
@@ -55,6 +57,7 @@ interface McpOAuthStateData extends ProviderOAuthStateData {
   platform: string;
   channelId: string;
   conversationId: string;
+  resumeMode?: McpOAuthResumeMode;
   teamId?: string;
   connectionId?: string;
 }
@@ -80,6 +83,7 @@ interface StartFlowOptions {
   platform: string;
   channelId: string;
   conversationId: string;
+  resumeMode?: McpOAuthResumeMode;
   teamId?: string;
   connectionId?: string;
   organizationId?: string;
@@ -111,6 +115,7 @@ export async function startAuthCodeFlow(
     platform,
     channelId,
     conversationId,
+    resumeMode = "prompt",
     teamId,
     connectionId,
     organizationId,
@@ -157,6 +162,7 @@ export async function startAuthCodeFlow(
     platform,
     channelId,
     conversationId,
+    resumeMode,
     teamId,
     connectionId,
     organizationId,
@@ -205,6 +211,7 @@ interface CompleteFlowResult {
   platform: string;
   channelId: string;
   conversationId: string;
+  resumeMode?: McpOAuthResumeMode;
   teamId?: string;
   connectionId?: string;
   /** Space-separated scopes actually granted (provider-reported) or requested. */
@@ -240,6 +247,7 @@ export async function completeAuthCodeFlow(
     platform,
     channelId,
     conversationId,
+    resumeMode,
     teamId,
     connectionId,
     organizationId,
@@ -346,6 +354,7 @@ export async function completeAuthCodeFlow(
     platform,
     channelId,
     conversationId,
+    resumeMode: resumeMode ?? "prompt",
     teamId,
     connectionId,
     scope: tokenData.scope ?? scope,

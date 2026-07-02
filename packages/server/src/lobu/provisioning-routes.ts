@@ -203,6 +203,31 @@ async function ensureUsableOAuthCredential(
 	return refreshed;
 }
 
+async function syncProvisioningAgentUsers(params: {
+	organizationId: string;
+	agentId: string;
+	ownerUserId: string;
+	patUserId: string;
+}): Promise<void> {
+	const sql = getDb();
+	await sql.begin(async (tx) => {
+		await tx`
+			DELETE FROM agent_users
+			WHERE organization_id = ${params.organizationId}
+			  AND agent_id = ${params.agentId}
+			  AND platform = 'toolbox'
+			  AND user_id <> ${params.ownerUserId}
+		`;
+		await tx`
+			INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
+			VALUES
+				(${params.organizationId}, ${params.agentId}, 'toolbox', ${params.ownerUserId}, NOW()),
+				(${params.organizationId}, ${params.agentId}, 'external', ${params.patUserId}, NOW())
+			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
+		`;
+	});
+}
+
 async function syncProvisioningGrants(
 	agentId: string,
 	settings: Omit<AgentSettings, "updatedAt">,
@@ -300,6 +325,12 @@ export function createProvisioningRoutes(
 		await configStore.saveSettings(agentId, {
 			...settings,
 			updatedAt: Date.now(),
+		});
+		await syncProvisioningAgentUsers({
+			organizationId,
+			agentId,
+			ownerUserId,
+			patUserId: user.id,
 		});
 		await syncProvisioningGrants(agentId, settings, organizationId);
 
@@ -438,6 +469,7 @@ export function createProvisioningRoutes(
 				platform: "toolbox-web",
 				channelId: "",
 				conversationId: "",
+				resumeMode: "none",
 				organizationId: organizationId ?? undefined,
 			});
 

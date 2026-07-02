@@ -133,7 +133,7 @@ export function createMcpOAuthRoutes(config: McpOAuthRoutesConfig): Hono {
       // doesn't have to retype. Best-effort — if the injection fails (no
       // coreServices, missing provider, queue unavailable), the credential
       // is still stored and the user can send a follow-up message manually.
-      if (coreServices) {
+      if (coreServices && result.resumeMode !== "none") {
         try {
           await postOAuthCompletionPrompt({
             coreServices,
