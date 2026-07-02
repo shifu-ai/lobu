@@ -529,6 +529,12 @@ describe("POST /api/provisioning/agents", () => {
 				user_id: "toolbox-user-agent-users",
 			},
 		]);
+
+		const { UserAgentsStore } = await import("../../gateway/auth/user-agents-store.js");
+		const store = new UserAgentsStore();
+		await expect(
+			store.ownsAgent("external", "gateway-user", "shifu-u-agent-users", ORG_ID),
+		).resolves.toBe(true);
 	});
 
 	test("repeated provisioning keeps one current Toolbox owner row", async () => {
