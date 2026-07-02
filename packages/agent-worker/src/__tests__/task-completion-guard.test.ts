@@ -223,6 +223,19 @@ describe("2026-07-02 write tool pattern fail-open guard", () => {
     });
     expect(decision.outcome).toBe("failed_incomplete");
   });
+
+  test("hyphenated notion read tools are not write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我更新那份文件",
+      finalVisibleText: "我查到了相關頁面。",
+      toolExecutions: [
+        { toolName: "notion-search", isError: false },
+        { toolName: "notion-get-comments", isError: false },
+        { toolName: "notion-query-data-sources", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("failed_incomplete");
+  });
 });
 
 describe("2026-06-25 Google Doc rewrite regression", () => {

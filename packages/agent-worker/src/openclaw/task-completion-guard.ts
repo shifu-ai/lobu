@@ -1,3 +1,7 @@
+import { createLogger } from "@lobu/core";
+
+const logger = createLogger("task-completion-guard");
+
 export type TaskCompletionOutcome =
   | "completed"
   | "failed_incomplete"
@@ -79,7 +83,7 @@ const GOOGLE_DOCS_WRITE_TOOL_PATTERNS = [
 ];
 
 const READ_ONLY_TOOL_PATTERNS = [
-  /(^|_)(search|list|get|read|fetch|query|describe|check|status|find|help|access)(_|$|\d)/i,
+  /(^|[-_])(search|list|get|read|fetch|query|describe|check|status|find|help|access)([-_]|$|\d)/i,
 ];
 
 function isReadOnlyTool(toolName: string): boolean {
@@ -90,6 +94,8 @@ export function evaluateTaskCompletion(
   input: TaskCompletionInput
 ): TaskCompletionDecision {
   const finalText = input.finalVisibleText.trim();
+
+  logFailOpenWriteEvidence(input.toolExecutions);
 
   if (!finalText) {
     return {
@@ -144,6 +150,38 @@ export function hasSuccessfulWriteEvidence(
       (WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName)) ||
         !isReadOnlyTool(tool.toolName))
   );
+}
+
+/**
+ * Returns the tool names that only counted as write evidence via the
+ * fail-open disjunct in `hasSuccessfulWriteEvidence` — i.e. tools that are
+ * not error, not a recognized write tool, and not a recognized read-only
+ * tool either. These are "unknown" tools the guard is uncertain about, and
+ * their fail-open classification should be observable (spec AC2).
+ */
+function getFailOpenWriteEvidenceTools(
+  toolExecutions: ToolExecutionSummary[]
+): string[] {
+  return toolExecutions
+    .filter(
+      (tool) =>
+        !tool.isError &&
+        !WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName)) &&
+        !isReadOnlyTool(tool.toolName)
+    )
+    .map((tool) => tool.toolName);
+}
+
+function logFailOpenWriteEvidence(
+  toolExecutions: ToolExecutionSummary[]
+): void {
+  const failOpenTools = getFailOpenWriteEvidenceTools(toolExecutions);
+  if (failOpenTools.length > 0) {
+    logger.warn("guard_uncertain", {
+      reason: "unknown_tool_fail_open_as_write_evidence",
+      toolNames: failOpenTools,
+    });
+  }
 }
 
 export function hasUnverifiedWriteEvidence(
