@@ -238,6 +238,46 @@ describe("2026-07-02 write tool pattern fail-open guard", () => {
   });
 });
 
+describe("2026-07-02 approval-blocked turn guard", () => {
+  test("allows write-intent task when final text says waiting for approval (Chinese)", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "幫我改這份 Google Doc",
+      finalVisibleText: "我已送出授權請求，等你核准後就會執行。",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+      ],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+
+  test("allows write-intent task when final text says waiting for approval (English)", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "please create the doc for me",
+      finalVisibleText: "I'm waiting for your approval to create the doc.",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+
+  test("allows write-intent task when errored tool result text signals approval required", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "幫我新增 Notion 頁面",
+      finalVisibleText: "我先確認一下內容。",
+      toolExecutions: [
+        {
+          toolName: "notion-create-pages",
+          isError: true,
+          resultSummary: { error: "Tool call requires approval before it can run." },
+        },
+      ],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+});
+
 describe("2026-06-25 Google Doc rewrite regression", () => {
   test("blocks completed status when doc rewrite task only reads docs and slides", () => {
     const result = evaluateTaskCompletion({
