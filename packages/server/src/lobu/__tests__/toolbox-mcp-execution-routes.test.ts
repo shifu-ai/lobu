@@ -512,7 +512,7 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
-  test('POST /mcp/tools/call returns safe diagnostic code for connector execution failure results', async () => {
+  test('POST /mcp/tools/call returns safe diagnostic code and classifies upstream_forbidden isError result as needs_reauth', async () => {
     executeToolDirectMock.mockResolvedValueOnce({
       content: [{ type: 'text', text: 'private upstream body must not leak' }],
       isError: true,
@@ -543,7 +543,49 @@ describe('Toolbox MCP execution routes', () => {
       errorCode: 'lobu_mcp_tool_error',
       errorMessage: 'MCP tool execution failed',
       diagnosticCode: 'upstream_forbidden',
-      classification: 'transient_error',
+      classification: 'needs_reauth',
+    });
+    expect(executeToolDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF,
+      'gws_drive_search',
+      { query: 'test', limit: 1 }
+    );
+  });
+
+  test('POST /mcp/tools/call classifies upstream_unauthorized isError result as needs_reauth', async () => {
+    executeToolDirectMock.mockResolvedValueOnce({
+      content: [{ type: 'text', text: 'private upstream body must not leak' }],
+      isError: true,
+      diagnosticCode: 'upstream_unauthorized',
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'google_workspace_drive_search',
+        args: { query: 'test', limit: 1 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      ok: false,
+      content: null,
+      errorCode: 'lobu_mcp_tool_error',
+      errorMessage: 'MCP tool execution failed',
+      diagnosticCode: 'upstream_unauthorized',
+      classification: 'needs_reauth',
     });
     expect(executeToolDirectMock).toHaveBeenCalledWith(
       AGENT_ID,
@@ -761,7 +803,7 @@ describe('Toolbox MCP execution routes', () => {
     expect(executeToolDirectMock).not.toHaveBeenCalled();
   });
 
-  test('classifies upstream 401 as needs_reauth, never not_connected', async () => {
+  test('catch-block fallback: classifies a thrown upstream 401 error as needs_reauth, never not_connected (executeToolDirect does not throw in production; this covers the classifier fallback path)', async () => {
     getAllHttpServersMock.mockResolvedValueOnce(
       new Map([['notion', { url: 'https://mcp.test.local/notion' }]])
     );

@@ -11,7 +11,7 @@ export type ToolCallOutcome =
 
 const REAUTH_STATUS = new Set([401, 403]);
 const REAUTH_PATTERN =
-  /\b(auth|oauth|token|credential|reauth|unauthorized|forbidden|invalid_grant)\b/i;
+  /\b(auth|oauth|tokens?|credentials?|reauth|unauthorized|forbidden|invalid_grant|authentication|authorization)\b/i;
 const CONFIG_PATTERN = /\b(tool not found|not allowed|allowlist|unknown tool|tools\/list)\b/i;
 const TRANSIENT_PATTERN =
   /\b(timeout|timed out|econnreset|econnrefused|network|fetch failed|socket|unavailable|connection reset|reset by peer)\b/i;

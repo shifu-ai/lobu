@@ -33,4 +33,13 @@ describe('classifyToolCallFailure', () => {
   it('regression: "authority" 不得因 auth 裸子字串被判 needs_reauth', () => {
     expect(classifyToolCallFailure({ errorMessage: 'invalid authority certificate' })).not.toBe('needs_reauth');
   });
+
+  it.each([
+    ['authentication failed', { errorMessage: 'authentication failed' }, 'needs_reauth'],
+    ['invalid credentials', { errorMessage: 'invalid credentials' }, 'needs_reauth'],
+    ['expired tokens', { errorMessage: 'expired tokens' }, 'needs_reauth'],
+    ['authorization failed', { errorMessage: 'authorization failed' }, 'needs_reauth'],
+  ] as const)('regression (recall): %s → %s', (_name, input, expected) => {
+    expect(classifyToolCallFailure(input)).toBe(expected);
+  });
 });

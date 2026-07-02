@@ -1077,9 +1077,11 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     );
     if (result?.isError) {
       const diagnosticCode = safeToolDiagnosticCode(result);
-      const classification = classifyToolCallFailure({
-        errorMessage: extractToolFailureSignal(result),
-      });
+      const classification = isMcpAuthDiagnosticCode(diagnosticCode)
+        ? 'needs_reauth'
+        : classifyToolCallFailure({
+            errorMessage: extractToolFailureSignal(result),
+          });
       return c.json(
         {
           ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
