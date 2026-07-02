@@ -56,9 +56,7 @@ function createId(prefix: "tr" | "sp") {
 }
 
 function safeString(value: unknown, pattern: RegExp): string | undefined {
-  return typeof value === "string" && pattern.test(value)
-    ? value
-    : undefined;
+  return typeof value === "string" && pattern.test(value) ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,7 +65,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isSensitiveKey(key: string) {
   const normalized = key.replace(/[^a-zA-Z0-9_]/g, "").toLowerCase();
-  return sensitiveKeyFragments.some((fragment) => normalized.includes(fragment));
+  return sensitiveKeyFragments.some((fragment) =>
+    normalized.includes(fragment)
+  );
 }
 
 function sanitizeFields(fields: Record<string, unknown> = {}) {
