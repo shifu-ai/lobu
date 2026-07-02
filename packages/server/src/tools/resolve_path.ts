@@ -1071,7 +1071,7 @@ async function fetchRecentWatchers(
     ),
     watcher_window_counts AS (
       SELECT ww.watcher_id, COUNT(*)::int AS windows_count
-      FROM watcher_windows ww
+      FROM canvas_windows ww
       WHERE ww.watcher_id IN (SELECT id FROM scoped_watchers)
       GROUP BY ww.watcher_id
     )

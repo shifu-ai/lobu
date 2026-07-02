@@ -102,12 +102,13 @@ export async function computePendingWindow(
   watcherId: number,
   granularity: WatcherTimeGranularity
 ): Promise<WindowDates> {
-  // Find the last completed leaf window for this watcher. Zero-content
-  // windows are durable cursor progress too; otherwise empty periods can be
-  // reprocessed forever.
+  // Find the last completed leaf window for this watcher (canvas_windows =
+  // one row per chain root, so this is the latest completed period). Zero-
+  // content windows are durable cursor progress too; otherwise empty periods
+  // can be reprocessed forever.
   const lastWindow = await sql`
     SELECT window_end
-    FROM watcher_windows
+    FROM canvas_windows
     WHERE watcher_id = ${watcherId}
     ORDER BY window_end DESC
     LIMIT 1
@@ -153,15 +154,27 @@ export async function computePendingWindow(
  *
  * @returns SQL SELECT ... FROM ... JOIN fragment (without WHERE clause)
  */
+/**
+ * Windows read from the `canvas_windows` view — one row per canvas chain ROOT,
+ * live extracted_data from the chain HEAD, provenance from the head's run (see
+ * migration 20260703000000). `iw.id` is the ROOT event id (the window
+ * identity), so link tables re-keyed to root ids match.
+ */
+/** FROM fragment for callers that need `iw` joined to versions (the SELECT clause). */
+export function buildWindowsFromWithVersions(): string {
+  return `canvas_windows iw
+    JOIN watchers i ON iw.watcher_id = i.id
+    LEFT JOIN watcher_versions watcher_v ON i.current_version_id = watcher_v.id
+    LEFT JOIN watcher_versions window_v ON iw.version_id = window_v.id`;
+}
+
+/** Bare FROM fragment for the COUNT(*) pagination fallback (no version joins). */
+export function buildWindowsCountFromClause(): string {
+  return `canvas_windows iw
+    JOIN watchers i ON iw.watcher_id = i.id`;
+}
+
 export function buildWindowsSelectClause(): string {
-  // Canvas-on-events read flip (dual-write transition): a window's extracted_data
-  // now lives on the chain HEAD `canvas_state` event (payload_data). The LATERAL
-  // finds the head for this window's period — the chain member with no superseder
-  // (NOT EXISTS anti-join), scoped to semantic_type='canvas_state' so it never
-  // matches the tab_event/tab_snapshot BROWSER rows that also carry
-  // metadata.window_id. COALESCE falls back to the legacy iw.extracted_data column
-  // for pre-backfill windows, keeping the API field shape byte-identical. Keys
-  // match idx_canvas_state_listing so the probe stays on the partial index.
   return `
     SELECT
       iw.id as window_id,
@@ -171,7 +184,7 @@ export function buildWindowsSelectClause(): string {
       iw.window_start,
       iw.window_end,
       iw.content_analyzed,
-      COALESCE(canvas_head.payload_data, iw.extracted_data) as extracted_data,
+      iw.extracted_data as extracted_data,
       iw.model_used,
       iw.client_id,
       iw.run_metadata,
@@ -179,20 +192,7 @@ export function buildWindowsSelectClause(): string {
       iw.created_at,
       iw.version_id,
       CAST(COUNT(*) OVER () AS INTEGER) as total_count
-    FROM watcher_windows iw
-    JOIN watchers i ON iw.watcher_id = i.id
-    LEFT JOIN watcher_versions watcher_v ON i.current_version_id = watcher_v.id
-    LEFT JOIN watcher_versions window_v ON iw.version_id = window_v.id
-    LEFT JOIN LATERAL (
-      SELECT e.payload_data
-      FROM events e
-      WHERE e.semantic_type = 'canvas_state'
-        AND (e.metadata->>'watcher_id')::bigint = iw.watcher_id
-        AND (e.metadata->>'granularity') = iw.granularity
-        AND (e.metadata->>'window_start')::timestamptz = iw.window_start
-        AND NOT EXISTS (SELECT 1 FROM events n WHERE n.supersedes_event_id = e.id)
-      LIMIT 1
-    ) canvas_head ON TRUE
+    FROM ${buildWindowsFromWithVersions()}
   `.trim();
 }
 

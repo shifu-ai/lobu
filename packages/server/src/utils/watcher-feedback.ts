@@ -19,16 +19,18 @@ export async function getRecentFeedbackSummary(
   limit = 20
 ): Promise<string | undefined> {
   const sql = getDb();
+  // A correction's metadata.window_id is the canvas ROOT event id; the
+  // canvas_windows view resolves the period (LEFT JOIN — tombstoned roots null).
   const feedback = await sql`
         SELECT DISTINCT ON (e.metadata->>'field_path')
                e.metadata->>'field_path' AS field_path,
                e.metadata->>'mutation' AS mutation,
                e.metadata->'corrected_value' AS corrected_value,
                e.metadata->>'note' AS note,
-               e.created_at,
-               w.window_start, w.window_end
+               e.created_at, w.window_start, w.window_end
         FROM events e
-        JOIN watcher_windows w ON (e.metadata->>'window_id')::bigint = w.id
+        LEFT JOIN canvas_windows w
+          ON w.id = (e.metadata->>'window_id')::bigint
         WHERE e.semantic_type = 'correction'
           AND (e.metadata->>'watcher_id')::bigint = ${watcherId}
         ORDER BY e.metadata->>'field_path', e.created_at DESC
@@ -39,8 +41,14 @@ export async function getRecentFeedbackSummary(
 
   const lines: string[] = ['## Past Corrections from User Feedback'];
   for (const row of feedback) {
-    const start = new Date(row.window_start as string).toISOString().split('T')[0];
-    const end = new Date(row.window_end as string).toISOString().split('T')[0];
+    // window_start/window_end come from the canvas root event; guard against a
+    // correction whose root was tombstoned (LEFT JOIN → null).
+    const start = row.window_start
+      ? new Date(row.window_start as string).toISOString().split('T')[0]
+      : '?';
+    const end = row.window_end
+      ? new Date(row.window_end as string).toISOString().split('T')[0]
+      : '?';
     const path = row.field_path as string;
     const mutation = row.mutation as 'set' | 'remove' | 'add';
     const value = row.corrected_value;

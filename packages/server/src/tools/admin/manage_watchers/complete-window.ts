@@ -17,7 +17,7 @@ import {
 } from '../../../utils/promote-keyed-entities';
 import { proposeEntityFieldChange } from '../entity-field-approval';
 import { ensureCanvasEntity, findCanvasHead } from '../../../utils/canvas-events';
-import { insertEvent, stableJson } from '../../../utils/insert-event';
+import { insertEvent } from '../../../utils/insert-event';
 import { isUniqueViolation } from '../../../utils/pg-errors';
 import { computeStableKeys } from '../../../utils/stable-keys';
 import { deriveWatcherExtractionSchema } from '../../../utils/watcher-extraction-schema';
@@ -58,6 +58,9 @@ export async function handleCompleteWindow(
   content_linked: number;
   /** False on idempotent replays that reused an existing window. */
   window_created: boolean;
+  /** True when replace_existing superseded the head — the canvas changed, so
+   *  reactions fire and the schedule advances like a fresh completion. */
+  head_superseded: boolean;
   reaction_status: 'success' | 'failed' | 'skipped';
   reaction_error?: string;
 }> {
@@ -117,21 +120,14 @@ export async function handleCompleteWindow(
   }
 
   const firstToken = tokenPayloads[0];
-  const {
-    watcher_id: watcherId,
-    window_start,
-    window_end,
-    granularity,
-    window_id: tokenWindowId,
-  } = firstToken;
+  const { watcher_id: watcherId, window_start, window_end, granularity } = firstToken;
 
   for (const token of tokenPayloads) {
     if (
       token.watcher_id !== watcherId ||
       token.window_start !== window_start ||
       token.window_end !== window_end ||
-      token.granularity !== granularity ||
-      token.window_id !== tokenWindowId
+      token.granularity !== granularity
     ) {
       throw new Error('All window_tokens must belong to the same watcher window.');
     }
@@ -357,145 +353,25 @@ export async function handleCompleteWindow(
   let blockedProposals: BlockedFieldProposal[] = [];
   const result = await sql.begin(async (tx) => {
     // ============================================
-    // STEP 7: Get or create window with FINAL values
+    // STEP 7: Canvas-on-events write — THE window storage.
     //
-    // Empty-content replay is idempotent: if a zero-content window already
-    // exists for this period (a prior run consumed all candidates already),
-    // refresh provenance instead of throwing "Window already exists". This
-    // keeps the agent loop from retrying the same period forever (LOBU-Q)
-    // without needing a separate no-op code path.
+    // A watcher "window" (canvas) is a supersede chain of
+    // `semantic_type='canvas_state'` events; the chain ROOT
+    // (supersedes_event_id IS NULL) is the window identity and its event id is
+    // the `windowId` returned by complete_window. A fresh completion inserts a
+    // root; `replace_existing` supersedes the current head instead of creating
+    // a second root — so the root id NEVER changes. Concurrent root inserts
+    // race on the partial unique index idx_canvas_chain_root → 23505 → 409;
+    // concurrent supersedes race on idx_events_superseded_by → 23505 → 409.
+    //
+    // Any other same-period completion is an idempotent no-op that returns the
+    // existing root — the agent loop can retry a period forever without
+    // duplicating a root or overwriting a successful head (LOBU-Q); a genuine
+    // re-analysis states replace_existing explicitly.
     // ============================================
     let windowId!: number;
     let windowCreated = false;
-
-    if (tokenWindowId) {
-      // Legacy flow: window_id in token, verify and update it
-      const windowResult = await tx`
-        UPDATE watcher_windows
-        SET
-          extracted_data = ${sql.json(cleanedExtractedData)},
-          content_analyzed = ${batchContentIds.length},
-          model_used = ${provenanceModel},
-          client_id = ${provenanceClientId},
-          run_metadata = ${sql.json(provenanceMetadata)},
-          run_id = COALESCE(${watcherRunId}, run_id),
-          created_at = COALESCE(created_at, NOW())
-        WHERE id = ${tokenWindowId} AND watcher_id = ${watcherId}
-        RETURNING id
-      `;
-      if (windowResult.length === 0) {
-        throw new Error(
-          `Window ${tokenWindowId} not found for watcher ${watcherId}. ` +
-            'The window may have been deleted. Get a fresh token from read_knowledge({ watcher_id: ... }).'
-        );
-      }
-      windowId = tokenWindowId;
-    } else {
-      // New flow: check for existing window first
-      const existingWindow = await tx`
-        SELECT id, content_analyzed FROM watcher_windows
-        WHERE watcher_id = ${watcherId}
-          AND window_start = ${window_start}
-          AND window_end = ${window_end}
-          AND granularity = ${timeGranularity}
-        LIMIT 1
-      `;
-
-      let reuseExistingWindow = false;
-      if (existingWindow.length > 0) {
-        if (args.replace_existing) {
-          // Delete existing window and its content links
-          windowId = existingWindow[0].id as number;
-          await tx`DELETE FROM watcher_window_events WHERE window_id = ${windowId}`;
-          await tx`DELETE FROM watcher_windows WHERE id = ${windowId}`;
-          logger.info(
-            `[complete_window] Deleted existing window ${windowId} (replace_existing=true)`
-          );
-        } else if (watcherRunId != null || batchContentIds.length === 0) {
-          // Idempotent replay: reuse the existing window so retries/manual
-          // runs can still mark their run completed. Only refresh analysis
-          // payload if the existing row was itself a no-op write — never
-          // overwrite a successful completion's extracted data.
-          windowId = existingWindow[0].id as number;
-          reuseExistingWindow = true;
-          if (Number(existingWindow[0].content_analyzed ?? 0) === 0) {
-            await tx`
-              UPDATE watcher_windows
-              SET extracted_data = ${sql.json(cleanedExtractedData)},
-                  content_analyzed = ${batchContentIds.length},
-                  model_used = ${provenanceModel},
-                  client_id = ${provenanceClientId},
-                  run_metadata = ${sql.json(provenanceMetadata)},
-                  run_id = COALESCE(${watcherRunId}, run_id)
-              WHERE id = ${windowId} AND watcher_id = ${watcherId}
-            `;
-          } else if (watcherRunId != null) {
-            await tx`
-              UPDATE watcher_windows
-              SET run_id = COALESCE(${watcherRunId}, run_id)
-              WHERE id = ${windowId} AND watcher_id = ${watcherId}
-            `;
-          }
-        } else {
-          // Conflict with an existing window, not a server fault — 409 keeps
-          // it out of the Sentry feed (was LOBU-BACKEND-Q).
-          throw new ToolUserError(
-            `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
-              'Use replace_existing: true to replace it, or query a different time period.',
-            409
-          );
-        }
-      }
-
-      if (!reuseExistingWindow) {
-        const newWindowId = await getNextNumericId(tx, 'watcher_windows');
-
-        // Single INSERT with ALL final values
-        // UNIQUE index idx_watcher_windows_unique_period prevents race conditions
-        try {
-          await tx`
-            INSERT INTO watcher_windows (
-              id,
-              watcher_id, version_id, window_start, window_end, granularity,
-              extracted_data, content_analyzed, model_used, client_id, run_metadata, run_id, created_at
-            ) VALUES (
-              ${newWindowId},
-              ${watcherId}, ${resolvedVersionId}, ${window_start}, ${window_end}, ${timeGranularity},
-              ${sql.json(cleanedExtractedData)}, ${batchContentIds.length}, ${provenanceModel}, ${provenanceClientId}, ${sql.json(provenanceMetadata)}, ${watcherRunId}, NOW()
-            )
-          `;
-        } catch (err: any) {
-          if (err?.code === '23505') {
-            throw new ToolUserError(
-              `Window already exists for watcher ${watcherId} for period ${window_start} to ${window_end}. ` +
-                'Use replace_existing: true to replace it, or query a different time period.',
-              409
-            );
-          }
-          throw err;
-        }
-        windowId = newWindowId;
-        windowCreated = true;
-        logger.info(
-          `[complete_window] Created window ${windowId} for watcher ${watcherId} (${window_start} - ${window_end})`
-        );
-      }
-    }
-
-    // ============================================
-    // STEP 7.5: Canvas-on-events write (dual-write with watcher_windows above).
-    //
-    // The canvas is a supersede chain of `semantic_type='canvas_state'` events.
-    // The chain ROOT is the window identity; a fresh completion inserts a root,
-    // and `replace_existing` supersedes the current head (found by anti-join)
-    // instead of creating a second root — so the root event id NEVER changes
-    // (fixes the DELETE+reinsert-with-new-id dangling-reference bug the legacy
-    // watcher_windows path has). Concurrent root inserts race on the partial
-    // unique index idx_canvas_chain_root → 23505 → 409, mirroring the legacy
-    // idx_watcher_windows_unique_period handling above. Idempotent replays that
-    // find a non-empty head are no-ops. Runs on `tx` so the entity + identity +
-    // event writes commit atomically with the window.
-    // ============================================
+    let headSuperseded = false;
     const canvasEntityId = await ensureCanvasEntity({
       tx,
       watcherId: Number(watcherId),
@@ -504,8 +380,8 @@ export async function handleCompleteWindow(
       createdBy: watcherCreatedBy,
     });
     const canvasEntityIds = canvasEntityId != null ? [canvasEntityId] : [];
-    // events.client_id has an FK to oauth_clients — unlike the legacy
-    // watcher_windows.client_id, which stores PAT/device ids verbatim. Inside
+    // events.client_id has an FK to oauth_clients — but callers pass PAT/device
+    // ids verbatim (the legacy column had no FK, so they were accepted). Inside
     // this transaction insertEvent's client-id-FK retry cannot engage (the
     // first failed INSERT aborts the tx), so resolve validity up front and
     // drop unknown ids to NULL rather than aborting the whole completion.
@@ -531,22 +407,16 @@ export async function handleCompleteWindow(
       windowStart: window_start,
     });
 
-    // The tokenWindowId branch above refreshes the legacy row's extracted_data
-    // unconditionally. Reads prefer the canvas head, so a head that exists with
-    // DIFFERENT data must be superseded too or the refresh is invisible (stale
-    // head). Same-payload replays stay no-ops (stableJson is key-order
-    // independent, matching how jsonb normalizes).
-    const headPayloadChanged =
-      existingHead != null &&
-      stableJson(existingHead.payloadData) !== stableJson(cleanedExtractedData);
-
-    if (existingHead && !args.replace_existing && !(tokenWindowId && headPayloadChanged)) {
+    if (existingHead && !args.replace_existing) {
       // Idempotent replay / concurrent completion that already produced a head:
-      // never create a second root and never overwrite a successful head.
-      // (The legacy branch above already refreshed provenance where allowed.)
-    } else if (existingHead && (args.replace_existing || (tokenWindowId && headPayloadChanged))) {
+      // never create a second root and never overwrite a successful head. The
+      // window identity is the existing chain root.
+      windowId = existingHead.rootEventId;
+    } else if (existingHead && args.replace_existing) {
       // Supersede the current head, copying the root's period metadata. Loser of
-      // a concurrent supersede hits idx_events_superseded_by → 23505 → 409.
+      // a concurrent supersede hits idx_events_superseded_by → 23505 → 409. The
+      // root id (window identity) never changes across a supersede.
+      windowId = existingHead.rootEventId;
       try {
         await insertEvent(
           {
@@ -574,13 +444,20 @@ export async function handleCompleteWindow(
         }
         throw err;
       }
+      headSuperseded = true;
+      if (args.replace_existing) {
+        // An explicit replace states "this analysis covers THIS content set":
+        // clear the previous completion's links so STEP 8 re-links exactly the
+        // new batch.
+        await tx`DELETE FROM watcher_window_events WHERE window_id = ${windowId}`;
+      }
     } else {
       // No chain yet → insert the ROOT. A root omits metadata.root_event_id (its
       // id isn't known until after insert, and metadata is immutable); readers
       // treat a missing root_event_id as "self", so the root id IS the window id.
-      // Superseders below stamp root_event_id explicitly for zero-traversal reads.
+      // Superseders above stamp root_event_id explicitly for zero-traversal reads.
       try {
-        await insertEvent(
+        const rootEvent = await insertEvent(
           {
             entityIds: canvasEntityIds,
             organizationId: watcherOrgId,
@@ -595,6 +472,11 @@ export async function handleCompleteWindow(
             clientId: canvasClientId,
           },
           { sql: tx }
+        );
+        windowId = Number(rootEvent.id);
+        windowCreated = true;
+        logger.info(
+          `[complete_window] Created canvas window ${windowId} for watcher ${watcherId} (${window_start} - ${window_end})`
         );
       } catch (err) {
         if (isUniqueViolation(err, 'idx_canvas_chain_root')) {
@@ -675,13 +557,19 @@ export async function handleCompleteWindow(
 
     let runMarkedCompleted = false;
     if (watcherRunId && Number.isFinite(watcherRunId)) {
-      // Scope by watcher_id so a wrong/stale watcher_run_id (passed in
-      // run_metadata) cannot mark another watcher's run completed against
-      // this watcher's window.
+      // Provenance now lives on the RUN row (model_used, run_metadata), not on
+      // the retired watcher_windows table. window_id is stamped to the canvas
+      // ROOT event id. Scope by watcher_id so a wrong/stale watcher_run_id
+      // (passed in run_metadata) cannot mark another watcher's run completed
+      // against this watcher's window. Stamp provenance whenever the run is
+      // still terminable so an idempotent replay refreshing a running run still
+      // records model/metadata.
       const completedRows = await tx`
         UPDATE runs
         SET status = 'completed',
             window_id = ${windowId},
+            model_used = ${provenanceModel},
+            run_metadata = ${sql.json(provenanceMetadata)},
             completed_at = current_timestamp,
             error_message = NULL
         WHERE id = ${watcherRunId}
@@ -691,12 +579,25 @@ export async function handleCompleteWindow(
         RETURNING id
       `;
       runMarkedCompleted = completedRows.length > 0;
+      if (!runMarkedCompleted) {
+        // Idempotent replay against an already-completed run: keep window_id and
+        // provenance current without re-transitioning status or side effects.
+        await tx`
+          UPDATE runs
+          SET window_id = ${windowId},
+              model_used = COALESCE(${provenanceModel}, model_used),
+              run_metadata = COALESCE(${sql.json(provenanceMetadata)}, run_metadata)
+          WHERE id = ${watcherRunId}
+            AND watcher_id = ${watcherId}
+            AND run_type = 'watcher'
+        `;
+      }
     }
 
     // Advance the schedule only when we actually did new work. Idempotent
     // replays (no window created, no run transitioned) must not push
     // next_run_at forward, or each retry would shift the schedule.
-    if (windowCreated || runMarkedCompleted) {
+    if (windowCreated || headSuperseded || runMarkedCompleted) {
       await advanceWatcherSchedule(tx, watcherId);
     }
 
@@ -713,6 +614,7 @@ export async function handleCompleteWindow(
       window_end,
       content_linked: batchContentIds.length,
       window_created: windowCreated,
+      head_superseded: headSuperseded,
     };
   });
 
@@ -760,7 +662,7 @@ export async function handleCompleteWindow(
     const sql = watcherMetaSql;
     const scriptRows = watcherMetaRows;
     if (
-      (result.content_linked > 0 || result.window_created) &&
+      (result.content_linked > 0 || result.window_created || result.head_superseded) &&
       scriptRows.length > 0 &&
       scriptRows[0].reaction_script_compiled
     ) {

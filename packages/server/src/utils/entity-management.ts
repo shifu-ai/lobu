@@ -614,17 +614,12 @@ export async function deleteEntity(
            OR to_entity_id = ANY(${entityTreeIdsLiteral}::bigint[])
       `;
 
+      // Canvas-on-events: window_id link rows are re-keyed to canvas root event
+      // ids, so key the cleanup on the denormalized watcher_id. (Legacy
+      // watcher_windows rows need no explicit delete — watcher_id CASCADEs when
+      // the watchers rows are hard-deleted below, until 3b drops the table.)
       await tx`
         DELETE FROM watcher_window_events
-        WHERE window_id IN (
-          SELECT ww.id
-          FROM watcher_windows ww
-          JOIN watchers w ON ww.watcher_id = w.id
-          WHERE COALESCE(w.entity_ids, '{}'::bigint[]) <@ ${entityTreeIdsLiteral}::bigint[]
-        )
-      `;
-      await tx`
-        DELETE FROM watcher_windows
         WHERE watcher_id IN (
           SELECT id
           FROM watchers
@@ -694,17 +689,9 @@ export async function deleteEntity(
         )
         WHERE entity_ids && ${entityTreeIdsLiteral}::bigint[]
       `;
+      // Canvas-on-events: key link-row cleanup on the denormalized watcher_id.
       await tx`
         DELETE FROM watcher_window_events
-        WHERE window_id IN (
-          SELECT ww.id
-          FROM watcher_windows ww
-          JOIN watchers w ON ww.watcher_id = w.id
-          WHERE cardinality(COALESCE(w.entity_ids, '{}'::bigint[])) = 0
-        )
-      `;
-      await tx`
-        DELETE FROM watcher_windows
         WHERE watcher_id IN (
           SELECT id
           FROM watchers

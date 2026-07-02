@@ -152,12 +152,13 @@ export async function handleSubmitFeedback(
   const watcherId = Number(args.watcher_id);
 
   // Scope to the caller's current org so a member of org A can't write
-  // feedback against a watcher in org B by passing its watcher_id.
+  // feedback against a watcher in org B by passing its watcher_id. window_id is
+  // the canvas ROOT event id — canvas_windows resolves the period metadata.
   const windowCheck = await sql`
     SELECT ww.id, ww.granularity, ww.window_start, ww.window_end,
            w.organization_id, w.created_by, w.entity_ids
-    FROM watcher_windows ww
-    JOIN watchers w ON ww.watcher_id = w.id
+    FROM canvas_windows ww
+    JOIN watchers w ON w.id = ww.watcher_id
     WHERE ww.id = ${args.window_id}
       AND ww.watcher_id = ${watcherId}
       AND w.organization_id = ${ctx.organizationId}
@@ -323,6 +324,8 @@ export async function handleGetFeedback(
   // (semantic_type='correction'); the feedback id is recovered from origin_id 'wwff_<id>'.
   // created_by is the author user id, or NULL once that user is deleted (events.created_by FK
   // SET NULL) — the dangling-id behavior the retired table had is intentionally not reproduced.
+  // A correction's metadata.window_id is the canvas ROOT event id; the
+  // canvas_windows view resolves the period (LEFT JOIN — tombstoned roots null).
   const feedback = args.window_id
     ? await sql`
         SELECT (substring(e.origin_id from 6))::bigint AS id,
@@ -331,7 +334,8 @@ export async function handleGetFeedback(
                e.metadata->'corrected_value' AS corrected_value, e.metadata->>'note' AS note,
                e.created_by, e.created_at, w.window_start, w.window_end
         FROM events e
-        JOIN watcher_windows w ON (e.metadata->>'window_id')::bigint = w.id
+        LEFT JOIN canvas_windows w
+          ON w.id = (e.metadata->>'window_id')::bigint
         WHERE e.semantic_type = 'correction'
           AND (e.metadata->>'watcher_id')::bigint = ${watcherId}
           AND (e.metadata->>'window_id')::bigint = ${args.window_id}
@@ -346,7 +350,8 @@ export async function handleGetFeedback(
                e.metadata->'corrected_value' AS corrected_value, e.metadata->>'note' AS note,
                e.created_by, e.created_at, w.window_start, w.window_end
         FROM events e
-        JOIN watcher_windows w ON (e.metadata->>'window_id')::bigint = w.id
+        LEFT JOIN canvas_windows w
+          ON w.id = (e.metadata->>'window_id')::bigint
         WHERE e.semantic_type = 'correction'
           AND (e.metadata->>'watcher_id')::bigint = ${watcherId}
           AND e.organization_id = ${ctx.organizationId}

@@ -82,11 +82,13 @@ export async function getPastReactionsSummary(
   limit = 20
 ): Promise<string | undefined> {
   const sql = getDb();
+  // watcher_reactions.window_id is the canvas ROOT event id; the canvas_windows
+  // view resolves the period (LEFT JOIN — tombstoned roots null).
   const reactions = await sql`
     SELECT wr.reaction_type, wr.tool_name, wr.tool_args, wr.created_at,
            ww.window_start, ww.window_end
     FROM watcher_reactions wr
-    JOIN watcher_windows ww ON wr.window_id = ww.id
+    LEFT JOIN canvas_windows ww ON ww.id = wr.window_id
     WHERE wr.watcher_id = ${watcherId}
     ORDER BY wr.created_at DESC
     LIMIT ${limit}
@@ -94,7 +96,11 @@ export async function getPastReactionsSummary(
   if (reactions.length === 0) return undefined;
   const lines: string[] = ['## Past Reactions'];
   for (const r of reactions) {
-    const date = new Date(r.window_start as string).toISOString().split('T')[0];
+    // window_start comes from the canvas root event; guard a tombstoned root
+    // (LEFT JOIN → null).
+    const date = r.window_start
+      ? new Date(r.window_start as string).toISOString().split('T')[0]
+      : '?';
     const toolArgs = r.tool_args as Record<string, unknown> | null;
     const detail = toolArgs ? JSON.stringify(toolArgs) : '';
     lines.push(`- Window ${date}: ${r.reaction_type} via ${r.tool_name} ${detail}`);

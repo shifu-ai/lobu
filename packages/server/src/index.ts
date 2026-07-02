@@ -1101,10 +1101,23 @@ app.get("/api/:orgSlug/watchers/windows/:windowId", mcpAuth, async (c) => {
 	const organizationId = c.var.organizationId;
 
 	try {
-		// Get window details with watcher info
+		// Canvas-on-events: windowId is the canvas ROOT event id; canvas_windows
+		// resolves the chain (head payload + run provenance). Content links are
+		// counted off watcher_window_events.window_id (re-keyed to the root id).
 		const windowResult = await sql`
       SELECT
-        iw.*,
+        iw.id,
+        iw.watcher_id,
+        iw.granularity,
+        iw.window_start,
+        iw.window_end,
+        iw.version_id,
+        iw.created_at,
+        iw.extracted_data,
+        iw.content_analyzed,
+        iw.client_id,
+        iw.model_used,
+        iw.run_metadata,
         i.entity_ids,
         i.slug as watcher_slug,
         i.name as watcher_name,
@@ -1112,8 +1125,8 @@ app.get("/api/:orgSlug/watchers/windows/:windowId", mcpAuth, async (c) => {
         et.slug AS entity_type,
         parent.name as parent_name,
         CAST(COUNT(iwf.event_id) AS INTEGER) as content_count
-      FROM watcher_windows iw
-      JOIN watchers i ON iw.watcher_id = i.id
+      FROM canvas_windows iw
+      JOIN watchers i ON i.id = iw.watcher_id
       JOIN entities e ON e.id = ANY(i.entity_ids)
       JOIN entity_types et ON et.id = e.entity_type_id
       LEFT JOIN entities parent ON e.parent_id = parent.id
@@ -1121,7 +1134,10 @@ app.get("/api/:orgSlug/watchers/windows/:windowId", mcpAuth, async (c) => {
       WHERE iw.id = ${windowId}
         AND e.organization_id = ${organizationId}
         AND i.status = 'active'
-      GROUP BY iw.id, i.entity_ids, i.slug, i.name, e.name, et.slug, parent.name
+      GROUP BY iw.id, iw.watcher_id, iw.granularity, iw.window_start, iw.window_end,
+               iw.version_id, iw.created_at, iw.extracted_data, iw.content_analyzed,
+               iw.client_id, iw.model_used, iw.run_metadata,
+               i.entity_ids, i.slug, i.name, e.name, et.slug, parent.name
     `;
 
 		if (windowResult.length === 0) {

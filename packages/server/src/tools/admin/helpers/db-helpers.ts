@@ -109,7 +109,7 @@ export async function assertEntityIdsInOrg(
  * Tables whose `id` column is allocated via SELECT MAX(id) + 1. Whitelisted so
  * the table name can be safely interpolated into sql.unsafe().
  */
-const NUMERIC_ID_TABLES = ['watchers', 'watcher_windows', 'watcher_window_events', 'watcher_versions'] as const;
+const NUMERIC_ID_TABLES = ['watchers', 'watcher_window_events', 'watcher_versions'] as const;
 
 type NumericIdTable = (typeof NUMERIC_ID_TABLES)[number];
 
@@ -126,7 +126,7 @@ type NumericIdTable = (typeof NUMERIC_ID_TABLES)[number];
  *
  * Without the advisory lock, two concurrent completions on DIFFERENT rows
  * (e.g. two device workers completing two different watcher runs) can both
- * compute the same `MAX(id)+1` and one will fail on the watcher_windows PK
+ * compute the same `MAX(id)+1` and one will fail on the target table's PK
  * conflict. With the lock + caller-side tx, the second caller blocks until
  * the first commits (and thus sees the first INSERT in its `MAX(id)`).
  */

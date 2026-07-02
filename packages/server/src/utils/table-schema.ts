@@ -201,25 +201,27 @@ export const QUERYABLE_SCHEMA = {
         'version_sources'
       ),
     },
-    // watcher_windows
+    // canvas_windows (VIEW; replaces the retired watcher_windows table): one row
+    // per watcher window = canvas_state chain ROOT; id is the root event id and
+    // matches event_classifications/watcher_window_events/runs.window_id.
     {
-      name: 'watcher_windows',
+      name: 'canvas_windows',
       columns: cols(
         'id',
+        'organization_id',
         'watcher_id',
-        'parent_window_id',
         'granularity',
         'window_start',
         'window_end',
-        'content_analyzed',
-        'extracted_data',
-        'model_used',
-        'client_id',
-        'run_metadata',
-        'execution_time_ms',
-        'created_at',
         'version_id',
-        'run_id'
+        'created_at',
+        'extracted_data',
+        'content_analyzed',
+        'client_id',
+        'run_id',
+        'model_used',
+        'run_metadata',
+        'execution_time_ms'
       ),
     },
     // oauth_clients (excludes: client_secret, client_secret_expires_at)

@@ -595,6 +595,13 @@ export function buildScopedQuery(
           'SELECT 1 FROM public.entities ent WHERE ent.id = ANY(i.entity_ids) ' +
           `AND ent.organization_id = ${orgP}))`
       );
+    } else if (table === 'canvas_windows') {
+      // Watcher windows as canvas chains (view over events; migration
+      // 20260703000000) — org-scoped directly, the view carries organization_id.
+      // security-allowed: see block comment above the for-loop
+      ctes.push(
+        `"${safeName}" AS (SELECT ${sel(table, 'cw')} FROM public.canvas_windows cw WHERE cw.organization_id = ${orgP})`
+      );
     } else if (table === 'event_classifications') {
       // `excerpts`/`values`/`reasoning` carry verbatim source-event content, so
       // the EXISTS must apply per-user connection visibility on `ev` — otherwise
@@ -617,14 +624,6 @@ export function buildScopedQuery(
       ctes.push(
         `"${safeName}" AS (SELECT ${sel(table, 'wv')} FROM public.watcher_versions wv ` +
           'JOIN public.watchers w ON w.id = wv.watcher_id WHERE EXISTS (' +
-          'SELECT 1 FROM public.entities ent WHERE ent.id = ANY(w.entity_ids) ' +
-          `AND ent.organization_id = ${orgP}))`
-      );
-    } else if (table === 'watcher_windows') {
-      // security-allowed: see block comment above the for-loop
-      ctes.push(
-        `"${safeName}" AS (SELECT ${sel(table, 'ww')} FROM public.watcher_windows ww ` +
-          'JOIN public.watchers w ON w.id = ww.watcher_id WHERE EXISTS (' +
           'SELECT 1 FROM public.entities ent WHERE ent.id = ANY(w.entity_ids) ' +
           `AND ent.organization_id = ${orgP}))`
       );

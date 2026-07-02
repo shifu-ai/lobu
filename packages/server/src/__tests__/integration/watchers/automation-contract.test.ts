@@ -27,7 +27,12 @@ import {
 } from '../../../watchers/automation';
 import { generateSecureToken, hashToken } from '../../../auth/oauth/utils';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
-import { createTestAgent, createTestEntity, createTestEvent } from '../../setup/test-fixtures';
+import {
+  createCanvasWindow,
+  createTestAgent,
+  createTestEntity,
+  createTestEvent,
+} from '../../setup/test-fixtures';
 import { post } from '../../setup/test-helpers';
 import { TestApiClient, TestWorkspace } from '../../setup/test-mcp-client';
 
@@ -147,17 +152,20 @@ describe('watcher automation contract', () => {
       dispatchSource: 'scheduled',
     });
 
-    const [window] = await sql`
-      INSERT INTO watcher_windows (
-        watcher_id, granularity, window_start, window_end,
-        extracted_data, content_analyzed, model_used, run_metadata, run_id, created_at
-      ) VALUES (
-        ${watcherId}, 'daily', ${windowStart}, ${windowEnd},
-        ${sql.json({ summary: 'External completion' })}, 1, 'external-client',
-        ${sql.json({ source: 'external', watcher_run_id: queued.runId })}, ${queued.runId}, NOW()
-      )
-      RETURNING id
-    `;
+    // Canvas-on-events: the correlated window is a canvas_state chain root
+    // stamped with this run_id — what the reconciler joins runs to.
+    const windowRootId = await createCanvasWindow({
+      watcherId,
+      organizationId: workspace.org.id,
+      granularity: 'daily',
+      windowStart,
+      windowEnd,
+      extractedData: { summary: 'External completion' },
+      contentAnalyzed: 1,
+      runId: queued.runId,
+      modelUsed: 'external-client',
+      runMetadata: { source: 'external', watcher_run_id: queued.runId },
+    });
 
     const result = await dispatchPendingWatcherRuns({} as Env, {
       db: dbClient,
@@ -171,7 +179,7 @@ describe('watcher automation contract', () => {
 
     expect(result.reconciled).toBe(1);
     expect(String(run.status)).toBe('completed');
-    expect(Number(run.window_id)).toBe(Number(window.id));
+    expect(Number(run.window_id)).toBe(windowRootId);
   });
 
   it('completes a queued watcher run from complete_window provenance', async () => {
@@ -382,10 +390,14 @@ describe('watcher automation contract', () => {
       extracted_data: { summary: 'Summary from exact content IDs' },
     })) as { action: string; window_id: number; content_linked: number };
 
+    // Canvas-on-events: window_id is the canvas ROOT event id; content_analyzed
+    // lives in the chain member's metadata. Content links are keyed to the root
+    // event id (re-keyed window_id).
     const [window] = await sql`
-      SELECT content_analyzed
-      FROM watcher_windows
+      SELECT (metadata->>'content_analyzed')::int AS content_analyzed
+      FROM events
       WHERE id = ${completion.window_id}
+        AND semantic_type = 'canvas_state'
     `;
     const links = await sql`
       SELECT event_id
@@ -522,18 +534,25 @@ describe('watcher automation contract', () => {
       expect(Number(run.exit_code)).toBe(0);
       expect(String(run.exit_reason)).toBe('ok');
 
+      // Canvas-on-events: extracted_data lives on the chain HEAD event
+      // (window_id = canvas root id); provenance (model_used + execution time)
+      // now lives on the RUN row, stamped by the exit report.
       const [window] = await sql`
-        SELECT extracted_data, run_metadata, execution_time_ms, model_used
-        FROM watcher_windows
+        SELECT payload_data AS extracted_data
+        FROM events
         WHERE id = ${run.window_id}
+          AND semantic_type = 'canvas_state'
       `;
-      // Structured data straight from the shared pipeline; the exit report
-      // stamped the subprocess wall-clock onto the window.
+      const [runProvenance] = await sql`
+        SELECT model_used, (run_metadata->>'execution_time_ms')::int AS execution_time_ms
+        FROM runs
+        WHERE id = ${queued.runId}
+      `;
       expect(window.extracted_data as Record<string, unknown>).toEqual({
         summary: 'Looked at 5 events, no anomalies.',
       });
-      expect(Number(window.execution_time_ms)).toBe(1234);
-      expect(String(window.model_used)).toBe('device-cli:claude-code');
+      expect(Number(runProvenance.execution_time_ms)).toBe(1234);
+      expect(String(runProvenance.model_used)).toBe('device-cli:claude-code');
 
       const [watcher] = await sql`
         SELECT last_fired_at
@@ -550,10 +569,68 @@ describe('watcher automation contract', () => {
       const dupJson = (await dup.json()) as { status: string; idempotent?: boolean };
       expect(dupJson.status).toBe('completed');
       expect(dupJson.idempotent).toBe(true);
-      const [windowAfterDup] = await sql`
-        SELECT execution_time_ms FROM watcher_windows WHERE id = ${run.window_id}
+      const [runAfterDup] = await sql`
+        SELECT (run_metadata->>'execution_time_ms')::int AS execution_time_ms
+        FROM runs WHERE id = ${queued.runId}
       `;
-      expect(Number(windowAfterDup.execution_time_ms)).toBe(1234);
+      expect(Number(runAfterDup.execution_time_ms)).toBe(1234);
+    });
+
+    it('exit report without duration_ms preserves run_metadata (jsonb_set strictness)', async () => {
+      // jsonb_set is STRICT: stamping execution_time_ms with a NULL duration
+      // (device report omits duration_ms, none recorded) must NOT null out the
+      // run_metadata that complete_window already wrote.
+      const { sql, dbClient, workspace, api, watcherId, agent } = await createAutomatedWatcher();
+      const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
+      const { windowStart, windowEnd } = await computePendingWindow(
+        dbClient,
+        watcherId,
+        granularity
+      );
+      const queued = await createWatcherRun({
+        organizationId: workspace.org.id,
+        watcherId,
+        agentId: agent.agentId,
+        windowStart: windowStart.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        dispatchSource: 'scheduled',
+        deviceWorkerId: '11111111-1111-1111-1111-111111111111',
+        agentKind: 'claude-code',
+      });
+      const workerId = 'mac-device-cli-test-nodur';
+      await sql`
+        UPDATE runs
+        SET status = 'running', claimed_at = NOW(), claimed_by = ${workerId}
+        WHERE id = ${queued.runId}
+      `;
+      const content = (await api.knowledge.read({ watcher_id: watcherId })) as {
+        window_token: string;
+      };
+      await api.watchers.completeWindow({
+        watcher_id: String(watcherId),
+        window_token: content.window_token,
+        extracted_data: { summary: 'No-duration exit report case.' },
+        run_metadata: {
+          source: 'device_worker',
+          agent_kind: 'claude-code',
+          watcher_run_id: queued.runId,
+        },
+      });
+
+      // Exit report with NO duration_ms.
+      const response = await post(`/api/workers/me/runs/${queued.runId}/complete-watcher`, {
+        body: { worker_id: workerId, output: 'done', exit_code: 0, exit_reason: 'ok' },
+      });
+      expect(response.status).toBe(200);
+
+      const [run] = await sql`
+        SELECT run_metadata, model_used FROM runs WHERE id = ${queued.runId}
+      `;
+      const meta = run.run_metadata as Record<string, unknown> | null;
+      expect(meta).not.toBeNull();
+      expect(meta?.source).toBe('device_worker');
+      expect(meta?.agent_kind).toBe('claude-code');
+      expect(String(run.model_used)).toBe('device-cli:claude-code');
     });
 
     // Content-less windows (device runs fetch their own context; nothing is
@@ -624,6 +701,61 @@ describe('watcher automation contract', () => {
       expect(window?.reactions?.[0].tool_name).toBe('reaction_executor');
     });
 
+    // Canvas-on-events: replace_existing supersedes the head instead of
+    // deleting+recreating the window row, so window_created is false — the
+    // head_superseded gate must fire reactions for a zero-content replace
+    // (legacy parity: the recreate set window_created=true and reactions ran).
+    it('fires the reaction script on a zero-content replace_existing (head_superseded gate)', async () => {
+      const { api, watcherId } = await createAutomatedWatcher();
+      await api.watchers.setReactionScript({
+        watcher_id: String(watcherId),
+        reaction_script: 'export default async function reaction() { return; }',
+      });
+      const windowStart = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+      const windowEnd = new Date().toISOString();
+      const env = { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env;
+      const mint = () =>
+        generateWindowToken(
+          {
+            watcher_id: watcherId,
+            window_start: windowStart,
+            window_end: windowEnd,
+            granularity: 'daily',
+            content_count: 0,
+            content_ids: [],
+          },
+          env
+        );
+
+      const first = (await api.watchers.completeWindow({
+        watcher_id: String(watcherId),
+        window_token: await mint(),
+        extracted_data: { summary: 'v1' },
+      })) as { window_id: number };
+
+      const replaced = (await api.watchers.completeWindow({
+        watcher_id: String(watcherId),
+        window_token: await mint(),
+        extracted_data: { summary: 'v2 re-analysis' },
+        replace_existing: true,
+      })) as {
+        window_id: number;
+        window_created: boolean;
+        head_superseded: boolean;
+        content_linked: number;
+        reaction_status: string;
+      };
+
+      // Same root identity, no new window, no content — yet the canvas CHANGED,
+      // so the reaction must be attempted (never 'skipped'; 'failed' is fine on
+      // runtimes without an isolated-vm build, as in the content-less test).
+      expect(replaced.window_id).toBe(first.window_id);
+      expect(replaced.window_created).toBe(false);
+      expect(replaced.head_superseded).toBe(true);
+      expect(replaced.content_linked).toBe(0);
+      expect(replaced.reaction_status).not.toBe('skipped');
+    });
+
     // Fail closed: the agent exiting cleanly WITHOUT calling complete_window
     // means no real work was recorded — the run must fail (and the schedule
     // advance), mirroring the server-side dispatch guard. This is exactly
@@ -683,7 +815,7 @@ describe('watcher automation contract', () => {
       expect(String(run.output_tail)).toContain('nothing to report');
 
       const windows = await sql`
-        SELECT id FROM watcher_windows WHERE run_id = ${queued.runId}
+        SELECT id FROM events WHERE run_id = ${queued.runId} AND semantic_type = 'canvas_state'
       `;
       expect(windows).toHaveLength(0);
 
@@ -752,7 +884,7 @@ describe('watcher automation contract', () => {
       expect(String(run.exit_reason)).toBe('crash');
 
       const windows = await sql`
-        SELECT id FROM watcher_windows WHERE run_id = ${queued.runId}
+        SELECT id FROM events WHERE run_id = ${queued.runId} AND semantic_type = 'canvas_state'
       `;
       expect(windows).toHaveLength(0);
     });
@@ -903,7 +1035,7 @@ describe('watcher automation contract', () => {
       expect(new Date(afterSecond.next_run_at as string).getTime()).toBe(advancedOnce);
 
       const windowsForRun = await sql`
-        SELECT id FROM watcher_windows WHERE run_id = ${queued.runId}
+        SELECT id FROM events WHERE run_id = ${queued.runId} AND semantic_type = 'canvas_state'
       `;
       expect(windowsForRun).toHaveLength(0);
     });
@@ -984,7 +1116,7 @@ describe('watcher automation contract', () => {
       expect(run.window_id).toBeNull();
       // No watcher_windows row was created.
       const windows = await sql`
-        SELECT id FROM watcher_windows WHERE run_id = ${queued.runId}
+        SELECT id FROM events WHERE run_id = ${queued.runId} AND semantic_type = 'canvas_state'
       `;
       expect(windows).toHaveLength(0);
     });
@@ -1151,19 +1283,23 @@ describe('watcher automation contract', () => {
 
     it('completes the run immediately when a window exists', async () => {
       const messageId = randomUUID();
-      const { sql, runId, watcherId, windowStart, windowEnd } =
+      const { sql, workspace, runId, watcherId, windowStart, windowEnd } =
         await makeRunningWatcherRun(messageId);
-      const [window] = await sql`
-        INSERT INTO watcher_windows (
-          watcher_id, granularity, window_start, window_end,
-          extracted_data, content_analyzed, model_used, run_metadata, run_id, created_at
-        ) VALUES (
-          ${watcherId}, 'daily', ${windowStart}, ${windowEnd},
-          ${sql.json({ summary: 'done' })}, 1, 'test-model',
-          ${sql.json({ watcher_run_id: runId })}, ${runId}, NOW()
-        )
-        RETURNING id
-      `;
+      // Canvas-on-events: the "window" is a canvas_state chain root stamped with
+      // this run_id (what findWindowIdForRun keys on).
+      const windowRootId = await createCanvasWindow({
+        watcherId,
+        organizationId: workspace.org.id,
+        granularity: 'daily',
+        windowStart,
+        windowEnd,
+        extractedData: { summary: 'done' },
+        contentAnalyzed: 1,
+        runId,
+        modelUsed: 'test-model',
+        runMetadata: { watcher_run_id: runId },
+      });
+      const window = { id: windowRootId };
 
       await makeHeadlessConsumer().handleThreadResponse({
         id: 'job-headless-2',
@@ -1468,71 +1604,51 @@ describe('canvas-on-events window completion', () => {
     expect(completion.action).toBe('complete_window');
 
     const [root] = await sql`
-      SELECT client_id, payload_data FROM events
+      SELECT id, client_id, payload_data FROM events
       WHERE semantic_type = 'canvas_state'
         AND (metadata->>'watcher_id')::bigint = ${watcherId}
     `;
     expect(root.client_id).toBeNull();
     expect((root.payload_data as Record<string, unknown>).summary).toBe('pat canvas');
-
-    // The legacy row keeps the raw PAT id (no FK there) — provenance preserved.
-    const [win] = await sql`
-      SELECT client_id FROM watcher_windows WHERE id = ${completion.window_id}
-    `;
-    expect(String(win.client_id)).toBe('pat_nonexistent_e2e');
+    // The canvas root IS the window (window_id = root event id).
+    expect(Number(root.id)).toBe(completion.window_id);
   });
 
-  it('a tokenWindowId refresh with changed data supersedes the head; same-data replay is a no-op', async () => {
-    // The tokenWindowId (legacy) branch refreshes watcher_windows.extracted_data
-    // unconditionally. Reads prefer the canvas head, so the canvas must follow a
-    // real data change (else the refresh is invisible) while a same-payload
-    // replay must NOT grow the chain.
+  it('a same-period completion without replace_existing is an idempotent no-op', async () => {
+    // Retrying a period never grows the chain or overwrites a successful head —
+    // even with different data. A genuine re-analysis must state
+    // replace_existing explicitly.
     const { sql, api, watcherId, windowStart, windowEnd, completion } = await completeOnce({
       extracted_data: { summary: 'v1' },
     });
 
-    const tokenWithWindowId = await generateWindowToken(
+    const retryToken = await generateWindowToken(
       {
         watcher_id: watcherId,
         window_start: windowStart,
         window_end: windowEnd,
         granularity: 'daily',
-        window_id: completion.window_id,
         content_count: 0,
         content_ids: [],
       },
       { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env
     );
-
-    // Changed payload → head superseded (chain grows to 2), root id stable.
-    await api.watchers.completeWindow({
+    const retry = (await api.watchers.completeWindow({
       watcher_id: String(watcherId),
-      window_token: tokenWithWindowId,
-      extracted_data: { summary: 'v2 refreshed' },
-    });
-    const afterChange = await sql`
-      SELECT id, payload_data, supersedes_event_id FROM events
-      WHERE semantic_type = 'canvas_state'
-        AND (metadata->>'watcher_id')::bigint = ${watcherId}
-      ORDER BY id ASC
-    `;
-    expect(afterChange).toHaveLength(2);
-    expect(afterChange[0].supersedes_event_id).toBeNull();
-    expect(Number(afterChange[1].supersedes_event_id)).toBe(Number(afterChange[0].id));
-    expect((afterChange[1].payload_data as Record<string, unknown>).summary).toBe('v2 refreshed');
+      window_token: retryToken,
+      extracted_data: { summary: 'v2 changed but not a replace' },
+    })) as { window_id: number; window_created: boolean };
 
-    // Same payload replayed → no new chain member.
-    await api.watchers.completeWindow({
-      watcher_id: String(watcherId),
-      window_token: tokenWithWindowId,
-      extracted_data: { summary: 'v2 refreshed' },
-    });
-    const afterReplay = await sql`
-      SELECT id FROM events
+    // Same window identity returned; chain unchanged; head still v1.
+    expect(retry.window_id).toBe(completion.window_id);
+    expect(retry.window_created).toBe(false);
+    const chain = await sql`
+      SELECT payload_data FROM events
       WHERE semantic_type = 'canvas_state'
         AND (metadata->>'watcher_id')::bigint = ${watcherId}
     `;
-    expect(afterReplay).toHaveLength(2);
+    expect(chain).toHaveLength(1);
+    expect((chain[0].payload_data as Record<string, unknown>).summary).toBe('v1');
   });
 
   it('replace_existing supersedes the head, keeping the root id stable', async () => {
@@ -1595,6 +1711,73 @@ describe('canvas-on-events window completion', () => {
       windows: Array<{ extracted_data: Record<string, unknown> }>;
     };
     expect(view.windows[0].extracted_data.summary).toBe('v2');
+  });
+
+  it('replace_existing re-links exactly the new content set (no stale links)', async () => {
+    // The root id is stable across a replace, so STEP 8's ON CONFLICT DO
+    // NOTHING alone would UNION old+new links. An explicit replace states
+    // "this analysis covers THIS content set" — legacy parity (the old path
+    // deleted the window row and its links) requires the old links to go.
+    const { sql, workspace, api, entityId, watcherId } = await createAutomatedWatcher();
+    const eventA = await createTestEvent({
+      entity_id: entityId,
+      organization_id: workspace.org.id,
+      content: 'Replace-links content A.',
+      occurred_at: new Date(Date.now() - 60 * 60 * 1000),
+    });
+    const eventB = await createTestEvent({
+      entity_id: entityId,
+      organization_id: workspace.org.id,
+      content: 'Replace-links content B.',
+      occurred_at: new Date(Date.now() - 30 * 60 * 1000),
+    });
+    const windowStart = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+    const windowEnd = new Date().toISOString();
+    const env = { JWT_SECRET: 'test-jwt-secret-for-testing-only' } as Env;
+
+    const tokenA = await generateWindowToken(
+      {
+        watcher_id: watcherId,
+        window_start: windowStart,
+        window_end: windowEnd,
+        granularity: 'daily',
+        content_count: 1,
+        content_ids: [eventA.id],
+      },
+      env
+    );
+    const first = (await api.watchers.completeWindow({
+      watcher_id: String(watcherId),
+      window_token: tokenA,
+      extracted_data: { summary: 'v1 over A' },
+    })) as { window_id: number };
+
+    const tokenB = await generateWindowToken(
+      {
+        watcher_id: watcherId,
+        window_start: windowStart,
+        window_end: windowEnd,
+        granularity: 'daily',
+        content_count: 1,
+        content_ids: [eventB.id],
+      },
+      env
+    );
+    const second = (await api.watchers.completeWindow({
+      watcher_id: String(watcherId),
+      window_token: tokenB,
+      extracted_data: { summary: 'v2 over B' },
+      replace_existing: true,
+    })) as { window_id: number };
+
+    // Same window identity (the canvas root), but the links are exactly the
+    // replace's content set — eventA's stale link is gone.
+    expect(second.window_id).toBe(first.window_id);
+    const links = await sql`
+      SELECT event_id FROM watcher_window_events WHERE window_id = ${first.window_id}
+    `;
+    expect(links).toHaveLength(1);
+    expect(Number(links[0].event_id)).toBe(Number(eventB.id));
   });
 
   it('superseded canvas states are masked from current_event_records', async () => {
