@@ -31,6 +31,12 @@ import {
   createPostgresAgentConnectionStore,
 } from './stores/postgres-stores';
 import { orgContext } from './stores/org-context';
+import {
+  canonicalMcpIdForConnector,
+  connectorKeyAliases,
+  type ToolboxMcpConnectorKey,
+  type ToolboxMcpStatusConnectorKey,
+} from './connector-mcp-resolver';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -390,9 +396,6 @@ function isToolboxDiscoveryToolAllowed(
   return Object.hasOwn(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey], toolName);
 }
 
-type ToolboxMcpConnectorKey = 'notion' | 'google_workspace' | 'shifu_toolbox';
-type ToolboxMcpStatusConnectorKey = ToolboxMcpConnectorKey;
-
 type ToolboxMcpToolCallRequest = {
   ownerUserId?: unknown;
   agentId?: unknown;
@@ -434,17 +437,6 @@ function isToolboxMcpConnectorKey(value: unknown): value is ToolboxMcpConnectorK
 
 function isToolboxMcpStatusConnectorKey(value: unknown): value is ToolboxMcpStatusConnectorKey {
   return isToolboxMcpConnectorKey(value) || value === 'shifu_toolbox';
-}
-
-function connectorKeyAliases(connectorKey: ToolboxMcpStatusConnectorKey): ReadonlySet<string> {
-  if (connectorKey === 'shifu_toolbox') {
-    return new Set(['shifu_toolbox', 'shifu-toolbox']);
-  }
-  return new Set([connectorKey]);
-}
-
-function canonicalMcpIdForConnector(connectorKey: ToolboxMcpStatusConnectorKey): string {
-  return connectorKey === 'shifu_toolbox' ? 'shifu-toolbox' : connectorKey;
 }
 
 function metadataString(
