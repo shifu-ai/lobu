@@ -784,6 +784,52 @@ function isMcpAuthDiagnosticCode(
   return value === 'upstream_unauthorized' || value === 'upstream_forbidden';
 }
 
+/**
+ * Build the `connectUrl` attached to `not_connected` / `needs_reauth`
+ * tool-call failures — a directly-clickable link (e.g. surfaced in a LINE
+ * authorization card) that walks the user through OAuth reauth for the
+ * connector, landing on the unauthenticated `GET /mcp/oauth/start` route
+ * (see `gateway/routes/public/mcp-oauth.ts`), which resolves the connector's
+ * live upstream config and redirects into the real OAuth authorize page.
+ *
+ * Best-effort: returns undefined (never throws) when `publicGatewayUrl` isn't
+ * configured or isn't https — callers must omit the field rather than fail
+ * the tool call over a missing/invalid link.
+ */
+function buildToolCallConnectUrl(params: {
+  agentId: string;
+  mcpId: string;
+  ownerUserId: string;
+}): string | undefined {
+  const publicGatewayUrl = getLobuCoreServices()?.getPublicGatewayUrl?.();
+  if (!publicGatewayUrl || typeof publicGatewayUrl !== 'string') {
+    console.warn('[tools/call] connectUrl omitted: publicGatewayUrl not configured', {
+      mcpId: params.mcpId,
+    });
+    return undefined;
+  }
+  try {
+    const base = publicGatewayUrl.replace(/\/+$/, '');
+    const url = new URL(`${base}/mcp/oauth/start`);
+    if (url.protocol !== 'https:') {
+      console.warn('[tools/call] connectUrl omitted: publicGatewayUrl is not https', {
+        mcpId: params.mcpId,
+      });
+      return undefined;
+    }
+    url.searchParams.set('agentId', params.agentId);
+    url.searchParams.set('mcpId', params.mcpId);
+    url.searchParams.set('userId', params.ownerUserId);
+    return url.toString();
+  } catch (error) {
+    console.warn('[tools/call] connectUrl omitted: failed to build URL', {
+      mcpId: params.mcpId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
 /** Raw (unfiltered) diagnostic code, used only as classifier input — never returned to the client. */
 function rawToolDiagnosticCode(value: unknown): string | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -1045,6 +1091,11 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       configService: mcpConfigService,
     });
     if (resolved.status === 'not_connected') {
+      const connectUrl = buildToolCallConnectUrl({
+        agentId,
+        mcpId: canonicalMcpIdForConnector(connectorKey),
+        ownerUserId,
+      });
       return c.json(
         {
           ...safeToolboxMcpError(
@@ -1052,6 +1103,7 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
             'Connector is not attached to agent settings'
           ),
           classification: 'not_connected',
+          ...(connectUrl ? { connectUrl } : {}),
         },
         200
       );
@@ -1082,10 +1134,15 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
         : classifyToolCallFailure({
             errorMessage: extractToolFailureSignal(result),
           });
+      const connectUrl =
+        classification === 'needs_reauth'
+          ? buildToolCallConnectUrl({ agentId, mcpId, ownerUserId })
+          : undefined;
       return c.json(
         {
           ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
           classification,
+          ...(connectUrl ? { connectUrl } : {}),
         },
         200
       );
@@ -1096,10 +1153,15 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     const classification = classifyToolCallFailure({
       errorMessage: error instanceof Error ? error.message : String(error),
     });
+    const connectUrl =
+      classification === 'needs_reauth'
+        ? buildToolCallConnectUrl({ agentId, mcpId, ownerUserId })
+        : undefined;
     return c.json(
       {
         ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
         classification,
+        ...(connectUrl ? { connectUrl } : {}),
       },
       200
     );

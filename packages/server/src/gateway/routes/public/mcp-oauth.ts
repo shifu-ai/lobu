@@ -9,7 +9,10 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import { completeAuthCodeFlow } from "../../auth/mcp/oauth-flow.js";
+import {
+  completeAuthCodeFlow,
+  startAuthCodeFlow,
+} from "../../auth/mcp/oauth-flow.js";
 import { postOAuthCompletionPrompt } from "../../auth/mcp/resume-after-oauth.js";
 import { escapeHtml } from "../../../utils/html.js";
 import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
@@ -188,6 +191,99 @@ export function createMcpOAuthRoutes(config: McpOAuthRoutesConfig): Hono {
     }
   });
 
+  /**
+   * Directly-clickable entry point for `connectUrl` links handed to end
+   * users (e.g. a LINE authorization card) when a tool call fails with
+   * `not_connected` / `needs_reauth`. Unlike the admin-PAT-gated
+   * `POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/start`, this is
+   * unauthenticated by design — it's opened directly in the user's browser,
+   * which has no PAT to present. Ownership is still checked against the
+   * agent's recorded owner so this can't be used to start (and thus bind) an
+   * OAuth credential onto an agent the caller doesn't own.
+   */
+  router.get("/mcp/oauth/start", async (c) => {
+    const agentId = c.req.query("agentId")?.trim();
+    const mcpId = c.req.query("mcpId")?.trim();
+    const userId = c.req.query("userId")?.trim();
+
+    if (!agentId || !mcpId || !userId) {
+      return c.html(
+        renderResultPage({
+          success: false,
+          title: "Missing parameters",
+          body: `<p>This connect link is missing required information. Please request a new one.</p>`,
+        }),
+        400
+      );
+    }
+
+    const agentMetadataStore = coreServices?.getAgentMetadataStore?.();
+    const metadata = agentMetadataStore
+      ? await agentMetadataStore.getMetadata(agentId)
+      : null;
+    if (!metadata || metadata.owner?.userId !== userId) {
+      return c.html(
+        renderResultPage({
+          success: false,
+          title: "Connect link invalid",
+          body: `<p>This connect link is invalid or has expired. Please request a new one.</p>`,
+        }),
+        404
+      );
+    }
+
+    const mcpConfigService = coreServices?.getMcpConfigService?.();
+    const httpServer = await mcpConfigService?.getHttpServer?.(mcpId, agentId);
+    if (!httpServer) {
+      return c.html(
+        renderResultPage({
+          success: false,
+          title: "Connector unavailable",
+          body: `<p>This connector is not configured. Please try again from the chat.</p>`,
+        }),
+        404
+      );
+    }
+
+    try {
+      const { authorizationUrl } = await startAuthCodeFlow({
+        secretStore,
+        mcpId,
+        upstreamUrl: httpServer.upstreamUrl,
+        agentId,
+        userId,
+        scopeKey: userId,
+        wwwAuthenticate: null,
+        redirectUri,
+        staticOauth: httpServer.oauth,
+        platform: "toolbox-line",
+        channelId: "",
+        conversationId: "",
+        resumeMode: "none",
+      });
+      return c.redirect(authorizationUrl, 302);
+    } catch (err) {
+      logger.error("Failed to start MCP OAuth flow from connect link", {
+        mcpId,
+        agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      const safeMessage = escapeHtml(
+        err instanceof Error ? err.message : "Unknown error"
+      );
+      return c.html(
+        renderResultPage({
+          success: false,
+          title: "Authorization failed",
+          body: `<p>${safeMessage}</p>
+                 <p>Please try again from the chat.</p>`,
+        }),
+        500
+      );
+    }
+  });
+
   logger.debug("MCP OAuth callback route registered at /mcp/oauth/callback");
+  logger.debug("MCP OAuth start route registered at /mcp/oauth/start");
   return router;
 }

@@ -831,6 +831,233 @@ describe('Toolbox MCP execution routes', () => {
     expect(body.classification).not.toBe('not_connected');
   });
 
+  describe('connectUrl on not_connected / needs_reauth tool call failures', () => {
+    const PUBLIC_GATEWAY_URL = 'https://gateway.example.test/lobu';
+
+    function withPublicGatewayUrl() {
+      coreServicesStash.services = {
+        ...coreServicesStash.services,
+        getPublicGatewayUrl: () => PUBLIC_GATEWAY_URL,
+      };
+    }
+
+    test('attaches an https connectUrl referencing mcpId and ownerUserId when an isError result classifies as needs_reauth', async () => {
+      withPublicGatewayUrl();
+      getAllHttpServersMock.mockResolvedValueOnce(
+        new Map([['notion', { url: 'https://mcp.test.local/notion' }]])
+      );
+      executeToolDirectMock.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'private upstream body must not leak' }],
+        isError: true,
+        diagnosticCode: 'upstream_unauthorized',
+      });
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'notion',
+          toolName: 'search',
+          args: {},
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('needs_reauth');
+      expect(typeof body.connectUrl).toBe('string');
+      expect(body.connectUrl.startsWith('https://')).toBe(true);
+      const url = new URL(body.connectUrl);
+      expect(url.searchParams.get('mcpId')).toBe('notion');
+      expect(url.searchParams.get('userId')).toBe(OWNER_USER_ID);
+    });
+
+    test('attaches connectUrl when a thrown error classifies as needs_reauth via the classifier fallback', async () => {
+      withPublicGatewayUrl();
+      getAllHttpServersMock.mockResolvedValueOnce(
+        new Map([['notion', { url: 'https://mcp.test.local/notion' }]])
+      );
+      executeToolDirectMock.mockRejectedValueOnce(new Error('upstream 401 unauthorized'));
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'notion',
+          toolName: 'search',
+          args: {},
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('needs_reauth');
+      expect(typeof body.connectUrl).toBe('string');
+      expect(body.connectUrl.startsWith('https://')).toBe(true);
+    });
+
+    test('attaches connectUrl for a genuine settings-miss not_connected using the canonical mcpId', async () => {
+      withPublicGatewayUrl();
+      getAllHttpServersMock.mockResolvedValueOnce(new Map());
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'notion',
+          toolName: 'search',
+          args: {},
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('not_connected');
+      expect(typeof body.connectUrl).toBe('string');
+      const url = new URL(body.connectUrl);
+      expect(url.protocol).toBe('https:');
+      expect(url.searchParams.get('mcpId')).toBe('notion');
+      expect(url.searchParams.get('userId')).toBe(OWNER_USER_ID);
+      expect(url.searchParams.get('agentId')).toBe(AGENT_ID);
+    });
+
+    test('never attaches connectUrl for an IDOR ownerUserId mismatch, even with a configured gateway URL', async () => {
+      withPublicGatewayUrl();
+      getAllHttpServersMock.mockResolvedValueOnce(
+        new Map([['notion', { url: 'https://mcp.test.local/notion' }]])
+      );
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: 'user-intruder-999',
+          agentId: AGENT_ID,
+          connectorKey: 'notion',
+          toolName: 'search',
+          args: {},
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('not_connected');
+      expect(body.connectUrl).toBeUndefined();
+      expect(getAllHttpServersMock).not.toHaveBeenCalled();
+    });
+
+    test('never attaches connectUrl for an unknown agentId, even with a configured gateway URL', async () => {
+      withPublicGatewayUrl();
+      getAllHttpServersMock.mockResolvedValueOnce(
+        new Map([['notion', { url: 'https://mcp.test.local/notion' }]])
+      );
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: 'no-such-agent',
+          connectorKey: 'notion',
+          toolName: 'search',
+          args: {},
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('not_connected');
+      expect(body.connectUrl).toBeUndefined();
+    });
+
+    test('omits connectUrl and still responds 200 when publicGatewayUrl is not configured', async () => {
+      // Deliberately do NOT call withPublicGatewayUrl(): coreServicesStash.services
+      // has no getPublicGatewayUrl, mirroring a deployment missing the config.
+      getAllHttpServersMock.mockResolvedValueOnce(
+        new Map([['notion', { url: 'https://mcp.test.local/notion' }]])
+      );
+      executeToolDirectMock.mockRejectedValueOnce(new Error('upstream 401 unauthorized'));
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'notion',
+          toolName: 'search',
+          args: {},
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('needs_reauth');
+      expect(body.connectUrl).toBeUndefined();
+    });
+
+    test('never attaches connectUrl for transient_error / config_error classifications', async () => {
+      withPublicGatewayUrl();
+      executeToolDirectMock.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'sensitive provider details' }],
+        isError: true,
+        diagnosticCode: 'raw_provider_payload',
+      });
+      const app = await importMountedAgentRoutes();
+
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'google_workspace',
+          connectionRef: CONNECTION_REF,
+          toolName: 'google_workspace_drive_search',
+          args: { query: 'test', limit: 1 },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.classification).toBe('transient_error');
+      expect(body.connectUrl).toBeUndefined();
+    });
+  });
+
   test('keeps legacy connectionRef path working during compat window', async () => {
     const app = await importMountedAgentRoutes();
 
