@@ -1119,6 +1119,8 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
   const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
   const connectorKey = body.connectorKey;
 
+  console.info('[deprecated] mcp connections status/materialize called', { agentId });
+
   if (!ownerUserId || !agentId || !isToolboxMcpStatusConnectorKey(connectorKey)) {
     return c.json(
       toolboxMcpMaterializeResult('error', null, 'lobu_mcp_invalid_request'),
@@ -1330,6 +1332,8 @@ toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
   const agentId = c.req.query('agentId')?.trim() ?? '';
   const connectionRef = c.req.query('connectionRef')?.trim() ?? '';
   const connectorKey = c.req.query('connectorKey')?.trim();
+
+  console.info('[deprecated] mcp connections status/materialize called', { agentId });
 
   if (
     !ownerUserId ||

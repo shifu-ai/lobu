@@ -644,6 +644,63 @@ describe('writeContextPackMemory', () => {
     }
   });
 
+  test('passes supersedesEventId through to saveContent as supersedes_event_id', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const calls: unknown[][] = [];
+    const saveContentImpl = async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        id: 129,
+        semantic_type: 'project_profile',
+      };
+    };
+
+    await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        body: contextPackBody({ supersedesEventId: 123 }),
+      },
+      { saveContentImpl: saveContentImpl as never }
+    );
+
+    expect(calls).toHaveLength(1);
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error('Expected saveContentImpl to be called');
+    const [args] = firstCall;
+    expect(args).toMatchObject({ supersedes_event_id: 123 });
+  });
+
+  test('does not set supersedes_event_id on saveContent when supersedesEventId is omitted', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const calls: unknown[][] = [];
+    const saveContentImpl = async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        id: 130,
+        semantic_type: 'project_profile',
+      };
+    };
+
+    await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        body: contextPackBody(),
+      },
+      { saveContentImpl: saveContentImpl as never }
+    );
+
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error('Expected saveContentImpl to be called');
+    const [args] = firstCall;
+    expect(args).not.toHaveProperty('supersedes_event_id');
+  });
+
   test('rejects durable memory writes that return no event id', async () => {
     const { ContextPackMemoryError, writeContextPackMemory } = await import(
       '../context-pack-memory-service.js'
@@ -670,6 +727,49 @@ describe('writeContextPackMemory', () => {
       expect(error).toMatchObject({
         errorCode: 'lobu_memory_write_failed',
       });
+    }
+  });
+});
+
+// Pure unit-level coverage for supersedesEventId parsing. Deliberately does not
+// depend on the file-level ensureDbForGatewayTests()/resetTestDatabase() setup
+// above — parseContextPackMemoryRequest is a pure function with no DB access.
+describe('parseContextPackMemoryRequest supersedesEventId validation', () => {
+  test('accepts a positive integer supersedesEventId', async () => {
+    const { parseContextPackMemoryRequest } = await import('../context-pack-memory-service.js');
+    const parsed = parseContextPackMemoryRequest(contextPackBody({ supersedesEventId: 123 }));
+    expect(parsed.supersedesEventId).toBe(123);
+  });
+
+  test('omits supersedesEventId when absent from the request body', async () => {
+    const { parseContextPackMemoryRequest } = await import('../context-pack-memory-service.js');
+    const parsed = parseContextPackMemoryRequest(contextPackBody());
+    expect(parsed.supersedesEventId).toBeUndefined();
+  });
+
+  test('rejects a non-numeric supersedesEventId with lobu_memory_invalid_request', async () => {
+    const { ContextPackMemoryError, parseContextPackMemoryRequest } = await import(
+      '../context-pack-memory-service.js'
+    );
+    try {
+      parseContextPackMemoryRequest(contextPackBody({ supersedesEventId: 'abc' }));
+      throw new Error('Expected parseContextPackMemoryRequest to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContextPackMemoryError);
+      expect(error).toMatchObject({ errorCode: 'lobu_memory_invalid_request', httpStatus: 400 });
+    }
+  });
+
+  test('rejects a negative supersedesEventId with lobu_memory_invalid_request', async () => {
+    const { ContextPackMemoryError, parseContextPackMemoryRequest } = await import(
+      '../context-pack-memory-service.js'
+    );
+    try {
+      parseContextPackMemoryRequest(contextPackBody({ supersedesEventId: -1 }));
+      throw new Error('Expected parseContextPackMemoryRequest to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(ContextPackMemoryError);
+      expect(error).toMatchObject({ errorCode: 'lobu_memory_invalid_request', httpStatus: 400 });
     }
   });
 });
