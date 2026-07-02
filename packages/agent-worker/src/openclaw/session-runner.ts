@@ -30,6 +30,10 @@ import { createExecutionReporter } from "./execution-reporter";
 import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
 import { isRecord } from "../shared/type-guards";
 import {
+  emitJourneyEvent,
+  parseWorkerShifuTrace,
+} from "../shared/journey-trace";
+import {
   createMcpAuthToolDefinitions,
   createMcpToolDefinitions,
   createOpenClawCustomTools,
@@ -657,10 +661,14 @@ export async function runAISession(
   )?.mcpExposure;
   const mcpExposure: "tools" | "cli" =
     configuredMcpExposure === "cli" ? "cli" : "tools";
+  const shifuTrace = parseWorkerShifuTrace(platformMetadata, "worker");
 
   // Fetch session context BEFORE model resolution. Pass `mcpExposure` so
   // MCP setup instructions use the right call syntax.
-  const context = await getOpenClawSessionContext({ mcpExposure });
+  const context = await getOpenClawSessionContext({
+    mcpExposure,
+    shifuTrace,
+  });
 
   // Sync enabled skills to workspace filesystem so the agent can `cat` them.
   // Remove stale skill directories to avoid serving removed/disabled skills.
@@ -1175,10 +1183,22 @@ Use it when the user references past discussions or you need context.`);
   // wired in above, and `<server> auth login|check|logout` supersedes the
   // `<id>_login` / `<id>_login_check` / `<id>_logout` trio.
   let registeredDirectMcpTools: Record<string, McpToolDef[]> = context.mcpTools;
+  let registeredMcpToolCount = 0;
   if (mcpExposure === "cli") {
     logger.info(
       "mcpExposure='cli' — skipping first-class MCP tool registration (tools reachable via <server> <tool> in Bash)."
     );
+    emitJourneyEvent({
+      event: "worker.tools_registered",
+      trace: shifuTrace,
+      module: "agent-worker",
+      status: "skipped",
+      fields: {
+        mcp_exposure: mcpExposure,
+        mcp_server_count: Object.keys(context.mcpTools).length,
+        tool_count: 0,
+      },
+    });
   } else {
     const projectedMcp = projectMcpToolsForProvider(context.mcpTools, {
       provider: rawProvider,
@@ -1223,8 +1243,10 @@ Use it when the user references past discussions or you need context.`);
     const mcpToolDefs = createMcpToolDefinitions(
       projectedMcp.tools,
       gwParams,
-      context.mcpContext
+      context.mcpContext,
+      { shifuTrace }
     );
+    registeredMcpToolCount = mcpToolDefs.length;
     if (mcpToolDefs.length > 0) {
       customTools.push(...mcpToolDefs);
       logger.info(
@@ -1281,6 +1303,20 @@ Use it when the user references past discussions or you need context.`);
         `Registered ${authToolDefs.length} MCP auth tool(s): ${authToolDefs.map((t) => t.name).join(", ")}`
       );
     }
+    emitJourneyEvent({
+      event: "worker.tools_registered",
+      trace: shifuTrace,
+      module: "agent-worker",
+      status: "ok",
+      fields: {
+        mcp_exposure: mcpExposure,
+        mcp_server_count: Object.keys(context.mcpTools).length,
+        mcp_ids: Object.keys(context.mcpTools).sort(),
+        tool_count: registeredMcpToolCount,
+        auth_tool_count: authToolDefs.length,
+        mcp_status_count: context.mcpStatus.length,
+      },
+    });
   }
 
   tools = projectToolParametersForProvider(tools, rawProvider);

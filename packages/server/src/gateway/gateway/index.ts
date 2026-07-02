@@ -28,6 +28,7 @@ import {
 } from "../orchestration/turn-liveness.js";
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { parseShifuTraceHeaders } from "../trace-context.js";
 import {
 	type SSEWriter,
 	WorkerConnectionManager,
@@ -414,6 +415,21 @@ const TOOLBOX_PERSONAL_AGENT_TOOL_CATALOG: Record<
 		},
 	],
 	shifu_toolbox: [
+		{
+			name: "meeting_search",
+			connectorToolName: "meeting_search",
+			description:
+				"Search meeting records available to the connected Toolbox user.",
+			approvalRequired: false,
+			inputSchema: {
+				type: "object",
+				properties: {
+					query: { type: "string" },
+					limit: { type: "number" },
+				},
+				required: ["query"],
+			},
+		},
 		{
 			name: "submit_course_pm_profile",
 			connectorToolName: "submit_course_pm_profile",
@@ -1308,6 +1324,7 @@ export class WorkerGateway {
 						401,
 					);
 				}
+				const shifuTrace = parseShifuTraceHeaders(c.req.raw.headers, "worker");
 
 				// Build instruction context
 				const instructionContext: InstructionContext = {
@@ -1373,6 +1390,7 @@ export class WorkerGateway {
 								agentId || userId,
 								auth.tokenData,
 								auth.token,
+								{ trace: shifuTrace },
 							);
 							return { mcpId: mcp.id, ...(result || { tools: [] }) };
 						}),

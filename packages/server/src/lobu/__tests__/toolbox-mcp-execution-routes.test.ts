@@ -60,6 +60,7 @@ const SHIFU_TOOLBOX_DISCOVERY_TOOLS = [
   'submit_course_pm_profile',
 ];
 let executeToolDirectMock: ReturnType<typeof mock>;
+let listToolsDirectMock: ReturnType<typeof mock>;
 let getHttpServerMock: ReturnType<typeof mock>;
 
 async function importMountedAgentRoutes() {
@@ -143,6 +144,12 @@ describe('Toolbox MCP execution routes', () => {
       content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
       isError: false,
     }));
+    listToolsDirectMock = mock(async (_agentId: string, _userId: string, mcpId: string) => ({
+      tools: (mcpId === 'shifu-toolbox'
+        ? SHIFU_TOOLBOX_DISCOVERY_TOOLS
+        : GOOGLE_WORKSPACE_DISCOVERY_TOOLS
+      ).map((name) => ({ name })),
+    }));
     getHttpServerMock = mock(async () => ({
       id: 'google_workspace',
       upstreamUrl: 'https://mcp.test.local/google-workspace',
@@ -150,6 +157,7 @@ describe('Toolbox MCP execution routes', () => {
     coreServicesStash.services = {
       getMcpProxy: () => ({
         executeToolDirect: executeToolDirectMock,
+        listToolsDirect: listToolsDirectMock,
       }),
       getMcpConfigService: () => ({
         getHttpServer: getHttpServerMock,
@@ -915,6 +923,11 @@ describe('Toolbox MCP execution routes', () => {
       status: 'ready',
       toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      CONNECTION_REF
+    );
   });
 
   test('GET /mcp/connections/status returns mcp_server_missing when no executable MCP server is configured', async () => {
@@ -1060,6 +1073,28 @@ describe('Toolbox MCP execution routes', () => {
     });
   });
 
+  test('GET /mcp/connections/status maps tools/list auth failures to needs_reauth', async () => {
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP tools/list requires authentication'), {
+        diagnosticCode: 'upstream_unauthorized',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request(
+      `/lobu/api/v1/mcp/connections/status?agentId=${AGENT_ID}&ownerUserId=${OWNER_USER_ID}&connectorKey=google_workspace&connectionRef=${CONNECTION_REF}`,
+      {
+        headers: { Authorization: 'Bearer admin-token' },
+      }
+    );
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'needs_reauth',
+      toolsDiscovered: [],
+    });
+  });
+
   test('POST /mcp/connections/materialize returns ready and a ref for an owner connector', async () => {
     seedSourceConnectionForMaterialize();
     const app = await importMountedAgentRoutes();
@@ -1083,6 +1118,11 @@ describe('Toolbox MCP execution routes', () => {
       lobuConnectionRef: MATERIALIZED_CONNECTION_REF,
       toolsDiscovered: GOOGLE_WORKSPACE_DISCOVERY_TOOLS,
     });
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'google_workspace'
+    );
     expect(fakeConnections.get(MATERIALIZED_CONNECTION_REF)).toMatchObject({
       id: MATERIALIZED_CONNECTION_REF,
       agentId: AGENT_ID,
@@ -1173,6 +1213,163 @@ describe('Toolbox MCP execution routes', () => {
       toolsDiscovered: SHIFU_TOOLBOX_DISCOVERY_TOOLS,
     });
     expect(body.lobuConnectionRef).toEqual(expect.any(String));
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox'
+    );
+  });
+
+  test('POST /mcp/connections/materialize maps shifu_toolbox tools/list auth failures to needs_reauth', async () => {
+    fakeAgents.set(SOURCE_AGENT_ID, {
+      agentId: SOURCE_AGENT_ID,
+      name: 'Source Agent',
+      owner: { platform: 'toolbox', userId: OWNER_USER_ID },
+      organizationId: ORG_ID,
+      createdAt: Date.now(),
+    });
+    fakeConnections.delete(CONNECTION_REF);
+    fakeConnections.set('owner-shifu-toolbox', {
+      id: 'owner-shifu-toolbox',
+      organizationId: ORG_ID,
+      agentId: SOURCE_AGENT_ID,
+      platform: 'shifu-toolbox',
+      config: {},
+      settings: {},
+      metadata: {
+        ownerUserId: OWNER_USER_ID,
+        connectorKey: 'shifu-toolbox',
+        mcpId: 'shifu-toolbox',
+        authSource: 'lobu_oauth',
+      },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP tools/list requires authentication'), {
+        diagnosticCode: 'upstream_unauthorized',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'needs_reauth',
+      lobuConnectionRef: null,
+      toolsDiscovered: [],
+      errorCode: 'upstream_unauthorized',
+    });
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox'
+    );
+  });
+
+  test('POST /mcp/connections/materialize creates a ready shifu_toolbox row when only the agent MCP server exists', async () => {
+    const shifuToolboxConnectionRef = `toolbox-mcp:${createHash('sha256')
+      .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu_toolbox']))
+      .digest('hex')}`;
+    fakeConnections.delete(CONNECTION_REF);
+    for (const [connectionRef, connection] of fakeConnections) {
+      if (connection.agentId === AGENT_ID && connection.platform === 'shifu-toolbox') {
+        fakeConnections.delete(connectionRef);
+      }
+    }
+    fakeSettings.set(AGENT_ID, {
+      mcpServers: {
+        'shifu-toolbox': {
+          type: 'http',
+          url: 'https://mcp.shifu-ai.org/mcp',
+        },
+      },
+      preApprovedTools: [],
+    });
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe('ready');
+    expect(body.lobuConnectionRef).toEqual(expect.any(String));
+    expect(body.toolsDiscovered).toContain('meeting_search');
+    expect(body.toolsDiscovered).toContain('submit_course_pm_profile');
+    expect(body.lobuConnectionRef).toBe(shifuToolboxConnectionRef);
+    expect(listToolsDirectMock).toHaveBeenCalledWith(
+      AGENT_ID,
+      OWNER_USER_ID,
+      'shifu-toolbox'
+    );
+    expect(fakeConnections.get(shifuToolboxConnectionRef)).toMatchObject({
+      id: shifuToolboxConnectionRef,
+      agentId: AGENT_ID,
+      platform: 'shifu-toolbox',
+      status: 'active',
+      metadata: {
+        connectorKey: 'shifu_toolbox',
+        mcpId: 'shifu-toolbox',
+        provider: 'shifu-toolbox',
+        ownerUserId: OWNER_USER_ID,
+        source: 'toolbox-personal-agent-materialized',
+      },
+    });
+  });
+
+  test('POST /mcp/connections/materialize does not create shifu_toolbox row from global-only MCP config', async () => {
+    const shifuToolboxConnectionRef = `toolbox-mcp:${createHash('sha256')
+      .update(JSON.stringify([ORG_ID, OWNER_USER_ID, AGENT_ID, 'shifu_toolbox']))
+      .digest('hex')}`;
+    fakeConnections.delete(CONNECTION_REF);
+    fakeSettings.delete(AGENT_ID);
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'shifu_toolbox',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(['not_connected', 'error']).toContain(body.status);
+    if (body.status === 'error') {
+      expect(body.errorCode).toBe('mcp_server_missing');
+    }
+    expect(body.lobuConnectionRef).toBe(null);
+    expect(fakeConnections.has(shifuToolboxConnectionRef)).toBe(false);
   });
 
   test('POST /mcp/connections/materialize accepts an existing deterministic Lobu OAuth row without materialized metadata', async () => {
@@ -1224,6 +1421,37 @@ describe('Toolbox MCP execution routes', () => {
         connectorKey: 'google_workspace',
         authSource: 'lobu_oauth',
       },
+    });
+  });
+
+  test('POST /mcp/connections/materialize maps tools/list auth failures to needs_reauth', async () => {
+    seedSourceConnectionForMaterialize();
+    listToolsDirectMock.mockRejectedValueOnce(
+      Object.assign(new Error('MCP tools/list requires authentication'), {
+        diagnosticCode: 'upstream_forbidden',
+      })
+    );
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/connections/materialize', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toEqual({
+      status: 'needs_reauth',
+      lobuConnectionRef: null,
+      toolsDiscovered: [],
+      errorCode: 'upstream_forbidden',
     });
   });
 

@@ -94,6 +94,9 @@ jobs:
             sleep 1
           done
           PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d lobu_test \
+            -c "ALTER SYSTEM SET maintenance_work_mem = '256MB';" \
+            -c "SELECT pg_reload_conf();"
+          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d lobu_test \
             -c "CREATE EXTENSION IF NOT EXISTS vector"
 
       - name: core security tests (encryption, worker-auth)
@@ -178,6 +181,9 @@ jobs:
             if pg_isready -h 127.0.0.1 -p 5433 -U postgres; then break; fi
             sleep 1
           done
+          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d lobu_test \
+            -c "ALTER SYSTEM SET maintenance_work_mem = '256MB';" \
+            -c "SELECT pg_reload_conf();"
           PGPASSWORD=postgres psql -h 127.0.0.1 -p 5433 -U postgres -d lobu_test \
             -c "CREATE EXTENSION IF NOT EXISTS vector"
 

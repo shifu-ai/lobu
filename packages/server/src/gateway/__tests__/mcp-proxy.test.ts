@@ -104,6 +104,10 @@ async function withImmediateRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+function inTestOrg<T>(fn: () => T): T {
+  return orgContext.run({ organizationId: "test-org" }, fn);
+}
+
 function jsonRpcToolsResponse(
   tools: Array<{ name: string; description?: string }> = []
 ): Response {
@@ -453,7 +457,7 @@ describe("McpProxy", () => {
       10_000
     );
 
-    test("does not pause when tools/list retry returns 401 or 403", async () => {
+    test("does not pause when surfaced tools/list retry returns 401 or 403", async () => {
       for (const retryStatus of [401, 403]) {
         const configSource = createMockConfigSource({
           "test-mcp": TEST_SERVER,
@@ -480,8 +484,7 @@ describe("McpProxy", () => {
               method: "GET",
               headers: { Authorization: `Bearer ${validToken}` },
             });
-            expect(res.status).toBe(200);
-            expect(await res.json()).toEqual({ tools: [] });
+            expect(res.status).toBe(502);
           }
         });
 
@@ -500,6 +503,253 @@ describe("McpProxy", () => {
         expect(body.tools[0].name).toBe(`after_${retryStatus}`);
         expect(fetchCount).toBeGreaterThan(fetchesBeforeSuccess);
       }
+    });
+
+    test("non-surface discovery stays soft when tools/list returns 401 or 403", async () => {
+      for (const status of [401, 403]) {
+        const configSource = createMockConfigSource({
+          "test-mcp": TEST_SERVER,
+        });
+        const proxy = new McpProxy(configSource, {
+          secretStore: createTestSecretStore(queue),
+        });
+
+        globalThis.fetch = async (_input, init) => {
+          const body = String(init?.body ?? "");
+          if (body.includes("tools/list")) {
+            return new Response("auth failed", { status });
+          }
+          return jsonRpcToolsResponse();
+        };
+
+        const result = await inTestOrg(() =>
+          proxy.fetchToolsForMcp(
+            "test-mcp",
+            "agent1",
+            { userId: "user1", channelId: "ch1" },
+            undefined
+          )
+        );
+
+        expect(result).toEqual({ tools: [] });
+      }
+    });
+
+    test("surfaceErrors throws when initialize returns 401", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+
+      globalThis.fetch = async () =>
+        new Response("login required", {
+          status: 401,
+          headers: {
+            "www-authenticate":
+              'Bearer resource_metadata="https://auth.test/.well-known/oauth-protected-resource"',
+          },
+        });
+
+      await withImmediateRetry(() =>
+        expect(
+          inTestOrg(() =>
+            proxy.fetchToolsForMcp(
+              "test-mcp",
+              "agent1",
+              { userId: "user1", channelId: "ch1" },
+              undefined,
+              { surfaceErrors: true }
+            )
+          )
+        ).rejects.toMatchObject({ diagnosticCode: "upstream_unauthorized" })
+      );
+    });
+
+    test("surfaceErrors throws when tools/list returns 401 or 403", async () => {
+      for (const status of [401, 403]) {
+        const configSource = createMockConfigSource({
+          "test-mcp": TEST_SERVER,
+        });
+        const proxy = new McpProxy(configSource, {
+          secretStore: createTestSecretStore(queue),
+        });
+
+        globalThis.fetch = async (_input, init) => {
+          const body = String(init?.body ?? "");
+          if (body.includes("tools/list")) {
+            return new Response("auth failed", { status });
+          }
+          return jsonRpcToolsResponse();
+        };
+
+        await withImmediateRetry(() =>
+          expect(
+            inTestOrg(() =>
+              proxy.fetchToolsForMcp(
+                "test-mcp",
+                "agent1",
+                { userId: "user1", channelId: "ch1" },
+                undefined,
+                { surfaceErrors: true }
+              )
+            )
+          ).rejects.toMatchObject({
+            diagnosticCode:
+              status === 401 ? "upstream_unauthorized" : "upstream_forbidden",
+          })
+        );
+      }
+    });
+
+    test("surfaceErrors throws for auth-style JSON-RPC tools/list errors", async () => {
+      for (const [message, diagnosticCode] of [
+        ["unauthorized", "upstream_unauthorized"],
+        ["forbidden", "upstream_forbidden"],
+      ] as const) {
+        const configSource = createMockConfigSource({
+          "test-mcp": TEST_SERVER,
+        });
+        const proxy = new McpProxy(configSource, {
+          secretStore: createTestSecretStore(queue),
+        });
+
+        globalThis.fetch = async (_input, init) => {
+          const body = String(init?.body ?? "");
+          if (body.includes("tools/list")) {
+            return jsonRpcErrorResponse(message);
+          }
+          return jsonRpcToolsResponse();
+        };
+
+        await withImmediateRetry(() =>
+          expect(
+            inTestOrg(() =>
+              proxy.fetchToolsForMcp(
+                "test-mcp",
+                "agent1",
+                { userId: "user1", channelId: "ch1" },
+                undefined,
+                { surfaceErrors: true }
+              )
+            )
+          ).rejects.toMatchObject({ diagnosticCode })
+        );
+      }
+    });
+
+    test("non-surface discovery stays soft for auth-style JSON-RPC tools/list errors", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+
+      globalThis.fetch = async (_input, init) => {
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          return jsonRpcErrorResponse("unauthorized");
+        }
+        return jsonRpcToolsResponse();
+      };
+
+      const result = await inTestOrg(() =>
+        proxy.fetchToolsForMcp(
+          "test-mcp",
+          "agent1",
+          { userId: "user1", channelId: "ch1" },
+          undefined
+        )
+      );
+
+      expect(result).toEqual({ tools: [] });
+    });
+
+    test("surfaceErrors throws for invalid tools/list JSON bodies", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+
+      globalThis.fetch = async (_input, init) => {
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          return new Response("{", {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return jsonRpcToolsResponse();
+      };
+
+      await withImmediateRetry(() =>
+        expect(
+          inTestOrg(() =>
+            proxy.fetchToolsForMcp(
+              "test-mcp",
+              "agent1",
+              { userId: "user1", channelId: "ch1" },
+              undefined,
+              { surfaceErrors: true }
+            )
+          )
+        ).rejects.toBeInstanceOf(SyntaxError)
+      );
+    });
+
+    test("repeated surfaceErrors auth failures do not pause discovery", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+
+      let fetchCount = 0;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        return new Response("forbidden", { status: 403 });
+      };
+
+      await withImmediateRetry(async () => {
+        for (let i = 0; i < 3; i++) {
+          await expect(
+            inTestOrg(() =>
+              proxy.fetchToolsForMcp(
+                "test-mcp",
+                "agent1",
+                { userId: "user1", channelId: "ch1" },
+                undefined,
+                { surfaceErrors: true }
+              )
+            )
+          ).rejects.toMatchObject({ diagnosticCode: "upstream_forbidden" });
+        }
+      });
+
+      const fetchesBeforeSuccess = fetchCount;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        return jsonRpcToolsResponse([{ name: "after_auth_failures" }]);
+      };
+
+      const result = await inTestOrg(() =>
+        proxy.fetchToolsForMcp(
+          "test-mcp",
+          "agent1",
+          { userId: "user1", channelId: "ch1" },
+          undefined,
+          { surfaceErrors: true }
+        )
+      );
+      expect(result.tools.map((tool) => tool.name)).toEqual([
+        "after_auth_failures",
+      ]);
+      expect(fetchCount).toBeGreaterThan(fetchesBeforeSuccess);
     });
 
     test("retry success with zero tools clears prior health failures", async () => {
@@ -616,7 +866,7 @@ describe("McpProxy", () => {
       expect(fetchCount).toBe(fetchesBeforePause);
     });
 
-    test("auth-style JSON-RPC tools/list errors do not pause discovery", async () => {
+    test("surfaced auth-style JSON-RPC tools/list errors do not pause discovery", async () => {
       for (const message of ["unauthorized", "forbidden"]) {
         const configSource = createMockConfigSource({
           "test-mcp": TEST_SERVER,
@@ -642,8 +892,7 @@ describe("McpProxy", () => {
               method: "GET",
               headers: { Authorization: `Bearer ${validToken}` },
             });
-            expect(res.status).toBe(200);
-            expect(await res.json()).toEqual({ tools: [] });
+            expect(res.status).toBe(502);
           }
         });
 

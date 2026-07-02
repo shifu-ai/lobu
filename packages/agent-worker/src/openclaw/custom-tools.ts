@@ -5,6 +5,10 @@ import type { Static } from "@sinclair/typebox";
 import { type TSchema, Type } from "@sinclair/typebox";
 import type { GatewayParams, TextResult } from "../shared/tool-implementations";
 import {
+  emitJourneyEvent,
+  type WorkerShifuTraceContext,
+} from "../shared/journey-trace";
+import {
   askUserQuestion,
   callMcpTool,
   callToolboxPersonalAgentTool,
@@ -26,6 +30,12 @@ import {
 import type { ToolboxPersonalAgentToolGroup } from "./session-context";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
+
+function safeObjectKeys(value: unknown): string[] {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort()
+    : [];
+}
 
 /** Adapt shared TextResult to OpenClaw's ToolResult (adds details field) */
 function toToolResult(result: TextResult): ToolResult {
@@ -346,7 +356,8 @@ export function createOpenClawCustomTools(params: {
 export function createMcpToolDefinitions(
   mcpTools: Record<string, McpToolDef[]>,
   gw: GatewayParams,
-  mcpContext?: Record<string, string>
+  mcpContext?: Record<string, string>,
+  options?: { shifuTrace?: WorkerShifuTraceContext }
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   const registeredNames = new Set<string>();
@@ -375,15 +386,67 @@ export function createMcpToolDefinitions(
           ? description
           : `${description} Alias for \`${upstreamToolName}\`.`,
       parameters: schema,
-      execute: async (_toolCallId, args) =>
-        toToolResult(
-          await callMcpTool(
+      execute: async (_toolCallId, args) => {
+        const argumentKeys = safeObjectKeys(args);
+        if (options?.shifuTrace) {
+          emitJourneyEvent({
+            event: "worker.mcp_tool_invoked",
+            trace: options.shifuTrace,
+            module: "agent-worker",
+            status: "started",
+            fields: {
+              mcp_id: mcpId,
+              tool_name: upstreamToolName,
+              projected_tool_name: toolName,
+              argument_keys: argumentKeys,
+            },
+          });
+        }
+        let result: TextResult;
+        try {
+          result = await callMcpTool(
             gw,
             mcpId,
             upstreamToolName,
-            (args || {}) as Record<string, unknown>
-          )
-        ),
+            (args || {}) as Record<string, unknown>,
+            { shifuTrace: options?.shifuTrace }
+          );
+        } catch (error) {
+          if (options?.shifuTrace) {
+            emitJourneyEvent({
+              event: "worker.mcp_tool_completed",
+              trace: options.shifuTrace,
+              module: "agent-worker",
+              status: "failed",
+              fields: {
+                mcp_id: mcpId,
+                tool_name: upstreamToolName,
+                projected_tool_name: toolName,
+                error_code: "mcp_tool_request_failed",
+              },
+            });
+          }
+          throw error;
+        }
+        if (options?.shifuTrace) {
+          emitJourneyEvent({
+            event: "worker.mcp_tool_completed",
+            trace: options.shifuTrace,
+            module: "agent-worker",
+            status: result.isError ? "failed" : "ok",
+            fields: {
+              mcp_id: mcpId,
+              tool_name: upstreamToolName,
+              projected_tool_name: toolName,
+              is_error: Boolean(result.isError),
+              content_count: Array.isArray(result.content)
+                ? result.content.length
+                : 0,
+            },
+          });
+        }
+        return toToolResult(result);
+      },
     };
   };
 
