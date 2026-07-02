@@ -100,8 +100,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       if (
         candidate.agentId !== input.agentId ||
         candidate.userId !== input.toolboxUserId ||
-        !candidate.channelId ||
-        candidate.channelId !== input.lineUserId
+        !(await ownsToolboxAgent(input))
       ) {
         return { status: "forbidden" };
       }
@@ -110,8 +109,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       if (
         !pending ||
         pending.agentId !== candidate.agentId ||
-        pending.userId !== candidate.userId ||
-        pending.channelId !== candidate.channelId
+        pending.userId !== candidate.userId
       ) {
         return { status: "expired" };
       }
