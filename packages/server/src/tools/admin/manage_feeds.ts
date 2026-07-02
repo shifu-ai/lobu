@@ -5,9 +5,10 @@
  *
  * Actions:
  * - list_feeds: List feeds with optional filters
- * - read_feed: Read one feed by id, dispatching on kind — a collected/virtual
- *   feed returns its metadata + recent sync runs; a streaming (chat-channel)
- *   feed returns its live transcript from channel_messages.
+ * - read_feed: Read one feed by id, dispatching on kind — a collected feed
+ *   returns its metadata + recent sync runs; a virtual feed returns LIVE rows
+ *   via the connector query()/search() pushdown (never synced); a streaming
+ *   (chat-channel) feed returns its live transcript from channel_messages.
  * - create_feed: Create a new feed for a connection
  * - update_feed: Update feed settings
  * - delete_feed: Delete a feed
@@ -17,7 +18,9 @@
 import { getErrorMessage, parseJsonObject } from '@lobu/core';
 import { type Static, Type } from '@sinclair/typebox';
 import { getDb, pgBigintArray } from '../../db/client';
+import { authzScopeFromToolContext } from '../../authz/scope';
 import { filterChannelsForRequester } from '../../authz/channel-visibility';
+import { readVirtualFeed } from '../../lib/connector-pushdown';
 import { readChannelTranscript } from '../../gateway/connections/channel-transcript';
 import type { Env } from '../../index';
 import { getAuthProfileById } from '../../utils/auth-profiles';
@@ -77,6 +80,12 @@ const CreateFeedAction = Type.Object({
   schedule: Type.Optional(
     Type.String({ description: 'Cron expression for sync schedule (default: every 6 hours)' })
   ),
+  virtual: Type.Optional(
+    Type.Boolean({
+      description:
+        'When true, create a VIRTUAL feed (kind=virtual): read LIVE via the connector query()/search() pushdown at request time, never synced — sync-lifecycle columns stay NULL. Requires config.query (a connector-specific read predicate, e.g. a Gmail search string) and the connector to implement the pushdown.',
+    })
+  ),
 });
 
 const UpdateFeedAction = Type.Object({
@@ -129,6 +138,14 @@ type ManageFeedsResult =
         text: string;
         isBot: boolean;
       }>;
+    }
+  | {
+      action: 'read_feed';
+      kind: 'virtual';
+      feed: any;
+      rows: Record<string, unknown>[];
+      columns: { name: string; type: string }[];
+      total?: number;
     }
   | { action: 'create_feed'; feed: any }
   | { action: 'update_feed'; feed: any }
@@ -348,6 +365,20 @@ async function handleReadFeed(
     return { action: 'read_feed', kind: 'streaming', feed, messages };
   }
 
+  // A virtual feed is never synced — its content is read LIVE at request time
+  // via the connector's query()/search() pushdown (no events written). Same
+  // AuthzScope connection-visibility gate as the query_sql pushdown: a member
+  // only reaches org-visible or own connections; the feed's connection is the
+  // ACL boundary.
+  if (feed.kind === 'virtual') {
+    const live = await readVirtualFeed({
+      scope: authzScopeFromToolContext({ organizationId, userId: userId ?? null }),
+      feedId: args.feed_id,
+      limit: args.limit,
+    });
+    return { action: 'read_feed', kind: 'virtual', feed, ...live };
+  }
+
   const runs = await sql`
     SELECT id, status, items_collected, error_message, created_at, completed_at, checkpoint, connector_version
     FROM runs
@@ -414,13 +445,33 @@ async function handleCreateFeed(
     };
   }
 
-  const schedule = args.schedule ?? getDefaultSchedule(env);
-  const scheduleError = validateSchedule(schedule);
-  if (scheduleError) {
-    return { error: scheduleError };
+  // A virtual feed is read LIVE at request time and never synced, so it has no
+  // schedule. It MUST carry config.query (the pushdown predicate readVirtualFeed
+  // reads) — without it the live read would always throw at request time.
+  const isVirtual = args.virtual === true;
+  // Only validate the sync schedule for non-virtual feeds — a virtual feed
+  // persists schedule = NULL, so a (possibly defaulted) schedule string must not
+  // gate its creation.
+  const schedule = isVirtual ? null : (args.schedule ?? getDefaultSchedule(env));
+  if (!isVirtual) {
+    const scheduleError = validateSchedule(schedule as string);
+    if (scheduleError) {
+      return { error: scheduleError };
+    }
   }
-  // Don't schedule a first run for a feed whose connection is still pending auth.
-  const nextRunAtVal = feedInitialStatus === 'active' ? nextRunAt(schedule) : null;
+  if (isVirtual) {
+    const configQuery = args.config?.query;
+    if (typeof configQuery !== 'string' || !configQuery.trim()) {
+      return {
+        error:
+          'A virtual feed requires config.query (a connector-specific read predicate, e.g. a Gmail search string).',
+      };
+    }
+  }
+  // Don't schedule a first run for a feed whose connection is still pending auth,
+  // or for a virtual feed (never synced — schedule is NULL).
+  const nextRunAtVal =
+    schedule && feedInitialStatus === 'active' ? nextRunAt(schedule) : null;
   // Reject cross-org entity_ids: a feed pointing at another org's entity links
   // synced events to a non-existent in-org entity (silent data-correctness bug).
   try {
@@ -442,12 +493,13 @@ async function handleCreateFeed(
   const inserted = await sql`
     INSERT INTO feeds (
       organization_id, connection_id, feed_key, display_name, status,
-      entity_ids, config, schedule, next_run_at
+      entity_ids, config, schedule, next_run_at, kind, virtual
     ) VALUES (
       ${organizationId}, ${args.connection_id}, ${args.feed_key}, ${displayName}, ${feedInitialStatus},
       ${entityIdsValue}::bigint[],
       ${args.config ? sql.json(args.config) : null},
-      ${schedule}, ${nextRunAtVal}
+      ${schedule}, ${nextRunAtVal},
+      ${isVirtual ? 'virtual' : 'collected'}, ${isVirtual}
     )
     RETURNING *
   `;

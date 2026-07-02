@@ -15,6 +15,9 @@ import {
   type HttpClient,
   IDENTITY,
   paginateByCursor,
+  type QueryContext,
+  type QueryResult,
+  type SearchContext,
   type SyncContext,
   type SyncResult,
 } from '@lobu/connector-sdk';
@@ -70,6 +73,19 @@ interface GmailConfig {
   max_results?: number;
   lookback_days?: number;
 }
+
+/** Stable column set returned by live `query()`/`search()` pushdown reads. */
+const GMAIL_SEARCH_COLUMNS = [
+  { name: 'id', type: 'string' },
+  { name: 'thread_id', type: 'string' },
+  { name: 'subject', type: 'string' },
+  { name: 'from', type: 'string' },
+  { name: 'from_name', type: 'string' },
+  { name: 'from_email', type: 'string' },
+  { name: 'date', type: 'string' },
+  { name: 'snippet', type: 'string' },
+  { name: 'url', type: 'string' },
+];
 
 // ---------------------------------------------------------------------------
 // Connector
@@ -430,6 +446,141 @@ export default class GmailConnector extends ConnectorRuntime<GmailCheckpoint, Gm
         error: error instanceof Error ? error.message : String(error),
       };
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Live pushdown (virtual feeds) — read-only, never persisted.
+  // `query()` runs the feed's configured Gmail search string; `search()` adds
+  // keyword `terms` as an AND predicate (Gmail's `q` is space-separated = AND).
+  // Both return the same row shape so a virtual `threads` feed is consistent
+  // whether read bare or with recall terms pushed down.
+  // -------------------------------------------------------------------------
+
+  async query(ctx: QueryContext<GmailConfig>): Promise<QueryResult> {
+    return this.liveSearch(ctx, ctx.query, []);
+  }
+
+  async search(ctx: SearchContext<GmailConfig>): Promise<QueryResult> {
+    return this.liveSearch(ctx, ctx.query, ctx.terms ?? []);
+  }
+
+  /**
+   * Shared live read: build a Gmail `q` from the base predicate plus optional
+   * keyword terms, list matching messages, then fetch each message's metadata
+   * (Subject/From/Date) + snippet. Returns rows + a stable column set.
+   */
+  private async liveSearch(
+    ctx: QueryContext<GmailConfig>,
+    baseQuery: string,
+    terms: string[]
+  ): Promise<QueryResult> {
+    const token = ctx.credentials?.accessToken;
+    if (!token) {
+      throw new Error('Gmail virtual-feed reads require Google OAuth credentials.');
+    }
+
+    // Gmail's `q` is space-separated = AND. Each term is escaped so a term that
+    // contains Gmail operators/spaces (e.g. `from:a b`) is matched literally as a
+    // quoted phrase rather than reinterpreted as query syntax.
+    const parts = [baseQuery.trim(), ...terms.map((t) => this.escapeGmailTerm(t))].filter(Boolean);
+    const q = parts.join(' ');
+    if (!q) {
+      throw new Error('Gmail virtual feed has no `query` in its config and no search terms.');
+    }
+
+    // Gmail search has no arbitrary sort — results are always reverse-chronological
+    // (newest first). Reject a sort we can't honor rather than silently ignore it.
+    if (ctx.sort && !(ctx.sort.column === 'date' && ctx.sort.order === 'desc')) {
+      throw new Error(
+        `Gmail virtual feed only supports sort {column:'date', order:'desc'} (newest first); got ${JSON.stringify(ctx.sort)}.`
+      );
+    }
+
+    const limit = Math.min(Math.max(Math.trunc(ctx.limit ?? ctx.config.max_results ?? 25), 1), 100);
+    const offset = Math.max(Math.trunc(ctx.offset ?? 0), 0);
+
+    // Apply offset by listing offset+limit ids then dropping the leading `offset`.
+    // Gmail's list endpoint has no offset param, only forward pagination.
+    const http = this.createClient(token);
+    const ids = (await this.listMessageIds(http, q, offset + limit)).slice(offset, offset + limit);
+    const rows = await this.fetchMessageRows(http, ids);
+
+    // No `total`: Gmail's list endpoint returns no reliable match count, and
+    // `resultSizeEstimate` is a coarse estimate — reporting the page length as a
+    // total would be wrong. Callers page until a short page.
+    return { rows, columns: GMAIL_SEARCH_COLUMNS };
+  }
+
+  /**
+   * Quote a recall term so Gmail matches it LITERALLY. A bare word passes
+   * through; anything containing whitespace, a quote, or a Gmail query-operator
+   * character (`:` `(` `)` `{` `}`) is wrapped in quotes so it is not reparsed as
+   * query syntax (e.g. `from:alice@example.com` must match the text, not act as a
+   * `from:` operator). Embedded quotes are stripped — Gmail has no escape for a
+   * literal quote inside a phrase.
+   */
+  private escapeGmailTerm(term: string): string {
+    const t = term.trim();
+    if (!t) return '';
+    // Bare token with no whitespace, quotes, or operator characters → pass through.
+    if (!/[\s"():{}]/.test(t)) return t;
+    return `"${t.replace(/"/g, '')}"`;
+  }
+
+  private async listMessageIds(
+    http: HttpClient,
+    q: string,
+    want: number
+  ): Promise<Array<{ id: string; threadId: string }>> {
+    const out: Array<{ id: string; threadId: string }> = [];
+    let pageToken: string | undefined;
+    do {
+      const remaining = want - out.length;
+      if (remaining <= 0) break;
+      const params = new URLSearchParams({
+        q,
+        maxResults: String(Math.min(100, remaining)),
+      });
+      if (pageToken) params.set('pageToken', pageToken);
+      const res = await http.raw(`${this.BASE_URL}/messages?${params.toString()}`);
+      if (!res.ok) {
+        throw new Error(`Gmail messages.list error (${res.status}): ${await res.text()}`);
+      }
+      const data = (await res.json()) as {
+        messages?: Array<{ id: string; threadId: string }>;
+        nextPageToken?: string;
+      };
+      for (const m of data.messages ?? []) out.push({ id: m.id, threadId: m.threadId });
+      pageToken = data.nextPageToken;
+    } while (pageToken && out.length < want);
+    return out.slice(0, want);
+  }
+
+  private async fetchMessageRows(
+    http: HttpClient,
+    ids: Array<{ id: string; threadId: string }>
+  ): Promise<Record<string, unknown>[]> {
+    const rows: Record<string, unknown>[] = [];
+    for (const m of ids) {
+      const url = `${this.BASE_URL}/messages/${m.id}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
+      const res = await http.raw(url);
+      if (!res.ok) continue; // skip a single unreachable message, keep the batch reliable
+      const msg = (await res.json()) as GmailMessage;
+      const rawFrom = this.getHeader(msg, 'From') || 'Unknown';
+      const { name, email } = this.parseFromHeader(rawFrom);
+      rows.push({
+        id: msg.id,
+        thread_id: msg.threadId,
+        subject: this.getHeader(msg, 'Subject') || '(no subject)',
+        from: rawFrom,
+        from_name: name,
+        from_email: email,
+        date: this.getHeader(msg, 'Date') || '',
+        snippet: msg.snippet || '',
+        url: `https://mail.google.com/mail/u/0/#inbox/${msg.threadId}`,
+      });
+    }
+    return rows;
   }
 
   // -------------------------------------------------------------------------
