@@ -39,6 +39,7 @@ import {
   type ToolboxMcpStatusConnectorKey,
 } from './connector-mcp-resolver';
 import { classifyToolCallFailure } from './tool-call-classifier';
+import { mintConnectLinkToken } from '../gateway/auth/mcp/connect-link-token';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -792,14 +793,24 @@ function isMcpAuthDiagnosticCode(
  * (see `gateway/routes/public/mcp-oauth.ts`), which resolves the connector's
  * live upstream config and redirects into the real OAuth authorize page.
  *
+ * The link carries a short-lived HMAC-signed token binding
+ * `(agentId, mcpId, userId, organizationId)` — minted here because this is
+ * the only place the binding is known to be legitimate: inside the
+ * authenticated tools/call handler, after the IDOR ownership check has
+ * passed. `/mcp/oauth/start` accepts nothing but this token, so a forged or
+ * re-targeted link cannot bind a victim's OAuth credential onto an
+ * attacker's agent (account-binding CSRF).
+ *
  * Best-effort: returns undefined (never throws) when `publicGatewayUrl` isn't
- * configured or isn't https — callers must omit the field rather than fail
- * the tool call over a missing/invalid link.
+ * configured or isn't https, or when no signing key is available — callers
+ * must omit the field rather than fail the tool call over a missing/invalid
+ * link.
  */
 function buildToolCallConnectUrl(params: {
   agentId: string;
   mcpId: string;
   ownerUserId: string;
+  organizationId?: string;
 }): string | undefined {
   const publicGatewayUrl = getLobuCoreServices()?.getPublicGatewayUrl?.();
   if (!publicGatewayUrl || typeof publicGatewayUrl !== 'string') {
@@ -817,9 +828,19 @@ function buildToolCallConnectUrl(params: {
       });
       return undefined;
     }
-    url.searchParams.set('agentId', params.agentId);
-    url.searchParams.set('mcpId', params.mcpId);
-    url.searchParams.set('userId', params.ownerUserId);
+    const token = mintConnectLinkToken({
+      agentId: params.agentId,
+      mcpId: params.mcpId,
+      userId: params.ownerUserId,
+      organizationId: params.organizationId,
+    });
+    if (!token) {
+      console.warn('[tools/call] connectUrl omitted: no signing key (ENCRYPTION_KEY unset)', {
+        mcpId: params.mcpId,
+      });
+      return undefined;
+    }
+    url.searchParams.set('token', token);
     return url.toString();
   } catch (error) {
     console.warn('[tools/call] connectUrl omitted: failed to build URL', {
@@ -1095,6 +1116,7 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
         agentId,
         mcpId: canonicalMcpIdForConnector(connectorKey),
         ownerUserId,
+        organizationId: c.get('organizationId') as string | undefined,
       });
       return c.json(
         {
@@ -1136,7 +1158,12 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
           });
       const connectUrl =
         classification === 'needs_reauth'
-          ? buildToolCallConnectUrl({ agentId, mcpId, ownerUserId })
+          ? buildToolCallConnectUrl({
+              agentId,
+              mcpId,
+              ownerUserId,
+              organizationId: c.get('organizationId') as string | undefined,
+            })
           : undefined;
       return c.json(
         {
@@ -1155,7 +1182,12 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     });
     const connectUrl =
       classification === 'needs_reauth'
-        ? buildToolCallConnectUrl({ agentId, mcpId, ownerUserId })
+        ? buildToolCallConnectUrl({
+            agentId,
+            mcpId,
+            ownerUserId,
+            organizationId: c.get('organizationId') as string | undefined,
+          })
         : undefined;
     return c.json(
       {

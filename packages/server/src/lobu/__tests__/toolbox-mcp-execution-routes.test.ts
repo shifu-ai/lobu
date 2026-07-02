@@ -2,6 +2,15 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { generateWorkerToken } from '@lobu/core';
 import { Hono } from 'hono';
+
+// connectUrl signing derives its HMAC key from ENCRYPTION_KEY; pin a
+// deterministic canonical 32-byte key (hex) so token mint/verify works and
+// @lobu/core `encrypt` (used by the worker-token passthrough test) accepts it.
+process.env.ENCRYPTION_KEY =
+  process.env.ENCRYPTION_KEY ??
+  '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+import { verifyConnectLinkToken } from '../../gateway/auth/mcp/connect-link-token';
 import {
   authStash,
   coreServicesStash,
@@ -874,8 +883,17 @@ describe('Toolbox MCP execution routes', () => {
       expect(typeof body.connectUrl).toBe('string');
       expect(body.connectUrl.startsWith('https://')).toBe(true);
       const url = new URL(body.connectUrl);
-      expect(url.searchParams.get('mcpId')).toBe('notion');
-      expect(url.searchParams.get('userId')).toBe(OWNER_USER_ID);
+      // The binding travels inside a signed token, never as free-form params.
+      expect(url.searchParams.get('agentId')).toBeNull();
+      expect(url.searchParams.get('mcpId')).toBeNull();
+      expect(url.searchParams.get('userId')).toBeNull();
+      const payload = verifyConnectLinkToken(url.searchParams.get('token') ?? '');
+      expect(payload).not.toBeNull();
+      expect(payload!.mcpId).toBe('notion');
+      expect(payload!.userId).toBe(OWNER_USER_ID);
+      expect(payload!.agentId).toBe(AGENT_ID);
+      expect(payload!.organizationId).toBe(ORG_ID);
+      expect(payload!.exp).toBeGreaterThan(Date.now());
     });
 
     test('attaches connectUrl when a thrown error classifies as needs_reauth via the classifier fallback', async () => {
@@ -934,9 +952,12 @@ describe('Toolbox MCP execution routes', () => {
       expect(typeof body.connectUrl).toBe('string');
       const url = new URL(body.connectUrl);
       expect(url.protocol).toBe('https:');
-      expect(url.searchParams.get('mcpId')).toBe('notion');
-      expect(url.searchParams.get('userId')).toBe(OWNER_USER_ID);
-      expect(url.searchParams.get('agentId')).toBe(AGENT_ID);
+      const payload = verifyConnectLinkToken(url.searchParams.get('token') ?? '');
+      expect(payload).not.toBeNull();
+      expect(payload!.mcpId).toBe('notion');
+      expect(payload!.userId).toBe(OWNER_USER_ID);
+      expect(payload!.agentId).toBe(AGENT_ID);
+      expect(payload!.organizationId).toBe(ORG_ID);
     });
 
     test('never attaches connectUrl for an IDOR ownerUserId mismatch, even with a configured gateway URL', async () => {
