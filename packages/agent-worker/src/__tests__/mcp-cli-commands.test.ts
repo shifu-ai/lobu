@@ -10,6 +10,7 @@ import {
   summariseAuthCheck,
   summariseAuthStart,
 } from "../embedded/mcp-cli-commands";
+import { applyCapabilityLimitNotes } from "../openclaw/mcp-tool-projection";
 import type { GatewayParams } from "../shared/tool-implementations";
 
 const gw: GatewayParams = {
@@ -125,6 +126,31 @@ describe("buildMcpServerHandler", () => {
     expect(result.stdout).toContain("lobu — MCP server CLI");
     expect(result.stdout).toContain("search_memory");
     expect(result.stdout).toContain("auth login|check|logout");
+  });
+
+  test("--help prints the capability-limit note for a notion tool on the cli-exposure path", async () => {
+    // Mirrors session-runner's cli-exposure wiring: mcpTools flow through
+    // applyCapabilityLimitNotes before landing in mcpRuntimeRef.current,
+    // since this path bypasses projectMcpToolsForProvider entirely.
+    const notionUpdatePage: McpToolDef = {
+      name: "notion-update-page",
+      description: "Update a Notion page.",
+      inputSchema: { type: "object", properties: {} },
+    };
+    const ref = makeRef({
+      mcpTools: applyCapabilityLimitNotes({ notion: [notionUpdatePage] }),
+    });
+    const handler = buildMcpServerHandler("notion", ref, gw, {
+      callTool: async () => ({ content: [] }),
+    });
+
+    const result = await handler(["--help"], {});
+    expect(result.exitCode).toBe(0);
+    // The help renderer truncates descriptions to 80 chars, so only the
+    // start of the note survives — that's enough to prove it was applied.
+    expect(result.stdout).toContain(
+      "Update a Notion page. IMPORTANT: This tool CANNOT delete"
+    );
   });
 
   test("--schema prints JSON schema for a known tool", async () => {

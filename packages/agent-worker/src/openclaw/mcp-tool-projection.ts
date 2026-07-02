@@ -38,6 +38,55 @@ export interface ProjectedMcpTools {
   omittedForCap: CapNotice[];
 }
 
+const MCP_TOOL_DESCRIPTION_NOTES: Record<string, Record<string, string>> = {
+  notion: {
+    "notion-update-page":
+      "IMPORTANT: This tool CANNOT delete, archive, or trash pages. The allow_deleting_content parameter only guards child-page removal during content edits. There is no way to delete a Notion page through this MCP — tell the user to delete it manually instead of attempting it with this tool.",
+    "notion-move-pages":
+      "IMPORTANT: This tool CANNOT move pages to trash. Valid destinations are pages, databases, and the workspace only — it cannot delete or archive anything.",
+  },
+};
+
+function applyCapabilityLimitNote<T extends { description?: string }>(
+  mcpId: string,
+  upstreamToolName: string,
+  tool: T
+): T {
+  const note = MCP_TOOL_DESCRIPTION_NOTES[mcpId]?.[upstreamToolName];
+  if (!note) {
+    return tool;
+  }
+  const existingDescription = tool.description?.trim();
+  if (existingDescription && existingDescription.includes(note)) {
+    // Already applied (e.g. cli-exposure path ran before the projection
+    // path also touched this tool) — skip to avoid duplicating the note.
+    return tool;
+  }
+  const description = existingDescription
+    ? `${existingDescription}\n\n${note}`
+    : note;
+  return { ...tool, description };
+}
+
+/**
+ * Bulk variant of {@link applyCapabilityLimitNote} for exposure paths that
+ * bypass `projectMcpToolsForProvider` entirely (e.g. `mcpExposure: "cli"`,
+ * where raw `mcpTools` flow straight to the just-bash `<mcpId> --help`
+ * renderer). Idempotent — safe to call more than once, and harmless to call
+ * on tools that also pass through the projection path.
+ */
+export function applyCapabilityLimitNotes(
+  mcpTools: Record<string, McpToolDef[]>
+): Record<string, McpToolDef[]> {
+  const result: Record<string, McpToolDef[]> = {};
+  for (const [mcpId, tools] of Object.entries(mcpTools)) {
+    result[mcpId] = tools.map((tool) =>
+      applyCapabilityLimitNote(mcpId, tool.name, tool)
+    );
+  }
+  return result;
+}
+
 const UNION_KEYWORDS = new Set(["anyOf", "oneOf", "allOf"]);
 const PROJECTED_UNION_SCHEMA = {
   type: "string",
@@ -420,11 +469,16 @@ export function projectMcpToolsForProvider(
               inputSchema: projectedSchema as Record<string, unknown>,
             }
           : tool;
+      const annotatedTool = applyCapabilityLimitNote(
+        mcpId,
+        toolName,
+        normalizedTool
+      );
 
       flattened.push({
         mcpId,
         tool: projectToolNameForProvider(
-          normalizedTool,
+          annotatedTool,
           options.provider,
           reservedProviderToolNames
         ),
