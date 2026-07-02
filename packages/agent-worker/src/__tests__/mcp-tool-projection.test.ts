@@ -553,4 +553,82 @@ describe("projectMcpToolsForProvider", () => {
       { mcpId: "shifu-toolbox", omitted: 1, limit: 24 },
     ]);
   });
+
+  test("appends the capability-limit note to notion-update-page's projected description", () => {
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [
+          {
+            name: "notion-update-page",
+            description:
+              "Update a Notion page. Set allow_deleting_content to permit deletion of child pages during edits.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      { provider: "openai", directToolLimit: 24 }
+    );
+
+    const tool = projected.tools.notion?.[0];
+    expect(tool?.description).toBe(
+      "Update a Notion page. Set allow_deleting_content to permit deletion of child pages during edits.\n\nIMPORTANT: This tool CANNOT delete, archive, or trash pages. The allow_deleting_content parameter only guards child-page removal during content edits. There is no way to delete a Notion page through this MCP — tell the user to delete it manually instead of attempting it with this tool."
+    );
+  });
+
+  test("keeps the capability-limit note on notion-update-page after a provider-safe rename collision", () => {
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [
+          {
+            name: "notion-update-page",
+            description: "Update a Notion page.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      {
+        provider: "gemini",
+        directToolLimit: 24,
+        reservedProviderToolNames: new Set(["notion_update_page"]),
+      }
+    );
+
+    const tool = projected.tools.notion?.[0];
+    expect(tool).toMatchObject({
+      name: "notion_update_page_2",
+      upstreamToolName: "notion-update-page",
+      providerToolName: "notion_update_page_2",
+      providerSafeNameOnly: true,
+    });
+    expect(tool?.description).toBe(
+      "Update a Notion page.\n\nIMPORTANT: This tool CANNOT delete, archive, or trash pages. The allow_deleting_content parameter only guards child-page removal during content edits. There is no way to delete a Notion page through this MCP — tell the user to delete it manually instead of attempting it with this tool."
+    );
+  });
+
+  test("leaves descriptions unchanged for notion tools not in the capability-note map and for non-notion MCPs", () => {
+    const projected = projectMcpToolsForProvider(
+      {
+        notion: [
+          {
+            name: "notion-search",
+            description: "Search Notion",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+        github: [
+          {
+            name: "notion-update-page",
+            description: "Same tool name, different MCP",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      { provider: "openai", directToolLimit: 24 }
+    );
+
+    expect(projected.tools.notion?.[0]?.description).toBe("Search Notion");
+    expect(projected.tools.github?.[0]?.description).toBe(
+      "Same tool name, different MCP"
+    );
+  });
 });
