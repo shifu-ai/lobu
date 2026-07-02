@@ -117,6 +117,85 @@ describe("hydrateFromSnapshot", () => {
       })
     ).rejects.toThrow(/transcript hydrate failed: 500/);
   });
+
+  test("hydrate skips overwrite when local watermark is newer or equal", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(sessionFile, "LOCAL", "utf-8");
+    await fs.writeFile(
+      join(sessionDir, "snapshot-watermark.json"),
+      JSON.stringify({ runId: 50 }),
+      "utf-8"
+    );
+
+    stubFetch(() => {
+      return new Response("DB_CONTENT", {
+        status: 200,
+        headers: { "x-snapshot-run-id": "49" },
+      });
+    });
+
+    const hydrated = await hydrateFromSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+    });
+    expect(hydrated).toBe(false);
+    const content = await fs.readFile(sessionFile, "utf-8");
+    expect(content).toBe("LOCAL");
+  });
+
+  test("hydrate overwrites when db snapshot is newer", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(sessionFile, "LOCAL", "utf-8");
+    const watermarkFile = join(sessionDir, "snapshot-watermark.json");
+    await fs.writeFile(
+      watermarkFile,
+      JSON.stringify({ runId: 50 }),
+      "utf-8"
+    );
+
+    stubFetch(() => {
+      return new Response("DB_CONTENT", {
+        status: 200,
+        headers: { "x-snapshot-run-id": "51" },
+      });
+    });
+
+    const hydrated = await hydrateFromSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+    });
+    expect(hydrated).toBe(true);
+    const content = await fs.readFile(sessionFile, "utf-8");
+    expect(content).toBe("DB_CONTENT");
+    const watermarkRaw = await fs.readFile(watermarkFile, "utf-8");
+    expect(JSON.parse(watermarkRaw)).toEqual({ runId: 51 });
+  });
+
+  test("hydrate overwrites on cold start (no watermark or no session file)", async () => {
+    const sessionFile = join(tmp, ".openclaw", "session.jsonl");
+
+    stubFetch(() => {
+      return new Response("DB_CONTENT", {
+        status: 200,
+        headers: { "x-snapshot-run-id": "1" },
+      });
+    });
+
+    const hydrated = await hydrateFromSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+    });
+    expect(hydrated).toBe(true);
+    const content = await fs.readFile(sessionFile, "utf-8");
+    expect(content).toBe("DB_CONTENT");
+  });
 });
 
 describe("writeSnapshot", () => {
@@ -271,5 +350,28 @@ describe("writeSnapshot", () => {
       terminalStatus: "completed",
       runId: 42,
     });
+  });
+
+  test("writeSnapshot records watermark on success", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(sessionFile, `{"type":"session"}\n`, "utf-8");
+
+    stubFetch(() => new Response('{"id":1}', { status: 200 }));
+
+    await writeSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+      terminalStatus: "completed",
+      runId: 77,
+    });
+
+    const watermarkRaw = await fs.readFile(
+      join(sessionDir, "snapshot-watermark.json"),
+      "utf-8"
+    );
+    expect(JSON.parse(watermarkRaw)).toEqual({ runId: 77 });
   });
 });

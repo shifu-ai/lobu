@@ -39,6 +39,7 @@ const MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 
 interface SnapshotRow {
   snapshot_jsonl: string;
+  run_id: number;
 }
 
 function authenticate(c: Context): WorkerTokenData | null {
@@ -117,7 +118,7 @@ export function createTranscriptRoutes(): Hono {
 
     const sql = getDb();
     const rows = await sql<SnapshotRow>`
-      SELECT snapshot_jsonl
+      SELECT snapshot_jsonl, run_id
       FROM public.agent_transcript_snapshot
       WHERE organization_id = ${organizationId}
         AND agent_id = ${agentId}
@@ -132,6 +133,7 @@ export function createTranscriptRoutes(): Hono {
     }
     return c.body(row.snapshot_jsonl, 200, {
       "content-type": "application/x-ndjson; charset=utf-8",
+      "x-snapshot-run-id": String(row.run_id),
     });
   });
 

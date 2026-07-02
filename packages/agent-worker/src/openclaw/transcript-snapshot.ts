@@ -11,6 +11,35 @@ const logger = createLogger("transcript-snapshot");
 
 export type TerminalStatus = "completed" | "failed" | "timeout" | "cancelled";
 
+function watermarkPath(sessionFile: string): string {
+  return path.join(path.dirname(sessionFile), "snapshot-watermark.json");
+}
+
+/**
+ * Read the locally recorded watermark runId, if any. Returns `undefined`
+ * on any read/parse failure (missing file, corrupt JSON, wrong shape) so
+ * callers treat it the same as "no watermark yet" — i.e. cold start.
+ */
+async function readWatermark(sessionFile: string): Promise<number | undefined> {
+  try {
+    const raw = await fs.readFile(watermarkPath(sessionFile), "utf-8");
+    const parsed = JSON.parse(raw) as { runId?: unknown };
+    return typeof parsed.runId === "number" ? parsed.runId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist the watermark runId next to the session file. Called after every
+ * successful hydrate and every successful snapshot write so the local
+ * watermark always reflects the runId whose bytes are on disk.
+ */
+async function writeWatermark(sessionFile: string, runId: number): Promise<void> {
+  await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+  await fs.writeFile(watermarkPath(sessionFile), JSON.stringify({ runId }), "utf-8");
+}
+
 interface TranscriptSnapshotOptions {
   /** Absolute path to the session.jsonl SessionManager reads/writes. */
   sessionFile: string;
@@ -50,6 +79,30 @@ export async function hydrateFromSnapshot(
     );
   }
 
+  // Watermark guard: if the local session file is already at or ahead of
+  // the DB's latest completed snapshot, skip the overwrite. Without this,
+  // a single skipped/failed writeSnapshot() (e.g. transient POST failure)
+  // would cause the NEXT turn's hydrate to roll the local transcript back
+  // to the older DB row, silently discarding everything written locally
+  // since. Cold start (no watermark file, or no local session file yet)
+  // falls through to the unconditional overwrite below, preserving today's
+  // behavior.
+  const dbRunIdRaw = res.headers.get("x-snapshot-run-id");
+  const dbRunId = dbRunIdRaw ? Number(dbRunIdRaw) : undefined;
+  if (dbRunId !== undefined && Number.isFinite(dbRunId)) {
+    const localRunId = await readWatermark(opts.sessionFile);
+    const localExists = await fs
+      .access(opts.sessionFile)
+      .then(() => true)
+      .catch(() => false);
+    if (localExists && localRunId !== undefined && localRunId >= dbRunId) {
+      logger.info(
+        `Hydrate skipped: local transcript watermark ${localRunId} >= db snapshot ${dbRunId}`
+      );
+      return false;
+    }
+  }
+
   const body = await res.text();
   await fs.mkdir(path.dirname(opts.sessionFile), { recursive: true });
   // writeFile truncates atomically (open with O_TRUNC); no partial state
@@ -64,6 +117,10 @@ export async function hydrateFromSnapshot(
     await handle.sync();
   } finally {
     await handle.close();
+  }
+
+  if (dbRunId !== undefined && Number.isFinite(dbRunId)) {
+    await writeWatermark(opts.sessionFile, dbRunId);
   }
 
   logger.info(
@@ -161,6 +218,7 @@ export async function writeSnapshot(
       logger.error(`Snapshot POST failed: ${res.status} ${res.statusText}`);
       return;
     }
+    await writeWatermark(opts.sessionFile, opts.runId);
     logger.info(
       `Wrote snapshot: ${body.length} bytes, status=${opts.terminalStatus}`
     );

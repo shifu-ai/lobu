@@ -202,6 +202,36 @@ describe("agent_transcript_snapshot — snapshot route", () => {
     expect(await res.text()).toBe(turn2);
   });
 
+  test("GET snapshot exposes run id header", async () => {
+    const orgId = await seedAgentRow("agent-runid-header", {
+      organizationId: "org_runid_header",
+    });
+    const agentId = "agent-runid-header";
+    const conversationId = "conv-runid-header";
+    const runId = await insertRun({
+      organizationId: orgId,
+      agentId,
+      conversationId,
+    });
+    const token = mintWorkerToken({
+      organizationId: orgId,
+      agentId,
+      conversationId,
+      runId,
+    });
+    const jsonl = `{"type":"session","id":"header-check"}\n`;
+    const post = await callRoute("POST", "/snapshot", token, {
+      terminalStatus: "completed",
+      snapshotJsonl: jsonl,
+      runId,
+    });
+    expect(post.status).toBe(200);
+
+    const res = await callRoute("GET", "/snapshot", token);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-snapshot-run-id")).toBe(String(runId));
+  });
+
   test("large-snapshot-roundtrip: ~600 KB session survives PG TOAST", async () => {
     // Reproduces the largest-real-row case (633 KB measured across 2050
     // production session.jsonl rows). One synthetic `message` entry
