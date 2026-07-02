@@ -34,9 +34,11 @@ import { orgContext } from './stores/org-context';
 import {
   canonicalMcpIdForConnector,
   connectorKeyAliases,
+  resolveConnectorMcpId,
   type ToolboxMcpConnectorKey,
   type ToolboxMcpStatusConnectorKey,
 } from './connector-mcp-resolver';
+import { classifyToolCallFailure } from './tool-call-classifier';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -782,6 +784,30 @@ function isMcpAuthDiagnosticCode(
   return value === 'upstream_unauthorized' || value === 'upstream_forbidden';
 }
 
+/** Raw (unfiltered) diagnostic code, used only as classifier input — never returned to the client. */
+function rawToolDiagnosticCode(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const diagnosticValue =
+    'diagnosticCode' in value ? (value as { diagnosticCode?: unknown }).diagnosticCode : undefined;
+  const code =
+    diagnosticValue ?? ('code' in value ? (value as { code?: unknown }).code : undefined);
+  return typeof code === 'string' ? code : undefined;
+}
+
+/** Best-effort signal for classifying a resolved (non-thrown) tool error result. */
+function extractToolFailureSignal(result: unknown): string {
+  const raw = rawToolDiagnosticCode(result);
+  if (raw) return raw;
+  if (isPlainRecord(result) && Array.isArray(result.content)) {
+    const text = result.content
+      .map((item) => (isPlainRecord(item) && typeof item.text === 'string' ? item.text : ''))
+      .filter((value) => value.length > 0)
+      .join(' ');
+    if (text) return text;
+  }
+  return 'tool_execution_failed';
+}
+
 function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRef: string): string {
   if (connection && isPlainRecord(connection.metadata)) {
     const mcpId = connection.metadata.mcpId;
@@ -924,18 +950,24 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   const connectorKey = body.connectorKey;
   const args = body.args === undefined ? {} : body.args;
 
+  // Compat window: connectionRef is optional now that /mcp/tools/call can resolve
+  // the connector's mcpId directly from agent settings (the same truth the agent
+  // itself reads), rather than the connectionStore read-model that can go stale.
+  // TOOLS_CALL_REQUIRE_CONNECTION_REF restores the old required-ref behavior.
+  const requireConnectionRef = process.env.TOOLS_CALL_REQUIRE_CONNECTION_REF === 'true';
+
   if (
     !ownerUserId ||
     !agentId ||
-    !connectionRef ||
     !toolName ||
     !isToolboxMcpConnectorKey(connectorKey) ||
-    !isPlainRecord(args)
+    !isPlainRecord(args) ||
+    (requireConnectionRef && !connectionRef)
   ) {
     return c.json(
       safeToolboxMcpError(
         'lobu_mcp_invalid_request',
-        'ownerUserId, agentId, connectorKey, connectionRef, toolName, and object args are required'
+        'ownerUserId, agentId, connectorKey, toolName, and object args are required'
       ),
       400
     );
@@ -955,17 +987,76 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     );
   }
 
-  const guard = await verifyAttachedMcpConnection({
-    ownerUserId,
-    agentId,
-    connectorKey,
-    connectionRef,
-  });
-  if (guard.status !== 'ready') {
-    return c.json(
-      safeToolboxMcpError('lobu_mcp_not_ready', `MCP connection is ${guard.status}`),
-      200
-    );
+  let mcpId: string;
+  if (connectionRef) {
+    // Legacy path, kept for the compat window: callers that still pass a
+    // materialized connectionRef are verified against the connectionStore.
+    const guard = await verifyAttachedMcpConnection({
+      ownerUserId,
+      agentId,
+      connectorKey,
+      connectionRef,
+    });
+    console.info('[tools/call] legacy connectionRef path used', { agentId, connectorKey });
+    if (guard.status !== 'ready') {
+      return c.json(
+        {
+          ...safeToolboxMcpError('lobu_mcp_not_ready', `MCP connection is ${guard.status}`),
+          classification: guard.status === 'needs_reauth' ? 'needs_reauth' : 'not_connected',
+        },
+        200
+      );
+    }
+    mcpId = mcpIdForConnection(guard.connection, connectionRef);
+  } else {
+    // Ownership binding: the asserted ownerUserId must match the agent's
+    // recorded owner before we consult its settings. The legacy path gets this
+    // from verifyAttachedMcpConnection; without it a caller holding an
+    // mcp:execute/mcp:admin PAT could invoke tools on someone else's agentId
+    // (IDOR). Mirrors the materialize route's check. Responding not_connected
+    // keeps a foreign agentId indistinguishable from a missing connector.
+    const metadata = await configStore.getMetadata(agentId);
+    if (!metadata || metadata.owner?.userId !== ownerUserId) {
+      return c.json(
+        {
+          ...safeToolboxMcpError(
+            'lobu_mcp_not_connected',
+            'Connector is not attached to agent settings'
+          ),
+          classification: 'not_connected',
+        },
+        200
+      );
+    }
+
+    // Settings-truth path: resolve the connector's mcpId from the agent's own
+    // configured MCP servers — the same source the agent reads when it calls
+    // the tool itself, instead of the separately-materialized connectionStore.
+    const mcpConfigService = getLobuCoreServices()?.getMcpConfigService?.();
+    if (!mcpConfigService?.getAllHttpServers) {
+      return c.json(
+        safeToolboxMcpError('lobu_mcp_unavailable', 'MCP execution is unavailable'),
+        503
+      );
+    }
+    const resolved = await resolveConnectorMcpId({
+      agentId,
+      connectorKey,
+      configService: mcpConfigService,
+    });
+    if (resolved.status === 'not_connected') {
+      return c.json(
+        {
+          ...safeToolboxMcpError(
+            'lobu_mcp_not_connected',
+            'Connector is not attached to agent settings'
+          ),
+          classification: 'not_connected',
+        },
+        200
+      );
+    }
+    mcpId = resolved.mcpId;
   }
 
   const mcpProxy = getLobuCoreServices()?.getMcpProxy?.();
@@ -980,30 +1071,34 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     const result = await mcpProxy.executeToolDirect(
       agentId,
       ownerUserId,
-      mcpIdForConnection(guard.connection, connectionRef),
+      mcpId,
       normalizedToolName,
       args
     );
     if (result?.isError) {
       const diagnosticCode = safeToolDiagnosticCode(result);
+      const classification = classifyToolCallFailure({
+        errorMessage: extractToolFailureSignal(result),
+      });
       return c.json(
-        safeToolboxMcpError(
-          'lobu_mcp_tool_error',
-          'MCP tool execution failed',
-          diagnosticCode
-        ),
+        {
+          ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
+          classification,
+        },
         200
       );
     }
     return c.json({ ok: true, content: result?.content ?? null });
   } catch (error) {
     const diagnosticCode = safeToolDiagnosticCode(error);
+    const classification = classifyToolCallFailure({
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
     return c.json(
-      safeToolboxMcpError(
-        'lobu_mcp_tool_error',
-        'MCP tool execution failed',
-        diagnosticCode
-      ),
+      {
+        ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
+        classification,
+      },
       200
     );
   }
