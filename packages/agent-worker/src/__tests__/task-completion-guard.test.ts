@@ -268,9 +268,10 @@ describe("2026-07-02 approval-blocked turn guard", () => {
       toolExecutions: [
         {
           toolName: "notion-create-pages",
-          isError: true,
+          isError: false,
           resultSummary: {
-            error: "Tool call requires approval before it can run.",
+            error:
+              "Error: Tool call requires approval. The user has been asked to approve. Your session will end. The result will arrive as your next message.",
           },
         },
       ],

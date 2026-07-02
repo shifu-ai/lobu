@@ -149,6 +149,70 @@ describe("buildToolUseEventPayload", () => {
     });
   });
 
+  test("surfaces worker 'Error:' text as result_summary.error even when isError is false", () => {
+    // Mirrors the real production shape: the worker's
+    // withErrorHandling/textResult convention swallows the gateway proxy's
+    // 403 approval-required rejection and returns a normal (non-error) tool
+    // result whose first text content is prefixed with "Error: ".
+    const payload = buildToolUseEventPayload({
+      toolCallId: "call_approval",
+      toolName: "notion-create-pages",
+      args: {},
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "Error: Tool call requires approval. The user has been asked to approve. Your session will end. The result will arrive as your next message.",
+          },
+        ],
+      },
+      isError: false,
+    });
+
+    expect(payload.isError).toBe(false);
+    expect(payload.result_summary?.error).toContain(
+      "Error: Tool call requires approval"
+    );
+  });
+
+  test("leaves error unset for a successful tool whose text does not start with 'Error:'", () => {
+    const payload = buildToolUseEventPayload({
+      toolCallId: "call_ok",
+      toolName: "bash",
+      args: { command: "ls" },
+      result: {
+        content: [{ type: "text", text: "total 0\ndrwxr-xr-x  2 user  staff" }],
+      },
+      isError: false,
+    });
+
+    expect(payload.isError).toBe(false);
+    expect(payload.result_summary?.error).toBeUndefined();
+  });
+
+  test("does not populate error when successful output merely contains the word 'approval'", () => {
+    // False-positive guard: a search tool whose output text happens to
+    // mention "approval" (but isn't the worker's "Error:"-prefixed
+    // convention) must not be mistaken for an approval-blocked result.
+    const payload = buildToolUseEventPayload({
+      toolCallId: "call_search",
+      toolName: "search_docs",
+      args: { query: "approval workflow" },
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "Found 3 docs about the approval workflow process.",
+          },
+        ],
+      },
+      isError: false,
+    });
+
+    expect(payload.isError).toBe(false);
+    expect(payload.result_summary?.error).toBeUndefined();
+  });
+
   test("summarizes Google Docs replaceAllText occurrences as verified effect", () => {
     const payload = buildToolUseEventPayload({
       toolCallId: "docs_2",

@@ -215,19 +215,26 @@ export function hasVisibleBlocker(finalVisibleText: string): boolean {
 }
 
 /**
- * Deterministic blocker signal: a turn whose tool executions include an
- * errored tool call whose result text indicates the call was blocked
- * pending approval (e.g. an MCP write tool rejected by the approval gate).
- * This does not depend on the model's final text mentioning approval at
- * all, so it catches cases where BLOCKER_PATTERNS would otherwise miss the
- * phrasing.
+ * Deterministic blocker signal: a turn whose tool executions include a tool
+ * call whose result text indicates the call was blocked pending approval
+ * (e.g. an MCP write tool rejected by the approval gate). This does not
+ * depend on the model's final text mentioning approval at all, so it
+ * catches cases where BLOCKER_PATTERNS would otherwise miss the phrasing.
+ *
+ * Note: on the real production path this signal arrives with `isError:
+ * false` — the worker's `withErrorHandling`/`textResult` convention
+ * swallows the gateway proxy's 403 rejection and returns a normal tool
+ * result whose text is prefixed with "Error: ..." (see
+ * tool-use-events.ts). We deliberately do not also require `tool.isError`
+ * here: a populated `resultSummary.error` already implies failure (it's
+ * only ever set for genuine errors or worker "Error:"-prefixed text), so
+ * requiring isError too would exclude the very case this guard exists for.
  */
 export function hasApprovalBlockedToolResult(
   toolExecutions: ToolExecutionSummary[]
 ): boolean {
   return toolExecutions.some(
     (tool) =>
-      tool.isError &&
       typeof tool.resultSummary?.error === "string" &&
       TOOL_RESULT_APPROVAL_REQUIRED_PATTERN.test(tool.resultSummary.error)
   );
