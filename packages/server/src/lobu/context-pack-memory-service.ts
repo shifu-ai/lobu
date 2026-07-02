@@ -42,6 +42,7 @@ export interface ContextPackMemoryRequest {
   content: string;
   semanticType: string;
   metadata: Record<string, unknown>;
+  supersedesEventId?: number;
 }
 
 export interface ContextPackMemoryResult {
@@ -138,6 +139,18 @@ export function parseContextPackMemoryRequest(body: unknown): ContextPackMemoryR
     );
   }
 
+  let supersedesEventId: number | undefined;
+  if (body.supersedesEventId !== undefined) {
+    const value = body.supersedesEventId;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+      throw new ContextPackMemoryError(
+        'lobu_memory_invalid_request',
+        'supersedesEventId must be a positive integer'
+      );
+    }
+    supersedesEventId = value;
+  }
+
   return {
     ownerUserId,
     agentId,
@@ -147,6 +160,7 @@ export function parseContextPackMemoryRequest(body: unknown): ContextPackMemoryR
     content,
     semanticType,
     metadata,
+    ...(supersedesEventId !== undefined ? { supersedesEventId } : {}),
   };
 }
 
@@ -320,6 +334,9 @@ export async function writeContextPackMemory(
           agent_id: parsed.agentId,
           memory_source: parsed.source,
         },
+        ...(parsed.supersedesEventId !== undefined
+          ? { supersedes_event_id: parsed.supersedesEventId }
+          : {}),
         ...(embedding ? {
           embedding,
           embedding_model: getConfiguredEmbeddingModel(),

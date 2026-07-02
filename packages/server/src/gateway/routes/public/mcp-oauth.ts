@@ -9,9 +9,14 @@
 
 import { createLogger } from "@lobu/core";
 import { Hono } from "hono";
-import { completeAuthCodeFlow } from "../../auth/mcp/oauth-flow.js";
+import {
+  completeAuthCodeFlow,
+  startAuthCodeFlow,
+} from "../../auth/mcp/oauth-flow.js";
 import { postOAuthCompletionPrompt } from "../../auth/mcp/resume-after-oauth.js";
+import { verifyConnectLinkToken } from "../../auth/mcp/connect-link-token.js";
 import { escapeHtml } from "../../../utils/html.js";
+import { getClientIP, getRateLimiter } from "../../../utils/rate-limiter.js";
 import type { ChatInstanceManager } from "../../connections/chat-instance-manager.js";
 import type { CoreServices } from "../../platform.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
@@ -188,6 +193,115 @@ export function createMcpOAuthRoutes(config: McpOAuthRoutesConfig): Hono {
     }
   });
 
+  /**
+   * Directly-clickable entry point for `connectUrl` links handed to end
+   * users (e.g. a LINE authorization card) when a tool call fails with
+   * `not_connected` / `needs_reauth`. Unlike the admin-PAT-gated
+   * `POST /api/provisioning/agents/:agentId/mcp/:mcpId/oauth/start`, this is
+   * unauthenticated by design — it's opened directly in the user's browser,
+   * which has no PAT to present.
+   *
+   * The route accepts nothing but a short-lived HMAC-signed `token` minted by
+   * the authenticated tools/call handler (see
+   * `lobu/agent-routes.ts#buildToolCallConnectUrl` and
+   * `gateway/auth/mcp/connect-link-token.ts`). `agentId`/`mcpId`/`userId`/
+   * `organizationId` come exclusively from the verified token payload —
+   * free-form query params are ignored. This closes the OAuth account-binding
+   * CSRF where an attacker hands a victim a link targeting the attacker's
+   * agent: the attacker cannot mint a valid token for a binding Lobu never
+   * authorized, and tampering with the payload breaks the signature.
+   *
+   * All rejection paths (missing/forged/tampered/expired token, unresolvable
+   * connector) intentionally return the same generic message so the endpoint
+   * cannot be used as an enumeration oracle.
+   */
+  const connectLinkInvalidPage = () =>
+    renderResultPage({
+      success: false,
+      title: "Connect link invalid",
+      body: `<p>This connect link is invalid or has expired. Please request a new one.</p>`,
+    });
+
+  router.get("/mcp/oauth/start", async (c) => {
+    // Basic per-IP throttle: this is an unauthenticated endpoint whose only
+    // cost is HMAC verification + a config lookup, but keep brute-force and
+    // scanning noise down. Same opt-out knob as the other public limiters.
+    if (process.env.RATE_LIMIT_ENABLED !== "false") {
+      const rateLimit = getRateLimiter().checkLimit(
+        `rate:mcp-oauth-start:${getClientIP(c.req.raw)}`,
+        {
+          limit: 30,
+          windowSeconds: 60,
+          errorMessage: "Too many requests. Please wait a moment and retry.",
+        }
+      );
+      if (!rateLimit.allowed) {
+        return c.html(
+          renderResultPage({
+            success: false,
+            title: "Too many requests",
+            body: `<p>Please wait a moment and open the link again.</p>`,
+          }),
+          429
+        );
+      }
+    }
+
+    const token = c.req.query("token")?.trim();
+    const payload = token ? verifyConnectLinkToken(token) : null;
+    if (!payload) {
+      return c.html(connectLinkInvalidPage(), 400);
+    }
+    // Binding comes exclusively from the verified token payload; any other
+    // query params (e.g. a stray attacker-appended agentId) are ignored.
+    const { agentId, mcpId, userId, organizationId } = payload;
+
+    const mcpConfigService = coreServices?.getMcpConfigService?.();
+    const httpServer = await mcpConfigService?.getHttpServer?.(mcpId, agentId);
+    if (!httpServer) {
+      return c.html(connectLinkInvalidPage(), 404);
+    }
+
+    try {
+      const { authorizationUrl } = await startAuthCodeFlow({
+        secretStore,
+        mcpId,
+        upstreamUrl: httpServer.upstreamUrl,
+        agentId,
+        userId,
+        scopeKey: userId,
+        wwwAuthenticate: null,
+        redirectUri,
+        staticOauth: httpServer.oauth,
+        platform: "toolbox-line",
+        channelId: "",
+        conversationId: "",
+        resumeMode: "none",
+        organizationId,
+      });
+      return c.redirect(authorizationUrl, 302);
+    } catch (err) {
+      logger.error("Failed to start MCP OAuth flow from connect link", {
+        mcpId,
+        agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      const safeMessage = escapeHtml(
+        err instanceof Error ? err.message : "Unknown error"
+      );
+      return c.html(
+        renderResultPage({
+          success: false,
+          title: "Authorization failed",
+          body: `<p>${safeMessage}</p>
+                 <p>Please try again from the chat.</p>`,
+        }),
+        500
+      );
+    }
+  });
+
   logger.debug("MCP OAuth callback route registered at /mcp/oauth/callback");
+  logger.debug("MCP OAuth start route registered at /mcp/oauth/start");
   return router;
 }

@@ -31,6 +31,15 @@ import {
   createPostgresAgentConnectionStore,
 } from './stores/postgres-stores';
 import { orgContext } from './stores/org-context';
+import {
+  canonicalMcpIdForConnector,
+  connectorKeyAliases,
+  resolveConnectorMcpId,
+  type ToolboxMcpConnectorKey,
+  type ToolboxMcpStatusConnectorKey,
+} from './connector-mcp-resolver';
+import { classifyToolCallFailure } from './tool-call-classifier';
+import { mintConnectLinkToken } from '../gateway/auth/mcp/connect-link-token';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -390,9 +399,6 @@ function isToolboxDiscoveryToolAllowed(
   return Object.hasOwn(TOOLBOX_DISCOVERY_TOOL_ALIASES[connectorKey], toolName);
 }
 
-type ToolboxMcpConnectorKey = 'notion' | 'google_workspace' | 'shifu_toolbox';
-type ToolboxMcpStatusConnectorKey = ToolboxMcpConnectorKey;
-
 type ToolboxMcpToolCallRequest = {
   ownerUserId?: unknown;
   agentId?: unknown;
@@ -434,17 +440,6 @@ function isToolboxMcpConnectorKey(value: unknown): value is ToolboxMcpConnectorK
 
 function isToolboxMcpStatusConnectorKey(value: unknown): value is ToolboxMcpStatusConnectorKey {
   return isToolboxMcpConnectorKey(value) || value === 'shifu_toolbox';
-}
-
-function connectorKeyAliases(connectorKey: ToolboxMcpStatusConnectorKey): ReadonlySet<string> {
-  if (connectorKey === 'shifu_toolbox') {
-    return new Set(['shifu_toolbox', 'shifu-toolbox']);
-  }
-  return new Set([connectorKey]);
-}
-
-function canonicalMcpIdForConnector(connectorKey: ToolboxMcpStatusConnectorKey): string {
-  return connectorKey === 'shifu_toolbox' ? 'shifu-toolbox' : connectorKey;
 }
 
 function metadataString(
@@ -790,6 +785,96 @@ function isMcpAuthDiagnosticCode(
   return value === 'upstream_unauthorized' || value === 'upstream_forbidden';
 }
 
+/**
+ * Build the `connectUrl` attached to `not_connected` / `needs_reauth`
+ * tool-call failures — a directly-clickable link (e.g. surfaced in a LINE
+ * authorization card) that walks the user through OAuth reauth for the
+ * connector, landing on the unauthenticated `GET /mcp/oauth/start` route
+ * (see `gateway/routes/public/mcp-oauth.ts`), which resolves the connector's
+ * live upstream config and redirects into the real OAuth authorize page.
+ *
+ * The link carries a short-lived HMAC-signed token binding
+ * `(agentId, mcpId, userId, organizationId)` — minted here because this is
+ * the only place the binding is known to be legitimate: inside the
+ * authenticated tools/call handler, after the IDOR ownership check has
+ * passed. `/mcp/oauth/start` accepts nothing but this token, so a forged or
+ * re-targeted link cannot bind a victim's OAuth credential onto an
+ * attacker's agent (account-binding CSRF).
+ *
+ * Best-effort: returns undefined (never throws) when `publicGatewayUrl` isn't
+ * configured or isn't https, or when no signing key is available — callers
+ * must omit the field rather than fail the tool call over a missing/invalid
+ * link.
+ */
+function buildToolCallConnectUrl(params: {
+  agentId: string;
+  mcpId: string;
+  ownerUserId: string;
+  organizationId?: string;
+}): string | undefined {
+  const publicGatewayUrl = getLobuCoreServices()?.getPublicGatewayUrl?.();
+  if (!publicGatewayUrl || typeof publicGatewayUrl !== 'string') {
+    console.warn('[tools/call] connectUrl omitted: publicGatewayUrl not configured', {
+      mcpId: params.mcpId,
+    });
+    return undefined;
+  }
+  try {
+    const base = publicGatewayUrl.replace(/\/+$/, '');
+    const url = new URL(`${base}/mcp/oauth/start`);
+    if (url.protocol !== 'https:') {
+      console.warn('[tools/call] connectUrl omitted: publicGatewayUrl is not https', {
+        mcpId: params.mcpId,
+      });
+      return undefined;
+    }
+    const token = mintConnectLinkToken({
+      agentId: params.agentId,
+      mcpId: params.mcpId,
+      userId: params.ownerUserId,
+      organizationId: params.organizationId,
+    });
+    if (!token) {
+      console.warn('[tools/call] connectUrl omitted: no signing key (ENCRYPTION_KEY unset)', {
+        mcpId: params.mcpId,
+      });
+      return undefined;
+    }
+    url.searchParams.set('token', token);
+    return url.toString();
+  } catch (error) {
+    console.warn('[tools/call] connectUrl omitted: failed to build URL', {
+      mcpId: params.mcpId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return undefined;
+  }
+}
+
+/** Raw (unfiltered) diagnostic code, used only as classifier input — never returned to the client. */
+function rawToolDiagnosticCode(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const diagnosticValue =
+    'diagnosticCode' in value ? (value as { diagnosticCode?: unknown }).diagnosticCode : undefined;
+  const code =
+    diagnosticValue ?? ('code' in value ? (value as { code?: unknown }).code : undefined);
+  return typeof code === 'string' ? code : undefined;
+}
+
+/** Best-effort signal for classifying a resolved (non-thrown) tool error result. */
+function extractToolFailureSignal(result: unknown): string {
+  const raw = rawToolDiagnosticCode(result);
+  if (raw) return raw;
+  if (isPlainRecord(result) && Array.isArray(result.content)) {
+    const text = result.content
+      .map((item) => (isPlainRecord(item) && typeof item.text === 'string' ? item.text : ''))
+      .filter((value) => value.length > 0)
+      .join(' ');
+    if (text) return text;
+  }
+  return 'tool_execution_failed';
+}
+
 function mcpIdForConnection(connection: StoredConnection | undefined, fallbackRef: string): string {
   if (connection && isPlainRecord(connection.metadata)) {
     const mcpId = connection.metadata.mcpId;
@@ -932,18 +1017,24 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   const connectorKey = body.connectorKey;
   const args = body.args === undefined ? {} : body.args;
 
+  // Compat window: connectionRef is optional now that /mcp/tools/call can resolve
+  // the connector's mcpId directly from agent settings (the same truth the agent
+  // itself reads), rather than the connectionStore read-model that can go stale.
+  // TOOLS_CALL_REQUIRE_CONNECTION_REF restores the old required-ref behavior.
+  const requireConnectionRef = process.env.TOOLS_CALL_REQUIRE_CONNECTION_REF === 'true';
+
   if (
     !ownerUserId ||
     !agentId ||
-    !connectionRef ||
     !toolName ||
     !isToolboxMcpConnectorKey(connectorKey) ||
-    !isPlainRecord(args)
+    !isPlainRecord(args) ||
+    (requireConnectionRef && !connectionRef)
   ) {
     return c.json(
       safeToolboxMcpError(
         'lobu_mcp_invalid_request',
-        'ownerUserId, agentId, connectorKey, connectionRef, toolName, and object args are required'
+        'ownerUserId, agentId, connectorKey, toolName, and object args are required'
       ),
       400
     );
@@ -963,17 +1054,83 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     );
   }
 
-  const guard = await verifyAttachedMcpConnection({
-    ownerUserId,
-    agentId,
-    connectorKey,
-    connectionRef,
-  });
-  if (guard.status !== 'ready') {
-    return c.json(
-      safeToolboxMcpError('lobu_mcp_not_ready', `MCP connection is ${guard.status}`),
-      200
-    );
+  let mcpId: string;
+  if (connectionRef) {
+    // Legacy path, kept for the compat window: callers that still pass a
+    // materialized connectionRef are verified against the connectionStore.
+    const guard = await verifyAttachedMcpConnection({
+      ownerUserId,
+      agentId,
+      connectorKey,
+      connectionRef,
+    });
+    console.info('[tools/call] legacy connectionRef path used', { agentId, connectorKey });
+    if (guard.status !== 'ready') {
+      return c.json(
+        {
+          ...safeToolboxMcpError('lobu_mcp_not_ready', `MCP connection is ${guard.status}`),
+          classification: guard.status === 'needs_reauth' ? 'needs_reauth' : 'not_connected',
+        },
+        200
+      );
+    }
+    mcpId = mcpIdForConnection(guard.connection, connectionRef);
+  } else {
+    // Ownership binding: the asserted ownerUserId must match the agent's
+    // recorded owner before we consult its settings. The legacy path gets this
+    // from verifyAttachedMcpConnection; without it a caller holding an
+    // mcp:execute/mcp:admin PAT could invoke tools on someone else's agentId
+    // (IDOR). Mirrors the materialize route's check. Responding not_connected
+    // keeps a foreign agentId indistinguishable from a missing connector.
+    const metadata = await configStore.getMetadata(agentId);
+    if (!metadata || metadata.owner?.userId !== ownerUserId) {
+      return c.json(
+        {
+          ...safeToolboxMcpError(
+            'lobu_mcp_not_connected',
+            'Connector is not attached to agent settings'
+          ),
+          classification: 'not_connected',
+        },
+        200
+      );
+    }
+
+    // Settings-truth path: resolve the connector's mcpId from the agent's own
+    // configured MCP servers — the same source the agent reads when it calls
+    // the tool itself, instead of the separately-materialized connectionStore.
+    const mcpConfigService = getLobuCoreServices()?.getMcpConfigService?.();
+    if (!mcpConfigService?.getAllHttpServers) {
+      return c.json(
+        safeToolboxMcpError('lobu_mcp_unavailable', 'MCP execution is unavailable'),
+        503
+      );
+    }
+    const resolved = await resolveConnectorMcpId({
+      agentId,
+      connectorKey,
+      configService: mcpConfigService,
+    });
+    if (resolved.status === 'not_connected') {
+      const connectUrl = buildToolCallConnectUrl({
+        agentId,
+        mcpId: canonicalMcpIdForConnector(connectorKey),
+        ownerUserId,
+        organizationId: c.get('organizationId') as string | undefined,
+      });
+      return c.json(
+        {
+          ...safeToolboxMcpError(
+            'lobu_mcp_not_connected',
+            'Connector is not attached to agent settings'
+          ),
+          classification: 'not_connected',
+          ...(connectUrl ? { connectUrl } : {}),
+        },
+        200
+      );
+    }
+    mcpId = resolved.mcpId;
   }
 
   const mcpProxy = getLobuCoreServices()?.getMcpProxy?.();
@@ -988,30 +1145,56 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     const result = await mcpProxy.executeToolDirect(
       agentId,
       ownerUserId,
-      mcpIdForConnection(guard.connection, connectionRef),
+      mcpId,
       normalizedToolName,
       args
     );
     if (result?.isError) {
       const diagnosticCode = safeToolDiagnosticCode(result);
+      const classification = isMcpAuthDiagnosticCode(diagnosticCode)
+        ? 'needs_reauth'
+        : classifyToolCallFailure({
+            errorMessage: extractToolFailureSignal(result),
+          });
+      const connectUrl =
+        classification === 'needs_reauth'
+          ? buildToolCallConnectUrl({
+              agentId,
+              mcpId,
+              ownerUserId,
+              organizationId: c.get('organizationId') as string | undefined,
+            })
+          : undefined;
       return c.json(
-        safeToolboxMcpError(
-          'lobu_mcp_tool_error',
-          'MCP tool execution failed',
-          diagnosticCode
-        ),
+        {
+          ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
+          classification,
+          ...(connectUrl ? { connectUrl } : {}),
+        },
         200
       );
     }
     return c.json({ ok: true, content: result?.content ?? null });
   } catch (error) {
     const diagnosticCode = safeToolDiagnosticCode(error);
+    const classification = classifyToolCallFailure({
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+    const connectUrl =
+      classification === 'needs_reauth'
+        ? buildToolCallConnectUrl({
+            agentId,
+            mcpId,
+            ownerUserId,
+            organizationId: c.get('organizationId') as string | undefined,
+          })
+        : undefined;
     return c.json(
-      safeToolboxMcpError(
-        'lobu_mcp_tool_error',
-        'MCP tool execution failed',
-        diagnosticCode
-      ),
+      {
+        ...safeToolboxMcpError('lobu_mcp_tool_error', 'MCP tool execution failed', diagnosticCode),
+        classification,
+        ...(connectUrl ? { connectUrl } : {}),
+      },
       200
     );
   }
@@ -1031,6 +1214,8 @@ toolboxMcpRoutes.post('/mcp/connections/materialize', async (c) => {
   const ownerUserId = typeof body.ownerUserId === 'string' ? body.ownerUserId.trim() : '';
   const agentId = typeof body.agentId === 'string' ? body.agentId.trim() : '';
   const connectorKey = body.connectorKey;
+
+  console.info('[deprecated] mcp connections status/materialize called', { agentId });
 
   if (!ownerUserId || !agentId || !isToolboxMcpStatusConnectorKey(connectorKey)) {
     return c.json(
@@ -1243,6 +1428,8 @@ toolboxMcpRoutes.get('/mcp/connections/status', async (c) => {
   const agentId = c.req.query('agentId')?.trim() ?? '';
   const connectionRef = c.req.query('connectionRef')?.trim() ?? '';
   const connectorKey = c.req.query('connectorKey')?.trim();
+
+  console.info('[deprecated] mcp connections status/materialize called', { agentId });
 
   if (
     !ownerUserId ||
