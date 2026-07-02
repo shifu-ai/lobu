@@ -1914,27 +1914,30 @@ export class McpProxy {
       )
     );
 
-    await this.onToolBlocked(
-      requestId,
-      agentId,
-      tokenData.userId,
-      mcpId,
-      toolName,
-      toolArgs,
-      pattern,
-      tokenData.channelId || "",
-      tokenData.conversationId || "",
-      tokenData.teamId,
-      tokenData.connectionId,
-      tokenData.platform,
-      originMessageId,
-      processedMessageIds
-    ).catch((err) =>
+    try {
+      await this.onToolBlocked(
+        requestId,
+        agentId,
+        tokenData.userId,
+        mcpId,
+        toolName,
+        toolArgs,
+        pattern,
+        tokenData.channelId || "",
+        tokenData.conversationId || "",
+        tokenData.teamId,
+        tokenData.connectionId,
+        tokenData.platform,
+        originMessageId,
+        processedMessageIds
+      );
+    } catch (err) {
       logger.error(
         { requestId, error: String(err) },
-        "onToolBlocked callback failed"
-      )
-    );
+        "onToolBlocked callback failed; approval notification was not delivered"
+      );
+      return "blocked-no-channel";
+    }
 
     return "blocked-notified";
   }
