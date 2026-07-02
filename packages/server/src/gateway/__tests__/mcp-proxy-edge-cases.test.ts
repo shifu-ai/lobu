@@ -1804,11 +1804,11 @@ describe("requiresToolApproval (approval-policy.ts)", () => {
     ).toBe(false);
   });
 
-  test("destructiveHint=false requires no approval", async () => {
+  test("destructiveHint=false alone still requires approval (self-declared non-destructive is not trusted)", async () => {
     const { requiresToolApproval } = await import(
       "../permissions/approval-policy.js"
     );
-    expect(requiresToolApproval({ destructiveHint: false })).toBe(false);
+    expect(requiresToolApproval({ destructiveHint: false })).toBe(true);
   });
 
   test("empty annotations object requires approval (conservative default)", async () => {

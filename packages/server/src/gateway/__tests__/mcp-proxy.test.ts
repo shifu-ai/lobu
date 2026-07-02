@@ -1348,28 +1348,21 @@ describe("McpProxy", () => {
       expect(res.status).toBe(200);
     });
 
-    test("allows destructiveHint=false without grant", async () => {
+    test("blocks destructiveHint=false without grant (self-declared non-destructive is not trusted)", async () => {
       const { proxy, toolCache } = createProxyWithGrants({
         "test-mcp": TEST_SERVER,
       });
       const app = proxy.getApp();
 
-      // Pre-populate cache with a non-destructive tool (seed in `validToken`'s org).
+      // Pre-populate cache with a tool that only self-declares non-destructive
+      // (seed in `validToken`'s org). destructiveHint=false is no longer an
+      // approval exemption; only readOnlyHint=true bypasses approval.
       orgContext.run({ organizationId: "test-org" }, () => {
         toolCache.set(
           "test-mcp",
           [{ name: "safe_tool", annotations: { destructiveHint: false } }],
           "agent1"
         );
-      });
-
-      mockUpstreamFetch({
-        jsonrpc: "2.0",
-        id: 1,
-        result: {
-          content: [{ type: "text", text: "Safe result" }],
-          isError: false,
-        },
       });
 
       const res = await app.request("/test-mcp/tools/safe_tool", {
@@ -1380,7 +1373,10 @@ describe("McpProxy", () => {
         },
         body: JSON.stringify({}),
       });
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.isError).toBe(true);
+      expect(body.content[0].text).toContain("requires approval");
     });
   });
 

@@ -19,6 +19,7 @@ export interface ToolExecutionSummary {
   resultSummary?: {
     effect_verified?: boolean;
     effect_status?: string;
+    error?: string;
   };
 }
 
@@ -65,7 +66,13 @@ const BLOCKER_PATTERNS = [
   /\b(?:cannot|can't|unable)\b.*\b(?:access|write|update|edit|modify|send|create|delete|permission|authorize|approval)\b/i,
   /\b(?:need|missing|lack|lacking|without)\b.*\b(?:permission|authorization|approval|access|confirmation|information|link)\b/i,
   /\b(?:please|need you to)\b.*\b(?:authorize|approve|confirm|provide|grant|share|send)\b/i,
+  /(?:等|待|需要|請).*(?:核准|批准|同意|授權)/i,
+  /(?:核准|批准|同意|授權).*(?:後|之後).*(?:執行|繼續|進行)/i,
+  /\b(?:waiting for|awaiting|pending|once you|after you)\b.*\b(?:approv|authoriz|consent)/i,
+  /(?:同意|授權)(?:卡|請求|按鈕)/i,
 ];
+
+const TOOL_RESULT_APPROVAL_REQUIRED_PATTERN = /requires approval/i;
 
 const WRITE_TOOL_PATTERNS = [
   /_batch_update(_\d+)?$/i,
@@ -108,7 +115,8 @@ export function evaluateTaskCompletion(
   if (
     hasWriteIntent(input.latestUserText) &&
     hasUnverifiedWriteEvidence(input.toolExecutions) &&
-    !hasVisibleBlocker(finalText)
+    !hasVisibleBlocker(finalText) &&
+    !hasApprovalBlockedToolResult(input.toolExecutions)
   ) {
     return {
       outcome: "failed_incomplete",
@@ -120,7 +128,8 @@ export function evaluateTaskCompletion(
   if (
     hasWriteIntent(input.latestUserText) &&
     !hasSuccessfulWriteEvidence(input.toolExecutions) &&
-    !hasVisibleBlocker(finalText)
+    !hasVisibleBlocker(finalText) &&
+    !hasApprovalBlockedToolResult(input.toolExecutions)
   ) {
     return {
       outcome: "failed_incomplete",
@@ -203,4 +212,30 @@ function isGoogleDocsWriteTool(toolName: string): boolean {
 
 export function hasVisibleBlocker(finalVisibleText: string): boolean {
   return BLOCKER_PATTERNS.some((pattern) => pattern.test(finalVisibleText));
+}
+
+/**
+ * Deterministic blocker signal: a turn whose tool executions include a tool
+ * call whose result text indicates the call was blocked pending approval
+ * (e.g. an MCP write tool rejected by the approval gate). This does not
+ * depend on the model's final text mentioning approval at all, so it
+ * catches cases where BLOCKER_PATTERNS would otherwise miss the phrasing.
+ *
+ * Note: on the real production path this signal arrives with `isError:
+ * false` — the worker's `withErrorHandling`/`textResult` convention
+ * swallows the gateway proxy's 403 rejection and returns a normal tool
+ * result whose text is prefixed with "Error: ..." (see
+ * tool-use-events.ts). We deliberately do not also require `tool.isError`
+ * here: a populated `resultSummary.error` already implies failure (it's
+ * only ever set for genuine errors or worker "Error:"-prefixed text), so
+ * requiring isError too would exclude the very case this guard exists for.
+ */
+export function hasApprovalBlockedToolResult(
+  toolExecutions: ToolExecutionSummary[]
+): boolean {
+  return toolExecutions.some(
+    (tool) =>
+      typeof tool.resultSummary?.error === "string" &&
+      TOOL_RESULT_APPROVAL_REQUIRED_PATTERN.test(tool.resultSummary.error)
+  );
 }

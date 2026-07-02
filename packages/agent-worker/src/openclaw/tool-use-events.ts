@@ -79,6 +79,19 @@ export function buildToolUseEventPayload(event: {
       payload.result_summary = { error: message };
     }
     return payload;
+  } else if (isWorkerErrorTextResult(event.result)) {
+    // The worker's `withErrorHandling`/`textResult` convention (see
+    // packages/agent-worker/src/shared/tool-implementations.ts) swallows
+    // thrown errors (e.g. the gateway proxy's 403 approval-required
+    // rejection) and returns a normal, non-error tool result whose first
+    // text content is prefixed with "Error: ". Surface that here so
+    // downstream consumers (task-completion-guard's
+    // hasApprovalBlockedToolResult) can detect it — this is the only shape
+    // that signal ever actually arrives in on the real production path.
+    const text = extractFirstMcpText(event.result);
+    if (text) {
+      payload.result_summary = { error: text };
+    }
   }
 
   if (SEARCH_MEMORY_TOOL_NAMES.has(event.toolName)) {
@@ -199,23 +212,52 @@ function extractMcpJsonBody(raw: unknown): unknown {
   // MCP CallToolResult shape — text content holds a JSON-stringified payload.
   const mcpContent = (raw as { content?: unknown }).content;
   if (Array.isArray(mcpContent)) {
-    for (const part of mcpContent) {
-      if (!part || typeof part !== "object") continue;
-      const type = (part as { type?: unknown }).type;
-      const text = (part as { text?: unknown }).text;
-      if (type === "text" && typeof text === "string") {
-        try {
-          return JSON.parse(text);
-        } catch {
-          // Plain text result — nothing to summarise.
-          return null;
-        }
+    const text = extractFirstMcpText(raw);
+    if (text !== null) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        // Plain text result — nothing to summarise.
+        return null;
       }
     }
+    // No { type: 'text', text } part found — fall through and treat the
+    // array as the body itself (e.g. search_memory's content array of
+    // snippet objects, which has no `type`/`text` fields).
   }
 
   // Already the search_memory body.
   return raw;
+}
+
+/**
+ * Extracts the first `{ type: 'text', text }` content entry's raw text from
+ * an MCP CallToolResult-shaped value, without attempting JSON parsing
+ * (unlike `extractMcpJsonBody`, which is for structured tool payloads).
+ */
+function extractFirstMcpText(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const content = (raw as { content?: unknown }).content;
+  if (!Array.isArray(content)) return null;
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const type = (part as { type?: unknown }).type;
+    const text = (part as { text?: unknown }).text;
+    if (type === "text" && typeof text === "string") {
+      return text;
+    }
+  }
+  return null;
+}
+
+/**
+ * True when a non-error tool result's first text content starts with the
+ * worker's deliberate "Error: " prefix convention (see `textResult` /
+ * `withErrorHandling` in tool-implementations.ts).
+ */
+function isWorkerErrorTextResult(raw: unknown): boolean {
+  const text = extractFirstMcpText(raw);
+  return typeof text === "string" && text.startsWith("Error:");
 }
 
 function extractErrorMessage(result: unknown): string | null {
