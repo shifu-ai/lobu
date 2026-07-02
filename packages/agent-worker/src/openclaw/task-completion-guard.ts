@@ -68,7 +68,6 @@ const WRITE_TOOL_PATTERNS = [
   /_values_update(_\d+)?$/i,
   /_messages_create(_\d+)?$/i,
   /(^|_)(docs|sheets|slides|calendar_events)_(create|update|delete)(_\d+)?$/i,
-  /^(gws_|google_workspace_)?(docs|sheets|slides|chat)_/i,
   /^notion[-_](create|update|move|duplicate)[-_]/i,
   /^submit_course_pm_profile(_\d+)?$/i,
   /^write_segments(_\d+)?$/i,
