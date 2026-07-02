@@ -16,6 +16,7 @@ import {
 } from "@lobu/core";
 import type { OrchestratorConfig } from "../orchestration/deployment-manager.js";
 import { findEnclosingMonorepoRoot } from "../../utils/monorepo-root.js";
+import { normalizePublicGatewayUrl } from "../../utils/public-origin.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const logger = createLogger("cli-config");
@@ -113,10 +114,6 @@ export interface GatewayConfig {
     /** OIDC issuer used to validate external/service tokens. */
     issuerUrl?: string;
   };
-  lobuMemory: {
-    /** Public origin that serves org-scoped LOBU memory MCP endpoints under /mcp/:orgSlug. */
-    publicBaseUrl?: string;
-  };
   secrets: {
     /** Read-only AWS Secrets Manager backend for `aws-sm://` refs. */
     aws: {
@@ -138,6 +135,15 @@ export function getInternalGatewayUrl(): string {
   }
   const port = process.env.PORT || process.env.GATEWAY_PORT || "8787";
   return `http://127.0.0.1:${port}/lobu`;
+}
+
+/**
+ * Loopback origin for org-scoped LOBU memory MCP endpoints (`/mcp/:orgSlug`).
+ * Derived from {@link getInternalGatewayUrl} so PORT / DISPATCHER_URL are the
+ * single source of truth — never PUBLIC_GATEWAY_URL / the public ingress.
+ */
+export function getLobuMemoryUpstreamOrigin(): string {
+  return new URL(getInternalGatewayUrl()).origin;
 }
 
 /**
@@ -355,10 +361,13 @@ export function buildGatewayConfig(
     "AGENT_DEFAULT_MEMORY_FLUSH_PROMPT",
     "Write any lasting notes to memory using available memory tools. Reply with NO_REPLY if nothing to store."
   );
-  const publicGatewayUrl = getOptionalEnv(
+  const publicGatewayUrlRaw = getOptionalEnv(
     "PUBLIC_GATEWAY_URL",
     DEFAULTS.PUBLIC_GATEWAY_URL
   );
+  const publicGatewayUrl = publicGatewayUrlRaw
+    ? normalizePublicGatewayUrl(publicGatewayUrlRaw)
+    : "";
   const config: GatewayConfig = {
     agentDefaults: {
       allowedTools: process.env.ALLOWED_TOOLS?.split(","),
@@ -467,9 +476,6 @@ export function buildGatewayConfig(
     },
     auth: {
       issuerUrl: getOptionalEnv("EXTERNAL_AUTH_ISSUER_URL", undefined),
-    },
-    lobuMemory: {
-      publicBaseUrl: getOptionalEnv("LOBU_MEMORY_PUBLIC_BASE_URL", undefined),
     },
     secrets: {
       aws: {
