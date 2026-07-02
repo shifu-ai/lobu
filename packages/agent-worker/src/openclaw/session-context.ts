@@ -214,7 +214,20 @@ function buildMcpServerInstructions(
   return lines.join("\n");
 }
 
-function buildMcpToolInventoryInstructions(
+/**
+ * Model-facing notes about MCP tool capability gaps that are easy to
+ * misdiagnose from tool names/descriptions alone (e.g. an "update" tool
+ * whose param names imply deletion is possible when it is not). Keyed by
+ * mcpId; MCPs not listed here get no note.
+ */
+const MCP_CAPABILITY_NOTES: Record<string, string> = {
+  notion:
+    "This Notion MCP CANNOT delete, archive, or trash pages/databases — no tool provides that. When the user asks to delete Notion content, say so directly and give them the page link to delete it manually. Do NOT attempt deletion via `notion-update-page` or `notion-move-pages`; they cannot achieve it.",
+  google_workspace:
+    "This Google Workspace MCP CANNOT delete or trash Docs/Sheets/Slides/Drive files — only calendar events have a delete tool. When the user asks to delete a file, say so directly and point them to Drive to delete it manually.",
+};
+
+export function buildMcpToolInventoryInstructions(
   mcpTools: Record<string, McpToolDef[]>,
   mcpStatus: McpStatus[]
 ): string {
@@ -226,7 +239,9 @@ function buildMcpToolInventoryInstructions(
       if (toolNames.length === 0) return null;
       const displayName = mcpStatus.find((mcp) => mcp.id === mcpId)?.name;
       const label = displayName ? `${displayName} (${mcpId})` : mcpId;
-      return `- ${label}: ${toolNames.map((name) => `\`${name}\``).join(", ")}`;
+      const line = `- ${label}: ${toolNames.map((name) => `\`${name}\``).join(", ")}`;
+      const note = MCP_CAPABILITY_NOTES[mcpId];
+      return note ? `${line}\n  - Capability limits: ${note}` : line;
     })
     .filter((entry): entry is string => Boolean(entry));
 
