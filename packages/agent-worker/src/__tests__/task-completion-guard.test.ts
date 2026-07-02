@@ -49,8 +49,8 @@ describe("evaluateTaskCompletion write intent guard", () => {
         "那可以幫我修改超級AI個體商品頁嗎？是一份google doc我想要根據銷講簡報v5的內容調整 可以直接幫我改",
       finalVisibleText: "我已經讀完文件。",
       toolExecutions: [
-        { toolName: "google_workspace_docs_read", isError: false },
-        { toolName: "google_workspace_slides_read", isError: false },
+        { toolName: "notion_search", isError: false },
+        { toolName: "notion_search_docs", isError: false },
       ],
     });
 
@@ -141,8 +141,8 @@ describe("evaluateTaskCompletion write intent guard", () => {
       latestUserText: "請根據銷講簡報調整 Google Doc",
       finalVisibleText: "我已經讀完文件。",
       toolExecutions: [
-        { toolName: "google_workspace_docs_read", isError: false },
-        { toolName: "google_workspace_slides_read", isError: false },
+        { toolName: "notion_search", isError: false },
+        { toolName: "notion_search_docs", isError: false },
       ],
     });
 
@@ -167,6 +167,52 @@ describe("evaluateTaskCompletion write intent guard", () => {
   });
 });
 
+describe("2026-07-02 write tool pattern fail-open guard", () => {
+  test("notion page creation counts as write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我新增notion頁面 標題是AI",
+      finalVisibleText: "已建立 Notion 頁面！",
+      toolExecutions: [{ toolName: "notion-create-pages", isError: false }],
+    });
+    expect(decision.outcome).toBe("completed");
+  });
+
+  test("google docs creation counts as write evidence (suffixed variant)", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我新增一個google doc 標題寫ai pm",
+      finalVisibleText: "Google Doc 已建立成功！",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_create_2", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("completed");
+  });
+
+  test("unknown non-read tool fails open as write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我建立排程",
+      finalVisibleText: "排程已建立。",
+      toolExecutions: [
+        { toolName: "sales_battle_report_schedule_create", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("completed");
+  });
+
+  test("write intent with only read tools still fails incomplete", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我更新那份文件",
+      finalVisibleText: "我找到了文件。",
+      toolExecutions: [
+        { toolName: "notion_search_2", isError: false },
+        { toolName: "google_workspace_drive_search", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("failed_incomplete");
+    expect(decision.reason).toBe("task_completion_write_intent_without_write");
+  });
+});
+
 describe("2026-06-25 Google Doc rewrite regression", () => {
   test("blocks completed status when doc rewrite task only reads docs and slides", () => {
     const result = evaluateTaskCompletion({
@@ -174,8 +220,8 @@ describe("2026-06-25 Google Doc rewrite regression", () => {
         "那可以幫我修改超級AI個體商品頁嗎？是一份google doc我想要根據銷講簡報v5的內容調整 可以直接幫我改",
       finalVisibleText: "我現在會開始讀取文件內容。",
       toolExecutions: [
-        { toolName: "google_workspace_docs_read", isError: false },
-        { toolName: "google_workspace_slides_read", isError: false },
+        { toolName: "notion_search", isError: false },
+        { toolName: "notion_search_docs", isError: false },
       ],
     });
 

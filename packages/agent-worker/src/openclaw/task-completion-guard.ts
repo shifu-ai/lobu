@@ -64,21 +64,28 @@ const BLOCKER_PATTERNS = [
 ];
 
 const WRITE_TOOL_PATTERNS = [
-  /_batch_update$/i,
-  /_values_update$/i,
-  /_messages_create$/i,
-  /^docs_batch_update$/i,
-  /^gws_docs_batch_update$/i,
-  /^google_workspace_docs_batch_update$/i,
-  /^sheets_values_update$/i,
-  /^slides_batch_update$/i,
-  /^chat_messages_create$/i,
+  /_batch_update(_\d+)?$/i,
+  /_values_update(_\d+)?$/i,
+  /_messages_create(_\d+)?$/i,
+  /(^|_)(docs|sheets|slides|calendar_events)_(create|update|delete)(_\d+)?$/i,
+  /^(gws_|google_workspace_)?(docs|sheets|slides|chat)_/i,
+  /^notion[-_](create|update|move|duplicate)[-_]/i,
+  /^submit_course_pm_profile(_\d+)?$/i,
+  /^write_segments(_\d+)?$/i,
+  /^card_studio_(write|create|update|delete)_/i,
+  /^sales_battle_report_schedule_(create|update|delete|pause)(_\d+)?$/i,
 ];
 const GOOGLE_DOCS_WRITE_TOOL_PATTERNS = [
-  /^docs_batch_update$/i,
-  /^gws_docs_batch_update$/i,
-  /^google_workspace_docs_batch_update$/i,
+  /^(gws_|google_workspace_)?docs_batch_update(_\d+)?$/i,
 ];
+
+const READ_ONLY_TOOL_PATTERNS = [
+  /(^|_)(search|list|get|read|fetch|query|describe|check|status|find|help|access)(_|$|\d)/i,
+];
+
+function isReadOnlyTool(toolName: string): boolean {
+  return READ_ONLY_TOOL_PATTERNS.some((pattern) => pattern.test(toolName));
+}
 
 export function evaluateTaskCompletion(
   input: TaskCompletionInput
@@ -135,7 +142,8 @@ export function hasSuccessfulWriteEvidence(
       !tool.isError &&
       (!isGoogleDocsWriteTool(tool.toolName) ||
         tool.resultSummary?.effect_verified === true) &&
-      WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName))
+      (WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName)) ||
+        !isReadOnlyTool(tool.toolName))
   );
 }
 
