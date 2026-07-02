@@ -49,13 +49,17 @@ function setupService() {
       isError: false,
     })),
   };
+  const userAgentsStore = {
+    ownsAgent: mock(async () => true),
+  };
   const service = createToolApprovalService({
     grantStore,
     mcpProxy,
+    userAgentsStore,
     organizationId: "org-1",
   });
 
-  return { grantStore, mcpProxy, service };
+  return { grantStore, mcpProxy, userAgentsStore, service };
 }
 
 async function submitApproveAll(
@@ -141,31 +145,41 @@ describe("createToolApprovalService", () => {
     expect(mcpProxy.executeToolDirect).toHaveBeenCalledTimes(1);
   });
 
-  test("mismatched line user does not consume the pending approval", async () => {
-    await seedLinePending("ta-line-1");
-    const { grantStore, mcpProxy, service } = setupService();
+  test("non-owner toolbox user cannot consume the pending approval", async () => {
+    const { service, userAgentsStore, mcpProxy } = setupService();
+    userAgentsStore.ownsAgent = mock(async () => false);
+    await seedLinePending("appr-owner-1");
 
-    const rejected = await submitApproveAll(service, {
-      lineUserId: "line-user-wrong",
+    const result = await service.submit({
+      approvalId: "appr-owner-1",
+      action: "approve_once",
+      toolboxUserId: "toolbox-user-1",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
     });
-    expect(rejected.status).toBe("forbidden");
-    expect(grantStore.grant).not.toHaveBeenCalled();
-    expect(mcpProxy.executeToolDirect).not.toHaveBeenCalled();
-
-    const approved = await submitApproveAll(service);
-    expect(approved.status).toBe("executed");
-    expect(mcpProxy.executeToolDirect).toHaveBeenCalledTimes(1);
-  });
-
-  test("missing pending line channel fails closed", async () => {
-    await seedLinePending("ta-line-1", { channelId: undefined });
-    const { grantStore, mcpProxy, service } = setupService();
-
-    const result = await submitApproveAll(service);
 
     expect(result.status).toBe("forbidden");
-    expect(grantStore.grant).not.toHaveBeenCalled();
     expect(mcpProxy.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("submit checks ownership through the toolbox platform", async () => {
+    const { service, userAgentsStore } = setupService();
+    await seedLinePending("appr-owner-2");
+
+    await service.submit({
+      approvalId: "appr-owner-2",
+      action: "approve_once",
+      toolboxUserId: "toolbox-user-1",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
+    });
+
+    expect(userAgentsStore.ownsAgent).toHaveBeenCalledWith(
+      "toolbox",
+      "toolbox-user-1",
+      "shifu-u-1",
+      "org-1"
+    );
   });
 
   test("executes the approved tool inside the organization context", async () => {
@@ -183,6 +197,9 @@ describe("createToolApprovalService", () => {
     const service = createToolApprovalService({
       grantStore,
       mcpProxy,
+      userAgentsStore: {
+        ownsAgent: mock(async () => true),
+      },
       organizationId: "org-1",
     });
 

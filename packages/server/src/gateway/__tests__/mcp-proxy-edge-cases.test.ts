@@ -758,6 +758,70 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     });
   });
 
+  test("returns blocked-no-channel when onToolBlocked throws", async () => {
+    const toolCache = new McpToolCache();
+    const grantStore = new GrantStore();
+    inTestOrg(() => {
+      toolCache.set("google_workspace", [{ name: "gws_docs_create" }], "agent-1");
+    });
+
+    const configSource = createConfigSource({
+      google_workspace: {
+        id: "google_workspace",
+        upstreamUrl: "http://gws.example.com/mcp",
+      },
+    });
+
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+      toolCache,
+      grantStore,
+    });
+    proxy.onToolBlocked = async () => {
+      throw new Error(
+        "Refusing to post tool approval: connectionId is required to prevent cross-platform event leakage"
+      );
+    };
+
+    let upstreamCallCount = 0;
+    globalThis.fetch = async () => {
+      upstreamCallCount++;
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            content: [{ type: "text", text: "created doc" }],
+            isError: false,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    };
+
+    const result = await inTestOrg(() =>
+      proxy.callToolWithApproval(
+        "agent-1",
+        "user-1",
+        "google_workspace",
+        "gws_docs_create",
+        { title: "PM weekly summary" },
+        {
+          channelId: "channel-1",
+          conversationId: "conv-1",
+          organizationId: "org-1",
+          platform: "api",
+          token: "worker-token",
+        }
+      )
+    );
+
+    expect(result.status).toBe("blocked-no-channel");
+    expect(result.isError).toBe(true);
+    expect(upstreamCallCount).toBe(0);
+    expect(result.content?.[0]?.text).not.toContain("has been asked");
+  });
+
   test("onToolBlocked fires once; subsequent blocked-no-channel when no handler", async () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();
