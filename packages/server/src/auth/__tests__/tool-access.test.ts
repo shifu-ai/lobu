@@ -15,13 +15,14 @@ import {
   checkToolAccess,
   extractAuthContext,
 } from '../../tools/execute';
-import { getTool, type ToolContext } from '../../tools/registry';
+import { getAllTools, getTool, type ToolContext } from '../../tools/registry';
 import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isPublicReadable,
   requiresMemberWrite,
   requiresOwnerAdmin,
+  resolveMaxAccessLevel,
   SCOPE_CHECK_NOT_APPLICABLE,
 } from '../tool-access';
 
@@ -218,24 +219,21 @@ describe('extractAuthContext scopes (F8 source side)', () => {
   });
 });
 
-describe('extractAuthContext adminTools — builder-tool grant must only widen', () => {
-  // A non-empty `adminTools` is the LIMIT in checkToolAccess (it overrides
-  // `allowInternalTools`). So the scope-derived builder-tool allowlist may only
-  // be handed to a caller that does NOT already have blanket internal access —
-  // otherwise it NARROWS them (regression: worker direct-auth + admin REST
-  // proxy both carry `mcp:admin` AND `allowInternalTools === true`).
+describe('extractAuthContext adminTools — only the verified worker allowlist rides through', () => {
+  // `adminTools` is a LIMIT in checkToolAccess on ADMIN-tier actions. Under
+  // the uniform surface model (no internal-tool axis) no allowlist is ever
+  // DERIVED for external admin callers — role x scope already grant them every
+  // tool. Only the builder worker token's per-run allowlist is carried.
   function ctxFor(opts: {
     scopes?: string[];
     adminTools?: string[] | null;
     url?: string;
-    directAuth?: boolean;
   }) {
     const fake = {
       req: {
         url: opts.url ?? 'http://localhost/mcp/acme',
         param: (_k: string) => undefined,
-        header: (k: string) =>
-          k === 'x-lobu-memory-direct-auth' && opts.directAuth ? '1' : undefined,
+        header: (_k: string) => undefined,
       },
       var: {
         mcpAuthInfo: {
@@ -250,27 +248,16 @@ describe('extractAuthContext adminTools — builder-tool grant must only widen',
     return extractAuthContext(fake);
   }
 
-  it('surfaces the two builder tools to an external /mcp admin caller (widens)', () => {
+  it('does NOT derive an allowlist for an external /mcp admin caller (uniform surface)', () => {
     const ctx = ctxFor({ scopes: ['mcp:admin'] });
-    expect(ctx.allowInternalTools).toBe(false);
-    expect(ctx.adminTools).toEqual(['manage_agents', 'manage_operations']);
-  });
-
-  it('does NOT derive an allowlist for a worker direct-auth admin caller (would narrow)', () => {
-    const ctx = ctxFor({
-      scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
-      directAuth: true,
-    });
-    expect(ctx.allowInternalTools).toBe(true);
     expect(ctx.adminTools).toBeNull();
   });
 
-  it('does NOT derive an allowlist for an admin caller on the REST proxy (would narrow)', () => {
+  it('does NOT derive an allowlist for an admin caller on the REST proxy', () => {
     const ctx = ctxFor({
       scopes: ['mcp:admin'],
       url: 'http://localhost/api/v1/tools/manage_watchers',
     });
-    expect(ctx.allowInternalTools).toBe(true);
     expect(ctx.adminTools).toBeNull();
   });
 
@@ -278,7 +265,6 @@ describe('extractAuthContext adminTools — builder-tool grant must only widen',
     const ctx = ctxFor({
       scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
       adminTools: ['manage_agents'],
-      directAuth: true,
     });
     expect(ctx.adminTools).toEqual(['manage_agents']);
   });
@@ -502,10 +488,10 @@ describe('checkToolAccess', () => {
     ).not.toThrow();
   });
 
-  it('hides internal tools from external MCP calls even when the name is known', () => {
+  it('exposes admin tools on external MCP uniformly (no internal-tool hiding)', () => {
     expect(() =>
       checkToolAccess('manage_entity', { action: 'list' }, { ...baseAuth, memberRole: 'owner' })
-    ).toThrow('Tool not found: manage_entity');
+    ).not.toThrow();
   });
 
   it('throws ToolNotRegisteredError for genuinely unregistered names so REST proxy can alert', () => {
@@ -514,35 +500,36 @@ describe('checkToolAccess', () => {
     ).toThrow(ToolNotRegisteredError);
   });
 
-  it('allows REST compatibility paths to reach internal tools subject to access', () => {
+  it('allows admin tools on any surface subject to role x scope (uniform model)', () => {
     expect(() =>
       checkToolAccess('manage_entity', { action: 'create' }, {
         ...baseAuth,
         memberRole: 'member',
         scopes: ['mcp:write'],
-        allowInternalTools: true,
       })
     ).not.toThrow();
   });
 
-  it.each(['list_watchers', 'get_watcher', 'read_knowledge'])(
-    'hides %s from external MCP but keeps it reachable via REST',
-    (toolName) => {
-      // External MCP — must look like an unknown tool to the caller.
-      expect(() =>
-        checkToolAccess(toolName, {}, { ...baseAuth, memberRole: 'owner' })
-      ).toThrow(`Tool not found: ${toolName}`);
-
-      // REST proxy — frontend reaches the same handler.
-      expect(() =>
-        checkToolAccess(
-          toolName,
-          {},
-          { ...baseAuth, memberRole: 'member', allowInternalTools: true }
-        )
-      ).not.toThrow();
-    }
-  );
+  it('builder adminTools allowlist limits ADMIN-tier actions to listed tools only', () => {
+    const builderAuth = {
+      ...baseAuth,
+      memberRole: 'owner',
+      scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
+      adminTools: ['manage_agents'],
+    };
+    // Admin-tier action on a listed tool — allowed.
+    expect(() =>
+      checkToolAccess('manage_agents', { action: 'update' }, builderAuth)
+    ).not.toThrow();
+    // Admin-tier action on an unlisted tool — blocked by the allowlist.
+    expect(() =>
+      checkToolAccess('manage_classifiers', { action: 'delete' }, builderAuth)
+    ).toThrow(/may not perform admin actions/);
+    // Read/write-tier actions on unlisted tools follow the uniform model.
+    expect(() =>
+      checkToolAccess('manage_classifiers', { action: 'list' }, builderAuth)
+    ).not.toThrow();
+  });
 
   it('lets members run query_sql (read-tier; auth/identity tables gated per-query, not at the tool gate)', () => {
     expect(() =>
@@ -563,10 +550,8 @@ describe('checkToolAccess', () => {
 
 describe('first-party tool-name coverage', () => {
   // Both surfaces share the same dispatch (`POST /api/:orgSlug/:toolName` →
-  // `restToolProxy` → `executeTool` → `getTool(name)`), but the CLI's
-  // browser-auth flow goes through MCP RPC and needs its tools to *also* be
-  // visible on `tools/list` (i.e. NOT `internal: true`). These tests pin both
-  // invariants.
+  // `restToolProxy` → `executeTool` → `getTool(name)`); tools are listed
+  // uniformly on MCP `tools/list` as well. These tests pin registration.
   const __dirname = dirname(fileURLToPath(import.meta.url));
   const webSrcRoot = join(__dirname, '..', '..', '..', '..', 'web', 'src');
   // The standalone lobu-cli package was merged into @lobu/cli's `memory`
@@ -656,20 +641,15 @@ describe('first-party tool-name coverage', () => {
   });
 
   // CLI bootstrap tools that the `lobu memory browser-auth` flow drives via the
-  // REST proxy (`POST /api/{slug}/{toolName}`). They must be registered AND
-  // `internal: true` so they stay off the external MCP surface — no external
-  // MCP client should see CLI bootstrap tools in `tools/list`.
+  // REST proxy (`POST /api/{slug}/{toolName}`). Under the uniform surface
+  // model they are ordinary registered tools — visible everywhere, gated by
+  // per-action tier x role x scope like everything else.
   const CLI_REST_BOOTSTRAP_TOOLS = ['manage_catalog', 'manage_auth_profiles'] as const;
 
   it.each(CLI_REST_BOOTSTRAP_TOOLS)(
-    'CLI bootstrap tool %s is registered and hidden from external MCP tools/list',
+    'CLI bootstrap tool %s is registered',
     (name) => {
-      const tool = getTool(name);
-      expect(tool).toBeDefined();
-      // `internal: true` keeps these tools reachable via the REST proxy
-      // (`allowInternalTools=true` for non-`/mcp` paths) while hiding them
-      // from external MCP clients like Claude Desktop or Cursor.
-      expect(tool?.internal).toBe(true);
+      expect(getTool(name)).toBeDefined();
     }
   );
 
@@ -689,3 +669,77 @@ describe('first-party tool-name coverage', () => {
     }
   });
 });
+
+const ACCESS_SURFACE = `
+search_memory: read+public ?=read+public
+save_memory: write ?=write
+list_organizations: read ?=read
+search_sdk: read+public ?=read+public
+query_sdk: read ?=read
+list_metrics: read ?=read
+query_metric: read ?=read
+query_sql: read ?=read
+metric_series: read ?=read
+run_sdk: write ?=write
+manage_entity: create=write update=write list=read+public get=read+public delete=admin link=write unlink=write update_link=write list_links=read+public ?=read
+manage_entity_schema: list=read+public get=read+public create=admin update=admin delete=admin audit=read+public add_rule=admin remove_rule=admin list_rules=read+public ?=read
+manage_connections: list_connector_groups=read+public list=read+public get=read+public create=write connect=admin update=write delete=admin reauthenticate=write test=admin install_connector=admin uninstall_connector=admin toggle_connector_login=admin update_connector_auth=admin update_connector_default_config=admin update_connector_default_repair_agent=admin set_connector_entity_link_overrides=admin list_channel_bindings=read+public bind_channel=admin unbind_channel=admin get_channel_audience=read+public connect_channel_dm=admin ?=read
+manage_catalog: list_catalog=read+public list_installed=read+public ?=read
+manage_agents: list=admin get=admin create=admin update=admin delete=admin set_system_agent=admin ?=read
+manage_feeds: list_feeds=read+public read_feed=read+public create_feed=admin update_feed=admin delete_feed=admin trigger_feed=admin ?=read
+manage_auth_profiles: list_auth_profiles=read+public get_auth_profile=admin test_auth_profile=admin create_auth_profile=write update_auth_profile=write delete_auth_profile=admin set_default_auth_profile=admin ?=read
+manage_operations: list_available=read+public execute=admin list_runs=read+public get_run=read+public approve=admin reject=admin ?=read
+notify: send=admin ?=admin
+manage_schedules: create=admin list=admin update=admin pause=admin cancel=admin ?=admin
+manage_watchers: create=admin update=admin create_version=admin complete_window=write trigger=admin delete=admin set_reaction_script=admin get_versions=read+public get_version_details=read+public get_component_reference=read+public submit_feedback=admin get_feedback=read+public list_promoted=read create_from_version=admin ?=read
+list_watchers: read+public ?=read+public
+get_watcher: read+public ?=read+public
+read_knowledge: read+public ?=read+public
+manage_classifiers: create=admin list=read+public generate_embeddings=admin delete=admin classify=admin ?=read
+manage_view_templates: set=admin get=read+public rollback=admin remove_tab=admin clear=admin ?=read
+resolve_path: read+public ?=read+public
+`.trim();
+
+describe('pinned access matrix', () => {
+  // One line per tool: every action's tier (+public readability) plus the `?`
+  // unknown-action probe (pins the fallback branch). A diff here is an
+  // access-control change — review it as one; regenerate lines from the
+  // failure diff. Captured before the internal-flag removal and identical
+  // after it: visibility changed, the access matrix did not.
+  function actionsOf(schema: any): string[] | null {
+    const action = schema?.properties?.action;
+    if (Array.isArray(action?.enum)) return action.enum.map(String);
+    if (typeof action?.const === 'string') return [action.const];
+    // Flat tools keep `action` as a TypeBox union → anyOf-of-const.
+    if (Array.isArray(action?.anyOf)) {
+      const consts = action.anyOf
+        .map((v: any) => v?.const)
+        .filter((v: unknown): v is string => typeof v === 'string');
+      return consts.length > 0 ? consts : null;
+    }
+    return null;
+  }
+
+  it('matches the fixture for every registered tool and action', () => {
+    const lines = getAllTools({ publicOnly: false, maxAccessLevel: 'admin' }).map((tool) => {
+      const readOnly = tool.annotations?.readOnlyHint === true;
+      const parts = [...(actionsOf(tool.inputSchema) ?? ['-']), '?'].map((action) => {
+        const args = action === '-' ? {} : { action };
+        const tier = getRequiredAccessLevel(tool.name, args, readOnly);
+        const pub = isPublicReadable(tool.name, args) ? '+public' : '';
+        return `${action === '-' ? '' : `${action}=`}${tier}${pub}`;
+      });
+      return `${tool.name}: ${parts.join(' ')}`;
+    });
+    expect(lines.join('\n')).toBe(ACCESS_SURFACE);
+  });
+
+  it('resolveMaxAccessLevel is the min of role and scope tiers', () => {
+    expect(resolveMaxAccessLevel('owner', ['mcp:admin'])).toBe('admin');
+    expect(resolveMaxAccessLevel('owner', ['mcp:write'])).toBe('write');
+    expect(resolveMaxAccessLevel('member', ['mcp:admin'])).toBe('write');
+    expect(resolveMaxAccessLevel(null, ['mcp:admin'])).toBe('read');
+    expect(resolveMaxAccessLevel('owner', null)).toBe('admin');
+  });
+});
+

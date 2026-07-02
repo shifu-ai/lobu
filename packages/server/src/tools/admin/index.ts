@@ -1,13 +1,10 @@
 /**
- * Internal REST/CLI tool surface.
+ * Admin tool surface (manage_*, watcher reads, knowledge reads, notify).
  *
- * External MCP clients see the small `search_sdk`/`query_sdk`/`run_sdk`/`save_memory`/...
- * surface from `registry.ts`. The frontend, lobu-cli, and other REST/session
- * callers reach the named handlers below by `name` via `POST /api/:orgSlug/:toolName`.
- *
- * `restToolProxy` sets `allowInternalTools=true` (since the request didn't come
- * in over `/mcp`), so `internal: true` tools are reachable by REST but hidden
- * from MCP `tools/list`.
+ * Exposed uniformly on every surface — MCP `tools/list`, the REST proxy
+ * (`POST /api/:orgSlug/:toolName`), the ClientSDK namespaces, and the CLI.
+ * There is no visibility flag: reach is decided purely by per-action access
+ * tier x member role x `mcp:*` scope (see `auth/tool-access.ts`).
  */
 
 import type { TSchema } from "@sinclair/typebox";
@@ -49,24 +46,19 @@ import {
 } from "./manage_watchers";
 import { NotifySchema, notify } from "./notify";
 
-interface InternalToolEntry {
+interface AdminToolEntry {
 	name: string;
 	description: string;
 	schema: TSchema;
 	handler: (args: any, env: Env, ctx: ToolContext) => Promise<unknown>;
 	/** Defaults to `{ destructiveHint: false }`. */
 	annotations?: ToolAnnotations;
-	/**
-	 * `true` (default) hides from MCP `tools/list` — REST/session callers can
-	 * still reach it. `false` keeps it on the public MCP surface.
-	 */
-	internal?: boolean;
 }
 
 const READ_ONLY: ToolAnnotations = { readOnlyHint: true, idempotentHint: true };
 const WRITE: ToolAnnotations = { destructiveHint: false };
 
-const ENTRIES: InternalToolEntry[] = [
+const ENTRIES: AdminToolEntry[] = [
 	{
 		name: "manage_entity",
 		description: "Entity management. SDK alternative: client.entities.",
@@ -180,11 +172,10 @@ const ENTRIES: InternalToolEntry[] = [
 	},
 ];
 
-export const INTERNAL_REST_TOOLS: ToolDefinition[] = ENTRIES.map((entry) => ({
+export const ADMIN_TOOLS: ToolDefinition[] = ENTRIES.map((entry) => ({
 	name: entry.name,
 	description: entry.description,
 	inputSchema: entry.schema,
 	annotations: entry.annotations ?? WRITE,
-	internal: entry.internal ?? true,
 	handler: entry.handler,
 }));

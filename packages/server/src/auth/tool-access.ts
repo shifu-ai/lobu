@@ -17,10 +17,9 @@ const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
 	// `run_sdk` reaches admin handlers inside the script; per-call gates fire
 	// on each SDK method, so the entry-point check is just write-tier.
 	run_sdk: null,
-	// Legacy `manage_*` policy entries — the tools themselves are no longer
-	// exposed on the external MCP surface, but the handlers are still reached
-	// via SDK namespace wrappers from inside `run_sdk`, and `routeAction` consults
-	// these tables to fire the same per-action access decisions.
+	// `manage_*` per-action policy. The same tables gate every surface: direct
+	// tool calls (MCP / REST proxy) via `checkToolAccess`, and the SDK namespace
+	// wrappers inside `run_sdk` via `routeAction`.
 	manage_entity: new Set(["create", "update", "link", "unlink", "update_link"]),
 	// Members can install connections that bind to their own OAuth account
 	// grant. `update` is here so members can rebind their own connection's
@@ -251,6 +250,32 @@ export function hasRequiredMcpScope(
 		return scopeSet.has("mcp:write") || scopeSet.has("mcp:admin");
 	}
 	return scopeSet.has("mcp:admin");
+}
+
+/**
+ * Highest access tier a caller can exercise, from member role x `mcp:*`
+ * scopes. `null`/sentinel scopes don't limit (session/anonymous callers are
+ * gated by role + public-readability instead). Shared by MCP `tools/list` and
+ * `GET /api/:orgSlug/tools` so both surfaces filter identically.
+ */
+export function resolveMaxAccessLevel(
+	memberRole: string | null | undefined,
+	scopes: readonly string[] | null | undefined,
+): ToolAccessLevel {
+	const roleLevel: ToolAccessLevel = !memberRole
+		? "read"
+		: memberRole === "owner" || memberRole === "admin"
+			? "admin"
+			: "write";
+	const scopeLevel: ToolAccessLevel =
+		scopes == null || scopes.includes("*") || scopes.includes("mcp:admin")
+			? "admin"
+			: scopes.includes("mcp:write")
+				? "write"
+				: "read";
+	if (roleLevel === "read" || scopeLevel === "read") return "read";
+	if (roleLevel === "write" || scopeLevel === "write") return "write";
+	return "admin";
 }
 
 export function isPublicReadable(toolName: string, args: unknown): boolean {

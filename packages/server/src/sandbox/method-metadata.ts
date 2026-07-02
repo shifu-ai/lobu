@@ -288,10 +288,6 @@ export default async (_ctx, client) => {
 		summary: "Create a new watcher template version.",
 		access: "write",
 	},
-	"watchers.upgrade": {
-		summary: "Move a watcher to another template version.",
-		access: "write",
-	},
 	"watchers.trigger": {
 		summary:
 			"Trigger an immediate watcher run and dispatch it to its assigned agent.",
