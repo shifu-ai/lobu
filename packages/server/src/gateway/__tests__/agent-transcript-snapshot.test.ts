@@ -354,6 +354,86 @@ describe("agent_transcript_snapshot — snapshot route", () => {
     expect(both[1]).toEqual({ run_id: failedRun, terminal_status: "failed" });
   });
 
+  test("POST with failed terminal status stores the row with terminal_status='failed'", async () => {
+    // Task 3: failed turns must persist for incident forensics — previously
+    // the worker client skipped the POST entirely for non-completed
+    // statuses, so failed rows never reached PG at all. The route itself
+    // already accepted them; this test locks in that the row lands with
+    // the real status.
+    const orgId = await seedAgentRow("agent-failed-store", {
+      organizationId: "org_failed_store",
+    });
+    const agentId = "agent-failed-store";
+    const conversationId = "conv-failed-store";
+    const runId = await insertRun({ organizationId: orgId, agentId, conversationId });
+    const token = mintWorkerToken({
+      organizationId: orgId,
+      agentId,
+      conversationId,
+      runId,
+    });
+
+    const res = await callRoute("POST", "/snapshot", token, {
+      terminalStatus: "failed",
+      snapshotJsonl: `{"type":"session","id":"failed-store"}\n`,
+      runId,
+    });
+    expect(res.status).toBe(200);
+
+    const sql = getDb();
+    const rows = (await sql`
+      SELECT run_id, terminal_status FROM public.agent_transcript_snapshot
+      WHERE organization_id = ${orgId} AND agent_id = ${agentId}
+    `) as Array<{ run_id: number; terminal_status: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toEqual({ run_id: runId, terminal_status: "failed" });
+  });
+
+  test("hydrate GET still returns the latest completed run's body and run-id header when a newer failed run exists", async () => {
+    // Write completed run N, then failed run N+1 → GET must still return
+    // run N's body with x-snapshot-run-id = N. Binding constraint: hydrate
+    // selection stays completed-only even though failed rows now persist.
+    const orgId = await seedAgentRow("agent-hydrate-ignore-failed", {
+      organizationId: "org_hydrate_ignore_failed",
+    });
+    const agentId = "agent-hydrate-ignore-failed";
+    const conversationId = "conv-hydrate-ignore-failed";
+
+    const runN = await insertRun({ organizationId: orgId, agentId, conversationId });
+    const tokenN = mintWorkerToken({
+      organizationId: orgId,
+      agentId,
+      conversationId,
+      runId: runN,
+    });
+    const completedJsonl = `{"type":"session","id":"run-n"}\n`;
+    let res = await callRoute("POST", "/snapshot", tokenN, {
+      terminalStatus: "completed",
+      snapshotJsonl: completedJsonl,
+      runId: runN,
+    });
+    expect(res.status).toBe(200);
+
+    const runNPlus1 = await insertRun({ organizationId: orgId, agentId, conversationId });
+    const tokenNPlus1 = mintWorkerToken({
+      organizationId: orgId,
+      agentId,
+      conversationId,
+      runId: runNPlus1,
+    });
+    res = await callRoute("POST", "/snapshot", tokenNPlus1, {
+      terminalStatus: "failed",
+      snapshotJsonl: `{"type":"session","id":"run-n-plus-1-failed"}\n`,
+      runId: runNPlus1,
+    });
+    expect(res.status).toBe(200);
+
+    res = await callRoute("GET", "/snapshot", tokenNPlus1);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(completedJsonl);
+    expect(res.headers.get("x-snapshot-run-id")).toBe(String(runN));
+  });
+
   test("failed-run-not-replayed (empty-history variant): no completed rows → hydrate 404s", async () => {
     const orgId = await seedAgentRow("agent-only-fail", {
       organizationId: "org_only_fail",

@@ -1,6 +1,9 @@
 /**
  * Mirrors session.jsonl to PG so multi-replica pods can hydrate.
- * Snapshot written on success only; hydrate reads latest completed row.
+ * Snapshots are written for every terminal status (completed, failed,
+ * timeout, cancelled) so incident forensics can inspect what a
+ * misjudged-as-failed turn actually did; hydrate reads only the latest
+ * completed row.
  */
 
 import { promises as fs } from "node:fs";
@@ -131,9 +134,14 @@ export async function hydrateFromSnapshot(
 
 /**
  * Read the session file in full and POST it to the gateway. Called once per
- * worker run at terminal time, from `OpenClawWorker.cleanup()`. The
- * `terminal_status` discriminator lets the hydrate path skip failed/timeout
- * snapshots so a dangling `tool_use` doesn't poison the next attempt.
+ * worker run at terminal time, from `OpenClawWorker.cleanup()`. ALL terminal
+ * statuses are persisted (`completed`, `failed`, `timeout`, `cancelled`) —
+ * hydrate still filters to `terminal_status='completed'` only, so
+ * failed/timeout/cancelled rows are never replayed into a fresh worker.
+ * They exist purely for incident forensics (and any future admin-driven
+ * "restore/clean up a dangling tool_use" tooling) — without them, a
+ * misjudged-as-failed turn's transcript is gone forever once the local
+ * session.jsonl is overwritten by the next attempt.
  *
  * Failure to snapshot is logged but does NOT throw — there's nothing the
  * caller can do beyond what cleanup already does (the worker is exiting).
@@ -153,19 +161,6 @@ export async function writeSnapshot(
     runId: number;
   }
 ): Promise<void> {
-  // Hydrate filters `terminal_status='completed'` — failed/timeout/cancelled
-  // snapshots are never used. POSTing them is pure network waste; the
-  // route would store them but no future hydrate would pick them up.
-  // Skip at the source so any caller (cleanup() today, future paths
-  // tomorrow) stays out of the wasteful write. Codex round 2 quality
-  // win C on PR #865.
-  if (opts.terminalStatus !== "completed") {
-    logger.debug(
-      `Skipping snapshot POST: terminal_status='${opts.terminalStatus}' is never read by hydrate`
-    );
-    return;
-  }
-
   let body: string;
   try {
     body = await fs.readFile(opts.sessionFile, "utf-8");
