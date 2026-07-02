@@ -335,6 +335,16 @@ describe("2026-07-02 capability-refusal blocker patterns", () => {
 
     expect(result.outcome).toBe("completed");
   });
+
+  test("recognizes '沒有刪除功能' refusal as a visible blocker", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "幫我刪除那個頁面",
+      finalVisibleText: "這個工具沒有刪除功能，請手動處理。",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
 });
 
 describe("2026-06-25 Google Doc rewrite regression", () => {

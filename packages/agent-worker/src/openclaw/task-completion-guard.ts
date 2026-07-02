@@ -70,7 +70,7 @@ const BLOCKER_PATTERNS = [
   /(?:核准|批准|同意|授權).*(?:後|之後).*(?:執行|繼續|進行)/i,
   /\b(?:waiting for|awaiting|pending|once you|after you)\b.*\b(?:approv|authoriz|consent)/i,
   /(?:同意|授權)(?:卡|請求|按鈕)/i,
-  /(?:不支持|不支援|無法|沒有辦法|做不到|沒有提供).*(?:刪除|歸檔|封存|移除|delete|archive|trash)/i,
+  /(?:不支持|不支援|無法|沒有辦法|做不到|沒有提供|不能|沒有).*(?:刪除|歸檔|封存|移除|delete|archive|trash)/i,
 ];
 
 const TOOL_RESULT_APPROVAL_REQUIRED_PATTERN = /requires approval/i;
