@@ -182,6 +182,30 @@ describe("createToolApprovalService", () => {
     );
   });
 
+  test("approve_once executes the pending tool without writing any grant", async () => {
+    await seedLinePending("ta-line-once-1");
+    const { grantStore, mcpProxy, service } = setupService();
+
+    const result = await service.submit({
+      action: "approve_once",
+      approvalId: "ta-line-once-1",
+      toolboxUserId: "toolbox-user-1",
+      lineUserId: "line-user-1",
+      agentId: "shifu-u-1",
+    });
+
+    expect(result.status).toBe("executed");
+    expect(grantStore.grant).not.toHaveBeenCalled();
+    expect(mcpProxy.executeToolDirect).toHaveBeenCalledTimes(1);
+    expect(mcpProxy.executeToolDirect).toHaveBeenCalledWith(
+      "shifu-u-1",
+      "toolbox-user-1",
+      "google_workspace",
+      "gws_calendar_events_create",
+      { summary: "Demo" }
+    );
+  });
+
   test("executes the approved tool inside the organization context", async () => {
     await seedLinePending("ta-line-1");
     const grantStore = {
