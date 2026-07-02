@@ -10,6 +10,8 @@ import {
   type McpStatus,
   type McpToolDef,
 } from "@lobu/core";
+import type { WorkerShifuTraceContext } from "../shared/journey-trace";
+import { shifuTraceHeaders } from "../shared/journey-trace";
 
 const logger = createLogger("openclaw-session-context");
 
@@ -267,7 +269,10 @@ function buildToolboxPersonalAgentToolInstructions(
  * Skips MCP server config (OpenClaw doesn't use Claude SDK's MCP format).
  */
 export async function getOpenClawSessionContext(
-  opts: { mcpExposure?: "tools" | "cli" } = {}
+  opts: {
+    mcpExposure?: "tools" | "cli";
+    shifuTrace?: WorkerShifuTraceContext;
+  } = {}
 ): Promise<{
   /**
    * Identity/soul/user instructions for this agent. Returned separately from
@@ -314,6 +319,7 @@ export async function getOpenClawSessionContext(
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${workerToken}`,
+        ...(opts.shifuTrace ? shifuTraceHeaders(opts.shifuTrace) : {}),
       },
       // Session context is fetched once per turn; a stalled gateway here would
       // otherwise hang the worker before the agent ever sees the prompt.

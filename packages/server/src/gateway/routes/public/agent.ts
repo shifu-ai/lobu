@@ -30,6 +30,10 @@ import type { PlatformRegistry } from "../../platform.js";
 import { resolveAgentOptions } from "../../services/platform-helpers.js";
 import type { SseManager } from "../../services/sse-manager.js";
 import type { ISessionManager, ThreadSession } from "../../session.js";
+import {
+  parseShifuTraceHeaders,
+  shifuTraceEnvelope,
+} from "../../trace-context.js";
 import { verifyOwnedAgentAccess } from "../shared/agent-ownership.js";
 import { errorResponse } from "../shared/helpers.js";
 import {
@@ -1084,6 +1088,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
   //   1. Direct API (no platform field): requires pre-created session, enqueues directly
   //   2. Platform-routed (platform field present): delegates to platform adapter
   app.openapi(sendMessageRoute, async (c): Promise<any> => {
+    const shifuTrace = parseShifuTraceHeaders(c.req.raw.headers);
     const { agentId } = c.req.valid("param");
 
     // Gate ownership BEFORE parsing body / uploading files. The path param is
@@ -1403,6 +1408,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
                 ? "watcher-run"
                 : "direct-api",
           traceparent: traceparent || undefined,
+          shifuTrace: shifuTraceEnvelope(shifuTrace),
           dryRun: session.dryRun || false,
           intent: session.intent,
           ...(directFiles.length > 0 ? { files: directFiles } : {}),

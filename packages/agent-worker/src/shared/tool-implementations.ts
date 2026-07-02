@@ -6,6 +6,8 @@ import { createLogger, ensureBaseUrl } from "@lobu/core";
 import FormData from "form-data";
 import { normalizeMcpResultContent } from "../openclaw/mcp-result-normalizer";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
+import type { WorkerShifuTraceContext } from "./journey-trace";
+import { shifuTraceHeaders } from "./journey-trace";
 import {
   assertRecoverableDecisionOptions,
   type StructuredDecisionOption,
@@ -1202,7 +1204,8 @@ export async function callMcpTool(
   gw: GatewayParams,
   mcpId: string,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  options: { shifuTrace?: WorkerShifuTraceContext } = {}
 ): Promise<TextResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
     let response: Response;
@@ -1212,6 +1215,9 @@ export async function callMcpTool(
         Authorization: `Bearer ${gw.workerToken}`,
         "Content-Type": "application/json",
       };
+      if (options.shifuTrace) {
+        Object.assign(headers, shifuTraceHeaders(options.shifuTrace));
+      }
       // Retrieval tools (`search_memory`) opt into JSON-encoded results so the
       // worker → SSE `tool_use` event can carry structured `result_summary`
       // (event ids + snippet text) to clients like @lobu/promptfoo-provider for

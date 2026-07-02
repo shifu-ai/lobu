@@ -28,6 +28,7 @@ import {
 } from "../orchestration/turn-liveness.js";
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { parseShifuTraceHeaders } from "../trace-context.js";
 import {
 	type SSEWriter,
 	WorkerConnectionManager,
@@ -1323,6 +1324,7 @@ export class WorkerGateway {
 						401,
 					);
 				}
+				const shifuTrace = parseShifuTraceHeaders(c.req.raw.headers, "worker");
 
 				// Build instruction context
 				const instructionContext: InstructionContext = {
@@ -1388,6 +1390,7 @@ export class WorkerGateway {
 								agentId || userId,
 								auth.tokenData,
 								auth.token,
+								{ trace: shifuTrace },
 							);
 							return { mcpId: mcp.id, ...(result || { tools: [] }) };
 						}),
