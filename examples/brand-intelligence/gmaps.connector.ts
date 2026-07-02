@@ -1,5 +1,5 @@
 /**
- * Google Maps Connector (V1 runtime)
+ * Google Maps Connector (V1 runtime) — example-only, not bundled with Lobu.
  *
  * Fetches business reviews using Google Places API.
  */
@@ -12,8 +12,8 @@ import {
   type EventEnvelope,
   type SyncContext,
   type SyncResult,
-} from '@lobu/connector-sdk';
-import { filterByCheckpoint } from './browser-scraper-utils.ts';
+} from "@lobu/connector-sdk";
+import { finalizeTimestampSync } from "@lobu/connector-sdk";
 
 interface GMapsReview {
   author_name: string;
@@ -38,40 +38,36 @@ interface FindPlaceResponse {
   candidates?: Array<{ place_id: string }>;
 }
 
-interface GMapsCheckpoint {
-  last_timestamp?: string;
-}
-
 const configSchema = {
-  type: 'object',
+  type: "object",
   properties: {
     place_id: {
-      type: 'string',
-      description: 'Google Place ID',
+      type: "string",
+      description: "Google Place ID",
     },
     business_name: {
-      type: 'string',
-      description: 'Business name for search-based fallback',
+      type: "string",
+      description: "Business name for search-based fallback",
     },
   },
 };
 
 export default class GoogleMapsConnector extends ConnectorRuntime {
   readonly definition: ConnectorDefinition = {
-    key: 'gmaps',
-    name: 'Google Maps',
-    description: 'Fetches business reviews using Google Places API.',
-    version: '1.0.0',
-    faviconDomain: 'maps.google.com',
+    key: "gmaps",
+    name: "Google Maps",
+    description: "Fetches business reviews using Google Places API.",
+    version: "1.0.0",
+    faviconDomain: "maps.google.com",
     authSchema: {
       methods: [
         {
-          type: 'env_keys',
+          type: "env_keys",
           required: true,
           fields: [
             {
-              key: 'GOOGLE_MAPS_API_KEY',
-              label: 'Google Maps API Key',
+              key: "GOOGLE_MAPS_API_KEY",
+              label: "Google Maps API Key",
               secret: true,
             },
           ],
@@ -80,20 +76,20 @@ export default class GoogleMapsConnector extends ConnectorRuntime {
     },
     feeds: {
       reviews: {
-        key: 'reviews',
-        name: 'Business Reviews',
-        description: 'Fetch reviews for a business on Google Maps.',
+        key: "reviews",
+        name: "Business Reviews",
+        description: "Fetch reviews for a business on Google Maps.",
         configSchema,
         eventKinds: {
           review: {
-            description: 'A Google Maps business review',
+            description: "A Google Maps business review",
             metadataSchema: {
-              type: 'object',
+              type: "object",
               properties: {
-                rating: { type: 'number', description: 'Star rating (1-5)' },
-                author_url: { type: 'string', format: 'uri' },
-                profile_photo_url: { type: 'string', format: 'uri' },
-                relative_time_description: { type: 'string' },
+                rating: { type: "number", description: "Star rating (1-5)" },
+                author_url: { type: "string", format: "uri" },
+                profile_photo_url: { type: "string", format: "uri" },
+                relative_time_description: { type: "string" },
               },
             },
           },
@@ -105,19 +101,19 @@ export default class GoogleMapsConnector extends ConnectorRuntime {
   // Google Places authenticates via the `key` query param, not a bearer header,
   // so the client carries no token — it's adopted purely for retry/backoff on
   // transient 429/5xx and consistent error formatting.
-  private readonly http = createHttpClient({ errorPrefix: 'Google Places' });
+  private readonly http = createHttpClient({ errorPrefix: "Google Places" });
 
   async sync(ctx: SyncContext): Promise<SyncResult> {
     const apiKey = ctx.config.GOOGLE_MAPS_API_KEY as string | undefined;
     if (!apiKey) {
-      throw new Error('GOOGLE_MAPS_API_KEY is required');
+      throw new Error("GOOGLE_MAPS_API_KEY is required");
     }
 
     let placeId = ctx.config.place_id as string | undefined;
     const businessName = ctx.config.business_name as string | undefined;
 
     if (!placeId && !businessName) {
-      throw new Error('Either place_id or business_name is required');
+      throw new Error("Either place_id or business_name is required");
     }
 
     // If no place_id, search by business name
@@ -146,25 +142,26 @@ export default class GoogleMapsConnector extends ConnectorRuntime {
     }
     const data = (await detailsResponse.json()) as PlaceDetailsResponse;
 
-    if (data.status !== 'OK') {
+    if (data.status !== "OK") {
       throw new Error(`Google Places API error: ${data.status}`);
     }
 
     const place = data.result;
     const reviews = place?.reviews ?? [];
-    const placeUrl = place?.url ?? `https://maps.google.com/?q=place_id:${placeId}`;
+    const placeUrl =
+      place?.url ?? `https://maps.google.com/?q=place_id:${placeId}`;
 
     // Transform reviews to EventEnvelope[] — skip reviews without text
-    let events: EventEnvelope[] = reviews
+    const events: EventEnvelope[] = reviews
       .filter((review) => review.text)
       .map((review) => ({
         origin_id: `${placeId}_${review.time}`,
         payload_text: review.text,
         author_name: review.author_name || undefined,
         occurred_at: new Date(review.time * 1000),
-        origin_type: 'review',
+        origin_type: "review",
         source_url: placeUrl,
-        score: calculateEngagementScore('gmaps', { rating: review.rating }),
+        score: calculateEngagementScore("gmaps", { rating: review.rating }),
         metadata: {
           rating: review.rating,
           author_url: review.author_url,
@@ -173,20 +170,11 @@ export default class GoogleMapsConnector extends ConnectorRuntime {
         },
       }));
 
-    // Filter by checkpoint
-    const checkpoint = ctx.checkpoint as GMapsCheckpoint | null;
-    events = filterByCheckpoint(events, checkpoint);
-
-    // Sort descending by occurred_at
-    events.sort((a, b) => b.occurred_at.getTime() - a.occurred_at.getTime());
-
-    const newCheckpoint: Record<string, unknown> =
-      events.length > 0
-        ? { last_timestamp: events[0].occurred_at.toISOString() }
-        : { last_timestamp: checkpoint?.last_timestamp ?? null };
+    const { events: emitted, checkpoint: newCheckpoint } =
+      finalizeTimestampSync(events, ctx.checkpoint);
 
     return {
-      events,
+      events: emitted,
       checkpoint: newCheckpoint,
       metadata: {
         items_found: reviews.length,
