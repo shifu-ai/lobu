@@ -57,10 +57,34 @@ function applyCapabilityLimitNote<T extends { description?: string }>(
     return tool;
   }
   const existingDescription = tool.description?.trim();
+  if (existingDescription && existingDescription.includes(note)) {
+    // Already applied (e.g. cli-exposure path ran before the projection
+    // path also touched this tool) — skip to avoid duplicating the note.
+    return tool;
+  }
   const description = existingDescription
     ? `${existingDescription}\n\n${note}`
     : note;
   return { ...tool, description };
+}
+
+/**
+ * Bulk variant of {@link applyCapabilityLimitNote} for exposure paths that
+ * bypass `projectMcpToolsForProvider` entirely (e.g. `mcpExposure: "cli"`,
+ * where raw `mcpTools` flow straight to the just-bash `<mcpId> --help`
+ * renderer). Idempotent — safe to call more than once, and harmless to call
+ * on tools that also pass through the projection path.
+ */
+export function applyCapabilityLimitNotes(
+  mcpTools: Record<string, McpToolDef[]>
+): Record<string, McpToolDef[]> {
+  const result: Record<string, McpToolDef[]> = {};
+  for (const [mcpId, tools] of Object.entries(mcpTools)) {
+    result[mcpId] = tools.map((tool) =>
+      applyCapabilityLimitNote(mcpId, tool.name, tool)
+    );
+  }
+  return result;
 }
 
 const UNION_KEYWORDS = new Set(["anyOf", "oneOf", "allOf"]);

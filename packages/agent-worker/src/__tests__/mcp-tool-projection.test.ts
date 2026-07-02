@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
-import { projectMcpToolsForProvider } from "../openclaw/mcp-tool-projection";
+import {
+  applyCapabilityLimitNotes,
+  projectMcpToolsForProvider,
+} from "../openclaw/mcp-tool-projection";
 
 function countDefaultRegisteredDirectToolDefinitions(
   mcpTools: Record<string, McpToolDef[]>
@@ -629,6 +632,73 @@ describe("projectMcpToolsForProvider", () => {
     expect(projected.tools.notion?.[0]?.description).toBe("Search Notion");
     expect(projected.tools.github?.[0]?.description).toBe(
       "Same tool name, different MCP"
+    );
+  });
+});
+
+describe("applyCapabilityLimitNotes", () => {
+  const mcpTools: Record<string, McpToolDef[]> = {
+    notion: [
+      {
+        name: "notion-update-page",
+        description:
+          "Update a Notion page. Set allow_deleting_content to permit deletion of child pages during edits.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "notion-move-pages",
+        description: "Move pages to a new parent.",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "notion-search",
+        description: "Search Notion",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ],
+    github: [
+      {
+        name: "notion-update-page",
+        description: "Same tool name, different MCP",
+        inputSchema: { type: "object", properties: {} },
+      },
+    ],
+  };
+
+  test("applies notes to mapped tools and leaves others untouched", () => {
+    const result = applyCapabilityLimitNotes(mcpTools);
+
+    expect(result.notion?.[0]?.description).toBe(
+      "Update a Notion page. Set allow_deleting_content to permit deletion of child pages during edits.\n\nIMPORTANT: This tool CANNOT delete, archive, or trash pages. The allow_deleting_content parameter only guards child-page removal during content edits. There is no way to delete a Notion page through this MCP — tell the user to delete it manually instead of attempting it with this tool."
+    );
+    expect(result.notion?.[1]?.description).toBe(
+      "Move pages to a new parent.\n\nIMPORTANT: This tool CANNOT move pages to trash. Valid destinations are pages, databases, and the workspace only — it cannot delete or archive anything."
+    );
+    // Not in the capability-note map — left untouched.
+    expect(result.notion?.[2]?.description).toBe("Search Notion");
+    // Same tool name, different (non-notion) MCP — left untouched.
+    expect(result.github?.[0]?.description).toBe(
+      "Same tool name, different MCP"
+    );
+  });
+
+  test("is idempotent — applying twice yields identical output", () => {
+    const once = applyCapabilityLimitNotes(mcpTools);
+    const twice = applyCapabilityLimitNotes(once);
+
+    expect(twice).toEqual(once);
+  });
+
+  test("does not duplicate the note when a projection-path tool already carries it", () => {
+    const alreadyProjected = projectMcpToolsForProvider(
+      { notion: [mcpTools.notion[0]] },
+      { provider: "openai", directToolLimit: 24 }
+    );
+
+    const result = applyCapabilityLimitNotes(alreadyProjected.tools);
+
+    expect(result.notion?.[0]?.description).toBe(
+      alreadyProjected.tools.notion?.[0]?.description
     );
   });
 });

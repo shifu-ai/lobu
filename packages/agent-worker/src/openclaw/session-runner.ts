@@ -49,6 +49,7 @@ import {
   resolveModelRef,
 } from "./model-resolver";
 import {
+  applyCapabilityLimitNotes,
   buildMcpAuthToolNames,
   type McpAuthToolNames,
   projectMcpToolsForProvider,
@@ -973,7 +974,7 @@ export async function runAISession(
   // the gateway cache, so the next fetch reaches the gateway.
   const mcpRuntimeRef = {
     current: {
-      mcpTools: context.mcpTools,
+      mcpTools: applyCapabilityLimitNotes(context.mcpTools),
       mcpStatus: context.mcpStatus,
       mcpContext: context.mcpContext,
     },
@@ -982,7 +983,7 @@ export async function runAISession(
         try {
           const fresh = await getOpenClawSessionContext({ mcpExposure });
           return {
-            mcpTools: fresh.mcpTools,
+            mcpTools: applyCapabilityLimitNotes(fresh.mcpTools),
             mcpStatus: fresh.mcpStatus,
             mcpContext: fresh.mcpContext,
           };
