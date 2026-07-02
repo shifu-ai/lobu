@@ -128,17 +128,15 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         return { status: "denied" };
       }
 
-      const pattern =
-        input.action === "approve_all"
-          ? GLOBAL_TOOL_AUTO_APPROVAL_PATTERN
-          : specificPattern;
-      await deps.grantStore.grant(
-        pending.agentId,
-        pattern,
-        null,
-        undefined,
-        organizationId
-      );
+      if (input.action === "approve_all") {
+        await deps.grantStore.grant(
+          pending.agentId,
+          GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+          null,
+          undefined,
+          organizationId
+        );
+      }
 
       const execute = () =>
         deps.mcpProxy.executeToolDirect(
