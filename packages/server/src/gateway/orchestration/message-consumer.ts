@@ -54,7 +54,9 @@ export function mintRunJobToken(
     agentId: data.agentId,
     organizationId: data.organizationId,
     platform: data.platform,
-    connectionId: getStringField(data.platformMetadata, "connectionId"),
+    connectionId:
+      getStringField(data.platformMetadata, "connectionId") ??
+      (data.platform === "api" ? effectiveConversationId : undefined),
     traceId: extractTraceId(data),
     runId: data.runId,
     messageId: data.messageId,
