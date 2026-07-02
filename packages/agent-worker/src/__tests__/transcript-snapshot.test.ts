@@ -117,6 +117,85 @@ describe("hydrateFromSnapshot", () => {
       })
     ).rejects.toThrow(/transcript hydrate failed: 500/);
   });
+
+  test("hydrate skips overwrite when local watermark is newer or equal", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(sessionFile, "LOCAL", "utf-8");
+    await fs.writeFile(
+      join(sessionDir, "snapshot-watermark.json"),
+      JSON.stringify({ runId: 50 }),
+      "utf-8"
+    );
+
+    stubFetch(() => {
+      return new Response("DB_CONTENT", {
+        status: 200,
+        headers: { "x-snapshot-run-id": "49" },
+      });
+    });
+
+    const hydrated = await hydrateFromSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+    });
+    expect(hydrated).toBe(false);
+    const content = await fs.readFile(sessionFile, "utf-8");
+    expect(content).toBe("LOCAL");
+  });
+
+  test("hydrate overwrites when db snapshot is newer", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(sessionFile, "LOCAL", "utf-8");
+    const watermarkFile = join(sessionDir, "snapshot-watermark.json");
+    await fs.writeFile(
+      watermarkFile,
+      JSON.stringify({ runId: 50 }),
+      "utf-8"
+    );
+
+    stubFetch(() => {
+      return new Response("DB_CONTENT", {
+        status: 200,
+        headers: { "x-snapshot-run-id": "51" },
+      });
+    });
+
+    const hydrated = await hydrateFromSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+    });
+    expect(hydrated).toBe(true);
+    const content = await fs.readFile(sessionFile, "utf-8");
+    expect(content).toBe("DB_CONTENT");
+    const watermarkRaw = await fs.readFile(watermarkFile, "utf-8");
+    expect(JSON.parse(watermarkRaw)).toEqual({ runId: 51 });
+  });
+
+  test("hydrate overwrites on cold start (no watermark or no session file)", async () => {
+    const sessionFile = join(tmp, ".openclaw", "session.jsonl");
+
+    stubFetch(() => {
+      return new Response("DB_CONTENT", {
+        status: 200,
+        headers: { "x-snapshot-run-id": "1" },
+      });
+    });
+
+    const hydrated = await hydrateFromSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+    });
+    expect(hydrated).toBe(true);
+    const content = await fs.readFile(sessionFile, "utf-8");
+    expect(content).toBe("DB_CONTENT");
+  });
 });
 
 describe("writeSnapshot", () => {
@@ -153,21 +232,26 @@ describe("writeSnapshot", () => {
     expect(parsed.runId).toBe(42);
   });
 
-  test("non-completed terminalStatus is skipped (no POST, no waste)", async () => {
-    // Hydrate filters terminal_status='completed' — writing failed/
-    // timeout/cancelled rows is pure network waste. Codex round 2
-    // quality win C on PR #865. The cleanup() path is also gated on
-    // `terminalStatus === "completed"`, but writeSnapshot defends in
-    // depth so any future caller can't accidentally write a row that
-    // hydrate will never read.
+  test("non-completed terminalStatus still posts with the real status (forensic persistence)", async () => {
+    // Today's incident forensics were crippled because misjudged-as-failed
+    // turns never persisted their transcripts — writeSnapshot used to skip
+    // the POST entirely for any non-completed status. Now ALL terminal
+    // statuses persist; hydrate is the one that filters to
+    // `terminal_status='completed'`, so failed/timeout/cancelled rows are
+    // forensic-only but must still reach PG.
     const sessionFile = join(tmp, ".openclaw", "session.jsonl");
     await fs.mkdir(join(tmp, ".openclaw"), { recursive: true });
     await fs.writeFile(sessionFile, `{"type":"session"}\n`, "utf-8");
 
     let calls = 0;
-    stubFetch(() => {
+    const postedStatuses: string[] = [];
+    stubFetch((_url, init) => {
       calls++;
-      return new Response("{}", { status: 200 });
+      const parsed = JSON.parse(init.body as string) as {
+        terminalStatus: string;
+      };
+      postedStatuses.push(parsed.terminalStatus);
+      return new Response('{"id":1}', { status: 200 });
     });
 
     for (const terminalStatus of ["failed", "timeout", "cancelled"] as const) {
@@ -179,7 +263,46 @@ describe("writeSnapshot", () => {
         runId: 42,
       });
     }
-    expect(calls).toBe(0);
+    expect(calls).toBe(3);
+    expect(postedStatuses).toEqual(["failed", "timeout", "cancelled"]);
+  });
+
+  test("writeSnapshot posts failed turns with real terminal status and advances the watermark", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    const body = `{"type":"session","id":"failed-turn"}\n{"type":"message","id":"dangling"}\n`;
+    await fs.writeFile(sessionFile, body, "utf-8");
+
+    let postedBody: string | null = null;
+    stubFetch((url, init) => {
+      expect(url.endsWith("/worker/transcript/snapshot")).toBe(true);
+      expect(init.method).toBe("POST");
+      postedBody = init.body as string;
+      return new Response('{"id":1}', { status: 200 });
+    });
+
+    await writeSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+      terminalStatus: "failed",
+      runId: 88,
+    });
+
+    expect(postedBody).not.toBeNull();
+    const parsed = JSON.parse(postedBody!);
+    expect(parsed.terminalStatus).toBe("failed");
+    expect(parsed.snapshotJsonl).toBe(body);
+    expect(parsed.runId).toBe(88);
+
+    // Watermark advances on a failed-turn POST too — the local file
+    // contains that turn, so this is correct, not a special case.
+    const watermarkRaw = await fs.readFile(
+      join(sessionDir, "snapshot-watermark.json"),
+      "utf-8"
+    );
+    expect(JSON.parse(watermarkRaw)).toEqual({ runId: 88 });
   });
 
   test("race-win-409 is benign — no throw", async () => {
@@ -271,5 +394,28 @@ describe("writeSnapshot", () => {
       terminalStatus: "completed",
       runId: 42,
     });
+  });
+
+  test("writeSnapshot records watermark on success", async () => {
+    const sessionDir = join(tmp, ".openclaw");
+    const sessionFile = join(sessionDir, "session.jsonl");
+    await fs.mkdir(sessionDir, { recursive: true });
+    await fs.writeFile(sessionFile, `{"type":"session"}\n`, "utf-8");
+
+    stubFetch(() => new Response('{"id":1}', { status: 200 }));
+
+    await writeSnapshot({
+      sessionFile,
+      gatewayUrl: "http://gw.test/lobu",
+      workerToken: "test-jwt",
+      terminalStatus: "completed",
+      runId: 77,
+    });
+
+    const watermarkRaw = await fs.readFile(
+      join(sessionDir, "snapshot-watermark.json"),
+      "utf-8"
+    );
+    expect(JSON.parse(watermarkRaw)).toEqual({ runId: 77 });
   });
 });

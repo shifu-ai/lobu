@@ -1,6 +1,9 @@
 /**
  * Mirrors session.jsonl to PG so multi-replica pods can hydrate.
- * Snapshot written on success only; hydrate reads latest completed row.
+ * Snapshots are written for every terminal status (completed, failed,
+ * timeout, cancelled) so incident forensics can inspect what a
+ * misjudged-as-failed turn actually did; hydrate reads only the latest
+ * completed row.
  */
 
 import { promises as fs } from "node:fs";
@@ -10,6 +13,35 @@ import { createLogger } from "@lobu/core";
 const logger = createLogger("transcript-snapshot");
 
 export type TerminalStatus = "completed" | "failed" | "timeout" | "cancelled";
+
+function watermarkPath(sessionFile: string): string {
+  return path.join(path.dirname(sessionFile), "snapshot-watermark.json");
+}
+
+/**
+ * Read the locally recorded watermark runId, if any. Returns `undefined`
+ * on any read/parse failure (missing file, corrupt JSON, wrong shape) so
+ * callers treat it the same as "no watermark yet" — i.e. cold start.
+ */
+async function readWatermark(sessionFile: string): Promise<number | undefined> {
+  try {
+    const raw = await fs.readFile(watermarkPath(sessionFile), "utf-8");
+    const parsed = JSON.parse(raw) as { runId?: unknown };
+    return typeof parsed.runId === "number" ? parsed.runId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Persist the watermark runId next to the session file. Called after every
+ * successful hydrate and every successful snapshot write so the local
+ * watermark always reflects the runId whose bytes are on disk.
+ */
+async function writeWatermark(sessionFile: string, runId: number): Promise<void> {
+  await fs.mkdir(path.dirname(sessionFile), { recursive: true });
+  await fs.writeFile(watermarkPath(sessionFile), JSON.stringify({ runId }), "utf-8");
+}
 
 interface TranscriptSnapshotOptions {
   /** Absolute path to the session.jsonl SessionManager reads/writes. */
@@ -50,6 +82,30 @@ export async function hydrateFromSnapshot(
     );
   }
 
+  // Watermark guard: if the local session file is already at or ahead of
+  // the DB's latest completed snapshot, skip the overwrite. Without this,
+  // a single skipped/failed writeSnapshot() (e.g. transient POST failure)
+  // would cause the NEXT turn's hydrate to roll the local transcript back
+  // to the older DB row, silently discarding everything written locally
+  // since. Cold start (no watermark file, or no local session file yet)
+  // falls through to the unconditional overwrite below, preserving today's
+  // behavior.
+  const dbRunIdRaw = res.headers.get("x-snapshot-run-id");
+  const dbRunId = dbRunIdRaw ? Number(dbRunIdRaw) : undefined;
+  if (dbRunId !== undefined && Number.isFinite(dbRunId)) {
+    const localRunId = await readWatermark(opts.sessionFile);
+    const localExists = await fs
+      .access(opts.sessionFile)
+      .then(() => true)
+      .catch(() => false);
+    if (localExists && localRunId !== undefined && localRunId >= dbRunId) {
+      logger.info(
+        `Hydrate skipped: local transcript watermark ${localRunId} >= db snapshot ${dbRunId}`
+      );
+      return false;
+    }
+  }
+
   const body = await res.text();
   await fs.mkdir(path.dirname(opts.sessionFile), { recursive: true });
   // writeFile truncates atomically (open with O_TRUNC); no partial state
@@ -66,6 +122,10 @@ export async function hydrateFromSnapshot(
     await handle.close();
   }
 
+  if (dbRunId !== undefined && Number.isFinite(dbRunId)) {
+    await writeWatermark(opts.sessionFile, dbRunId);
+  }
+
   logger.info(
     `Hydrated session file from snapshot: ${body.length} bytes → ${opts.sessionFile}`
   );
@@ -74,9 +134,14 @@ export async function hydrateFromSnapshot(
 
 /**
  * Read the session file in full and POST it to the gateway. Called once per
- * worker run at terminal time, from `OpenClawWorker.cleanup()`. The
- * `terminal_status` discriminator lets the hydrate path skip failed/timeout
- * snapshots so a dangling `tool_use` doesn't poison the next attempt.
+ * worker run at terminal time, from `OpenClawWorker.cleanup()`. ALL terminal
+ * statuses are persisted (`completed`, `failed`, `timeout`, `cancelled`) —
+ * hydrate still filters to `terminal_status='completed'` only, so
+ * failed/timeout/cancelled rows are never replayed into a fresh worker.
+ * They exist purely for incident forensics (and any future admin-driven
+ * "restore/clean up a dangling tool_use" tooling) — without them, a
+ * misjudged-as-failed turn's transcript is gone forever once the local
+ * session.jsonl is overwritten by the next attempt.
  *
  * Failure to snapshot is logged but does NOT throw — there's nothing the
  * caller can do beyond what cleanup already does (the worker is exiting).
@@ -96,19 +161,6 @@ export async function writeSnapshot(
     runId: number;
   }
 ): Promise<void> {
-  // Hydrate filters `terminal_status='completed'` — failed/timeout/cancelled
-  // snapshots are never used. POSTing them is pure network waste; the
-  // route would store them but no future hydrate would pick them up.
-  // Skip at the source so any caller (cleanup() today, future paths
-  // tomorrow) stays out of the wasteful write. Codex round 2 quality
-  // win C on PR #865.
-  if (opts.terminalStatus !== "completed") {
-    logger.debug(
-      `Skipping snapshot POST: terminal_status='${opts.terminalStatus}' is never read by hydrate`
-    );
-    return;
-  }
-
   let body: string;
   try {
     body = await fs.readFile(opts.sessionFile, "utf-8");
@@ -161,6 +213,7 @@ export async function writeSnapshot(
       logger.error(`Snapshot POST failed: ${res.status} ${res.statusText}`);
       return;
     }
+    await writeWatermark(opts.sessionFile, opts.runId);
     logger.info(
       `Wrote snapshot: ${body.length} bytes, status=${opts.terminalStatus}`
     );

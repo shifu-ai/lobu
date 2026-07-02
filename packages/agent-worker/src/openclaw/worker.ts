@@ -383,10 +383,12 @@ export class OpenClawWorker implements WorkerExecutor {
 
   async cleanup(): Promise<void> {
     // Snapshot the post-run session.jsonl to Postgres so the next worker
-    // (possibly on a different pod) can hydrate from it. Hydrate filters
-    // `terminal_status='completed'`, so we ONLY POST on the success path
-    // — writing `failed`/`timeout`/`cancelled` rows is pure network
-    // waste (codex round 2 quality win C on PR #865).
+    // (possibly on a different pod) can hydrate from it. We POST on EVERY
+    // terminal status — completed, failed, timeout, cancelled — so a
+    // misjudged-as-failed turn's transcript still lands in PG for incident
+    // forensics. Hydrate still filters to `terminal_status='completed'`
+    // only, so failed/timeout/cancelled rows are never replayed into a
+    // fresh worker; they're forensic-only.
     //
     // The runs queue has already moved this run to a terminal state by
     // the time cleanup() fires (sse-client.ts:865 finally block runs
@@ -394,7 +396,7 @@ export class OpenClawWorker implements WorkerExecutor {
     // breath; the gateway-side advisory lock held by the spawner is
     // released when the subprocess exits, so by the next claim's boot
     // this snapshot is the visible "latest" row.
-    if (this.sessionFilePath && this.terminalStatus === "completed") {
+    if (this.sessionFilePath) {
       const gatewayUrl = process.env.DISPATCHER_URL;
       const runId = this.config.runId;
       // Per-run JWT minted by the gateway's MessageConsumer alongside

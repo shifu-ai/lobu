@@ -167,6 +167,77 @@ describe("evaluateTaskCompletion write intent guard", () => {
   });
 });
 
+describe("2026-07-02 write tool pattern fail-open guard", () => {
+  test("notion page creation counts as write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我新增notion頁面 標題是AI",
+      finalVisibleText: "已建立 Notion 頁面！",
+      toolExecutions: [{ toolName: "notion-create-pages", isError: false }],
+    });
+    expect(decision.outcome).toBe("completed");
+  });
+
+  test("google docs creation counts as write evidence (suffixed variant)", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我新增一個google doc 標題寫ai pm",
+      finalVisibleText: "Google Doc 已建立成功！",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_create_2", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("completed");
+  });
+
+  test("unknown non-read tool fails open as write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我建立排程",
+      finalVisibleText: "排程已建立。",
+      toolExecutions: [
+        { toolName: "sales_battle_report_schedule_create", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("completed");
+  });
+
+  test("write intent with only read tools still fails incomplete", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我更新那份文件",
+      finalVisibleText: "我找到了文件。",
+      toolExecutions: [
+        { toolName: "notion_search_2", isError: false },
+        { toolName: "google_workspace_drive_search", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("failed_incomplete");
+    expect(decision.reason).toBe("task_completion_write_intent_without_write");
+  });
+
+  test("gws read tools in write namespaces are not write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我更新文件",
+      finalVisibleText: "我看完文件了。",
+      toolExecutions: [
+        { toolName: "google_workspace_docs_read", isError: false },
+        { toolName: "docs_search_2", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("failed_incomplete");
+  });
+
+  test("hyphenated notion read tools are not write evidence", () => {
+    const decision = evaluateTaskCompletion({
+      latestUserText: "幫我更新那份文件",
+      finalVisibleText: "我查到了相關頁面。",
+      toolExecutions: [
+        { toolName: "notion-search", isError: false },
+        { toolName: "notion-get-comments", isError: false },
+        { toolName: "notion-query-data-sources", isError: false },
+      ],
+    });
+    expect(decision.outcome).toBe("failed_incomplete");
+  });
+});
+
 describe("2026-06-25 Google Doc rewrite regression", () => {
   test("blocks completed status when doc rewrite task only reads docs and slides", () => {
     const result = evaluateTaskCompletion({

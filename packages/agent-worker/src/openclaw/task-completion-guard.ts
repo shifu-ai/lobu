@@ -1,3 +1,7 @@
+import { createLogger } from "@lobu/core";
+
+const logger = createLogger("task-completion-guard");
+
 export type TaskCompletionOutcome =
   | "completed"
   | "failed_incomplete"
@@ -64,26 +68,34 @@ const BLOCKER_PATTERNS = [
 ];
 
 const WRITE_TOOL_PATTERNS = [
-  /_batch_update$/i,
-  /_values_update$/i,
-  /_messages_create$/i,
-  /^docs_batch_update$/i,
-  /^gws_docs_batch_update$/i,
-  /^google_workspace_docs_batch_update$/i,
-  /^sheets_values_update$/i,
-  /^slides_batch_update$/i,
-  /^chat_messages_create$/i,
+  /_batch_update(_\d+)?$/i,
+  /_values_update(_\d+)?$/i,
+  /_messages_create(_\d+)?$/i,
+  /(^|_)(docs|sheets|slides|calendar_events)_(create|update|delete)(_\d+)?$/i,
+  /^notion[-_](create|update|move|duplicate)[-_]/i,
+  /^submit_course_pm_profile(_\d+)?$/i,
+  /^write_segments(_\d+)?$/i,
+  /^card_studio_(write|create|update|delete)_/i,
+  /^sales_battle_report_schedule_(create|update|delete|pause)(_\d+)?$/i,
 ];
 const GOOGLE_DOCS_WRITE_TOOL_PATTERNS = [
-  /^docs_batch_update$/i,
-  /^gws_docs_batch_update$/i,
-  /^google_workspace_docs_batch_update$/i,
+  /^(gws_|google_workspace_)?docs_batch_update(_\d+)?$/i,
 ];
+
+const READ_ONLY_TOOL_PATTERNS = [
+  /(^|[-_])(search|list|get|read|fetch|query|describe|check|status|find|help|access)([-_]|$|\d)/i,
+];
+
+function isReadOnlyTool(toolName: string): boolean {
+  return READ_ONLY_TOOL_PATTERNS.some((pattern) => pattern.test(toolName));
+}
 
 export function evaluateTaskCompletion(
   input: TaskCompletionInput
 ): TaskCompletionDecision {
   const finalText = input.finalVisibleText.trim();
+
+  logFailOpenWriteEvidence(input.toolExecutions);
 
   if (!finalText) {
     return {
@@ -135,8 +147,41 @@ export function hasSuccessfulWriteEvidence(
       !tool.isError &&
       (!isGoogleDocsWriteTool(tool.toolName) ||
         tool.resultSummary?.effect_verified === true) &&
-      WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName))
+      (WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName)) ||
+        !isReadOnlyTool(tool.toolName))
   );
+}
+
+/**
+ * Returns the tool names that only counted as write evidence via the
+ * fail-open disjunct in `hasSuccessfulWriteEvidence` — i.e. tools that are
+ * not error, not a recognized write tool, and not a recognized read-only
+ * tool either. These are "unknown" tools the guard is uncertain about, and
+ * their fail-open classification should be observable (spec AC2).
+ */
+function getFailOpenWriteEvidenceTools(
+  toolExecutions: ToolExecutionSummary[]
+): string[] {
+  return toolExecutions
+    .filter(
+      (tool) =>
+        !tool.isError &&
+        !WRITE_TOOL_PATTERNS.some((pattern) => pattern.test(tool.toolName)) &&
+        !isReadOnlyTool(tool.toolName)
+    )
+    .map((tool) => tool.toolName);
+}
+
+function logFailOpenWriteEvidence(
+  toolExecutions: ToolExecutionSummary[]
+): void {
+  const failOpenTools = getFailOpenWriteEvidenceTools(toolExecutions);
+  if (failOpenTools.length > 0) {
+    logger.warn("guard_uncertain", {
+      reason: "unknown_tool_fail_open_as_write_evidence",
+      toolNames: failOpenTools,
+    });
+  }
 }
 
 export function hasUnverifiedWriteEvidence(
