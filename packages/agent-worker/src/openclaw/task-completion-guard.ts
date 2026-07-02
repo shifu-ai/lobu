@@ -70,9 +70,37 @@ const BLOCKER_PATTERNS = [
   /(?:核准|批准|同意|授權).*(?:後|之後).*(?:執行|繼續|進行)/i,
   /\b(?:waiting for|awaiting|pending|once you|after you)\b.*\b(?:approv|authoriz|consent)/i,
   /(?:同意|授權)(?:卡|請求|按鈕)/i,
+  /(?:不支持|不支援|無法|沒有辦法|做不到|沒有提供).*(?:刪除|歸檔|封存|移除|delete|archive|trash)/i,
 ];
 
 const TOOL_RESULT_APPROVAL_REQUIRED_PATTERN = /requires approval/i;
+
+/**
+ * Cross-repo string contract: synthetic resume-turn prefixes.
+ *
+ * - `[系統通知]` is produced by the LINE Gateway's `approvalResumeContent`
+ *   (shifu-line-gateway `src/index.ts`) when it fires a resume turn after a
+ *   user approves/rejects a tool-approval card. The embedded text is a
+ *   system-generated report of a tool result/error (often containing
+ *   English write verbs like "update"/"delete"), not a user's write
+ *   request — and the actual tool call happened out-of-band at approval
+ *   time, so it never appears in this turn's `toolExecutions`.
+ * - `[System]` is produced by the server's OAuth resume path
+ *   (`packages/server/src/gateway/auth/mcp/resume-after-oauth.ts`) after an
+ *   MCP OAuth flow completes, asking the agent to retry the user's previous
+ *   request.
+ *
+ * Both are synthetic system messages, not user-authored write intent, so
+ * the write-intent branches below must not fire on them.
+ */
+const SYNTHETIC_SYSTEM_MESSAGE_PREFIXES = ["[系統通知]", "[System]"] as const;
+
+function isSyntheticSystemMessage(text: string): boolean {
+  const trimmed = text.trim();
+  return SYNTHETIC_SYSTEM_MESSAGE_PREFIXES.some((prefix) =>
+    trimmed.startsWith(prefix)
+  );
+}
 
 const WRITE_TOOL_PATTERNS = [
   /_batch_update(_\d+)?$/i,
@@ -112,7 +140,10 @@ export function evaluateTaskCompletion(
     };
   }
 
+  const isSyntheticResumeTurn = isSyntheticSystemMessage(input.latestUserText);
+
   if (
+    !isSyntheticResumeTurn &&
     hasWriteIntent(input.latestUserText) &&
     hasUnverifiedWriteEvidence(input.toolExecutions) &&
     !hasVisibleBlocker(finalText) &&
@@ -126,6 +157,7 @@ export function evaluateTaskCompletion(
   }
 
   if (
+    !isSyntheticResumeTurn &&
     hasWriteIntent(input.latestUserText) &&
     !hasSuccessfulWriteEvidence(input.toolExecutions) &&
     !hasVisibleBlocker(finalText) &&

@@ -281,6 +281,62 @@ describe("2026-07-02 approval-blocked turn guard", () => {
   });
 });
 
+describe("2026-07-02 synthetic resume-turn guard exemption", () => {
+  test("LINE Gateway approval-failure resume turn is exempt from write-intent guard", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText:
+        "[系統通知] 使用者已同意，但工具執行失敗：Error: cannot update or delete the page。請告知使用者失敗原因並提出替代做法。",
+      finalVisibleText: "抱歉，刪除操作失敗了。",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+
+  test("OAuth resume turn ([System] prefix) is exempt from write-intent guard", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText:
+        '[System] Authentication for "notion" completed successfully. Retry the user\'s previous request and continue where you left off.',
+      finalVisibleText: "已重新確認驗證狀態，可以繼續協助你。",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+
+  test("exemption does not leak to non-synthetic write-intent turns (regression guard)", () => {
+    // Reuses the fixture from the "2026-07-02 write tool pattern fail-open
+    // guard" describe block above ("write intent with only read tools still
+    // fails incomplete") to confirm the synthetic-message exemption is
+    // scoped to the `[系統通知]` / `[System]` prefix and does not weaken the
+    // guard for genuine user write-intent turns.
+    const result = evaluateTaskCompletion({
+      latestUserText: "幫我更新那份文件",
+      finalVisibleText: "我找到了文件。",
+      toolExecutions: [
+        { toolName: "notion_search_2", isError: false },
+        { toolName: "google_workspace_drive_search", isError: false },
+      ],
+    });
+
+    expect(result.outcome).toBe("failed_incomplete");
+    expect(result.reason).toBe("task_completion_write_intent_without_write");
+  });
+});
+
+describe("2026-07-02 capability-refusal blocker patterns", () => {
+  test("recognizes 'tool does not support delete/archive' as a visible blocker", () => {
+    const result = evaluateTaskCompletion({
+      latestUserText: "幫我刪除那個頁面",
+      finalVisibleText:
+        "Notion 工具不支持直接歸檔或刪除頁面，請手動處理。",
+      toolExecutions: [],
+    });
+
+    expect(result.outcome).toBe("completed");
+  });
+});
+
 describe("2026-06-25 Google Doc rewrite regression", () => {
   test("blocks completed status when doc rewrite task only reads docs and slides", () => {
     const result = evaluateTaskCompletion({
