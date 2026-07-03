@@ -11,7 +11,7 @@ describe("Shifu trace context", () => {
       new Headers({
         "X-Shifu-Trace-Id": "tr_test",
         "X-Shifu-Span-Id": "sp_parent",
-        "X-Shifu-Journey": "line_text_agent_turn",
+        "X-Shifu-Journey-Id": "line_text_agent_turn",
         "X-Shifu-Turn-Id": "turn_1",
         "X-Shifu-Actor": "line",
       })
@@ -25,6 +25,27 @@ describe("Shifu trace context", () => {
       actor: "line",
       traceSource: "incoming",
     });
+  });
+
+  test("parses existing journey id header contract", () => {
+    const trace = parseShifuTraceHeaders(
+      new Headers({
+        "X-Shifu-Journey-Id": "line_text_agent_turn",
+      })
+    );
+
+    expect(trace.journeyId).toBe("line_text_agent_turn");
+  });
+
+  test("prefers journey id header over journey fallback", () => {
+    const trace = parseShifuTraceHeaders(
+      new Headers({
+        "X-Shifu-Journey-Id": "line_text_agent_turn",
+        "X-Shifu-Journey": "fallback_journey",
+      })
+    );
+
+    expect(trace.journeyId).toBe("line_text_agent_turn");
   });
 
   test("missing headers generates safe fallback", () => {
@@ -49,7 +70,7 @@ describe("Shifu trace context", () => {
     ).toEqual({
       "X-Shifu-Trace-Id": "tr_test",
       "X-Shifu-Span-Id": "sp_parent",
-      "X-Shifu-Journey": "line_text_agent_turn",
+      "X-Shifu-Journey-Id": "line_text_agent_turn",
       "X-Shifu-Turn-Id": "turn_1",
       "X-Shifu-Actor": "line",
     });

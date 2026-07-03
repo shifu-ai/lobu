@@ -31,7 +31,10 @@ export function parseShifuTraceHeaders(headers: TraceHeaders): ShifuTraceContext
   return {
     traceId: traceId ?? `tr_lobu_${uuidHex()}`,
     parentSpanId: getHeader(headers, "X-Shifu-Span-Id"),
-    journeyId: getHeader(headers, "X-Shifu-Journey") ?? "lobu_runtime_unknown",
+    journeyId:
+      getHeader(headers, "X-Shifu-Journey-Id") ??
+      getHeader(headers, "X-Shifu-Journey") ??
+      "lobu_runtime_unknown",
     turnId: getHeader(headers, "X-Shifu-Turn-Id"),
     actor: getHeader(headers, "X-Shifu-Actor") ?? "unknown",
     traceSource: traceId ? "incoming" : "generated_missing_header",
@@ -44,7 +47,7 @@ export function headersFromTraceContext(
   return {
     "X-Shifu-Trace-Id": context.traceId,
     ...(context.parentSpanId ? { "X-Shifu-Span-Id": context.parentSpanId } : {}),
-    "X-Shifu-Journey": context.journeyId,
+    "X-Shifu-Journey-Id": context.journeyId,
     ...(context.turnId ? { "X-Shifu-Turn-Id": context.turnId } : {}),
     "X-Shifu-Actor": context.actor,
   };
