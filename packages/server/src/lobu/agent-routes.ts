@@ -39,7 +39,7 @@ import {
   type ToolboxMcpStatusConnectorKey,
 } from './connector-mcp-resolver';
 import { classifyToolCallFailure } from './tool-call-classifier';
-import { mintConnectLinkToken } from '../gateway/auth/mcp/connect-link-token';
+import { buildMcpConnectUrl } from '../gateway/auth/mcp/connect-link-url';
 import { emitAgentObsEvent } from '@lobu/core';
 import { parseShifuTraceHeaders } from '../observability/trace-context';
 
@@ -825,43 +825,14 @@ function buildToolCallConnectUrl(params: {
   ownerUserId: string;
   organizationId?: string;
 }): string | undefined {
-  const publicGatewayUrl = getLobuCoreServices()?.getPublicGatewayUrl?.();
-  if (!publicGatewayUrl || typeof publicGatewayUrl !== 'string') {
-    console.warn('[tools/call] connectUrl omitted: publicGatewayUrl not configured', {
-      mcpId: params.mcpId,
-    });
-    return undefined;
-  }
-  try {
-    const base = publicGatewayUrl.replace(/\/+$/, '');
-    const url = new URL(`${base}/mcp/oauth/start`);
-    if (url.protocol !== 'https:') {
-      console.warn('[tools/call] connectUrl omitted: publicGatewayUrl is not https', {
-        mcpId: params.mcpId,
-      });
-      return undefined;
-    }
-    const token = mintConnectLinkToken({
-      agentId: params.agentId,
-      mcpId: params.mcpId,
-      userId: params.ownerUserId,
-      organizationId: params.organizationId,
-    });
-    if (!token) {
-      console.warn('[tools/call] connectUrl omitted: no signing key (ENCRYPTION_KEY unset)', {
-        mcpId: params.mcpId,
-      });
-      return undefined;
-    }
-    url.searchParams.set('token', token);
-    return url.toString();
-  } catch (error) {
-    console.warn('[tools/call] connectUrl omitted: failed to build URL', {
-      mcpId: params.mcpId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return undefined;
-  }
+  return buildMcpConnectUrl({
+    publicGatewayUrl: getLobuCoreServices()?.getPublicGatewayUrl?.(),
+    agentId: params.agentId,
+    mcpId: params.mcpId,
+    userId: params.ownerUserId,
+    organizationId: params.organizationId,
+    logContext: "tools/call",
+  });
 }
 
 /** Raw (unfiltered) diagnostic code, used only as classifier input — never returned to the client. */

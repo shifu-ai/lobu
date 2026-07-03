@@ -2,6 +2,8 @@ import { createLogger, type McpOAuthConfig } from "@lobu/core";
 import { Hono } from "hono";
 import { GenericDeviceCodeClient } from "../../auth/external/device-code-client.js";
 import type { McpConfigService } from "../../auth/mcp/config-service.js";
+import { CONNECT_LINK_TOKEN_TTL_MS } from "../../auth/mcp/connect-link-token.js";
+import { buildMcpConnectUrl } from "../../auth/mcp/connect-link-url.js";
 import type { WritableSecretStore } from "../../secrets/index.js";
 import { errorResponse, getVerifiedWorker } from "../shared/helpers.js";
 import { authenticateWorker } from "./middleware.js";
@@ -60,6 +62,8 @@ interface StoredClient {
 interface DeviceAuthConfig {
   mcpConfigService: McpConfigService;
   secretStore: WritableSecretStore;
+  /** Public https base URL for minting auth-code connect links (fallback when the upstream lacks device-code support). */
+  publicGatewayUrl?: string;
 }
 
 interface ResolvedOAuthEndpoints {
@@ -564,7 +568,14 @@ export async function startDeviceAuth(
         }),
       });
 
-      if (!regResponse.ok) return null;
+      if (!regResponse.ok) {
+        logger.warn("startDeviceAuth: dynamic client registration failed", {
+          mcpId,
+          registrationUrl: endpoints.registrationUrl,
+          status: regResponse.status,
+        });
+        return null;
+      }
 
       const registration = (await regResponse.json()) as {
         client_id: string;
@@ -653,9 +664,30 @@ export function createDeviceAuthRoutes(
       );
 
       if (!result) {
+        const connectUrl = buildMcpConnectUrl({
+          publicGatewayUrl: config.publicGatewayUrl,
+          agentId,
+          mcpId,
+          userId,
+          organizationId: worker.organizationId,
+          logContext: "device-auth",
+        });
+        if (connectUrl) {
+          logger.info(
+            "Device flow unavailable — returning auth-code connect link",
+            { mcpId, agentId, userId }
+          );
+          return c.json({
+            flow: "auth_code",
+            userCode: "",
+            verificationUri: connectUrl,
+            verificationUriComplete: connectUrl,
+            expiresIn: Math.floor(CONNECT_LINK_TOKEN_TTL_MS / 1000),
+          });
+        }
         return errorResponse(
           c,
-          `MCP server '${mcpId}' not found or client registration failed`,
+          `authorization link could not be generated for '${mcpId}' — device flow unsupported and connect-link fallback unavailable (check publicGatewayUrl / ENCRYPTION_KEY)`,
           404
         );
       }
