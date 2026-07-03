@@ -323,6 +323,55 @@ describe("durable observability for tools/list", () => {
     });
   });
 
+  test("emits upstream host without port in auth failure metadata", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const configSource = createConfigSource({
+      "port-mcp": {
+        id: "port-mcp",
+        upstreamUrl: "https://port-mcp.example.test:9443/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://obs.example.test/ingest") {
+        obsBodies.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 202 });
+      }
+      return new Response("auth required", { status: 401 });
+    }) as unknown as typeof fetch;
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("port-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(result.tools).toEqual([]);
+    const completed = obsBodies.find(
+      (body) =>
+        body.eventName === "lobu.mcp.tools_list.completed" &&
+        body.status === "failed"
+    );
+    expect(completed).toMatchObject({
+      metadata: expect.objectContaining({
+        mcp_id: "port-mcp",
+        upstream_host: "port-mcp.example.test",
+      }),
+    });
+  });
+
   test.each([
     { status: 401, phase: "initialize", diagnostic: "upstream_unauthorized" },
     { status: 403, phase: "initialize", diagnostic: "upstream_forbidden" },
@@ -499,6 +548,36 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         classification: "unknown_error",
         jsonrpc_error_code: -32001,
         result_preview: expect.any(Object),
+      }),
+    });
+  });
+
+  test("classifies unknown MCP config errors from JSON-RPC tool calls as config_error", async () => {
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      error: { code: -32602, message: "unknown server: shifu-toolbox" },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 7,
+      error: { code: -32602, message: "unknown server: shifu-toolbox" },
+    });
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tool_call.completed",
+      status: "failed",
+      toolName: "meeting_search",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "jsonrpc-mcp",
+        tool_name: "meeting_search",
+        classification: "config_error",
+        jsonrpc_error_code: -32602,
       }),
     });
   });

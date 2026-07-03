@@ -60,7 +60,7 @@ function safeHost(value: string | URL | undefined): string {
   if (!value) return "";
   try {
     const url = value instanceof URL ? value : new URL(value);
-    return url.host;
+    return url.hostname;
   } catch {
     return "";
   }
@@ -124,7 +124,11 @@ function classifyMcpObsError(error: unknown): string {
   if (/401|403|unauthorized|forbidden|oauth|token/i.test(signal)) {
     return "needs_reauth";
   }
-  if (/not found|unknown tool|allowlist|not allowed/i.test(signal)) {
+  if (
+    /not found|allowlist|not allowed|\bunknown\s+(?:mcp|server|connector|tool)\b/i.test(
+      signal
+    )
+  ) {
     return "config_error";
   }
   if (
