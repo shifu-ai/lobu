@@ -20,6 +20,7 @@ import type { McpTool } from "../auth/mcp/tool-cache.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import { getStoredCredential } from "../routes/internal/device-auth.js";
 import type { WritableSecretStore } from "../secrets/index.js";
+import type { ShifuTraceContext } from "../../observability/trace-context.js";
 import { resolveEffectiveModelRef } from "../auth/settings/model-selection.js";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import {
@@ -1324,7 +1325,10 @@ export class WorkerGateway {
 						401,
 					);
 				}
-				const shifuTrace = parseShifuTraceHeaders(c.req.raw.headers, "worker");
+				const shifuTrace: ShifuTraceContext = parseShifuTraceHeaders(
+					c.req.raw.headers,
+					"worker",
+				);
 
 				// Build instruction context
 				const instructionContext: InstructionContext = {

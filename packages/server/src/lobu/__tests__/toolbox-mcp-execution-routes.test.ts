@@ -319,6 +319,10 @@ describe('Toolbox MCP execution routes', () => {
         Authorization: 'Bearer admin-token',
         'Content-Type': 'application/json',
         'X-Shifu-Trace-Id': 'trace-route-001',
+        'X-Shifu-Span-Id': 'sp_parent',
+        'X-Shifu-Journey': 'line_text_agent_turn',
+        'X-Shifu-Turn-Id': 'turn_1',
+        'X-Shifu-Actor': 'line',
       },
       body: JSON.stringify({
         ownerUserId: OWNER_USER_ID,
@@ -337,6 +341,7 @@ describe('Toolbox MCP execution routes', () => {
     expect(payload).toMatchObject({
       schemaVersion: 'journey.trace.v1',
       traceId: 'trace-route-001',
+      turnId: 'turn_1',
       eventName: 'lobu.mcp.tool_call.started',
       status: 'started',
       stage: 'lobu.mcp.tool_call',
@@ -348,6 +353,9 @@ describe('Toolbox MCP execution routes', () => {
       metadata: {
         route: '/mcp/tools/call',
         method: 'POST',
+        journey_id: 'line_text_agent_turn',
+        parent_span_id: 'sp_parent',
+        trace_source: 'incoming',
       },
     });
   });

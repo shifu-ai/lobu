@@ -4,7 +4,7 @@
  * All routes are org-scoped via mcpAuth middleware and orgContext.
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { encrypt, type AuthProfile, type StoredConnection } from '@lobu/core';
@@ -41,6 +41,7 @@ import {
 import { classifyToolCallFailure } from './tool-call-classifier';
 import { mintConnectLinkToken } from '../gateway/auth/mcp/connect-link-token';
 import { emitAgentObsEvent } from '../observability/shifu-agent-obs';
+import { parseShifuTraceHeaders } from '../observability/trace-context';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -1055,24 +1056,15 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
   if (denied) return denied;
 
-  const traceId =
-    stringField(c.req.header('x-shifu-trace-id')) ??
-    stringField(body.shifuTraceId) ??
-    stringField(body.traceId) ??
-    stringField(body.trace_id) ??
-    randomUUID();
-  const turnId =
-    stringField(c.req.header('x-shifu-turn-id')) ??
-    stringField(body.turnId) ??
-    stringField(body.turn_id);
+  const trace = parseShifuTraceHeaders(c.req.raw.headers);
   const conversationId =
     stringField(c.req.header('x-shifu-conversation-id')) ??
     stringField(body.conversationId) ??
     stringField(body.conversation_id);
 
   void emitAgentObsEvent({
-    traceId,
-    turnId,
+    traceId: trace.traceId,
+    turnId: trace.turnId,
     conversationId,
     agentId,
     userId: ownerUserId,
@@ -1085,6 +1077,9 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     metadata: {
       route: '/mcp/tools/call',
       method: 'POST',
+      journey_id: trace.journeyId,
+      parent_span_id: trace.parentSpanId,
+      trace_source: trace.traceSource,
     },
   });
 

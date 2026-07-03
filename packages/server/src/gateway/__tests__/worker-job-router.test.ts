@@ -180,6 +180,47 @@ describe("WorkerJobRouter", () => {
       expect(jobEvent?.data?.jobId).toBeDefined();
     });
 
+    test("preserves trace context in job payload", async () => {
+      const res = new MockResponse() as any;
+      connectionManager.addConnection(
+        "worker-1",
+        "U123",
+        "thread-1",
+        "agent-1",
+        res
+      );
+
+      await router.registerWorker("worker-1");
+      res.clearWrites();
+
+      const job = TestHelpers.createMockJob({
+        traceContext: {
+          traceId: "tr_worker_route",
+          parentSpanId: "sp_parent",
+          journeyId: "line_text_agent_turn",
+          turnId: "turn_worker",
+          actor: "line",
+          traceSource: "incoming",
+        },
+      });
+      const routePromise = queue.addJob("thread_message_worker-1", job);
+
+      const events = TestHelpers.parseSSE(res.getAllWrites());
+      const jobEvent = events.find((e) => e.event === "job");
+
+      if (jobEvent?.data?.jobId) {
+        router.acknowledgeJob(jobEvent.data.jobId);
+      }
+
+      await routePromise;
+
+      expect(jobEvent?.data?.payload?.traceContext).toMatchObject({
+        traceId: "tr_worker_route",
+        journeyId: "line_text_agent_turn",
+        turnId: "turn_worker",
+      });
+    });
+
     test("rejects job when worker not connected", async () => {
       await router.registerWorker("worker-1");
 
