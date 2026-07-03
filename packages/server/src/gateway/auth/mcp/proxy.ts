@@ -169,6 +169,12 @@ function nextMcpDebugHint(errorClass: string): string {
 }
 
 const RESULT_PREVIEW_MAX_LENGTH = 300;
+const SENSITIVE_PREVIEW_JSON_FIELD_PATTERN =
+  /["'](?:access[_-]?token|accessToken|refresh[_-]?token|refreshToken|id[_-]?token|idToken|client[_-]?secret|clientSecret|api[_-]?key|apiKey|authorization|password|secret)["']\s*:\s*["'][^"']*["']/gi;
+const SENSITIVE_PREVIEW_KV_PATTERN =
+  /\b(?:access[_-]?token|accessToken|refresh[_-]?token|refreshToken|id[_-]?token|idToken|client[_-]?secret|clientSecret|api[_-]?key|apiKey|authorization|password|secret)\s*=\s*[^\s,;&]+/gi;
+const SENSITIVE_PREVIEW_TOKEN_PREFIX_PATTERN =
+  /\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,}|xox[baprs]-[A-Za-z0-9-]+|ya29\.[A-Za-z0-9._-]+)\b/gi;
 const SENSITIVE_PREVIEW_VALUE_PATTERN =
   /\b(?:authorization\s*:\s*bearer|bearer|token|secret|password|api[_\-\s]?key)\s*[:=]?\s*[^\s,;]+/gi;
 const SENSITIVE_PREVIEW_PATTERN =
@@ -176,6 +182,9 @@ const SENSITIVE_PREVIEW_PATTERN =
 
 function sanitizeResultPreviewText(value: string): string {
   const redacted = value
+    .replace(SENSITIVE_PREVIEW_JSON_FIELD_PATTERN, "[REDACTED]")
+    .replace(SENSITIVE_PREVIEW_KV_PATTERN, "[REDACTED]")
+    .replace(SENSITIVE_PREVIEW_TOKEN_PREFIX_PATTERN, "[REDACTED]")
     .replace(SENSITIVE_PREVIEW_VALUE_PATTERN, "[REDACTED]")
     .replace(SENSITIVE_PREVIEW_PATTERN, "[REDACTED]");
   if (redacted.length <= RESULT_PREVIEW_MAX_LENGTH) return redacted;
@@ -3218,7 +3227,9 @@ export class McpProxy {
       responseHeaders.set("Mcp-Session-Id", newSessionId);
     }
 
-    const forwardedToolCallInspection = forwardedToolName
+    const shouldInspectForwardedToolCallResponse =
+      forwardedToolName && !contentType?.includes("text/event-stream");
+    const forwardedToolCallInspection = shouldInspectForwardedToolCallResponse
       ? await inspectForwardedToolCallResponseForObs(response.clone())
       : null;
     const body = this.wrapStreamableResponseBody(

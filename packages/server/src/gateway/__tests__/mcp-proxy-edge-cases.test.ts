@@ -683,6 +683,46 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     expect(firstText).toContain("[truncated]");
   });
 
+  test("redacts common credential shapes from tool call result preview text", async () => {
+    const credentials = {
+      accessTokenParam: "access_token=ya29.raw-access-token",
+      refreshTokenParam: "refresh_token=raw-refresh-token",
+      githubPat: "ghp_rawgithubtoken1234567890",
+      slackBotToken: "xoxb-raw-slack-token",
+      jsonAccessToken: `"access_token":"json-raw-access-token"`,
+      jsonRefreshToken: `"refreshToken":"json-raw-refresh-token"`,
+    };
+    const longText = `${Object.values(credentials).join(" ")} ${"x".repeat(
+      400
+    )}`;
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: longText }],
+        isError: true,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    const firstText = completed?.metadata?.result_preview?.first_text;
+    expect(firstText).toEqual(expect.any(String));
+    for (const credential of Object.values(credentials)) {
+      expect(firstText).not.toContain(credential);
+    }
+    expect(firstText).not.toContain("raw-access-token");
+    expect(firstText).not.toContain("raw-refresh-token");
+    expect(firstText).not.toContain("rawgithubtoken");
+    expect(firstText).not.toContain("raw-slack-token");
+    expect(firstText).not.toContain("json-raw-access-token");
+    expect(firstText).not.toContain("json-raw-refresh-token");
+    expect(firstText.length).toBeLessThanOrEqual(314);
+    expect(firstText).toContain("[truncated]");
+  });
+
   test("classifies machine-readable tool diagnostic codes as config_error", async () => {
     const { response, obsBodies } = await requestForwardedToolCall({
       jsonrpc: "2.0",
@@ -718,6 +758,114 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         result_preview: expect.objectContaining({
           is_error: true,
           diagnostic_code: "tool_not_found",
+        }),
+      }),
+    });
+  });
+
+  test("returns forwarded SSE tools/call response before delayed stream emits", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const configSource = createConfigSource({
+      "sse-forwarded-mcp": {
+        id: "sse-forwarded-mcp",
+        upstreamUrl: "https://sse-forwarded.example.test/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+    const app = proxy.getApp();
+    let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
+
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://obs.example.test/ingest") {
+        obsBodies.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 202 });
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (body.method === "tools/call") {
+        const stream = new ReadableStream<Uint8Array>({
+          start(streamController) {
+            controller = streamController;
+          },
+        });
+        return new Response(stream, {
+          status: 200,
+          headers: { "Content-Type": "text/event-stream" },
+        });
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const requestPromise = app.request("/sse-forwarded-mcp", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+        "X-Shifu-Trace-Id": "trace-forwarded-sse",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+
+    const outcome = await Promise.race([
+      requestPromise.then(() => "resolved"),
+      new Promise((resolve) => setTimeout(() => resolve("blocked"), 50)),
+    ]);
+    controller?.enqueue(
+      new TextEncoder().encode(
+        `data: ${JSON.stringify({
+          jsonrpc: "2.0",
+          id: 7,
+          result: {
+            content: [{ type: "text", text: "eventual" }],
+            isError: false,
+          },
+        })}\n\n`
+      )
+    );
+    controller?.close();
+
+    expect(outcome).toBe("resolved");
+    const response = await requestPromise;
+    expect(response.status).toBe(200);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const completedEvents = obsBodies.filter(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    expect(completedEvents).toHaveLength(1);
+    expect(completedEvents[0]).toMatchObject({
+      eventName: "lobu.mcp.tool_call.completed",
+      status: "ok",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "sse-forwarded-mcp",
+        tool_name: "meeting_search",
+        classification: "ok",
+        result_preview: expect.objectContaining({
+          streamed_response: true,
+          http_status: 200,
         }),
       }),
     });
