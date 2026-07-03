@@ -7,8 +7,6 @@ const OBS_ENV_KEYS = [
   'SHIFU_AGENT_OBS_TOKEN',
   'SHIFU_AGENT_OBS_SOURCE',
   'SHIFU_AGENT_OBS_TIMEOUT_MS',
-  'TOOLBOX_AGENT_OBSERVABILITY_URL',
-  'TOOLBOX_INTERNAL_SECRET',
 ] as const;
 
 const originalEnv = new Map<string, string | undefined>();
@@ -103,52 +101,6 @@ describe('ShiFu Agent Obs event emitter', () => {
       eventName: 'lobu.mcp.tool_call.started',
       status: 'started',
       stage: 'lobu.mcp.tool_call',
-    });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  test('posts through the Toolbox internal-secret alias without an enable flag', async () => {
-    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL = 'https://toolbox.example.test/ingest';
-    process.env.TOOLBOX_INTERNAL_SECRET = 'internal-secret';
-    const fetchMock = mock(async () => new Response('{}', { status: 202 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    await emitAgentObsEvent({
-      traceId: 'tr_toolbox_alias',
-      eventName: 'lobu.worker.started',
-      status: 'started',
-      stage: 'lobu.worker',
-      metadata: { authorization: 'Bearer secret-token', safe: 'ok' },
-    });
-
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://toolbox.example.test/ingest');
-    expect(init.headers).toEqual({
-      'content-type': 'application/json',
-      'x-internal-secret': 'internal-secret',
-    });
-    const payload = JSON.parse(String(init.body));
-    expect(payload).toMatchObject({
-      schemaVersion: 'journey.trace.v1',
-      traceId: 'tr_toolbox_alias',
-      eventName: 'lobu.worker.started',
-      metadata: { authorization: '[REDACTED]', safe: 'ok' },
-    });
-    expect(JSON.stringify(payload)).not.toContain('secret-token');
-  });
-
-  test('does not post through the Toolbox alias without an internal secret', async () => {
-    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL = 'https://toolbox.example.test/ingest';
-    const fetchMock = mock(async () => new Response('{}', { status: 202 }));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
-
-    await emitAgentObsEvent({
-      traceId: 'tr_toolbox_missing_secret',
-      eventName: 'lobu.worker.started',
-      status: 'started',
-      stage: 'lobu.worker',
     });
 
     expect(fetchMock).not.toHaveBeenCalled();

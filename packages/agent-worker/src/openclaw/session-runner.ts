@@ -29,6 +29,7 @@ import type { ProgressUpdate, SessionExecutionResult } from "../core/types";
 import type { GatewayParams } from "../shared/tool-implementations";
 import { createExecutionReporter } from "./execution-reporter";
 import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
+import { emitJourneyObservabilityEvent } from "../shared/journey-observability";
 import { isRecord } from "../shared/type-guards";
 import {
   emitJourneyEvent,
@@ -651,6 +652,35 @@ function emitWorkerObsEvent(input: {
   });
 }
 
+function emitWorkerJourneyObsEvent(input: {
+  trace: WorkerShifuTraceContext;
+  conversationId?: string;
+  agentId?: string;
+  userId?: string;
+  event: string;
+  status: "started" | "ok" | "failed" | string;
+  durationMs?: number;
+  fields?: Record<string, unknown>;
+}): void {
+  void emitJourneyObservabilityEvent({
+    trace: input.trace,
+    module: "agent-worker",
+    event: input.event,
+    status: input.status,
+    fields: {
+      ...(input.conversationId
+        ? { conversation: { id: input.conversationId } }
+        : {}),
+      ...(input.agentId ? { agent: { id: input.agentId } } : {}),
+      ...(input.userId ? { toolbox: { user_id: input.userId } } : {}),
+      ...(input.durationMs !== undefined
+        ? { duration_ms: input.durationMs }
+        : {}),
+      ...input.fields,
+    },
+  });
+}
+
 export function emitWorkerToolsRegisteredObsEvent(input: {
   trace: WorkerShifuTraceContext;
   conversationId?: string;
@@ -697,18 +727,21 @@ export async function runModelWithObs(
   run: () => Promise<ModelObsRunResult>
 ): Promise<ModelObsRunResult> {
   const startedAt = Date.now();
-  emitWorkerObsEvent({
+  emitWorkerJourneyObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
     agentId: input.agentId,
     userId: input.userId,
-    eventName: "provider.call.started",
+    event: "provider.call.started",
     status: "started",
-    stage: "provider.call",
-    metadata: {
-      provider: input.provider,
-      model: input.modelId,
-      tool_count: input.toolCount,
+    fields: {
+      provider: {
+        name: input.provider,
+        model: input.modelId,
+      },
+      tool: {
+        count: input.toolCount,
+      },
     },
   });
 
@@ -825,14 +858,13 @@ export async function runAISession(
   const mcpExposure: "tools" | "cli" =
     configuredMcpExposure === "cli" ? "cli" : "tools";
   const shifuTrace = parseWorkerShifuTrace(platformMetadata, "worker");
-  emitWorkerObsEvent({
+  emitWorkerJourneyObsEvent({
     trace: shifuTrace,
     conversationId,
     agentId,
-    eventName: "lobu.worker.started",
+    event: "lobu.worker.started",
     status: "started",
-    stage: "lobu.worker",
-    metadata: {
+    fields: {
       mcp_exposure: mcpExposure,
       has_platform_metadata: Boolean(platformMetadata),
     },
@@ -1732,17 +1764,16 @@ Use it when the user references past discussions or you need context.`);
       if (event.type === "tool_execution_start") {
         pendingToolArgs.set(event.toolCallId, event.args);
         pendingToolStartTimes.set(event.toolCallId, Date.now());
-        emitWorkerObsEvent({
+        emitWorkerJourneyObsEvent({
           trace: shifuTrace,
           conversationId,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          eventName: "mcp.tool_call.started",
+          event: "mcp.tool_call.started",
           status: "started",
-          stage: "mcp.tool_call",
-          metadata: {
+          fields: {
             tool_call_id: event.toolCallId,
-            tool_name: event.toolName,
+            tool: { name: event.toolName },
           },
         });
         const promise = executionReporter.record({
@@ -1767,21 +1798,20 @@ Use it when the user references past discussions or you need context.`);
         pendingToolArgs.delete(event.toolCallId);
         const toolStartedAt = pendingToolStartTimes.get(event.toolCallId);
         pendingToolStartTimes.delete(event.toolCallId);
-        emitWorkerObsEvent({
+        emitWorkerJourneyObsEvent({
           trace: shifuTrace,
           conversationId,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          eventName: "mcp.tool_call.completed",
+          event: "mcp.tool_call.completed",
           status: event.isError ? "failed" : "ok",
-          stage: "mcp.tool_call",
           durationMs:
             toolStartedAt === undefined
               ? undefined
               : Math.max(0, Date.now() - toolStartedAt),
-          metadata: {
+          fields: {
             tool_call_id: event.toolCallId,
-            tool_name: event.toolName,
+            tool: { name: event.toolName },
             is_error: event.isError,
           },
         });
