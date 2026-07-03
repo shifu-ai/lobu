@@ -139,7 +139,7 @@ function classifyMcpObsError(error: unknown): string {
 
 function nextMcpDebugHint(errorClass: string): string {
   if (errorClass === "needs_reauth") {
-    return "Check MCP OAuth credentials, token refresh, and required scopes.";
+    return "Check MCP OAuth connection, refresh flow, and required scopes.";
   }
   if (errorClass === "config_error") {
     return "Check MCP server config, tool allowlist, and the requested tool name.";
