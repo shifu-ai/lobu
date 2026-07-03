@@ -4,7 +4,7 @@
  * All routes are org-scoped via mcpAuth middleware and orgContext.
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { encrypt, type AuthProfile, type StoredConnection } from '@lobu/core';
@@ -40,6 +40,7 @@ import {
 } from './connector-mcp-resolver';
 import { classifyToolCallFailure } from './tool-call-classifier';
 import { mintConnectLinkToken } from '../gateway/auth/mcp/connect-link-token';
+import { emitAgentObsEvent } from '../observability/shifu-agent-obs';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -406,6 +407,13 @@ type ToolboxMcpToolCallRequest = {
   connectionRef?: unknown;
   toolName?: unknown;
   args?: unknown;
+  traceId?: unknown;
+  trace_id?: unknown;
+  shifuTraceId?: unknown;
+  turnId?: unknown;
+  turn_id?: unknown;
+  conversationId?: unknown;
+  conversation_id?: unknown;
 };
 
 type ToolboxMcpConnectionStatus = 'ready' | 'needs_reauth' | 'not_connected' | 'error';
@@ -432,6 +440,10 @@ type ToolboxMcpConnectionMaterializeRequest = {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
 function isToolboxMcpConnectorKey(value: unknown): value is ToolboxMcpConnectorKey {
@@ -1039,6 +1051,39 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       400
     );
   }
+
+  const traceId =
+    stringField(c.req.header('x-shifu-trace-id')) ??
+    stringField(body.shifuTraceId) ??
+    stringField(body.traceId) ??
+    stringField(body.trace_id) ??
+    randomUUID();
+  const turnId =
+    stringField(c.req.header('x-shifu-turn-id')) ??
+    stringField(body.turnId) ??
+    stringField(body.turn_id);
+  const conversationId =
+    stringField(c.req.header('x-shifu-conversation-id')) ??
+    stringField(body.conversationId) ??
+    stringField(body.conversation_id);
+
+  void emitAgentObsEvent({
+    traceId,
+    turnId,
+    conversationId,
+    agentId,
+    userId: ownerUserId,
+    toolboxUserId: ownerUserId,
+    connectorKey,
+    toolName,
+    eventName: 'lobu.mcp.tool_call.started',
+    status: 'started',
+    stage: 'lobu.mcp.tool_call',
+    metadata: {
+      route: '/mcp/tools/call',
+      method: 'POST',
+    },
+  });
 
   const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
   if (denied) return denied;

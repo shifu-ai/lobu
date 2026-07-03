@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { createHash } from 'node:crypto';
 import { generateWorkerToken } from '@lobu/core';
+import { Type } from '@sinclair/typebox';
 import { Hono } from 'hono';
 
 // connectUrl signing derives its HMAC key from ENCRYPTION_KEY; pin a
@@ -20,6 +21,75 @@ import {
   installRouteTestMocks,
   routeStoreStash,
 } from './helpers/route-test-mocks';
+
+mock.module('@lobu/connector-sdk', () => ({
+  AssuranceLevel: Type.Any(),
+  AutoCreateWhenRule: Type.Any(),
+  CLAIM_COLLISION_SEMANTIC_TYPE: 'claim_collision',
+  ClaimCollisionPayload: Type.Any(),
+  ConnectorFact: Type.Any(),
+  ConnectorIdentityCapability: Type.Any(),
+  DerivedFromProvenance: Type.Any(),
+  DerivedRelationshipMetadata: Type.Any(),
+  FactEventMetadata: Type.Any(),
+  IDENTITY: {},
+  IDENTITY_FACT_SEMANTIC_TYPE: 'identity_fact',
+  RelationshipTypeIdentityMetadata: Type.Any(),
+  WATCHER_TIME_GRANULARITIES: ['daily'],
+  addWatcherPeriod: (date: Date) => date,
+  alignToWatcherWindowStart: (date: Date) => date,
+  assuranceMeets: () => true,
+  getAvailableWatcherGranularities: () => ['daily'],
+  getFinerWatcherGranularities: () => [],
+  getNextWatcherGranularity: () => 'daily',
+  getWatcherDateTruncUnit: () => 'day',
+  inferWatcherGranularityFromDays: () => 'daily',
+  inferWatcherGranularityFromSchedule: () => 'daily',
+  isWatcherTimeGranularity: () => true,
+  normalizeAuthUserId: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : null,
+  normalizeEmail: (value: string | null | undefined) =>
+    typeof value === 'string' && value.includes('@') ? value.trim().toLowerCase() : null,
+  normalizeGithubLogin: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : null,
+  normalizeGithubRepoFullName: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : null,
+  normalizeGoogleContactId: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim() : null,
+  normalizeIdentifier: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim().toLowerCase() : null,
+  normalizeNumericId: (value: string | number | null | undefined) =>
+    value === null || value === undefined ? null : String(value).trim(),
+  normalizePhone: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim() : null,
+  normalizeSlackUserId: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim() : null,
+  normalizeWaJid: (value: string | null | undefined) =>
+    typeof value === 'string' ? value.trim() : null,
+  shiftWatcherPeriod: (date: Date) => date,
+  subtractWatcherPeriod: (date: Date) => date,
+}));
+
+mock.module('@lobu/connector-worker/executor/runtime', () => ({
+  executeCompiledConnector: async () => ({
+    mode: 'query',
+    rows: [],
+    columns: [],
+  }),
+}));
+
+mock.module('@lobu/connector-worker/compile', () => ({
+  EXTERNAL_RUNTIME_DEPS: [],
+  assertExternalDepsResolvable: () => {},
+  createConnectorCompiler: () => ({
+    compile: async () => ({
+      code: '',
+      metadata: {},
+      warnings: [],
+    }),
+  }),
+  findBundledConnectorFile: () => null,
+}));
 
 installRouteTestMocks();
 
@@ -72,6 +142,14 @@ let executeToolDirectMock: ReturnType<typeof mock>;
 let listToolsDirectMock: ReturnType<typeof mock>;
 let getHttpServerMock: ReturnType<typeof mock>;
 let getAllHttpServersMock: ReturnType<typeof mock>;
+const OBS_ENV_KEYS = [
+  'SHIFU_AGENT_OBS_ENABLED',
+  'SHIFU_AGENT_OBS_INGEST_URL',
+  'SHIFU_AGENT_OBS_TOKEN',
+  'SHIFU_AGENT_OBS_SOURCE',
+] as const;
+const originalObsEnv = new Map<string, string | undefined>();
+let originalFetch: typeof globalThis.fetch;
 
 async function importMountedAgentRoutes() {
   const { toolboxMcpRoutes } = await import('../agent-routes.js');
@@ -133,6 +211,11 @@ function seedSourceConnectionForMaterialize(overrides: Record<string, unknown> =
 
 describe('Toolbox MCP execution routes', () => {
   beforeEach(() => {
+    for (const key of OBS_ENV_KEYS) {
+      originalObsEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
+    originalFetch = globalThis.fetch;
     fakeAgents.clear();
     fakeSettings.clear();
     fakeConnections.clear();
@@ -177,6 +260,18 @@ describe('Toolbox MCP execution routes', () => {
     };
   });
 
+  afterEach(() => {
+    for (const key of OBS_ENV_KEYS) {
+      const value = originalObsEnv.get(key);
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+    globalThis.fetch = originalFetch;
+  });
+
   test('POST /mcp/tools/call executes a scoped MCP tool call for Toolbox', async () => {
     const app = await importMountedAgentRoutes();
 
@@ -208,6 +303,52 @@ describe('Toolbox MCP execution routes', () => {
       'gws_drive_search',
       { query: '"技術分析全攻略課程"', limit: 10 }
     );
+  });
+
+  test('POST /mcp/tools/call emits a durable observability started event', async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = 'true';
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = 'https://obs.example.test/ingest';
+    const fetchMock = mock(async () => new Response('{}', { status: 202 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer admin-token',
+        'Content-Type': 'application/json',
+        'X-Shifu-Trace-Id': 'trace-route-001',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'drive_search',
+        args: { query: 'course', limit: 5 },
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const payload = JSON.parse(String(init.body));
+    expect(payload).toMatchObject({
+      schemaVersion: 'journey.trace.v1',
+      traceId: 'trace-route-001',
+      eventName: 'lobu.mcp.tool_call.started',
+      status: 'started',
+      stage: 'lobu.mcp.tool_call',
+      agentId: AGENT_ID,
+      userId: OWNER_USER_ID,
+      toolboxUserId: OWNER_USER_ID,
+      connectorKey: 'google_workspace',
+      toolName: 'drive_search',
+      metadata: {
+        route: '/mcp/tools/call',
+        method: 'POST',
+      },
+    });
   });
 
   test('POST /mcp/tools/call accepts full Toolbox discovery tool aliases', async () => {
