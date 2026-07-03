@@ -11,6 +11,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
   createLogger,
+  emitAgentObsEvent,
   getOptionalEnv,
   type McpStatus,
   type McpToolDef,
@@ -32,6 +33,7 @@ import { isRecord } from "../shared/type-guards";
 import {
   emitJourneyEvent,
   parseWorkerShifuTrace,
+  type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
 import {
   createMcpAuthToolDefinitions,
@@ -611,6 +613,166 @@ export function resolveGatewayWorkerToken(
   return runJobToken && runJobToken.length > 0 ? runJobToken : envWorkerToken;
 }
 
+function obsTraceMetadata(trace: WorkerShifuTraceContext) {
+  return {
+    journey_id: trace.journeyId,
+    parent_span_id: trace.parentSpanId,
+    trace_source: trace.traceSource,
+  };
+}
+
+async function emitWorkerObsEvent(input: {
+  trace: WorkerShifuTraceContext;
+  conversationId?: string;
+  agentId?: string;
+  userId?: string;
+  eventName: string;
+  status: "started" | "ok" | "failed" | string;
+  stage: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  await emitAgentObsEvent({
+    traceId: input.trace.traceId,
+    turnId: input.trace.turnId,
+    conversationId: input.conversationId,
+    agentId: input.agentId,
+    userId: input.userId,
+    toolboxUserId: input.userId,
+    eventName: input.eventName,
+    status: input.status,
+    stage: input.stage,
+    durationMs: input.durationMs,
+    metadata: {
+      ...obsTraceMetadata(input.trace),
+      module: "agent-worker",
+      ...input.metadata,
+    },
+  });
+}
+
+export async function emitWorkerToolsRegisteredObsEvent(input: {
+  trace: WorkerShifuTraceContext;
+  conversationId?: string;
+  agentId?: string;
+  userId?: string;
+  toolCount: number;
+  mcpToolCount: number;
+  authToolCount: number;
+  pluginToolCount: number;
+  mcpIds: string[];
+}): Promise<void> {
+  await emitWorkerObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    agentId: input.agentId,
+    userId: input.userId,
+    eventName: "lobu.worker.tools_registered",
+    status: "ok",
+    stage: "lobu.worker.tools_registered",
+    metadata: {
+      tool_count: input.toolCount,
+      mcp_tool_count: input.mcpToolCount,
+      auth_tool_count: input.authToolCount,
+      plugin_tool_count: input.pluginToolCount,
+      mcp_ids: input.mcpIds.slice().sort(),
+    },
+  });
+}
+
+export type ModelObsRunResult =
+  | { success: true; outputChars?: number }
+  | { success: false; error: string; outputChars?: number };
+
+export async function runModelWithObs(
+  input: {
+    trace: WorkerShifuTraceContext;
+    conversationId?: string;
+    agentId?: string;
+    userId?: string;
+    provider: string;
+    modelId: string;
+    toolCount: number;
+  },
+  run: () => Promise<ModelObsRunResult>
+): Promise<ModelObsRunResult> {
+  const startedAt = Date.now();
+  await emitWorkerObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    agentId: input.agentId,
+    userId: input.userId,
+    eventName: "lobu.model.started",
+    status: "started",
+    stage: "lobu.model.started",
+    metadata: {
+      provider: input.provider,
+      model: input.modelId,
+      tool_count: input.toolCount,
+    },
+  });
+
+  try {
+    const result = await run();
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    if (result.success) {
+      await emitWorkerObsEvent({
+        trace: input.trace,
+        conversationId: input.conversationId,
+        agentId: input.agentId,
+        userId: input.userId,
+        eventName: "lobu.model.completed",
+        status: "ok",
+        stage: "lobu.model.completed",
+        durationMs,
+        metadata: {
+          provider: input.provider,
+          model: input.modelId,
+          output_chars: result.outputChars ?? 0,
+        },
+      });
+    } else {
+      await emitWorkerObsEvent({
+        trace: input.trace,
+        conversationId: input.conversationId,
+        agentId: input.agentId,
+        userId: input.userId,
+        eventName: "lobu.model.failed",
+        status: "failed",
+        stage: "lobu.model.failed",
+        durationMs,
+        metadata: {
+          provider: input.provider,
+          model: input.modelId,
+          error_class: "model_error",
+          next_debug_hint: `Check the model run for ${input.provider}/${input.modelId}; inspect worker logs and provider configuration.`,
+        },
+      });
+    }
+    return result;
+  } catch (error) {
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    await emitWorkerObsEvent({
+      trace: input.trace,
+      conversationId: input.conversationId,
+      agentId: input.agentId,
+      userId: input.userId,
+      eventName: "lobu.model.failed",
+      status: "failed",
+      stage: "lobu.model.failed",
+      durationMs,
+      metadata: {
+        provider: input.provider,
+        model: input.modelId,
+        error_class: "model_error",
+        next_debug_hint: `Check the model run for ${input.provider}/${input.modelId}; inspect worker logs and provider configuration.`,
+        error_name: error instanceof Error ? error.name : typeof error,
+      },
+    });
+    throw error;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main function
 // ---------------------------------------------------------------------------
@@ -981,7 +1143,10 @@ export async function runAISession(
     ...(mcpExposure === "cli" && {
       refresh: async () => {
         try {
-          const fresh = await getOpenClawSessionContext({ mcpExposure });
+          const fresh = await getOpenClawSessionContext({
+            mcpExposure,
+            shifuTrace,
+          });
           return {
             mcpTools: applyCapabilityLimitNotes(fresh.mcpTools),
             mcpStatus: fresh.mcpStatus,
@@ -1266,14 +1431,16 @@ Use it when the user references past discussions or you need context.`);
   );
   const loadedPlugins = await loadPlugins(pluginsConfig, workspaceDir);
   const pluginTools = loadedPlugins.flatMap((p) => p.tools);
+  const pluginToolCount = pluginTools.length;
 
-  if (pluginTools.length > 0) {
+  if (pluginToolCount > 0) {
     customTools.push(...pluginTools);
     logger.info(
-      `Loaded ${pluginTools.length} tool(s) from ${loadedPlugins.length} plugin(s)`
+      `Loaded ${pluginToolCount} tool(s) from ${loadedPlugins.length} plugin(s)`
     );
   }
 
+  let authToolCount = 0;
   if (mcpExposure !== "cli") {
     const existingToolNames = new Set(customTools.map((tool) => tool.name));
     const providerSafeAuthToolNames =
@@ -1298,10 +1465,11 @@ Use it when the user references past discussions or you need context.`);
         authToolNames,
       }
     );
-    if (authToolDefs.length > 0) {
+    authToolCount = authToolDefs.length;
+    if (authToolCount > 0) {
       customTools.push(...authToolDefs);
       logger.info(
-        `Registered ${authToolDefs.length} MCP auth tool(s): ${authToolDefs.map((t) => t.name).join(", ")}`
+        `Registered ${authToolCount} MCP auth tool(s): ${authToolDefs.map((t) => t.name).join(", ")}`
       );
     }
     emitJourneyEvent({
@@ -1314,11 +1482,23 @@ Use it when the user references past discussions or you need context.`);
         mcp_server_count: Object.keys(context.mcpTools).length,
         mcp_ids: Object.keys(context.mcpTools).sort(),
         tool_count: registeredMcpToolCount,
-        auth_tool_count: authToolDefs.length,
+        auth_tool_count: authToolCount,
         mcp_status_count: context.mcpStatus.length,
       },
     });
   }
+
+  await emitWorkerToolsRegisteredObsEvent({
+    trace: shifuTrace,
+    conversationId,
+    agentId: agentId || context.agentId,
+    userId: context.userId,
+    toolCount: tools.length + customTools.length,
+    mcpToolCount: registeredMcpToolCount,
+    authToolCount,
+    pluginToolCount,
+    mcpIds: Object.keys(registeredDirectMcpTools),
+  });
 
   tools = projectToolParametersForProvider(tools, rawProvider);
   customTools = projectToolParametersForProvider(customTools, rawProvider);
@@ -1804,9 +1984,32 @@ Use it when the user references past discussions or you need context.`);
       },
     });
 
-    await runPromptTurn(effectivePromptText, { images });
+    const modelRunResult = await runModelWithObs(
+      {
+        trace: shifuTrace,
+        conversationId,
+        agentId: agentId || context.agentId,
+        userId: context.userId,
+        provider,
+        modelId,
+        toolCount: tools.length + customTools.length,
+      },
+      async () => {
+        await runPromptTurn(effectivePromptText, { images });
+        const outputChars = progressProcessor.getOutputSnapshot().length;
+        const fatalError = progressProcessor.consumeFatalErrorMessage();
+        if (fatalError) {
+          return {
+            success: false,
+            error: fatalError,
+            outputChars,
+          };
+        }
+        return { success: true, outputChars };
+      }
+    );
 
-    const sessionError = progressProcessor.consumeFatalErrorMessage();
+    const sessionError = modelRunResult.success ? null : modelRunResult.error;
     if (sessionError) {
       await runPluginHooks({
         plugins: loadedPlugins,

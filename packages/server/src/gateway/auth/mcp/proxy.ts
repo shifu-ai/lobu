@@ -33,7 +33,7 @@ import {
   parseShifuTraceHeaders,
   type ShifuTraceContext,
 } from "../../trace-context.js";
-import { emitAgentObsEvent } from "../../../observability/shifu-agent-obs.js";
+import { emitAgentObsEvent } from "@lobu/core";
 
 const logger = createLogger("mcp-proxy");
 

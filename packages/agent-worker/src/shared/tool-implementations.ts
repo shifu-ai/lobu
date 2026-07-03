@@ -1211,13 +1211,14 @@ export async function callMcpTool(
     let response: Response;
     const wantsJson = TOOLS_REQUESTING_JSON_FORMAT.has(toolName);
     try {
+      const traceHeaders = options.shifuTrace
+        ? shifuTraceHeaders(options.shifuTrace)
+        : {};
       const headers: Record<string, string> = {
         Authorization: `Bearer ${gw.workerToken}`,
         "Content-Type": "application/json",
+        ...traceHeaders,
       };
-      if (options.shifuTrace) {
-        Object.assign(headers, shifuTraceHeaders(options.shifuTrace));
-      }
       // Retrieval tools (`search_memory`) opt into JSON-encoded results so the
       // worker → SSE `tool_use` event can carry structured `result_summary`
       // (event ids + snippet text) to clients like @lobu/promptfoo-provider for

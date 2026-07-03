@@ -40,7 +40,7 @@ import {
 } from './connector-mcp-resolver';
 import { classifyToolCallFailure } from './tool-call-classifier';
 import { mintConnectLinkToken } from '../gateway/auth/mcp/connect-link-token';
-import { emitAgentObsEvent } from '../observability/shifu-agent-obs';
+import { emitAgentObsEvent } from '@lobu/core';
 import { parseShifuTraceHeaders } from '../observability/trace-context';
 
 const routes = new Hono<{ Bindings: Env }>();

@@ -254,6 +254,12 @@ export function buildMcpToolInventoryInstructions(
   ].join("\n");
 }
 
+function optionalShifuTraceHeaders(
+  trace: WorkerShifuTraceContext | undefined
+): Record<string, string> {
+  return trace ? shifuTraceHeaders(trace) : {};
+}
+
 function buildToolboxPersonalAgentToolInstructions(
   toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[]
 ): string {
@@ -334,7 +340,7 @@ export async function getOpenClawSessionContext(
     const response = await fetch(url, {
       headers: {
         Authorization: `Bearer ${workerToken}`,
-        ...(opts.shifuTrace ? shifuTraceHeaders(opts.shifuTrace) : {}),
+        ...optionalShifuTraceHeaders(opts.shifuTrace),
       },
       // Session context is fetched once per turn; a stalled gateway here would
       // otherwise hang the worker before the agent ever sees the prompt.

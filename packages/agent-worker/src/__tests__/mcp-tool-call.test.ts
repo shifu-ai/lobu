@@ -19,6 +19,8 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { createMcpToolDefinitions } from "../openclaw/custom-tools";
+import { emitWorkerToolsRegisteredObsEvent } from "../openclaw/session-runner";
 import {
   askUserQuestion,
   callMcpTool,
@@ -32,6 +34,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const originalFetch = globalThis.fetch;
+const originalObsEnv = {
+  enabled: process.env.SHIFU_AGENT_OBS_ENABLED,
+  ingestUrl: process.env.SHIFU_AGENT_OBS_INGEST_URL,
+  token: process.env.SHIFU_AGENT_OBS_TOKEN,
+};
 
 const gw: GatewayParams = {
   gatewayUrl: "http://gateway",
@@ -50,6 +57,21 @@ function extractText(result: {
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  if (originalObsEnv.enabled === undefined) {
+    delete process.env.SHIFU_AGENT_OBS_ENABLED;
+  } else {
+    process.env.SHIFU_AGENT_OBS_ENABLED = originalObsEnv.enabled;
+  }
+  if (originalObsEnv.ingestUrl === undefined) {
+    delete process.env.SHIFU_AGENT_OBS_INGEST_URL;
+  } else {
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = originalObsEnv.ingestUrl;
+  }
+  if (originalObsEnv.token === undefined) {
+    delete process.env.SHIFU_AGENT_OBS_TOKEN;
+  } else {
+    process.env.SHIFU_AGENT_OBS_TOKEN = originalObsEnv.token;
+  }
   mock.restore();
 });
 
@@ -468,5 +490,83 @@ describe("callMcpTool: approval-blocked response from gateway", () => {
     const text = extractText(result);
     expect(text).toContain("Error:");
     expect(text).toContain("requires approval");
+  });
+});
+
+describe("worker MCP tool registration observability", () => {
+  test("emits lobu.worker.tools_registered with MCP registration counts", async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+    delete process.env.SHIFU_AGENT_OBS_TOKEN;
+
+    const fetchMock = mock(async () => new Response("{}", { status: 202 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const mcpTools = {
+      lobu: [
+        {
+          name: "search_memory",
+          description: "Search memory",
+          inputSchema: {
+            type: "object",
+            properties: { query: { type: "string" } },
+          },
+        },
+      ],
+    };
+    const registered = createMcpToolDefinitions(
+      mcpTools,
+      gw,
+      {},
+      {
+        shifuTrace: {
+          traceId: "tr_workerobs123456",
+          journeyId: "line_reply",
+          turnId: "turn_workerobs123",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+      }
+    );
+
+    await emitWorkerToolsRegisteredObsEvent({
+      trace: {
+        traceId: "tr_workerobs123456",
+        journeyId: "line_reply",
+        turnId: "turn_workerobs123",
+        actor: "worker",
+        traceSource: "incoming",
+      },
+      conversationId: gw.conversationId,
+      agentId: gw.agentId,
+      userId: gw.userId,
+      toolCount: registered.length,
+      mcpToolCount: registered.length,
+      authToolCount: 0,
+      pluginToolCount: 0,
+      mcpIds: Object.keys(mcpTools),
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    const payload = JSON.parse(String(init.body));
+    expect(payload).toMatchObject({
+      eventName: "lobu.worker.tools_registered",
+      status: "ok",
+      stage: "lobu.worker.tools_registered",
+      traceId: "tr_workerobs123456",
+      turnId: "turn_workerobs123",
+      conversationId: "conv-1",
+      agentId: "agent-1",
+      metadata: {
+        module: "agent-worker",
+        tool_count: 1,
+        mcp_tool_count: 1,
+      },
+    });
+    expect(payload.metadata.mcp_ids).toEqual(["lobu"]);
   });
 });

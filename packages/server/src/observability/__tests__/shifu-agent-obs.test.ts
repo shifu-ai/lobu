@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
-import { emitAgentObsEvent, redactAgentObsValue } from '../shifu-agent-obs';
+import { emitAgentObsEvent, redactAgentObsValue } from '@lobu/core';
 
 const OBS_ENV_KEYS = [
   'SHIFU_AGENT_OBS_ENABLED',

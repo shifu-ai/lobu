@@ -51,6 +51,7 @@ export {
   estimatePromptTokenCost,
   getLatestAssistantText,
   replaceBasePromptIdentity,
+  runModelWithObs,
   resolveMemoryFlushConfig,
   readLastFlushedCompactionCount,
   MEMORY_FLUSH_STATE_CUSTOM_TYPE,

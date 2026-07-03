@@ -1,11 +1,39 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   buildLobuSystemPrompt,
+  runModelWithObs,
   replaceBasePromptIdentity,
 } from "../openclaw/worker";
 
 const PI_OPENER =
   "You are an expert coding assistant operating inside pi, a coding agent harness. You help users by reading files, executing commands, editing code, and writing new files.";
+
+const originalFetch = globalThis.fetch;
+const originalObsEnv = {
+  enabled: process.env.SHIFU_AGENT_OBS_ENABLED,
+  ingestUrl: process.env.SHIFU_AGENT_OBS_INGEST_URL,
+  token: process.env.SHIFU_AGENT_OBS_TOKEN,
+};
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  if (originalObsEnv.enabled === undefined) {
+    delete process.env.SHIFU_AGENT_OBS_ENABLED;
+  } else {
+    process.env.SHIFU_AGENT_OBS_ENABLED = originalObsEnv.enabled;
+  }
+  if (originalObsEnv.ingestUrl === undefined) {
+    delete process.env.SHIFU_AGENT_OBS_INGEST_URL;
+  } else {
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = originalObsEnv.ingestUrl;
+  }
+  if (originalObsEnv.token === undefined) {
+    delete process.env.SHIFU_AGENT_OBS_TOKEN;
+  } else {
+    process.env.SHIFU_AGENT_OBS_TOKEN = originalObsEnv.token;
+  }
+  mock.restore();
+});
 
 describe("replaceBasePromptIdentity", () => {
   test("replaces the pi-coding-agent opener with agent identity, preserving the rest", () => {
@@ -53,5 +81,99 @@ describe("replaceBasePromptIdentity", () => {
     expect(out).toContain("Available tools:");
     expect(out).toContain("---");
     expect(out).toContain(gateway);
+  });
+});
+
+describe("worker model observability", () => {
+  function enableObs(fetchMock: ReturnType<typeof mock>) {
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+    delete process.env.SHIFU_AGENT_OBS_TOKEN;
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+  }
+
+  const obsBase = {
+    trace: {
+      traceId: "tr_modelobs123456",
+      journeyId: "line_reply",
+      turnId: "turn_modelobs123",
+      actor: "worker",
+      traceSource: "incoming" as const,
+    },
+    conversationId: "conv-1",
+    agentId: "agent-1",
+    userId: "user-1",
+    provider: "openai",
+    modelId: "gpt-4.1",
+    toolCount: 7,
+  };
+
+  test("emits model started and completed events around a successful runner", async () => {
+    const fetchMock = mock(async () => new Response("{}", { status: 202 }));
+    enableObs(fetchMock);
+
+    await runModelWithObs(obsBase, async () => ({
+      success: true,
+      outputChars: 42,
+    }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const events = fetchMock.mock.calls.map((call) =>
+      JSON.parse(String((call as unknown as [string, RequestInit])[1].body))
+    );
+    expect(events[0]).toMatchObject({
+      eventName: "lobu.model.started",
+      status: "started",
+      stage: "lobu.model.started",
+      metadata: {
+        module: "agent-worker",
+        provider: "openai",
+        model: "gpt-4.1",
+        tool_count: 7,
+      },
+    });
+    expect(events[1]).toMatchObject({
+      eventName: "lobu.model.completed",
+      status: "ok",
+      stage: "lobu.model.completed",
+      metadata: {
+        module: "agent-worker",
+        provider: "openai",
+        model: "gpt-4.1",
+        output_chars: 42,
+      },
+    });
+    expect(typeof events[1].durationMs).toBe("number");
+  });
+
+  test("emits model failed event when the runner throws", async () => {
+    const fetchMock = mock(async () => new Response("{}", { status: 202 }));
+    enableObs(fetchMock);
+
+    await expect(
+      runModelWithObs(obsBase, async () => {
+        throw new Error("provider rejected model request");
+      })
+    ).rejects.toThrow("provider rejected model request");
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const failed = JSON.parse(
+      String(
+        (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body
+      )
+    );
+    expect(failed).toMatchObject({
+      eventName: "lobu.model.failed",
+      status: "failed",
+      stage: "lobu.model.failed",
+      metadata: {
+        module: "agent-worker",
+        provider: "openai",
+        model: "gpt-4.1",
+        error_class: "model_error",
+      },
+    });
+    expect(failed.metadata.next_debug_hint).toContain("model");
+    expect(typeof failed.durationMs).toBe("number");
   });
 });

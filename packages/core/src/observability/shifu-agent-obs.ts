@@ -1,7 +1,7 @@
-const SCHEMA_VERSION = 'journey.trace.v1';
-const DEFAULT_SOURCE = 'lobu';
-const REDACTED = '[REDACTED]';
-const CIRCULAR = '[Circular]';
+const SCHEMA_VERSION = "journey.trace.v1";
+const DEFAULT_SOURCE = "lobu";
+const REDACTED = "[REDACTED]";
+const CIRCULAR = "[Circular]";
 const MAX_STRING_LENGTH = 2048;
 const MAX_ARRAY_ITEMS = 50;
 const MAX_OBJECT_KEYS = 100;
@@ -9,18 +9,18 @@ const MAX_DEPTH = 6;
 const DEFAULT_INGEST_TIMEOUT_MS = 2000;
 
 const SENSITIVE_KEY_WORDS = new Set([
-  'authorization',
-  'bearer',
-  'token',
-  'secret',
-  'password',
-  'passphrase',
-  'credential',
+  "authorization",
+  "bearer",
+  "token",
+  "secret",
+  "password",
+  "passphrase",
+  "credential",
 ]);
 const SENSITIVE_VALUE_PATTERN =
   /\b(bearer|token|secret|password|api[_\-\s]?key|authorization)\b|sk-[a-z0-9_-]+/i;
 
-type AgentObsStatus = 'started' | 'success' | 'error' | string;
+type AgentObsStatus = "started" | "success" | "error" | string;
 
 export type AgentObsEventInput = {
   traceId: string;
@@ -72,8 +72,8 @@ function truncateString(value: string): string {
 function isSensitiveKey(key: string | undefined): boolean {
   if (!key) return false;
   const words = key
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
     .split(/[^a-zA-Z0-9]+/)
     .filter(Boolean)
     .map((word) => word.toLowerCase());
@@ -82,7 +82,7 @@ function isSensitiveKey(key: string | undefined): boolean {
 
   for (let index = 0; index < words.length - 1; index += 1) {
     const phrase = `${words[index]} ${words[index + 1]}`;
-    if (phrase === 'api key' || phrase === 'private key') return true;
+    if (phrase === "api key" || phrase === "private key") return true;
   }
 
   return false;
@@ -92,29 +92,35 @@ function isSensitiveString(value: string): boolean {
   return SENSITIVE_VALUE_PATTERN.test(value);
 }
 
-function redactValue(value: unknown, key: string | undefined, depth: number, seen: WeakSet<object>): unknown {
+function redactValue(
+  value: unknown,
+  key: string | undefined,
+  depth: number,
+  seen: WeakSet<object>
+): unknown {
   if (isSensitiveKey(key)) return REDACTED;
 
-  if (typeof value === 'string') {
+  if (typeof value === "string") {
     if (isSensitiveString(value)) return REDACTED;
     return truncateString(value);
   }
 
   if (
     value === null ||
-    typeof value === 'number' ||
-    typeof value === 'boolean' ||
-    typeof value === 'undefined'
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "undefined"
   ) {
     return value;
   }
 
-  if (typeof value === 'bigint') return value.toString();
-  if (typeof value === 'symbol' || typeof value === 'function') return undefined;
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "symbol" || typeof value === "function")
+    return undefined;
 
-  if (typeof value !== 'object') return String(value);
+  if (typeof value !== "object") return String(value);
   if (seen.has(value)) return CIRCULAR;
-  if (depth >= MAX_DEPTH) return '[MaxDepth]';
+  if (depth >= MAX_DEPTH) return "[MaxDepth]";
 
   seen.add(value);
   try {
@@ -152,7 +158,7 @@ export function redactAgentObsValue(value: unknown): unknown {
 
 function isEnabled(): boolean {
   const value = process.env.SHIFU_AGENT_OBS_ENABLED?.trim().toLowerCase();
-  return value === 'true' || value === '1' || value === 'yes' || value === 'on';
+  return value === "true" || value === "1" || value === "yes" || value === "on";
 }
 
 function trimOptional(value: string | undefined): string | undefined {
@@ -166,14 +172,17 @@ function getIngestTimeoutMs(): number {
   return DEFAULT_INGEST_TIMEOUT_MS;
 }
 
-export async function emitAgentObsEvent(input: AgentObsEventInput): Promise<void> {
+export async function emitAgentObsEvent(
+  input: AgentObsEventInput
+): Promise<void> {
   try {
     const ingestUrl = trimOptional(process.env.SHIFU_AGENT_OBS_INGEST_URL);
     if (!isEnabled() || !ingestUrl) return;
 
     const payload: AgentObsEventPayload = {
       schemaVersion: SCHEMA_VERSION,
-      source: trimOptional(process.env.SHIFU_AGENT_OBS_SOURCE) ?? DEFAULT_SOURCE,
+      source:
+        trimOptional(process.env.SHIFU_AGENT_OBS_SOURCE) ?? DEFAULT_SOURCE,
       traceId: input.traceId,
       turnId: input.turnId,
       conversationId: input.conversationId,
@@ -196,7 +205,7 @@ export async function emitAgentObsEvent(input: AgentObsEventInput): Promise<void
     const token = trimOptional(process.env.SHIFU_AGENT_OBS_TOKEN);
     const body = JSON.stringify(redactAgentObsValue(payload));
     const headers: Record<string, string> = {
-      'content-type': 'application/json',
+      "content-type": "application/json",
     };
     if (token) headers.authorization = `Bearer ${token}`;
 
@@ -204,7 +213,7 @@ export async function emitAgentObsEvent(input: AgentObsEventInput): Promise<void
     const timeout = setTimeout(() => controller.abort(), getIngestTimeoutMs());
     try {
       const response = await fetch(ingestUrl, {
-        method: 'POST',
+        method: "POST",
         headers,
         body,
         signal: controller.signal,

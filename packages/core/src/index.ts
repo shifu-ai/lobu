@@ -91,6 +91,7 @@ export type {
 } from "./provider-config-types";
 export * from "./secret-refs";
 // Observability
+export * from "./observability/shifu-agent-obs";
 export { getSentry, initSentry } from "./sentry";
 export { extractTraceId, generateTraceId } from "./trace";
 // Core types
