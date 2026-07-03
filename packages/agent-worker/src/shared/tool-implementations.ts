@@ -688,6 +688,7 @@ export async function startMcpLogin(
     }
 
     const startResult = await gatewayFetch<{
+      flow?: "auth_code";
       userCode: string;
       verificationUri: string;
       verificationUriComplete?: string;
@@ -715,17 +716,26 @@ export async function startMcpLogin(
       });
     }
 
+    const expiresMinutes = Math.max(
+      1,
+      Math.round((startResult.data?.expiresIn ?? 900) / 60)
+    );
+    const userCode = startResult.data?.userCode || "";
+
     return textResult(
       JSON.stringify({
         status: "login_started",
         mcp_id: args.mcpId,
+        flow: startResult.data?.flow ?? "device_code",
         verification_url: verificationUrl,
         verification_uri: startResult.data?.verificationUri,
-        user_code: startResult.data?.userCode,
+        user_code: userCode,
         expires_in_seconds: startResult.data?.expiresIn,
         interaction_posted: Boolean(verificationUrl),
         message: verificationUrl
-          ? `Authentication required for ${args.mcpId}. The login link has been sent directly to the user. Do not repeat the URL unless they ask.`
+          ? `Authentication required for ${args.mcpId}. Send this authorization link to the user as a plain text message: ${verificationUrl}` +
+            (userCode ? ` (user code: ${userCode})` : "") +
+            ` — the link expires in ~${expiresMinutes} minutes; call ${args.mcpId}_login again for a fresh one. After the user completes login, call ${args.mcpId}_login_check.`
           : `Authentication required for ${args.mcpId}. Show the user the verification URL and code, then wait for them to finish login.`,
       })
     );
