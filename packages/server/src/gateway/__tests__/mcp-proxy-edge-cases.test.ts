@@ -582,6 +582,35 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     });
   });
 
+  test("classifies bare unknown JSON-RPC tool call errors as config_error", async () => {
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      error: "unknown",
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 7,
+      error: "unknown",
+    });
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tool_call.completed",
+      status: "failed",
+      toolName: "meeting_search",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "jsonrpc-mcp",
+        tool_name: "meeting_search",
+        classification: "config_error",
+      }),
+    });
+  });
+
   test("emits failed completed event when HTTP 200 tool result has isError true", async () => {
     const { response, obsBodies } = await requestForwardedToolCall({
       jsonrpc: "2.0",
@@ -620,6 +649,38 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         }),
       }),
     });
+  });
+
+  test("redacts and truncates tool call result preview text", async () => {
+    const longText = `Authorization: Bearer ${"abc"}${"123"} ${"x".repeat(
+      400
+    )}`;
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: longText }],
+        isError: true,
+      },
+    });
+
+    expect(response.status).toBe(200);
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    const preview = completed?.metadata?.result_preview;
+    expect(preview).toEqual(
+      expect.objectContaining({
+        is_error: true,
+        first_content_type: "text",
+        first_text: expect.any(String),
+      })
+    );
+    const firstText = (preview as { first_text: string }).first_text;
+    expect(firstText).not.toContain("Bearer");
+    expect(firstText).not.toContain(`${"abc"}${"123"}`);
+    expect(firstText.length).toBeLessThanOrEqual(314);
+    expect(firstText).toContain("[truncated]");
   });
 
   test("classifies machine-readable tool diagnostic codes as config_error", async () => {

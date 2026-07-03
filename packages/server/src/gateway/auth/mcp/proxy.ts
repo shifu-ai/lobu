@@ -126,6 +126,12 @@ function classifyMcpObsError(error: unknown): string {
     return "needs_reauth";
   }
   if (
+    diagnosticCode === "unknown" ||
+    diagnosticCode === "mcpjsonrpcerror_unknown"
+  ) {
+    return "config_error";
+  }
+  if (
     /\b(?:tool_not_found|tool_schema_invalid|unknown_tool|unknown_mcp|unknown_server|allowlist_denied|not_allowed)\b/.test(
       diagnosticCode
     )
@@ -163,11 +169,15 @@ function nextMcpDebugHint(errorClass: string): string {
 }
 
 const RESULT_PREVIEW_MAX_LENGTH = 300;
+const SENSITIVE_PREVIEW_VALUE_PATTERN =
+  /\b(?:authorization\s*:\s*bearer|bearer|token|secret|password|api[_\-\s]?key)\s*[:=]?\s*[^\s,;]+/gi;
 const SENSITIVE_PREVIEW_PATTERN =
   /\b(bearer|token|secret|password|api[_\-\s]?key|authorization)\b|sk-[a-z0-9_-]+/gi;
 
 function sanitizeResultPreviewText(value: string): string {
-  const redacted = value.replace(SENSITIVE_PREVIEW_PATTERN, "[REDACTED]");
+  const redacted = value
+    .replace(SENSITIVE_PREVIEW_VALUE_PATTERN, "[REDACTED]")
+    .replace(SENSITIVE_PREVIEW_PATTERN, "[REDACTED]");
   if (redacted.length <= RESULT_PREVIEW_MAX_LENGTH) return redacted;
   return `${redacted.slice(0, RESULT_PREVIEW_MAX_LENGTH)}...[truncated]`;
 }
