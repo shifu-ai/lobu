@@ -7,8 +7,15 @@ const MAX_ARRAY_ITEMS = 50;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 6;
 
-const SENSITIVE_KEY_PATTERN =
-  /(^|[_\-\s])(authorization|bearer|token|secret|password|passphrase|api[_\-\s]?key|credential|private[_\-\s]?key)([_\-\s]|$)/i;
+const SENSITIVE_KEY_WORDS = new Set([
+  'authorization',
+  'bearer',
+  'token',
+  'secret',
+  'password',
+  'passphrase',
+  'credential',
+]);
 const SENSITIVE_VALUE_PATTERN =
   /\b(bearer|token|secret|password|api[_\-\s]?key|authorization)\b|sk-[a-z0-9_-]+/i;
 
@@ -62,7 +69,22 @@ function truncateString(value: string): string {
 }
 
 function isSensitiveKey(key: string | undefined): boolean {
-  return Boolean(key && SENSITIVE_KEY_PATTERN.test(key));
+  if (!key) return false;
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .split(/[^a-zA-Z0-9]+/)
+    .filter(Boolean)
+    .map((word) => word.toLowerCase());
+
+  if (words.some((word) => SENSITIVE_KEY_WORDS.has(word))) return true;
+
+  for (let index = 0; index < words.length - 1; index += 1) {
+    const phrase = `${words[index]} ${words[index + 1]}`;
+    if (phrase === 'api key' || phrase === 'private key') return true;
+  }
+
+  return false;
 }
 
 function isSensitiveString(value: string): boolean {

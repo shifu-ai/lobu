@@ -125,6 +125,22 @@ describe('ShiFu Agent Obs event emitter', () => {
     });
   });
 
+  test('redacts camelCase opaque secret keys', () => {
+    const redacted = redactAgentObsValue({
+      accessToken: 'opaque123',
+      refreshToken: 'opaque456',
+      clientSecret: 'opaque789',
+      apiKey: 'opaque000',
+    });
+
+    expect(redacted).toEqual({
+      accessToken: '[REDACTED]',
+      refreshToken: '[REDACTED]',
+      clientSecret: '[REDACTED]',
+      apiKey: '[REDACTED]',
+    });
+  });
+
   test('ingest failures and fetch throws do not throw to callers', async () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = 'true';
     process.env.SHIFU_AGENT_OBS_INGEST_URL = 'https://obs.example.test/ingest';
