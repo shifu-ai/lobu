@@ -13,6 +13,8 @@ const originalObsEnv = {
   enabled: process.env.SHIFU_AGENT_OBS_ENABLED,
   ingestUrl: process.env.SHIFU_AGENT_OBS_INGEST_URL,
   token: process.env.SHIFU_AGENT_OBS_TOKEN,
+  toolboxUrl: process.env.TOOLBOX_AGENT_OBSERVABILITY_URL,
+  toolboxSecret: process.env.TOOLBOX_INTERNAL_SECRET,
 };
 
 afterEach(() => {
@@ -31,6 +33,16 @@ afterEach(() => {
     delete process.env.SHIFU_AGENT_OBS_TOKEN;
   } else {
     process.env.SHIFU_AGENT_OBS_TOKEN = originalObsEnv.token;
+  }
+  if (originalObsEnv.toolboxUrl === undefined) {
+    delete process.env.TOOLBOX_AGENT_OBSERVABILITY_URL;
+  } else {
+    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL = originalObsEnv.toolboxUrl;
+  }
+  if (originalObsEnv.toolboxSecret === undefined) {
+    delete process.env.TOOLBOX_INTERNAL_SECRET;
+  } else {
+    process.env.TOOLBOX_INTERNAL_SECRET = originalObsEnv.toolboxSecret;
   }
   mock.restore();
 });
@@ -89,6 +101,9 @@ describe("worker model observability", () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = "true";
     process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
     delete process.env.SHIFU_AGENT_OBS_TOKEN;
+    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL =
+      "https://toolbox.example.test/ingest";
+    process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
     globalThis.fetch = fetchMock as unknown as typeof fetch;
   }
 
@@ -155,7 +170,7 @@ describe("worker model observability", () => {
     expect(runSettledBeforeCompletedIngestSettled).toBe(true);
   });
 
-  test("emits model started and completed events around a successful runner", async () => {
+  test("emits provider call started and model completed events around a successful runner", async () => {
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     enableObs(fetchMock);
 
@@ -164,11 +179,39 @@ describe("worker model observability", () => {
       outputChars: 42,
     }));
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const firstCall = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(firstCall[0]).toBe("https://toolbox.example.test/ingest");
+    expect(firstCall[1].headers).toEqual({
+      "content-type": "application/json",
+      "x-internal-secret": "internal-secret",
+    });
     const events = fetchMock.mock.calls.map((call) =>
       JSON.parse(String((call as unknown as [string, RequestInit])[1].body))
     );
     expect(events[0]).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      payload: {
+        schema_version: "journey.trace.v1",
+        event: "provider.call.started",
+        trace_id: "tr_modelobs123456",
+        journey_id: "line_reply",
+        service: "lobu",
+        module: "agent-worker",
+        status: "started",
+        provider: {
+          name: "openai",
+          model: "gpt-4.1",
+        },
+        tool: {
+          count: 7,
+        },
+      },
+    });
+    expect(events[1]).toMatchObject({
       eventName: "lobu.model.started",
       status: "started",
       stage: "lobu.model.started",
@@ -179,7 +222,7 @@ describe("worker model observability", () => {
         tool_count: 7,
       },
     });
-    expect(events[1]).toMatchObject({
+    expect(events[2]).toMatchObject({
       eventName: "lobu.model.completed",
       status: "ok",
       stage: "lobu.model.completed",
@@ -190,7 +233,7 @@ describe("worker model observability", () => {
         output_chars: 42,
       },
     });
-    expect(typeof events[1].durationMs).toBe("number");
+    expect(typeof events[2].durationMs).toBe("number");
   });
 
   test("emits model failed event when the runner throws", async () => {
@@ -203,10 +246,10 @@ describe("worker model observability", () => {
       })
     ).rejects.toThrow("provider rejected model request");
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const failed = JSON.parse(
       String(
-        (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body
+        (fetchMock.mock.calls[2] as unknown as [string, RequestInit])[1].body
       )
     );
     expect(failed).toMatchObject({

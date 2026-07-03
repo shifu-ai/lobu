@@ -34,6 +34,7 @@ import {
   type ShifuTraceContext,
 } from "../../trace-context.js";
 import { emitAgentObsEvent } from "@lobu/core";
+import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -271,6 +272,21 @@ function emitMcpObsEvent(input: {
   durationMs?: number;
   metadata?: Record<string, unknown>;
 }): void {
+  void emitJourneyObsEvent({
+    schema_version: "journey.trace.v1",
+    trace_id: input.trace.traceId,
+    journey_id: input.trace.journeyId,
+    event: input.eventName.replace(/^lobu\./, ""),
+    service: "lobu",
+    module: "mcp-proxy",
+    status: input.status === "ok" ? "ok" : input.status,
+    agent: { id: input.agentId },
+    toolbox: { user_id: input.userId },
+    mcp: { id: input.mcpId },
+    ...(input.toolName ? { tool: { name: input.toolName } } : {}),
+    ...(input.durationMs !== undefined ? { duration_ms: input.durationMs } : {}),
+    ...input.metadata,
+  });
   void emitAgentObsEvent({
     traceId: input.trace.traceId,
     turnId: input.trace.turnId,

@@ -27,6 +27,7 @@ import {
 	commitTerminalReply,
 	extendTurnDeadlines,
 } from "../orchestration/turn-liveness.js";
+import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import type { InstructionService } from "../services/instruction-service.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
 import { parseShifuTraceHeaders } from "../trace-context.js";
@@ -1309,6 +1310,7 @@ export class WorkerGateway {
 		}
 
 		const buildContext = async (): Promise<Response> => {
+			let shifuTrace: ShifuTraceContext | undefined;
 			try {
 				const {
 					userId,
@@ -1325,7 +1327,7 @@ export class WorkerGateway {
 						401,
 					);
 				}
-				const shifuTrace: ShifuTraceContext = parseShifuTraceHeaders(
+				shifuTrace = parseShifuTraceHeaders(
 					c.req.raw.headers,
 					"worker",
 				);
@@ -1467,6 +1469,26 @@ export class WorkerGateway {
 					`Session context for ${userId}: ${Object.keys(mcpConfig.mcpServers || {}).length} MCPs, ${contextData.agentInstructions.length} chars agent instructions, ${contextData.platformInstructions.length} chars platform instructions, ${contextData.networkInstructions.length} chars network instructions, ${mergedSkillsInstructions.length} chars skills instructions, ${enrichedMcpStatus.length} MCP status entries, ${Object.keys(mcpTools).length} MCP tool lists, ${Object.keys(mcpInstructions).length} MCP instructions, ${skillsConfig.length} skills, provider: ${providerConfig.defaultProvider || "none"}`,
 				);
 
+				void emitJourneyObsEvent({
+					schema_version: "journey.trace.v1",
+					trace_id: shifuTrace.traceId,
+					journey_id: shifuTrace.journeyId,
+					event: "lobu.session.created",
+					service: "lobu",
+					module: "gateway",
+					status: "ok",
+					agent: { id: agentId || "" },
+					toolbox: { user_id: userId },
+					session: { key: sessionKey || "" },
+					conversation: { id: conversationId },
+					mcp: {
+						server_count: Object.keys(mcpConfig.mcpServers || {}).length,
+						tools_list_count: Object.keys(mcpTools).length,
+						status_count: enrichedMcpStatus.length,
+					},
+					provider: { default_provider: providerConfig.defaultProvider || "" },
+				});
+
 				return c.json({
 					userId,
 					agentId: agentId || "",
@@ -1485,6 +1507,21 @@ export class WorkerGateway {
 				});
 			} catch (error) {
 				logger.error("Failed to generate session context", { err: error });
+				const trace =
+					shifuTrace ?? parseShifuTraceHeaders(c.req.raw.headers, "worker");
+				void emitJourneyObsEvent({
+					schema_version: "journey.trace.v1",
+					trace_id: trace.traceId,
+					journey_id: trace.journeyId,
+					event: "lobu.session.created",
+					service: "lobu",
+					module: "gateway",
+					status: "failed",
+					error: {
+						name: error instanceof Error ? error.name : "Error",
+						message: error instanceof Error ? error.message : String(error),
+					},
+				});
 				return c.json({ error: "session_context_error" }, 500);
 			}
 		};
