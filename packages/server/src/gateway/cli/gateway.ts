@@ -224,6 +224,7 @@ export function createGatewayApp(
       const deviceAuthRouter = createDeviceAuthRoutes({
         mcpConfigService,
         secretStore: coreServices.getSecretStore(),
+        publicGatewayUrl: coreServices.getPublicGatewayUrl(),
       });
       app.route("", deviceAuthRouter);
       logger.debug(
