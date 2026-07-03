@@ -322,6 +322,226 @@ describe("durable observability for tools/list", () => {
       }),
     });
   });
+
+  test.each([
+    { status: 401, phase: "initialize", diagnostic: "upstream_unauthorized" },
+    { status: 403, phase: "initialize", diagnostic: "upstream_forbidden" },
+    { status: 401, phase: "tools/list", diagnostic: "upstream_unauthorized" },
+    { status: 403, phase: "tools/list", diagnostic: "upstream_forbidden" },
+  ])(
+    "emits a failed completed event for $phase HTTP $status auth early return",
+    async ({ status, phase, diagnostic }) => {
+      enableObsEnv();
+      const obsBodies: any[] = [];
+      const configSource = createConfigSource({
+        "auth-mcp": {
+          id: "auth-mcp",
+          upstreamUrl: "https://auth-mcp.example.test/mcp",
+        },
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: new InMemoryWritableStore(),
+      });
+
+      globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          if (phase === "initialize") {
+            return new Response("auth required", {
+              status,
+              headers: { "WWW-Authenticate": 'Bearer resource_metadata="https://auth.example.test/.well-known/oauth-protected-resource"' },
+            });
+          }
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (body.method === "tools/list") {
+          return new Response("auth required", { status });
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }) as unknown as typeof fetch;
+
+      const result = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("auth-mcp", "agent1", {
+          userId: "user1",
+          channelId: "ch1",
+        })
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(result.tools).toEqual([]);
+      const completed = obsBodies.find(
+        (body) =>
+          body.eventName === "lobu.mcp.tools_list.completed" &&
+          body.status === "failed"
+      );
+      expect(completed).toMatchObject({
+        eventName: "lobu.mcp.tools_list.completed",
+        status: "failed",
+        metadata: expect.objectContaining({
+          module: "mcp-proxy",
+          mcp_id: "auth-mcp",
+          error_class: "needs_reauth",
+          diagnostic_code: diagnostic,
+          next_debug_hint: expect.stringContaining("MCP"),
+        }),
+      });
+    }
+  );
+});
+
+describe("durable observability for forwarded JSON-RPC tools/call", () => {
+  async function requestForwardedToolCall(
+    upstreamToolCallResult: object
+  ): Promise<{ response: Response; obsBodies: any[] }> {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const configSource = createConfigSource({
+      "jsonrpc-mcp": {
+        id: "jsonrpc-mcp",
+        upstreamUrl: "https://jsonrpc.example.test/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+    const app = proxy.getApp();
+
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://obs.example.test/ingest") {
+        obsBodies.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 202 });
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (body.method === "tools/call") {
+        return new Response(JSON.stringify(upstreamToolCallResult), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const response = await app.request("/jsonrpc-mcp", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${agent1Token}`,
+        "Content-Type": "application/json",
+        "X-Shifu-Trace-Id": "trace-forwarded-call",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "course" } },
+      }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return { response, obsBodies };
+  }
+
+  test("emits failed completed event when HTTP 200 contains JSON-RPC error", async () => {
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      error: { code: -32001, message: "upstream tool failed" },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 7,
+      error: { code: -32001, message: "upstream tool failed" },
+    });
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tool_call.completed",
+      status: "failed",
+      toolName: "meeting_search",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "jsonrpc-mcp",
+        tool_name: "meeting_search",
+        classification: "unknown_error",
+        jsonrpc_error_code: -32001,
+        result_preview: expect.any(Object),
+      }),
+    });
+  });
+
+  test("emits failed completed event when HTTP 200 tool result has isError true", async () => {
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: "tool said no" }],
+        isError: true,
+        diagnosticCode: "connector_unavailable",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: "tool said no" }],
+        isError: true,
+      },
+    });
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tool_call.completed",
+      status: "failed",
+      toolName: "meeting_search",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "jsonrpc-mcp",
+        tool_name: "meeting_search",
+        classification: "transient_error",
+        result_preview: expect.objectContaining({
+          is_error: true,
+          first_text: "tool said no",
+        }),
+      }),
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

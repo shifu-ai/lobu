@@ -416,9 +416,32 @@ describe('Toolbox MCP execution routes', () => {
         trace_source: 'incoming',
       },
     });
-    expect(obsBodies.some((body) => body.eventName === 'lobu.mcp.tool_call.completed')).toBe(
-      true
+    const completedPayload = obsBodies.find(
+      (body) =>
+        body.eventName === 'lobu.mcp.tool_call.completed' && body.status === 'ok'
     );
+    expect(completedPayload).toMatchObject({
+      eventName: 'lobu.mcp.tool_call.completed',
+      status: 'ok',
+      stage: 'lobu.mcp.tool_call',
+      agentId: AGENT_ID,
+      userId: OWNER_USER_ID,
+      connectorKey: CONNECTION_REF,
+      toolName: 'gws_drive_search',
+      durationMs: expect.any(Number),
+      metadata: expect.objectContaining({
+        module: 'mcp-proxy',
+        mcp_id: CONNECTION_REF,
+        tool_name: 'gws_drive_search',
+        classification: 'ok',
+        result_preview: expect.objectContaining({
+          is_error: false,
+          content_count: 1,
+          first_content_type: 'text',
+          first_text: '{"items":[{"id":"doc-001"}]}',
+        }),
+      }),
+    });
   });
 
   test('POST /mcp/tools/call accepts full Toolbox discovery tool aliases', async () => {

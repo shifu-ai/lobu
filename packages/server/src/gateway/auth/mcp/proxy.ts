@@ -38,6 +38,8 @@ import { emitAgentObsEvent } from "../../../observability/shifu-agent-obs.js";
 const logger = createLogger("mcp-proxy");
 
 const MAX_BODY_SIZE = 1024 * 1024; // 1MB
+const OBS_RESPONSE_INSPECT_MAX_BYTES = 64 * 1024;
+const OBS_RESPONSE_INSPECT_TIMEOUT_MS = 1000;
 
 // Bound upstream MCP calls so a slow/hung third-party server can't pin a
 // worker turn (and the gateway request serving it) indefinitely. Applies to
@@ -85,7 +87,21 @@ function generatedMcpTrace(): ShifuTraceContext {
 
 function mcpObsErrorSignal(error: unknown): string {
   if (error instanceof Error) {
-    return `${error.name} ${error.message}`;
+    const record = error as Error & {
+      code?: unknown;
+      status?: unknown;
+      diagnosticCode?: unknown;
+    };
+    return [
+      error.name,
+      error.message,
+      record.code,
+      record.status,
+      record.diagnosticCode,
+    ]
+      .filter((value) => value !== undefined && value !== null)
+      .map(String)
+      .join(" ");
   }
   if (error && typeof error === "object") {
     const record = error as Record<string, unknown>;
@@ -111,7 +127,11 @@ function classifyMcpObsError(error: unknown): string {
   if (/not found|unknown tool|allowlist|not allowed/i.test(signal)) {
     return "config_error";
   }
-  if (/timeout|timed out|econn|network|fetch failed|5\d\d/i.test(signal)) {
+  if (
+    /timeout|timed out|econn|network|fetch failed|5\d\d|connector_unavailable/i.test(
+      signal
+    )
+  ) {
     return "transient_error";
   }
   return "unknown_error";
@@ -170,6 +190,22 @@ function resultPreviewFromValue(value: unknown): Record<string, unknown> {
     }
   }
   return preview;
+}
+
+function resultPreviewFromJsonRpcError(
+  error: { code?: unknown; message?: unknown } | unknown
+): Record<string, unknown> {
+  if (!error || typeof error !== "object") {
+    return { value_type: typeof error };
+  }
+
+  const record = error as { code?: unknown; message?: unknown };
+  return {
+    ...(typeof record.code === "number" ? { error_code: record.code } : {}),
+    ...(typeof record.message === "string"
+      ? { message: sanitizeResultPreviewText(record.message) }
+      : {}),
+  };
 }
 
 function toolNameFromJsonRpcToolCall(bodyText: string): string | undefined {
@@ -262,8 +298,12 @@ type AuthRequiredPayload = {
  */
 async function parseJsonRpcResponse(response: Response): Promise<any> {
   const contentType = response.headers.get("content-type") || "";
+  const text = await response.text();
+  return parseJsonRpcResponseText(contentType, text);
+}
+
+function parseJsonRpcResponseText(contentType: string, text: string): any {
   if (contentType.includes("text/event-stream")) {
-    const text = await response.text();
     // SSE frames: sequence of `event:`/`data:` lines separated by blank lines.
     // For request/response JSON-RPC we expect the last `data:` payload to be
     // the JSON-RPC response object.
@@ -278,7 +318,7 @@ async function parseJsonRpcResponse(response: Response): Promise<any> {
     }
     return JSON.parse(payload);
   }
-  return response.json();
+  return JSON.parse(text);
 }
 
 interface JsonRpcResponse {
@@ -361,6 +401,117 @@ function diagnosticCodeFromToolResult(result: unknown): string | undefined {
     safeMcpToolDiagnosticCode(record.code) ??
     safeMcpToolDiagnosticCode(record.name)
   );
+}
+
+type ForwardedToolCallObsInspection = {
+  status: "ok" | "failed";
+  metadata: Record<string, unknown>;
+  resultOrError?: unknown;
+};
+
+async function inspectForwardedToolCallResponseForObs(
+  response: Response
+): Promise<ForwardedToolCallObsInspection | null> {
+  const contentType = response.headers.get("content-type") || "";
+  if (
+    !contentType.includes("application/json") &&
+    !contentType.includes("text/event-stream")
+  ) {
+    return null;
+  }
+
+  try {
+    const bodyText = await readResponseTextForObs(response);
+    if (!bodyText) return null;
+    const data = parseJsonRpcResponseText(
+      contentType,
+      bodyText
+    ) as JsonRpcResponse;
+    if (data?.error) {
+      const errorMsg =
+        data.error.message ||
+        (typeof data.error === "string" ? data.error : "Upstream error");
+      return {
+        status: "failed",
+        metadata: {
+          jsonrpc_error_code: data.error.code,
+          result_preview: resultPreviewFromJsonRpcError(data.error),
+        },
+        resultOrError: new McpJsonRpcError(data.error.code, errorMsg),
+      };
+    }
+
+    const result = data?.result;
+    if (result?.isError) {
+      return {
+        status: "failed",
+        metadata: {
+          result_preview: resultPreviewFromValue(result),
+          ...(diagnosticCodeFromToolResult(result)
+            ? { diagnostic_code: diagnosticCodeFromToolResult(result) }
+            : {}),
+        },
+        resultOrError: result,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+async function readResponseTextForObs(
+  response: Response
+): Promise<string | null> {
+  if (!response.body) return "";
+
+  const reader = response.body.getReader();
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+
+  const readPromise = (async () => {
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > OBS_RESPONSE_INSPECT_MAX_BYTES) {
+          await reader.cancel().catch(() => {
+            /* noop */
+          });
+          return null;
+        }
+        chunks.push(value);
+      }
+      const merged = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      return new TextDecoder().decode(merged);
+    } catch {
+      return null;
+    }
+  })();
+
+  const timeoutPromise = new Promise<null>((resolve) => {
+    timeout = setTimeout(() => {
+      timedOut = true;
+      void reader.cancel().catch(() => {
+        /* noop */
+      });
+      resolve(null);
+    }, OBS_RESPONSE_INSPECT_TIMEOUT_MS);
+  });
+
+  const result = await Promise.race([readPromise, timeoutPromise]);
+  if (timeout) clearTimeout(timeout);
+  return timedOut ? null : result;
 }
 
 interface HttpMcpServerConfig {
@@ -949,6 +1100,21 @@ export class McpProxy {
         },
       });
     };
+    const emitDiscoveryAuthFailure = (
+      diagnosticCode: "upstream_unauthorized" | "upstream_forbidden",
+      upstreamHost?: string
+    ) => {
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "miss",
+          tool_count: 0,
+          ...(upstreamHost ? { upstream_host: upstreamHost } : {}),
+          diagnostic_code: diagnosticCode,
+        },
+        new McpDiscoveryAuthError(diagnosticCode)
+      );
+    };
 
     emitMcpObsEvent({
       trace,
@@ -1111,6 +1277,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_unauthorized");
           }
+          emitDiscoveryAuthFailure(
+            "upstream_unauthorized",
+            safeHost(httpServer.upstreamUrl)
+          );
           return { tools: [] };
         }
 
@@ -1121,6 +1291,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_forbidden");
           }
+          emitDiscoveryAuthFailure(
+            "upstream_forbidden",
+            safeHost(httpServer.upstreamUrl)
+          );
           return { tools: [] };
         }
 
@@ -1190,6 +1364,10 @@ export class McpProxy {
         if (options?.surfaceErrors) {
           throw new McpDiscoveryAuthError("upstream_unauthorized");
         }
+        emitDiscoveryAuthFailure(
+          "upstream_unauthorized",
+          safeHost(httpServer.upstreamUrl)
+        );
         return { tools: [] };
       }
 
@@ -1201,6 +1379,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_forbidden");
           }
+          emitDiscoveryAuthFailure(
+            "upstream_forbidden",
+            safeHost(httpServer.upstreamUrl)
+          );
           return { tools: [] };
         }
         throw new McpHttpStatusError(response.status);
@@ -1217,6 +1399,10 @@ export class McpProxy {
               errorMsg
             );
           }
+          emitDiscoveryAuthFailure(
+            this.authDiagnosticCodeFromMessage(errorMsg),
+            safeHost(httpServer.upstreamUrl)
+          );
           return { tools: [] };
         }
         throw new McpJsonRpcError(data.error.code, errorMsg);
@@ -1294,6 +1480,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_unauthorized");
           }
+          emitDiscoveryAuthFailure(
+            "upstream_unauthorized",
+            safeHost(httpServer.upstreamUrl)
+          );
           return { tools: [] };
         }
         if (retryResponse.status === 403) {
@@ -1303,6 +1493,10 @@ export class McpProxy {
           if (options?.surfaceErrors) {
             throw new McpDiscoveryAuthError("upstream_forbidden");
           }
+          emitDiscoveryAuthFailure(
+            "upstream_forbidden",
+            safeHost(httpServer.upstreamUrl)
+          );
           return { tools: [] };
         }
         if (!retryResponse.ok) {
@@ -1322,6 +1516,10 @@ export class McpProxy {
                 errorMsg
               );
             }
+            emitDiscoveryAuthFailure(
+              this.authDiagnosticCodeFromMessage(errorMsg),
+              safeHost(httpServer.upstreamUrl)
+            );
             return { tools: [] };
           }
           throw new McpJsonRpcError(retryData.error.code, errorMsg);
@@ -2998,21 +3196,30 @@ export class McpProxy {
       responseHeaders.set("Mcp-Session-Id", newSessionId);
     }
 
+    const forwardedToolCallInspection = forwardedToolName
+      ? await inspectForwardedToolCallResponseForObs(response.clone())
+      : null;
     const body = this.wrapStreamableResponseBody(
       response.body,
       mcpId,
       agentId
     );
     emitForwardedToolCallCompleted(
-      response.ok ? "ok" : "failed",
-      {
-        http_status: response.status,
-        result_preview: {
-          streamed_response: true,
-          http_status: response.status,
-        },
-      },
-      response.ok ? undefined : new McpHttpStatusError(response.status)
+      forwardedToolCallInspection?.status ?? (response.ok ? "ok" : "failed"),
+      forwardedToolCallInspection
+        ? {
+            http_status: response.status,
+            ...forwardedToolCallInspection.metadata,
+          }
+        : {
+            http_status: response.status,
+            result_preview: {
+              streamed_response: true,
+              http_status: response.status,
+            },
+          },
+      forwardedToolCallInspection?.resultOrError ??
+        (response.ok ? undefined : new McpHttpStatusError(response.status))
     );
 
     return new Response(body, {
