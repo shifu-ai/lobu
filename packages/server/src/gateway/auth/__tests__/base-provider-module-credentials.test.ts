@@ -11,7 +11,18 @@ let orgSharedSecretRows: Array<{ ciphertext: string }> = [];
 
 // Mock the org-context AsyncLocalStorage lookup so we can simulate a worker
 // request that does (or doesn't) carry an org.
+//
+// IMPORTANT: bun's `mock.module` is process-global and permanent for the rest
+// of the `bun test` process. Other modules (e.g. `gateway/routes/internal/
+// middleware.ts`) import the `orgContext` named export from this same
+// specifier; omitting it breaks their evaluation ("Export named 'orgContext'
+// not found") for every test file loaded later in the same process — so
+// mirror the full export surface of the real module.
 mock.module("../../../lobu/stores/org-context.js", () => ({
+  orgContext: {
+    run: (_ctx: unknown, fn: () => unknown) => fn(),
+    getStore: () => (mockOrgId ? { organizationId: mockOrgId } : undefined),
+  },
   tryGetOrgId: () => mockOrgId,
   getOrgId: () => {
     if (!mockOrgId) throw new Error("no org");
@@ -61,6 +72,14 @@ describe("BaseProviderModule.hasCredentials org-shared key fallback", () => {
     else process.env.ENCRYPTION_KEY = previousEncryptionKey;
     if (previousZKey === undefined) delete process.env.Z_AI_API_KEY;
     else process.env.Z_AI_API_KEY = previousZKey;
+    // The db mock above hijacks `getDb()` process-wide for the rest of the
+    // run. Any later suite that touches the DB through it (e.g. the
+    // revoked-token store's `SELECT jti ...` in `authenticateWorker`) gets
+    // whatever rows the last test left here — a non-empty leftover makes
+    // every subsequent worker token look revoked (silent 401s). Reset so the
+    // shared mock answers "no rows" once this file is done.
+    mockOrgId = null;
+    orgSharedSecretRows = [];
   });
 
   test("returns true when a per-user auth profile exists", async () => {
