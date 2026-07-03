@@ -451,14 +451,51 @@ export async function buildViewUrl(
   return buildConnectionsUrl(ownerSlug, baseUrl, connectorKey);
 }
 
+/**
+ * Default visibility for a newly created connection.
+ *
+ * A connection reads through ONE org-level credential (its auth profile's
+ * token), not a per-reader credential — so an `org`-visible connection lets
+ * EVERY org member read live through the connection owner's token. For a
+ * personal login (`profile_kind === 'oauth_account'` — a user's own Gmail /
+ * calendar / etc.) that means org-visible = the owner's private inbox exposed to
+ * the whole org. So a personal-credential connection defaults to `private`
+ * regardless of the creator's role — the credential being personal is a stronger
+ * fact than "an admin made it". Every other credential kind (env secrets,
+ * oauth_app client creds, service accounts, browser sessions) backs a genuinely
+ * shared source, so it keeps the role-based default (admins/owners → `org`,
+ * members → `private`).
+ */
 export async function resolveConnectionVisibility(
   organizationId: string,
-  userId?: string | null
+  userId?: string | null,
+  profileKind?: string | null
 ): Promise<'org' | 'private'> {
+  // Personal login → private, whatever the role. Checked BEFORE the role gate so
+  // an admin attaching their own Gmail still defaults private.
+  if (isPersonalCredentialKind(profileKind)) return 'private';
   if (!userId) return 'org';
   const sql = getDb();
   const role = await getWorkspaceRole(sql, organizationId, userId);
   return isAdminOrOwnerRole(role) ? 'org' : 'private';
+}
+
+/**
+ * Is this auth-profile kind a PERSONAL credential — a single user's own login
+ * whose token is not something the whole org should read through? Today only
+ * `oauth_account` (a user's own Gmail/calendar/etc. grant). Every other kind
+ * (env secrets, oauth_app client creds, service accounts, browser sessions)
+ * backs a genuinely shared source.
+ *
+ * A connection reads through ONE org-level credential, so an `org`-visible
+ * connection on a personal credential exposes that user's private data to every
+ * org member. This predicate is the single source of truth for "personal
+ * credential ⇒ must default private", used at create AND at every later point a
+ * connection can become personal-credential-backed (OAuth callback attach,
+ * update re-point).
+ */
+export function isPersonalCredentialKind(profileKind?: string | null): boolean {
+  return profileKind === 'oauth_account';
 }
 
 export async function resolveConnectionDisplayName(params: {
