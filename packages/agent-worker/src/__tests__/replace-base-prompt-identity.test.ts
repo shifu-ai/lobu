@@ -155,7 +155,7 @@ describe("worker model observability", () => {
     expect(runSettledBeforeCompletedIngestSettled).toBe(true);
   });
 
-  test("emits model started and completed events around a successful runner", async () => {
+  test("emits provider call started and model completed events around a successful runner", async () => {
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     enableObs(fetchMock);
 
@@ -169,9 +169,9 @@ describe("worker model observability", () => {
       JSON.parse(String((call as unknown as [string, RequestInit])[1].body))
     );
     expect(events[0]).toMatchObject({
-      eventName: "lobu.model.started",
+      eventName: "provider.call.started",
       status: "started",
-      stage: "lobu.model.started",
+      stage: "provider.call",
       metadata: {
         module: "agent-worker",
         provider: "openai",

@@ -6,7 +6,7 @@ const MAX_STRING_LENGTH = 2048;
 const MAX_ARRAY_ITEMS = 50;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 6;
-const DEFAULT_INGEST_TIMEOUT_MS = 2000;
+const DEFAULT_INGEST_TIMEOUT_MS = 500;
 
 const SENSITIVE_KEY_WORDS = new Set([
   "authorization",
@@ -157,6 +157,7 @@ export function redactAgentObsValue(value: unknown): unknown {
 }
 
 function isEnabled(): boolean {
+  if (trimOptional(process.env.TOOLBOX_AGENT_OBSERVABILITY_URL)) return true;
   const value = process.env.SHIFU_AGENT_OBS_ENABLED?.trim().toLowerCase();
   return value === "true" || value === "1" || value === "yes" || value === "on";
 }
@@ -176,7 +177,11 @@ export async function emitAgentObsEvent(
   input: AgentObsEventInput
 ): Promise<void> {
   try {
-    const ingestUrl = trimOptional(process.env.SHIFU_AGENT_OBS_INGEST_URL);
+    const toolboxIngestUrl = trimOptional(
+      process.env.TOOLBOX_AGENT_OBSERVABILITY_URL
+    );
+    const ingestUrl =
+      trimOptional(process.env.SHIFU_AGENT_OBS_INGEST_URL) ?? toolboxIngestUrl;
     if (!isEnabled() || !ingestUrl) return;
 
     const payload: AgentObsEventPayload = {
@@ -202,12 +207,22 @@ export async function emitAgentObsEvent(
       timestamp: input.timestamp ?? new Date().toISOString(),
     };
 
-    const token = trimOptional(process.env.SHIFU_AGENT_OBS_TOKEN);
+    const token =
+      trimOptional(process.env.SHIFU_AGENT_OBS_TOKEN) ??
+      trimOptional(process.env.TOOLBOX_INTERNAL_SECRET);
+    if (toolboxIngestUrl && !token) return;
+
     const body = JSON.stringify(redactAgentObsValue(payload));
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
-    if (token) headers.authorization = `Bearer ${token}`;
+    if (token) {
+      if (toolboxIngestUrl) {
+        headers["x-internal-secret"] = token;
+      } else {
+        headers.authorization = `Bearer ${token}`;
+      }
+    }
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), getIngestTimeoutMs());
