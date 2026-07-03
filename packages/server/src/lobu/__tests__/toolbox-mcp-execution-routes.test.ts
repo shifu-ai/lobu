@@ -147,6 +147,7 @@ const OBS_ENV_KEYS = [
   'SHIFU_AGENT_OBS_INGEST_URL',
   'SHIFU_AGENT_OBS_TOKEN',
   'SHIFU_AGENT_OBS_SOURCE',
+  'SHIFU_AGENT_OBS_TIMEOUT_MS',
 ] as const;
 const originalObsEnv = new Map<string, string | undefined>();
 let originalFetch: typeof globalThis.fetch;
@@ -1484,6 +1485,42 @@ describe('Toolbox MCP execution routes', () => {
     });
 
     expect(res.status).toBe(403);
+    expect(executeToolDirectMock).not.toHaveBeenCalled();
+  });
+
+  test('POST /mcp/tools/call does not emit observability when auth fails', async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = 'true';
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = 'https://obs.example.test/ingest';
+    const fetchMock = mock(async () => new Response('{}', { status: 202 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    authStash.user = {
+      id: 'different-user',
+      name: 'Different',
+      email: 'different@test.local',
+      emailVerified: true,
+    };
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:execute'] };
+    const app = await importMountedAgentRoutes();
+
+    const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer execute-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        ownerUserId: OWNER_USER_ID,
+        agentId: AGENT_ID,
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'drive_search',
+        args: {},
+      }),
+    });
+
+    expect(res.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(executeToolDirectMock).not.toHaveBeenCalled();
   });
 

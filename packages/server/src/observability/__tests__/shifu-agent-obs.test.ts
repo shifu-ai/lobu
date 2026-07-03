@@ -6,6 +6,7 @@ const OBS_ENV_KEYS = [
   'SHIFU_AGENT_OBS_INGEST_URL',
   'SHIFU_AGENT_OBS_TOKEN',
   'SHIFU_AGENT_OBS_SOURCE',
+  'SHIFU_AGENT_OBS_TIMEOUT_MS',
 ] as const;
 
 const originalEnv = new Map<string, string | undefined>();
@@ -168,6 +169,37 @@ describe('ShiFu Agent Obs event emitter', () => {
         stage: 'lobu.mcp.tool_call',
       })
     ).resolves.toBeUndefined();
+  });
+
+  test('aborts a hung ingest fetch after the configured timeout', async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = 'true';
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = 'https://obs.example.test/ingest';
+    process.env.SHIFU_AGENT_OBS_TIMEOUT_MS = '10';
+    let sawSignal = false;
+    const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
+      return new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal instanceof AbortSignal) {
+          sawSignal = true;
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      Promise.race([
+        emitAgentObsEvent({
+          traceId: 'trace-hung',
+          eventName: 'lobu.mcp.tool_call.started',
+          status: 'started',
+          stage: 'lobu.mcp.tool_call',
+        }).then(() => 'resolved'),
+        Bun.sleep(100).then(() => 'timed-out'),
+      ])
+    ).resolves.toBe('resolved');
+    expect(sawSignal).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test('redaction is deterministic', () => {

@@ -1052,6 +1052,9 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     );
   }
 
+  const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
+  if (denied) return denied;
+
   const traceId =
     stringField(c.req.header('x-shifu-trace-id')) ??
     stringField(body.shifuTraceId) ??
@@ -1084,9 +1087,6 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
       method: 'POST',
     },
   });
-
-  const denied = requireSessionOrMcpExecutionPat(c, ownerUserId);
-  if (denied) return denied;
 
   const normalizedToolName = normalizeToolboxDiscoveryToolName(connectorKey, toolName);
   if (!isToolboxDiscoveryToolAllowed(connectorKey, toolName)) {

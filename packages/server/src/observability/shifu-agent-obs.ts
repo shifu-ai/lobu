@@ -6,6 +6,7 @@ const MAX_STRING_LENGTH = 2048;
 const MAX_ARRAY_ITEMS = 50;
 const MAX_OBJECT_KEYS = 100;
 const MAX_DEPTH = 6;
+const DEFAULT_INGEST_TIMEOUT_MS = 2000;
 
 const SENSITIVE_KEY_WORDS = new Set([
   'authorization',
@@ -159,6 +160,12 @@ function trimOptional(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+function getIngestTimeoutMs(): number {
+  const parsed = Number(process.env.SHIFU_AGENT_OBS_TIMEOUT_MS);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  return DEFAULT_INGEST_TIMEOUT_MS;
+}
+
 export async function emitAgentObsEvent(input: AgentObsEventInput): Promise<void> {
   try {
     const ingestUrl = trimOptional(process.env.SHIFU_AGENT_OBS_INGEST_URL);
@@ -193,12 +200,19 @@ export async function emitAgentObsEvent(input: AgentObsEventInput): Promise<void
     };
     if (token) headers.authorization = `Bearer ${token}`;
 
-    const response = await fetch(ingestUrl, {
-      method: 'POST',
-      headers,
-      body,
-    });
-    if (!response.ok) return;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), getIngestTimeoutMs());
+    try {
+      const response = await fetch(ingestUrl, {
+        method: 'POST',
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      if (!response.ok) return;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return;
   }
