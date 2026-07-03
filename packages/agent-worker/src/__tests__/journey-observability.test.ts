@@ -49,8 +49,11 @@ describe("worker journey observability", () => {
       status: "started",
       fields: {
         tool: { name: "calendar_events_list" },
-        authorization: "Bearer secret-token",
-        agent: { id: "shifu-u-secret" },
+        authorization: "abc123",
+        line_user_id: "U-line-secret",
+        toolbox: { user_id: "toolbox-user-secret" },
+        agent: { id: "agent-public-but-still-identity" },
+        conversation: { id: "conversation-public-but-still-identity" },
       },
     });
 
@@ -68,8 +71,17 @@ describe("worker journey observability", () => {
       },
     });
     const serialized = JSON.stringify(body);
-    expect(serialized).not.toContain("Bearer secret-token");
-    expect(serialized).not.toContain("shifu-u-secret");
+    expect(serialized).not.toContain("abc123");
+    expect(serialized).not.toContain("U-line-secret");
+    expect(serialized).not.toContain("toolbox-user-secret");
+    expect(serialized).not.toContain("agent-public-but-still-identity");
+    expect(serialized).not.toContain("conversation-public-but-still-identity");
+    expect(body.payload).toMatchObject({
+      trace_id: "tr_workerwrapper",
+      toolbox: { user_id: "[REDACTED]" },
+      agent: { id: "[REDACTED]" },
+      conversation: { id: "[REDACTED]" },
+    });
   });
 
   test("posts wrapper bodies to Toolbox with fail-open timeout behavior", async () => {

@@ -744,6 +744,20 @@ export async function runModelWithObs(
       },
     },
   });
+  emitWorkerObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    agentId: input.agentId,
+    userId: input.userId,
+    eventName: "lobu.model.started",
+    status: "started",
+    stage: "lobu.model.started",
+    metadata: {
+      provider: input.provider,
+      model: input.modelId,
+      tool_count: input.toolCount,
+    },
+  });
 
   try {
     const result = await run();

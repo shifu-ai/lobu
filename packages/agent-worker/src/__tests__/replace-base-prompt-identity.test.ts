@@ -179,7 +179,7 @@ describe("worker model observability", () => {
       outputChars: 42,
     }));
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const firstCall = fetchMock.mock.calls[0] as unknown as [
       string,
       RequestInit,
@@ -212,6 +212,17 @@ describe("worker model observability", () => {
       },
     });
     expect(events[1]).toMatchObject({
+      eventName: "lobu.model.started",
+      status: "started",
+      stage: "lobu.model.started",
+      metadata: {
+        module: "agent-worker",
+        provider: "openai",
+        model: "gpt-4.1",
+        tool_count: 7,
+      },
+    });
+    expect(events[2]).toMatchObject({
       eventName: "lobu.model.completed",
       status: "ok",
       stage: "lobu.model.completed",
@@ -222,7 +233,7 @@ describe("worker model observability", () => {
         output_chars: 42,
       },
     });
-    expect(typeof events[1].durationMs).toBe("number");
+    expect(typeof events[2].durationMs).toBe("number");
   });
 
   test("emits model failed event when the runner throws", async () => {
@@ -235,10 +246,10 @@ describe("worker model observability", () => {
       })
     ).rejects.toThrow("provider rejected model request");
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
     const failed = JSON.parse(
       String(
-        (fetchMock.mock.calls[1] as unknown as [string, RequestInit])[1].body
+        (fetchMock.mock.calls[2] as unknown as [string, RequestInit])[1].body
       )
     );
     expect(failed).toMatchObject({
