@@ -121,8 +121,16 @@ function mcpObsErrorSignal(error: unknown): string {
 
 function classifyMcpObsError(error: unknown): string {
   const signal = mcpObsErrorSignal(error);
+  const diagnosticCode = signal.toLowerCase().replace(/[-\s]+/g, "_");
   if (/401|403|unauthorized|forbidden|oauth|token/i.test(signal)) {
     return "needs_reauth";
+  }
+  if (
+    /\b(?:tool_not_found|tool_schema_invalid|unknown_tool|unknown_mcp|unknown_server|allowlist_denied|not_allowed)\b/.test(
+      diagnosticCode
+    )
+  ) {
+    return "config_error";
   }
   if (
     /not found|allowlist|not allowed|\bunknown\s+(?:mcp|server|connector|tool)\b/i.test(

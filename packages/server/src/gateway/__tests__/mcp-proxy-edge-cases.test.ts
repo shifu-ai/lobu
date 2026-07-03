@@ -621,6 +621,46 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       }),
     });
   });
+
+  test("classifies machine-readable tool diagnostic codes as config_error", async () => {
+    const { response, obsBodies } = await requestForwardedToolCall({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: "tool missing" }],
+        isError: true,
+        diagnosticCode: "tool_not_found",
+      },
+    });
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [{ type: "text", text: "tool missing" }],
+        isError: true,
+      },
+    });
+    const completed = obsBodies.find(
+      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tool_call.completed",
+      status: "failed",
+      toolName: "meeting_search",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "jsonrpc-mcp",
+        tool_name: "meeting_search",
+        classification: "config_error",
+        result_preview: expect.objectContaining({
+          is_error: true,
+          diagnostic_code: "tool_not_found",
+        }),
+      }),
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
