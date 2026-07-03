@@ -829,10 +829,8 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       }),
     });
 
-    const outcome = await Promise.race([
-      requestPromise.then(() => "resolved"),
-      new Promise((resolve) => setTimeout(() => resolve("blocked"), 50)),
-    ]);
+    const response = await requestPromise;
+    expect(response.status).toBe(200);
     controller?.enqueue(
       new TextEncoder().encode(
         `data: ${JSON.stringify({
@@ -847,9 +845,6 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     );
     controller?.close();
 
-    expect(outcome).toBe("resolved");
-    const response = await requestPromise;
-    expect(response.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const completedEvents = obsBodies.filter(
       (body) => body.eventName === "lobu.mcp.tool_call.completed"

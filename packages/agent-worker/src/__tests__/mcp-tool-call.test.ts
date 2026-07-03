@@ -494,6 +494,54 @@ describe("callMcpTool: approval-blocked response from gateway", () => {
 });
 
 describe("worker MCP tool registration observability", () => {
+  test("does not wait for tools_registered observability ingest response", async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+    delete process.env.SHIFU_AGENT_OBS_TOKEN;
+
+    let settleFetch: (() => void) | undefined;
+    const fetchMock = mock(
+      () =>
+        new Promise<Response>((resolve) => {
+          settleFetch = () => resolve(new Response("{}", { status: 202 }));
+        })
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    let eventSettled = false;
+    const eventPromise = Promise.resolve(
+      emitWorkerToolsRegisteredObsEvent({
+        trace: {
+          traceId: "tr_workerobs123456",
+          journeyId: "line_reply",
+          turnId: "turn_workerobs123",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+        conversationId: gw.conversationId,
+        agentId: gw.agentId,
+        userId: gw.userId,
+        toolCount: 1,
+        mcpToolCount: 1,
+        authToolCount: 0,
+        pluginToolCount: 0,
+        mcpIds: ["lobu"],
+      })
+    ).then(() => {
+      eventSettled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    const settledBeforeIngestResponse = eventSettled;
+
+    settleFetch?.();
+    await eventPromise;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(settledBeforeIngestResponse).toBe(true);
+  });
+
   test("emits lobu.worker.tools_registered with MCP registration counts", async () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = "true";
     process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";

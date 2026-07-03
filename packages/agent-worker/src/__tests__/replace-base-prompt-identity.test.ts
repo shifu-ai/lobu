@@ -108,6 +108,53 @@ describe("worker model observability", () => {
     toolCount: 7,
   };
 
+  test("does not wait for model observability ingest responses", async () => {
+    const pendingFetches: Array<() => void> = [];
+    const fetchMock = mock(
+      () =>
+        new Promise<Response>((resolve) => {
+          pendingFetches.push(() => resolve(new Response("{}", { status: 202 })));
+        })
+    );
+    enableObs(fetchMock);
+
+    let runnerCalled = false;
+    let runSettled = false;
+    const runPromise = runModelWithObs(obsBase, async () => {
+      runnerCalled = true;
+      return { success: true, outputChars: 42 };
+    });
+    runPromise.then(() => {
+      runSettled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+    const runnerCalledBeforeStartedIngestSettled = runnerCalled;
+
+    if (!runnerCalled) {
+      pendingFetches[0]?.();
+      for (let i = 0; i < 5 && pendingFetches.length < 2; i++) {
+        await Promise.resolve();
+      }
+    }
+    const runSettledBeforeCompletedIngestSettled = runSettled;
+
+    for (const settle of pendingFetches) {
+      settle();
+    }
+    for (let i = 0; i < 5 && !runSettled; i++) {
+      await Promise.resolve();
+      for (const settle of pendingFetches) {
+        settle();
+      }
+    }
+    await runPromise;
+
+    expect(runnerCalledBeforeStartedIngestSettled).toBe(true);
+    expect(runSettledBeforeCompletedIngestSettled).toBe(true);
+  });
+
   test("emits model started and completed events around a successful runner", async () => {
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     enableObs(fetchMock);

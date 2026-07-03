@@ -621,7 +621,7 @@ function obsTraceMetadata(trace: WorkerShifuTraceContext) {
   };
 }
 
-async function emitWorkerObsEvent(input: {
+function emitWorkerObsEvent(input: {
   trace: WorkerShifuTraceContext;
   conversationId?: string;
   agentId?: string;
@@ -631,8 +631,8 @@ async function emitWorkerObsEvent(input: {
   stage: string;
   durationMs?: number;
   metadata?: Record<string, unknown>;
-}): Promise<void> {
-  await emitAgentObsEvent({
+}): void {
+  void emitAgentObsEvent({
     traceId: input.trace.traceId,
     turnId: input.trace.turnId,
     conversationId: input.conversationId,
@@ -651,7 +651,7 @@ async function emitWorkerObsEvent(input: {
   });
 }
 
-export async function emitWorkerToolsRegisteredObsEvent(input: {
+export function emitWorkerToolsRegisteredObsEvent(input: {
   trace: WorkerShifuTraceContext;
   conversationId?: string;
   agentId?: string;
@@ -661,8 +661,8 @@ export async function emitWorkerToolsRegisteredObsEvent(input: {
   authToolCount: number;
   pluginToolCount: number;
   mcpIds: string[];
-}): Promise<void> {
-  await emitWorkerObsEvent({
+}): void {
+  emitWorkerObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
     agentId: input.agentId,
@@ -697,7 +697,7 @@ export async function runModelWithObs(
   run: () => Promise<ModelObsRunResult>
 ): Promise<ModelObsRunResult> {
   const startedAt = Date.now();
-  await emitWorkerObsEvent({
+  emitWorkerObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
     agentId: input.agentId,
@@ -716,7 +716,7 @@ export async function runModelWithObs(
     const result = await run();
     const durationMs = Math.max(0, Date.now() - startedAt);
     if (result.success) {
-      await emitWorkerObsEvent({
+      emitWorkerObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
         agentId: input.agentId,
@@ -732,7 +732,7 @@ export async function runModelWithObs(
         },
       });
     } else {
-      await emitWorkerObsEvent({
+      emitWorkerObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
         agentId: input.agentId,
@@ -752,7 +752,7 @@ export async function runModelWithObs(
     return result;
   } catch (error) {
     const durationMs = Math.max(0, Date.now() - startedAt);
-    await emitWorkerObsEvent({
+    emitWorkerObsEvent({
       trace: input.trace,
       conversationId: input.conversationId,
       agentId: input.agentId,
@@ -1488,7 +1488,7 @@ Use it when the user references past discussions or you need context.`);
     });
   }
 
-  await emitWorkerToolsRegisteredObsEvent({
+  emitWorkerToolsRegisteredObsEvent({
     trace: shifuTrace,
     conversationId,
     agentId: agentId || context.agentId,
