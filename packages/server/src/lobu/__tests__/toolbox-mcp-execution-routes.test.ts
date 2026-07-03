@@ -12,6 +12,7 @@ process.env.ENCRYPTION_KEY =
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 
 import { verifyConnectLinkToken } from '../../gateway/auth/mcp/connect-link-token';
+import { McpProxy } from '../../gateway/auth/mcp/proxy';
 import {
   authStash,
   coreServicesStash,
@@ -306,11 +307,67 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
-  test('POST /mcp/tools/call emits a durable observability started event', async () => {
+  test('POST /mcp/tools/call emits durable observability started and completed events', async () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = 'true';
     process.env.SHIFU_AGENT_OBS_INGEST_URL = 'https://obs.example.test/ingest';
-    const fetchMock = mock(async () => new Response('{}', { status: 202 }));
+    const obsBodies: any[] = [];
+    const proxy = new McpProxy(
+      {
+        getHttpServer: async (mcpId) =>
+          mcpId === CONNECTION_REF
+            ? {
+                id: CONNECTION_REF,
+                upstreamUrl: 'https://mcp.test.local/google-workspace',
+              }
+            : undefined,
+        getAllHttpServers: async () => new Map(),
+      },
+      {
+        secretStore: {
+          get: async () => null,
+          put: async () => 'secret://unused',
+          delete: async () => {},
+          list: async () => [],
+        } as any,
+      }
+    );
+    const fetchMock = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === 'string'
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === 'https://obs.example.test/ingest') {
+        obsBodies.push(JSON.parse(String(init?.body)));
+        return new Response('{}', { status: 202 });
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body.method === 'tools/call') {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: '2.0',
+            id: body.id,
+            result: {
+              content: [{ type: 'text', text: '{"items":[{"id":"doc-001"}]}' }],
+              isError: false,
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: {} }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
     globalThis.fetch = fetchMock as unknown as typeof fetch;
+    coreServicesStash.services = {
+      ...coreServicesStash.services,
+      getMcpProxy: () => proxy,
+    };
     const app = await importMountedAgentRoutes();
 
     const res = await app.request('/lobu/api/v1/mcp/tools/call', {
@@ -335,10 +392,11 @@ describe('Toolbox MCP execution routes', () => {
     });
 
     expect(res.status).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    const payload = JSON.parse(String(init.body));
-    expect(payload).toMatchObject({
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const startedPayload = obsBodies.find(
+      (body) => body.eventName === 'lobu.mcp.tool_call.started'
+    );
+    expect(startedPayload).toMatchObject({
       schemaVersion: 'journey.trace.v1',
       traceId: 'trace-route-001',
       turnId: 'turn_1',
@@ -358,6 +416,9 @@ describe('Toolbox MCP execution routes', () => {
         trace_source: 'incoming',
       },
     });
+    expect(obsBodies.some((body) => body.eventName === 'lobu.mcp.tool_call.completed')).toBe(
+      true
+    );
   });
 
   test('POST /mcp/tools/call accepts full Toolbox discovery tool aliases', async () => {

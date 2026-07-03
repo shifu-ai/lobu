@@ -33,6 +33,7 @@ import {
   parseShifuTraceHeaders,
   type ShifuTraceContext,
 } from "../../trace-context.js";
+import { emitAgentObsEvent } from "../../../observability/shifu-agent-obs.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -53,12 +54,18 @@ function upstreamTimeoutSignal(method: string): AbortSignal | undefined {
     : AbortSignal.timeout(UPSTREAM_FETCH_TIMEOUT_MS);
 }
 
-function safeUrlHost(value: string): string | undefined {
+function safeHost(value: string | URL | undefined): string {
+  if (!value) return "";
   try {
-    return new URL(value).host;
+    const url = value instanceof URL ? value : new URL(value);
+    return url.host;
   } catch {
-    return undefined;
+    return "";
   }
+}
+
+function safeUrlHost(value: string): string | undefined {
+  return safeHost(value) || undefined;
 }
 
 function safeObjectKeys(value: unknown): string[] {
@@ -74,6 +81,150 @@ function generatedMcpTrace(): ShifuTraceContext {
     actor: "worker",
     traceSource: "generated_missing_header",
   };
+}
+
+function mcpObsErrorSignal(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name} ${error.message}`;
+  }
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    return [
+      record.name,
+      record.message,
+      record.code,
+      record.status,
+      record.diagnosticCode,
+    ]
+      .filter((value) => value !== undefined && value !== null)
+      .map(String)
+      .join(" ");
+  }
+  return String(error ?? "");
+}
+
+function classifyMcpObsError(error: unknown): string {
+  const signal = mcpObsErrorSignal(error);
+  if (/401|403|unauthorized|forbidden|oauth|token/i.test(signal)) {
+    return "needs_reauth";
+  }
+  if (/not found|unknown tool|allowlist|not allowed/i.test(signal)) {
+    return "config_error";
+  }
+  if (/timeout|timed out|econn|network|fetch failed|5\d\d/i.test(signal)) {
+    return "transient_error";
+  }
+  return "unknown_error";
+}
+
+function nextMcpDebugHint(errorClass: string): string {
+  if (errorClass === "needs_reauth") {
+    return "Check MCP OAuth credentials, token refresh, and required scopes.";
+  }
+  if (errorClass === "config_error") {
+    return "Check MCP server config, tool allowlist, and the requested tool name.";
+  }
+  if (errorClass === "transient_error") {
+    return "Check MCP upstream network health, timeouts, and 5xx responses.";
+  }
+  return "Check MCP proxy logs and upstream MCP server response details.";
+}
+
+const RESULT_PREVIEW_MAX_LENGTH = 300;
+const SENSITIVE_PREVIEW_PATTERN =
+  /\b(bearer|token|secret|password|api[_\-\s]?key|authorization)\b|sk-[a-z0-9_-]+/gi;
+
+function sanitizeResultPreviewText(value: string): string {
+  const redacted = value.replace(SENSITIVE_PREVIEW_PATTERN, "[REDACTED]");
+  if (redacted.length <= RESULT_PREVIEW_MAX_LENGTH) return redacted;
+  return `${redacted.slice(0, RESULT_PREVIEW_MAX_LENGTH)}...[truncated]`;
+}
+
+function resultPreviewFromValue(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object") {
+    return { value_type: typeof value };
+  }
+
+  const record = value as {
+    content?: unknown;
+    isError?: unknown;
+    diagnosticCode?: unknown;
+  };
+  const content = Array.isArray(record.content) ? record.content : [];
+  const preview: Record<string, unknown> = {
+    is_error: Boolean(record.isError),
+    content_count: content.length,
+  };
+  if (typeof record.diagnosticCode === "string") {
+    preview.diagnostic_code = record.diagnosticCode;
+  }
+
+  const first = content[0];
+  if (first && typeof first === "object") {
+    const firstRecord = first as { type?: unknown; text?: unknown };
+    if (typeof firstRecord.type === "string") {
+      preview.first_content_type = firstRecord.type;
+    }
+    if (typeof firstRecord.text === "string") {
+      preview.first_text = sanitizeResultPreviewText(firstRecord.text);
+    }
+  }
+  return preview;
+}
+
+function toolNameFromJsonRpcToolCall(bodyText: string): string | undefined {
+  try {
+    const parsed = JSON.parse(bodyText);
+    if (Array.isArray(parsed)) return undefined;
+    if (parsed?.method !== "tools/call") return undefined;
+    const name = parsed.params?.name;
+    return typeof name === "string" && name.trim() ? name.trim() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function obsTraceMetadata(trace: ShifuTraceContext): Record<string, unknown> {
+  return {
+    journey_id: trace.journeyId,
+    parent_span_id: trace.parentSpanId,
+    trace_source: trace.traceSource,
+  };
+}
+
+function emitMcpObsEvent(input: {
+  trace: ShifuTraceContext;
+  eventName: string;
+  status: "started" | "ok" | "failed" | string;
+  stage: string;
+  agentId?: string;
+  userId?: string;
+  mcpId: string;
+  toolName?: string;
+  durationMs?: number;
+  metadata?: Record<string, unknown>;
+}): void {
+  void emitAgentObsEvent({
+    traceId: input.trace.traceId,
+    turnId: input.trace.turnId,
+    agentId: input.agentId,
+    userId: input.userId,
+    toolboxUserId: input.userId,
+    connectorKey: input.mcpId,
+    toolName: input.toolName,
+    eventName: input.eventName,
+    status: input.status,
+    stage: input.stage,
+    durationMs: input.durationMs,
+    metadata: {
+      ...obsTraceMetadata(input.trace),
+      event: input.eventName,
+      module: "mcp-proxy",
+      mcp_id: input.mcpId,
+      ...(input.toolName ? { tool_name: input.toolName } : {}),
+      ...input.metadata,
+    },
+  });
 }
 
 /** Standard MCP `initialize` request body. */
@@ -486,14 +637,53 @@ export class McpProxy {
     userId: string,
     mcpId: string,
     toolName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    options?: { trace?: ShifuTraceContext }
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
     diagnosticCode?: string;
   }> {
+    const trace = options?.trace ?? generatedMcpTrace();
+    const toolCallStartedAt = Date.now();
+    const emitToolCallCompleted = (
+      status: "ok" | "failed",
+      metadata: Record<string, unknown>,
+      resultOrError?: unknown
+    ) => {
+      const classification =
+        status === "ok" ? "ok" : classifyMcpObsError(resultOrError);
+      emitMcpObsEvent({
+        trace,
+        eventName: "lobu.mcp.tool_call.completed",
+        status,
+        stage: "lobu.mcp.tool_call",
+        agentId,
+        userId,
+        mcpId,
+        toolName,
+        durationMs: Date.now() - toolCallStartedAt,
+        metadata: {
+          classification,
+          ...metadata,
+        },
+      });
+    };
+
     const httpServer = await this.configService.getHttpServer(mcpId, agentId);
     if (!httpServer) {
+      const result = {
+        content: [{ type: "text", text: `MCP server '${mcpId}' not found` }],
+        isError: true,
+        diagnosticCode: "tool_not_found",
+      };
+      emitToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue(result),
+        },
+        new Error(`MCP server '${mcpId}' not found`)
+      );
       return {
         content: [{ type: "text", text: `MCP server '${mcpId}' not found` }],
         isError: true,
@@ -518,6 +708,24 @@ export class McpProxy {
         pausedUntil: pause.pausedUntil,
         lastError: pause.lastError,
       });
+      const result = {
+        content: [
+          {
+            type: "text",
+            text: `MCP server '${mcpId}' is temporarily paused after repeated failures.`,
+          },
+        ],
+        isError: true,
+        diagnosticCode: "connector_unavailable",
+      };
+      emitToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue(result),
+          server_paused: true,
+        },
+        pause.lastError || "MCP server paused"
+      );
       return {
         content: [
           {
@@ -579,6 +787,24 @@ export class McpProxy {
             "direct tool execution"
           );
         }
+        const result = {
+          content: [
+            {
+              type: "text",
+              text: `Tool call failed: HTTP ${response.status}`,
+            },
+          ],
+          isError: true,
+          diagnosticCode: diagnosticCodeForHttpStatus(response.status),
+        };
+        emitToolCallCompleted(
+          "failed",
+          {
+            http_status: response.status,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpHttpStatusError(response.status, text)
+        );
         return {
           content: [
             {
@@ -593,6 +819,19 @@ export class McpProxy {
 
       const json = (await parseJsonRpcResponse(response)) as any;
       if (json?.error) {
+        const result = {
+          content: [],
+          isError: true,
+          diagnosticCode: diagnosticCodeForHttpStatus(lastResponseStatus ?? 502),
+        };
+        emitToolCallCompleted(
+          "failed",
+          {
+            jsonrpc_error_code: json.error.code,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpJsonRpcError(json.error.code, json.error.message)
+        );
         return {
           content: [],
           isError: true,
@@ -601,6 +840,13 @@ export class McpProxy {
       }
       const result = json.result || json;
       this.serverHealth.recordSuccess(healthKey);
+      emitToolCallCompleted(
+        result.isError ? "failed" : "ok",
+        {
+          result_preview: resultPreviewFromValue(result),
+        },
+        result
+      );
       return {
         content: result.content || [
           { type: "text", text: JSON.stringify(result) },
@@ -616,7 +862,7 @@ export class McpProxy {
         this.statusFromError(error),
         "direct tool execution"
       );
-      return {
+      const result = {
         content: [
           {
             type: "text",
@@ -626,6 +872,14 @@ export class McpProxy {
         isError: true,
         diagnosticCode: "connector_unavailable",
       };
+      emitToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue(result),
+        },
+        error
+      );
+      return result;
     }
   }
 
@@ -664,6 +918,52 @@ export class McpProxy {
     options?: { surfaceErrors?: boolean; trace?: ShifuTraceContext }
   ): Promise<{ tools: McpTool[]; instructions?: string }> {
     const trace = options?.trace ?? generatedMcpTrace();
+    const listStartedAt = Date.now();
+    const userId = tokenData?.userId;
+    let toolsListObsCompleted = false;
+    const emitToolsListCompleted = (
+      status: "ok" | "failed",
+      metadata: Record<string, unknown>,
+      error?: unknown
+    ) => {
+      if (toolsListObsCompleted) return;
+      toolsListObsCompleted = true;
+      const errorClass = status === "failed" ? classifyMcpObsError(error) : undefined;
+      emitMcpObsEvent({
+        trace,
+        eventName: "lobu.mcp.tools_list.completed",
+        status,
+        stage: "lobu.mcp.tools_list",
+        agentId,
+        userId,
+        mcpId,
+        durationMs: Date.now() - listStartedAt,
+        metadata: {
+          ...metadata,
+          ...(errorClass
+            ? {
+                error_class: errorClass,
+                next_debug_hint: nextMcpDebugHint(errorClass),
+              }
+            : {}),
+        },
+      });
+    };
+
+    emitMcpObsEvent({
+      trace,
+      eventName: "lobu.mcp.tools_list.started",
+      status: "started",
+      stage: "lobu.mcp.tools_list",
+      agentId,
+      userId,
+      mcpId,
+      metadata: {
+        cache_status: "unknown",
+        has_agent_id: Boolean(agentId),
+      },
+    });
+
     const httpServer = await this.configService.getHttpServer(mcpId, agentId);
     if (!httpServer) {
       emitJourneyEvent({
@@ -677,6 +977,14 @@ export class McpProxy {
           error_code: "mcp_server_not_found",
         },
       });
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "unknown",
+          tool_count: 0,
+        },
+        new Error(`MCP server '${mcpId}' not found`)
+      );
       return { tools: [] };
     }
     emitJourneyEvent({
@@ -708,6 +1016,24 @@ export class McpProxy {
         lastError: pause.lastError,
         cacheHit: !!cached,
       });
+      if (cached) {
+        emitToolsListCompleted("ok", {
+          cache_status: "hit",
+          tool_count: cached.tools.length,
+          has_instructions: Boolean(cached.instructions),
+          server_paused: true,
+        });
+      } else {
+        emitToolsListCompleted(
+          "failed",
+          {
+            cache_status: "miss",
+            tool_count: 0,
+            server_paused: true,
+          },
+          pause.lastError || "MCP server paused"
+        );
+      }
       return cached ?? { tools: [] };
     }
 
@@ -725,10 +1051,15 @@ export class McpProxy {
           has_agent_id: Boolean(agentId),
         },
       });
+      emitToolsListCompleted("ok", {
+        cache_status: "hit",
+        tool_count: cached.tools.length,
+        has_instructions: Boolean(cached.instructions),
+        has_agent_id: Boolean(agentId),
+      });
       return cached;
     }
 
-    const userId = tokenData?.userId;
     const channelId = tokenData?.channelId || "";
     const scopeKey = this.computeScopeKey(httpServer, userId, channelId);
     const hasFilter = hasActiveToolFilter(httpServer.toolFilter);
@@ -914,6 +1245,12 @@ export class McpProxy {
           has_instructions: Boolean(instructions),
         },
       });
+      emitToolsListCompleted("ok", {
+        cache_status: "miss",
+        tool_count: filteredTools.length,
+        has_instructions: Boolean(instructions),
+        upstream_host: safeHost(httpServer.upstreamUrl),
+      });
 
       return serverInfo;
     } catch (error) {
@@ -1018,6 +1355,12 @@ export class McpProxy {
             retry_succeeded: true,
           },
         });
+        emitToolsListCompleted("ok", {
+          cache_status: "miss",
+          tool_count: filteredRetryTools.length,
+          retry_succeeded: true,
+          upstream_host: safeHost(httpServer.upstreamUrl),
+        });
         return serverInfo;
       } catch (retryError) {
         logger.error("Retry also failed for MCP tool fetch", {
@@ -1037,7 +1380,18 @@ export class McpProxy {
         // The curl-facing REST endpoint surfaces upstream failures as 502;
         // agent-boot discovery (the default) fails soft so one unreachable
         // MCP doesn't block the worker from starting.
-        if (options?.surfaceErrors) throw retryError;
+        if (options?.surfaceErrors) {
+          emitToolsListCompleted(
+            "failed",
+            {
+              cache_status: "miss",
+              tool_count: 0,
+              upstream_host: safeHost(httpServer.upstreamUrl),
+            },
+            retryError
+          );
+          throw retryError;
+        }
       }
       if (!recordedFailure) {
         this.recordDiscoveryFailure(
@@ -1047,7 +1401,18 @@ export class McpProxy {
           this.statusFromError(error)
         );
       }
-      if (options?.surfaceErrors) throw error;
+      if (options?.surfaceErrors) {
+        emitToolsListCompleted(
+          "failed",
+          {
+            cache_status: "miss",
+            tool_count: 0,
+            upstream_host: safeHost(httpServer.upstreamUrl),
+          },
+          error
+        );
+        throw error;
+      }
       emitJourneyEvent({
         event: "mcp.tools_list.completed",
         trace,
@@ -1061,6 +1426,15 @@ export class McpProxy {
           error_code: "tools_list_failed",
         },
       });
+      emitToolsListCompleted(
+        "failed",
+        {
+          cache_status: "miss",
+          tool_count: 0,
+          upstream_host: safeHost(httpServer.upstreamUrl),
+        },
+        error
+      );
       return { tools: [] };
     }
   }
@@ -1243,6 +1617,31 @@ export class McpProxy {
       );
     }
 
+    const toolCallStartedAt = Date.now();
+    const emitToolCallCompleted = (
+      status: "ok" | "failed",
+      metadata: Record<string, unknown>,
+      resultOrError?: unknown
+    ) => {
+      const classification =
+        status === "ok" ? "ok" : classifyMcpObsError(resultOrError);
+      emitMcpObsEvent({
+        trace,
+        eventName: "lobu.mcp.tool_call.completed",
+        status,
+        stage: "lobu.mcp.tool_call",
+        agentId,
+        userId: requesterUserId,
+        mcpId,
+        toolName,
+        durationMs: Date.now() - toolCallStartedAt,
+        metadata: {
+          classification,
+          ...metadata,
+        },
+      });
+    };
+
     const pause = this.serverHealth.getPause(healthKey);
     if (pause) {
       logger.warn("MCP tool call paused after repeated failures", {
@@ -1252,6 +1651,24 @@ export class McpProxy {
         pausedUntil: pause.pausedUntil,
         lastError: pause.lastError,
       });
+      const result = {
+        content: [
+          {
+            type: "text",
+            text: `MCP server '${mcpId}' is temporarily paused after repeated failures.`,
+          },
+        ],
+        isError: true,
+        diagnosticCode: "connector_unavailable",
+      };
+      emitToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue(result),
+          server_paused: true,
+        },
+        pause.lastError || "MCP server paused"
+      );
       return c.json(
         {
           content: [
@@ -1354,6 +1771,25 @@ export class McpProxy {
           connectionId: auth.tokenData.connectionId,
           deviceAuthFallback: true,
         });
+        const result = {
+          content: [
+            {
+              type: "text",
+              text: payload
+                ? JSON.stringify(payload)
+                : `Authentication required for ${mcpId} but OAuth discovery failed.`,
+            },
+          ],
+          isError: true,
+        };
+        emitToolCallCompleted(
+          "failed",
+          {
+            http_status: response.status,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpHttpStatusError(response.status, "MCP OAuth token required")
+        );
         return c.json(
           {
             content: [
@@ -1442,6 +1878,19 @@ export class McpProxy {
             "tool call"
           );
         }
+        const result = {
+          content: [],
+          isError: true,
+          diagnosticCode: diagnosticCodeForHttpStatus(response.status),
+        };
+        emitToolCallCompleted(
+          "failed",
+          {
+            http_status: response.status,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpHttpStatusError(response.status)
+        );
         return c.json(
           {
             content: [],
@@ -1482,6 +1931,25 @@ export class McpProxy {
               auth.tokenData.platform
             );
           }
+          const result = {
+            content: [
+              {
+                type: "text",
+                text: autoAuthResult
+                  ? JSON.stringify(autoAuthResult)
+                  : `Authentication required for ${mcpId}. Call ${mcpId}_login to authenticate.`,
+              },
+            ],
+            isError: true,
+          };
+          emitToolCallCompleted(
+            "failed",
+            {
+              jsonrpc_error_code: data.error.code,
+              result_preview: resultPreviewFromValue(result),
+            },
+            new McpJsonRpcError(data.error.code, errorMsg)
+          );
           return c.json(
             {
               content: [
@@ -1498,6 +1966,19 @@ export class McpProxy {
           );
         }
 
+        const result = {
+          content: [],
+          isError: true,
+          diagnosticCode: diagnosticCodeForHttpStatus(lastResponseStatus ?? 502),
+        };
+        emitToolCallCompleted(
+          "failed",
+          {
+            jsonrpc_error_code: data.error.code,
+            result_preview: resultPreviewFromValue(result),
+          },
+          new McpJsonRpcError(data.error.code, errorMsg)
+        );
         return c.json(
           {
             content: [],
@@ -1522,6 +2003,13 @@ export class McpProxy {
           content_count: Array.isArray(result.content) ? result.content.length : 0,
         },
       });
+      emitToolCallCompleted(
+        result.isError ? "failed" : "ok",
+        {
+          result_preview: resultPreviewFromValue(result),
+        },
+        result
+      );
       return c.json({
         content: result.content || [],
         isError: result.isError || false,
@@ -1538,6 +2026,17 @@ export class McpProxy {
           error_code: "tool_call_failed",
         },
       });
+      emitToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue({
+            content: [],
+            isError: true,
+            diagnosticCode: "connector_unavailable",
+          }),
+        },
+        error
+      );
       this.recordServerFailure(
         healthKey,
         mcpId,
@@ -2235,6 +2734,36 @@ export class McpProxy {
       });
       return new Response("Request body too large", { status: 413 });
     }
+    const forwardedToolName =
+      c.req.method === "POST" ? toolNameFromJsonRpcToolCall(bodyText) : undefined;
+    const toolCallStartedAt = Date.now();
+    let forwardedToolCallObsCompleted = false;
+    const emitForwardedToolCallCompleted = (
+      status: "ok" | "failed",
+      metadata: Record<string, unknown>,
+      resultOrError?: unknown
+    ) => {
+      if (!forwardedToolName) return;
+      if (forwardedToolCallObsCompleted) return;
+      forwardedToolCallObsCompleted = true;
+      const classification =
+        status === "ok" ? "ok" : classifyMcpObsError(resultOrError);
+      emitMcpObsEvent({
+        trace: parseShifuTraceHeaders(c.req.raw.headers, "worker"),
+        eventName: "lobu.mcp.tool_call.completed",
+        status,
+        stage: "lobu.mcp.tool_call",
+        agentId,
+        userId: authContext?.userId,
+        mcpId,
+        toolName: forwardedToolName,
+        durationMs: Date.now() - toolCallStartedAt,
+        metadata: {
+          classification,
+          ...metadata,
+        },
+      });
+    };
 
     // Internal MCPs (lobu-memory) accept the worker JWT directly; forcing a
     // second OAuth login would block unattended watcher runs. Non-internal
@@ -2255,6 +2784,18 @@ export class McpProxy {
         pausedUntil: pause.pausedUntil,
         lastError: pause.lastError,
       });
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue({
+            content: [],
+            isError: true,
+            diagnosticCode: "connector_unavailable",
+          }),
+          server_paused: true,
+        },
+        pause.lastError || "MCP server paused"
+      );
       return this.sendJsonRpcError(
         c,
         -32000,
@@ -2306,6 +2847,17 @@ export class McpProxy {
         undefined,
         "proxy request"
       );
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          result_preview: resultPreviewFromValue({
+            content: [],
+            isError: true,
+            diagnosticCode: "connector_unavailable",
+          }),
+        },
+        error
+      );
       throw error;
     }
 
@@ -2330,6 +2882,17 @@ export class McpProxy {
         status: "login_required" as const,
         message: `Authentication required for ${mcpId}.`,
       };
+      emitForwardedToolCallCompleted(
+        "failed",
+        {
+          http_status: response.status,
+          result_preview: resultPreviewFromValue({
+            content: [{ type: "text", text: JSON.stringify(finalPayload) }],
+            isError: true,
+          }),
+        },
+        new McpHttpStatusError(response.status, "MCP OAuth token required")
+      );
       return c.json(
         {
           jsonrpc: "2.0",
@@ -2382,6 +2945,18 @@ export class McpProxy {
             undefined,
             "proxy request"
           );
+          emitForwardedToolCallCompleted(
+            "failed",
+            {
+              result_preview: resultPreviewFromValue({
+                content: [],
+                isError: true,
+                diagnosticCode: "connector_unavailable",
+              }),
+              retry: true,
+            },
+            error
+          );
           throw error;
         }
       } catch (error) {
@@ -2427,6 +3002,17 @@ export class McpProxy {
       response.body,
       mcpId,
       agentId
+    );
+    emitForwardedToolCallCompleted(
+      response.ok ? "ok" : "failed",
+      {
+        http_status: response.status,
+        result_preview: {
+          streamed_response: true,
+          http_status: response.status,
+        },
+      },
+      response.ok ? undefined : new McpHttpStatusError(response.status)
     );
 
     return new Response(body, {

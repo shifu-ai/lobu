@@ -19,6 +19,7 @@ import {
   beforeEach,
   describe,
   expect,
+  mock,
   test,
 } from "bun:test";
 import { generateWorkerToken, type SecretRef } from "@lobu/core";
@@ -127,6 +128,12 @@ function successFetch(body: object = { jsonrpc: "2.0", id: 1, result: { tools: [
     });
 }
 
+function enableObsEnv() {
+  process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+  process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+  delete process.env.SHIFU_AGENT_OBS_TOKEN;
+}
+
 function inTestOrg<T>(fn: () => T): T {
   return orgContext.run({ organizationId: "test-org" }, fn);
 }
@@ -178,6 +185,143 @@ afterAll(() => {
 
 beforeEach(() => {
   globalThis.fetch = originalFetch;
+  delete process.env.SHIFU_AGENT_OBS_ENABLED;
+  delete process.env.SHIFU_AGENT_OBS_INGEST_URL;
+  delete process.env.SHIFU_AGENT_OBS_TOKEN;
+});
+
+// ---------------------------------------------------------------------------
+// Durable observability
+// ---------------------------------------------------------------------------
+
+describe("durable observability for tools/list", () => {
+  test("emits a completed ok event with tool count and cache status", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const configSource = createConfigSource({
+      "obs-mcp": {
+        id: "obs-mcp",
+        upstreamUrl: "https://mcp.example.test/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://obs.example.test/ingest") {
+        obsBodies.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 202 });
+      }
+
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      if (body.method === "initialize") {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (body.method === "tools/list") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { tools: [{ name: "search" }, { name: "read" }] },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    await inTestOrg(() =>
+      proxy.fetchToolsForMcp("obs-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const completed = obsBodies.find(
+      (body) =>
+        body.eventName === "lobu.mcp.tools_list.completed" &&
+        body.status === "ok"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tools_list.completed",
+      status: "ok",
+      metadata: expect.objectContaining({
+        event: "lobu.mcp.tools_list.completed",
+        module: "mcp-proxy",
+        mcp_id: "obs-mcp",
+        tool_count: 2,
+        cache_status: "miss",
+      }),
+    });
+  });
+
+  test("emits a completed failed event with transient classification and MCP debug hint", async () => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const configSource = createConfigSource({
+      "flaky-mcp": {
+        id: "flaky-mcp",
+        upstreamUrl: "https://flaky.example.test/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
+
+    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : (input as Request).url;
+      if (url === "https://obs.example.test/ingest") {
+        obsBodies.push(JSON.parse(String(init?.body)));
+        return new Response("{}", { status: 202 });
+      }
+      throw new Error("fetch failed: network timeout 503");
+    }) as unknown as typeof fetch;
+
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("flaky-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      })
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(result.tools).toEqual([]);
+    const completed = obsBodies.find(
+      (body) =>
+        body.eventName === "lobu.mcp.tools_list.completed" &&
+        body.status === "failed"
+    );
+    expect(completed).toMatchObject({
+      eventName: "lobu.mcp.tools_list.completed",
+      status: "failed",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "flaky-mcp",
+        error_class: "transient_error",
+        cache_status: "miss",
+        next_debug_hint: expect.stringContaining("MCP"),
+      }),
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
