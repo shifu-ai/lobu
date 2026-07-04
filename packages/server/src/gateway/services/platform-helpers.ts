@@ -172,7 +172,7 @@ export async function resolveAgentOptions(
     );
   }
   // Apply default memory plugins if no pluginsConfig from settings or baseOptions
-  if (!mergedOptions.pluginsConfig) {
+  if (!mergedOptions.pluginsConfig?.plugins?.length) {
     mergedOptions.pluginsConfig = { plugins: buildMemoryPlugins() };
   }
   if (settings.verboseLogging !== undefined) {

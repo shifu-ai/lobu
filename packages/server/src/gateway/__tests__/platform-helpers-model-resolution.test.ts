@@ -226,6 +226,88 @@ describe("resolveAgentOptions model resolution", () => {
       },
     });
   });
+
+  test("applies default memory plugins when settings have no pluginsConfig", async () => {
+    process.env.PORT = "8787";
+
+    const settingsStore = {
+      getSettings: async () => ({}) as any,
+    };
+
+    const resolved = await resolveAgentOptions(
+      "agent-1",
+      {},
+      settingsStore as any
+    );
+
+    expect(resolved.pluginsConfig).toEqual({
+      plugins: [
+        {
+          source: "@lobu/openclaw-plugin",
+          slot: "memory",
+          enabled: true,
+          config: {
+            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/lobu-memory",
+            gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
+          },
+        },
+      ],
+    });
+  });
+
+  test("applies default memory plugins when settings.pluginsConfig is an empty object", async () => {
+    process.env.PORT = "8787";
+
+    const settingsStore = {
+      getSettings: async () =>
+        ({
+          pluginsConfig: {},
+        }) as any,
+    };
+
+    const resolved = await resolveAgentOptions(
+      "agent-1",
+      {},
+      settingsStore as any
+    );
+
+    expect(resolved.pluginsConfig).toEqual({
+      plugins: [
+        {
+          source: "@lobu/openclaw-plugin",
+          slot: "memory",
+          enabled: true,
+          config: {
+            mcpUrl: "http://127.0.0.1:8787/lobu/mcp/lobu-memory",
+            gatewayAuthUrl: "http://127.0.0.1:8787/lobu",
+          },
+        },
+      ],
+    });
+  });
+
+  test("preserves an explicit non-empty pluginsConfig without applying defaults", async () => {
+    process.env.PORT = "8787";
+
+    const settingsStore = {
+      getSettings: async () =>
+        ({
+          pluginsConfig: {
+            plugins: [{ source: "something-else", slot: "memory", enabled: true }],
+          },
+        }) as any,
+    };
+
+    const resolved = await resolveAgentOptions(
+      "agent-1",
+      {},
+      settingsStore as any
+    );
+
+    expect(resolved.pluginsConfig).toEqual({
+      plugins: [{ source: "something-else", slot: "memory", enabled: true }],
+    });
+  });
 });
 
 describe("resolveAgentId", () => {
