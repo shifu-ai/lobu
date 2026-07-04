@@ -751,7 +751,7 @@ function buildDigestDispatchMessage(params: {
     `Dispatch source: ${params.payload.dispatch_source}`,
     '',
     '請依序執行：',
-    '1. 呼叫 get_pm_daily_context 取得你負責課程的今日會議記錄與訂單概況。',
+    `1. 呼叫 get_pm_daily_context，並帶上參數 today="${today}"，取得你負責課程的今日會議記錄與訂單概況（不帶 today 參數會拿到最近 20 筆未過濾的會議，混入非今日資料）。`,
     '2.(若已授權 Notion)可補充 Notion 專案動態；未授權則略過，不要編造。',
     '3. 綜合成「今日建議聚焦事項」，用繁體中文、條列、精簡。',
     '4. 呼叫 send_daily_digest 把這份報告推送出去（text 參數 = 你的報告）。',

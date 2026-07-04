@@ -69,6 +69,18 @@ describe('buildDispatchMessage — kind branch', () => {
     expect(message).not.toContain('complete_window');
   });
 
+  it('digest payload instructs calling get_pm_daily_context with today= the computed date, so the toolbox-side client filter actually narrows to today (M1 fix)', () => {
+    const message = buildDispatchMessage({
+      ...baseParams,
+      payload: basePayload({ kind: 'digest', window_start: '2026-07-04T00:00:00.000Z' }),
+    });
+
+    // window_start is UTC midnight of 2026-07-04, so `today` renders as
+    // 2026-07-04 (YYYY-MM-DD) — the exact format get_pm_daily_context's
+    // `today` arg expects for its client-side date-string comparison.
+    expect(message).toMatch(/get_pm_daily_context.*today="2026-07-04"/);
+  });
+
   it('digest payload instructs skip-not-fabricate for unavailable/unauthorized sources', () => {
     const message = buildDispatchMessage({
       ...baseParams,
