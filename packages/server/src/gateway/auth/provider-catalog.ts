@@ -12,11 +12,9 @@ import {
   type ModelProviderModule,
   type ProviderUpstreamConfig,
 } from "../modules/module-system.js";
-import type { DeclaredAgentRegistry } from "../services/declared-agent-registry.js";
 import { ApiKeyProviderModule } from "./api-key-provider-module.js";
 import type { AgentSettingsStore } from "./settings/agent-settings-store.js";
 import type { AuthProfilesManager } from "./settings/auth-profiles-manager.js";
-import { reconcileModelSelectionForInstalledProviders } from "./settings/model-selection.js";
 
 const logger = createLogger("provider-catalog");
 
@@ -47,6 +45,11 @@ export interface ProviderCatalogEntry {
   baseUrl: string;
   defaultModel: string | null;
   modelsEndpoint: string | null;
+  /**
+   * Static fallback model IDs (from providers.json), used by the model picker
+   * when a provider has no live `modelsEndpoint` or the live fetch is empty.
+   */
+  models: string[];
   apiKeyPlaceholder: string;
   apiKeyInstructions: string;
   /** Modalities served; drives which per-modality overrides the UI offers. */
@@ -109,6 +112,7 @@ export function buildProviderCatalog(
         baseUrl,
         defaultModel,
         modelsEndpoint: config?.modelsEndpoint ?? null,
+        models: config?.models ?? module.catalogModels ?? [],
         apiKeyPlaceholder:
           config?.apiKeyPlaceholder ?? module.apiKeyPlaceholder ?? "",
         apiKeyInstructions:
@@ -175,14 +179,10 @@ async function resolveInstalledProviders(
  * Providers are registered globally in the module registry,
  * but each agent chooses which providers to install from the catalog.
  */
-const DECLARED_AGENT_MUTATION_ERROR =
-  "provider list is declared in lobu.config.ts; edit the file and restart";
-
 export class ProviderCatalogService {
   constructor(
     private agentSettingsStore: AgentSettingsStore,
     private authProfilesManager: AuthProfilesManager,
-    private declaredAgents: DeclaredAgentRegistry,
     /**
      * Reads the org's inference_providers rows. When present, an installed
      * provider slug that isn't a providers.json module is synthesized from a
@@ -244,12 +244,6 @@ export class ProviderCatalogService {
     return module;
   }
 
-  private guardDeclared(agentId: string): void {
-    if (this.declaredAgents.has(agentId)) {
-      throw new Error(DECLARED_AGENT_MUTATION_ERROR);
-    }
-  }
-
   /**
    * List all catalog-visible providers from the module registry.
    */
@@ -276,25 +270,22 @@ export class ProviderCatalogService {
       this.agentSettingsStore,
       agentId
     );
-    if (installed.length === 0) return [];
 
     const allModules = getModelProviderModules();
     const moduleMap = new Map(allModules.map((m) => [m.providerId, m]));
 
     // Slugs not backed by a providers.json module may be org-defined inference
     // providers. Load the org's rows once and index by slug so each unmatched
-    // installed slug can be synthesized in install order.
+    // installed slug — AND the org DEFAULT provider — can be synthesized.
     let orgRowsBySlug: Map<string, InferenceProviderListItem> | undefined;
+    let orgDefaultSlug: string | undefined;
     // Protocol per catalog slug, so a synthesized org row routes with the wire
     // protocol its `kind` declares (openai/anthropic/…), not a hardcoded one.
     let sdkCompatByKind: Map<string, SdkCompat> | undefined;
-    if (
-      organizationId &&
-      this.listOrgInferenceProviders &&
-      installed.some((ip) => !moduleMap.has(ip.providerId))
-    ) {
+    if (organizationId && this.listOrgInferenceProviders) {
       const rows = await this.listOrgInferenceProviders(organizationId);
       orgRowsBySlug = new Map(rows.map((r) => [r.slug, r]));
+      orgDefaultSlug = rows.find((r) => r.isDefault)?.slug;
       sdkCompatByKind = new Map();
       for (const entry of buildProviderCatalog()) {
         if (isSdkCompat(entry.sdkCompat)) {
@@ -303,14 +294,25 @@ export class ProviderCatalogService {
       }
     }
 
+    // Resolve providers in install order, then append the org default when it
+    // isn't already covered. The default must reach the worker even for an agent
+    // with NO installed providers — that is the exact case the org-default
+    // fallback exists to serve (behavior → agent → ORG default). Without this a
+    // bare-config agent gets a routable model ref (`slug/model`) but no provider
+    // config/credentials, so the run can't route to a custom upstream.
+    const providerIds = installed.map((ip) => ip.providerId);
+    if (orgDefaultSlug && !providerIds.includes(orgDefaultSlug)) {
+      providerIds.push(orgDefaultSlug);
+    }
+
     const resolved: ModelProviderModule[] = [];
-    for (const ip of installed) {
-      const staticModule = moduleMap.get(ip.providerId);
+    for (const providerId of providerIds) {
+      const staticModule = moduleMap.get(providerId);
       if (staticModule) {
         resolved.push(staticModule);
         continue;
       }
-      const row = orgRowsBySlug?.get(ip.providerId);
+      const row = orgRowsBySlug?.get(providerId);
       if (row) {
         // Resolve the row's protocol from its catalog `kind`. Unknown/absent ⇒
         // default to openai (legacy rows created before kind carried a
@@ -328,83 +330,6 @@ export class ProviderCatalogService {
    */
   async getInstalledProviders(agentId: string): Promise<InstalledProvider[]> {
     return resolveInstalledProviders(this.agentSettingsStore, agentId);
-  }
-
-  /**
-   * Install a provider for an agent. Appends to the end of the list.
-   */
-  async installProvider(agentId: string, providerId: string): Promise<void> {
-    this.guardDeclared(agentId);
-    const allModules = getModelProviderModules();
-    const module = allModules.find((m) => m.providerId === providerId);
-    if (!module) {
-      throw new Error(`Unknown provider: ${providerId}`);
-    }
-
-    const settings = await this.agentSettingsStore.getSettings(agentId);
-    const installed = settings?.installedProviders || [];
-
-    if (installed.some((ip) => ip.providerId === providerId)) {
-      logger.info(
-        `Provider ${providerId} already installed for agent ${agentId}`
-      );
-      return;
-    }
-
-    const entry: InstalledProvider = {
-      providerId,
-      installedAt: Date.now(),
-    };
-    const nextInstalledProviders = [...installed, entry];
-    const reconciled = reconcileModelSelectionForInstalledProviders({
-      model: settings?.model,
-      modelSelection: settings?.modelSelection,
-      providerModelPreferences: settings?.providerModelPreferences,
-      installedProviders: nextInstalledProviders,
-    });
-
-    await this.agentSettingsStore.updateSettings(agentId, {
-      installedProviders: nextInstalledProviders,
-      ...reconciled,
-    });
-
-    logger.info(`Installed provider ${providerId} for agent ${agentId}`);
-  }
-
-  /**
-   * Uninstall a provider from an agent. Also cleans up auth profiles.
-   */
-  async uninstallProvider(agentId: string, providerId: string): Promise<void> {
-    this.guardDeclared(agentId);
-    const settings = await this.agentSettingsStore.getSettings(agentId);
-    const installed = settings?.installedProviders || [];
-
-    const filtered = installed.filter((ip) => ip.providerId !== providerId);
-    if (filtered.length === installed.length) {
-      logger.info(
-        `Provider ${providerId} not installed for agent ${agentId}, nothing to uninstall`
-      );
-      return;
-    }
-
-    // Clean up ephemeral auth profiles. User-scoped profiles in
-    // UserAuthProfileStore stay put — uninstalling a provider on a
-    // runtime agent shouldn't cascade-delete every user's tokens; users
-    // remove their own credentials from the per-user UI.
-    await this.authProfilesManager.deleteProviderProfiles(agentId, providerId);
-    const reconciled = reconcileModelSelectionForInstalledProviders({
-      model: settings?.model,
-      modelSelection: settings?.modelSelection,
-      providerModelPreferences: settings?.providerModelPreferences,
-      installedProviders: filtered,
-    });
-
-    await this.agentSettingsStore.updateSettings(agentId, {
-      installedProviders: filtered,
-      ...reconciled,
-    });
-
-    logger.info(`Uninstalled provider ${providerId} for agent ${agentId}`);
   }
 
   /**
@@ -439,50 +364,5 @@ export class ProviderCatalogService {
       }
     }
     return undefined;
-  }
-
-  /**
-   * Reorder installed providers. The orderedIds must contain
-   * exactly the same provider IDs as currently installed.
-   */
-  async reorderProviders(agentId: string, orderedIds: string[]): Promise<void> {
-    this.guardDeclared(agentId);
-    const settings = await this.agentSettingsStore.getSettings(agentId);
-    const installed = settings?.installedProviders || [];
-
-    const installedMap = new Map(installed.map((ip) => [ip.providerId, ip]));
-
-    // Validate all ordered IDs exist in installed
-    for (const id of orderedIds) {
-      if (!installedMap.has(id)) {
-        throw new Error(`Provider ${id} is not installed`);
-      }
-    }
-
-    const reordered = orderedIds
-      .map((id) => installedMap.get(id))
-      .filter((ip): ip is InstalledProvider => ip !== undefined);
-
-    // Append any installed providers not in orderedIds (shouldn't happen but safety)
-    for (const ip of installed) {
-      if (!orderedIds.includes(ip.providerId)) {
-        reordered.push(ip);
-      }
-    }
-    const reconciled = reconcileModelSelectionForInstalledProviders({
-      model: settings?.model,
-      modelSelection: settings?.modelSelection,
-      providerModelPreferences: settings?.providerModelPreferences,
-      installedProviders: reordered,
-    });
-
-    await this.agentSettingsStore.updateSettings(agentId, {
-      installedProviders: reordered,
-      ...reconciled,
-    });
-
-    logger.info(
-      `Reordered providers for agent ${agentId}: ${orderedIds.join(", ")}`
-    );
   }
 }

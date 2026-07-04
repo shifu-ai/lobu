@@ -13,9 +13,11 @@ import {
 import {
   createInferenceProvider,
   getInferenceProviderBySlug,
+  getOrgDefaultModel,
   listInferenceProviders,
   resolveInferenceProviderConfig,
   rotateInferenceProviderKey,
+  setInferenceProviderDefault,
   softDeleteInferenceProvider,
   updateInferenceProviderCapabilities,
 } from '../provider-secrets';
@@ -133,5 +135,92 @@ describe('inference-provider store', () => {
       { model: 'x' }
     );
     expect(res).toBeNull();
+  });
+
+  it('org default: flags one row and getOrgDefaultModel reads its text model', async () => {
+    await createInferenceProvider({
+      organizationId: ORG,
+      slug: 'openai',
+      kind: 'openai',
+      apiKey: 'k1',
+      capabilities: { text: { model: 'gpt-x' } },
+    });
+    await createInferenceProvider({
+      organizationId: ORG,
+      slug: 'groq',
+      kind: 'groq',
+      apiKey: 'k2',
+      capabilities: { text: { model: 'llama-y' } },
+    });
+
+    // No default yet → no org default model.
+    expect(await getOrgDefaultModel(ORG)).toBeNull();
+
+    // Mark openai the default → its text model is the org default, returned as
+    // a routable `slug/model` ref (the worker derives the provider from the
+    // prefix; a bare model would throw "No provider specified" there).
+    expect(await setInferenceProviderDefault(ORG, 'openai')).toBe(true);
+    expect(await getOrgDefaultModel(ORG)).toBe('openai/gpt-x');
+    expect(
+      (await listInferenceProviders(ORG)).find((p) => p.slug === 'openai')
+        ?.isDefault
+    ).toBe(true);
+
+    // Switching the default clears the prior one (one live default per org).
+    expect(await setInferenceProviderDefault(ORG, 'groq')).toBe(true);
+    expect(await getOrgDefaultModel(ORG)).toBe('groq/llama-y');
+    const after = await listInferenceProviders(ORG);
+    expect(after.find((p) => p.slug === 'openai')?.isDefault).toBe(false);
+    expect(after.find((p) => p.slug === 'groq')?.isDefault).toBe(true);
+  });
+
+  it('org default: prefixes a provider-native model id that already contains a slash', async () => {
+    // openrouter/nvidia-style model ids carry slashes (`anthropic/claude-sonnet-5`).
+    // The prefix must still be applied — otherwise the worker derives the wrong
+    // provider from the first segment and misroutes. Only a `${slug}/…` ref is
+    // already routable and left untouched.
+    await createInferenceProvider({
+      organizationId: ORG,
+      slug: 'openrouter',
+      kind: 'openrouter',
+      apiKey: 'k1',
+      capabilities: { text: { model: 'anthropic/claude-sonnet-5' } },
+    });
+    expect(await setInferenceProviderDefault(ORG, 'openrouter')).toBe(true);
+    expect(await getOrgDefaultModel(ORG)).toBe(
+      'openrouter/anthropic/claude-sonnet-5'
+    );
+  });
+
+  it('org default: does not double-prefix a model already carrying its own slug', async () => {
+    await createInferenceProvider({
+      organizationId: ORG,
+      slug: 'openai',
+      kind: 'openai',
+      apiKey: 'k1',
+      capabilities: { text: { model: 'openai/gpt-x' } },
+    });
+    expect(await setInferenceProviderDefault(ORG, 'openai')).toBe(true);
+    expect(await getOrgDefaultModel(ORG)).toBe('openai/gpt-x');
+  });
+
+  it('setInferenceProviderDefault returns false for a missing slug', async () => {
+    expect(await setInferenceProviderDefault(ORG, 'does-not-exist')).toBe(false);
+  });
+
+  it('setting a missing slug default does NOT clear the existing default', async () => {
+    await createInferenceProvider({
+      organizationId: ORG,
+      slug: 'openai',
+      kind: 'openai',
+      apiKey: 'k1',
+      capabilities: { text: { model: 'gpt-x' } },
+    });
+    expect(await setInferenceProviderDefault(ORG, 'openai')).toBe(true);
+    expect(await getOrgDefaultModel(ORG)).toBe('openai/gpt-x');
+
+    // A no-op on a missing slug must leave the current default intact.
+    expect(await setInferenceProviderDefault(ORG, 'ghost')).toBe(false);
+    expect(await getOrgDefaultModel(ORG)).toBe('openai/gpt-x');
   });
 });

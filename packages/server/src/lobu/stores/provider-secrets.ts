@@ -105,6 +105,8 @@ export interface InferenceProviderListItem {
 	hasCustomUpstream: boolean;
 	status: string;
 	createdAt: string;
+	/** This row is the org's default inference provider (the model-resolution tail). */
+	isDefault: boolean;
 }
 
 export interface InferenceProviderRow {
@@ -232,6 +234,7 @@ interface RawInferenceProviderRow {
 	has_custom_upstream: boolean;
 	status: string;
 	created_at: string | Date;
+	is_default: boolean;
 }
 
 function mapRow(r: RawInferenceProviderRow): InferenceProviderRow {
@@ -337,7 +340,7 @@ export async function listInferenceProviders(
 	const sql = getDb();
 	const rows = (await sql`
 		SELECT id, slug, kind, display_name, capabilities, has_custom_upstream,
-		       status, created_at
+		       status, created_at, is_default
 		FROM inference_providers
 		WHERE organization_id = ${organizationId} AND deleted_at IS NULL
 		ORDER BY slug
@@ -356,7 +359,83 @@ export async function listInferenceProviders(
 			r.created_at instanceof Date
 				? r.created_at.toISOString()
 				: String(r.created_at),
+		isDefault: r.is_default ?? false,
 	}));
+}
+
+/**
+ * The org's default model — the fallback tail of `behavior → agent → org`. Reads
+ * the `is_default` inference-provider row and returns a ROUTABLE `slug/model`
+ * ref built from the row's slug + text-modality model (`capabilities.text.model`),
+ * or null when the org has no default (or the default row carries no text model).
+ *
+ * The `slug/` prefix is load-bearing: the worker derives the provider from a
+ * model ref's first segment (`model-resolver.ts` auto path). A bare model like
+ * `gpt-4o` throws "No provider specified" there, so an agent with no installed
+ * providers (the exact case the org default exists to serve) could never route
+ * a bare org default. Returning `openai/gpt-4o` lets the worker route it with no
+ * installed-provider module. Callers fall through to the worker's hard "no model
+ * resolved" error only when this is null.
+ */
+export async function getOrgDefaultModel(
+	organizationId: string,
+): Promise<string | null> {
+	const sql = getDb();
+	const rows = (await sql`
+		SELECT slug, capabilities
+		FROM inference_providers
+		WHERE organization_id = ${organizationId}
+		  AND is_default AND deleted_at IS NULL
+		LIMIT 1
+	`) as Array<{ slug: string; capabilities: InferenceCapabilities }>;
+	const row = rows[0];
+	const model = row?.capabilities?.text?.model?.trim();
+	if (!model || !row?.slug) return null;
+	// Prefix with the provider slug unless it's ALREADY prefixed with THIS
+	// slug. Checking for a bare `/` is wrong: provider-native model ids often
+	// contain slashes (openrouter `anthropic/claude-sonnet-5`, nvidia
+	// `nvidia/moonshotai/kimi-k2.6`), and returning those bare would misroute
+	// them to the wrong provider. Only `${slug}/…` is already routable.
+	return model.startsWith(`${row.slug}/`) ? model : `${row.slug}/${model}`;
+}
+
+/**
+ * Mark one live provider as the org default (clearing any prior default in the
+ * same transaction). The partial unique index guarantees at most one live
+ * default per org; clearing first keeps the switch atomic. Returns false when
+ * the slug has no live row.
+ */
+export async function setInferenceProviderDefault(
+	organizationId: string,
+	slug: string,
+): Promise<boolean> {
+	const sql = getDb();
+	return await sql.begin(async (tx) => {
+		// Confirm the target exists BEFORE clearing the current default —
+		// otherwise a missing slug would commit the clear and leave the org with
+		// no default at all.
+		const target = (await tx`
+			SELECT id FROM inference_providers
+			WHERE organization_id = ${organizationId}
+			  AND slug = ${slug} AND deleted_at IS NULL
+			LIMIT 1
+		`) as Array<{ id: string | number }>;
+		if (target.length === 0) return false;
+
+		await tx`
+			UPDATE inference_providers
+			SET is_default = false, updated_at = now()
+			WHERE organization_id = ${organizationId}
+			  AND is_default AND deleted_at IS NULL
+		`;
+		await tx`
+			UPDATE inference_providers
+			SET is_default = true, updated_at = now()
+			WHERE organization_id = ${organizationId}
+			  AND slug = ${slug} AND deleted_at IS NULL
+		`;
+		return true;
+	});
 }
 
 /**
