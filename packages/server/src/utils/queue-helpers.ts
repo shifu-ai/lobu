@@ -19,12 +19,21 @@ import { ACTIVE_RUN_STATUSES, runStatusLiteral } from './run-statuses';
 
 export type WatcherDispatchSource = 'scheduled' | 'manual';
 
+export type WatcherKind = 'knowledge' | 'digest';
+
 export interface WatcherRunPayload {
   watcher_id: number;
   agent_id: string;
   window_start: string;
   window_end: string;
   dispatch_source: WatcherDispatchSource;
+  /**
+   * Snapshot of the watcher's `kind` at run-creation time. 'knowledge'
+   * (default) runs the standard read_knowledge/complete_window extraction
+   * loop; 'digest' is reserved for an agent-driven digest run (dispatch
+   * branching on this is a later change — this field is plumbing only).
+   */
+  kind: WatcherKind;
   /**
    * Snapshot of the watcher's `current_version_id` at run-creation time.
    * The agent and `complete_window` use this fixed version for the entire
@@ -268,6 +277,7 @@ async function createWatcherRunWithClient(
     dispatchSource: WatcherDispatchSource;
     deviceWorkerId?: string | null;
     agentKind?: string | null;
+    kind?: WatcherKind;
   }
 ): Promise<{ runId: number; status: string; created: boolean }> {
   const existing = await findActiveWatcherRun(sql, params.watcherId);
@@ -311,6 +321,7 @@ async function createWatcherRunWithClient(
     version_id: snapshotVersionId,
     device_worker_id: normalizedDeviceWorkerId,
     agent_kind: normalizedAgentKind,
+    kind: params.kind ?? 'knowledge',
   };
 
   const inserted = await sql`
@@ -354,6 +365,7 @@ export async function createWatcherRun(
     dispatchSource: WatcherDispatchSource;
     deviceWorkerId?: string | null;
     agentKind?: string | null;
+    kind?: WatcherKind;
   },
   db?: DbClient
 ): Promise<{ runId: number; status: string; created: boolean }> {

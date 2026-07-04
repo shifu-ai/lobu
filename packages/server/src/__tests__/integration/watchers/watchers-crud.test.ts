@@ -211,6 +211,54 @@ describe('watcher CRUD', () => {
     ).rejects.toThrow(/execution_config/i);
   });
 
+  // Task 3 (PM daily digest): watchers.kind distinguishes knowledge-extraction
+  // (default) from agent-driven digest watchers. This is plumbing only — the
+  // dispatch branch on `kind` is Task 4. Assert directly against the row
+  // since manage_watchers/list.ts doesn't project `kind` (out of scope here).
+  describe('kind (knowledge | digest)', () => {
+    it('defaults to "knowledge" when kind is omitted', async () => {
+      const created = (await owner.watchers.manage({
+        action: 'create',
+        entity_id: entityId,
+        slug: 'kind-default-watcher',
+        name: 'Kind Default',
+        prompt: 'Track things.',
+        extraction_schema: { type: 'object', properties: {} },
+        agent_id: agentId,
+      })) as { watcher_id: string };
+
+      const sql = getTestDb();
+      const rows = (await sql`
+        SELECT kind FROM watchers WHERE id = ${created.watcher_id}
+      `) as unknown as Array<{ kind: string }>;
+      expect(rows[0]?.kind).toBe('knowledge');
+
+      await owner.watchers.delete([created.watcher_id]);
+    });
+
+    it('stores kind="digest" when passed to create', async () => {
+      const created = (await owner.watchers.manage({
+        action: 'create',
+        entity_id: entityId,
+        slug: 'kind-digest-watcher',
+        name: 'Kind Digest',
+        prompt: 'Summarize things.',
+        extraction_schema: { type: 'object', properties: {} },
+        agent_id: agentId,
+        schedule: '0 9 * * *',
+        kind: 'digest',
+      })) as { watcher_id: string };
+
+      const sql = getTestDb();
+      const rows = (await sql`
+        SELECT kind FROM watchers WHERE id = ${created.watcher_id}
+      `) as unknown as Array<{ kind: string }>;
+      expect(rows[0]?.kind).toBe('digest');
+
+      await owner.watchers.delete([created.watcher_id]);
+    });
+  });
+
   it('creates an org-scoped watcher with no entity_id', async () => {
     const created = (await owner.watchers.create({
       slug: 'org-scoped-watcher',

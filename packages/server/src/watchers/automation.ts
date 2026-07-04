@@ -11,7 +11,7 @@ import {
 } from '../lobu/gateway';
 import { getLobuServiceToken } from '../lobu/service-token';
 import logger from '../utils/logger';
-import { createWatcherRun, type WatcherRunPayload } from '../utils/queue-helpers';
+import { createWatcherRun, type WatcherKind, type WatcherRunPayload } from '../utils/queue-helpers';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { computePendingWindow } from '../utils/window-utils';
 import {
@@ -40,6 +40,8 @@ interface DueWatcherRow {
   device_worker_id?: string | null;
   /** Preferred local agent kind on the pinned device (e.g. 'claude-code'). */
   agent_kind?: string | null;
+  /** 'knowledge' (default, extraction pipeline) | 'digest' (agent-driven digest). */
+  kind?: WatcherKind;
 }
 
 interface ClaimedWatcherRunRow {
@@ -142,6 +144,12 @@ export function parseWatcherRunPayload(value: unknown): WatcherRunPayload | null
       ? rawAgentKind.trim()
       : null;
 
+  // Older runs (queued before this column existed) have no `kind` in
+  // approved_input — default to 'knowledge' so pre-existing dispatch behavior
+  // is unchanged. An unrecognized value is also coerced to 'knowledge' rather
+  // than propagated, since only 'knowledge' | 'digest' are valid.
+  const kind: WatcherKind = payload.kind === 'digest' ? 'digest' : 'knowledge';
+
   return {
     watcher_id: watcherId,
     agent_id: agentId,
@@ -151,6 +159,7 @@ export function parseWatcherRunPayload(value: unknown): WatcherRunPayload | null
     version_id: Number.isFinite(versionId as number) ? (versionId as number) : null,
     device_worker_id: deviceWorkerId,
     agent_kind: agentKind,
+    kind,
   };
 }
 
@@ -160,7 +169,7 @@ async function loadWatcherForAutomation(
 ): Promise<DueWatcherRow | null> {
   const rows = await sql<DueWatcherRow>`
     SELECT id, organization_id, agent_id, schedule, status,
-           device_worker_id::text AS device_worker_id, agent_kind
+           device_worker_id::text AS device_worker_id, agent_kind, kind
     FROM watchers
     WHERE id = ${watcherId}
     LIMIT 1
@@ -195,6 +204,7 @@ async function enqueueWatcherRunForRecord(
       dispatchSource,
       deviceWorkerId: watcher.device_worker_id ?? null,
       agentKind: watcher.agent_kind ?? null,
+      kind: watcher.kind ?? 'knowledge',
     },
     sql
   );
@@ -527,7 +537,7 @@ export async function materializeDueWatcherRuns(
   // backstop.
   const dueWatchers = await sql<DueWatcherRow>`
     SELECT w.id, w.organization_id, w.agent_id, w.schedule,
-           w.device_worker_id::text AS device_worker_id, w.agent_kind
+           w.device_worker_id::text AS device_worker_id, w.agent_kind, w.kind
     FROM watchers w
     WHERE w.status = 'active'
       AND w.schedule IS NOT NULL
