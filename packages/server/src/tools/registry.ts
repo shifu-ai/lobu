@@ -28,7 +28,7 @@ import { ListOrganizationsSchema } from './organizations';
 import { ResolvePathSchema, ResolvePathResultSchema, resolvePath } from './resolve_path';
 import { SaveContentSchema, saveContent } from './save_content';
 import { PublicSearchSchema, SearchSchema, UnifiedSearchResultSchema, search } from './search';
-import { QuerySchema, RunSchema, querySdkScript, runSdkScript } from './sdk_run';
+import { QuerySchema, RunSchema, SdkScriptResultSchema, querySdkScript, runSdkScript } from './sdk_run';
 import { SdkSearchSchema, SdkSearchResultSchema, sdkSearch } from './sdk_search';
 
 // ============================================
@@ -185,6 +185,7 @@ const TOOLS: ToolDefinition[] = [
     description:
       'Run read-only TypeScript in a sandboxed isolate over the ClientSDK. Use this to fetch workspace data through typed SDK methods. The script signature is `export default async (ctx, client) => ...`. Mutating methods are absent from `client` — attempts surface as undefined methods; use `run_sdk` for writes. Output capped at 1 MB. Use `search_sdk` to find method names. Example: `export default async (_ctx, client) => client.entities.list({ entity_type: "company" });`',
     inputSchema: QuerySchema,
+    outputSchema: SdkScriptResultSchema,
     annotations: { ...READ_ONLY, title: 'Query SDK (read-only)' },
     handler: querySdkScript,
   },
@@ -225,6 +226,7 @@ const TOOLS: ToolDefinition[] = [
     description:
       'Destructive — confirm before running. Runs TypeScript in a sandboxed isolate over the FULL ClientSDK. Use this for SDK writes or multi-step workflows. Signature: `export default async (ctx, client) => ...`. Can mutate entities, watchers, memory, classifiers, connections, etc. Use `query_sdk` for reads. Pass `dry_run: true` to execute reads while skipping write/external SDK calls and returning `side_effect_preview`. Output capped at 1 MB. Example: `export default async (_ctx, client) => client.entities.create({ type: "company", name: "Acme" });`',
     inputSchema: RunSchema,
+    outputSchema: SdkScriptResultSchema,
     annotations: { destructiveHint: true, idempotentHint: false, title: 'Run SDK' },
     handler: runSdkScript,
   },
@@ -261,21 +263,36 @@ export function getTool(name: string): ToolDefinition | undefined {
 /**
  * Flatten a TypeBox Union (anyOf) schema into a single object schema.
  * Each variant must be an object with an `action` literal discriminator.
- * Result: single object with `action` as a string enum, all other
- * properties merged (only `action` is required).
+ * Result: single object with `action` as a string enum (description
+ * generated from the variants — see `buildActionEnumDescription`), all
+ * other properties merged (first occurrence wins; only `action` is
+ * required on the wire, per-action required fields surface in prose).
  */
 function flattenUnionSchema(schema: any): any {
   const variants: any[] = schema.anyOf || schema.oneOf;
   const actionValues: string[] = [];
+  const actionDescriptions = new Map<string, string>();
+  const actionRequired = new Map<string, string[]>();
   const mergedProperties: Record<string, any> = {};
 
   for (const variant of variants) {
     if (variant.type !== 'object' || !variant.properties) continue;
+    const actionProp = variant.properties.action;
+    const actionName = actionProp?.const;
+    if (typeof actionName !== 'string') continue;
+    actionValues.push(actionName);
+    if (typeof actionProp?.description === 'string') {
+      actionDescriptions.set(actionName, actionProp.description);
+    }
+    // Variant's `required` array carries non-Optional prop names — the
+    // basis for the per-action "Required: ..." line in the enum description.
+    const requiredFields = (variant.required ?? [])
+      .filter((k: string) => k !== 'action');
+    if (requiredFields.length > 0) {
+      actionRequired.set(actionName, requiredFields);
+    }
     for (const [key, prop] of Object.entries<any>(variant.properties)) {
-      if (key === 'action') {
-        if (prop.const) actionValues.push(prop.const);
-        continue;
-      }
+      if (key === 'action') continue;
       // First occurrence wins (keeps description from the first variant that defines it)
       if (!mergedProperties[key]) {
         mergedProperties[key] = prop;
@@ -286,11 +303,42 @@ function flattenUnionSchema(schema: any): any {
   return {
     type: 'object' as const,
     properties: {
-      action: { type: 'string', enum: actionValues, description: 'Action to perform' },
+      action: {
+        type: 'string',
+        enum: actionValues,
+        description: buildActionEnumDescription(
+          actionValues,
+          actionDescriptions,
+          actionRequired,
+        ),
+      },
       ...mergedProperties,
     },
     required: ['action'],
   };
+}
+
+/**
+ * Build a multi-line description for the flattened `action` enum. Each line
+ * names one action and its purpose, followed by its required fields when the
+ * variant declared any (beyond `action`). The purpose text is sourced from
+ * each variant's `action: Type.Literal(name, { description })` — colocated
+ * with the handler, so it can't drift from the schema. Falls back to a bare
+ * `- name` line when no description is declared for an action.
+ */
+function buildActionEnumDescription(
+  actionValues: string[],
+  actionDescriptions: Map<string, string>,
+  actionRequired: Map<string, string[]>,
+): string {
+  const lines: string[] = ['Action to perform.'];
+  for (const name of actionValues) {
+    const purpose = actionDescriptions.get(name);
+    const head = purpose ? `- ${name}: ${purpose}` : `- ${name}`;
+    const required = actionRequired.get(name);
+    lines.push(required && required.length > 0 ? `${head} Required: ${required.join(', ')}.` : head);
+  }
+  return lines.join('\n');
 }
 
 /**
