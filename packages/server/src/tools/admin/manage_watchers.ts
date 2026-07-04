@@ -165,6 +165,12 @@ export const ManageWatchersSchema = Type.Object({
       description: '[create/update] Agent ID that owns/executes this watcher.',
     })
   ),
+  kind: Type.Optional(
+    Type.Union([Type.Literal('knowledge'), Type.Literal('digest')], {
+      description:
+        '[create/update] Watcher kind: "knowledge" (default) runs the standard read_knowledge/complete_window extraction pipeline; "digest" is an agent-driven digest run. Omit to keep the default/current value.',
+    })
+  ),
   scheduler_client_id: Type.Optional(
     Type.String({
       description:

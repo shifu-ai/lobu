@@ -3,22 +3,31 @@ import { generateWorkerToken } from '@lobu/core';
 import { inferWatcherGranularityFromSchedule } from '@lobu/connector-sdk';
 import type { DbClient } from '../db/client';
 import { getDb, pgTextArray } from '../db/client';
+import type { McpConfigService } from '../gateway/auth/mcp/config-service';
 import { incrementCounter, setGauge } from '../gateway/metrics/prometheus';
 import type { Env } from '../index';
 import {
   getLobuCoreServices,
   isLobuGatewayRunning,
 } from '../lobu/gateway';
+import { resolveConnectorMcpId } from '../lobu/connector-mcp-resolver';
 import { getLobuServiceToken } from '../lobu/service-token';
 import logger from '../utils/logger';
-import { createWatcherRun, type WatcherRunPayload } from '../utils/queue-helpers';
+import { createWatcherRun, type WatcherKind, type WatcherRunPayload } from '../utils/queue-helpers';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 import { computePendingWindow } from '../utils/window-utils';
 import {
   findWindowIdForRun,
   markWatcherRunCompleted,
   resolveWatcherRunsByMessageIds,
+  watcherRunSucceedsWithoutWindow,
 } from './run-completion';
+
+// Re-exported for callers/tests that historically imported this decision
+// function from automation.ts (e.g. watcher-digest-dispatch.test.ts). The
+// canonical definition lives in run-completion.ts so it can be shared by
+// BOTH completion paths — see the doc comment there.
+export { watcherRunSucceedsWithoutWindow };
 import { nextRunAt } from '../utils/cron';
 
 type WatcherRunStatus =
@@ -40,6 +49,8 @@ interface DueWatcherRow {
   device_worker_id?: string | null;
   /** Preferred local agent kind on the pinned device (e.g. 'claude-code'). */
   agent_kind?: string | null;
+  /** 'knowledge' (default, extraction pipeline) | 'digest' (agent-driven digest). */
+  kind?: WatcherKind;
 }
 
 interface ClaimedWatcherRunRow {
@@ -142,6 +153,12 @@ export function parseWatcherRunPayload(value: unknown): WatcherRunPayload | null
       ? rawAgentKind.trim()
       : null;
 
+  // Older runs (queued before this column existed) have no `kind` in
+  // approved_input — default to 'knowledge' so pre-existing dispatch behavior
+  // is unchanged. An unrecognized value is also coerced to 'knowledge' rather
+  // than propagated, since only 'knowledge' | 'digest' are valid.
+  const kind: WatcherKind = payload.kind === 'digest' ? 'digest' : 'knowledge';
+
   return {
     watcher_id: watcherId,
     agent_id: agentId,
@@ -151,6 +168,7 @@ export function parseWatcherRunPayload(value: unknown): WatcherRunPayload | null
     version_id: Number.isFinite(versionId as number) ? (versionId as number) : null,
     device_worker_id: deviceWorkerId,
     agent_kind: agentKind,
+    kind,
   };
 }
 
@@ -160,7 +178,7 @@ async function loadWatcherForAutomation(
 ): Promise<DueWatcherRow | null> {
   const rows = await sql<DueWatcherRow>`
     SELECT id, organization_id, agent_id, schedule, status,
-           device_worker_id::text AS device_worker_id, agent_kind
+           device_worker_id::text AS device_worker_id, agent_kind, kind
     FROM watchers
     WHERE id = ${watcherId}
     LIMIT 1
@@ -195,6 +213,7 @@ async function enqueueWatcherRunForRecord(
       dispatchSource,
       deviceWorkerId: watcher.device_worker_id ?? null,
       agentKind: watcher.agent_kind ?? null,
+      kind: watcher.kind ?? 'knowledge',
     },
     sql
   );
@@ -527,7 +546,7 @@ export async function materializeDueWatcherRuns(
   // backstop.
   const dueWatchers = await sql<DueWatcherRow>`
     SELECT w.id, w.organization_id, w.agent_id, w.schedule,
-           w.device_worker_id::text AS device_worker_id, w.agent_kind
+           w.device_worker_id::text AS device_worker_id, w.agent_kind, w.kind
     FROM watchers w
     WHERE w.status = 'active'
       AND w.schedule IS NOT NULL
@@ -682,7 +701,67 @@ export async function runWatcherAutomationTick(env: Env): Promise<WatcherAutomat
   };
 }
 
-function buildDispatchMessage(params: {
+/**
+ * Build the message posted to the agent to run this watcher turn. Branches
+ * on `payload.kind` (Task 3):
+ *  - 'digest': agent-driven PM daily digest via toolbox MCP (Task 4) — see
+ *    {@link buildDigestDispatchMessage}.
+ *  - 'knowledge' (default): the original lobu-memory read_knowledge /
+ *    complete_window extraction script — see
+ *    {@link buildKnowledgeDispatchMessage}, kept bit-for-bit unchanged.
+ */
+export function buildDispatchMessage(params: {
+  watcherId: number;
+  runId: number;
+  agentId: string;
+  sessionAgentId: string;
+  payload: WatcherRunPayload;
+}): string {
+  if (params.payload.kind === 'digest') {
+    return buildDigestDispatchMessage(params);
+  }
+  return buildKnowledgeDispatchMessage(params);
+}
+
+/**
+ * Agent-driven daily PM digest (Task 4). Unlike the knowledge-extraction
+ * script, there is no lobu-memory read_knowledge / complete_window
+ * round-trip — the agent pulls its own context via the toolbox MCP
+ * (get_pm_daily_context) and pushes the result itself (send_daily_digest).
+ * Sources the agent isn't authorized for (e.g. Notion) must be skipped with
+ * a note, never fabricated — mirrors the "do not fabricate" guard at the end
+ * of the knowledge script below.
+ */
+function buildDigestDispatchMessage(params: {
+  watcherId: number;
+  runId: number;
+  agentId: string;
+  sessionAgentId: string;
+  payload: WatcherRunPayload;
+}): string {
+  const today = new Date(params.payload.window_start).toISOString().split('T')[0];
+
+  return [
+    `今天是 ${today}。請產生這位 PM 的每日工作報告：`,
+    '',
+    `Watcher ID: ${params.watcherId}`,
+    `Watcher run ID: ${params.runId}`,
+    `Assigned agent ID: ${params.agentId}`,
+    `Session agent ID: ${params.sessionAgentId}`,
+    `Dispatch source: ${params.payload.dispatch_source}`,
+    '',
+    '請依序執行：',
+    `1. 呼叫 get_pm_daily_context，並帶上參數 today="${today}"，取得你負責課程的今日會議記錄與訂單概況（不帶 today 參數會拿到最近 20 筆未過濾的會議，混入非今日資料）。`,
+    '2.(若已授權 Notion)可補充 Notion 專案動態；未授權則略過，不要編造。',
+    '3. 綜合成「今日建議聚焦事項」，用繁體中文、條列、精簡。',
+    '4. 呼叫 send_daily_digest 把這份報告推送出去（text 參數 = 你的報告）。',
+    '',
+    '若某來源無資料或未授權，如實標註略過，不要捏造。',
+  ].join('\n');
+}
+
+/** Original knowledge-extraction dispatch script (pre-Task-4). Unchanged bit-for-bit. */
+function buildKnowledgeDispatchMessage(params: {
   watcherId: number;
   runId: number;
   agentId: string;
@@ -862,6 +941,59 @@ async function preflightWatcherMemoryTools(params: {
   }
 }
 
+/**
+ * Digest-watcher preflight (Task 4). digest watchers depend on the ShiFu
+ * Toolbox MCP's `get_pm_daily_context` / `send_daily_digest` tools, which are
+ * a REMOTE, per-user OAuth-backed MCP — unlike lobu-memory (an internal MCP
+ * the embedded gateway always proxies with a worker JWT, so
+ * {@link preflightWatcherMemoryTools}'s `tools/list` fetch always succeeds
+ * for it). Hitting `/lobu/mcp/shifu-toolbox/tools` with a worker/service
+ * token cannot complete a user's interactive OAuth grant, so it can't be used
+ * to verify the tools are actually callable the way the lobu-memory check
+ * does.
+ *
+ * Verified against this codebase's own remote-MCP status check
+ * (`resolveConnectorMcpId` / `McpConfigService.getAllHttpServers`, used by
+ * the onboarding-discovery job to report connector status without a live
+ * `tools/list`): it degrades to a local, DB-backed configuration check —
+ * is the toolbox MCP present in the agent's effective `settings.mcpServers`
+ * at all? This does NOT confirm the user completed OAuth (Notion-style
+ * optional sources are allowed to be unauthorized — the dispatch prompt
+ * instructs the agent to skip those and never fabricate), only that the
+ * MCP entry the agent needs is wired up. That's the safe, always-available
+ * signal; the real "did this call succeed" check happens if/when the agent
+ * actually invokes get_pm_daily_context / send_daily_digest during the run.
+ */
+export async function preflightDigestWatcherMcp(params: {
+  agentId: string;
+  configService?: Pick<McpConfigService, 'getAllHttpServers'>;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  const configService = params.configService ?? getLobuCoreServices()?.getMcpConfigService?.();
+  if (!configService) {
+    return {
+      ok: false,
+      error: 'Digest watcher preflight failed: embedded Lobu MCP config service is unavailable.',
+    };
+  }
+
+  const resolved = await resolveConnectorMcpId({
+    agentId: params.agentId,
+    connectorKey: 'shifu_toolbox',
+    configService,
+  });
+
+  if (resolved.status !== 'resolved') {
+    return {
+      ok: false,
+      error:
+        `Digest watcher preflight failed: agent "${params.agentId}" has no ShiFu Toolbox MCP ` +
+        'configured (required for get_pm_daily_context / send_daily_digest).',
+    };
+  }
+
+  return { ok: true };
+}
+
 async function dispatchWatcherRun(
   sql: DbClient,
   run: ClaimedWatcherRunRow
@@ -900,12 +1032,15 @@ async function dispatchWatcherRun(
   }
 
   const port = process.env.PORT || '8787';
-  const preflight = await preflightWatcherMemoryTools({
-    port,
-    organizationId: run.organization_id,
-    agentId: payload.agent_id,
-    runId: run.id,
-  });
+  const preflight =
+    payload.kind === 'digest'
+      ? await preflightDigestWatcherMcp({ agentId: payload.agent_id })
+      : await preflightWatcherMemoryTools({
+          port,
+          organizationId: run.organization_id,
+          agentId: payload.agent_id,
+          runId: run.id,
+        });
   if (!preflight.ok) {
     await failWatcherRun(sql, run.id, preflight.error);
     return 'failed';
@@ -970,6 +1105,7 @@ async function dispatchWatcherRun(
       watcherId: run.watcher_id,
       organizationId: run.organization_id,
       messageId,
+      kind: payload.kind,
     });
 
     const messageResponse = await fetch(messagesUrl, {
@@ -1015,6 +1151,7 @@ function registerWatcherRunHandle(params: {
   watcherId: number;
   organizationId: string;
   messageId: string;
+  kind: WatcherKind;
 }): void {
   const coreServices = getLobuCoreServices();
   const tracker = coreServices?.getWatcherRunTracker();
@@ -1042,9 +1179,15 @@ function registerWatcherRunHandle(params: {
       // tools, or a chatty reply that skipped read_knowledge / complete_window)
       // would silently mark the run "completed" — which is what masked the
       // Reddit watcher being broken for a week. complete_window is the only
-      // signal that real work happened; absence of it is a failure, not a pass.
+      // signal that real work happened; absence of it is a failure, not a
+      // pass — UNLESS this is a digest watcher (Task 4), which never calls
+      // complete_window by design. See watcherRunSucceedsWithoutWindow.
       const windowId = await findWindowIdForRun(db, params.runId);
       if (windowId === null) {
+        if (watcherRunSucceedsWithoutWindow(params.kind)) {
+          await markWatcherRunCompleted(db, params.runId, null);
+          return;
+        }
         await markWatcherRunFailedIdempotent(
           db,
           params.runId,

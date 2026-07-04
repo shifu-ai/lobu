@@ -22,6 +22,7 @@ import {
   runWatcherAutomationTick,
   sweepStaleWatcherRuns,
 } from '../../../watchers/automation';
+import { resolveWatcherRunsByMessageIds } from '../../../watchers/run-completion';
 import { generateSecureToken, hashToken } from '../../../auth/oauth/utils';
 import { cleanupTestDatabase, getTestDb } from '../../setup/test-db';
 import { createTestAgent, createTestEntity, createTestEvent } from '../../setup/test-fixtures';
@@ -174,6 +175,148 @@ describe('watcher automation contract', () => {
     expect(result.reconciled).toBe(1);
     expect(String(run.status)).toBe('completed');
     expect(Number(run.window_id)).toBe(Number(window.id));
+  });
+
+  // Task 4 fix (CRITICAL): resolveWatcherRunsByMessageIds is the shared
+  // completion path hit by BOTH the gateway API's ThreadResponsePayload
+  // completion event (response-renderer.ts's handleCompletion) AND the
+  // periodic reconcileWatcherRuns sweep below. Pre-fix it was kind-blind and
+  // unconditionally fail-closed any watcher run finishing without a
+  // watcher_windows row — including digest runs, for which "no window" is
+  // the EXPECTED outcome (Task 4). That made every digest run land as
+  // `failed` even though registerWatcherRunHandle's onResolve (which runs
+  // AFTER this path and therefore couldn't undo the damage — the row was
+  // already terminal) correctly wanted to mark it `completed`.
+  describe('resolveWatcherRunsByMessageIds — kind-aware no-window completion (Task 4 fix)', () => {
+    it('marks a digest run completed (not failed) when it finishes with no window', async () => {
+      const { sql, dbClient, workspace, watcherId, agent } = await createAutomatedWatcher();
+      const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
+      const { windowStart, windowEnd } = await computePendingWindow(dbClient, watcherId, granularity);
+      const queued = await createWatcherRun({
+        organizationId: workspace.org.id,
+        watcherId,
+        agentId: agent.agentId,
+        windowStart: windowStart.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        dispatchSource: 'scheduled',
+        kind: 'digest',
+      });
+
+      const dispatchedMessageId = 'digest-msg-no-window';
+      await sql`
+        UPDATE runs
+        SET status = 'running', dispatched_message_id = ${dispatchedMessageId}
+        WHERE id = ${queued.runId}
+      `;
+
+      const result = await resolveWatcherRunsByMessageIds(
+        [dispatchedMessageId],
+        { ok: true },
+        dbClient
+      );
+      expect(result.resolved).toBe(1);
+
+      const [run] = await sql`
+        SELECT status, window_id, error_message
+        FROM runs
+        WHERE id = ${queued.runId}
+      `;
+      expect(String(run.status)).toBe('completed');
+      expect(run.window_id).toBeNull();
+      expect(run.error_message).toBeNull();
+    });
+
+    // Regression: this is the pre-existing, MUST-NOT-CHANGE behavior for
+    // knowledge watchers (the Reddit-watcher-broken-for-a-week fail-closed
+    // guard). A knowledge run finishing without complete_window is still a
+    // failure.
+    it('keeps a knowledge run failed when it finishes with no window (regression)', async () => {
+      const { sql, dbClient, workspace, watcherId, agent } = await createAutomatedWatcher();
+      const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
+      const { windowStart, windowEnd } = await computePendingWindow(dbClient, watcherId, granularity);
+      const queued = await createWatcherRun({
+        organizationId: workspace.org.id,
+        watcherId,
+        agentId: agent.agentId,
+        windowStart: windowStart.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        dispatchSource: 'scheduled',
+        kind: 'knowledge',
+      });
+
+      const dispatchedMessageId = 'knowledge-msg-no-window';
+      await sql`
+        UPDATE runs
+        SET status = 'running', dispatched_message_id = ${dispatchedMessageId}
+        WHERE id = ${queued.runId}
+      `;
+
+      const result = await resolveWatcherRunsByMessageIds(
+        [dispatchedMessageId],
+        { ok: true },
+        dbClient
+      );
+      expect(result.resolved).toBe(1);
+
+      const [run] = await sql`
+        SELECT status, window_id, error_message
+        FROM runs
+        WHERE id = ${queued.runId}
+      `;
+      expect(String(run.status)).toBe('failed');
+      expect(run.window_id).toBeNull();
+      expect(String(run.error_message)).toMatch(/complete_window/);
+    });
+
+    // The reconcile sweep (automation.ts's reconcileWatcherRuns, exercised via
+    // its own "chat_message" thread_response scan below) delegates to the
+    // SAME resolveWatcherRunsByMessageIds — so it inherits the fix without a
+    // separate branch. This confirms the sweep's own call site is fixed too.
+    it('reconcile sweep marks a digest run completed via processedMessageIds (not failed)', async () => {
+      const { sql, dbClient, workspace, watcherId, agent } = await createAutomatedWatcher();
+      const granularity = inferWatcherGranularityFromSchedule('0 9 * * *');
+      const { windowStart, windowEnd } = await computePendingWindow(dbClient, watcherId, granularity);
+      const queued = await createWatcherRun({
+        organizationId: workspace.org.id,
+        watcherId,
+        agentId: agent.agentId,
+        windowStart: windowStart.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        dispatchSource: 'scheduled',
+        kind: 'digest',
+      });
+
+      const dispatchedMessageId = 'digest-msg-reconcile-sweep';
+      await sql`
+        UPDATE runs
+        SET status = 'running', dispatched_message_id = ${dispatchedMessageId}
+        WHERE id = ${queued.runId}
+      `;
+
+      // Simulate the completed thread_response chat_message run whose
+      // processedMessageIds includes the watcher's dispatched_message_id —
+      // the exact shape reconcileWatcherRuns scans for.
+      await sql`
+        INSERT INTO runs (
+          organization_id, run_type, queue_name, approval_status, status,
+          action_input, completed_at, created_at
+        ) VALUES (
+          ${workspace.org.id}, 'chat_message', 'thread_response', 'auto', 'completed',
+          ${sql.json({ processedMessageIds: [dispatchedMessageId] })}, NOW(), NOW()
+        )
+      `;
+
+      const result = await reconcileWatcherRuns(dbClient);
+      expect(result.reconciled).toBeGreaterThanOrEqual(1);
+
+      const [run] = await sql`
+        SELECT status, window_id
+        FROM runs
+        WHERE id = ${queued.runId}
+      `;
+      expect(String(run.status)).toBe('completed');
+      expect(run.window_id).toBeNull();
+    });
   });
 
   it('completes a queued watcher run from complete_window provenance', async () => {

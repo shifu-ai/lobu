@@ -173,7 +173,7 @@ export async function handleCreate(
         schedule, next_run_at, agent_id, scheduler_client_id, model_config, sources, version,
         current_version_id, tags, status, created_by, created_at, updated_at,
         watcher_group_id,
-        device_worker_id, agent_kind,
+        device_worker_id, agent_kind, kind,
         notification_channel, notification_priority, min_cooldown_seconds,
         execution_config
       ) VALUES (
@@ -185,7 +185,7 @@ export async function handleCreate(
         1, NULL, ${toTextArrayParam(args.tags || [])}::text[],
         'active', ${createdBy}, NOW(), NOW(),
         ${watcherId},
-        ${args.device_worker_id ?? null}, ${args.agent_kind ?? null},
+        ${args.device_worker_id ?? null}, ${args.agent_kind ?? null}, ${args.kind ?? 'knowledge'},
         ${args.notification_channel ?? 'canvas'},
         ${args.notification_priority ?? 'normal'},
         ${args.min_cooldown_seconds ?? 0},
@@ -332,6 +332,7 @@ export async function handleUpdate(
   if (args.tags !== undefined) updatedFields.push('tags');
   if (args.device_worker_id !== undefined) updatedFields.push('device_worker_id');
   if (args.agent_kind !== undefined) updatedFields.push('agent_kind');
+  if (args.kind !== undefined) updatedFields.push('kind');
   if (args.notification_channel !== undefined) updatedFields.push('notification_channel');
   if (args.notification_priority !== undefined) updatedFields.push('notification_priority');
   if (args.min_cooldown_seconds !== undefined) updatedFields.push('min_cooldown_seconds');
@@ -359,6 +360,7 @@ export async function handleUpdate(
       tags = CASE WHEN ${args.tags !== undefined} THEN ${toTextArrayParam(args.tags || [])}::text[] ELSE tags END,
       device_worker_id = CASE WHEN ${args.device_worker_id !== undefined} THEN ${args.device_worker_id ?? null}::uuid ELSE device_worker_id END,
       agent_kind = CASE WHEN ${args.agent_kind !== undefined} THEN ${args.agent_kind ?? null} ELSE agent_kind END,
+      kind = CASE WHEN ${args.kind !== undefined} THEN ${args.kind ?? 'knowledge'} ELSE kind END,
       notification_channel = CASE WHEN ${args.notification_channel !== undefined} THEN ${args.notification_channel ?? 'canvas'} ELSE notification_channel END,
       notification_priority = CASE WHEN ${args.notification_priority !== undefined} THEN ${args.notification_priority ?? 'normal'} ELSE notification_priority END,
       min_cooldown_seconds = CASE WHEN ${args.min_cooldown_seconds !== undefined} THEN ${args.min_cooldown_seconds ?? 0} ELSE min_cooldown_seconds END
