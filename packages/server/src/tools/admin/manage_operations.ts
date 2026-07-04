@@ -15,7 +15,7 @@ import { notifyActionApprovalNeeded } from '../../notifications/triggers';
 import { resolveActionMode } from '../../operations/action-modes';
 import { getOperationForConnection, listOperations } from '../../operations/connector-operations';
 import { validateOperationInput } from '../../operations/input-validation';
-import type { AvailableOperation, OperationDescriptor } from '../../operations/types';
+import type { OperationDescriptor } from '../../operations/types';
 import { resolveConnectorCode } from '../../utils/ensure-connector-installed';
 import { resolveExecutionAuth } from '../../utils/execution-context';
 import { insertEvent } from '../../utils/insert-event';
@@ -44,20 +44,21 @@ const BackendLiteral = Type.Union([
   Type.Literal('local_action'),
   Type.Literal('mcp_tool'),
   Type.Literal('http_operation'),
-]);
+], { description: 'Filter by operation backend type' });
 
-const KindLiteral = Type.Union([Type.Literal('read'), Type.Literal('write')]);
+const KindLiteral = Type.Union([Type.Literal('read'), Type.Literal('write')], { description: 'Filter by operation kind (read/write)' });
 
 const ListAvailableAction = Type.Object({
   action: Type.Literal('list_available'),
-  connector_key: Type.Optional(Type.String()),
-  connection_id: Type.Optional(Type.Number()),
-  entity_id: Type.Optional(Type.Number()),
+  connector_key: Type.Optional(Type.String({ description: 'Filter by connector key' })),
+  connection_id: Type.Optional(Type.Number({ description: 'Filter by connection ID' })),
+  entity_id: Type.Optional(Type.Number({ description: 'Filter by entity ID' })),
   kind: Type.Optional(KindLiteral),
   backend: Type.Optional(BackendLiteral),
-  include_input_schema: Type.Optional(Type.Boolean({ default: true })),
-  include_output_schema: Type.Optional(Type.Boolean({ default: false })),
-  ...PaginationFields,
+  include_input_schema: Type.Optional(Type.Boolean({ default: true, description: 'Include input schema in response' })),
+  include_output_schema: Type.Optional(Type.Boolean({ default: false, description: 'Include output schema in response' })),
+  limit: Type.Optional(Type.Number({ description: 'Maximum number of results to return' })),
+  offset: Type.Optional(Type.Number({ description: 'Number of results to skip' })),
 });
 
 const ExecuteAction = Type.Object({
@@ -75,20 +76,20 @@ const ExecuteAction = Type.Object({
 
 const ListRunsAction = Type.Object({
   action: Type.Literal('list_runs'),
-  connection_id: Type.Optional(Type.Number()),
-  connection_ids: Type.Optional(Type.Array(Type.Number())),
-  feed_ids: Type.Optional(Type.Array(Type.Number())),
-  device_worker_id: Type.Optional(Type.String()),
-  operation_key: Type.Optional(Type.String()),
-  status: Type.Optional(Type.String()),
-  approval_status: Type.Optional(Type.String()),
+  connection_id: Type.Optional(Type.Number({ description: 'Filter by connection ID' })),
+  connection_ids: Type.Optional(Type.Array(Type.Number({ description: 'Filter by connection IDs' }))),
+  feed_ids: Type.Optional(Type.Array(Type.Number({ description: 'Filter by feed IDs' }))),
+  device_worker_id: Type.Optional(Type.String({ description: 'Filter by device worker ID' })),
+  operation_key: Type.Optional(Type.String({ description: 'Filter by operation key' })),
+  status: Type.Optional(Type.String({ description: 'Filter by run status' })),
+  approval_status: Type.Optional(Type.String({ description: 'Filter by approval status' })),
   /** Filter by run_type. Omit to list every run type (sync, action, auth, …). */
-  run_types: Type.Optional(Type.Array(Type.String())),
+  run_types: Type.Optional(Type.Array(Type.String({ description: 'Filter by run types' }))),
   /** Filter watcher runs by watcher id(s). */
-  watcher_ids: Type.Optional(Type.Array(Type.Number())),
+  watcher_ids: Type.Optional(Type.Array(Type.Number({ description: 'Filter by watcher IDs' }))),
   /** Keyset cursor: return runs ordered before (before_created_at, before_id). */
-  before_id: Type.Optional(Type.Number()),
-  before_created_at: Type.Optional(Type.String()),
+  before_id: Type.Optional(Type.Number({ description: 'Keyset cursor: return runs before this ID' })),
+  before_created_at: Type.Optional(Type.String({ description: 'Keyset cursor: return runs before this timestamp' })),
   ...PaginationFields,
 });
 
@@ -110,48 +111,78 @@ const RejectAction = Type.Object({
 });
 
 
-type ManageOperationsResult =
-  | { error: string }
-  | {
-      action: 'list_available';
-      operations: Array<Record<string, unknown>> | AvailableOperation[];
-      total: number;
-      limit: number;
-      offset: number;
-    }
-  | {
-      action: 'execute';
-      run_id: number;
-      event_id?: number;
-      approval_url?: string;
-      status: 'pending_approval';
-      message: string;
-    }
-  | {
-      action: 'execute';
-      run_id: number;
-      status: 'completed';
-      output: Record<string, unknown>;
-      metadata?: Record<string, unknown>;
-    }
-  | { action: 'execute'; run_id: number; status: 'failed'; error_message: string }
-  | {
-      action: 'execute';
-      run_id: number;
-      status: 'timeout';
-      error_message: string;
-    }
-  | {
-      action: 'list_runs';
-      runs: any[];
-      total: number;
-      limit: number;
-      offset: number;
-      has_more: boolean;
-    }
-  | { action: 'get_run'; run: any }
-  | { action: 'approve'; approved: true; run_id: number; event_id?: number; message: string }
-  | { action: 'reject'; rejected: true; run_id: number; event_id?: number };
+/**
+ * Result of `manage_operations` — discriminated union (on `action`/`status`,
+ * plus an error variant). TypeBox-first: `Static<>` derives the TS type from
+ * the same schema exposed as the tool's `outputSchema`. Operation/run rows are
+ * wide snapshots, so they're honestly `Record<string, unknown>`.
+ */
+export const ManageOperationsResultSchema = Type.Union([
+  Type.Object({ error: Type.String() }),
+  Type.Object({
+    action: Type.Literal('list_available'),
+    // AvailableOperation is a typed descriptor; modeled as unknown so the
+    // handler's typed array satisfies the schema without forcing an index
+    // signature onto the interface.
+    operations: Type.Array(Type.Unknown()),
+    total: Type.Integer(),
+    limit: Type.Integer(),
+    offset: Type.Integer(),
+  }),
+  Type.Object({
+    action: Type.Literal('execute'),
+    run_id: Type.Integer(),
+    event_id: Type.Optional(Type.Integer()),
+    approval_url: Type.Optional(Type.String()),
+    status: Type.Literal('pending_approval'),
+    message: Type.String(),
+  }),
+  Type.Object({
+    action: Type.Literal('execute'),
+    run_id: Type.Integer(),
+    status: Type.Literal('completed'),
+    output: Type.Record(Type.String(), Type.Unknown()),
+    metadata: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+  }),
+  Type.Object({
+    action: Type.Literal('execute'),
+    run_id: Type.Integer(),
+    status: Type.Literal('failed'),
+    error_message: Type.String(),
+  }),
+  Type.Object({
+    action: Type.Literal('execute'),
+    run_id: Type.Integer(),
+    status: Type.Literal('timeout'),
+    error_message: Type.String(),
+  }),
+  Type.Object({
+    action: Type.Literal('list_runs'),
+    runs: Type.Array(Type.Record(Type.String(), Type.Unknown())),
+    total: Type.Integer(),
+    limit: Type.Integer(),
+    offset: Type.Integer(),
+    has_more: Type.Boolean(),
+  }),
+  Type.Object({
+    action: Type.Literal('get_run'),
+    run: Type.Record(Type.String(), Type.Unknown()),
+  }),
+  Type.Object({
+    action: Type.Literal('approve'),
+    approved: Type.Literal(true),
+    run_id: Type.Integer(),
+    event_id: Type.Optional(Type.Integer()),
+    message: Type.String(),
+  }),
+  Type.Object({
+    action: Type.Literal('reject'),
+    rejected: Type.Literal(true),
+    run_id: Type.Integer(),
+    event_id: Type.Optional(Type.Integer()),
+  }),
+]);
+type ManageOperationsResult = Static<typeof ManageOperationsResultSchema>;
 
 
 type InlineExecutionResult =
