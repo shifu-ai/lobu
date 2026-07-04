@@ -20,7 +20,14 @@ import {
   findWindowIdForRun,
   markWatcherRunCompleted,
   resolveWatcherRunsByMessageIds,
+  watcherRunSucceedsWithoutWindow,
 } from './run-completion';
+
+// Re-exported for callers/tests that historically imported this decision
+// function from automation.ts (e.g. watcher-digest-dispatch.test.ts). The
+// canonical definition lives in run-completion.ts so it can be shared by
+// BOTH completion paths — see the doc comment there.
+export { watcherRunSucceedsWithoutWindow };
 import { nextRunAt } from '../utils/cron';
 
 type WatcherRunStatus =
@@ -1137,29 +1144,6 @@ async function dispatchWatcherRun(
     );
     return 'failed';
   }
-}
-
-/**
- * Whether a watcher run that finished without producing a `watcher_windows`
- * row (via `manage_watchers(action="complete_window")`) should be treated as
- * a SUCCESS rather than a failure.
- *
- * `knowledge` watchers MUST call complete_window — it's the only signal real
- * extraction happened; a normally-finished reply that skipped it silently
- * masked the Reddit watcher being broken for a week (see the fail-closed
- * comment in {@link registerWatcherRunHandle} below), so absence stays a
- * failure for them.
- *
- * `digest` watchers (Task 4) never call complete_window at all — they call
- * get_pm_daily_context / send_daily_digest via the toolbox MCP instead — so
- * a normally-finished agent turn with no window is the EXPECTED outcome, not
- * a failure.
- *
- * Pure decision function (no DB/IO) so the branch is independently
- * unit-testable without standing up a WatcherRunTracker + Postgres.
- */
-export function watcherRunSucceedsWithoutWindow(kind: WatcherKind): boolean {
-  return kind === 'digest';
 }
 
 function registerWatcherRunHandle(params: {

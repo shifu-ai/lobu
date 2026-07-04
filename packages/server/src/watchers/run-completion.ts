@@ -1,8 +1,52 @@
 import type { DbClient } from '../db/client';
 import { getDb, pgTextArray } from '../db/client';
+import type { WatcherKind } from '../utils/queue-helpers';
 import { ACTIVE_RUN_STATUSES, runStatusLiteral } from '../utils/run-statuses';
 
 export type WatcherTerminalResult = { ok: true } | { ok: false; error: string };
+
+/**
+ * Whether a watcher run that finished without producing a `watcher_windows`
+ * row (via `manage_watchers(action="complete_window")`) should be treated as
+ * a SUCCESS rather than a failure.
+ *
+ * `knowledge` watchers MUST call complete_window — it's the only signal real
+ * extraction happened; a normally-finished reply that skipped it silently
+ * masked the Reddit watcher being broken for a week, so absence stays a
+ * failure for them.
+ *
+ * `digest` watchers (Task 4) never call complete_window at all — they call
+ * get_pm_daily_context / send_daily_digest via the toolbox MCP instead — so
+ * a normally-finished agent turn with no window is the EXPECTED outcome, not
+ * a failure.
+ *
+ * Canonical location: this decision must be shared by BOTH completion paths
+ * that can mark a watcher run terminal without a window —
+ * `resolveWatcherRunsByMessageIds` below (driven by the gateway API's
+ * `ThreadResponsePayload` completion/error events AND the periodic
+ * `reconcileWatcherRuns` sweep in automation.ts) and the in-process
+ * `WatcherRunTracker.onResolve` callback (`registerWatcherRunHandle` in
+ * automation.ts). Defining it once here and re-exporting from automation.ts
+ * keeps both call sites from drifting apart.
+ *
+ * Pure decision function (no DB/IO) so the branch is independently
+ * unit-testable without standing up a WatcherRunTracker + Postgres.
+ */
+export function watcherRunSucceedsWithoutWindow(kind: WatcherKind): boolean {
+  return kind === 'digest';
+}
+
+/**
+ * Coerce a raw `approved_input->>'kind'` value to a concrete WatcherKind.
+ * Older runs (queued before the `kind` column existed) have no `kind` in
+ * approved_input — default to 'knowledge' so pre-existing behavior for those
+ * runs is unchanged. An unrecognized value is also coerced to 'knowledge'
+ * rather than propagated, since only 'knowledge' | 'digest' are valid.
+ * Mirrors the identical coercion in automation.ts's parseWatcherRunPayload.
+ */
+function coerceWatcherKind(rawKind: unknown): WatcherKind {
+  return rawKind === 'digest' ? 'digest' : 'knowledge';
+}
 
 export async function findWindowIdForRun(sql: DbClient, runId: number): Promise<number | null> {
   const rows = await sql`
@@ -57,7 +101,7 @@ export async function resolveWatcherRunsByMessageIds(
 
   const sql = db ?? getDb();
   const rows = await sql`
-    SELECT id
+    SELECT id, approved_input->>'kind' AS kind
     FROM runs
     WHERE run_type = 'watcher'
       AND dispatched_message_id = ANY(${pgTextArray(ids)}::text[])
@@ -68,6 +112,7 @@ export async function resolveWatcherRunsByMessageIds(
   for (const row of rows) {
     const runId = Number((row as { id: unknown }).id);
     if (!Number.isFinite(runId)) continue;
+    const kind = coerceWatcherKind((row as { kind: unknown }).kind);
 
     if (!result.ok) {
       await markWatcherRunFailed(sql, runId, result.error);
@@ -77,6 +122,11 @@ export async function resolveWatcherRunsByMessageIds(
 
     const windowId = await findWindowIdForRun(sql, runId);
     if (windowId === null) {
+      if (watcherRunSucceedsWithoutWindow(kind)) {
+        await markWatcherRunCompleted(sql, runId, null);
+        resolved++;
+        continue;
+      }
       await markWatcherRunFailed(
         sql,
         runId,
