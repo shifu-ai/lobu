@@ -138,7 +138,11 @@ describe('Toolbox context pack memory route', () => {
     const res = await app.request('/lobu/api/v1/memory/context-packs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(contextPackBody()),
+      body: JSON.stringify(
+        contextPackBody({
+          entityIds: [' course:user-001:super-ai ', 'course:user-001:super-ai'],
+        })
+      ),
     });
 
     if (res.status !== 200) {
@@ -175,9 +179,38 @@ describe('Toolbox context pack memory route', () => {
           owner_user_id: OWNER_USER_ID,
           agent_id: AGENT_ID,
           memory_source: 'toolbox_onboarding',
+          course_entity_ids: ['course:user-001:super-ai'],
+          course_entity_id: 'course:user-001:super-ai',
         }),
       }),
     ]);
+  });
+
+  test.each([
+    ['non-array entityIds', { entityIds: 'course:user-001:super-ai' }],
+    ['unsafe entityIds', { entityIds: ['course:user-001:super ai'] }],
+    [
+      'too many entityIds',
+      { entityIds: Array.from({ length: 21 }, (_, index) => `course:${index}`) },
+    ],
+    ['zero supersedesEventId', { supersedesEventId: 0 }],
+    ['negative supersedesEventId', { supersedesEventId: -1 }],
+    ['non-integer supersedesEventId', { supersedesEventId: 1.5 }],
+  ])('rejects invalid context pack contract fields: %s', async (_name, overrides) => {
+    const app = await importMountedMemoryRoutes();
+
+    const res = await app.request('/lobu/api/v1/memory/context-packs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(contextPackBody(overrides)),
+    });
+
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({
+      ok: false,
+      errorCode: 'lobu_memory_invalid_request',
+      errorMessage: expect.any(String),
+    });
   });
 
   test('rejects read-only PAT scopes for memory writes', async () => {
@@ -342,7 +375,14 @@ describe('writeContextPackMemory', () => {
         ownerMemberRole: 'member',
         authSource: 'pat',
         scopes: ['mcp:admin'],
-        body: contextPackBody(),
+        body: contextPackBody({
+          entityIds: [
+            ' course:user-001:super-ai ',
+            'course:user-001:super-ai',
+            'course:user-001:advanced-ai',
+          ],
+          supersedesEventId: 456,
+        }),
       },
       { saveContentImpl: saveContentImpl as never }
     );
@@ -367,8 +407,12 @@ describe('writeContextPackMemory', () => {
         owner_user_id: OWNER_USER_ID,
         agent_id: AGENT_ID,
         memory_source: 'toolbox_onboarding',
+        course_entity_ids: ['course:user-001:super-ai', 'course:user-001:advanced-ai'],
+        course_entity_id: 'course:user-001:super-ai',
       },
+      supersedes_event_id: 456,
     });
+    expect(args).not.toHaveProperty('entity_ids');
     expect(ctx).toMatchObject({
       organizationId: ORG_ID,
       userId: OWNER_USER_ID,
