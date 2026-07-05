@@ -1,8 +1,5 @@
 import { createLogger } from "@lobu/core";
-import {
-  journeyEvent,
-  type WorkerJourneyEventInput,
-} from "./journey-trace";
+import { journeyEvent, type WorkerJourneyEventInput } from "./journey-trace";
 
 const logger = createLogger("worker-journey-observability");
 const SCHEMA_VERSION = "journey.trace.v1";
@@ -69,7 +66,10 @@ function redactSensitiveValues(
   if (value && typeof value === "object") {
     const output: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value)) {
-      output[key] = redactSensitiveValues(entry, key, [...path, normalizeKey(key)]);
+      output[key] = redactSensitiveValues(entry, key, [
+        ...path,
+        normalizeKey(key),
+      ]);
     }
     return output;
   }
