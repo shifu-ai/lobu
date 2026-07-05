@@ -38,6 +38,8 @@ const originalObsEnv = {
   enabled: process.env.SHIFU_AGENT_OBS_ENABLED,
   ingestUrl: process.env.SHIFU_AGENT_OBS_INGEST_URL,
   token: process.env.SHIFU_AGENT_OBS_TOKEN,
+  toolboxUrl: process.env.TOOLBOX_AGENT_OBSERVABILITY_URL,
+  toolboxSecret: process.env.TOOLBOX_INTERNAL_SECRET,
 };
 
 const gw: GatewayParams = {
@@ -71,6 +73,16 @@ afterEach(() => {
     delete process.env.SHIFU_AGENT_OBS_TOKEN;
   } else {
     process.env.SHIFU_AGENT_OBS_TOKEN = originalObsEnv.token;
+  }
+  if (originalObsEnv.toolboxUrl === undefined) {
+    delete process.env.TOOLBOX_AGENT_OBSERVABILITY_URL;
+  } else {
+    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL = originalObsEnv.toolboxUrl;
+  }
+  if (originalObsEnv.toolboxSecret === undefined) {
+    delete process.env.TOOLBOX_INTERNAL_SECRET;
+  } else {
+    process.env.TOOLBOX_INTERNAL_SECRET = originalObsEnv.toolboxSecret;
   }
   mock.restore();
 });
@@ -546,6 +558,9 @@ describe("worker MCP tool registration observability", () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = "true";
     process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
     delete process.env.SHIFU_AGENT_OBS_TOKEN;
+    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL =
+      "https://toolbox.example.test/ingest";
+    process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
 
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -595,8 +610,29 @@ describe("worker MCP tool registration observability", () => {
       mcpIds: Object.keys(mcpTools),
     });
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0] as unknown as [
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, journeyInit] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    const journeyPayload = JSON.parse(String(journeyInit.body));
+    expect(journeyPayload).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      payload: {
+        schema_version: "journey.trace.v1",
+        event: "lobu.worker.tools_registered",
+        trace_id: "tr_workerobs123456",
+        journey_id: "line_reply",
+        service: "lobu",
+        module: "agent-worker",
+        status: "ok",
+        tool_count: 1,
+        mcp_tool_count: 1,
+      },
+    });
+    expect(journeyPayload.payload.mcp_ids).toEqual(["lobu"]);
+
+    const [, init] = fetchMock.mock.calls[1] as unknown as [
       string,
       RequestInit,
     ];

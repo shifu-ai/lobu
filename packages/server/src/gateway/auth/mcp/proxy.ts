@@ -276,7 +276,7 @@ function emitMcpObsEvent(input: {
     schema_version: "journey.trace.v1",
     trace_id: input.trace.traceId,
     journey_id: input.trace.journeyId,
-    event: input.eventName.replace(/^lobu\./, ""),
+    event: input.eventName,
     service: "lobu",
     module: "mcp-proxy",
     status: input.status === "ok" ? "ok" : input.status,
