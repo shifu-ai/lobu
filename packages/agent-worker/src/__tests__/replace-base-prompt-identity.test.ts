@@ -172,7 +172,7 @@ describe("worker model observability", () => {
     expect(runSettledBeforeCompletedIngestSettled).toBe(true);
   });
 
-  test("emits provider call started and model completed events around a successful runner", async () => {
+  test("emits canonical Lobu model journey events around a successful runner", async () => {
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     enableObs(fetchMock);
 
@@ -181,7 +181,7 @@ describe("worker model observability", () => {
       outputChars: 42,
     }));
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     const firstCall = fetchMock.mock.calls[0] as unknown as [
       string,
       RequestInit,
@@ -198,7 +198,7 @@ describe("worker model observability", () => {
       schemaVersion: "journey.trace.v1",
       payload: {
         schema_version: "journey.trace.v1",
-        event: "provider.call.started",
+        event: "lobu.model.started",
         trace_id: "tr_modelobs123456",
         journey_id: "line_reply",
         service: "lobu",
@@ -225,6 +225,23 @@ describe("worker model observability", () => {
       },
     });
     expect(events[2]).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      payload: {
+        schema_version: "journey.trace.v1",
+        event: "lobu.model.completed",
+        trace_id: "tr_modelobs123456",
+        journey_id: "line_reply",
+        service: "lobu",
+        module: "agent-worker",
+        status: "ok",
+        provider: {
+          name: "openai",
+          model: "gpt-4.1",
+        },
+        output_chars: 42,
+      },
+    });
+    expect(events[3]).toMatchObject({
       eventName: "lobu.model.completed",
       status: "ok",
       stage: "lobu.model.completed",
@@ -235,7 +252,7 @@ describe("worker model observability", () => {
         output_chars: 42,
       },
     });
-    expect(typeof events[2].durationMs).toBe("number");
+    expect(typeof events[3].durationMs).toBe("number");
   });
 
   test("emits model failed event when the runner throws", async () => {
@@ -248,10 +265,10 @@ describe("worker model observability", () => {
       })
     ).rejects.toThrow("provider rejected model request");
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
     const failed = JSON.parse(
       String(
-        (fetchMock.mock.calls[2] as unknown as [string, RequestInit])[1].body
+        (fetchMock.mock.calls[3] as unknown as [string, RequestInit])[1].body
       )
     );
     expect(failed).toMatchObject({

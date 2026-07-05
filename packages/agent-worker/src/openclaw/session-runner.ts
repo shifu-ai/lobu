@@ -659,7 +659,7 @@ function emitWorkerJourneyObsEvent(input: {
   agentId?: string;
   userId?: string;
   event: string;
-  status: "started" | "ok" | "failed" | string;
+  status: JourneyTraceStatus;
   durationMs?: number;
   fields?: Record<string, unknown>;
 }): void {
@@ -713,6 +713,22 @@ export function emitWorkerToolsRegisteredObsEvent(input: {
   pluginToolCount: number;
   mcpIds: string[];
 }): void {
+  const metadata = {
+    tool_count: input.toolCount,
+    mcp_tool_count: input.mcpToolCount,
+    auth_tool_count: input.authToolCount,
+    plugin_tool_count: input.pluginToolCount,
+    mcp_ids: input.mcpIds.slice().sort(),
+  };
+  emitWorkerJourneyObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    agentId: input.agentId,
+    userId: input.userId,
+    event: "lobu.worker.tools_registered",
+    status: "ok",
+    fields: metadata,
+  });
   emitWorkerObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
@@ -721,13 +737,7 @@ export function emitWorkerToolsRegisteredObsEvent(input: {
     eventName: "lobu.worker.tools_registered",
     status: "ok",
     stage: "lobu.worker.tools_registered",
-    metadata: {
-      tool_count: input.toolCount,
-      mcp_tool_count: input.mcpToolCount,
-      auth_tool_count: input.authToolCount,
-      plugin_tool_count: input.pluginToolCount,
-      mcp_ids: input.mcpIds.slice().sort(),
-    },
+    metadata,
   });
 }
 
@@ -753,7 +763,7 @@ export async function runModelWithObs(
     conversationId: input.conversationId,
     agentId: input.agentId,
     userId: input.userId,
-    event: "provider.call.started",
+    event: "lobu.model.started",
     status: "started",
     fields: {
       provider: {
@@ -784,6 +794,22 @@ export async function runModelWithObs(
     const result = await run();
     const durationMs = Math.max(0, Date.now() - startedAt);
     if (result.success) {
+      emitWorkerJourneyObsEvent({
+        trace: input.trace,
+        conversationId: input.conversationId,
+        agentId: input.agentId,
+        userId: input.userId,
+        event: "lobu.model.completed",
+        status: "ok",
+        durationMs,
+        fields: {
+          provider: {
+            name: input.provider,
+            model: input.modelId,
+          },
+          output_chars: result.outputChars ?? 0,
+        },
+      });
       emitWorkerObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
@@ -800,6 +826,23 @@ export async function runModelWithObs(
         },
       });
     } else {
+      emitWorkerJourneyObsEvent({
+        trace: input.trace,
+        conversationId: input.conversationId,
+        agentId: input.agentId,
+        userId: input.userId,
+        event: "lobu.model.failed",
+        status: "failed",
+        durationMs,
+        fields: {
+          provider: {
+            name: input.provider,
+            model: input.modelId,
+          },
+          error_class: "model_error",
+          next_debug_hint: `Check the model run for ${input.provider}/${input.modelId}; inspect worker logs and provider configuration.`,
+        },
+      });
       emitWorkerObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
@@ -820,6 +863,24 @@ export async function runModelWithObs(
     return result;
   } catch (error) {
     const durationMs = Math.max(0, Date.now() - startedAt);
+    emitWorkerJourneyObsEvent({
+      trace: input.trace,
+      conversationId: input.conversationId,
+      agentId: input.agentId,
+      userId: input.userId,
+      event: "lobu.model.failed",
+      status: "failed",
+      durationMs,
+      fields: {
+        provider: {
+          name: input.provider,
+          model: input.modelId,
+        },
+        error_class: "model_error",
+        next_debug_hint: `Check the model run for ${input.provider}/${input.modelId}; inspect worker logs and provider configuration.`,
+        error_name: error instanceof Error ? error.name : typeof error,
+      },
+    });
     emitWorkerObsEvent({
       trace: input.trace,
       conversationId: input.conversationId,
@@ -1804,7 +1865,7 @@ Use it when the user references past discussions or you need context.`);
           conversationId,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          event: "mcp.tool_call.started",
+          event: "lobu.mcp.tool_call.started",
           status: "started",
           fields: {
             tool_call_id: event.toolCallId,
@@ -1838,7 +1899,7 @@ Use it when the user references past discussions or you need context.`);
           conversationId,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          event: "mcp.tool_call.completed",
+          event: "lobu.mcp.tool_call.completed",
           status: event.isError ? "failed" : "ok",
           durationMs:
             toolStartedAt === undefined

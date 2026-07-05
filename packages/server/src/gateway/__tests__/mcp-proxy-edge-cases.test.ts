@@ -132,6 +132,9 @@ function enableObsEnv() {
   process.env.SHIFU_AGENT_OBS_ENABLED = "true";
   process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
   delete process.env.SHIFU_AGENT_OBS_TOKEN;
+  process.env.TOOLBOX_AGENT_OBSERVABILITY_URL =
+    "https://obs.example.test/ingest";
+  process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
 }
 
 function inTestOrg<T>(fn: () => T): T {
@@ -188,6 +191,8 @@ beforeEach(() => {
   delete process.env.SHIFU_AGENT_OBS_ENABLED;
   delete process.env.SHIFU_AGENT_OBS_INGEST_URL;
   delete process.env.SHIFU_AGENT_OBS_TOKEN;
+  delete process.env.TOOLBOX_AGENT_OBSERVABILITY_URL;
+  delete process.env.TOOLBOX_INTERNAL_SECRET;
 });
 
 // ---------------------------------------------------------------------------
@@ -266,6 +271,23 @@ describe("durable observability for tools/list", () => {
         tool_count: 2,
         cache_status: "miss",
       }),
+    });
+    const journeyCompleted = obsBodies.find(
+      (body) =>
+        body.schemaVersion === "journey.trace.v1" &&
+        body.payload?.event === "lobu.mcp.tools_list.completed"
+    );
+    expect(journeyCompleted).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      payload: {
+        schema_version: "journey.trace.v1",
+        event: "lobu.mcp.tools_list.completed",
+        service: "lobu",
+        module: "mcp-proxy",
+        status: "ok",
+        tool_count: 2,
+        cache_status: "miss",
+      },
     });
   });
 
