@@ -12,6 +12,7 @@ import {
 	parsePgNumberArray,
 	pgBigintArray,
 } from "../../../../db/client";
+import { recordToolConfigChange } from "../../helpers/config-audit";
 import {
 	deleteChatConnection,
 	updateChatConnection,
@@ -641,6 +642,13 @@ export async function handleCreate(
 				ctx,
 			);
 			if ("error" in read || read.action !== "get") return read;
+			recordToolConfigChange(ctx, {
+				resourceKind: "connection",
+				resourceId: created.connectionId,
+				op: created.created ? "created" : "updated",
+				summary: `Connection '${args.display_name ?? args.connector_key}' ${created.created ? "created" : "updated"}`,
+				state: read.connection as Record<string, unknown>,
+			});
 			return {
 				action: "create",
 				connection: read.connection,
@@ -1127,6 +1135,14 @@ export async function handleCreate(
     extra: { connector_key: args.connector_key, slug: inserted[0].slug },
   });
 
+  recordToolConfigChange(ctx, {
+		resourceKind: "connection",
+    resourceId: inserted[0].id,
+		op: "created",
+    summary: `Connection '${displayName}' created`,
+    state: inserted[0] as Record<string, unknown>,
+  });
+
   return {
 		action: "create",
     connection: enrichWithAuthProfiles(
@@ -1168,6 +1184,15 @@ export async function handleApplyChatConnection(
 			ctx,
 		);
 		if ("error" in read || read.action !== "get") return read;
+		if (result.created || result.changed) {
+			recordToolConfigChange(ctx, {
+				resourceKind: "connection",
+				resourceId: result.connectionId,
+				op: result.created ? "created" : "updated",
+				summary: `Connection '${args.display_name ?? args.stable_id}' ${result.created ? "created" : "updated"}`,
+				state: read.connection as Record<string, unknown>,
+			});
+		}
 		return {
 			action: "apply_chat_connection",
 			connection: read.connection,
@@ -1259,6 +1284,18 @@ export async function handleUpdate(
 				ctx,
 			);
 			if ("error" in read || read.action !== "get") return read;
+			recordToolConfigChange(ctx, {
+				resourceKind: "connection",
+				resourceId: args.connection_id,
+				op: "updated",
+				summary: `Connection '${args.display_name ?? args.connection_id}' updated`,
+				state: read.connection as Record<string, unknown>,
+				changedFields: [
+					...(args.display_name !== undefined ? ["display_name"] : []),
+					...(args.config !== undefined ? ["config"] : []),
+					...(args.status !== undefined ? ["status"] : []),
+				],
+			});
 			return { action: "update", connection: read.connection };
 		} catch (error) {
 			return { error: getErrorMessage(error) };
@@ -1615,6 +1652,26 @@ export async function handleUpdate(
     await syncOAuthConnectionsForAuthProfile(organizationId, effectiveAuth.id);
   }
 
+  const updatedRow = updated[0] as Record<string, unknown>;
+  const changedFields = [
+    ...(args.display_name !== undefined ? ["display_name"] : []),
+    ...(updateExplicitSlug ? ["slug"] : []),
+    ...(args.status !== undefined ? ["status"] : []),
+    ...(hasAuthProfileArg ? ["auth_profile_id"] : []),
+    ...(hasAppAuthProfileArg ? ["app_auth_profile_id"] : []),
+    ...(hasDeviceWorkerArg ? ["device_worker_id"] : []),
+    ...(args.entity_ids !== undefined ? ["entity_ids"] : []),
+    ...(args.config !== undefined ? ["config"] : []),
+  ];
+  recordToolConfigChange(ctx, {
+    resourceKind: "connection",
+    resourceId: args.connection_id,
+    op: "updated",
+    summary: `Connection '${updatedRow.display_name ?? updatedRow.slug ?? args.connection_id}' updated`,
+    state: updatedRow,
+    ...(changedFields.length > 0 ? { changedFields } : {}),
+  });
+
   return {
 		action: "update",
     connection: enrichWithAuthProfiles(
@@ -1720,6 +1777,14 @@ export async function handleDelete(
     entityId: args.connection_id,
     summary: `Connection "${connName}" deleted`,
     extra: { connector_key: conn.connector_key, slug: conn.slug },
+  });
+
+  recordToolConfigChange(ctx, {
+		resourceKind: "connection",
+    resourceId: args.connection_id,
+		op: "deleted",
+    summary: `Connection '${connName}' deleted`,
+    state: null,
   });
 
   return {

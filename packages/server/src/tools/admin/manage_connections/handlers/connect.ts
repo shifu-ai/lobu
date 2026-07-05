@@ -13,6 +13,7 @@ import {
 } from '../../../../utils/connections';
 import { applyEntityLinkOverrides } from '../../../../utils/entity-link-validation';
 import { recordLifecycleEvent } from '../../../../utils/insert-event';
+import { recordToolConfigChange } from '../../helpers/config-audit';
 import logger from '../../../../utils/logger';
 import { ensureConnectorInstalled } from '../../../../utils/ensure-connector-installed';
 import {
@@ -386,6 +387,14 @@ export async function handleConnect(
     entityId: connection.id,
     summary: `Connection "${connectDisplayName}" created`,
     extra: { connector_key: args.connector_key, slug: connection.slug, via: 'connect' },
+  });
+
+  recordToolConfigChange(ctx, {
+    resourceKind: 'connection',
+    resourceId: connection.id,
+    op: 'created',
+    summary: `Connection '${connectDisplayName}' created`,
+    state: insertedConn[0] as Record<string, unknown>,
   });
 
   // If active immediately, return simple result

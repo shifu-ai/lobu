@@ -4,6 +4,7 @@
  */
 
 import { getDb } from '../../../db/client';
+import { recordToolConfigChange } from '../helpers/config-audit';
 import { nextRunAt, validateSchedule } from '../../../utils/cron';
 import { resolveUsernames } from '../../../utils/resolve-usernames';
 import { getNextNumericId } from '../helpers/db-helpers';
@@ -211,6 +212,41 @@ export async function handleCreateVersion(
       `;
     }
   });
+
+  if (versionOrganizationId) {
+    const setAsCurrent = args.set_as_current !== false;
+    recordToolConfigChange(ctx, {
+      organizationId: versionOrganizationId,
+      resourceKind: 'watcher',
+      resourceId: args.watcher_id,
+      op: 'updated',
+      summary: `Watcher '${args.name ?? (prev.name as string) ?? args.watcher_id}' version ${lockedNextVersion} created`,
+      // Composed from the values just written (watcher row not refetched);
+      // carries the new version-bound fields.
+      state: {
+        id: args.watcher_id,
+        name: args.name ?? (prev.name as string) ?? 'Watcher',
+        version: lockedNextVersion,
+        current_version_id: setAsCurrent ? versionId : undefined,
+        prompt,
+        sources,
+        keying_config: keyingConfig ?? null,
+        classifiers: classifiers ?? null,
+        reactions_guidance: args.reactions_guidance ?? (prev.reactions_guidance as string) ?? null,
+        change_notes: args.change_notes ?? null,
+      },
+      changedFields: [
+        'version',
+        ...(promptEdited ? ['prompt'] : []),
+        ...(args.name !== undefined ? ['name'] : []),
+        ...(args.sources !== undefined ? ['sources'] : []),
+        ...(args.keying_config !== undefined ? ['keying_config'] : []),
+        ...(args.classifiers !== undefined ? ['classifiers'] : []),
+        ...(args.reactions_guidance !== undefined ? ['reactions_guidance'] : []),
+        ...(args.schedule !== undefined ? ['schedule'] : []),
+      ],
+    });
+  }
 
   return {
     action: 'create_version',

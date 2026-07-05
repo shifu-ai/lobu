@@ -12,6 +12,7 @@ import { type Static, Type } from '@sinclair/typebox';
 import type { AutoCreateWhenRule } from '@lobu/connector-sdk';
 import { validateEntityMetrics } from '@lobu/connector-sdk';
 import { type DbClient, getDb } from '../../db/client';
+import { recordToolConfigChange } from './helpers/config-audit';
 import { measureColumns } from '../../utils/infer-measures';
 import type { Env } from '../../index';
 import logger from '../../utils/logger';
@@ -709,6 +710,14 @@ async function etHandleCreate(
     inserted[0] as Record<string, unknown>
   );
 
+  recordToolConfigChange(ctx, {
+    resourceKind: 'entity-type',
+    resourceId: slug,
+    op: 'created',
+    summary: `Entity type '${args.name}' created`,
+    state: inserted[0] as Record<string, unknown>,
+  });
+
   return { schema_type: 'entity_type', action: 'create', entity_type: created };
 }
 
@@ -813,6 +822,25 @@ async function etHandleUpdate(
     updated[0] as Record<string, unknown>
   );
 
+  const etChangedFields = [
+    ...(args.name !== undefined ? ['name'] : []),
+    ...(args.description !== undefined ? ['description'] : []),
+    ...(args.icon !== undefined ? ['icon'] : []),
+    ...(args.color !== undefined ? ['color'] : []),
+    ...(hasMetadataSchema ? ['metadata_schema'] : []),
+    ...(hasEventKinds ? ['event_kinds'] : []),
+    ...(hasBacking ? ['backing'] : []),
+    ...(hasMetricsConfig ? ['metrics_config'] : []),
+  ];
+  recordToolConfigChange(ctx, {
+    resourceKind: 'entity-type',
+    resourceId: args.slug,
+    op: 'updated',
+    summary: `Entity type '${result.name ?? args.slug}' updated`,
+    state: updated[0] as Record<string, unknown>,
+    ...(etChangedFields.length > 0 ? { changedFields: etChangedFields } : {}),
+  });
+
   return { schema_type: 'entity_type', action: 'update', entity_type: result };
 }
 
@@ -859,6 +887,14 @@ async function etHandleDelete(
     current as Record<string, unknown>,
     null
   );
+
+  recordToolConfigChange(ctx, {
+    resourceKind: 'entity-type',
+    resourceId: slug,
+    op: 'deleted',
+    summary: `Entity type '${slug}' deleted`,
+    state: null,
+  });
 
   return {
     schema_type: 'entity_type',
@@ -1204,6 +1240,14 @@ async function rtHandleCreate(
     WHERE rt.id = ${typeId}
   `;
 
+  recordToolConfigChange(ctx, {
+    resourceKind: 'relationship-type',
+    resourceId: args.slug,
+    op: 'created',
+    summary: `Relationship type '${args.name}' created`,
+    state: created[0] as unknown as Record<string, unknown>,
+  });
+
   return {
     schema_type: 'relationship_type',
     action: 'create',
@@ -1271,6 +1315,23 @@ async function rtHandleUpdate(
     WHERE rt.id = ${typeId}
   `;
 
+  const rtChangedFields = [
+    ...(args.name !== undefined ? ['name'] : []),
+    ...(args.description !== undefined ? ['description'] : []),
+    ...(args.metadata_schema !== undefined ? ['metadata_schema'] : []),
+    ...(args.auto_create_when !== undefined ? ['auto_create_when'] : []),
+    ...(args.inverse_type_slug !== undefined ? ['inverse_type_id'] : []),
+    ...(args.status !== undefined ? ['status'] : []),
+  ];
+  recordToolConfigChange(ctx, {
+    resourceKind: 'relationship-type',
+    resourceId: args.slug ?? typeId,
+    op: 'updated',
+    summary: `Relationship type '${args.slug ?? typeId}' updated`,
+    state: updated[0] as unknown as Record<string, unknown>,
+    ...(rtChangedFields.length > 0 ? { changedFields: rtChangedFields } : {}),
+  });
+
   return {
     schema_type: 'relationship_type',
     action: 'update',
@@ -1313,6 +1374,14 @@ async function rtHandleDelete(
     SET deleted_at = current_timestamp, updated_at = current_timestamp
     WHERE relationship_type_id = ${typeId} AND deleted_at IS NULL
   `;
+
+  recordToolConfigChange(ctx, {
+    resourceKind: 'relationship-type',
+    resourceId: args.slug ?? typeId,
+    op: 'deleted',
+    summary: `Relationship type '${args.slug ?? typeId}' deleted`,
+    state: null,
+  });
 
   return {
     schema_type: 'relationship_type',
@@ -1370,6 +1439,19 @@ async function rtHandleAddRule(
     WHERE id = ${ruleId}
   `;
 
+  recordToolConfigChange(ctx, {
+    resourceKind: 'relationship-type',
+    resourceId: args.slug ?? typeId,
+    op: 'updated',
+    summary: `Relationship type '${args.slug ?? typeId}' rule added: ${args.source_entity_type_slug} → ${args.target_entity_type_slug}`,
+    // Full relationship-type state isn't in scope here; snapshot the rule delta.
+    state: {
+      slug: args.slug ?? null,
+      rule_added: created[0] as unknown as Record<string, unknown>,
+    },
+    changedFields: ['rules'],
+  });
+
   return {
     schema_type: 'relationship_type',
     action: 'add_rule',
@@ -1386,7 +1468,7 @@ async function rtHandleRemoveRule(
   const sql = getDb();
 
   const ruleRows = await sql`
-    SELECT r.id, rt.organization_id
+    SELECT r.id, rt.organization_id, rt.slug AS relationship_type_slug
     FROM entity_relationship_type_rules r
     JOIN entity_relationship_types rt ON r.relationship_type_id = rt.id
     WHERE r.id = ${args.rule_id} AND r.deleted_at IS NULL
@@ -1404,6 +1486,20 @@ async function rtHandleRemoveRule(
     SET deleted_at = current_timestamp, updated_at = current_timestamp
     WHERE id = ${args.rule_id}
   `;
+
+  const removedRuleTypeSlug = String(ruleRows[0].relationship_type_slug ?? '');
+  recordToolConfigChange(ctx, {
+    resourceKind: 'relationship-type',
+    resourceId: removedRuleTypeSlug || args.rule_id,
+    op: 'updated',
+    summary: `Relationship type '${removedRuleTypeSlug || args.rule_id}' rule ${args.rule_id} removed`,
+    // Full relationship-type state isn't in scope here; snapshot the rule delta.
+    state: {
+      slug: removedRuleTypeSlug || null,
+      rule_removed: args.rule_id,
+    },
+    changedFields: ['rules'],
+  });
 
   return {
     schema_type: 'relationship_type',

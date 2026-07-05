@@ -6,6 +6,7 @@
 import { getDb } from '../../../db/client';
 import type { Env } from '../../../index';
 import { isLobuGatewayRunning } from '../../../lobu/gateway';
+import { recordToolConfigChange } from '../helpers/config-audit';
 import logger from '../../../utils/logger';
 import { getWatcherRunInfo, queueAndDispatchWatcherRun } from '../../../watchers/automation';
 import {
@@ -13,6 +14,7 @@ import {
   extractReactionInputSchema,
 } from '../../../watchers/reaction-executor';
 import { requireExists } from '../helpers/db-helpers';
+import type { ToolContext } from '../../registry';
 import type { ManageWatchersArgs } from '../manage_watchers';
 
 // ============================================
@@ -58,7 +60,8 @@ export async function handleTrigger(
 
 export async function handleSetReactionScript(
   args: ManageWatchersArgs,
-  _env: Env
+  _env: Env,
+  ctx: ToolContext
 ): Promise<{
   action: 'set_reaction_script';
   watcher_id: string;
@@ -90,6 +93,19 @@ export async function handleSetReactionScript(
           reaction_input_schema = NULL
       WHERE watcher_group_id = ${groupId}
     `;
+    recordToolConfigChange(ctx, {
+      resourceKind: 'watcher',
+      resourceId: args.watcher_id,
+      op: 'updated',
+      summary: `Watcher ${args.watcher_id} reaction script removed`,
+      state: {
+        id: args.watcher_id,
+        watcher_group_id: groupId,
+        reaction_script: null,
+        reaction_input_schema: null,
+      },
+      changedFields: ['reaction_script'],
+    });
     return {
       action: 'set_reaction_script',
       watcher_id: String(args.watcher_id),
@@ -112,6 +128,22 @@ export async function handleSetReactionScript(
   `;
 
   logger.info(`[manage_watchers] Set reaction script for watcher ${args.watcher_id}`);
+
+  recordToolConfigChange(ctx, {
+    resourceKind: 'watcher',
+    resourceId: args.watcher_id,
+    op: 'updated',
+    summary: `Watcher ${args.watcher_id} reaction script updated`,
+    // Snapshot of the fields just written (row not refetched); compiled code
+    // is intentionally omitted to keep the state small.
+    state: {
+      id: args.watcher_id,
+      watcher_group_id: groupId,
+      reaction_script: script,
+      reaction_input_schema: reactionInputSchema ?? null,
+    },
+    changedFields: ['reaction_script'],
+  });
 
   return {
     action: 'set_reaction_script',
