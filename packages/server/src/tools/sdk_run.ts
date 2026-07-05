@@ -2,7 +2,7 @@ import { type Static, Type } from "@sinclair/typebox";
 import { resolveMaxAccessLevel } from "../auth/tool-access";
 import type { Env } from "../index";
 import { buildClientSDK, type SDKMode } from "../sandbox/client-sdk";
-import { runScript } from "../sandbox/run-script";
+import { MAX_SCRIPT_TIMEOUT_MS, runScript } from "../sandbox/run-script";
 import type { ToolContext } from "./registry";
 import { withValidatedArgs } from "./validate-args";
 
@@ -15,9 +15,10 @@ const SCRIPT_FIELDS = {
   }),
   timeout_ms: Type.Optional(
     Type.Number({
-      description: "Wall-clock budget. Default 60000 (max 60000).",
+      description:
+        "Wall-clock budget. Default 60000 (max 180000 — device-bound operations may wait ~155s).",
       minimum: 100,
-      maximum: 60_000,
+      maximum: MAX_SCRIPT_TIMEOUT_MS,
     }),
   ),
 };
