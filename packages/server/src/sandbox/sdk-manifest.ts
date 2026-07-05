@@ -4,7 +4,9 @@
  * runtime — the run-script-runtime.test.ts CI guard depends on this.
  */
 
+import type { ToolAccessLevel } from "../auth/tool-access";
 import { METHOD_METADATA } from "./method-metadata";
+import { sdkMethodVisible } from "./sdk-method-access";
 
 export type SDKMode = "read" | "full";
 
@@ -13,20 +15,24 @@ type SDKManifest = {
 	byNamespace: Record<string, string[]>;
 };
 
-// METHOD_METADATA is a static module constant, so there are only four distinct
-// manifests (mode × allowCrossOrg). Memoize them so each sandbox call is a Map
-// lookup instead of a ~545-entry walk + allocations.
 const manifestCache = new Map<string, SDKManifest>();
 
-function buildSDKManifest(mode: SDKMode, allowCrossOrg: boolean): SDKManifest {
-	const topLevel = ["query", "log"];
-	if (allowCrossOrg) topLevel.unshift("org");
+function buildSDKManifest(
+	mode: SDKMode,
+	allowCrossOrg: boolean,
+	callerMax: ToolAccessLevel,
+): SDKManifest {
+	const topLevel: string[] = [];
+	if (sdkMethodVisible("read", callerMax, mode)) {
+		if (allowCrossOrg) topLevel.push("org");
+		topLevel.push("query", "log");
+	}
 
 	const byNamespace: Record<string, string[]> = {};
 	for (const [path, meta] of Object.entries(METHOD_METADATA)) {
 		const dot = path.indexOf(".");
 		if (dot === -1) continue;
-		if (mode === "read" && meta.access !== "read") continue;
+		if (!sdkMethodVisible(meta.access, callerMax, mode)) continue;
 		const ns = path.slice(0, dot);
 		(byNamespace[ns] ??= []).push(path.slice(dot + 1));
 	}
@@ -35,13 +41,18 @@ function buildSDKManifest(mode: SDKMode, allowCrossOrg: boolean): SDKManifest {
 
 export function enumerateSDKManifest(
 	mode: SDKMode,
-	options?: { allowCrossOrg?: boolean },
+	options?: { allowCrossOrg?: boolean; maxAccessLevel?: ToolAccessLevel },
 ): SDKManifest {
 	const allowCrossOrg = options?.allowCrossOrg !== false;
-	const key = `${mode}:${allowCrossOrg ? "1" : "0"}`;
+	// Callers that omit maxAccessLevel (reaction scripts, tests) expect the
+	// historical full manifest. MCP entry points pass the caller tier explicitly.
+	const callerMax =
+		options?.maxAccessLevel ??
+		(mode === "read" ? "read" : "admin");
+	const key = `${mode}:${allowCrossOrg ? "1" : "0"}:${callerMax}`;
 	let manifest = manifestCache.get(key);
 	if (!manifest) {
-		manifest = buildSDKManifest(mode, allowCrossOrg);
+		manifest = buildSDKManifest(mode, allowCrossOrg, callerMax);
 		manifestCache.set(key, manifest);
 	}
 	return manifest;
