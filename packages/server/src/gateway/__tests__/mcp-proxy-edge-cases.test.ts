@@ -256,6 +256,24 @@ describe("durable observability for tools/list", () => {
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    const discovered = obsBodies.find(
+      (body) =>
+        body.schemaVersion === "journey.trace.v1" &&
+        body.payload?.event === "mcp.server.discovered"
+    );
+    expect(discovered).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      payload: {
+        schema_version: "journey.trace.v1",
+        event: "mcp.server.discovered",
+        service: "lobu",
+        module: "mcp-proxy",
+        status: "ok",
+        mcp_id: "obs-mcp",
+        upstream_url_host: "mcp.example.test",
+      },
+    });
+
     const completed = obsBodies.find(
       (body) =>
         body.eventName === "mcp.tools_list.completed" &&

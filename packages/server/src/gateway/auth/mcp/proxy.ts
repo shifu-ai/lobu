@@ -1179,12 +1179,15 @@ export class McpProxy {
 
     const httpServer = await this.configService.getHttpServer(mcpId, agentId);
     if (!httpServer) {
-      emitJourneyEvent({
-        event: "mcp.agent_settings.loaded",
+      emitMcpObsEvent({
         trace,
-        module: "mcp-proxy",
+        eventName: "mcp.server.discovered",
         status: "failed",
-        fields: {
+        stage: "mcp.server.discovered",
+        agentId,
+        userId,
+        mcpId,
+        metadata: {
           mcp_id: mcpId,
           has_agent_id: Boolean(agentId),
           error_code: "mcp_server_not_found",
@@ -1200,12 +1203,15 @@ export class McpProxy {
       );
       return { tools: [] };
     }
-    emitJourneyEvent({
-      event: "mcp.agent_settings.loaded",
+    emitMcpObsEvent({
       trace,
-      module: "mcp-proxy",
+      eventName: "mcp.server.discovered",
       status: "ok",
-      fields: {
+      stage: "mcp.server.discovered",
+      agentId,
+      userId,
+      mcpId,
+      metadata: {
         mcp_id: mcpId,
         has_agent_id: Boolean(agentId),
         upstream_url_host: safeUrlHost(httpServer.upstreamUrl),
