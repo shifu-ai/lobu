@@ -424,6 +424,45 @@ describe('writeContextPackMemory', () => {
     });
   });
 
+  test('preserves explicit metadata course_entity_id over top-level entityIds', async () => {
+    const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
+    const calls: unknown[][] = [];
+    const saveContentImpl = async (...args: unknown[]) => {
+      calls.push(args);
+      return {
+        id: 129,
+        semantic_type: 'project_profile',
+      };
+    };
+
+    await writeContextPackMemory(
+      {
+        organizationId: ORG_ID,
+        ownerMemberRole: 'member',
+        authSource: 'pat',
+        scopes: ['mcp:admin'],
+        body: contextPackBody({
+          entityIds: ['course:user-001:first-from-top-level'],
+          metadata: {
+            source: 'toolbox_onboarding',
+            course_entity_id: 'course:user-001:explicit-metadata',
+          },
+        }),
+      },
+      { saveContentImpl: saveContentImpl as never }
+    );
+
+    const firstCall = calls[0];
+    if (!firstCall) throw new Error('Expected saveContentImpl to be called');
+    const [args] = firstCall;
+    expect(args).toMatchObject({
+      metadata: {
+        course_entity_ids: ['course:user-001:first-from-top-level'],
+        course_entity_id: 'course:user-001:explicit-metadata',
+      },
+    });
+  });
+
   test('passes generated embeddings into saveContent when embeddings service is configured', async () => {
     const { writeContextPackMemory } = await import('../context-pack-memory-service.js');
     const generatedEmbedding = Array.from({ length: 768 }, (_, index) => index / 768);

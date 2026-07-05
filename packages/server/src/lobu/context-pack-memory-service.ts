@@ -364,7 +364,7 @@ export async function writeContextPackMemory(
   }
   let saved: Awaited<ReturnType<SaveContentImpl>>;
   try {
-    const metadata = {
+    const metadata: Record<string, unknown> = {
       ...parsed.metadata,
       summary: parsed.summary,
       owner_user_id: parsed.ownerUserId,
