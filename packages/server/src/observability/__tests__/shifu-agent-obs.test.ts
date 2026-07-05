@@ -47,9 +47,9 @@ describe('ShiFu Agent Obs event emitter', () => {
 
     await emitAgentObsEvent({
       traceId: 'trace-001',
-      eventName: 'lobu.mcp.tool_call.started',
+      eventName: 'mcp.tool_call.started',
       status: 'started',
-      stage: 'lobu.mcp.tool_call',
+      stage: 'mcp.tool_call',
       agentId: 'agent-001',
       userId: 'user-001',
       toolboxUserId: 'user-001',
@@ -71,9 +71,9 @@ describe('ShiFu Agent Obs event emitter', () => {
       schemaVersion: 'journey.trace.v1',
       source: 'lobu-test',
       traceId: 'trace-001',
-      eventName: 'lobu.mcp.tool_call.started',
+      eventName: 'mcp.tool_call.started',
       status: 'started',
-      stage: 'lobu.mcp.tool_call',
+      stage: 'mcp.tool_call',
       agentId: 'agent-001',
       userId: 'user-001',
       toolboxUserId: 'user-001',
@@ -90,17 +90,17 @@ describe('ShiFu Agent Obs event emitter', () => {
 
     await emitAgentObsEvent({
       traceId: 'trace-disabled',
-      eventName: 'lobu.mcp.tool_call.started',
+      eventName: 'mcp.tool_call.started',
       status: 'started',
-      stage: 'lobu.mcp.tool_call',
+      stage: 'mcp.tool_call',
     });
 
     process.env.SHIFU_AGENT_OBS_ENABLED = 'true';
     await emitAgentObsEvent({
       traceId: 'trace-missing-url',
-      eventName: 'lobu.mcp.tool_call.started',
+      eventName: 'mcp.tool_call.started',
       status: 'started',
-      stage: 'lobu.mcp.tool_call',
+      stage: 'mcp.tool_call',
     });
 
     expect(fetchMock).not.toHaveBeenCalled();
@@ -151,9 +151,9 @@ describe('ShiFu Agent Obs event emitter', () => {
     await expect(
       emitAgentObsEvent({
         traceId: 'trace-500',
-        eventName: 'lobu.mcp.tool_call.started',
+        eventName: 'mcp.tool_call.started',
         status: 'started',
-        stage: 'lobu.mcp.tool_call',
+        stage: 'mcp.tool_call',
       })
     ).resolves.toBeUndefined();
 
@@ -164,9 +164,9 @@ describe('ShiFu Agent Obs event emitter', () => {
     await expect(
       emitAgentObsEvent({
         traceId: 'trace-throw',
-        eventName: 'lobu.mcp.tool_call.started',
+        eventName: 'mcp.tool_call.started',
         status: 'started',
-        stage: 'lobu.mcp.tool_call',
+        stage: 'mcp.tool_call',
       })
     ).resolves.toBeUndefined();
   });
@@ -191,9 +191,9 @@ describe('ShiFu Agent Obs event emitter', () => {
       Promise.race([
         emitAgentObsEvent({
           traceId: 'trace-hung',
-          eventName: 'lobu.mcp.tool_call.started',
+          eventName: 'mcp.tool_call.started',
           status: 'started',
-          stage: 'lobu.mcp.tool_call',
+          stage: 'mcp.tool_call',
         }).then(() => 'resolved'),
         Bun.sleep(100).then(() => 'timed-out'),
       ])

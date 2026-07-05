@@ -394,15 +394,15 @@ describe('Toolbox MCP execution routes', () => {
     expect(res.status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 0));
     const startedPayload = obsBodies.find(
-      (body) => body.eventName === 'lobu.mcp.tool_call.started'
+      (body) => body.eventName === 'mcp.tool_call.started'
     );
     expect(startedPayload).toMatchObject({
       schemaVersion: 'journey.trace.v1',
       traceId: 'trace-route-001',
       turnId: 'turn_1',
-      eventName: 'lobu.mcp.tool_call.started',
+      eventName: 'mcp.tool_call.started',
       status: 'started',
-      stage: 'lobu.mcp.tool_call',
+      stage: 'mcp.tool_call',
       agentId: AGENT_ID,
       userId: OWNER_USER_ID,
       toolboxUserId: OWNER_USER_ID,
@@ -418,12 +418,12 @@ describe('Toolbox MCP execution routes', () => {
     });
     const completedPayload = obsBodies.find(
       (body) =>
-        body.eventName === 'lobu.mcp.tool_call.completed' && body.status === 'ok'
+        body.eventName === 'mcp.tool_call.completed' && body.status === 'ok'
     );
     expect(completedPayload).toMatchObject({
-      eventName: 'lobu.mcp.tool_call.completed',
+      eventName: 'mcp.tool_call.completed',
       status: 'ok',
-      stage: 'lobu.mcp.tool_call',
+      stage: 'mcp.tool_call',
       agentId: AGENT_ID,
       userId: OWNER_USER_ID,
       connectorKey: CONNECTION_REF,

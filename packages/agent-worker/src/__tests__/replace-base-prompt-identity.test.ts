@@ -198,7 +198,7 @@ describe("worker model observability", () => {
       schemaVersion: "journey.trace.v1",
       payload: {
         schema_version: "journey.trace.v1",
-        event: "lobu.model.started",
+        event: "provider.call.started",
         trace_id: "tr_modelobs123456",
         journey_id: "line_reply",
         service: "lobu",
@@ -214,9 +214,9 @@ describe("worker model observability", () => {
       },
     });
     expect(events[1]).toMatchObject({
-      eventName: "lobu.model.started",
+      eventName: "provider.call.started",
       status: "started",
-      stage: "lobu.model.started",
+      stage: "provider.call.started",
       metadata: {
         module: "agent-worker",
         provider: "openai",
@@ -228,7 +228,7 @@ describe("worker model observability", () => {
       schemaVersion: "journey.trace.v1",
       payload: {
         schema_version: "journey.trace.v1",
-        event: "lobu.model.completed",
+        event: "provider.call.completed",
         trace_id: "tr_modelobs123456",
         journey_id: "line_reply",
         service: "lobu",
@@ -242,9 +242,9 @@ describe("worker model observability", () => {
       },
     });
     expect(events[3]).toMatchObject({
-      eventName: "lobu.model.completed",
+      eventName: "provider.call.completed",
       status: "ok",
-      stage: "lobu.model.completed",
+      stage: "provider.call.completed",
       metadata: {
         module: "agent-worker",
         provider: "openai",
@@ -272,9 +272,9 @@ describe("worker model observability", () => {
       )
     );
     expect(failed).toMatchObject({
-      eventName: "lobu.model.failed",
+      eventName: "provider.call.completed",
       status: "failed",
-      stage: "lobu.model.failed",
+      stage: "provider.call.completed",
       metadata: {
         module: "agent-worker",
         provider: "openai",

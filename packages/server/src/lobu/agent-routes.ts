@@ -1042,9 +1042,9 @@ toolboxMcpRoutes.post('/mcp/tools/call', async (c) => {
     toolboxUserId: ownerUserId,
     connectorKey,
     toolName,
-    eventName: 'lobu.mcp.tool_call.started',
+    eventName: 'mcp.tool_call.started',
     status: 'started',
-    stage: 'lobu.mcp.tool_call',
+    stage: 'mcp.tool_call',
     metadata: {
       route: '/mcp/tools/call',
       method: 'POST',
