@@ -34,6 +34,7 @@ import { isRecord } from "../shared/type-guards";
 import {
   emitJourneyEvent,
   parseWorkerShifuTrace,
+  type JourneyTraceStatus,
   type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
 import {
@@ -666,7 +667,7 @@ function emitWorkerJourneyObsEvent(input: {
     trace: input.trace,
     module: "agent-worker",
     event: input.event,
-    status: input.status,
+    status: normalizeJourneyTraceStatus(input.status),
     fields: {
       ...(input.conversationId
         ? { conversation: { id: input.conversationId } }
@@ -679,6 +680,26 @@ function emitWorkerJourneyObsEvent(input: {
       ...input.fields,
     },
   });
+}
+
+function normalizeJourneyTraceStatus(status: string): JourneyTraceStatus {
+  switch (status) {
+    case "started":
+    case "ok":
+    case "skipped":
+    case "failed":
+    case "timeout":
+    case "blocked":
+    case "degraded":
+      return status;
+    case "completed":
+      return "ok";
+    case "running":
+    case "waiting_for_tool":
+      return "started";
+    default:
+      return "degraded";
+  }
 }
 
 export function emitWorkerToolsRegisteredObsEvent(input: {

@@ -328,8 +328,7 @@ describe("2026-07-02 capability-refusal blocker patterns", () => {
   test("recognizes 'tool does not support delete/archive' as a visible blocker", () => {
     const result = evaluateTaskCompletion({
       latestUserText: "幫我刪除那個頁面",
-      finalVisibleText:
-        "Notion 工具不支持直接歸檔或刪除頁面，請手動處理。",
+      finalVisibleText: "Notion 工具不支持直接歸檔或刪除頁面，請手動處理。",
       toolExecutions: [],
     });
 

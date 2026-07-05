@@ -89,21 +89,23 @@ describe("worker journey observability", () => {
       "https://toolbox.example.test/ingest";
     process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
     let sawAbort = false;
-    const fetchMock = mock((_url: string | URL | Request, init?: RequestInit) => {
-      return new Promise<Response>((_resolve, reject) => {
-        const signal = init?.signal;
-        if (signal instanceof AbortSignal) {
-          signal.addEventListener(
-            "abort",
-            () => {
-              sawAbort = true;
-              reject(signal.reason);
-            },
-            { once: true }
-          );
-        }
-      });
-    });
+    const fetchMock = mock(
+      (_url: string | URL | Request, init?: RequestInit) => {
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal instanceof AbortSignal) {
+            signal.addEventListener(
+              "abort",
+              () => {
+                sawAbort = true;
+                reject(signal.reason);
+              },
+              { once: true }
+            );
+          }
+        });
+      }
+    );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
     await expect(

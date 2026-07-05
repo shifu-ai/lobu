@@ -41,14 +41,17 @@ describe("startMcpLogin message copy", () => {
       flow: "auth_code",
       userCode: "",
       verificationUri: "https://gw.example.com/mcp/oauth/start?token=abc",
-      verificationUriComplete: "https://gw.example.com/mcp/oauth/start?token=abc",
+      verificationUriComplete:
+        "https://gw.example.com/mcp/oauth/start?token=abc",
       expiresIn: 900,
     });
     const parsed = parseResult(await startMcpLogin(GW, { mcpId: "notion" }));
     expect(parsed.status).toBe("login_started");
     expect(parsed.verification_url).toContain("/mcp/oauth/start?token=abc");
     expect(parsed.message).toContain("plain text");
-    expect(parsed.message).toContain("https://gw.example.com/mcp/oauth/start?token=abc");
+    expect(parsed.message).toContain(
+      "https://gw.example.com/mcp/oauth/start?token=abc"
+    );
     expect(parsed.message).toContain("notion_login_check");
     expect(parsed.message).not.toContain("Do not repeat the URL");
   });
@@ -57,10 +60,13 @@ describe("startMcpLogin message copy", () => {
     stubGateway({
       userCode: "ABCD-1234",
       verificationUri: "https://idp.example.com/device",
-      verificationUriComplete: "https://idp.example.com/device?user_code=ABCD-1234",
+      verificationUriComplete:
+        "https://idp.example.com/device?user_code=ABCD-1234",
       expiresIn: 600,
     });
-    const parsed = parseResult(await startMcpLogin(GW, { mcpId: "shifu-toolbox" }));
+    const parsed = parseResult(
+      await startMcpLogin(GW, { mcpId: "shifu-toolbox" })
+    );
     expect(parsed.message).toContain("plain text");
     expect(parsed.message).toContain("ABCD-1234");
     expect(parsed.message).not.toContain("has been sent directly to the user");

@@ -128,7 +128,9 @@ describe("worker model observability", () => {
     const fetchMock = mock(
       () =>
         new Promise<Response>((resolve) => {
-          pendingFetches.push(() => resolve(new Response("{}", { status: 202 })));
+          pendingFetches.push(() =>
+            resolve(new Response("{}", { status: 202 }))
+          );
         })
     );
     enableObs(fetchMock);

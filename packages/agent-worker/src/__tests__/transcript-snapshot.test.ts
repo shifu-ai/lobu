@@ -152,11 +152,7 @@ describe("hydrateFromSnapshot", () => {
     await fs.mkdir(sessionDir, { recursive: true });
     await fs.writeFile(sessionFile, "LOCAL", "utf-8");
     const watermarkFile = join(sessionDir, "snapshot-watermark.json");
-    await fs.writeFile(
-      watermarkFile,
-      JSON.stringify({ runId: 50 }),
-      "utf-8"
-    );
+    await fs.writeFile(watermarkFile, JSON.stringify({ runId: 50 }), "utf-8");
 
     stubFetch(() => {
       return new Response("DB_CONTENT", {

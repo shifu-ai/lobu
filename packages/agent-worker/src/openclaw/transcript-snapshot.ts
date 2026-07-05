@@ -38,9 +38,16 @@ async function readWatermark(sessionFile: string): Promise<number | undefined> {
  * successful hydrate and every successful snapshot write so the local
  * watermark always reflects the runId whose bytes are on disk.
  */
-async function writeWatermark(sessionFile: string, runId: number): Promise<void> {
+async function writeWatermark(
+  sessionFile: string,
+  runId: number
+): Promise<void> {
   await fs.mkdir(path.dirname(sessionFile), { recursive: true });
-  await fs.writeFile(watermarkPath(sessionFile), JSON.stringify({ runId }), "utf-8");
+  await fs.writeFile(
+    watermarkPath(sessionFile),
+    JSON.stringify({ runId }),
+    "utf-8"
+  );
 }
 
 interface TranscriptSnapshotOptions {
