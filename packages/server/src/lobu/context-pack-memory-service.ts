@@ -11,9 +11,11 @@ import { AGENT_ID_PATTERN } from './stores/postgres-stores';
 const MAX_TITLE_LENGTH = 500;
 const MAX_CONTENT_LENGTH = 200_000;
 const MAX_METADATA_JSON_LENGTH = 64_000;
+const MAX_CONTEXT_PACK_ENTITY_IDS = 20;
 const DEFAULT_SEMANTIC_TYPE = 'project_profile';
 const TOOLBOX_ONBOARDING_SOURCE = 'toolbox_onboarding';
 const LOG_SAFE_METADATA_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
+const COURSE_ENTITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 
 export type ContextPackMemoryErrorCode =
   | 'lobu_memory_invalid_request'
@@ -42,6 +44,7 @@ export interface ContextPackMemoryRequest {
   content: string;
   semanticType: string;
   metadata: Record<string, unknown>;
+  entityIds?: string[];
   supersedesEventId?: number;
 }
 
@@ -73,6 +76,56 @@ function metadataJsonLength(metadata: Record<string, unknown>): number {
   }
 }
 
+function parseCourseEntityIds(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new ContextPackMemoryError(
+      'lobu_memory_invalid_request',
+      'entityIds must be an array of strings'
+    );
+  }
+  if (value.length > MAX_CONTEXT_PACK_ENTITY_IDS) {
+    throw new ContextPackMemoryError(
+      'lobu_memory_invalid_request',
+      `entityIds must contain ${MAX_CONTEXT_PACK_ENTITY_IDS} ids or fewer`
+    );
+  }
+
+  const entityIds: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== 'string') {
+      throw new ContextPackMemoryError(
+        'lobu_memory_invalid_request',
+        'entityIds must be an array of strings'
+      );
+    }
+    const entityId = item.trim();
+    if (!COURSE_ENTITY_ID_PATTERN.test(entityId)) {
+      throw new ContextPackMemoryError(
+        'lobu_memory_invalid_request',
+        'entityIds contains an invalid course entity id'
+      );
+    }
+    if (!seen.has(entityId)) {
+      seen.add(entityId);
+      entityIds.push(entityId);
+    }
+  }
+  return entityIds;
+}
+
+function parseSupersedesEventId(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
+    throw new ContextPackMemoryError(
+      'lobu_memory_invalid_request',
+      'supersedesEventId must be a positive integer'
+    );
+  }
+  return value;
+}
+
 export function parseContextPackMemoryRequest(body: unknown): ContextPackMemoryRequest {
   if (!isPlainRecord(body)) {
     throw new ContextPackMemoryError(
@@ -89,6 +142,8 @@ export function parseContextPackMemoryRequest(body: unknown): ContextPackMemoryR
   const semanticType = stringField(body.semanticType) || DEFAULT_SEMANTIC_TYPE;
   const metadata = body.metadata === undefined ? {} : body.metadata;
   const source = isPlainRecord(metadata) ? stringField(metadata.source) : '';
+  const entityIds = parseCourseEntityIds(body.entityIds);
+  const supersedesEventId = parseSupersedesEventId(body.supersedesEventId);
 
   if (!ownerUserId) {
     throw new ContextPackMemoryError(
@@ -139,18 +194,6 @@ export function parseContextPackMemoryRequest(body: unknown): ContextPackMemoryR
     );
   }
 
-  let supersedesEventId: number | undefined;
-  if (body.supersedesEventId !== undefined) {
-    const value = body.supersedesEventId;
-    if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
-      throw new ContextPackMemoryError(
-        'lobu_memory_invalid_request',
-        'supersedesEventId must be a positive integer'
-      );
-    }
-    supersedesEventId = value;
-  }
-
   return {
     ownerUserId,
     agentId,
@@ -160,6 +203,7 @@ export function parseContextPackMemoryRequest(body: unknown): ContextPackMemoryR
     content,
     semanticType,
     metadata,
+    ...(entityIds !== undefined ? { entityIds } : {}),
     ...(supersedesEventId !== undefined ? { supersedesEventId } : {}),
   };
 }
@@ -320,6 +364,18 @@ export async function writeContextPackMemory(
   }
   let saved: Awaited<ReturnType<SaveContentImpl>>;
   try {
+    const metadata: Record<string, unknown> = {
+      ...parsed.metadata,
+      summary: parsed.summary,
+      owner_user_id: parsed.ownerUserId,
+      agent_id: parsed.agentId,
+      memory_source: parsed.source,
+      course_entity_ids: parsed.entityIds ?? [],
+    };
+    if (metadata.course_entity_id === undefined && parsed.entityIds?.[0]) {
+      metadata.course_entity_id = parsed.entityIds[0];
+    }
+
     saved = await saveContentImpl(
       {
         payload_type: 'markdown',
@@ -327,19 +383,13 @@ export async function writeContextPackMemory(
         title: parsed.title,
         content: parsed.content,
         author: 'Toolbox Onboarding',
-        metadata: {
-          ...parsed.metadata,
-          summary: parsed.summary,
-          owner_user_id: parsed.ownerUserId,
-          agent_id: parsed.agentId,
-          memory_source: parsed.source,
-        },
-        ...(parsed.supersedesEventId !== undefined
-          ? { supersedes_event_id: parsed.supersedesEventId }
-          : {}),
+        metadata,
         ...(embedding ? {
           embedding,
           embedding_model: getConfiguredEmbeddingModel(),
+        } : {}),
+        ...(parsed.supersedesEventId !== undefined ? {
+          supersedes_event_id: parsed.supersedesEventId,
         } : {}),
       },
       env,
