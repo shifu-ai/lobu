@@ -853,9 +853,9 @@ export class McpProxy {
         status === "ok" ? "ok" : classifyMcpObsError(resultOrError);
       emitMcpObsEvent({
         trace,
-        eventName: "lobu.mcp.tool_call.completed",
+        eventName: "mcp.tool_call.completed",
         status,
-        stage: "lobu.mcp.tool_call",
+        stage: "mcp.tool_call",
         agentId,
         userId,
         mcpId,
@@ -1129,9 +1129,9 @@ export class McpProxy {
       const errorClass = status === "failed" ? classifyMcpObsError(error) : undefined;
       emitMcpObsEvent({
         trace,
-        eventName: "lobu.mcp.tools_list.completed",
+        eventName: "mcp.tools_list.completed",
         status,
-        stage: "lobu.mcp.tools_list",
+        stage: "mcp.tools_list",
         agentId,
         userId,
         mcpId,
@@ -1165,9 +1165,9 @@ export class McpProxy {
 
     emitMcpObsEvent({
       trace,
-      eventName: "lobu.mcp.tools_list.started",
+      eventName: "mcp.tools_list.started",
       status: "started",
-      stage: "lobu.mcp.tools_list",
+      stage: "mcp.tools_list",
       agentId,
       userId,
       mcpId,
@@ -1872,9 +1872,9 @@ export class McpProxy {
         status === "ok" ? "ok" : classifyMcpObsError(resultOrError);
       emitMcpObsEvent({
         trace,
-        eventName: "lobu.mcp.tool_call.completed",
+        eventName: "mcp.tool_call.completed",
         status,
-        stage: "lobu.mcp.tool_call",
+        stage: "mcp.tool_call",
         agentId,
         userId: requesterUserId,
         mcpId,
@@ -2995,9 +2995,9 @@ export class McpProxy {
         status === "ok" ? "ok" : classifyMcpObsError(resultOrError);
       emitMcpObsEvent({
         trace: parseShifuTraceHeaders(c.req.raw.headers, "worker"),
-        eventName: "lobu.mcp.tool_call.completed",
+        eventName: "mcp.tool_call.completed",
         status,
-        stage: "lobu.mcp.tool_call",
+        stage: "mcp.tool_call",
         agentId,
         userId: authContext?.userId,
         mcpId,

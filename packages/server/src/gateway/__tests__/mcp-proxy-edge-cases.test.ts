@@ -258,14 +258,14 @@ describe("durable observability for tools/list", () => {
 
     const completed = obsBodies.find(
       (body) =>
-        body.eventName === "lobu.mcp.tools_list.completed" &&
+        body.eventName === "mcp.tools_list.completed" &&
         body.status === "ok"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tools_list.completed",
+      eventName: "mcp.tools_list.completed",
       status: "ok",
       metadata: expect.objectContaining({
-        event: "lobu.mcp.tools_list.completed",
+        event: "mcp.tools_list.completed",
         module: "mcp-proxy",
         mcp_id: "obs-mcp",
         tool_count: 2,
@@ -275,13 +275,13 @@ describe("durable observability for tools/list", () => {
     const journeyCompleted = obsBodies.find(
       (body) =>
         body.schemaVersion === "journey.trace.v1" &&
-        body.payload?.event === "lobu.mcp.tools_list.completed"
+        body.payload?.event === "mcp.tools_list.completed"
     );
     expect(journeyCompleted).toMatchObject({
       schemaVersion: "journey.trace.v1",
       payload: {
         schema_version: "journey.trace.v1",
-        event: "lobu.mcp.tools_list.completed",
+        event: "mcp.tools_list.completed",
         service: "lobu",
         module: "mcp-proxy",
         status: "ok",
@@ -329,11 +329,11 @@ describe("durable observability for tools/list", () => {
     expect(result.tools).toEqual([]);
     const completed = obsBodies.find(
       (body) =>
-        body.eventName === "lobu.mcp.tools_list.completed" &&
+        body.eventName === "mcp.tools_list.completed" &&
         body.status === "failed"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tools_list.completed",
+      eventName: "mcp.tools_list.completed",
       status: "failed",
       metadata: expect.objectContaining({
         module: "mcp-proxy",
@@ -383,7 +383,7 @@ describe("durable observability for tools/list", () => {
     expect(result.tools).toEqual([]);
     const completed = obsBodies.find(
       (body) =>
-        body.eventName === "lobu.mcp.tools_list.completed" &&
+        body.eventName === "mcp.tools_list.completed" &&
         body.status === "failed"
     );
     expect(completed).toMatchObject({
@@ -459,11 +459,11 @@ describe("durable observability for tools/list", () => {
       expect(result.tools).toEqual([]);
       const completed = obsBodies.find(
         (body) =>
-          body.eventName === "lobu.mcp.tools_list.completed" &&
+          body.eventName === "mcp.tools_list.completed" &&
           body.status === "failed"
       );
       expect(completed).toMatchObject({
-        eventName: "lobu.mcp.tools_list.completed",
+        eventName: "mcp.tools_list.completed",
         status: "failed",
         metadata: expect.objectContaining({
           module: "mcp-proxy",
@@ -557,10 +557,10 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       error: { code: -32001, message: "upstream tool failed" },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tool_call.completed",
+      eventName: "mcp.tool_call.completed",
       status: "failed",
       toolName: "meeting_search",
       metadata: expect.objectContaining({
@@ -588,10 +588,10 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       error: { code: -32602, message: "unknown server: shifu-toolbox" },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tool_call.completed",
+      eventName: "mcp.tool_call.completed",
       status: "failed",
       toolName: "meeting_search",
       metadata: expect.objectContaining({
@@ -618,10 +618,10 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       error: "unknown",
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tool_call.completed",
+      eventName: "mcp.tool_call.completed",
       status: "failed",
       toolName: "meeting_search",
       metadata: expect.objectContaining({
@@ -654,10 +654,10 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tool_call.completed",
+      eventName: "mcp.tool_call.completed",
       status: "failed",
       toolName: "meeting_search",
       metadata: expect.objectContaining({
@@ -688,7 +688,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     expect(response.status).toBe(200);
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     const preview = completed?.metadata?.result_preview;
     expect(preview).toEqual(
@@ -728,7 +728,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     expect(response.status).toBe(200);
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     const firstText = completed?.metadata?.result_preview?.first_text;
     expect(firstText).toEqual(expect.any(String));
@@ -766,10 +766,10 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     expect(completed).toMatchObject({
-      eventName: "lobu.mcp.tool_call.completed",
+      eventName: "mcp.tool_call.completed",
       status: "failed",
       toolName: "meeting_search",
       metadata: expect.objectContaining({
@@ -869,11 +869,11 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const completedEvents = obsBodies.filter(
-      (body) => body.eventName === "lobu.mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed"
     );
     expect(completedEvents).toHaveLength(1);
     expect(completedEvents[0]).toMatchObject({
-      eventName: "lobu.mcp.tool_call.completed",
+      eventName: "mcp.tool_call.completed",
       status: "ok",
       metadata: expect.objectContaining({
         module: "mcp-proxy",

@@ -763,7 +763,7 @@ export async function runModelWithObs(
     conversationId: input.conversationId,
     agentId: input.agentId,
     userId: input.userId,
-    event: "lobu.model.started",
+    event: "provider.call.started",
     status: "started",
     fields: {
       provider: {
@@ -780,9 +780,9 @@ export async function runModelWithObs(
     conversationId: input.conversationId,
     agentId: input.agentId,
     userId: input.userId,
-    eventName: "lobu.model.started",
+    eventName: "provider.call.started",
     status: "started",
-    stage: "lobu.model.started",
+    stage: "provider.call.started",
     metadata: {
       provider: input.provider,
       model: input.modelId,
@@ -799,7 +799,7 @@ export async function runModelWithObs(
         conversationId: input.conversationId,
         agentId: input.agentId,
         userId: input.userId,
-        event: "lobu.model.completed",
+        event: "provider.call.completed",
         status: "ok",
         durationMs,
         fields: {
@@ -815,9 +815,9 @@ export async function runModelWithObs(
         conversationId: input.conversationId,
         agentId: input.agentId,
         userId: input.userId,
-        eventName: "lobu.model.completed",
+        eventName: "provider.call.completed",
         status: "ok",
-        stage: "lobu.model.completed",
+        stage: "provider.call.completed",
         durationMs,
         metadata: {
           provider: input.provider,
@@ -831,7 +831,7 @@ export async function runModelWithObs(
         conversationId: input.conversationId,
         agentId: input.agentId,
         userId: input.userId,
-        event: "lobu.model.failed",
+        event: "provider.call.completed",
         status: "failed",
         durationMs,
         fields: {
@@ -848,9 +848,9 @@ export async function runModelWithObs(
         conversationId: input.conversationId,
         agentId: input.agentId,
         userId: input.userId,
-        eventName: "lobu.model.failed",
+        eventName: "provider.call.completed",
         status: "failed",
-        stage: "lobu.model.failed",
+        stage: "provider.call.completed",
         durationMs,
         metadata: {
           provider: input.provider,
@@ -868,7 +868,7 @@ export async function runModelWithObs(
       conversationId: input.conversationId,
       agentId: input.agentId,
       userId: input.userId,
-      event: "lobu.model.failed",
+      event: "provider.call.completed",
       status: "failed",
       durationMs,
       fields: {
@@ -886,9 +886,9 @@ export async function runModelWithObs(
       conversationId: input.conversationId,
       agentId: input.agentId,
       userId: input.userId,
-      eventName: "lobu.model.failed",
+      eventName: "provider.call.completed",
       status: "failed",
-      stage: "lobu.model.failed",
+      stage: "provider.call.completed",
       durationMs,
       metadata: {
         provider: input.provider,
@@ -1865,7 +1865,7 @@ Use it when the user references past discussions or you need context.`);
           conversationId,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          event: "lobu.mcp.tool_call.started",
+          event: "mcp.tool_call.started",
           status: "started",
           fields: {
             tool_call_id: event.toolCallId,
@@ -1899,7 +1899,7 @@ Use it when the user references past discussions or you need context.`);
           conversationId,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          event: "lobu.mcp.tool_call.completed",
+          event: "mcp.tool_call.completed",
           status: event.isError ? "failed" : "ok",
           durationMs:
             toolStartedAt === undefined
