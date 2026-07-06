@@ -26,11 +26,22 @@ app:
 
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
+      # The app pod embeds the orchestrator AND spawns agent-worker subprocesses
+      # in-pod, so this container does far more than serve HTTP — yet it was
+      # capped at 1 core (the connector worker, which does comparable work, gets
+      # 2-4). Under-resourced regardless of the exact stall mechanism; give the
+      # event loop real headroom. Request stays modest so it isn't over-reserved.
+      cpu: 500m
+      memory: 512Mi
     limits:
-      cpu: 1000m
-      memory: 1Gi
+      cpu: 3000m
+      # Prod pods OOM-killed (exit 137) at a 2Gi limit — repeatedly. The parent
+      # Node heap is only ~300MB; the rest of RSS is the in-pod agent-worker
+      # child subprocesses, whose memory counts toward this pod cgroup. Per-child
+      # heap is now capped (LOBU_WORKER_MAX_OLD_SPACE_MB), but the pod still needs
+      # room for several concurrent workers + parent + proxies. 4Gi matches the
+      # connector worker, which does comparable per-run work.
+      memory: 4Gi
 
   # Non-secret environment variables
   env:
