@@ -1,15 +1,21 @@
 import { Hono } from "hono";
+import { compareWorkerToken } from "../auth/worker-token.js";
+import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import {
 	createLobuConfigStatusService,
 	LobuConfigStatusError,
 	type LobuConfigStatusService,
 	type LobuConfigStatusStore,
+	type LobuOAuthStatusProvider,
 } from "./config-status-service.js";
 import { isValidAgentId } from "./stores/postgres-stores.js";
 
 export interface LobuConfigStatusRouteDeps {
 	token?: string;
 	store?: LobuConfigStatusStore;
+	oauthStatusProvider?: LobuOAuthStatusProvider;
+	secretStore?: WritableSecretStore;
+	getSecretStore?: () => WritableSecretStore | undefined;
 	getCurrentStatus?: LobuConfigStatusService["getCurrentStatus"];
 }
 
@@ -24,6 +30,10 @@ function requestToken(headers: Headers): string | null {
 	return bearerToken(headers.get("authorization") ?? undefined) ?? headers.get("x-internal-token");
 }
 
+function tokenMatches(provided: string | null, expected: string | undefined): boolean {
+	return compareWorkerToken(provided ?? undefined, expected);
+}
+
 function isValidShifuAgentId(agentId: string): boolean {
 	return isValidAgentId(agentId) && SHIFU_USER_AGENT_ID_PATTERN.test(agentId);
 }
@@ -32,10 +42,15 @@ export function createLobuConfigStatusRoutes(deps: LobuConfigStatusRouteDeps = {
 	const app = new Hono();
 	const service = deps.getCurrentStatus
 		? { getCurrentStatus: deps.getCurrentStatus }
-		: createLobuConfigStatusService(deps.store);
+		: createLobuConfigStatusService({
+				store: deps.store,
+				oauthStatusProvider: deps.oauthStatusProvider,
+				secretStore: deps.secretStore,
+				getSecretStore: deps.getSecretStore,
+			});
 
 	app.get("/current", async (c) => {
-		if (!deps.token || requestToken(c.req.raw.headers) !== deps.token) {
+		if (!tokenMatches(requestToken(c.req.raw.headers), deps.token)) {
 			return c.json({ error: "unauthorized" }, 401);
 		}
 
