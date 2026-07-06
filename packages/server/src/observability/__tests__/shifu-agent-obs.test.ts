@@ -47,6 +47,7 @@ describe('ShiFu Agent Obs event emitter', () => {
 
     await emitAgentObsEvent({
       traceId: 'trace-001',
+      sessionId: 'session-001',
       eventName: 'mcp.tool_call.started',
       status: 'started',
       stage: 'mcp.tool_call',
@@ -71,6 +72,7 @@ describe('ShiFu Agent Obs event emitter', () => {
       schemaVersion: 'journey.trace.v1',
       source: 'lobu-test',
       traceId: 'trace-001',
+      sessionId: 'session-001',
       eventName: 'mcp.tool_call.started',
       status: 'started',
       stage: 'mcp.tool_call',

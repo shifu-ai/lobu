@@ -152,20 +152,49 @@ function redactValue(
 	}
 }
 
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function promotableContext(payload: Record<string, unknown>) {
+	const conversation = recordValue(payload.conversation);
+	const session = recordValue(payload.session);
+	const sessionId =
+		nonEmptyString(payload.session_id) ??
+		nonEmptyString(session?.id) ??
+		nonEmptyString(session?.key);
+	return {
+		conversation_id:
+			nonEmptyString(payload.conversation_id) ??
+			(sessionId ? nonEmptyString(conversation?.id) : undefined),
+		session_id: sessionId,
+	};
+}
+
 export function buildJourneyEventBody(
 	input: JourneyEventPayload,
 	source?: string
 ) {
+	const rawPayload = {
+		...input,
+		schema_version: SCHEMA_VERSION,
+		timestamp: input.timestamp ?? new Date().toISOString(),
+	};
+	const context = promotableContext(rawPayload);
 	const payload = redactValue(
-		{
-			...input,
-			schema_version: SCHEMA_VERSION,
-			timestamp: input.timestamp ?? new Date().toISOString(),
-		},
+		rawPayload,
 		undefined,
 		0,
 		new WeakSet<object>()
-	);
+	) as Record<string, unknown>;
+	if (context.conversation_id) payload.conversation_id = context.conversation_id;
+	if (context.session_id) payload.session_id = context.session_id;
 
 	return {
 		schemaVersion: SCHEMA_VERSION,

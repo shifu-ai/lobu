@@ -26,6 +26,7 @@ export type AgentObsEventInput = {
   traceId: string;
   turnId?: string;
   conversationId?: string;
+  sessionId?: string;
   agentId?: string;
   userId?: string;
   toolboxUserId?: string;
@@ -48,6 +49,7 @@ type AgentObsEventPayload = {
   traceId: string;
   turnId?: string;
   conversationId?: string;
+  sessionId?: string;
   agentId?: string;
   userId?: string;
   toolboxUserId?: string;
@@ -186,6 +188,7 @@ export async function emitAgentObsEvent(
       traceId: input.traceId,
       turnId: input.turnId,
       conversationId: input.conversationId,
+      sessionId: input.sessionId,
       agentId: input.agentId,
       userId: input.userId,
       toolboxUserId: input.toolboxUserId,

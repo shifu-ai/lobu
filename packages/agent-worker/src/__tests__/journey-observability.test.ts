@@ -89,6 +89,31 @@ describe("worker journey observability", () => {
     });
   });
 
+  test("promotes safe conversation and session ids for Toolbox trace lookup", () => {
+    const body = buildWorkerJourneyEventBody({
+      event: "lobu.worker.started",
+      trace: {
+        traceId: "tr_worker_context",
+        journeyId: "line_reply",
+        actor: "worker",
+        traceSource: "incoming",
+      },
+      status: "started",
+      fields: {
+        conversation: { id: "conv-lookup-1" },
+        session: { key: "session-lookup-1" },
+      },
+    });
+
+    expect(body.payload).toMatchObject({
+      trace_id: "tr_worker_context",
+      event: "lobu.worker.started",
+      conversation_id: "conv-lookup-1",
+      session_id: "session-lookup-1",
+      conversation: { id: "[REDACTED]" },
+    });
+  });
+
   test("posts wrapper bodies to Toolbox with fail-open timeout behavior", async () => {
     process.env.TOOLBOX_AGENT_OBSERVABILITY_URL =
       "https://toolbox.example.test/ingest";

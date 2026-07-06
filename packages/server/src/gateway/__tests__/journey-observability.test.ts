@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { emitJourneyEvent } from "../services/journey-observability";
+import {
+	buildJourneyEventBody,
+	emitJourneyEvent,
+} from "../services/journey-observability";
 
 const OBS_ENV_KEYS = [
 	"TOOLBOX_AGENT_OBSERVABILITY_URL",
@@ -37,6 +40,31 @@ describe("journey observability emitter", () => {
 	afterEach(() => {
 		restoreObsEnv();
 		globalThis.fetch = originalFetch;
+	});
+
+	test("promotes safe conversation and session ids for Toolbox trace lookup", () => {
+		const body = buildJourneyEventBody({
+			trace_id: "tr_server_context",
+			journey_id: "line_text_agent_turn",
+			event: "lobu.session.created",
+			service: "lobu",
+			module: "gateway",
+			status: "ok",
+			session: { key: "session-lookup-1" },
+			conversation: { id: "conv-lookup-1" },
+		});
+
+		expect(body).toMatchObject({
+			schemaVersion: "journey.trace.v1",
+			payload: {
+				trace_id: "tr_server_context",
+				event: "lobu.session.created",
+				conversation_id: "conv-lookup-1",
+				session_id: "session-lookup-1",
+				conversation: { id: "conv-lookup-1" },
+				session: { key: "session-lookup-1" },
+			},
+		});
 	});
 
 	test("posts journey.trace.v1 payloads to Toolbox with the internal secret", async () => {
