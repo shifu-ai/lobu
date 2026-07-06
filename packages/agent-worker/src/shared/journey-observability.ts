@@ -112,11 +112,14 @@ function resolveWorkerJourneyIngestConfig():
     return {
       endpoint: shifuEndpoint,
       headers,
-      source: trimOptional(process.env.SHIFU_AGENT_OBS_SOURCE) ?? DEFAULT_SOURCE,
+      source:
+        trimOptional(process.env.SHIFU_AGENT_OBS_SOURCE) ?? DEFAULT_SOURCE,
     };
   }
 
-  const toolboxEndpoint = trimOptional(process.env.TOOLBOX_AGENT_OBSERVABILITY_URL);
+  const toolboxEndpoint = trimOptional(
+    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL
+  );
   const toolboxSecret = trimOptional(process.env.TOOLBOX_INTERNAL_SECRET);
   if (toolboxEndpoint && toolboxSecret) {
     return {

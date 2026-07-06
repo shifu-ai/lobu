@@ -144,8 +144,7 @@ describe("worker journey observability", () => {
 
   test("posts wrapper bodies with SHIFU Agent Obs env without legacy Toolbox secret", async () => {
     process.env.SHIFU_AGENT_OBS_ENABLED = "true";
-    process.env.SHIFU_AGENT_OBS_INGEST_URL =
-      "https://obs.example.test/ingest";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
     process.env.SHIFU_AGENT_OBS_TOKEN = "agent-obs-token";
     process.env.SHIFU_AGENT_OBS_SOURCE = "lobu-worker";
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
@@ -197,8 +196,7 @@ describe("worker journey observability", () => {
       "https://toolbox.example.test/ingest";
     process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
     process.env.SHIFU_AGENT_OBS_ENABLED = "true";
-    process.env.SHIFU_AGENT_OBS_INGEST_URL =
-      "https://obs.example.test/ingest";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
     const fetchMock = mock(async () => new Response("{}", { status: 202 }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
