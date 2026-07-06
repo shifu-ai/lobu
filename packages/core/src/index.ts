@@ -92,6 +92,11 @@ export type {
 export * from "./secret-refs";
 // Observability
 export * from "./observability/shifu-agent-obs";
+export {
+  emitAgentObsEvent,
+  redactAgentObsValue,
+} from "./observability/shifu-agent-obs";
+export type { AgentObsEventInput } from "./observability/shifu-agent-obs";
 export { getSentry, initSentry } from "./sentry";
 export { extractTraceId, generateTraceId } from "./trace";
 // Core types
