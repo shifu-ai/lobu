@@ -18,6 +18,11 @@
 import { createLogger } from "@lobu/core";
 import { getDb } from "../../../../db/client";
 import { ChannelBindingService } from "../../../../gateway/channels/binding-service";
+import { scheduleChannelBindConfirmation } from "../../../../gateway/channels/bind-channel-notify";
+import {
+	runtimeConnectionIdToSlug,
+	slugToRuntimeConnectionId,
+} from "../../../../lobu/stores/connections-projection";
 import {
 	createSlackWebApi,
 	type SlackWebApi,
@@ -26,10 +31,10 @@ import {
 	resolveSecretValue,
 	SecretStoreRegistry,
 } from "../../../../gateway/secrets";
-import { runtimeConnectionIdToSlug } from "../../../../lobu/stores/connections-projection";
 import { orgContext } from "../../../../lobu/stores/org-context";
 import { PostgresSecretStore } from "../../../../lobu/stores/postgres-secret-store";
 import { canonicalSlackChannelId } from "../../../../preview/slack";
+import { getConfiguredPublicOrigin } from "../../../../utils/public-origin";
 import type { ToolContext } from "../../../registry";
 import type { ConnectionsArgs, ManageConnectionsResult } from "../schemas";
 
@@ -60,6 +65,29 @@ async function assertAgentInOrg(
 		LIMIT 1
 	`) as Array<unknown>;
 	return rows.length > 0;
+}
+
+async function resolveAgentBindNotice(
+	organizationId: string,
+	agentId: string,
+): Promise<{ name: string; url?: string }> {
+	const sql = getDb();
+	const rows = (await sql`
+		SELECT a.name, o.slug AS org_slug
+		FROM agents a
+		JOIN organization o ON o.id = a.organization_id
+		WHERE a.id = ${agentId} AND a.organization_id = ${organizationId}
+		LIMIT 1
+	`) as Array<{ name: string | null; org_slug: string | null }>;
+	const row = rows[0];
+	const name = row?.name?.trim() || agentId;
+	const origin = getConfiguredPublicOrigin()?.replace(/\/+$/, "");
+	const orgSlug = row?.org_slug?.trim();
+	const url =
+		origin && orgSlug
+			? `${origin}/${orgSlug}/agents/${agentId}/behaviors`
+			: undefined;
+	return { name, url };
 }
 
 /**
@@ -130,7 +158,7 @@ export async function handleBindChannel(
 	if (!channelId) return { error: "Invalid channel_id" };
 	const sql = getDb();
 	const connections = (await sql`
-		SELECT id, connector_key, external_tenant_id
+		SELECT id, slug, connector_key, external_tenant_id
 		FROM connections
 		WHERE id = ${args.connection_id}
 			AND organization_id = ${organizationId}
@@ -140,6 +168,7 @@ export async function handleBindChannel(
 		LIMIT 1
 	`) as Array<{
 		id: number;
+		slug: string;
 		connector_key: string;
 		external_tenant_id: string | null;
 	}>;
@@ -148,6 +177,12 @@ export async function handleBindChannel(
 	const teamId = connection.external_tenant_id ?? undefined;
 
 	const svc = new ChannelBindingService();
+	const runtimeConnectionId = slugToRuntimeConnectionId(connection.slug);
+	const existing = await svc.getBindingForConnection(
+		runtimeConnectionId,
+		channelId,
+		organizationId,
+	);
 	await svc.createBinding(
 		args.agent_id,
 		connection.connector_key,
@@ -160,6 +195,19 @@ export async function handleBindChannel(
 			model: args.model,
 		},
 	);
+	const agentNotice = await resolveAgentBindNotice(
+		organizationId,
+		args.agent_id,
+	);
+	scheduleChannelBindConfirmation({
+		connectionSlug: connection.slug,
+		platform: connection.connector_key,
+		channelId,
+		agentId: args.agent_id,
+		agentName: agentNotice.name,
+		agentUrl: agentNotice.url,
+		previousAgentId: existing?.agentId,
+	});
 	logger.info(
 		`Bound ${connection.connector_key}/${channelId} → ${args.agent_id}`,
 	);
@@ -323,7 +371,7 @@ export async function handleConnectChannelDm(
 
 	const sql = getDb();
 	const rows = (await sql`
-		SELECT id, connector_key, external_tenant_id, config
+		SELECT id, slug, connector_key, external_tenant_id, config
 		FROM connections
 		WHERE id = ${args.connection_id}
 			AND organization_id = ${organizationId}
@@ -334,6 +382,7 @@ export async function handleConnectChannelDm(
 		LIMIT 1
 	`) as Array<{
 		id: number;
+		slug: string;
 		connector_key: string;
 		external_tenant_id: string | null;
 		config: { botToken?: string } | null;
@@ -372,11 +421,18 @@ export async function handleConnectChannelDm(
 	// Store the binding under the canonical `slack:<id>` channel key — inbound
 	// Slack messages reach the dispatcher already canonicalized, so a raw `D…`
 	// key would never route. (dmChannelId stays raw for the Web API calls.)
+	const boundChannelId = canonicalSlackChannelId(dmChannelId);
 	const svc = new ChannelBindingService();
+	const runtimeConnectionId = slugToRuntimeConnectionId(connection.slug);
+	const existing = await svc.getBindingForConnection(
+		runtimeConnectionId,
+		boundChannelId,
+		organizationId,
+	);
 	await svc.createBinding(
 		args.agent_id,
 		"slack",
-		canonicalSlackChannelId(dmChannelId),
+		boundChannelId,
 		connection.external_tenant_id ?? undefined,
 		{
 			configuredBy: userId ?? undefined,
@@ -384,15 +440,19 @@ export async function handleConnectChannelDm(
 			connectionId: String(connection.id),
 		},
 	);
-
-	// Best-effort welcome — the binding is the contract, not this DM.
-	void slackWebApi
-		.postMessage(
-			botToken,
-			dmChannelId,
-			"✅ Connected. I'm now wired to this DM — ask me anything to get started.",
-		)
-		.catch(() => {});
+	const agentNotice = await resolveAgentBindNotice(
+		organizationId,
+		args.agent_id,
+	);
+	scheduleChannelBindConfirmation({
+		connectionSlug: connection.slug,
+		platform: "slack",
+		channelId: boundChannelId,
+		agentId: args.agent_id,
+		agentName: agentNotice.name,
+		agentUrl: agentNotice.url,
+		previousAgentId: existing?.agentId,
+	});
 
 	logger.info(
 		`Connected Slack DM ${dmChannelId} (team ${connection.external_tenant_id ?? "unknown"}) → ${args.agent_id}`,
