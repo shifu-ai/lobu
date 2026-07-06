@@ -61,6 +61,11 @@ interface LobuConfigStatusServiceOptions {
 	now?: () => number;
 }
 
+interface CredentialStatusInspection {
+	authorized: boolean;
+	credentialError: ShifuMcpStatusReasonCode | null;
+}
+
 export class LobuConfigStatusError extends Error {
 	constructor(
 		readonly code: "agent_not_found" | "agent_owner_mismatch",
@@ -108,7 +113,14 @@ function configuredMcpIdForKnownConnector(
 }
 
 async function statusFor(
-	oauthStatusProvider: LobuOAuthStatusProvider | undefined,
+	deps: {
+		oauthStatusProvider?: LobuOAuthStatusProvider;
+		inspectCredentialStatus?: (input: {
+			agentId: string;
+			userId: string;
+			mcpId: string;
+		}) => Promise<CredentialStatusInspection>;
+	},
 	params: {
 		agentId: string;
 		userId: string;
@@ -117,17 +129,48 @@ async function statusFor(
 		configured: boolean;
 	},
 ): Promise<LobuConnectorCurrentStatus> {
-	let oauthStatus: LobuOAuthStatus = "unknown";
-	if (oauthStatusProvider) {
-		oauthStatus = await oauthStatusProvider.getOAuthStatus({
+	const uiManaged = isUiManagedMcp(String(params.key));
+	let reasonCode: ShifuMcpStatusReasonCode;
+
+	if (!params.configured) {
+		reasonCode = statusReasonForConnector({
+			configured: false,
+			authorized: false,
+			oauthStatus: "unknown",
+			uiManaged,
+		});
+	} else if (deps.oauthStatusProvider) {
+		const oauthStatus = await deps.oauthStatusProvider.getOAuthStatus({
 			agentId: params.agentId,
 			userId: params.userId,
 			connectorKey: params.key,
 			mcpId: params.mcpId,
 		});
+		reasonCode = statusReasonForConnector({
+			configured: true,
+			authorized: oauthStatus === "authorized",
+			oauthStatus,
+			uiManaged,
+		});
+	} else if (deps.inspectCredentialStatus && uiManaged) {
+		const credentialStatus = await deps.inspectCredentialStatus({
+			agentId: params.agentId,
+			userId: params.userId,
+			mcpId: params.mcpId,
+		});
+		reasonCode =
+			credentialStatus.credentialError ??
+			(credentialStatus.authorized ? "ok" : "missing_credential");
+	} else {
+		reasonCode = statusReasonForConnector({
+			configured: params.configured,
+			authorized: false,
+			oauthStatus: "unknown",
+			uiManaged,
+		});
 	}
+	const oauthStatus = oauthStatusForReason(reasonCode);
 	const authorized = oauthStatus === "authorized";
-	const uiManaged = isUiManagedMcp(String(params.key));
 
 	return {
 		key: params.key,
@@ -135,55 +178,100 @@ async function statusFor(
 		agentToolStatus: params.configured ? "usable" : "not_usable",
 		configured: params.configured,
 		authorized,
-		reasonCode: statusReasonForConnector({
-			configured: params.configured,
-			authorized,
-			oauthStatus,
-			uiManaged,
-		}),
+		reasonCode,
 		reauthorizationAvailable: uiManaged && params.configured,
 		authorizationUrlAvailable: uiManaged && params.configured,
 		uiManaged,
 	};
 }
 
-function createStoredCredentialOAuthStatusProvider(
-	getSecretStore: () => WritableSecretStore | undefined,
-	now: () => number,
-): LobuOAuthStatusProvider {
-	return {
-		async getOAuthStatus({ agentId, userId, mcpId }) {
-			const secretStore = getSecretStore();
-			if (!secretStore) return "unknown";
-			try {
-				const credential = await getStoredCredential(secretStore, agentId, userId, mcpId);
-				if (!credential) return "not_connected";
-				if (credential.expiresAt > now()) return "authorized";
-				return "needs_reauth";
-			} catch {
-				return "unknown";
-			}
-		},
-	};
+function credentialErrorForMessage(message: string): ShifuMcpStatusReasonCode {
+	if (message.includes("token_expired")) return "token_expired";
+	if (message.includes("refresh")) return "token_refresh_failed";
+	if (message.includes("scope")) return "scope_missing";
+	return "provider_error";
 }
 
-function resolveOAuthStatusProvider(
+async function inspectCredentialStatus(input: {
+	agentId: string;
+	userId: string;
+	mcpId: string;
+	getSecretStore: () => WritableSecretStore | undefined;
+	now: () => number;
+}): Promise<CredentialStatusInspection> {
+	const secretStore = input.getSecretStore();
+	if (!secretStore) {
+		return { authorized: false, credentialError: "runtime_status_unavailable" };
+	}
+	try {
+		const credential = await getStoredCredential(
+			secretStore,
+			input.agentId,
+			input.userId,
+			input.mcpId,
+		);
+		if (!credential) return { authorized: false, credentialError: null };
+		if (credential.expiresAt > input.now()) {
+			return { authorized: true, credentialError: null };
+		}
+		return { authorized: false, credentialError: "token_expired" };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return {
+			authorized: false,
+			credentialError: credentialErrorForMessage(message),
+		};
+	}
+}
+
+function oauthStatusForReason(reasonCode: ShifuMcpStatusReasonCode): LobuOAuthStatus {
+	if (reasonCode === "ok") return "authorized";
+	if (
+		reasonCode === "token_expired" ||
+		reasonCode === "token_refresh_failed" ||
+		reasonCode === "scope_missing"
+	) {
+		return "needs_reauth";
+	}
+	if (reasonCode === "missing_credential") return "not_connected";
+	return "unknown";
+}
+
+function createStoredCredentialInspector(
+	getSecretStore: () => WritableSecretStore | undefined,
+	now: () => number,
+): (input: {
+	agentId: string;
+	userId: string;
+	mcpId: string;
+}) => Promise<CredentialStatusInspection> {
+	return (input) =>
+		inspectCredentialStatus({
+			...input,
+			getSecretStore,
+			now,
+		});
+}
+
+function resolveStoredCredentialInspector(
 	options: LobuConfigStatusServiceOptions,
-): LobuOAuthStatusProvider | undefined {
-	if (options.oauthStatusProvider) return options.oauthStatusProvider;
+): ((input: {
+	agentId: string;
+	userId: string;
+	mcpId: string;
+}) => Promise<CredentialStatusInspection>) | undefined {
+	if (options.oauthStatusProvider) return undefined;
 	if (!options.secretStore && !options.getSecretStore) return undefined;
 	const getSecretStore = options.getSecretStore ?? (() => options.secretStore);
-	return createStoredCredentialOAuthStatusProvider(
-		getSecretStore,
-		options.now ?? Date.now,
-	);
+	return createStoredCredentialInspector(getSecretStore, options.now ?? Date.now);
 }
 
 export function createLobuConfigStatusService(
 	options: LobuConfigStatusServiceOptions = {},
 ): LobuConfigStatusService {
 	const store = options.store ?? createPostgresAgentConfigStore();
-	const oauthStatusProvider = resolveOAuthStatusProvider(options);
+	const oauthStatusProvider = options.oauthStatusProvider;
+	const inspectStoredCredentialStatus = resolveStoredCredentialInspector(options);
 
 	return {
 		async getCurrentStatus({ agentId, userId }) {
@@ -204,25 +292,37 @@ export function createLobuConfigStatusService(
 				for (const alias of connectorKeyAliases(key)) knownIds.add(alias);
 				const configuredMcpId = configuredMcpIdForKnownConnector(ids, key);
 				connectors.push(
-					await statusFor(oauthStatusProvider, {
+					await statusFor(
+						{
+							oauthStatusProvider,
+							inspectCredentialStatus: inspectStoredCredentialStatus,
+						},
+						{
 						agentId,
 						userId,
 						key,
 						mcpId: configuredMcpId ?? canonical,
 						configured: Boolean(configuredMcpId),
-					}),
+						},
+					),
 				);
 			}
 			for (const id of Array.from(ids.keys()).sort()) {
 				if (!knownIds.has(id)) {
 					connectors.push(
-						await statusFor(oauthStatusProvider, {
+						await statusFor(
+							{
+								oauthStatusProvider,
+								inspectCredentialStatus: inspectStoredCredentialStatus,
+							},
+							{
 							agentId,
 							userId,
 							key: id,
 							mcpId: id,
 							configured: true,
-						}),
+							},
+						),
 					);
 				}
 			}

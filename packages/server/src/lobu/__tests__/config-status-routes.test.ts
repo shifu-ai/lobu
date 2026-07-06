@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from "bun:test";
 import type { AgentMetadata, AgentSettings } from "@lobu/core";
 import { Hono } from "hono";
 import { createLobuConfigStatusRoutes } from "../config-status-routes.js";
+import type { WritableSecretStore } from "../../gateway/secrets/index.js";
 import type {
 	LobuConfigStatusStore,
 	LobuOAuthStatusProvider,
@@ -23,7 +24,11 @@ function buildStore(options: {
 
 function buildApp(
 	store: LobuConfigStatusStore,
-	oauthStatusProvider?: LobuOAuthStatusProvider,
+	options: {
+		oauthStatusProvider?: LobuOAuthStatusProvider;
+		secretStore?: WritableSecretStore;
+		getSecretStore?: () => WritableSecretStore | undefined;
+	} = {},
 ) {
 	const app = new Hono();
 	app.route(
@@ -31,10 +36,24 @@ function buildApp(
 		createLobuConfigStatusRoutes({
 			token: TOKEN,
 			store,
-			oauthStatusProvider,
+			oauthStatusProvider: options.oauthStatusProvider,
+			secretStore: options.secretStore,
+			getSecretStore: options.getSecretStore,
 		}),
 	);
 	return app;
+}
+
+function buildSecretStore(
+	overrides: Partial<WritableSecretStore> = {},
+): WritableSecretStore {
+	return {
+		get: mock(async () => null),
+		put: mock(async () => "secret://stub"),
+		delete: mock(async () => {}),
+		list: mock(async () => []),
+		...overrides,
+	};
 }
 
 function ownedMetadata(overrides: Partial<AgentMetadata> = {}): AgentMetadata {
@@ -119,9 +138,7 @@ describe("Lobu config current status routes", () => {
 					},
 				},
 			}),
-			{
-				getOAuthStatus: mock(async () => "authorized"),
-			},
+			{ oauthStatusProvider: { getOAuthStatus: mock(async () => "authorized") } },
 		);
 
 		const res = await app.request(
@@ -155,9 +172,7 @@ describe("Lobu config current status routes", () => {
 				metadata: ownedMetadata(),
 				settings: { mcpServers: { "shifu-toolbox": { url: "https://mcp.example.test" } } },
 			}),
-			{
-				getOAuthStatus: mock(async () => "needs_reauth"),
-			},
+			{ oauthStatusProvider: { getOAuthStatus: mock(async () => "needs_reauth") } },
 		);
 
 		const res = await app.request(
@@ -184,9 +199,7 @@ describe("Lobu config current status routes", () => {
 				metadata: ownedMetadata(),
 				settings: { mcpServers: { "shifu-toolbox": { url: "https://mcp.example.test" } } },
 			}),
-			{
-				getOAuthStatus: mock(async () => "not_connected"),
-			},
+			{ oauthStatusProvider: { getOAuthStatus: mock(async () => "not_connected") } },
 		);
 
 		const res = await app.request(
@@ -222,9 +235,7 @@ describe("Lobu config current status routes", () => {
 					preApprovedTools: ["notion_search"],
 				},
 			}),
-			{
-				getOAuthStatus: mock(async () => "not_connected"),
-			},
+			{ oauthStatusProvider: { getOAuthStatus: mock(async () => "not_connected") } },
 		);
 
 		const response = await app.request(
@@ -271,6 +282,109 @@ describe("Lobu config current status routes", () => {
 				agentToolStatus: "not_usable",
 				configured: false,
 				authorized: false,
+			}),
+		);
+	});
+
+	test("returns ok reason for an authorized configured connector", async () => {
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata(),
+				settings: {
+					mcpServers: {
+						google_workspace: { url: "https://mcp.google.test/mcp" },
+					},
+				},
+			}),
+			{ oauthStatusProvider: { getOAuthStatus: mock(async () => "authorized") } },
+		);
+
+		const response = await app.request(
+			`/internal/lobu-config/current?agentId=${AGENT_ID}&userId=${USER_ID}`,
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "google_workspace",
+				authorized: true,
+				oauthStatus: "authorized",
+				agentToolStatus: "usable",
+				reasonCode: "ok",
+				reauthorizationAvailable: true,
+				authorizationUrlAvailable: true,
+				uiManaged: true,
+			}),
+		);
+	});
+
+	test("returns needs_reauth when credential lookup reports token_expired", async () => {
+		const secretStore = buildSecretStore({
+			get: mock(async () => {
+				throw new Error("token_expired");
+			}),
+		});
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata(),
+				settings: {
+					mcpServers: {
+						notion: { url: "https://mcp.notion.test/mcp" },
+					},
+				},
+			}),
+			{ secretStore },
+		);
+
+		const response = await app.request(
+			`/internal/lobu-config/current?agentId=${AGENT_ID}&userId=${USER_ID}`,
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "notion",
+				authorized: false,
+				oauthStatus: "needs_reauth",
+				reasonCode: "token_expired",
+				reauthorizationAvailable: true,
+				authorizationUrlAvailable: true,
+			}),
+		);
+	});
+
+	test("marks runtime connectors outside Toolbox UI as unmanaged", async () => {
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata(),
+				settings: {
+					mcpServers: {
+						"lobu-memory": { url: "https://mcp.lobu-memory.test/mcp" },
+					},
+				},
+			}),
+		);
+
+		const response = await app.request(
+			`/internal/lobu-config/current?agentId=${AGENT_ID}&userId=${USER_ID}`,
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "lobu-memory",
+				configured: true,
+				agentToolStatus: "usable",
+				reasonCode: "ui_unmanaged_connector",
+				reauthorizationAvailable: false,
+				authorizationUrlAvailable: false,
+				uiManaged: false,
 			}),
 		);
 	});
