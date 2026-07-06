@@ -32,6 +32,23 @@ import {
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+const SHIFU_UI_MANAGED_MCP_IDS = new Set([
+	"google_workspace",
+	"notion",
+	"shifu_toolbox",
+]);
+
+export type ShifuMcpStatusReasonCode =
+	| "ok"
+	| "missing_credential"
+	| "token_expired"
+	| "token_refresh_failed"
+	| "scope_missing"
+	| "connector_not_configured"
+	| "mcp_not_found"
+	| "provider_error"
+	| "runtime_status_unavailable"
+	| "ui_unmanaged_connector";
 
 const configStore = createPostgresAgentConfigStore();
 const connectionStore = createPostgresAgentConnectionStore();
@@ -91,6 +108,24 @@ function validateShifuAgentId(agentId: string): string | null {
 
 function parseUserId(value: unknown): string {
 	return typeof value === "string" ? value.trim() : "";
+}
+
+export function isUiManagedMcp(mcpId: string): boolean {
+	return SHIFU_UI_MANAGED_MCP_IDS.has(mcpId);
+}
+
+export function statusReasonForConnector(input: {
+	configured: boolean;
+	authorized: boolean;
+	oauthStatus: "authorized" | "needs_reauth" | "not_connected" | "unknown";
+	uiManaged: boolean;
+}): ShifuMcpStatusReasonCode {
+	if (!input.uiManaged) return "ui_unmanaged_connector";
+	if (!input.configured) return "connector_not_configured";
+	if (input.oauthStatus === "needs_reauth") return "token_expired";
+	if (input.oauthStatus === "unknown") return "runtime_status_unavailable";
+	if (!input.authorized) return "missing_credential";
+	return "ok";
 }
 
 async function isOwnedByToolboxUser(

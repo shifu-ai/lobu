@@ -6,6 +6,11 @@ import {
 	connectorKeyAliases,
 	type ToolboxMcpStatusConnectorKey,
 } from "./connector-mcp-resolver.js";
+import {
+	isUiManagedMcp,
+	statusReasonForConnector,
+	type ShifuMcpStatusReasonCode,
+} from "./provisioning-routes.js";
 import { createPostgresAgentConfigStore } from "./stores/postgres-stores.js";
 
 export type LobuConnectorKey = ToolboxMcpStatusConnectorKey | (string & {});
@@ -18,6 +23,10 @@ export interface LobuConnectorCurrentStatus {
 	agentToolStatus: LobuAgentToolStatus;
 	configured: boolean;
 	authorized: boolean;
+	reasonCode: ShifuMcpStatusReasonCode;
+	reauthorizationAvailable: boolean;
+	authorizationUrlAvailable: boolean;
+	uiManaged: boolean;
 	toolNames?: string[];
 }
 
@@ -117,13 +126,24 @@ async function statusFor(
 			mcpId: params.mcpId,
 		});
 	}
+	const authorized = oauthStatus === "authorized";
+	const uiManaged = isUiManagedMcp(String(params.key));
 
 	return {
 		key: params.key,
 		oauthStatus,
 		agentToolStatus: params.configured ? "usable" : "not_usable",
 		configured: params.configured,
-		authorized: oauthStatus === "authorized",
+		authorized,
+		reasonCode: statusReasonForConnector({
+			configured: params.configured,
+			authorized,
+			oauthStatus,
+			uiManaged,
+		}),
+		reauthorizationAvailable: uiManaged && params.configured,
+		authorizationUrlAvailable: uiManaged && params.configured,
+		uiManaged,
 	};
 }
 

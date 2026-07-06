@@ -137,13 +137,15 @@ describe("Lobu config current status routes", () => {
 			userId: USER_ID,
 			checkedAt: expect.any(Number),
 		});
-		expect(body.connectors).toContainEqual({
-			key: "shifu_toolbox",
-			oauthStatus: "authorized",
-			agentToolStatus: "usable",
-			configured: true,
-			authorized: true,
-		});
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "shifu_toolbox",
+				oauthStatus: "authorized",
+				agentToolStatus: "usable",
+				configured: true,
+				authorized: true,
+			}),
+		);
 		expect(JSON.stringify(body)).not.toMatch(/accessToken|refreshToken|credential|secret/i);
 	});
 
@@ -165,13 +167,15 @@ describe("Lobu config current status routes", () => {
 
 		expect(res.status).toBe(200);
 		const body = await res.json();
-		expect(body.connectors).toContainEqual({
-			key: "shifu_toolbox",
-			oauthStatus: "needs_reauth",
-			agentToolStatus: "usable",
-			configured: true,
-			authorized: false,
-		});
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "shifu_toolbox",
+				oauthStatus: "needs_reauth",
+				agentToolStatus: "usable",
+				configured: true,
+				authorized: false,
+			}),
+		);
 	});
 
 	test("reports missing credentials as not connected", async () => {
@@ -192,13 +196,57 @@ describe("Lobu config current status routes", () => {
 
 		expect(res.status).toBe(200);
 		const body = await res.json();
-		expect(body.connectors).toContainEqual({
-			key: "shifu_toolbox",
-			oauthStatus: "not_connected",
-			agentToolStatus: "usable",
-			configured: true,
-			authorized: false,
-		});
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "shifu_toolbox",
+				oauthStatus: "not_connected",
+				agentToolStatus: "usable",
+				configured: true,
+				authorized: false,
+			}),
+		);
+	});
+
+	test("returns reason detail for a configured connector with no user credential", async () => {
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata({
+					agentId: "shifu-u-status-detail",
+					owner: { platform: "toolbox", userId: "toolbox-user-001" },
+				}),
+				settings: {
+					mcpServers: {
+						notion: { url: "https://mcp.notion.test/mcp" },
+					},
+					allowedTools: ["notion_search"],
+					preApprovedTools: ["notion_search"],
+				},
+			}),
+			{
+				getOAuthStatus: mock(async () => "not_connected"),
+			},
+		);
+
+		const response = await app.request(
+			"/internal/lobu-config/current?agentId=shifu-u-status-detail&userId=toolbox-user-001",
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "notion",
+				configured: true,
+				authorized: false,
+				oauthStatus: "not_connected",
+				agentToolStatus: "usable",
+				reasonCode: "missing_credential",
+				reauthorizationAvailable: true,
+				authorizationUrlAvailable: true,
+				uiManaged: true,
+			}),
+		);
 	});
 
 	test("reports absent MCP servers as not usable", async () => {
@@ -216,12 +264,14 @@ describe("Lobu config current status routes", () => {
 
 		expect(res.status).toBe(200);
 		const body = await res.json();
-		expect(body.connectors).toContainEqual({
-			key: "shifu_toolbox",
-			oauthStatus: "unknown",
-			agentToolStatus: "not_usable",
-			configured: false,
-			authorized: false,
-		});
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "shifu_toolbox",
+				oauthStatus: "unknown",
+				agentToolStatus: "not_usable",
+				configured: false,
+				authorized: false,
+			}),
+		);
 	});
 });
