@@ -61,6 +61,18 @@ async function* paginateByOffset<T>(
   }
 }
 
+export class HttpStatusError extends Error {
+  readonly status: number;
+  readonly body: string;
+
+  constructor(args: { status: number; body?: string; message?: string }) {
+    super(args.message ?? `HTTP ${args.status}`);
+    this.name = 'HttpStatusError';
+    this.status = args.status;
+    this.body = args.body ?? '';
+  }
+}
+
 export function connectorSdkMock() {
   const notUsed = (name: string) => () => {
     throw new Error(`${name} is not used in connector unit tests`);
@@ -68,12 +80,46 @@ export function connectorSdkMock() {
   return {
     acquireBrowser: notUsed('acquireBrowser'),
     captureErrorArtifacts: notUsed('captureErrorArtifacts'),
-    extensionNetworkSync: notUsed('extensionNetworkSync'),
+    HttpStatusError,
+    extensionNetworkSync: async (opts: {
+      dispatcher: {
+        dispatch: (
+          action: string,
+          input: Record<string, unknown>,
+        ) => Promise<Record<string, unknown>>;
+      };
+      url: string;
+      parseResponse: (url: string, json: unknown) => unknown[];
+    }) => {
+      const observation = await opts.dispatcher.dispatch('navigate', {
+        network_intercept: true,
+        url: opts.url,
+      });
+      const responses =
+        (observation?.result as { responses?: Array<{ body?: string }> })
+          ?.responses ?? [];
+      const items: unknown[] = [];
+      for (const response of responses) {
+        if (!response.body) continue;
+        items.push(
+          ...opts.parseResponse(
+            opts.url,
+            JSON.parse(response.body) as unknown,
+          ),
+        );
+      }
+      return {
+        items,
+        backend: 'extension-network',
+        apiCallCount: responses.length,
+      };
+    },
     // Connectors create their HTTP client as a class field at construction, so a
     // throwing stub would break `new XConnector()`. Return an inert client whose
     // network methods throw only IF actually called — tests that exercise a
     // request path override `connector.http` / `connector.requestJson` first.
     createHttpClient: () => ({
+      get: notUsed('http.get'),
       json: notUsed('http.json'),
       request: notUsed('http.request'),
       raw: notUsed('http.raw'),
@@ -97,18 +143,6 @@ export function connectorSdkMock() {
     paginateByOffset,
     ConnectorRuntime: class {},
     calculateEngagementScore: () => 0,
-    IDENTITY: {
-      PHONE: 'phone',
-      EMAIL: 'email',
-      WA_JID: 'wa_jid',
-      SLACK_USER_ID: 'slack_user_id',
-      GITHUB_LOGIN: 'github_login',
-      GITHUB_USER_ID: 'github_user_id',
-      GITHUB_REPO_ID: 'github_repo_id',
-      GITHUB_REPO_FULL_NAME: 'github_repo_full_name',
-      AUTH_USER_ID: 'auth_user_id',
-      GOOGLE_CONTACT_ID: 'google_contact_id',
-    },
     extensionDomScrape: async (opts: DomScrapeOpts) => {
       const observation = await opts.dispatcher.dispatch('navigate', {
         cs_scrape: true,

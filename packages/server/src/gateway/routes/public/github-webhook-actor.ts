@@ -5,12 +5,15 @@
  * Org-scoped via the caller's resolved install; resolution never crosses orgs.
  */
 
-import { IDENTITY } from "@lobu/connector-sdk";
 import type { DbClient } from "../../../db/client.js";
+import { normalizeGithubLogin } from "../../../authz/github-normalize.js";
 import {
 	loadEntityLinkRuleByType,
 	resolveEntityLinksForItems,
 } from "../../../utils/entity-link-upsert.js";
+
+const GITHUB_LOGIN_NS = "github_login";
+const GITHUB_USER_ID_NS = "github_user_id";
 
 interface GithubActor {
 	login?: unknown;
@@ -106,6 +109,9 @@ export async function resolveGithubWebhookActor(params: {
 
 	const actor = extractGithubActor(params.payload);
 	if (!actor) return null;
+	// Validate shape; keep raw casing in metadata for display title/traits —
+	// entity-link-upsert normalizes github_login for identities + read-time slots.
+	if (!normalizeGithubLogin(actor.author_login)) return null;
 
 	// The person entity-link rule is read from the connector definition (same
 	// source the poll path uses) — not mirrored here. Absent def/rule → no
@@ -146,7 +152,7 @@ export async function resolveGithubWebhookActor(params: {
 	// resolveEntityLinksForItems stamped the canonical namespace slots onto
 	// item.metadata; forward only those onto the landed row.
 	const metadata: Record<string, string> = {};
-	for (const ns of [IDENTITY.GITHUB_LOGIN, IDENTITY.GITHUB_USER_ID]) {
+	for (const ns of [GITHUB_LOGIN_NS, GITHUB_USER_ID_NS]) {
 		const value = item.metadata[ns];
 		if (typeof value === "string" && value.length > 0) metadata[ns] = value;
 	}

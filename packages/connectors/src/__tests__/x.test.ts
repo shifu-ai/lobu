@@ -8,9 +8,13 @@ mock.module("@lobu/connector-sdk", connectorSdkMock);
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let parseBrowserSearchResponse: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
+let parseBrowserTimelineResponse: any;
+// biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let extractTweetsFromInstructions: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let finalizeSyncResult: any;
+// biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
+let finalizeDmSyncResult: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let buildHomeFeedTweets: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
@@ -18,13 +22,18 @@ let parseUsernameFromStatusPath: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let isHomeFeedNoise: any;
 // biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
+let parseBrowserDmResponse: any;
+// biome-ignore lint/suspicious/noExplicitAny: dynamic import after mock
 let XConnector: any;
 
 beforeAll(async () => {
 	const mod = await import("../x");
 	parseBrowserSearchResponse = mod.parseBrowserSearchResponse;
+	parseBrowserTimelineResponse = mod.parseBrowserTimelineResponse;
+	parseBrowserDmResponse = mod.parseBrowserDmResponse;
 	extractTweetsFromInstructions = mod.extractTweetsFromInstructions;
 	finalizeSyncResult = mod.finalizeSyncResult;
+	finalizeDmSyncResult = mod.finalizeDmSyncResult;
 	buildHomeFeedTweets = mod.buildHomeFeedTweets;
 	parseUsernameFromStatusPath = mod.parseUsernameFromStatusPath;
 	isHomeFeedNoise = mod.isHomeFeedNoise;
@@ -206,6 +215,39 @@ describe("extractTweetsFromInstructions", () => {
 	});
 });
 
+describe("parseBrowserTimelineResponse", () => {
+	test("reads profile and bookmark timeline instructions", () => {
+		const instructions = [
+			{
+				entries: [
+					{
+						entryId: "tweet-9",
+						content: {
+							itemContent: {
+								tweet_results: {
+									result: tweetResult("9", "alice", "profile tweet"),
+								},
+							},
+						},
+					},
+				],
+			},
+		];
+
+		const profile = parseBrowserTimelineResponse("https://x.com/alice", {
+			data: { user: { result: { timeline_v2: { timeline: { instructions } } } } },
+		});
+		expect(profile).toHaveLength(1);
+		expect(profile[0]).toMatchObject({ id: "9", username: "alice" });
+
+		const bookmarks = parseBrowserTimelineResponse("https://x.com/i/bookmarks", {
+			data: { bookmark_timeline_v2: { timeline: { instructions } } },
+		});
+		expect(bookmarks).toHaveLength(1);
+		expect(bookmarks[0].text).toBe("profile tweet");
+	});
+});
+
 describe("parseBrowserSearchResponse", () => {
 	test("reads search_by_raw_query instructions", () => {
 		const json = wrapSearchInstructions([
@@ -293,6 +335,26 @@ describe("finalizeSyncResult", () => {
 		expect(res.checkpoint.last_tweet_id).toBe("5");
 	});
 
+	test("can stamp a custom origin_type for liked posts and bookmarks", () => {
+		const tweets = [
+			{
+				id: "9",
+				text: "liked",
+				username: "alice",
+				publishedAt: new Date("2025-06-01T00:00:00Z"),
+			},
+		];
+		const liked = finalizeSyncResult(tweets as any, {}, {}, {
+			originType: "liked_tweet",
+		});
+		expect(liked.events[0].origin_type).toBe("liked_tweet");
+
+		const bookmarked = finalizeSyncResult(tweets as any, {}, {}, {
+			originType: "bookmark",
+		});
+		expect(bookmarked.events[0].origin_type).toBe("bookmark");
+	});
+
 	test("preserves prior checkpoint when nothing new was emitted", () => {
 		const res = finalizeSyncResult(
 			[],
@@ -354,16 +416,213 @@ describe("buildHomeFeedTweets", () => {
 });
 
 describe("XConnector definition", () => {
-	test("declares both the search feed and the extension-only home timeline feed", () => {
+	test("declares search, account, and extension-only home timeline feeds", () => {
 		const def = new XConnector().definition;
 		expect(def.key).toBe("x");
-		expect(Object.keys(def.feeds).sort()).toEqual(["home_feed", "tweets"]);
+		expect(Object.keys(def.feeds).sort()).toEqual([
+			"bookmarks",
+			"direct_messages",
+			"home_feed",
+			"liked_tweets",
+			"my_tweets",
+			"tweets",
+		]);
+		expect(def.feeds.direct_messages.requiredScopes).toBeUndefined();
+		expect(
+			def.feeds.tweets.eventKinds.tweet.entityLinks?.[0]?.identities?.map(
+				(i: { namespace: string }) => i.namespace,
+			),
+		).toEqual(["x_user_id", "x_handle"]);
+		expect(def.feeds.liked_tweets.requiredScopes).toBeUndefined();
+		expect(def.feeds.bookmarks.requiredScopes).toBeUndefined();
 		expect(def.feeds.home_feed.description).toMatch(/home timeline/i);
 		// Extension is the browser fallback method (no public API for the timeline).
 		const browserMethod = def.authSchema.methods.find(
 			(m: any) => m.type === "browser",
 		);
 		expect(browserMethod).toBeDefined();
+	});
+});
+
+describe("parseBrowserDmResponse", () => {
+	test("extracts DM messages from inbox timeline entries", () => {
+		const messages = parseBrowserDmResponse("https://x.com/messages", {
+			data: {
+				viewer_v2: {
+					user_results: { result: { rest_id: "999" } },
+				},
+				user_events: {
+					timeline: {
+						instructions: [
+							{
+								entries: [
+									{
+										content: {
+											message: {
+												id: "dm-1",
+												conversation_id: "111-999",
+												message_data: {
+													text: "hey there",
+													time: "Wed Jun 04 12:00:00 +0000 2025",
+													sender_id: "111",
+													sender_screen_name: "alice",
+													sender_name: "Alice",
+												},
+											},
+										},
+									},
+								],
+							},
+						],
+					},
+				},
+			},
+		});
+
+		expect(messages).toHaveLength(1);
+		expect(messages[0]).toMatchObject({
+			id: "dm-1",
+			text: "hey there",
+			senderId: "111",
+			senderHandle: "alice",
+			fromMe: false,
+			participantId: "111",
+			participantHandle: "alice",
+		});
+	});
+});
+
+describe("XConnector browser-first routing", () => {
+	test("uses extension for bookmarks when OAuth lacks bookmark.read", async () => {
+		const calls: Array<{ action: string; input: Record<string, unknown> }> =
+			[];
+		const dispatcher = {
+			dispatch: async (action: string, input: Record<string, unknown>) => {
+				calls.push({ action, input });
+				return {
+					result: {
+						responses: [
+							{
+								body: JSON.stringify({
+									data: {
+										bookmark_timeline_v2: {
+											timeline: { instructions: [] },
+										},
+									},
+								}),
+							},
+						],
+					},
+				};
+			},
+		};
+
+		const connector = new XConnector();
+		const res = await connector.sync({
+			feedKey: "bookmarks",
+			config: {},
+			checkpoint: {},
+			credentials: {
+				provider: "twitter",
+				accessToken: "token-without-bookmark-scope",
+				scope: "users.read tweet.read offline.access",
+			},
+			entityIds: [],
+			sessionState: { chrome_dispatcher: dispatcher },
+		});
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].input.url).toBe("https://x.com/i/bookmarks");
+		expect(res.metadata.backend).toBe("extension-network");
+	});
+
+	test("honors use_extension even when OAuth scopes are sufficient", async () => {
+		const calls: Array<{ action: string; input: Record<string, unknown> }> =
+			[];
+		const dispatcher = {
+			dispatch: async (action: string, input: Record<string, unknown>) => {
+				calls.push({ action, input });
+				return { result: { responses: [] } };
+			},
+		};
+
+		const connector = new XConnector();
+		await connector.sync({
+			feedKey: "my_tweets",
+			config: { use_extension: "true", account_handle: "buremba" },
+			checkpoint: {},
+			credentials: {
+				provider: "twitter",
+				accessToken: "token-with-full-scope",
+				scope: "users.read tweet.read offline.access",
+			},
+			entityIds: [],
+			sessionState: { chrome_dispatcher: dispatcher },
+		});
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].input.url).toBe("https://x.com/buremba");
+	});
+
+	test("uses extension for direct_messages when OAuth lacks dm.read", async () => {
+		const calls: Array<{ action: string; input: Record<string, unknown> }> =
+			[];
+		const dispatcher = {
+			dispatch: async (action: string, input: Record<string, unknown>) => {
+				calls.push({ action, input });
+				return { result: { responses: [] } };
+			},
+		};
+
+		const connector = new XConnector();
+		await connector.sync({
+			feedKey: "direct_messages",
+			config: {},
+			checkpoint: {},
+			credentials: {
+				provider: "twitter",
+				accessToken: "token-without-dm-scope",
+				scope: "users.read tweet.read offline.access",
+			},
+			entityIds: [],
+			sessionState: { chrome_dispatcher: dispatcher },
+		});
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].input.url).toBe("https://x.com/messages");
+	});
+});
+
+describe("finalizeDmSyncResult", () => {
+	test("emits dm_message events with participant metadata", () => {
+		const res = finalizeDmSyncResult(
+			[
+				{
+					id: "9001",
+					text: "hey there",
+					senderId: "111",
+					senderHandle: "alice",
+					conversationId: "111-222",
+					isGroup: false,
+					fromMe: false,
+					participantId: "111",
+					participantHandle: "alice",
+					participantName: "Alice",
+					publishedAt: new Date("2025-06-01T00:00:00Z"),
+				},
+			],
+			{},
+			{ backend: "oauth_api" },
+		);
+		expect(res.events).toHaveLength(1);
+		expect(res.events[0].origin_type).toBe("dm_message");
+		expect(res.events[0].metadata).toMatchObject({
+			participant_id: "111",
+			participant_handle: "alice",
+			from_me: false,
+			is_group: false,
+		});
+		expect(res.checkpoint.last_dm_event_id).toBe("9001");
 	});
 });
 
