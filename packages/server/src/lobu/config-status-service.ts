@@ -121,6 +121,58 @@ function configuredMcpIdForKnownConnector(
 	return null;
 }
 
+function stringArray(value: unknown): string[] {
+	return Array.isArray(value)
+		? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+		: [];
+}
+
+function toolNameFromPattern(
+	pattern: string,
+	mcpId: string,
+	allowUnqualified: boolean,
+): string | null {
+	const mcpPathPrefix = `/mcp/${mcpId}/tools/`;
+	if (pattern.startsWith(mcpPathPrefix)) {
+		const name = pattern.slice(mcpPathPrefix.length);
+		return name && name !== "*" ? name : null;
+	}
+	const mcpFunctionPrefix = `mcp__${mcpId}__`;
+	if (pattern.startsWith(mcpFunctionPrefix)) {
+		const name = pattern.slice(mcpFunctionPrefix.length);
+		return name && name !== "*" ? name : null;
+	}
+	if (
+		allowUnqualified &&
+		!pattern.includes("*") &&
+		!pattern.startsWith("/mcp/") &&
+		!pattern.startsWith("mcp__")
+	) {
+		return pattern;
+	}
+	return null;
+}
+
+function toolNamesForMcp(
+	settings: AgentSettings | null,
+	mcpId: string,
+	options: { allowUnqualified: boolean },
+): string[] {
+	if (!settings) return [];
+	const rawTools = [
+		...stringArray((settings as { allowedTools?: unknown }).allowedTools),
+		...stringArray(settings.preApprovedTools),
+		...stringArray(settings.toolsConfig?.allowedTools),
+	];
+	return Array.from(
+		new Set(
+			rawTools
+				.map((pattern) => toolNameFromPattern(pattern, mcpId, options.allowUnqualified))
+				.filter((name): name is string => Boolean(name)),
+		),
+	).sort();
+}
+
 async function statusFor(
 	deps: {
 		oauthStatusProvider?: LobuOAuthStatusProvider;
@@ -136,6 +188,7 @@ async function statusFor(
 		key: LobuConnectorKey;
 		mcpId: string;
 		configured: boolean;
+		toolNames?: string[];
 	},
 ): Promise<LobuConnectorCurrentStatus> {
 	const uiManaged = isUiManagedMcp(String(params.key));
@@ -191,6 +244,7 @@ async function statusFor(
 		reauthorizationAvailable: uiManaged && params.configured,
 		authorizationUrlAvailable: uiManaged && params.configured,
 		uiManaged,
+		...(params.toolNames ? { toolNames: params.toolNames } : {}),
 	};
 }
 
@@ -301,7 +355,9 @@ export function createLobuConfigStatusService(
 				throw new LobuConfigStatusError("agent_owner_mismatch");
 			}
 
-			const ids = configuredMcpIds(await store.getSettings(agentId));
+			const settings = await store.getSettings(agentId);
+			const ids = configuredMcpIds(settings);
+			const allowUnqualifiedToolNames = ids.size <= 1;
 			const connectors: LobuConnectorCurrentStatus[] = [];
 			const knownIds = new Set<string>();
 			for (const key of KNOWN_CONNECTORS) {
@@ -316,11 +372,14 @@ export function createLobuConfigStatusService(
 							inspectCredentialStatus: inspectStoredCredentialStatus,
 						},
 						{
-						agentId,
-						userId,
-						key,
-						mcpId: configuredMcpId ?? canonical,
-						configured: Boolean(configuredMcpId),
+							agentId,
+							userId,
+							key,
+							mcpId: configuredMcpId ?? canonical,
+							configured: Boolean(configuredMcpId),
+							toolNames: toolNamesForMcp(settings, configuredMcpId ?? canonical, {
+								allowUnqualified: allowUnqualifiedToolNames,
+							}),
 						},
 					),
 				);
@@ -334,11 +393,14 @@ export function createLobuConfigStatusService(
 								inspectCredentialStatus: inspectStoredCredentialStatus,
 							},
 							{
-							agentId,
-							userId,
-							key: id,
-							mcpId: id,
-							configured: true,
+								agentId,
+								userId,
+								key: id,
+								mcpId: id,
+								configured: true,
+								toolNames: toolNamesForMcp(settings, id, {
+									allowUnqualified: allowUnqualifiedToolNames,
+								}),
 							},
 						),
 					);

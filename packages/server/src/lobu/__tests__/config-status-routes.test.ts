@@ -258,6 +258,7 @@ describe("Lobu config current status routes", () => {
 				reauthorizationAvailable: true,
 				authorizationUrlAvailable: true,
 				uiManaged: true,
+				toolNames: ["notion_search"],
 			}),
 		);
 	});
@@ -296,6 +297,7 @@ describe("Lobu config current status routes", () => {
 					mcpServers: {
 						google_workspace: { url: "https://mcp.google.test/mcp" },
 					},
+					preApprovedTools: ["/mcp/google_workspace/tools/gws_calendar_events_list"],
 				},
 			}),
 			{ oauthStatusProvider: { getOAuthStatus: mock(async () => "authorized") } },
@@ -318,6 +320,7 @@ describe("Lobu config current status routes", () => {
 				reauthorizationAvailable: true,
 				authorizationUrlAvailable: true,
 				uiManaged: true,
+				toolNames: ["gws_calendar_events_list"],
 			}),
 		);
 	});
@@ -342,6 +345,7 @@ describe("Lobu config current status routes", () => {
 					mcpServers: {
 						notion: { url: "https://mcp.notion.test/mcp" },
 					},
+					preApprovedTools: ["/mcp/notion/tools/notion_search"],
 				},
 			}),
 			{ secretStore },
@@ -362,6 +366,7 @@ describe("Lobu config current status routes", () => {
 				reasonCode: "token_expired",
 				reauthorizationAvailable: true,
 				authorizationUrlAvailable: true,
+				toolNames: ["notion_search"],
 			}),
 		);
 	});
