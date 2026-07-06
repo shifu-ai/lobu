@@ -950,6 +950,94 @@ describe("POST /api/provisioning/agents", () => {
 	});
 });
 
+describe("GET /api/provisioning/agents/:agentId/settings", () => {
+	beforeEach(async () => {
+		await resetTestDatabase();
+		await seedOrg(ORG_ID);
+	});
+
+	test("returns live settings for a provisioned ShiFu user agent", async () => {
+		const app = await buildApp();
+		const agentId = "shifu-u-settings-read";
+
+		const provision = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId,
+				name: "Settings Read Agent",
+				settings: {
+					identityMd: "You are ShiFu.",
+					mcpServers: {
+						"shifu-toolbox": {
+							type: "streamable-http",
+							url: "https://mcp.shifu-ai.org/mcp",
+						},
+					},
+					preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+				},
+			}),
+		});
+		expect(provision.status).toBe(201);
+
+		const response = await app.request(
+			`/api/provisioning/agents/${agentId}/settings`,
+		);
+
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			ok: true,
+			agentId,
+			settings: {
+				identityMd: "You are ShiFu.",
+				mcpServers: {
+					"shifu-toolbox": {
+						type: "streamable-http",
+						url: "https://mcp.shifu-ai.org/mcp",
+					},
+				},
+				preApprovedTools: ["/mcp/shifu-toolbox/tools/*"],
+			},
+		});
+	});
+
+	test("rejects settings reads for PATs without mcp:admin scope", async () => {
+		const app = await buildApp(["mcp:read"]);
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-settings-no-admin/settings",
+		);
+
+		expect(response.status).toBe(403);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "forbidden",
+		});
+	});
+
+	test("rejects invalid agent ids", async () => {
+		const app = await buildApp();
+
+		const response = await app.request(
+			"/api/provisioning/agents/lobu-test/settings",
+		);
+
+		expect(response.status).toBe(400);
+	});
+
+	test("returns 404 for a valid ShiFu user agent without settings", async () => {
+		const app = await buildApp();
+
+		const response = await app.request(
+			"/api/provisioning/agents/shifu-u-missing-settings/settings",
+		);
+
+		expect(response.status).toBe(404);
+		await expect(response.json()).resolves.toEqual({
+			error: "Agent not found",
+		});
+	});
+});
+
 describe("POST /api/provisioning/agents/:agentId/runtime-grants/verify", () => {
 	beforeEach(async () => {
 		await resetTestDatabase();

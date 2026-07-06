@@ -346,6 +346,24 @@ export function createProvisioningRoutes(
 		);
 	});
 
+	provisioningRoutes.get("/agents/:agentId/settings", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+
+		const agentId = c.req.param("agentId")?.trim() ?? "";
+		const agentIdError = validateShifuAgentId(agentId);
+		if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+		const settings = await configStore.getSettings(agentId);
+		if (!settings) return c.json({ error: "Agent not found" }, 404);
+
+		return c.json({
+			ok: true,
+			agentId,
+			settings,
+		});
+	});
+
 	provisioningRoutes.post(
 		"/agents/:agentId/runtime-grants/verify",
 		async (c) => {
