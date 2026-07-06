@@ -76,7 +76,22 @@ export function connectorSdkMock() {
     createHttpClient: () => ({
       json: notUsed('http.json'),
       request: notUsed('http.request'),
+      raw: notUsed('http.raw'),
     }),
+    // Faithful copy of connector-sdk checkpoint/timestamp-watermark.ts — must
+    // honor the checkpoint arg; a passthrough stub leaks via Bun's global mock
+    // registry and breaks scraper-utils.test when connector tests run first.
+    filterByCheckpoint: <T extends { occurred_at: Date }>(
+      events: T[],
+      checkpoint: Record<string, unknown> | null
+    ): T[] => {
+      const lastTimestamp = checkpoint?.last_timestamp as string | undefined;
+      if (!lastTimestamp) return events;
+      const cutoff = new Date(lastTimestamp);
+      return events.filter((e) => e.occurred_at >= cutoff);
+    },
+    sleep: async () => {},
+    validatePublicUrl: (url: string) => url,
     requireBearerClient: notUsed('requireBearerClient'),
     paginateByCursor,
     paginateByOffset,
