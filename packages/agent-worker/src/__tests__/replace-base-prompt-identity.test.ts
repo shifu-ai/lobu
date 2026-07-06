@@ -186,10 +186,9 @@ describe("worker model observability", () => {
       string,
       RequestInit,
     ];
-    expect(firstCall[0]).toBe("https://toolbox.example.test/ingest");
+    expect(firstCall[0]).toBe("https://obs.example.test/ingest");
     expect(firstCall[1].headers).toEqual({
       "content-type": "application/json",
-      "x-internal-secret": "internal-secret",
     });
     const events = fetchMock.mock.calls.map((call) =>
       JSON.parse(String((call as unknown as [string, RequestInit])[1].body))
