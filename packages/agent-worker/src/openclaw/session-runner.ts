@@ -626,6 +626,7 @@ function obsTraceMetadata(trace: WorkerShifuTraceContext) {
 function emitWorkerObsEvent(input: {
   trace: WorkerShifuTraceContext;
   conversationId?: string;
+  sessionId?: string;
   agentId?: string;
   userId?: string;
   eventName: string;
@@ -638,6 +639,7 @@ function emitWorkerObsEvent(input: {
     traceId: input.trace.traceId,
     turnId: input.trace.turnId,
     conversationId: input.conversationId,
+    sessionId: input.sessionId,
     agentId: input.agentId,
     userId: input.userId,
     toolboxUserId: input.userId,
@@ -656,6 +658,7 @@ function emitWorkerObsEvent(input: {
 function emitWorkerJourneyObsEvent(input: {
   trace: WorkerShifuTraceContext;
   conversationId?: string;
+  sessionId?: string;
   agentId?: string;
   userId?: string;
   event: string;
@@ -672,6 +675,7 @@ function emitWorkerJourneyObsEvent(input: {
       ...(input.conversationId
         ? { conversation: { id: input.conversationId } }
         : {}),
+      ...(input.sessionId ? { session: { key: input.sessionId } } : {}),
       ...(input.agentId ? { agent: { id: input.agentId } } : {}),
       ...(input.userId ? { toolbox: { user_id: input.userId } } : {}),
       ...(input.durationMs !== undefined
@@ -705,6 +709,7 @@ function normalizeJourneyTraceStatus(status: string): JourneyTraceStatus {
 export function emitWorkerToolsRegisteredObsEvent(input: {
   trace: WorkerShifuTraceContext;
   conversationId?: string;
+  sessionId?: string;
   agentId?: string;
   userId?: string;
   toolCount: number;
@@ -723,6 +728,7 @@ export function emitWorkerToolsRegisteredObsEvent(input: {
   emitWorkerJourneyObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
+    sessionId: input.sessionId,
     agentId: input.agentId,
     userId: input.userId,
     event: "lobu.worker.tools_registered",
@@ -732,6 +738,7 @@ export function emitWorkerToolsRegisteredObsEvent(input: {
   emitWorkerObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
+    sessionId: input.sessionId,
     agentId: input.agentId,
     userId: input.userId,
     eventName: "lobu.worker.tools_registered",
@@ -749,6 +756,7 @@ export async function runModelWithObs(
   input: {
     trace: WorkerShifuTraceContext;
     conversationId?: string;
+    sessionId?: string;
     agentId?: string;
     userId?: string;
     provider: string;
@@ -761,6 +769,7 @@ export async function runModelWithObs(
   emitWorkerJourneyObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
+    sessionId: input.sessionId,
     agentId: input.agentId,
     userId: input.userId,
     event: "provider.call.started",
@@ -778,6 +787,7 @@ export async function runModelWithObs(
   emitWorkerObsEvent({
     trace: input.trace,
     conversationId: input.conversationId,
+    sessionId: input.sessionId,
     agentId: input.agentId,
     userId: input.userId,
     eventName: "provider.call.started",
@@ -797,6 +807,7 @@ export async function runModelWithObs(
       emitWorkerJourneyObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
+        sessionId: input.sessionId,
         agentId: input.agentId,
         userId: input.userId,
         event: "provider.call.completed",
@@ -813,6 +824,7 @@ export async function runModelWithObs(
       emitWorkerObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
+        sessionId: input.sessionId,
         agentId: input.agentId,
         userId: input.userId,
         eventName: "provider.call.completed",
@@ -829,6 +841,7 @@ export async function runModelWithObs(
       emitWorkerJourneyObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
+        sessionId: input.sessionId,
         agentId: input.agentId,
         userId: input.userId,
         event: "provider.call.completed",
@@ -846,6 +859,7 @@ export async function runModelWithObs(
       emitWorkerObsEvent({
         trace: input.trace,
         conversationId: input.conversationId,
+        sessionId: input.sessionId,
         agentId: input.agentId,
         userId: input.userId,
         eventName: "provider.call.completed",
@@ -866,6 +880,7 @@ export async function runModelWithObs(
     emitWorkerJourneyObsEvent({
       trace: input.trace,
       conversationId: input.conversationId,
+      sessionId: input.sessionId,
       agentId: input.agentId,
       userId: input.userId,
       event: "provider.call.completed",
@@ -884,6 +899,7 @@ export async function runModelWithObs(
     emitWorkerObsEvent({
       trace: input.trace,
       conversationId: input.conversationId,
+      sessionId: input.sessionId,
       agentId: input.agentId,
       userId: input.userId,
       eventName: "provider.call.completed",
@@ -957,6 +973,7 @@ export async function runAISession(
   emitWorkerJourneyObsEvent({
     trace: shifuTrace,
     conversationId,
+    sessionId: sessionKey,
     agentId,
     event: "lobu.worker.started",
     status: "started",
@@ -1631,6 +1648,7 @@ Use it when the user references past discussions or you need context.`);
   emitWorkerToolsRegisteredObsEvent({
     trace: shifuTrace,
     conversationId,
+    sessionId: sessionKey,
     agentId: agentId || context.agentId,
     userId: context.userId,
     toolCount: tools.length + customTools.length,
@@ -1863,6 +1881,7 @@ Use it when the user references past discussions or you need context.`);
         emitWorkerJourneyObsEvent({
           trace: shifuTrace,
           conversationId,
+          sessionId: sessionKey,
           agentId: agentId || context.agentId,
           userId: context.userId,
           event: "mcp.tool_call.started",
@@ -1897,6 +1916,7 @@ Use it when the user references past discussions or you need context.`);
         emitWorkerJourneyObsEvent({
           trace: shifuTrace,
           conversationId,
+          sessionId: sessionKey,
           agentId: agentId || context.agentId,
           userId: context.userId,
           event: "mcp.tool_call.completed",
@@ -2161,6 +2181,7 @@ Use it when the user references past discussions or you need context.`);
       {
         trace: shifuTrace,
         conversationId,
+        sessionId: sessionKey,
         agentId: agentId || context.agentId,
         userId: context.userId,
         provider,
