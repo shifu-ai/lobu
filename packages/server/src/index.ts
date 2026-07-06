@@ -33,7 +33,8 @@ import { isShuttingDown } from './lifecycle-state';
 import { restGetAuthProfileForRun, restGetFeedForRun } from './connector-run/routes';
 import { agentRoutes } from './lobu/agent-routes';
 import { clientRoutes, platformSchemaRoutes } from './lobu/client-routes';
-import { isLobuGatewayRunning } from './lobu/gateway';
+import { createLobuConfigStatusRoutes } from './lobu/config-status-routes';
+import { getLobuCoreServices, isLobuGatewayRunning } from './lobu/gateway';
 import { handleMcp } from './mcp-handler';
 import {
   restDeleteNotification,
@@ -652,6 +653,13 @@ app.get('/api/health', restHealth);
 // route handles its own auth without falling into the OAuth-bearer path.
 import { createSmokeRoutes } from './gateway/routes/internal/smoke';
 app.route('/api/internal/smoke', createSmokeRoutes());
+app.route(
+  '/internal/lobu-config',
+  createLobuConfigStatusRoutes({
+    token: process.env.LOBU_CONFIG_STATUS_TOKEN,
+    getSecretStore: () => getLobuCoreServices()?.getSecretStore?.(),
+  })
+);
 
 import {
   completeActionRun,
