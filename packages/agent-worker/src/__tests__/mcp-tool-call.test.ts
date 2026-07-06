@@ -550,7 +550,7 @@ describe("worker MCP tool registration observability", () => {
     settleFetch?.();
     await eventPromise;
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(settledBeforeIngestResponse).toBe(true);
   });
 

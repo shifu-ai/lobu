@@ -7,6 +7,11 @@ import {
 const OBS_ENV_KEYS = [
   "TOOLBOX_AGENT_OBSERVABILITY_URL",
   "TOOLBOX_INTERNAL_SECRET",
+  "SHIFU_AGENT_OBS_ENABLED",
+  "SHIFU_AGENT_OBS_INGEST_URL",
+  "SHIFU_AGENT_OBS_TOKEN",
+  "SHIFU_AGENT_OBS_SOURCE",
+  "SHIFU_AGENT_OBS_TIMEOUT_MS",
 ] as const;
 
 const originalEnv = new Map<string, string | undefined>();
@@ -135,6 +140,96 @@ describe("worker journey observability", () => {
       "content-type": "application/json",
       "x-internal-secret": "internal-secret",
     });
+  });
+
+  test("posts wrapper bodies with SHIFU Agent Obs env without legacy Toolbox secret", async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+    process.env.SHIFU_AGENT_OBS_TOKEN = "agent-obs-token";
+    process.env.SHIFU_AGENT_OBS_SOURCE = "lobu-worker";
+    const fetchMock = mock(async () => new Response("{}", { status: 202 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await emitJourneyObservabilityEvent({
+      event: "provider.call.started",
+      trace: {
+        traceId: "tr_worker_shifu_only",
+        journeyId: "line_reply",
+        actor: "worker",
+        traceSource: "incoming",
+      },
+      status: "started",
+      fields: {
+        provider: { name: "openai" },
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("https://obs.example.test/ingest");
+    expect(init.headers).toEqual({
+      "content-type": "application/json",
+      authorization: "Bearer agent-obs-token",
+    });
+    const body = JSON.parse(String(init.body));
+    expect(body).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      source: "lobu-worker",
+      payload: {
+        trace_id: "tr_worker_shifu_only",
+        journey_id: "line_reply",
+        event: "provider.call.started",
+        service: "lobu",
+        module: "agent-worker",
+        status: "started",
+        provider: { name: "openai" },
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("agent-obs-token");
+  });
+
+  test("prefers SHIFU Agent Obs transport over legacy Toolbox config when enabled", async () => {
+    process.env.TOOLBOX_AGENT_OBSERVABILITY_URL =
+      "https://toolbox.example.test/ingest";
+    process.env.TOOLBOX_INTERNAL_SECRET = "internal-secret";
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL = "https://obs.example.test/ingest";
+    const fetchMock = mock(async () => new Response("{}", { status: 202 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await emitJourneyObservabilityEvent({
+      event: "provider.call.completed",
+      trace: {
+        traceId: "tr_worker_dual_config",
+        journeyId: "line_reply",
+        actor: "worker",
+        traceSource: "incoming",
+      },
+      status: "ok",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe("https://obs.example.test/ingest");
+    expect(init.headers).toEqual({
+      "content-type": "application/json",
+    });
+    const body = JSON.parse(String(init.body));
+    expect(body).toMatchObject({
+      schemaVersion: "journey.trace.v1",
+      source: "lobu",
+      payload: {
+        trace_id: "tr_worker_dual_config",
+        event: "provider.call.completed",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("internal-secret");
   });
 
   test("does not fetch when endpoint or secret is missing", async () => {

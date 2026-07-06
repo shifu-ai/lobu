@@ -4,6 +4,7 @@ const logger = createLogger("journey-observability");
 
 const SCHEMA_VERSION = "journey.trace.v1";
 const DEFAULT_TIMEOUT_MS = 500;
+const DEFAULT_SOURCE = "lobu";
 const REDACTED = "[REDACTED]";
 const MAX_DEPTH = 6;
 const MAX_ARRAY_ITEMS = 50;
@@ -67,6 +68,17 @@ const SENSITIVE_VALUE_PATTERN =
 function trimOptional(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	return trimmed ? trimmed : undefined;
+}
+
+function isShifuAgentObsEnabled(): boolean {
+	const value = process.env.SHIFU_AGENT_OBS_ENABLED?.trim().toLowerCase();
+	return value === "true" || value === "1" || value === "yes" || value === "on";
+}
+
+function getTimeoutMs(): number {
+	const parsed = Number(process.env.SHIFU_AGENT_OBS_TIMEOUT_MS);
+	if (Number.isFinite(parsed) && parsed > 0) return parsed;
+	return DEFAULT_TIMEOUT_MS;
 }
 
 function isSensitiveKey(key: string | undefined): boolean {
@@ -140,7 +152,10 @@ function redactValue(
 	}
 }
 
-export function buildJourneyEventBody(input: JourneyEventPayload) {
+export function buildJourneyEventBody(
+	input: JourneyEventPayload,
+	source?: string
+) {
 	const payload = redactValue(
 		{
 			...input,
@@ -154,27 +169,57 @@ export function buildJourneyEventBody(input: JourneyEventPayload) {
 
 	return {
 		schemaVersion: SCHEMA_VERSION,
+		...(source ? { source } : {}),
 		payload,
 	};
+}
+
+function resolveJourneyIngestConfig():
+	| { endpoint: string; headers: Record<string, string>; source?: string }
+	| undefined {
+	const shifuEndpoint = trimOptional(process.env.SHIFU_AGENT_OBS_INGEST_URL);
+	if (isShifuAgentObsEnabled() && shifuEndpoint) {
+		const headers: Record<string, string> = {
+			"content-type": "application/json",
+		};
+		const token = trimOptional(process.env.SHIFU_AGENT_OBS_TOKEN);
+		if (token) headers.authorization = `Bearer ${token}`;
+		return {
+			endpoint: shifuEndpoint,
+			headers,
+			source: trimOptional(process.env.SHIFU_AGENT_OBS_SOURCE) ?? DEFAULT_SOURCE,
+		};
+	}
+
+	const toolboxEndpoint = trimOptional(
+		process.env.TOOLBOX_AGENT_OBSERVABILITY_URL
+	);
+	const toolboxSecret = trimOptional(process.env.TOOLBOX_INTERNAL_SECRET);
+	if (toolboxEndpoint && toolboxSecret) {
+		return {
+			endpoint: toolboxEndpoint,
+			headers: {
+				"content-type": "application/json",
+				"x-internal-secret": toolboxSecret,
+			},
+		};
+	}
+	return undefined;
 }
 
 export async function emitJourneyEvent(
 	input: JourneyEventPayload
 ): Promise<void> {
-	const endpoint = trimOptional(process.env.TOOLBOX_AGENT_OBSERVABILITY_URL);
-	const secret = trimOptional(process.env.TOOLBOX_INTERNAL_SECRET);
-	if (!endpoint || !secret) return;
+	const config = resolveJourneyIngestConfig();
+	if (!config) return;
 
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+	const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
 	try {
-		const response = await fetch(endpoint, {
+		const response = await fetch(config.endpoint, {
 			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-internal-secret": secret,
-			},
-			body: JSON.stringify(buildJourneyEventBody(input)),
+			headers: config.headers,
+			body: JSON.stringify(buildJourneyEventBody(input, config.source)),
 			signal: controller.signal,
 		});
 		if (!response.ok) {
