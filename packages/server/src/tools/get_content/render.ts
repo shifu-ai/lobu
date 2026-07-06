@@ -8,7 +8,7 @@ import type { ContentItem } from '@lobu/connector-sdk';
 import { parseJsonObject } from '@lobu/core';
 import { type DbClient, parsePgNumberArray, pgTextArray } from '../../db/client';
 import logger from '../../utils/logger';
-import { buildEventPermalink } from '../../utils/url-builder';
+import { buildResourcePermalink } from '../../utils/url-builder';
 import { resolveEntityRender } from '../../utils/default-entity-template';
 import { resolveEventKindDefinition } from '../../utils/event-kind-validation';
 import type { ContentRow } from './types';
@@ -172,12 +172,13 @@ export async function buildContentItems(opts: {
         : undefined,
       interaction_error: f.interaction_error ?? undefined,
       supersedes_event_id: f.supersedes_event_id == null ? null : Number(f.supersedes_event_id),
+      run_id: f.run_id == null ? null : Number(f.run_id),
       parent_context:
         parentContextMap.get(f.origin_parent_id as string) ??
         (f.parent_context as ContentItem['parent_context']) ??
         null,
       root_context: f.root_context as ContentItem['root_context'],
-      permalink: ownerSlug ? buildEventPermalink(ownerSlug, f.id, baseUrl) : null,
+      permalink: buildResourcePermalink(ownerSlug, { kind: 'event', eventId: f.id }, baseUrl) ?? null,
     };
   });
 
