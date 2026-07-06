@@ -48,6 +48,14 @@ const SECRET_PLACEHOLDER_TTL_SECONDS = (() => {
  */
 const GRANT_SYNC_CACHE_MAX = 1000;
 
+const WORKER_SAFE_OBSERVABILITY_ENV_VARS = [
+  "SHIFU_AGENT_OBS_ENABLED",
+  "SHIFU_AGENT_OBS_INGEST_URL",
+  "SHIFU_AGENT_OBS_TOKEN",
+  "SHIFU_AGENT_OBS_SOURCE",
+  "SHIFU_AGENT_OBS_TIMEOUT_MS",
+] as const;
+
 interface DeploymentIdentity {
   conversationId: string;
   channelId?: string;
@@ -702,6 +710,13 @@ export abstract class BaseDeploymentManager {
         envVars.NO_PROXY = `${envVars.NO_PROXY},${otlpUrl.hostname}`;
       } catch {
         envVars.NO_PROXY = `${envVars.NO_PROXY},tempo`;
+      }
+    }
+
+    for (const key of WORKER_SAFE_OBSERVABILITY_ENV_VARS) {
+      const value = process.env[key];
+      if (value !== undefined) {
+        envVars[key] = value;
       }
     }
 

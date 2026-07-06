@@ -143,6 +143,12 @@ const ENV_KEYS = [
   "WORKER_ENV_FOO",
   "WORKER_ENV_BAR",
   "MY_SECRET_KEY",
+  "SHIFU_AGENT_OBS_ENABLED",
+  "SHIFU_AGENT_OBS_INGEST_URL",
+  "SHIFU_AGENT_OBS_TOKEN",
+  "SHIFU_AGENT_OBS_SOURCE",
+  "SHIFU_AGENT_OBS_TIMEOUT_MS",
+  "SHIFU_AGENT_OBS_UNRELATED",
 ];
 
 beforeEach(() => {
@@ -612,6 +618,42 @@ describe("WORKER_ENV_* env-var passthrough", () => {
     } finally {
       mkdirSpy.mockRestore();
       delete process.env.WORKER_ENV_BAR;
+    }
+  });
+
+  test("SHIFU_AGENT_OBS_* worker-safe vars are forwarded explicitly", async () => {
+    process.env.SHIFU_AGENT_OBS_ENABLED = "true";
+    process.env.SHIFU_AGENT_OBS_INGEST_URL =
+      "https://observability.example.test/ingest";
+    process.env.SHIFU_AGENT_OBS_TOKEN = "obs-token";
+    process.env.SHIFU_AGENT_OBS_SOURCE = "lobu-test";
+    process.env.SHIFU_AGENT_OBS_TIMEOUT_MS = "2500";
+    process.env.SHIFU_AGENT_OBS_UNRELATED = "should-not-appear";
+    const mgr = makeManager();
+    const mkdirSpy = spyOn(fs, "mkdirSync").mockReturnValue(undefined);
+    try {
+      const msg = makePayload();
+      await mgr.ensureDeployment("worker-1", "user-1", "user-1", msg);
+
+      const spawnOpts = mockSpawn.mock.calls.at(-1)?.[2] as
+        | { env?: Record<string, string> }
+        | undefined;
+      expect(spawnOpts?.env?.SHIFU_AGENT_OBS_ENABLED).toBe("true");
+      expect(spawnOpts?.env?.SHIFU_AGENT_OBS_INGEST_URL).toBe(
+        "https://observability.example.test/ingest"
+      );
+      expect(spawnOpts?.env?.SHIFU_AGENT_OBS_TOKEN).toBe("obs-token");
+      expect(spawnOpts?.env?.SHIFU_AGENT_OBS_SOURCE).toBe("lobu-test");
+      expect(spawnOpts?.env?.SHIFU_AGENT_OBS_TIMEOUT_MS).toBe("2500");
+      expect(spawnOpts?.env?.SHIFU_AGENT_OBS_UNRELATED).toBeUndefined();
+    } finally {
+      mkdirSpy.mockRestore();
+      delete process.env.SHIFU_AGENT_OBS_ENABLED;
+      delete process.env.SHIFU_AGENT_OBS_INGEST_URL;
+      delete process.env.SHIFU_AGENT_OBS_TOKEN;
+      delete process.env.SHIFU_AGENT_OBS_SOURCE;
+      delete process.env.SHIFU_AGENT_OBS_TIMEOUT_MS;
+      delete process.env.SHIFU_AGENT_OBS_UNRELATED;
     }
   });
 
