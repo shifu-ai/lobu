@@ -1,5 +1,9 @@
-import type { AgentConfigStore, AgentMetadata, AgentSettings } from "@lobu/core";
-import { getStoredCredential } from "../gateway/routes/internal/device-auth.js";
+import {
+	createBuiltinSecretRef,
+	type AgentConfigStore,
+	type AgentMetadata,
+	type AgentSettings,
+} from "@lobu/core";
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import {
 	canonicalMcpIdForConnector,
@@ -64,6 +68,11 @@ interface LobuConfigStatusServiceOptions {
 interface CredentialStatusInspection {
 	authorized: boolean;
 	credentialError: ShifuMcpStatusReasonCode | null;
+}
+
+interface StoredCredentialRecord {
+	accessToken: string;
+	expiresAt: number;
 }
 
 export class LobuConfigStatusError extends Error {
@@ -185,11 +194,23 @@ async function statusFor(
 	};
 }
 
-function credentialErrorForMessage(message: string): ShifuMcpStatusReasonCode {
-	if (message.includes("token_expired")) return "token_expired";
-	if (message.includes("refresh")) return "token_refresh_failed";
-	if (message.includes("scope")) return "scope_missing";
-	return "provider_error";
+function credentialSecretRef(agentId: string, userId: string, mcpId: string): string {
+	return createBuiltinSecretRef(
+		encodeURIComponent(`mcp-auth/${agentId}/${userId}/${mcpId}/credential`),
+	);
+}
+
+function parseStoredCredential(value: string): StoredCredentialRecord | null {
+	const parsed: unknown = JSON.parse(value);
+	if (!isRecord(parsed)) return null;
+	if (typeof parsed.accessToken !== "string") return null;
+	if (typeof parsed.expiresAt !== "number" || !Number.isFinite(parsed.expiresAt)) {
+		return null;
+	}
+	return {
+		accessToken: parsed.accessToken,
+		expiresAt: parsed.expiresAt,
+	};
 }
 
 async function inspectCredentialStatus(input: {
@@ -204,23 +225,20 @@ async function inspectCredentialStatus(input: {
 		return { authorized: false, credentialError: "runtime_status_unavailable" };
 	}
 	try {
-		const credential = await getStoredCredential(
-			secretStore,
-			input.agentId,
-			input.userId,
-			input.mcpId,
+		const storedValue = await secretStore.get(
+			credentialSecretRef(input.agentId, input.userId, input.mcpId),
 		);
-		if (!credential) return { authorized: false, credentialError: null };
+		if (!storedValue) return { authorized: false, credentialError: null };
+		const credential = parseStoredCredential(storedValue);
+		if (!credential) {
+			return { authorized: false, credentialError: "provider_error" };
+		}
 		if (credential.expiresAt > input.now()) {
 			return { authorized: true, credentialError: null };
 		}
 		return { authorized: false, credentialError: "token_expired" };
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return {
-			authorized: false,
-			credentialError: credentialErrorForMessage(message),
-		};
+	} catch {
+		return { authorized: false, credentialError: "provider_error" };
 	}
 }
 

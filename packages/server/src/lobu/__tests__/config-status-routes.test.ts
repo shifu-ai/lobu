@@ -11,6 +11,8 @@ import type {
 const TOKEN = "test-service-token";
 const AGENT_ID = "shifu-u-abc123";
 const USER_ID = "toolbox-user-1";
+const SECRET_NAME = `mcp-auth/${AGENT_ID}/${USER_ID}/notion/credential`;
+const SECRET_REF = `secret://${encodeURIComponent(SECRET_NAME)}`;
 
 function buildStore(options: {
 	metadata?: AgentMetadata | null;
@@ -322,8 +324,15 @@ describe("Lobu config current status routes", () => {
 
 	test("returns needs_reauth when credential lookup reports token_expired", async () => {
 		const secretStore = buildSecretStore({
-			get: mock(async () => {
-				throw new Error("token_expired");
+			get: mock(async (ref) => {
+				expect(ref).toBe(SECRET_REF);
+				return JSON.stringify({
+					accessToken: "expired-access-token",
+					refreshToken: "expired-refresh-token",
+					expiresAt: Date.now() - 60_000,
+					clientId: "test-client",
+					tokenUrl: "https://oauth.example.test/token",
+				});
 			}),
 		});
 		const app = buildApp(
@@ -355,6 +364,46 @@ describe("Lobu config current status routes", () => {
 				authorizationUrlAvailable: true,
 			}),
 		);
+	});
+
+	test("treats malformed credential JSON as provider_error without leaking secret details", async () => {
+		const secretStore = buildSecretStore({
+			get: mock(async (ref) => {
+				expect(ref).toBe(SECRET_REF);
+				return '{"accessToken":"top-secret-token"';
+			}),
+		});
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata(),
+				settings: {
+					mcpServers: {
+						notion: { url: "https://mcp.notion.test/mcp" },
+					},
+				},
+			}),
+			{ secretStore },
+		);
+
+		const response = await app.request(
+			`/internal/lobu-config/current?agentId=${AGENT_ID}&userId=${USER_ID}`,
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "notion",
+				authorized: false,
+				oauthStatus: "unknown",
+				reasonCode: "provider_error",
+				reauthorizationAvailable: true,
+				authorizationUrlAvailable: true,
+			}),
+		);
+		expect(JSON.stringify(body)).not.toContain(SECRET_NAME);
+		expect(JSON.stringify(body)).not.toContain("top-secret-token");
 	});
 
 	test("marks runtime connectors outside Toolbox UI as unmanaged", async () => {
