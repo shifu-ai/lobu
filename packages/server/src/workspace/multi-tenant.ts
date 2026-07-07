@@ -309,7 +309,14 @@ export class MultiTenantProvider implements WorkspaceProvider {
         LIMIT 1
       `;
       const directAuthRole = roleRows[0]?.role as string | undefined;
-      if (!directAuthRole || !['owner', 'admin'].includes(directAuthRole)) {
+      // SHIFU FORK: member-owned personal agents get a degraded (non-admin)
+      // MCP session so coworkers can use whitelisted self-service tools.
+      // Upstream assumes agent owner == org operator; ShiFu's personal-agent
+      // topology hangs agents off member-level coworkers.
+      const memberDirectAuthEnabled = process.env.SHIFU_MEMBER_AGENT_DIRECT_AUTH === '1';
+      const isAdminRole = Boolean(directAuthRole && ['owner', 'admin'].includes(directAuthRole));
+      const isMemberRole = directAuthRole === 'member';
+      if (!isAdminRole && !(memberDirectAuthEnabled && isMemberRole)) {
         return c.json(
           { error: 'insufficient_scope', error_description: 'Agent owner is not an organization admin' },
           403
@@ -320,7 +327,10 @@ export class MultiTenantProvider implements WorkspaceProvider {
           userId: directAuthUserId,
           organizationId: requestedOrgId,
           clientId: 'lobu-worker',
-          scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
+          scopes: isAdminRole
+            ? ['mcp:read', 'mcp:write', 'mcp:admin']
+            : ['mcp:read', 'mcp:write'],
+          agentId: tokenData.agentId,
           expiresAt: Math.floor((tokenData.timestamp + 2 * 60 * 60 * 1000) / 1000),
           tokenType: 'pat',
         },

@@ -215,6 +215,13 @@ export interface AuthInfo {
    * (Mac/iOS bridges register theirs on first poll).
    */
   workerId?: string | null;
+  // SHIFU FORK: the worker-token direct-auth branch (multi-tenant.ts) mints
+  // an in-process MCP session on behalf of the agent's owning user, but
+  // downstream tool handlers (internal-tool allowlisting, per-agent quota)
+  // need to know which *agent* is acting, not just which user owns it.
+  // Threaded from `WorkerTokenData.agentId` — see
+  // `MultiTenantProvider.resolveAuth`'s worker direct-auth branch.
+  agentId?: string;
 }
 
 // ============================================

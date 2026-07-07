@@ -56,7 +56,12 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     tokenOrganizationId: mcpAuthInfo?.organizationId ?? null,
     userId: mcpAuthInfo?.userId || c.var.session?.userId || null,
     memberRole: c.var.memberRole,
-    agentId: null,
+    // SHIFU FORK: threaded from the worker-token direct-auth branch in
+    // multi-tenant.ts (`mcpAuthInfo.agentId`) so per-agent tool policy
+    // (internal-tool allowlisting, quotas) knows which agent is acting.
+    // Previously hardcoded null — every direct-auth session looked
+    // agent-less to downstream tool handlers.
+    agentId: mcpAuthInfo?.agentId ?? null,
     requestedAgentId: null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
