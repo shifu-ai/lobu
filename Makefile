@@ -23,7 +23,7 @@ help:
 	@echo "  make task-clean NAME=<name> [FORCE=1]      - Remove the worktree, both branches, and the Lobu context (refuses if there's uncommitted/unpushed work unless FORCE=1)"
 	@echo "  make e2e-browser [RESTART=1]               - Launch/reuse the stable 'owletto' Chrome harness (extension from this worktree) for Chrome e2e"
 	@echo "  make bump SUBMODULE=<path> [TARGET=<ref>]  - Lightweight worktree + commit + PR for a trivial submodule pointer bump (skips bun install, .env, ports)"
-	@echo "  make review [BASE=<branch>]                - Run local review (typecheck+unit+integration + pi); posts pi-review status and PR comment"
+	@echo "  make review [BASE=<branch>]                - Run local review (typecheck+unit+integration + Claude); posts pi-review status and PR comment"
 
 # Strict typecheck — mirrors the Dockerfile so local matches CI. Catches
 # what `build-packages` (relaxed, bundler-only) misses.
@@ -169,13 +169,16 @@ test-integration:
 	@: $${DATABASE_URL?Set DATABASE_URL=postgres://… (with pgvector) before running}
 	@echo "🧪 Integration suite (Postgres at $${DATABASE_URL%%@*}@…)…"
 	@cd packages/server && node ../../node_modules/.bin/vitest run --reporter=default
-	@# Each gateway __tests__ dir in its own process: bun has no per-file
+	@# Each gateway test file in its own process: bun has no per-file
 	@# isolation and the suites aren't mutually hermetic, so a shared-process
 	@# co-run leaks DB/module state across files (see #1238). Fail if find
 	@# matches nothing, so a path typo can't silently run zero tests.
 	@dirs=$$(find packages/server/src/gateway -type d -name __tests__ | sort); \
 		[ -n "$$dirs" ] || { echo "no gateway __tests__ dirs found" >&2; exit 1; }; \
-		rc=0; for d in $$dirs; do echo ">> bun test $$d"; bun test "$$d" || rc=1; done; exit $$rc
+		rc=0; for d in $$dirs; do \
+			files=$$(find "$$d" -maxdepth 1 -type f -name '*.test.ts' | sort); \
+			for f in $$files; do echo ">> bun test $$f"; bun test "$$f" || rc=1; done; \
+		done; exit $$rc
 	@bun test packages/server/src/lobu/__tests__ packages/server/src/scheduled packages/server/src/workspace/__tests__
 	@bun test packages/connector-worker/integration-tests
 
@@ -250,7 +253,7 @@ clean-test-pg:
 	@echo "✅ Test-PG clusters + dirs reaped"
 
 # --- Local AI review gate ---------------------------------------------------
-# Local-only: runs the deterministic suites in cwd, then invokes pi against
+# Local-only: runs the deterministic suites in cwd, then invokes Claude CLI against
 # `git diff <BASE>...HEAD` (BASE defaults to main; override with BASE=<branch>
 # env or `--base <branch>` arg). Prints a JSON verdict on the last line. If
 # GitHub auth is available, posts a pi-review commit status; if the current
