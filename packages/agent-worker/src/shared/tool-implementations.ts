@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createLogger, ensureBaseUrl } from "@lobu/core";
 import FormData from "form-data";
+import { normalizeToolTextForContext } from "../openclaw/context-pressure";
 import { normalizeMcpResultContent } from "../openclaw/mcp-result-normalizer";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
 import type { WorkerShifuTraceContext } from "./journey-trace";
@@ -1218,6 +1219,15 @@ export async function callMcpTool(
   options: { shifuTrace?: WorkerShifuTraceContext } = {}
 ): Promise<TextResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
+    const normalizeResultText = (text: string) =>
+      normalizeToolTextForContext({
+        workspaceDir: gw.workspaceDir,
+        text,
+        source: "mcp",
+        runId: gw.conversationId,
+        toolLabel: `${mcpId}/${toolName}`,
+      });
+
     let response: Response;
     const wantsJson = TOOLS_REQUESTING_JSON_FORMAT.has(toolName);
     try {
@@ -1282,9 +1292,11 @@ export async function callMcpTool(
     if (!response.ok || data.isError) {
       const errorMsg =
         data.error || contentText || `${toolName} failed (${response.status})`;
-      return textResult(`Error: ${errorMsg}`);
+      return textResult(await normalizeResultText(`Error: ${errorMsg}`));
     }
 
-    return textResult(contentText || `${toolName} completed.`);
+    return textResult(
+      await normalizeResultText(contentText || `${toolName} completed.`)
+    );
   });
 }

@@ -278,6 +278,28 @@ describe("callMcpTool", () => {
     ]);
   });
 
+  test("large MCP text result is replaced with a context artifact descriptor", async () => {
+    const workspaceDir = mkdtempSync(join(tmpdir(), "lobu-mcp-large-result-"));
+    const localGw: GatewayParams = { ...gw, workspaceDir };
+    try {
+      globalThis.fetch = mock(async () =>
+        Response.json({
+          content: [{ type: "text", text: "X".repeat(120_000) }],
+          isError: false,
+        })
+      ) as unknown as typeof fetch;
+
+      const result = await callMcpTool(localGw, "docs", "read_big_doc", {});
+      const text = extractText(result);
+
+      expect(text.length).toBeLessThan(4_000);
+      expect(text).toContain("ctx_art_");
+      expect(text).toContain("artifact_read");
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
   test("sends correct Content-Type header", async () => {
     let capturedContentType = "";
     globalThis.fetch = mock(

@@ -96,9 +96,11 @@ async function writeArtifact(params: {
   };
 }
 
-function renderArtifactDescriptor(artifact: ContextArtifactDescriptor): string {
+export function renderArtifactDescriptor(
+  artifact: ContextArtifactDescriptor
+): string {
   return [
-    `The user provided large content stored as artifact ${artifact.artifactId}.`,
+    `Large content was stored as artifact ${artifact.artifactId}.`,
     "Use artifact_read with chunk selectors to inspect it. Do not assume unseen chunks.",
     `Kind: ${artifact.kind}`,
     `Source: ${artifact.source}`,
@@ -146,6 +148,34 @@ export async function prepareUserPromptForContext(params: {
     promptText: renderArtifactDescriptor(artifact),
     artifacts: [artifact],
   };
+}
+
+export async function normalizeToolTextForContext(params: {
+  workspaceDir?: string;
+  text: string;
+  source: "mcp" | "internal";
+  runId: string;
+  toolLabel: string;
+  inlineTokenCap?: number;
+}): Promise<string> {
+  const inlineTokenCap = params.inlineTokenCap ?? 8_000;
+  if (
+    estimateContextTokens(params.text, 0) <= inlineTokenCap ||
+    !params.workspaceDir
+  ) {
+    return params.text;
+  }
+
+  const artifact = await writeArtifact({
+    workspaceDir: params.workspaceDir,
+    text: params.text,
+    kind: "tool_result",
+    source: params.source,
+    runId: params.runId,
+    title: `Large tool result from ${params.toolLabel}`,
+  });
+
+  return renderArtifactDescriptor(artifact);
 }
 
 export async function readContextArtifactChunk(params: {
