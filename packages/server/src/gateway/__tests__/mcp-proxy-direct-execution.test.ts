@@ -43,6 +43,10 @@ class InMemoryWritableStore implements WritableSecretStore {
 describe("McpProxy executeToolDirect", () => {
   test("initializes a session before calling sessionful MCP tools", async () => {
     const originalFetch = globalThis.fetch;
+    const upstreamContent = [
+      { type: "text", text: "hello" },
+      { type: "image", data: "base64...", mimeType: "image/png" },
+    ];
     const proxy = new McpProxy({
       getHttpServer: async (id: string) => ({
         id,
@@ -76,7 +80,7 @@ describe("McpProxy executeToolDirect", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { content: [{ type: "text", text: "sessionful-result" }], isError: false },
+          result: { content: upstreamContent, isError: false },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } }
       );
@@ -96,7 +100,7 @@ describe("McpProxy executeToolDirect", () => {
       );
 
       expect(result.isError).toBe(false);
-      expect(result.content[0].text).toBe("sessionful-result");
+      expect(result.content).toEqual(upstreamContent);
       expect(methods).toEqual(["initialize", "notifications/initialized", "tools/call"]);
     } finally {
       globalThis.fetch = originalFetch;
