@@ -180,6 +180,32 @@ describe("buildToolUseEventPayload", () => {
     });
   });
 
+  test("redacts malformed image data without mimeType from summarized raw replies", () => {
+    const payload = buildToolUseEventPayload({
+      toolCallId: "docs_image_malformed",
+      toolName: "gws_docs_batch_update",
+      args: { documentId: "doc-image", requests: [] },
+      result: {
+        content: [{ type: "image", data: "bGVha3k=" }],
+        isError: false,
+      },
+      isError: false,
+    });
+
+    const summaryJson = JSON.stringify(payload.result_summary);
+    expect(summaryJson).not.toContain("bGVha3k=");
+    expect(summaryJson).not.toContain('"data"');
+    expect(payload.result_summary?.raw_reply).toEqual({
+      content: [
+        {
+          type: "image",
+          dataLength: 8,
+        },
+      ],
+      isError: false,
+    });
+  });
+
   test("surfaces worker 'Error:' text as result_summary.error even when isError is false", () => {
     // Mirrors the real production shape: the worker's
     // withErrorHandling/textResult convention swallows the gateway proxy's

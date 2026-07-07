@@ -205,22 +205,21 @@ function sanitizeToolUseSummaryValue(value: unknown): unknown {
   }
 
   const record = value as Record<string, unknown>;
-  if (
-    record.type === "image" &&
-    typeof record.data === "string" &&
-    typeof record.mimeType === "string"
-  ) {
+  if (record.type === "image" && typeof record.data === "string") {
     const metadata: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(record)) {
       if (key === "data") continue;
       metadata[key] = child;
     }
-    return {
+    const sanitizedImage: Record<string, unknown> = {
       ...sanitizeRecord(metadata),
       type: "image",
-      mimeType: record.mimeType,
       dataLength: record.data.length,
     };
+    if (typeof record.mimeType === "string") {
+      sanitizedImage.mimeType = record.mimeType;
+    }
+    return sanitizedImage;
   }
 
   return sanitizeRecord(record);

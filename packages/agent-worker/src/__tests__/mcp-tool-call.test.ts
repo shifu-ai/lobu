@@ -236,6 +236,24 @@ describe("callMcpTool", () => {
     expect(text).toContain("line two");
   });
 
+  test("pure text content returns one joined text block", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({
+        content: [
+          { type: "text", text: "line one" },
+          { type: "text", text: "line two" },
+        ],
+        isError: false,
+      })
+    ) as unknown as typeof fetch;
+
+    const result = await callMcpTool(gw, "lobu", "multi_content", {});
+
+    expect(result.content).toEqual([
+      { type: "text", text: "line one\nline two" },
+    ]);
+  });
+
   test("MCP response with image block is preserved", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
