@@ -338,6 +338,26 @@ describe('checkToolAccess', () => {
   });
 
   it('allows REST compatibility paths to reach internal tools subject to access', () => {
+    // SHIFU FORK: `manage_entity` isn't on the member-internal whitelist
+    // (see execute.ts's MEMBER_INTERNAL_TOOL_WHITELIST), so a non-admin-scoped
+    // session reaching it via REST is now also gated — covered by the
+    // `scopes: ['mcp:write']` case below. This case keeps proving REST/legacy
+    // callers with no meaningful scope concept (`scopes: null`, or an
+    // explicit admin scope) stay unrestricted.
+    expect(() =>
+      checkToolAccess('manage_entity', { action: 'create' }, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:write', 'mcp:admin'],
+        allowInternalTools: true,
+      })
+    ).not.toThrow();
+  });
+
+  it('gates non-whitelisted internal tools for member-scoped REST/PAT sessions, not just MCP', () => {
+    // See member-internal-whitelist.test.ts for the full whitelist matrix;
+    // this pins the specific regression this gate would otherwise cause for
+    // the "REST compatibility path" scenario above.
     expect(() =>
       checkToolAccess('manage_entity', { action: 'create' }, {
         ...baseAuth,
@@ -345,27 +365,54 @@ describe('checkToolAccess', () => {
         scopes: ['mcp:write'],
         allowInternalTools: true,
       })
-    ).not.toThrow();
+    ).toThrow(/requires organization admin access/i);
   });
 
-  it.each(['list_watchers', 'get_watcher', 'read_knowledge'])(
-    'hides %s from external MCP but keeps it reachable via REST',
+  it.each(['list_watchers', 'get_watcher'])(
+    'hides %s from external MCP, and now also requires admin scope via REST (not whitelisted)',
     (toolName) => {
       // External MCP — must look like an unknown tool to the caller.
       expect(() =>
         checkToolAccess(toolName, {}, { ...baseAuth, memberRole: 'owner' })
       ).toThrow(`Tool not found: ${toolName}`);
 
-      // REST proxy — frontend reaches the same handler.
+      // REST proxy, member scope (no mcp:admin) — blocked by the whitelist gate.
       expect(() =>
         checkToolAccess(
           toolName,
           {},
           { ...baseAuth, memberRole: 'member', allowInternalTools: true }
         )
+      ).toThrow(/requires organization admin access/i);
+
+      // REST proxy, admin scope — unrestricted, same as before this gate existed.
+      expect(() =>
+        checkToolAccess(toolName, {}, {
+          ...baseAuth,
+          memberRole: 'member',
+          scopes: ['mcp:admin'],
+          allowInternalTools: true,
+        })
       ).not.toThrow();
     }
   );
+
+  it('hides read_knowledge from external MCP but keeps it reachable via REST for member scope (whitelisted)', () => {
+    // External MCP — must look like an unknown tool to the caller.
+    expect(() =>
+      checkToolAccess('read_knowledge', {}, { ...baseAuth, memberRole: 'owner' })
+    ).toThrow('Tool not found: read_knowledge');
+
+    // REST proxy, member scope (no mcp:admin) — allowed, `read_knowledge` is
+    // on MEMBER_INTERNAL_TOOL_WHITELIST.
+    expect(() =>
+      checkToolAccess(
+        'read_knowledge',
+        {},
+        { ...baseAuth, memberRole: 'member', allowInternalTools: true }
+      )
+    ).not.toThrow();
+  });
 
   it('lets members run query_sql (read-tier; auth/identity tables gated per-query, not at the tool gate)', () => {
     expect(() =>

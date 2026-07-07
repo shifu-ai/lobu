@@ -28,8 +28,13 @@ import {
   clearInMemoryMcpSessionsForTests as clearInMemoryMcpSessionsForTestsShared,
   mcpSessionMap,
 } from './mcp-session-state';
-import { type AuthContext, executeTool, extractAuthContext } from './tools/execute';
-import { getAllTools } from './tools/registry';
+import {
+  type AuthContext,
+  executeTool,
+  extractAuthContext,
+  MEMBER_INTERNAL_TOOL_WHITELIST,
+} from './tools/execute';
+import { getAllTools, getTool } from './tools/registry';
 import { formatToolResult } from './utils/markdown-formatter';
 import { getConfiguredPublicOrigin } from './utils/public-origin';
 import { buildWorkspaceInstructions } from './utils/workspace-instructions';
@@ -146,7 +151,23 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
       publicOnly,
       maxAccessLevel,
     });
-    const allTools = staticTools.map((t) => ({
+    // SHIFU FORK: member-scoped sessions only see whitelisted internal
+    // tools. "Privileged" mirrors `checkToolAccess`'s role-OR-scope gate in
+    // execute.ts (role and OAuth scope are independent — an owner-role
+    // session can hold a scope-limited token, and vice versa via an
+    // mcp:admin-scoped client), reusing `roleAccessLevel`/`scopeAccessLevel`
+    // already computed above rather than re-deriving from `authCtx` a second
+    // time. Doesn't touch `getAllTools`'s own memoize cache; this filters its
+    // already-computed output per request.
+    const isPrivileged = roleAccessLevel === 'admin' || scopeAccessLevel === 'admin';
+    const memberScoped = includeInternalTools && !isPrivileged;
+    const staticToolsFiltered = memberScoped
+      ? staticTools.filter((t) => {
+          const src = getTool(t.name);
+          return !src?.internal || MEMBER_INTERNAL_TOOL_WHITELIST.has(t.name);
+        })
+      : staticTools;
+    const allTools = staticToolsFiltered.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,

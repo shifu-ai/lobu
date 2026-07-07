@@ -81,6 +81,15 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
  */
 const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations']);
 
+// SHIFU FORK: internal tools a member-scoped (non-admin) MCP session may use.
+// Default-deny: new internal tools stay admin-only until added here.
+export const MEMBER_INTERNAL_TOOL_WHITELIST: ReadonlySet<string> = new Set([
+  'manage_schedules',
+  'save_memory',
+  'search_memory',
+  'read_knowledge',
+]);
+
 export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthContext): void {
   if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
     if (!authCtx.isAuthenticated) {
@@ -109,6 +118,34 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   }
   if (tool.internal && !authCtx.allowInternalTools) {
     throw new Error(`Tool not found: ${toolName}`);
+  }
+
+  // SHIFU FORK: member-scoped (non-admin) sessions that DO reach internal
+  // tools (REST proxy, or a degraded direct-auth MCP session — see
+  // multi-tenant.ts's member branch) are further narrowed to the whitelist
+  // above.
+  //
+  // "Privileged" is role-OR-scope, not scope alone: plenty of legitimate
+  // owner/admin-role REST/OAuth traffic (e.g. the frontend's `resolve_path`
+  // calls) carries an OAuth token scoped to only `mcp:read mcp:write` — org
+  // role and OAuth grant breadth are independent, and gating on scope alone
+  // would 403 that pre-existing, non-agent traffic. Scope-only privilege
+  // (`mcp:admin` with no/any role) still bypasses too, so an org-admin-scoped
+  // OAuth client works regardless of the caller's org role. Only a session
+  // that is neither owner/admin by role NOR admin by scope — the actual
+  // member-owned direct-auth agent session from multi-tenant.ts — hits the
+  // whitelist.
+  const isPrivilegedRole = authCtx.memberRole === 'owner' || authCtx.memberRole === 'admin';
+  if (
+    tool.internal &&
+    authCtx.allowInternalTools &&
+    !isPrivilegedRole &&
+    !hasRequiredMcpScope('admin', authCtx.scopes) &&
+    !MEMBER_INTERNAL_TOOL_WHITELIST.has(toolName)
+  ) {
+    throw new Error(
+      `Tool '${toolName}' requires organization admin access. Member sessions may use: ${[...MEMBER_INTERNAL_TOOL_WHITELIST].join(', ')}.`
+    );
   }
 
   const isReadOnly = tool.annotations?.readOnlyHint === true;
