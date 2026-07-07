@@ -436,6 +436,11 @@ export interface ThreadResponsePayload {
    * drained by a different replica than the one that buffered the deltas.
    */
   finalText?: string;
+  /**
+   * Raw error message. For provider errors this is relayed verbatim as the
+   * user-facing body (the provider's own text already says the useful thing,
+   * e.g. the quota reset time); `errorCode` only selects the CTA link.
+   */
   error?: string;
   errorCode?: string;
   timestamp: number;

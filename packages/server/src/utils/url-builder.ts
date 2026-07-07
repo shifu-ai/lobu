@@ -4,6 +4,7 @@
  * Generates consistent URLs for the frontend application.
  */
 
+import { AGENT_ERRORS, type AgentErrorCode } from '@lobu/core';
 import { getWorkspaceProvider } from '../workspace';
 import {
   getConfiguredPublicOrigin,
@@ -36,6 +37,73 @@ export async function getOrganizationSlug(
 ): Promise<string | null> {
   if (!organizationId) return null;
   return getWorkspaceProvider().getOrgSlug(organizationId);
+}
+
+/**
+ * Build the agent's admin-settings URL — `<webOrigin>/<orgSlug>/agents/<agentId>`
+ * — the CTA target for provider/model errors (connect a provider, choose a
+ * model, reconnect credentials). Returns null when any required piece is
+ * missing; callers fall back to a non-linked message.
+ *
+ * `publicGatewayUrl` is the gateway base, which in embedded mode carries the
+ * `/lobu` path suffix (the gateway is mounted at `/lobu` under the web app).
+ * Admin UI routes live at the web origin (`/<slug>/agents/...`) NOT under
+ * `/lobu`, so a trailing `/lobu` is stripped before composing the link.
+ */
+export async function buildAgentSettingsUrl(
+  publicGatewayUrl: string | undefined,
+  organizationId: string | undefined,
+  agentId: string | undefined
+): Promise<string | null> {
+  if (!publicGatewayUrl || !organizationId || !agentId) return null;
+  const slug = await getOrganizationSlug(organizationId).catch(() => null);
+  if (!slug) return null;
+  const webOrigin = publicGatewayUrl.replace(/\/+$/, '').replace(/\/lobu$/, '');
+  return `${webOrigin}/${slug}/agents/${encodeURIComponent(agentId)}`;
+}
+
+export interface RenderedAgentError {
+  /** User-facing body (no link appended — carry `ctaUrl` separately). */
+  text: string;
+  /** Resolved CTA link, or null when the code has no CTA / it couldn't build. */
+  ctaUrl: string | null;
+  /** Button/link label for `ctaUrl`. */
+  ctaLabel?: string;
+  /** True when this code is intentionally silent (no user message emitted). */
+  silent: boolean;
+}
+
+/**
+ * THE renderer: turn an `AgentErrorCode` + the raw provider message into the
+ * user-facing body and a resolved CTA link. Every surface — Slack/Telegram
+ * bridge, browser SSE — calls this so the same error reads identically
+ * everywhere.
+ *
+ * The body is deliberately thin: for provider errors the catalog has no text, so
+ * we relay the provider's OWN message verbatim (it already says the useful thing
+ * — the reset time, the bad model id). For errors we synthesize (worker/config),
+ * the catalog carries the text. The code's only job is to pick the CTA *kind*;
+ * this function resolves that kind to a concrete URL (the only layer that knows
+ * the org slug / agent id / public origin). `resolveSettingsUrl` is injected so
+ * this stays free of the per-surface plumbing.
+ */
+export async function renderAgentError(
+  code: AgentErrorCode,
+  providerMessage: string | undefined,
+  resolveSettingsUrl: () => Promise<string | null>
+): Promise<RenderedAgentError> {
+  const spec = AGENT_ERRORS[code];
+  const text = spec.message ?? providerMessage ?? '';
+  let ctaUrl: string | null = null;
+  if (spec.cta === 'agent-settings' || spec.cta === 'provider-connect') {
+    ctaUrl = await resolveSettingsUrl().catch(() => null);
+  }
+  return {
+    text,
+    ctaUrl,
+    ctaLabel: spec.ctaLabel,
+    silent: spec.silent ?? false,
+  };
 }
 
 export interface EntityInfo {

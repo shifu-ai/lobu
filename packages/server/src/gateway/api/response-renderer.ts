@@ -5,7 +5,7 @@
  * Broadcasts worker responses to SSE connections for direct API clients
  */
 
-import { createLogger } from "@lobu/core";
+import { AGENT_ERRORS, createLogger, toAgentErrorCode } from "@lobu/core";
 import type { ThreadResponsePayload } from "../infrastructure/queue/types.js";
 import type { ResponseRenderer } from "../platform/response-renderer.js";
 import type { SseManager } from "../services/sse-manager.js";
@@ -112,9 +112,28 @@ export class ApiResponseRenderer implements ResponseRenderer {
       return;
     }
 
+    // Pick the body the same way every surface does: our catalog text for
+    // errors we synthesize (worker/config), else the provider's OWN message
+    // relayed verbatim (it already says the useful thing, e.g. the quota reset
+    // time). The structured `errorCode` is forwarded so the frontend can build
+    // the CTA button (this SSE surface lacks the org/agent ids to resolve the
+    // URL itself).
+    const code = toAgentErrorCode(payload.errorCode);
+    const spec = code ? AGENT_ERRORS[code] : undefined;
+    if (spec?.silent) {
+      // Silent codes (SESSION_TIMEOUT) are retried and must not surface.
+      await this.resolveWatcherRunsFromPayload(payload, {
+        ok: false,
+        error: "agent error",
+      });
+      return;
+    }
+    const errorText = spec?.message ?? payload.error;
+
     const errorEvent = {
       type: "error",
-      error: payload.error,
+      error: errorText,
+      errorCode: code,
       messageId: payload.messageId,
       timestamp: payload.timestamp || Date.now(),
     };
@@ -125,11 +144,11 @@ export class ApiResponseRenderer implements ResponseRenderer {
     this.sseManager.broadcast(sessionId, "error", errorEvent);
     this.sseManager.broadcast(sessionId, "agent-error", errorEvent);
 
-    logger.error(`Broadcast error to session ${sessionId}: ${payload.error}`);
+    logger.error(`Broadcast error to session ${sessionId}: ${errorText}`);
 
     await this.resolveWatcherRunsFromPayload(payload, {
       ok: false,
-      error: typeof payload.error === "string" ? payload.error : "agent error",
+      error: typeof errorText === "string" ? errorText : "agent error",
     });
   }
 

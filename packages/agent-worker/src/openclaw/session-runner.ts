@@ -430,11 +430,6 @@ interface RunAISessionParams {
     incomingImageCount: number;
     runSilentPrompt: (prompt: string) => Promise<void>;
   }) => Promise<void>;
-  maybeBuildAuthHintMessage: (
-    errorMessage: string,
-    provider: string,
-    modelId: string
-  ) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -461,7 +456,6 @@ export async function runAISession(
     onModelResolved,
     loadImageAttachments,
     maybeRunPreCompactionMemoryFlush,
-    maybeBuildAuthHintMessage,
   } = params;
 
   let rawOptions: Record<string, unknown>;
@@ -1574,12 +1568,10 @@ user references earlier discussion or you need prior context.`);
     const sessionError = progressProcessor.consumeFatalErrorMessage();
     if (sessionError) {
       await emitAgentEnd(sessionError);
-      const errorWithHint = maybeBuildAuthHintMessage(
-        sessionError,
-        rawProvider,
-        modelId
-      );
-      return buildResult(errorWithHint);
+      // Return the RAW provider error. It's the user-facing body verbatim; the
+      // only downstream work is `classifyError` → a code that selects the CTA
+      // link (via AGENT_ERRORS). No sentence is rewritten here.
+      return buildResult(sessionError);
     }
 
     await emitAgentEnd();
@@ -1597,13 +1589,9 @@ user references earlier discussion or you need prior context.`);
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     await emitAgentEnd(errorMsg);
-    const errorWithHint = maybeBuildAuthHintMessage(
-      errorMsg,
-      provider,
-      modelId
-    );
-
-    return buildResult(errorWithHint);
+    // Raw error out; downstream `classifyError` picks the code (→ CTA) and the
+    // raw message is the body verbatim (see the sessionError branch above).
+    return buildResult(errorMsg);
   } finally {
     if (heartbeatTimer) {
       clearInterval(heartbeatTimer);

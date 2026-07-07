@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { classifyError } from "../core/error-handler";
 import { OpenClawWorker } from "../openclaw/worker";
 import {
   fetchAudioProviderSuggestions,
@@ -180,20 +181,14 @@ describe("OpenClawWorker audio permission hint", () => {
   });
 });
 
-describe("OpenClawWorker auth hint messaging", () => {
-  test("routes missing provider auth to admin guidance", async () => {
-    const hint = await (
-      OpenClawWorker.prototype as any
-    ).maybeBuildAuthHintMessage(
-      'Authentication failed for "openai"',
-      "openai",
-      "gpt-4.1",
-      "http://gateway",
-      "token"
+describe("provider auth classification (no bespoke hint round-trip)", () => {
+  test("a raw provider auth error classifies to PROVIDER_AUTH", () => {
+    // The worker no longer rewrites the raw error into an admin-guidance
+    // sentence that the classifier then re-parses. The raw error classifies
+    // directly to a code; that code selects the reconnect CTA, and the raw
+    // provider message is relayed verbatim as the body.
+    expect(classifyError(new Error('Authentication failed for "openai"'))).toBe(
+      "PROVIDER_AUTH"
     );
-
-    expect(hint).toContain("gpt-4.1");
-    expect(hint).toContain("admin");
-    expect(hint).toContain("openai");
   });
 });
