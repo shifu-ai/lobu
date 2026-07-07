@@ -107,13 +107,65 @@ const CancelAction = Type.Object({
   id: Type.String({ format: 'uuid' }),
 });
 
-export const ManageSchedulesSchema = Type.Union([
-  CreateAction,
-  ListAction,
-  PauseAction,
-  CancelAction,
-]);
-type ManageSchedulesArgs = Static<typeof ManageSchedulesSchema>;
+/**
+ * MCP-facing schema. Deliberately flat and union-free: the agent-worker's
+ * schema projection strips union keywords (anyOf/oneOf) and quarantines
+ * root-level unions, so models never see union shapes. Precise per-action
+ * validation happens in the handlers, whose error messages document the
+ * expected shape for model self-correction.
+ */
+export const ManageSchedulesSchema = Type.Object({
+  action: Type.String({
+    description: "One of 'create', 'list', 'pause', 'cancel'.",
+  }),
+  // create
+  description: Type.Optional(Type.String({ maxLength: 200 })),
+  run_at: Type.Optional(
+    Type.String({
+      description:
+        "ISO timestamp for the first / only firing (must be in the future, e.g. '2026-05-15T09:00:00Z'). Optional when cron is set.",
+    })
+  ),
+  cron: Type.Optional(
+    Type.String({ description: 'Cron expression for recurring jobs. Omit for one-shot.' })
+  ),
+  payload: Type.Optional(
+    Type.Object(
+      {},
+      {
+        additionalProperties: true,
+        description:
+          "Handler payload. {type:'wake_agent', agent_id, prompt} or {type:'send_notification', title, body?, recipients?}.",
+      }
+    )
+  ),
+  // Flattened create fields — accepted as an alternative to payload.
+  action_type: Type.Optional(
+    Type.String({ description: "'wake_agent' or 'send_notification' (alternative to payload.type)." })
+  ),
+  agent_id: Type.Optional(
+    Type.String({ description: 'wake_agent target agent id; also the list filter.' })
+  ),
+  prompt: Type.Optional(Type.String({ description: 'wake_agent prompt.' })),
+  thread_id: Type.Optional(Type.String()),
+  reason: Type.Optional(Type.String()),
+  title: Type.Optional(Type.String({ description: 'send_notification title.' })),
+  body: Type.Optional(Type.String()),
+  recipients: Type.Optional(Type.Unknown()),
+  resource_url: Type.Optional(Type.String()),
+  source_run_id: Type.Optional(Type.Number()),
+  source_event_id: Type.Optional(Type.Number()),
+  source_thread_id: Type.Optional(Type.String()),
+  // list
+  user_id: Type.Optional(Type.String()),
+  include_paused: Type.Optional(Type.Boolean()),
+  // pause / cancel
+  id: Type.Optional(Type.String()),
+  paused: Type.Optional(Type.Boolean()),
+});
+
+const InternalActionSchema = Type.Union([CreateAction, ListAction, PauseAction, CancelAction]);
+type ManageSchedulesArgs = Static<typeof InternalActionSchema>;
 
 const createValidator = TypeCompiler.Compile(CreateAction);
 
@@ -158,21 +210,91 @@ export function coerceSchedulePayload(payload: unknown): unknown {
   return payload;
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const WAKE_AGENT_FIELDS = ['agent_id', 'prompt', 'thread_id', 'reason'] as const;
+const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as const;
+
+/**
+ * Models flying blind on the projected schema flatten payload fields to the
+ * top level or invent near-miss shapes. Assemble the canonical payload from
+ * whatever arrived: parse string payloads, honour payload.type / action_type
+ * aliases, and lift flattened fields into the payload.
+ */
+export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string, unknown> {
+  const args = { ...raw };
+  const coerced = coerceSchedulePayload(args.payload);
+  const payload: Record<string, unknown> = isPlainRecord(coerced) ? { ...coerced } : {};
+
+  if (typeof payload.type !== 'string' || payload.type.length === 0) {
+    const alias = [payload.action_type, args.action_type].find(
+      (v): v is string => typeof v === 'string' && v.length > 0
+    );
+    if (alias) payload.type = alias;
+  }
+  delete payload.action_type;
+  delete args.action_type;
+
+  if (typeof payload.type !== 'string' || payload.type.length === 0) {
+    if (typeof args.prompt === 'string' || typeof args.agent_id === 'string') {
+      payload.type = 'wake_agent';
+    } else if (typeof args.title === 'string') {
+      payload.type = 'send_notification';
+    }
+  }
+
+  const liftFields =
+    payload.type === 'send_notification' ? NOTIFICATION_FIELDS : WAKE_AGENT_FIELDS;
+  for (const field of liftFields) {
+    if (payload[field] === undefined && args[field] !== undefined) {
+      payload[field] = args[field];
+    }
+  }
+  for (const field of [...WAKE_AGENT_FIELDS, ...NOTIFICATION_FIELDS]) {
+    delete args[field];
+  }
+
+  // run_at omitted for a cron job: derive the first firing from the cron.
+  if ((args.run_at === undefined || args.run_at === '') && typeof args.cron === 'string') {
+    try {
+      args.run_at = nextCronTickAt(args.cron);
+    } catch {
+      // leave run_at absent; validation reports the cron error below
+    }
+  }
+
+  args.payload = payload;
+  return args;
+}
+
+const CREATE_SHAPE_HINT =
+  "Expected create shape: {action:'create', description, run_at:'<future ISO>', cron?, payload:{type:'wake_agent', agent_id, prompt} | {type:'send_notification', title, body?, recipients?}}. Flattened fields (action_type/agent_id/prompt/title/body) are also accepted in place of payload.";
+
 async function handleCreate(
   rawArgs: Extract<ManageSchedulesArgs, { action: 'create' }>,
   ctx: ToolContext
 ): Promise<ToolResult> {
-  const args = {
-    ...rawArgs,
-    payload: coerceSchedulePayload(rawArgs.payload),
-  } as typeof rawArgs;
+  const args = normalizeCreateArgs(
+    rawArgs as unknown as Record<string, unknown>
+  ) as unknown as Extract<ManageSchedulesArgs, { action: 'create' }>;
   if (!createValidator.Check(args)) {
     const errs = [...createValidator.Errors(args)];
-    return { error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}` };
+    return {
+      error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}. ${CREATE_SHAPE_HINT}`,
+    };
   }
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
     return { error: `run_at is not a valid ISO timestamp: ${args.run_at}` };
+  }
+  // A stale timestamp usually means the model guessed the current time.
+  // Return the server clock so it can self-correct on retry.
+  if (runAtDate.getTime() < Date.now() - 30_000 && !args.cron) {
+    return {
+      error: `run_at is in the past. Current server time is ${new Date().toISOString()}; provide a future ISO timestamp.`,
+    };
   }
   // If cron is set, sanity-check it by computing the next tick from now.
   if (args.cron) {
