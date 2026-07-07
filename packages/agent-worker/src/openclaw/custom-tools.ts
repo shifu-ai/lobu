@@ -173,7 +173,7 @@ export function createOpenClawCustomTools(params: {
         artifactId: Type.String({
           description: "Artifact id, for example ctx_art_abc123.",
         }),
-        chunkIndex: Type.Number({
+        chunkIndex: Type.Integer({
           description: "Zero-based chunk index to read.",
         }),
       }),

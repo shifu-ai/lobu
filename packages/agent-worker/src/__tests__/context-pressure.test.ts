@@ -108,4 +108,41 @@ describe("context pressure", () => {
       await rm(workspaceDir, { recursive: true, force: true });
     }
   });
+
+  test("returns the expected text for a selected artifact chunk", async () => {
+    const workspaceDir = await mkdtemp(
+      join(tmpdir(), "lobu-context-pressure-")
+    );
+    try {
+      const text = "0123456789".repeat(4_000);
+      const prepared = await prepareUserPromptForContext({
+        workspaceDir,
+        promptText: text,
+        source: "line",
+        runId: "run-test-4",
+        effectiveCapTokens: 1,
+      });
+
+      const artifact = prepared.artifacts[0];
+      if (!artifact) {
+        throw new Error("Expected spilled artifact");
+      }
+
+      const chunk = await readContextArtifactChunk({
+        workspaceDir,
+        artifactId: artifact.artifactId,
+        chunkIndex: 2,
+        chunkChars: 6,
+      });
+
+      expect(chunk).toEqual({
+        artifactId: artifact.artifactId,
+        chunkIndex: 2,
+        totalChunks: 6_667,
+        text: "234567",
+      });
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
 });
