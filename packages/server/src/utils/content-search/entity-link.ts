@@ -52,7 +52,21 @@ export const STANDARD_IDENTITY_NAMESPACES: readonly string[] = [
  * namespace becomes a join filter instead of a restrictable predicate.
  */
 export function entityLinkMatchSql(paramRef: string, alias = 'f'): string {
-  const directBranch = `SELECT e2.id FROM events e2 WHERE e2.entity_ids @> ARRAY[${paramRef}]`;
+  // Direct (feed-pinned / save_content / webhook) attribution: the entity id is
+  // stamped in `events.entity_ids`. Merge redirect: also match events stamped
+  // with any entity MERGED INTO this one — a merged loser's raw-stamped events
+  // (which can't be rewritten, events being append-only) recall against the
+  // winner. `applyMerge` FLATTENS chains (L→W→V is stored as L→V, W→V), so a
+  // single `merged_into = X` hop reaches every descendant loser — no recursion.
+  // `&&` (overlap) against the {self ∪ direct losers} set; the losers subquery
+  // is one indexed lookup (idx_entities_merged_into), a one-time InitPlan even
+  // when `paramRef` is an outer column, NOT per-event (see
+  // entity-merge-redirect-plan.test.ts).
+  const directBranch = `SELECT e2.id FROM events e2
+      WHERE e2.entity_ids && ARRAY(
+        SELECT en.id FROM entities en
+        WHERE en.id = ${paramRef} OR en.merged_into = ${paramRef}
+      )`;
 
   const standardBranches = STANDARD_IDENTITY_NAMESPACES.map(
     (ns) => `SELECT e2.id FROM events e2
@@ -130,7 +144,15 @@ export function buildEntityLinkUnion(opts: {
   baseParamIndex: number;
 }): { sql: string; params: string[] } {
   const alias = opts.alias ?? 'f';
-  const direct = `SELECT e2.id FROM events e2 WHERE e2.entity_ids @> ARRAY[${opts.entityIdLiteral}::bigint]`;
+  // Merge redirect (see entityLinkMatchSql): match events stamped with this
+  // entity OR any entity merged into it, so a merged loser's raw-stamped events
+  // recall against the winner. Chains are flattened at merge time (merged_into is
+  // the flattened root), so one indexed hop reaches every descendant loser.
+  const direct = `SELECT e2.id FROM events e2
+      WHERE e2.entity_ids && ARRAY(
+        SELECT en.id FROM entities en
+        WHERE en.id = ${opts.entityIdLiteral}::bigint OR en.merged_into = ${opts.entityIdLiteral}::bigint
+      )`;
   const params: string[] = [];
   let paramIndex = opts.baseParamIndex;
 
