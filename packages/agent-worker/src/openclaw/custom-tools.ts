@@ -3,7 +3,10 @@ import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import { type TSchema, Type } from "@sinclair/typebox";
-import type { GatewayParams, TextResult } from "../shared/tool-implementations";
+import type {
+  GatewayParams,
+  ToolContentResult,
+} from "../shared/tool-implementations";
 import { readContextArtifactChunk } from "./context-pressure";
 import {
   emitJourneyEvent,
@@ -83,8 +86,8 @@ function isOfficialNotionToolboxWrapper(
   );
 }
 
-/** Adapt shared TextResult to OpenClaw's ToolResult (adds details field) */
-function toToolResult(result: TextResult): ToolResult {
+/** Adapt shared tool result content to OpenClaw's ToolResult (adds details field). */
+function toToolResult(result: ToolContentResult): ToolResult {
   return { content: result.content, details: {} };
 }
 
@@ -97,7 +100,7 @@ function defineTool<T extends TSchema>(config: {
   name: string;
   description: string;
   parameters: T;
-  run: (args: Static<T>) => Promise<TextResult>;
+  run: (args: Static<T>) => Promise<ToolContentResult>;
 }): ToolDefinition {
   return {
     name: config.name,
@@ -483,7 +486,7 @@ export function createMcpToolDefinitions(
             },
           });
         }
-        let result: TextResult;
+        let result: ToolContentResult;
         try {
           result = await callMcpTool(
             gw,

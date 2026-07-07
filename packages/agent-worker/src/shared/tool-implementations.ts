@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { createLogger, ensureBaseUrl } from "@lobu/core";
 import FormData from "form-data";
 import { normalizeToolTextForContext } from "../openclaw/context-pressure";
-import { normalizeMcpResultContent } from "../openclaw/mcp-result-normalizer";
 import { fetchAudioProviderSuggestions } from "./audio-provider-suggestions";
 import type { WorkerShifuTraceContext } from "./journey-trace";
 import { shifuTraceHeaders } from "./journey-trace";
@@ -16,13 +15,28 @@ import {
 
 const logger = createLogger("shared-tools");
 
-/** Standard text result shape used by both SDK wrappers */
-export interface TextResult {
+export type ToolTextContent = {
   [key: string]: unknown;
-  content: Array<{ [key: string]: unknown; type: "text"; text: string }>;
+  type: "text";
+  text: string;
+};
+
+export type ToolImageContent = {
+  [key: string]: unknown;
+  type: "image";
+  data: string;
+  mimeType: string;
+};
+
+/** Standard tool result shape used by both SDK wrappers. */
+export interface ToolContentResult {
+  [key: string]: unknown;
+  content: Array<ToolTextContent | ToolImageContent>;
 }
 
-function textResult(text: string): TextResult {
+export type TextResult = ToolContentResult;
+
+function textResult(text: string): ToolContentResult {
   return { content: [{ type: "text" as const, text }] };
 }
 
@@ -32,12 +46,72 @@ function formatError(error: unknown): string {
 
 function withErrorHandling(
   label: string,
-  fn: () => Promise<TextResult>
-): Promise<TextResult> {
+  fn: () => Promise<ToolContentResult>
+): Promise<ToolContentResult> {
   return fn().catch((error) => {
     logger.error(`${label} error:`, error);
     return textResult(`Error: ${formatError(error)}`);
   });
+}
+
+function normalizeMcpToolContent(content: unknown): ToolContentResult["content"] {
+  if (!Array.isArray(content)) return [];
+
+  const normalized: ToolContentResult["content"] = [];
+  for (const part of content) {
+    if (!part || typeof part !== "object" || Array.isArray(part)) continue;
+    const record = part as Record<string, unknown>;
+    if (record.type === "text" && typeof record.text === "string") {
+      normalized.push({ ...record, type: "text", text: record.text });
+      continue;
+    }
+    if (
+      record.type === "image" &&
+      typeof record.data === "string" &&
+      typeof record.mimeType === "string"
+    ) {
+      normalized.push({
+        ...record,
+        type: "image",
+        data: record.data,
+        mimeType: record.mimeType,
+      });
+    }
+  }
+  return normalized;
+}
+
+async function normalizeMcpToolContentForModel(
+  content: unknown,
+  normalizeText: (text: string) => Promise<string>
+): Promise<ToolContentResult["content"]> {
+  if (!Array.isArray(content)) return [];
+
+  const normalized: ToolContentResult["content"] = [];
+  for (const part of normalizeMcpToolContent(content)) {
+    if (part.type === "text") {
+      normalized.push({ ...part, text: await normalizeText(part.text) });
+    } else {
+      normalized.push(part);
+    }
+  }
+
+  if (normalized.every((part) => part.type === "text")) {
+    const text = normalized
+      .filter((part): part is ToolTextContent => part.type === "text")
+      .map((part) => part.text)
+      .join("\n");
+    return text ? [{ type: "text", text }] : [];
+  }
+
+  return normalized;
+}
+
+function extractMcpTextContent(content: unknown): string {
+  return normalizeMcpToolContent(content)
+    .filter((part): part is ToolTextContent => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
 }
 
 async function parseErrorBody(response: Response): Promise<{ error?: string }> {
@@ -1217,7 +1291,7 @@ export async function callMcpTool(
   toolName: string,
   args: Record<string, unknown>,
   options: { shifuTrace?: WorkerShifuTraceContext } = {}
-): Promise<TextResult> {
+): Promise<ToolContentResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
     const normalizeResultText = (text: string) =>
       normalizeToolTextForContext({
@@ -1286,8 +1360,7 @@ export async function callMcpTool(
       );
     }
 
-    const normalizedContent = normalizeMcpResultContent(data.content);
-    const contentText = normalizedContent.map((c) => c.text).join("\n");
+    const contentText = extractMcpTextContent(data.content);
 
     if (!response.ok || data.isError) {
       const errorMsg =
@@ -1305,8 +1378,12 @@ export async function callMcpTool(
       );
     }
 
-    return textResult(
-      await normalizeResultText(contentText || `${toolName} completed.`)
+    const content = await normalizeMcpToolContentForModel(
+      data.content,
+      normalizeResultText
     );
+    return content.length > 0
+      ? { content }
+      : textResult(`${toolName} completed.`);
   });
 }

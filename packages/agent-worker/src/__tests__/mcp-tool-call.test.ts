@@ -3,7 +3,7 @@
  *
  * callMcpTool is the function the agent calls to invoke an MCP tool via the
  * gateway proxy. It routes to POST /mcp/<mcpId>/tools/<toolName> using the
- * worker's JWT, then normalises the JSON response into the shared TextResult
+ * worker's JWT, then normalises the JSON response into the shared tool result
  * shape. These tests cover:
  *
  *   - Happy path: content text forwarded
@@ -52,9 +52,14 @@ const gw: GatewayParams = {
 };
 
 function extractText(result: {
-  content: Array<{ type: "text"; text: string }>;
+  content: Array<{ type: string; text?: string }>;
 }): string {
-  return result.content.map((c) => c.text).join("\n");
+  return result.content
+    .filter((c): c is { type: "text"; text: string } => {
+      return c.type === "text" && typeof c.text === "string";
+    })
+    .map((c) => c.text)
+    .join("\n");
 }
 
 afterEach(() => {
@@ -133,19 +138,22 @@ describe("callMcpTool", () => {
     expect(extractText(result)).toContain("not allowed");
   });
 
-  test("isError=true from proxy: normalizes non-text content before Error prefix", async () => {
+  test("isError=true from proxy: extracts text content before Error prefix", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
-        content: [{ type: "image", mimeType: "image/jpeg", data: "YWJj" }],
+        content: [
+          { type: "image", mimeType: "image/jpeg", data: "YWJj" },
+          { type: "text", text: "vision tool failed" },
+        ],
         isError: true,
       })
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "vision", "read_image", {});
 
-    expect(extractText(result)).toBe(
-      "Error: [image result omitted: image/jpeg, 3 bytes]"
-    );
+    expect(result.content).toEqual([
+      { type: "text", text: "Error: vision tool failed" },
+    ]);
   });
 
   test("non-200 HTTP status: error message surfaced", async () => {
@@ -228,18 +236,30 @@ describe("callMcpTool", () => {
     expect(text).toContain("line two");
   });
 
-  test("non-text content items are normalized before output", async () => {
+  test("MCP response with image block is preserved", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
         content: [
           { type: "image", mimeType: "image/png", data: "YWJjZA==" },
-          {
-            type: "resource_link",
-            name: "docs",
-            uri: "https://example.com/docs",
-          },
-          { type: "audio", mimeType: "audio/mpeg", data: "YWJj" },
-          { type: "text", text: "the text" },
+        ],
+        isError: false,
+      })
+    ) as unknown as typeof fetch;
+
+    const result = await callMcpTool(gw, "vision", "read_image", {});
+
+    expect(result.content).toEqual([
+      { type: "image", mimeType: "image/png", data: "YWJjZA==" },
+    ]);
+  });
+
+  test("mixed text and image content order is preserved", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({
+        content: [
+          { type: "text", text: "before" },
+          { type: "image", mimeType: "image/png", data: "YWJj" },
+          { type: "text", text: "after" },
         ],
         isError: false,
       })
@@ -247,34 +267,34 @@ describe("callMcpTool", () => {
 
     const result = await callMcpTool(gw, "lobu", "mixed_content", {});
 
-    expect(extractText(result)).toBe(
-      [
-        "[image result omitted: image/png, 4 bytes]",
-        "[resource: docs](https://example.com/docs)",
-        "[audio result omitted: audio/mpeg, 3 bytes]",
-        "the text",
-      ].join("\n")
-    );
+    expect(result.content).toEqual([
+      { type: "text", text: "before" },
+      { type: "image", mimeType: "image/png", data: "YWJj" },
+      { type: "text", text: "after" },
+    ]);
   });
 
-  test("successful normalized content is returned as one joined text block", async () => {
+  test("malformed image and text parts are dropped without crashing", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
         content: [
-          { type: "text", text: "line one" },
-          { type: "image", mimeType: "image/png", data: "YWJj" },
+          { type: "text", text: 123 },
+          { type: "image", mimeType: "image/png" },
+          { type: "image", data: "YWJj" },
+          { type: "resource_link", uri: "https://example.com/docs" },
+          null,
+          { type: "text", text: "kept" },
+          { type: "image", mimeType: "image/jpeg", data: "ZGF0YQ==" },
         ],
         isError: false,
       })
     ) as unknown as typeof fetch;
 
-    const result = await callMcpTool(gw, "lobu", "joined_content", {});
+    const result = await callMcpTool(gw, "lobu", "mixed_content", {});
 
     expect(result.content).toEqual([
-      {
-        type: "text",
-        text: "line one\n[image result omitted: image/png, 3 bytes]",
-      },
+      { type: "text", text: "kept" },
+      { type: "image", mimeType: "image/jpeg", data: "ZGF0YQ==" },
     ]);
   });
 
