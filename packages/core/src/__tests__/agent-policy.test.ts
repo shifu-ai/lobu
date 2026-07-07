@@ -34,6 +34,22 @@ describe("agent-policy file delivery guidance", () => {
     );
   });
 
+  test("upload_file guidance forbids inline large file payloads", () => {
+    const description = getCustomToolDescription("upload_file");
+    const alwaysOn = renderAlwaysOnToolPolicyRules();
+    const detected = renderDetectedToolIntentRules(
+      "Export a long report and give me a downloadable PDF file"
+    );
+
+    expect(description).toContain("downloadable link");
+    expect(description).toContain("raw file bytes");
+    expect(description).toContain("base64 content");
+    expect(alwaysOn).toContain("do not paste the full document, raw bytes, or base64");
+    expect(detected).toContain(
+      "Do not inline full file contents, raw bytes, or base64"
+    );
+  });
+
   test("always-on onboarding guidance requires confirmation before discovery", () => {
     const instructions = renderAlwaysOnToolPolicyRules();
 

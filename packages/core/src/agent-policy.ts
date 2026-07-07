@@ -15,7 +15,7 @@ export interface ToolIntentRule {
 export const CUSTOM_TOOL_METADATA: Record<string, CustomToolMetadata> = {
   upload_file: {
     description:
-      "Use this whenever you create a visualization, chart, image, document, report, or any file that helps answer the user's request. When the user asks you to send, share, attach, export, or upload a file, create it and then call this tool so the user can actually receive it in-thread. Do not substitute local paths, workspace paths, or sandbox links.",
+      "Use this whenever you create a visualization, chart, image, document, report, or any file that helps answer the user's request. When the user asks you to send, share, attach, export, or upload a file, create it and then call this tool so the user can actually receive it in-thread through a downloadable link. Do not substitute local paths, workspace paths, or sandbox links. Do not substitute raw file bytes or base64 content.",
   },
   generate_image: {
     description:
@@ -86,6 +86,7 @@ export const TOOL_INTENT_RULES: ToolIntentRule[] = [
       "If you create a file that helps answer the request, use upload_file so the user can access it in-thread.",
       "Never claim a file was sent unless upload_file actually succeeded in this turn.",
       "Never show sandbox:, workspace, or local filesystem links to the user as if they are downloadable attachments.",
+      "For large generated outputs, provide a short summary plus the uploaded/downloadable link; do not paste the full document, raw bytes, or base64 into the reply.",
     ],
     patterns: [],
     priority: 20,
@@ -99,6 +100,7 @@ export const TOOL_INTENT_RULES: ToolIntentRule[] = [
       "If the user asks to receive, download, attach, upload, export, or share a file, you must use upload_file after creating the file.",
       "Creating the file locally is not enough; the user cannot access sandbox, workspace, or local filesystem paths.",
       "For file delivery requests, use this sequence: create the file, call upload_file, then tell the user it was sent only if the tool succeeds.",
+      "Do not inline full file contents, raw bytes, or base64 as a substitute for a downloadable link.",
     ],
     patterns: [
       /\b(send|share|attach|upload|export|deliver|give)\b.*\b(file|document|csv|pdf|report|spreadsheet|image|audio)\b/i,
