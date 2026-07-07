@@ -7,10 +7,12 @@ import type {
 	LobuConfigStatusStore,
 	LobuOAuthStatusProvider,
 } from "../config-status-service.js";
+import { orgContext } from "../stores/org-context.js";
 
 const TOKEN = "test-service-token";
 const AGENT_ID = "shifu-u-abc123";
 const USER_ID = "toolbox-user-1";
+const ORG_ID = "org-status-test";
 const SECRET_NAME = `mcp-auth/${AGENT_ID}/${USER_ID}/notion/credential`;
 const SECRET_REF = `secret://${encodeURIComponent(SECRET_NAME)}`;
 
@@ -63,6 +65,7 @@ function ownedMetadata(overrides: Partial<AgentMetadata> = {}): AgentMetadata {
 		agentId: AGENT_ID,
 		name: "Personal Agent",
 		owner: { platform: "toolbox", userId: USER_ID },
+		organizationId: ORG_ID,
 		createdAt: Date.now(),
 		...overrides,
 	};
@@ -218,6 +221,47 @@ describe("Lobu config current status routes", () => {
 				agentToolStatus: "usable",
 				configured: true,
 				authorized: false,
+			}),
+		);
+	});
+
+	test("looks up OAuth credentials inside the agent organization context", async () => {
+		const secretStore = buildSecretStore({
+			get: mock(async (ref) => {
+				if (orgContext.getStore()?.organizationId !== ORG_ID) return null;
+				if (ref !== SECRET_REF) return null;
+				return JSON.stringify({
+					accessToken: "secret-token",
+					refreshToken: "secret-refresh",
+					expiresAt: 4_102_444_800_000,
+					clientId: "client-1",
+					tokenUrl: "https://auth.example.test/token",
+				});
+			}),
+		});
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata(),
+				settings: { mcpServers: { notion: { url: "https://mcp.notion.test/mcp" } } },
+			}),
+			{ secretStore },
+		);
+
+		const res = await app.request(
+			`/internal/lobu-config/current?agentId=${AGENT_ID}&userId=${USER_ID}`,
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(res.status).toBe(200);
+		const body = await res.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "notion",
+				oauthStatus: "authorized",
+				agentToolStatus: "usable",
+				configured: true,
+				authorized: true,
+				reasonCode: "ok",
 			}),
 		);
 	});
