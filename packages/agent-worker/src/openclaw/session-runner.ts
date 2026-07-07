@@ -42,6 +42,7 @@ import {
   createMcpToolDefinitions,
   createOpenClawCustomTools,
 } from "./custom-tools";
+import { prepareUserPromptForContext } from "./context-pressure";
 import { TurnController, wrapToolsWithTurnGuard } from "./turn-controller";
 import {
   buildDynamicOpenAIModel,
@@ -2157,7 +2158,15 @@ Use it when the user references past discussions or you need context.`);
       })
       .join("\n\n");
 
-    const effectivePromptText = `${configNotice}${sessionSummary ? `${sessionSummary}\n\n` : ""}${prependContexts ? `${prependContexts}\n\n` : ""}${userPrompt}`;
+    const originalEffectivePromptText = `${configNotice}${sessionSummary ? `${sessionSummary}\n\n` : ""}${prependContexts ? `${prependContexts}\n\n` : ""}${userPrompt}`;
+    const contextPreparedPrompt = await prepareUserPromptForContext({
+      workspaceDir,
+      promptText: originalEffectivePromptText,
+      source: platform === "line" ? "line" : "internal",
+      runId: conversationId,
+      effectiveCapTokens: 24_000,
+    });
+    const effectivePromptText = contextPreparedPrompt.promptText;
 
     // Load image attachments for vision-capable models
     const images = await loadImageAttachments();
