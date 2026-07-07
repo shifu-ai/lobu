@@ -46,6 +46,7 @@ describe("createOpenClawCustomTools", () => {
 
     expect(tools.map((tool) => tool.name)).toEqual([
       "upload_file",
+      "artifact_read",
       "generate_image",
       "generate_audio",
       "get_channel_history",

@@ -2158,15 +2158,15 @@ Use it when the user references past discussions or you need context.`);
       })
       .join("\n\n");
 
-    const originalEffectivePromptText = `${configNotice}${sessionSummary ? `${sessionSummary}\n\n` : ""}${prependContexts ? `${prependContexts}\n\n` : ""}${userPrompt}`;
+    const inlinePromptPrefix = `${configNotice}${sessionSummary ? `${sessionSummary}\n\n` : ""}${prependContexts ? `${prependContexts}\n\n` : ""}`;
     const contextPreparedPrompt = await prepareUserPromptForContext({
       workspaceDir,
-      promptText: originalEffectivePromptText,
+      promptText: userPrompt,
       source: platform === "line" ? "line" : "internal",
       runId: conversationId,
       effectiveCapTokens: 24_000,
     });
-    const effectivePromptText = contextPreparedPrompt.promptText;
+    const effectivePromptText = `${inlinePromptPrefix}${contextPreparedPrompt.promptText}`;
 
     // Load image attachments for vision-capable models
     const images = await loadImageAttachments();

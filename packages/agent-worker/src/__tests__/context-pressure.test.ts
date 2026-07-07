@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   estimateContextTokens,
   prepareUserPromptForContext,
+  readContextArtifactChunk,
 } from "../openclaw/context-pressure";
 
 describe("context pressure", () => {
@@ -63,6 +64,46 @@ describe("context pressure", () => {
       expect(result.classification).toBe("fits");
       expect(result.promptText).toBe("請幫我整理今天的會議重點。");
       expect(result.artifacts).toEqual([]);
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reads a selected artifact chunk without returning the whole artifact", async () => {
+    const workspaceDir = await mkdtemp(
+      join(tmpdir(), "lobu-context-pressure-")
+    );
+    try {
+      const text = [
+        "first".repeat(3000),
+        "second".repeat(3000),
+        "third".repeat(3000),
+      ].join("\n");
+      const prepared = await prepareUserPromptForContext({
+        workspaceDir,
+        promptText: text,
+        source: "line",
+        runId: "run-test-3",
+        effectiveCapTokens: 2_000,
+      });
+
+      const artifact = prepared.artifacts[0];
+      if (!artifact) {
+        throw new Error("Expected spilled artifact");
+      }
+
+      const chunk = await readContextArtifactChunk({
+        workspaceDir,
+        artifactId: artifact.artifactId,
+        chunkIndex: 1,
+        chunkChars: 4_000,
+      });
+
+      expect(chunk.artifactId).toBe(artifact.artifactId);
+      expect(chunk.chunkIndex).toBe(1);
+      expect(chunk.totalChunks).toBeGreaterThan(1);
+      expect(chunk.text.length).toBeLessThanOrEqual(4_000);
+      expect(chunk.text).not.toBe(text);
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }

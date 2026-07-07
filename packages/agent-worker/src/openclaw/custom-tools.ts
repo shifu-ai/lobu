@@ -4,6 +4,7 @@ import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
 import { type TSchema, Type } from "@sinclair/typebox";
 import type { GatewayParams, TextResult } from "../shared/tool-implementations";
+import { readContextArtifactChunk } from "./context-pressure";
 import {
   emitJourneyEvent,
   type WorkerShifuTraceContext,
@@ -162,6 +163,40 @@ export function createOpenClawCustomTools(params: {
         uploadUserFile(gw, args, {
           onUploaded: (data) => params.onCustomEvent?.("file-uploaded", data),
         }),
+    }),
+
+    defineTool({
+      name: "artifact_read",
+      description:
+        "Read one chunk from a large context artifact. Use this when a prompt or tool result was replaced by a ctx_art_* descriptor. Do not claim information from chunks you have not read.",
+      parameters: Type.Object({
+        artifactId: Type.String({
+          description: "Artifact id, for example ctx_art_abc123.",
+        }),
+        chunkIndex: Type.Number({
+          description: "Zero-based chunk index to read.",
+        }),
+      }),
+      run: async (args) => {
+        const chunk = await readContextArtifactChunk({
+          workspaceDir: params.workspaceDir,
+          artifactId: args.artifactId,
+          chunkIndex: args.chunkIndex,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: [
+                `Artifact: ${chunk.artifactId}`,
+                `Chunk: ${chunk.chunkIndex + 1}/${chunk.totalChunks}`,
+                "",
+                chunk.text,
+              ].join("\n"),
+            },
+          ],
+        };
+      },
     }),
 
     defineTool({

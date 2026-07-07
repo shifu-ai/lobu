@@ -147,3 +147,45 @@ export async function prepareUserPromptForContext(params: {
     artifacts: [artifact],
   };
 }
+
+export async function readContextArtifactChunk(params: {
+  workspaceDir: string;
+  artifactId: string;
+  chunkIndex: number;
+  chunkChars?: number;
+}): Promise<{
+  artifactId: string;
+  chunkIndex: number;
+  totalChunks: number;
+  text: string;
+}> {
+  if (!/^ctx_art_[a-f0-9]+$/.test(params.artifactId)) {
+    throw new Error("Invalid artifact id");
+  }
+
+  const chunkChars = params.chunkChars ?? DEFAULT_CHUNK_CHARS;
+  const artifactPath = path.join(
+    params.workspaceDir,
+    ".lobu",
+    "artifacts",
+    `${params.artifactId}.txt`
+  );
+  const text = await fs.readFile(artifactPath, "utf-8");
+  const totalChunks = Math.max(1, Math.ceil(text.length / chunkChars));
+
+  if (
+    !Number.isInteger(params.chunkIndex) ||
+    params.chunkIndex < 0 ||
+    params.chunkIndex >= totalChunks
+  ) {
+    throw new Error(`chunkIndex must be between 0 and ${totalChunks - 1}`);
+  }
+
+  const start = params.chunkIndex * chunkChars;
+  return {
+    artifactId: params.artifactId,
+    chunkIndex: params.chunkIndex,
+    totalChunks,
+    text: text.slice(start, start + chunkChars),
+  };
+}
