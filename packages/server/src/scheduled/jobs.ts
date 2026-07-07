@@ -22,6 +22,7 @@ import {
   createThreadForAgent,
   enqueueAgentMessage,
 } from '../gateway/services/agent-threads';
+import { buildScheduledWakeMessage, resolveWakeThreadId } from './wake-target.js';
 
 /**
  * Construct the TaskScheduler, register every periodic task, start dispatch,
@@ -255,7 +256,20 @@ function registerMaintenanceTasks(
     }
     const sessionManager = coreServices.getSessionManager();
     const queueProducer = coreServices.getQueueProducer();
+    const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== '0';
     let threadId = p.thread_id ?? null;
+    if (!threadId && reuseConversation) {
+      threadId = await resolveWakeThreadId(
+        { sql, sessionManager },
+        { agentId: p.agent_id, userId: p.__created_by_user ?? null }
+      );
+      if (threadId) {
+        logger.info(
+          { scheduled_job_id: p.__scheduled_job_id, threadId },
+          '[task] wake_agent reusing existing conversation'
+        );
+      }
+    }
     if (!threadId) {
       const result = await createThreadForAgent(
         { sessionManager },
@@ -278,7 +292,9 @@ function registerMaintenanceTasks(
       { sessionManager, queueProducer },
       {
         threadId,
-        messageText: renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
+        messageText: buildScheduledWakeMessage(
+          renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick)
+        ),
         source: 'scheduled-job',
       }
     );
