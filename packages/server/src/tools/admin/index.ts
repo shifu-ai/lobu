@@ -97,7 +97,7 @@ const ENTRIES: InternalToolEntry[] = [
   {
     name: 'manage_schedules',
     description:
-      'Create / list / pause / cancel recurring or one-shot scheduled jobs. Supports send_notification and wake_agent action types. Per-row attribution lets you trace what scheduled it and from where.',
+      'Create / list / pause / cancel recurring or one-shot scheduled jobs. Action types: wake_agent (post a prompt to an agent thread at the scheduled time — use this for reminders the agent should deliver) and send_notification. Example: {"action":"create","description":"drink water","run_at":"2026-07-08T01:00:00Z","payload":{"type":"wake_agent","agent_id":"<your agent id>","prompt":"Remind the user to drink water"}}. Add "cron" for recurring jobs. run_at must be a FUTURE ISO timestamp.',
     schema: ManageSchedulesSchema,
     handler: manageSchedules,
     annotations: { destructiveHint: false },
