@@ -42,7 +42,11 @@ import {
   createMcpToolDefinitions,
   createOpenClawCustomTools,
 } from "./custom-tools";
-import { prepareUserPromptForContext } from "./context-pressure";
+import {
+  isProviderPromptTooLongError,
+  prepareUserPromptForContext,
+  userFacingContextPressureMessage,
+} from "./context-pressure";
 import { TurnController, wrapToolsWithTurnGuard } from "./turn-controller";
 import {
   buildDynamicOpenAIModel,
@@ -2280,20 +2284,23 @@ Use it when the user references past discussions or you need context.`);
     };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
+    const normalizedErrorMsg = isProviderPromptTooLongError(errorMsg)
+      ? userFacingContextPressureMessage()
+      : errorMsg;
     if (session) {
       await runPluginHooks({
         plugins: loadedPlugins,
         hook: "agent_end",
         event: {
           success: false,
-          error: errorMsg,
+          error: normalizedErrorMsg,
           messages: session.messages as unknown as Record<string, unknown>[],
         },
         ctx: pluginHookContext,
       });
     }
     const errorWithHint = maybeBuildAuthHintMessage(
-      errorMsg,
+      normalizedErrorMsg,
       provider,
       modelId
     );

@@ -33,6 +33,20 @@ const CHARS_PER_TOKEN_ESTIMATE = 4;
 const DEFAULT_CHUNK_CHARS = 12_000;
 const INLINE_PROMPT_TOKEN_FLOOR = 8_000;
 
+export function isProviderPromptTooLongError(errorText: string): boolean {
+  const normalized = errorText.toLowerCase();
+  return (
+    normalized.includes("prompt is too long") ||
+    normalized.includes("context length") ||
+    normalized.includes("maximum context") ||
+    normalized.includes("tokens >")
+  );
+}
+
+export function userFacingContextPressureMessage(): string {
+  return "這份內容比目前可一次處理的範圍還大。我已先保留可處理的資料，但這輪無法完整完成。你可以指定要先看哪一段，我會接著處理。";
+}
+
 export function estimateContextTokens(
   text: string,
   imageCount: number

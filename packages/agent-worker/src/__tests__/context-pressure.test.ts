@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   estimateContextTokens,
+  isProviderPromptTooLongError,
   normalizeToolTextForContext,
   prepareUserPromptForContext,
   readContextArtifactChunk,
+  userFacingContextPressureMessage,
 } from "../openclaw/context-pressure";
 
 describe("context pressure", () => {
@@ -216,5 +218,34 @@ describe("context pressure", () => {
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
+  });
+
+  test("detects provider prompt-too-long errors without exposing raw provider payload", () => {
+    const raw =
+      '400 {"type":"error","message":"prompt is too long: 207585 tokens > 200000 maximum"}';
+
+    expect(isProviderPromptTooLongError(raw)).toBe(true);
+
+    const message = userFacingContextPressureMessage();
+    expect(message).not.toContain("207585");
+    expect(message).not.toContain("200000");
+    expect(message).not.toContain("400");
+    expect(message).not.toContain('{"type":"error"');
+    expect(message).toContain("內容");
+  });
+
+  test("detects common provider context length variants", () => {
+    expect(
+      isProviderPromptTooLongError("BadRequestError: context length exceeded")
+    ).toBe(true);
+    expect(
+      isProviderPromptTooLongError("input exceeds maximum context window")
+    ).toBe(true);
+  });
+
+  test("does not classify unrelated provider errors as prompt-too-long", () => {
+    expect(isProviderPromptTooLongError("401 invalid api key")).toBe(false);
+    expect(isProviderPromptTooLongError("429 rate limit exceeded")).toBe(false);
+    expect(isProviderPromptTooLongError("network connection reset")).toBe(false);
   });
 });
