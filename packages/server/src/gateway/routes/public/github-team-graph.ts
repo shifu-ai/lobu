@@ -36,7 +36,7 @@
 import { getDb } from "../../../db/client.js";
 import { createLogger } from "@lobu/core";
 import { GITHUB_IDENTITY } from "@lobu/connectors/github-identity";
-import { resolveEntityLinksForItems } from "../../../utils/entity-link-upsert.js";
+import { resolveEventAttributionsForItems } from "../../../utils/entity-link-upsert.js";
 
 const logger = createLogger("github-team-graph");
 
@@ -163,13 +163,14 @@ async function ensureOrgCompany(params: {
 				: {}),
 		},
 	};
-	const resolved = await resolveEntityLinksForItems({
+	const resolved = await resolveEventAttributionsForItems({
 		connectorKey: GITHUB_CONNECTOR_KEY,
 		orgId: params.orgId,
 		items: [item],
 		rules: {
 			org: [
 				{
+					role: "belongs_to",
 					entityType: "company",
 					autoCreate: true,
 					titlePath: "metadata.org_login",
@@ -260,13 +261,14 @@ export async function buildGithubTeamGraph(params: {
 			...(typeof m.id === "number" ? { author_id: String(m.id) } : {}),
 		},
 	}));
-	const resolvedMembers = await resolveEntityLinksForItems({
+	const resolvedMembers = await resolveEventAttributionsForItems({
 		connectorKey: GITHUB_CONNECTOR_KEY,
 		orgId: params.organizationId,
 		items: memberItems,
 		rules: {
 			org_member: [
 				{
+					role: "authored_by",
 					entityType: "person",
 					autoCreate: true,
 					titlePath: "metadata.author_login",

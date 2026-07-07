@@ -30,7 +30,9 @@
 import {
 	type ChromeActionDispatcher,
 	type ConnectorDefinition,
-	type EntityLinkRule,
+	type EventAttributionRule,
+	type EventAttributionTargetSpec,
+	type EntityTraitSpec,
 	ConnectorRuntime,
 	calculateEngagementScore,
 	createHttpClient,
@@ -43,11 +45,12 @@ import {
 	type SyncContext,
 	type SyncResult,
 } from "@lobu/connector-sdk";
+import { IDENTITY } from "@lobu/connector-sdk/identity-namespaces";
 
-/** Connector-owned identity namespaces for the person graph (not SDK-global). */
+/** Canonical identity namespaces for the X person graph. */
 const X_IDENTITY = {
-	USER_ID: "x_user_id",
-	HANDLE: "x_handle",
+	USER_ID: IDENTITY.X_USER_ID,
+	HANDLE: IDENTITY.X_HANDLE,
 } as const;
 
 /** OAuth scopes needed per feed for the API path (not used to pause browser-capable feeds). */
@@ -171,9 +174,8 @@ const X_ALLOWED_ORIGINS = ["x.com", "*.x.com", "twitter.com", "*.twitter.com"];
  * Match-only by default (like Gmail): identities accrete onto existing contacts,
  * but we do not mint a person per random timeline author.
  */
-const X_PERSON_AUTHOR_LINK: EntityLinkRule = {
+const X_PERSON_AUTHOR_TARGET: EventAttributionTargetSpec = {
 	entityType: "person",
-	autoCreate: false,
 	titlePath: "metadata.author_name",
 	identities: [
 		{
@@ -183,26 +185,26 @@ const X_PERSON_AUTHOR_LINK: EntityLinkRule = {
 		},
 		{ namespace: X_IDENTITY.HANDLE, eventPath: "metadata.author_handle" },
 	],
-	traits: {
-		x_handle: {
-			eventPath: "metadata.author_handle",
-			behavior: "prefer_non_empty",
-		},
-		x_display_name: {
-			eventPath: "metadata.author_name",
-			behavior: "prefer_non_empty",
-		},
-		last_x_interaction_at: {
-			eventPath: "occurred_at",
-			behavior: "overwrite",
-		},
+};
+
+const X_PERSON_AUTHOR_TRAITS: Record<string, EntityTraitSpec> = {
+	x_handle: {
+		eventPath: "metadata.author_handle",
+		behavior: "prefer_non_empty",
+	},
+	x_display_name: {
+		eventPath: "metadata.author_name",
+		behavior: "prefer_non_empty",
+	},
+	last_x_interaction_at: {
+		eventPath: "occurred_at",
+		behavior: "overwrite",
 	},
 };
 
 /** Mint/link the 1:1 DM counterparty (never the connected account itself). */
-const X_PERSON_DM_COUNTERPARTY_LINK: EntityLinkRule = {
+const X_PERSON_DM_COUNTERPARTY_TARGET: EventAttributionTargetSpec = {
 	entityType: "person",
-	autoCreate: true,
 	createWhen: { path: "metadata.is_group", equals: false },
 	titlePath: "metadata.participant_name",
 	identities: [
@@ -216,24 +218,56 @@ const X_PERSON_DM_COUNTERPARTY_LINK: EntityLinkRule = {
 			eventPath: "metadata.participant_handle",
 		},
 	],
-	traits: {
-		x_handle: {
-			eventPath: "metadata.participant_handle",
-			behavior: "prefer_non_empty",
-		},
-		x_display_name: {
-			eventPath: "metadata.participant_name",
-			behavior: "prefer_non_empty",
-		},
-		last_x_dm_at: {
-			eventPath: "occurred_at",
-			behavior: "overwrite",
-		},
+};
+
+const X_PERSON_DM_COUNTERPARTY_TRAITS: Record<string, EntityTraitSpec> = {
+	x_handle: {
+		eventPath: "metadata.participant_handle",
+		behavior: "prefer_non_empty",
+	},
+	x_display_name: {
+		eventPath: "metadata.participant_name",
+		behavior: "prefer_non_empty",
+	},
+	last_x_dm_at: {
+		eventPath: "occurred_at",
+		behavior: "overwrite",
 	},
 };
 
-const TWEET_ENTITY_LINKS = [X_PERSON_AUTHOR_LINK];
-const DM_ENTITY_LINKS = [X_PERSON_DM_COUNTERPARTY_LINK];
+const X_TWEET_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
+	{
+		role: "authored_by",
+		autoCreate: false,
+		target: X_PERSON_AUTHOR_TARGET,
+		traits: X_PERSON_AUTHOR_TRAITS,
+	},
+];
+
+const X_DM_COUNTERPARTY_ATTRIBUTIONS: EventAttributionRule[] = [
+	{
+		role: "authored_by",
+		autoCreate: false,
+		target: {
+			entityType: "person",
+			titlePath: "metadata.sender_name",
+			identities: [
+				{ namespace: X_IDENTITY.USER_ID, eventPath: "metadata.sender_id", primary: true },
+				{ namespace: X_IDENTITY.HANDLE, eventPath: "metadata.sender_handle", matchOnly: true },
+			],
+		},
+		traits: {
+			x_handle: { eventPath: "metadata.sender_handle", behavior: "prefer_non_empty" },
+			display_name: { eventPath: "metadata.sender_name", behavior: "prefer_non_empty" },
+		},
+	},
+	{
+		role: "about",
+		autoCreate: true,
+		target: X_PERSON_DM_COUNTERPARTY_TARGET,
+		traits: X_PERSON_DM_COUNTERPARTY_TRAITS,
+	},
+];
 
 // ── Home-feed content-script scrape contract ────────────────────
 //
@@ -1869,7 +1903,7 @@ export default class XConnector extends ConnectorRuntime {
 					tweet: {
 						description: "A tweet (original post)",
 						metadataSchema: engagementMetadataSchema,
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 					reply: {
 						description: "A reply to a tweet",
@@ -1880,7 +1914,7 @@ export default class XConnector extends ConnectorRuntime {
 								conversation_id: { type: "string" },
 							},
 						},
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 				},
 			},
@@ -1894,7 +1928,7 @@ export default class XConnector extends ConnectorRuntime {
 					tweet: {
 						description: "An original post by the connected account",
 						metadataSchema: engagementMetadataSchema,
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 					reply: {
 						description: "A reply posted by the connected account",
@@ -1905,7 +1939,7 @@ export default class XConnector extends ConnectorRuntime {
 								conversation_id: { type: "string" },
 							},
 						},
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 				},
 			},
@@ -1919,7 +1953,7 @@ export default class XConnector extends ConnectorRuntime {
 					liked_tweet: {
 						description: "A post liked by the connected account",
 						metadataSchema: engagementMetadataSchema,
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 				},
 			},
@@ -1933,7 +1967,7 @@ export default class XConnector extends ConnectorRuntime {
 					bookmark: {
 						description: "A post bookmarked by the connected account",
 						metadataSchema: engagementMetadataSchema,
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 				},
 			},
@@ -1947,7 +1981,7 @@ export default class XConnector extends ConnectorRuntime {
 					dm_message: {
 						description: "A direct message in a 1:1 or group conversation",
 						metadataSchema: dmMetadataSchema,
-						entityLinks: DM_ENTITY_LINKS,
+						attributions: X_DM_COUNTERPARTY_ATTRIBUTIONS,
 					},
 				},
 			},
@@ -1961,7 +1995,7 @@ export default class XConnector extends ConnectorRuntime {
 					tweet: {
 						description: "A tweet from your personalized home timeline",
 						metadataSchema: engagementMetadataSchema,
-						entityLinks: TWEET_ENTITY_LINKS,
+						attributions: X_TWEET_AUTHOR_ATTRIBUTIONS,
 					},
 				},
 			},

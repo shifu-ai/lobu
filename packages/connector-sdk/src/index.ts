@@ -20,7 +20,8 @@ export {
   IntegrationConnector,
 } from './connector-runtime.js';
 export { defineConnector } from './define-connector.js';
-export { validateEntityMetrics } from './metrics.js';
+import { validateEntityMetrics } from './metrics.js';
+export { validateEntityMetrics };
 // Entity-bound metric layer contract (shared by CLI authoring + server
 // compile/validate; lives here to satisfy config-isolation — see metrics.ts)
 export type {
@@ -63,11 +64,11 @@ export type {
   ConnectorWebhookSchema,
   ContentItem,
   EntityIdentitySpec,
-  EntityLinkOverride,
-  EntityLinkOverrides,
   EntityLinkPredicate,
-  EntityLinkRule,
   EntityTraitSpec,
+  EventAttributionRole,
+  EventAttributionRule,
+  EventAttributionTargetSpec,
   EventEnvelope,
   Feed,
   FeedDefinition,
@@ -123,6 +124,17 @@ export {
   IDENTITY_FACT_SEMANTIC_TYPE,
   RelationshipTypeIdentityMetadata,
 };
+import {
+  normalizeAuthUserId,
+  normalizeEmail,
+  normalizeNumericId,
+  normalizeIdentifier,
+  normalizePhone,
+  normalizeSlackUserId,
+  normalizeSlackUserIdCombined,
+  normalizeWaJid,
+  normalizeXHandle,
+} from './identity-normalize.js';
 export {
   normalizeAuthUserId,
   normalizeEmail,
@@ -132,7 +144,28 @@ export {
   normalizeSlackUserId,
   normalizeSlackUserIdCombined,
   normalizeWaJid,
-} from './identity-normalize.js';
+  normalizeXHandle,
+};
+export type {
+  IdentityNamespace,
+  IdentityNamespaceDefinition,
+  IdentityNormalizerKind,
+  IdentitySubjectKind,
+} from './identity-namespaces.js';
+import {
+  EVENT_RECALL_IDENTITY_NAMESPACES,
+  getIdentityNamespaceDefinition,
+  IDENTITY,
+  IDENTITY_NAMESPACE_REGISTRY,
+  isEventRecallIdentityNamespace,
+} from './identity-namespaces.js';
+export {
+  EVENT_RECALL_IDENTITY_NAMESPACES,
+  getIdentityNamespaceDefinition,
+  IDENTITY,
+  IDENTITY_NAMESPACE_REGISTRY,
+  isEventRecallIdentityNamespace,
+};
 // HTTP client (auth + retry + 429 Retry-After)
 export type {
   CreateHttpClientOptions,

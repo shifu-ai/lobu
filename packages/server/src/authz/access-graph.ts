@@ -33,7 +33,7 @@
 
 import { createLogger } from '@lobu/core';
 import { getDb, pgBigintArray, pgTextArray } from '../db/client.js';
-import { resolveEntityLinksForItems } from '../utils/entity-link-upsert.js';
+import { resolveEventAttributionsForItems } from '../utils/entity-link-upsert.js';
 
 const logger = createLogger('access-graph');
 
@@ -233,13 +233,14 @@ async function resolveMembers(
     for (const id of m.identities) metadata[id.namespace] = id.value;
     return { origin_type: 'access_member', metadata };
   });
-  const resolved = await resolveEntityLinksForItems({
+  const resolved = await resolveEventAttributionsForItems({
     connectorKey,
     orgId,
     items,
     rules: {
       access_member: [
         {
+          role: 'authored_by',
           entityType: 'person',
           autoCreate: true,
           titlePath: 'metadata.display_name',
@@ -294,13 +295,14 @@ export async function buildAccessGraph(params: {
     origin_type: 'access_resource',
     metadata: { resource_key: r.key, resource_name: r.name ?? r.key },
   }));
-  const resolvedResources = await resolveEntityLinksForItems({
+  const resolvedResources = await resolveEventAttributionsForItems({
     connectorKey,
     orgId: organizationId,
     items: resourceItems,
     rules: {
       access_resource: [
         {
+          role: 'belongs_to',
           entityType: resourceType.slug,
           autoCreate: true,
           titlePath: 'metadata.resource_name',

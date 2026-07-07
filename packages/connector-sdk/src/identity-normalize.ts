@@ -18,6 +18,11 @@
  *   share an English word — don't conflate them when reading this file.
  */
 
+import {
+  getIdentityNamespaceDefinition,
+  type IdentityNormalizerKind,
+} from './identity-namespaces.js';
+
 const PHONE_MIN_DIGITS = 7;
 const PHONE_MAX_DIGITS = 15;
 
@@ -120,6 +125,13 @@ export function normalizeNumericId(raw: string | null | undefined): string | nul
   return trimmed.replace(/^0+(?=\d)/, '');
 }
 
+export function normalizeXHandle(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim().replace(/^@+/, '').toLowerCase();
+  if (!trimmed || !/^[a-z0-9_]{1,15}$/.test(trimmed)) return null;
+  return trimmed;
+}
+
 /**
  * Normalize `auth_user_id` (Better Auth user id). Trim + lowercase so the
  * same user id from different clients collapses consistently.
@@ -131,26 +143,54 @@ export function normalizeAuthUserId(raw: string | null | undefined): string | nu
   return trimmed;
 }
 
+function normalizeTrim(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return trimmed ? trimmed : null;
+}
+
 /**
- * Look up the normalizer for a given namespace. Returns a noop-trimmer when
- * the namespace is unknown so custom connector namespaces still get basic
- * hygiene without special-casing.
+ * Apply a normalizer by its registry dispatch kind. The kind → function map
+ * lives here; the namespace → kind map lives in the identity namespace registry
+ * (identity-namespaces.ts), so `normalizeIdentifier` has one source of truth.
+ *
+ * `wa_jid` / `slack_user_id` intentionally fall through to trim-only: those are
+ * legacy recall namespaces whose stored rows predate stricter normalization, so
+ * the registry pins them to `trim` until a backfill re-normalizes the column.
+ */
+function applyNormalizer(
+  kind: IdentityNormalizerKind,
+  raw: string | null | undefined
+): string | null {
+  switch (kind) {
+    case 'phone':
+      return normalizePhone(raw);
+    case 'email':
+      return normalizeEmail(raw);
+    case 'numeric_id':
+      return normalizeNumericId(raw);
+    case 'x_handle':
+      return normalizeXHandle(raw);
+    case 'auth_user_id':
+      return normalizeAuthUserId(raw);
+    case 'wa_jid':
+    case 'slack_user_id':
+    case 'trim':
+      return normalizeTrim(raw);
+  }
+}
+
+/**
+ * Normalize an identity value for a given namespace. Dispatches through the
+ * canonical identity namespace registry's `normalizer` field. An unregistered
+ * namespace falls back to trim-only so custom connector namespaces still get
+ * basic hygiene without a registry entry.
  */
 export function normalizeIdentifier(
   namespace: string,
   raw: string | null | undefined
 ): string | null {
-  switch (namespace) {
-    case 'phone':
-      return normalizePhone(raw);
-    case 'email':
-      return normalizeEmail(raw);
-    case 'auth_user_id':
-      return normalizeAuthUserId(raw);
-    default: {
-      if (typeof raw !== 'string') return null;
-      const trimmed = raw.trim();
-      return trimmed ? trimmed : null;
-    }
-  }
+  const def = getIdentityNamespaceDefinition(namespace);
+  if (!def) return normalizeTrim(raw);
+  return applyNormalizer(def.normalizer, raw);
 }
