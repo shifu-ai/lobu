@@ -15,6 +15,7 @@ import {
 	statusReasonForConnector,
 	type ShifuMcpStatusReasonCode,
 } from "./provisioning-routes.js";
+import { orgContext } from "./stores/org-context.js";
 import { createPostgresAgentConfigStore } from "./stores/postgres-stores.js";
 
 export type LobuConnectorKey = ToolboxMcpStatusConnectorKey | (string & {});
@@ -354,38 +355,17 @@ export function createLobuConfigStatusService(
 			if (!agentBelongsToToolboxUser(metadata, userId)) {
 				throw new LobuConfigStatusError("agent_owner_mismatch");
 			}
-
-			const settings = await store.getSettings(agentId);
-			const ids = configuredMcpIds(settings);
-			const allowUnqualifiedToolNames = ids.size <= 1;
-			const connectors: LobuConnectorCurrentStatus[] = [];
-			const knownIds = new Set<string>();
-			for (const key of KNOWN_CONNECTORS) {
-				const canonical = canonicalMcpIdForConnector(key);
-				knownIds.add(canonical);
-				for (const alias of connectorKeyAliases(key)) knownIds.add(alias);
-				const configuredMcpId = configuredMcpIdForKnownConnector(ids, key);
-				connectors.push(
-					await statusFor(
-						{
-							oauthStatusProvider,
-							inspectCredentialStatus: inspectStoredCredentialStatus,
-						},
-						{
-							agentId,
-							userId,
-							key,
-							mcpId: configuredMcpId ?? canonical,
-							configured: Boolean(configuredMcpId),
-							toolNames: toolNamesForMcp(settings, configuredMcpId ?? canonical, {
-								allowUnqualified: allowUnqualifiedToolNames,
-							}),
-						},
-					),
-				);
-			}
-			for (const id of Array.from(ids.keys()).sort()) {
-				if (!knownIds.has(id)) {
+			const buildStatus = async () => {
+				const settings = await store.getSettings(agentId);
+				const ids = configuredMcpIds(settings);
+				const allowUnqualifiedToolNames = ids.size <= 1;
+				const connectors: LobuConnectorCurrentStatus[] = [];
+				const knownIds = new Set<string>();
+				for (const key of KNOWN_CONNECTORS) {
+					const canonical = canonicalMcpIdForConnector(key);
+					knownIds.add(canonical);
+					for (const alias of connectorKeyAliases(key)) knownIds.add(alias);
+					const configuredMcpId = configuredMcpIdForKnownConnector(ids, key);
 					connectors.push(
 						await statusFor(
 							{
@@ -395,25 +375,50 @@ export function createLobuConfigStatusService(
 							{
 								agentId,
 								userId,
-								key: id,
-								mcpId: id,
-								configured: true,
-								toolNames: toolNamesForMcp(settings, id, {
+								key,
+								mcpId: configuredMcpId ?? canonical,
+								configured: Boolean(configuredMcpId),
+								toolNames: toolNamesForMcp(settings, configuredMcpId ?? canonical, {
 									allowUnqualified: allowUnqualifiedToolNames,
 								}),
 							},
 						),
 					);
 				}
-			}
+				for (const id of Array.from(ids.keys()).sort()) {
+					if (!knownIds.has(id)) {
+						connectors.push(
+							await statusFor(
+								{
+									oauthStatusProvider,
+									inspectCredentialStatus: inspectStoredCredentialStatus,
+								},
+								{
+									agentId,
+									userId,
+									key: id,
+									mcpId: id,
+									configured: true,
+									toolNames: toolNamesForMcp(settings, id, {
+										allowUnqualified: allowUnqualifiedToolNames,
+									}),
+								},
+							),
+						);
+					}
+				}
 
-			return {
-				ok: true,
-				agentId,
-				userId,
-				checkedAt: Date.now(),
-				connectors,
+				return {
+					ok: true as const,
+					agentId,
+					userId,
+					checkedAt: Date.now(),
+					connectors,
+				};
 			};
+			return metadata.organizationId
+				? orgContext.run({ organizationId: metadata.organizationId }, buildStatus)
+				: buildStatus();
 		},
 	};
 }
