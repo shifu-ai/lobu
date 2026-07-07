@@ -355,6 +355,12 @@ const TOOLBOX_DISCOVERY_TOOL_ALIASES: Record<
     chat_messages_list: 'gws_chat_messages_list',
     google_workspace_chat_messages_list: 'gws_chat_messages_list',
     gws_chat_messages_list: 'gws_chat_messages_list',
+    chat_mentions_list: 'gws_chat_mentions_list',
+    google_workspace_chat_mentions_list: 'gws_chat_mentions_list',
+    gws_chat_mentions_list: 'gws_chat_mentions_list',
+    chat_attachment_read: 'gws_chat_attachment_read',
+    google_workspace_chat_attachment_read: 'gws_chat_attachment_read',
+    gws_chat_attachment_read: 'gws_chat_attachment_read',
   },
   notion: {
     search: 'notion-search',
