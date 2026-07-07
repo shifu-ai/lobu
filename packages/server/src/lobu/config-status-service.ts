@@ -74,6 +74,7 @@ interface CredentialStatusInspection {
 interface StoredCredentialRecord {
 	accessToken: string;
 	expiresAt: number;
+	refreshToken?: string;
 }
 
 export class LobuConfigStatusError extends Error {
@@ -265,6 +266,9 @@ function parseStoredCredential(value: string): StoredCredentialRecord | null {
 	return {
 		accessToken: parsed.accessToken,
 		expiresAt: parsed.expiresAt,
+		...(typeof parsed.refreshToken === "string" && parsed.refreshToken.length > 0
+			? { refreshToken: parsed.refreshToken }
+			: {}),
 	};
 }
 
@@ -289,6 +293,11 @@ async function inspectCredentialStatus(input: {
 			return { authorized: false, credentialError: "provider_error" };
 		}
 		if (credential.expiresAt > input.now()) {
+			return { authorized: true, credentialError: null };
+		}
+		// An expired access token with a refresh token is still a live grant:
+		// the runtime refreshes it silently on the next tool call.
+		if (credential.refreshToken) {
 			return { authorized: true, credentialError: null };
 		}
 		return { authorized: false, credentialError: "token_expired" };

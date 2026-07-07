@@ -369,13 +369,58 @@ describe("Lobu config current status routes", () => {
 		);
 	});
 
-	test("returns needs_reauth when credential lookup reports token_expired", async () => {
+	test("reports expired access token with a refresh token as authorized", async () => {
 		const secretStore = buildSecretStore({
 			get: mock(async (ref) => {
 				expect(ref).toBe(SECRET_REF);
 				return JSON.stringify({
 					accessToken: "expired-access-token",
-					refreshToken: "expired-refresh-token",
+					refreshToken: "usable-refresh-token",
+					expiresAt: Date.now() - 60_000,
+					clientId: "test-client",
+					tokenUrl: "https://oauth.example.test/token",
+				});
+			}),
+		});
+		const app = buildApp(
+			buildStore({
+				metadata: ownedMetadata(),
+				settings: {
+					mcpServers: {
+						notion: { url: "https://mcp.notion.test/mcp" },
+					},
+					preApprovedTools: ["/mcp/notion/tools/notion_search"],
+				},
+			}),
+			{ secretStore },
+		);
+
+		const response = await app.request(
+			`/internal/lobu-config/current?agentId=${AGENT_ID}&userId=${USER_ID}`,
+			{ headers: { Authorization: `Bearer ${TOKEN}` } },
+		);
+
+		expect(response.status).toBe(200);
+		const body = await response.json();
+		expect(body.connectors).toContainEqual(
+			expect.objectContaining({
+				key: "notion",
+				authorized: true,
+				oauthStatus: "authorized",
+				reasonCode: "ok",
+				reauthorizationAvailable: true,
+				authorizationUrlAvailable: true,
+				toolNames: ["notion_search"],
+			}),
+		);
+	});
+
+	test("returns needs_reauth for an expired access token without a refresh token", async () => {
+		const secretStore = buildSecretStore({
+			get: mock(async (ref) => {
+				expect(ref).toBe(SECRET_REF);
+				return JSON.stringify({
+					accessToken: "expired-access-token",
 					expiresAt: Date.now() - 60_000,
 					clientId: "test-client",
 					tokenUrl: "https://oauth.example.test/token",
