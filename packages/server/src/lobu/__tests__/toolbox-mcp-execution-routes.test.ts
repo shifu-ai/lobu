@@ -660,6 +660,63 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call allows Notion official read/query discovery tools only', async () => {
+    fakeConnections.set(NOTION_CONNECTION_REF, {
+      id: NOTION_CONNECTION_REF,
+      organizationId: ORG_ID,
+      agentId: AGENT_ID,
+      platform: 'notion',
+      config: {},
+      settings: {},
+      metadata: { ownerUserId: OWNER_USER_ID },
+      status: 'active',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+    const app = await importMountedAgentRoutes();
+
+    for (const [toolName, expectedUpstream] of [
+      ['notion-search', 'notion-search'],
+      ['notion-fetch', 'notion-fetch'],
+      ['notion-query-data-sources', 'notion-query-data-sources'],
+      ['notion_query_data_sources', 'notion-query-data-sources'],
+      ['notion-query-database-view', 'notion-query-database-view'],
+      ['notion-get-comments', 'notion-get-comments'],
+      ['notion-get-users', 'notion-get-users'],
+      ['notion-get-teams', 'notion-get-teams'],
+      ['notion-get-async-task', 'notion-get-async-task'],
+      ['search', 'notion-search'],
+      ['read_page', 'notion-fetch'],
+      ['read_database', 'notion-fetch'],
+    ] as const) {
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'notion',
+          connectionRef: NOTION_CONNECTION_REF,
+          toolName,
+          args: { query: 'course pm' },
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({ ok: true });
+      expect(executeToolDirectMock).toHaveBeenLastCalledWith(
+        AGENT_ID,
+        OWNER_USER_ID,
+        NOTION_CONNECTION_REF,
+        expectedUpstream,
+        { query: 'course pm' }
+      );
+    }
+  });
+
   test('POST /mcp/tools/call keeps provider write tools out of the direct discovery route', async () => {
     const app = await importMountedAgentRoutes();
 
@@ -669,6 +726,12 @@ describe('Toolbox MCP execution routes', () => {
         connectionRef: NOTION_CONNECTION_REF,
         toolName: 'notion-create-pages',
         args: { parent: { page_id: 'page-1' }, pages: [] },
+      },
+      {
+        connectorKey: 'notion',
+        connectionRef: NOTION_CONNECTION_REF,
+        toolName: 'notion-update-page',
+        args: { page_id: 'page-1', properties: {} },
       },
       {
         connectorKey: 'google_workspace',

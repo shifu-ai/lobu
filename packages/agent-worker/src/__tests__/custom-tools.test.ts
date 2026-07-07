@@ -214,7 +214,7 @@ describe("createOpenClawCustomTools", () => {
     });
   });
 
-  test("keeps Toolbox personal Notion tool and first-class MCP Notion tool globally unique for Gemini", () => {
+  test("keeps direct official Notion MCP tools authoritative over Toolbox wrappers for Gemini", () => {
     const gw = {
       gatewayUrl: "http://gateway",
       workerToken: "worker-token",
@@ -247,6 +247,39 @@ describe("createOpenClawCustomTools", () => {
                 required: ["query"],
               },
             },
+            {
+              name: "notion_update_page",
+              connectorToolName: "notion_update_page",
+              description: "Update a Notion page.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  page_id: { type: "string" },
+                  properties: { type: "object" },
+                },
+                required: ["page_id"],
+              },
+            },
+            {
+              name: "notion_read_page",
+              connectorToolName: "notion_read_page",
+              description: "Read a Notion page.",
+              inputSchema: {
+                type: "object",
+                properties: { page_id: { type: "string" } },
+                required: ["page_id"],
+              },
+            },
+            {
+              name: "notion_read_database",
+              connectorToolName: "notion_read_database",
+              description: "Read a Notion database.",
+              inputSchema: {
+                type: "object",
+                properties: { database_id: { type: "string" } },
+                required: ["database_id"],
+              },
+            },
           ],
         },
       ],
@@ -264,6 +297,15 @@ describe("createOpenClawCustomTools", () => {
               required: ["query"],
             },
           },
+          {
+            name: "notion-update-page",
+            description: "Update Notion page MCP",
+            inputSchema: {
+              type: "object",
+              properties: { page_id: { type: "string" } },
+              required: ["page_id"],
+            },
+          },
         ],
       },
       {
@@ -278,7 +320,107 @@ describe("createOpenClawCustomTools", () => {
     const mcpToolDefs = createMcpToolDefinitions(projectedMcp.tools, gw);
     const names = [...customTools, ...mcpToolDefs].map((tool) => tool.name);
     expect(names.filter((name) => name === "notion_search")).toHaveLength(1);
-    expect(names).toContain("notion_search_2");
+    expect(names.filter((name) => name === "notion_update_page")).toHaveLength(
+      1
+    );
+    expect(names).not.toContain("notion_read_page");
+    expect(names).not.toContain("notion_read_database");
+    expect(names).not.toContain("notion_search_2");
+    expect(names).not.toContain("notion_update_page_2");
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test("keeps non-official Toolbox Notion tools available", () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent",
+      userId: "toolbox-user",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      toolboxPersonalAgentTools: [
+        {
+          connectorKey: "notion",
+          connectionRef: "toolbox-mcp:ref",
+          tools: [
+            {
+              name: "course_pm_notion_lookup",
+              connectorToolName: "course_pm_notion_lookup",
+              description: "Course PM Notion lookup helper.",
+              inputSchema: {
+                type: "object",
+                properties: { query: { type: "string" } },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(tools.map((tool) => tool.name)).toContain("course_pm_notion_lookup");
+  });
+
+  test("keeps provider suffix fallback for non-official Toolbox Notion collisions", () => {
+    const gw = {
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "shifu-u-agent",
+      userId: "toolbox-user",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+    };
+
+    const customTools = createOpenClawCustomTools({
+      ...gw,
+      toolboxPersonalAgentTools: [
+        {
+          connectorKey: "notion",
+          connectionRef: "toolbox-mcp:ref",
+          tools: [
+            {
+              name: "course_pm_notion_lookup",
+              connectorToolName: "course_pm_notion_lookup",
+              description: "Course PM Notion lookup helper.",
+              inputSchema: {
+                type: "object",
+                properties: { query: { type: "string" } },
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const projectedMcp = projectMcpToolsForProvider(
+      {
+        notion: [
+          {
+            name: "course-pm-notion-lookup",
+            description: "Course PM Notion lookup MCP.",
+            inputSchema: {
+              type: "object",
+              properties: { query: { type: "string" } },
+            },
+          },
+        ],
+      },
+      {
+        provider: "gemini",
+        directToolLimit: 100,
+        reservedProviderToolNames: new Set(
+          customTools.map((tool) => tool.name)
+        ),
+      }
+    );
+
+    const mcpToolDefs = createMcpToolDefinitions(projectedMcp.tools, gw);
+    const names = [...customTools, ...mcpToolDefs].map((tool) => tool.name);
+    expect(names).toContain("course_pm_notion_lookup");
+    expect(names).toContain("course_pm_notion_lookup_2");
     expect(new Set(names).size).toBe(names.length);
   });
 

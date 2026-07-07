@@ -37,6 +37,51 @@ function safeObjectKeys(value: unknown): string[] {
     : [];
 }
 
+const OFFICIAL_NOTION_TOOL_NAMES = new Set([
+  "search",
+  "read_page",
+  "read_database",
+  "notion-search",
+  "notion-read-page",
+  "notion-read-database",
+  "notion-fetch",
+  "notion-query-data-sources",
+  "notion-query-database-view",
+  "notion-get-comments",
+  "notion-get-users",
+  "notion-get-teams",
+  "notion-get-async-task",
+  "notion-create-pages",
+  "notion-update-page",
+  "notion-move-pages",
+  "notion-duplicate-page",
+  "notion-create-database",
+  "notion-update-data-source",
+  "notion-create-view",
+  "notion-update-view",
+  "notion-create-comment",
+]);
+
+function isOfficialNotionToolName(name: string): boolean {
+  const trimmed = name.trim();
+  if (OFFICIAL_NOTION_TOOL_NAMES.has(trimmed)) return true;
+  if (trimmed.startsWith("notion_")) {
+    return OFFICIAL_NOTION_TOOL_NAMES.has(trimmed.replaceAll("_", "-"));
+  }
+  return false;
+}
+
+function isOfficialNotionToolboxWrapper(
+  connectorKey: string,
+  tool: ToolboxPersonalAgentToolGroup["tools"][number]
+): boolean {
+  if (connectorKey !== "notion") return false;
+  return (
+    isOfficialNotionToolName(tool.name) ||
+    isOfficialNotionToolName(tool.connectorToolName)
+  );
+}
+
 /** Adapt shared TextResult to OpenClaw's ToolResult (adds details field) */
 function toToolResult(result: TextResult): ToolResult {
   return { content: result.content, details: {} };
@@ -324,6 +369,7 @@ export function createOpenClawCustomTools(params: {
   for (const group of params.toolboxPersonalAgentTools || []) {
     for (const tool of group.tools) {
       if (!tool.name?.trim()) continue;
+      if (isOfficialNotionToolboxWrapper(group.connectorKey, tool)) continue;
       tools.push({
         name: tool.name,
         label: tool.name,
