@@ -141,10 +141,31 @@ export async function manageSchedules(
   });
 }
 
+/**
+ * MCP clients and models frequently serialize nested tool arguments as JSON
+ * strings. Parse a stringified `payload` back to an object instead of failing
+ * the union validation; non-JSON strings pass through so validation reports
+ * the real error.
+ */
+export function coerceSchedulePayload(payload: unknown): unknown {
+  if (typeof payload === 'string') {
+    try {
+      return JSON.parse(payload) as unknown;
+    } catch {
+      return payload;
+    }
+  }
+  return payload;
+}
+
 async function handleCreate(
-  args: Extract<ManageSchedulesArgs, { action: 'create' }>,
+  rawArgs: Extract<ManageSchedulesArgs, { action: 'create' }>,
   ctx: ToolContext
 ): Promise<ToolResult> {
+  const args = {
+    ...rawArgs,
+    payload: coerceSchedulePayload(rawArgs.payload),
+  } as typeof rawArgs;
   if (!createValidator.Check(args)) {
     const errs = [...createValidator.Errors(args)];
     return { error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}` };
