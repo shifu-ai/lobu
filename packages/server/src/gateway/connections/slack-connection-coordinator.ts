@@ -2,15 +2,22 @@ import { createLogger } from "@lobu/core";
 import { Chat } from "chat";
 import type { AppInstallationStore } from "../../lobu/stores/app-installation-store.js";
 import {
+  claimSlackWelcomeDm,
+  getSlackInstallByEnterpriseId,
   getSlackInstallByTeamId,
   resolveSlackPendingByTenant,
-  upsertSlackInstallByTeam,
   writeSlackPendingInstall,
 } from "../../lobu/stores/slack-installations.js";
 import { getConfiguredPublicOrigin } from "../../utils/public-origin.js";
+import { getDb } from "../../db/client.js";
 import { createSlackWebApi, type SlackWebApi } from "./slack-web.js";
-import type { WritableSecretStore } from "../secrets/index.js";
 import {
+  resolveSecretValue,
+  type WritableSecretStore,
+} from "../secrets/index.js";
+import { orgContext } from "../../lobu/stores/org-context.js";
+import {
+  getOrgAppInstallationMethod,
   getPrimedBundledMethod,
   resolveAppInstallCredentials,
 } from "../installation/app-install-credentials.js";
@@ -24,27 +31,37 @@ import {
 const logger = createLogger("slack-connection-coordinator");
 
 /**
- * Complete a Slack-initiated (marketplace) install: the callback got a `code`
- * but no Lobu-minted state, so there's no org to bind to. Exchange the code for
- * the bot token + installer identity via `oauth.v2.access`, and park it as an
- * UNCLAIMED `pending` install (org-less). The installer later claims the
- * workspace by signing in with Slack. Returns the parked install's identity, or
- * `null` when the hosted app credentials aren't configured (so the caller can
- * fall through to the normal invalid-state rejection).
+ * Complete a Slack install by parking it as an UNCLAIMED `pending` install
+ * (org-less): exchange the `code` for the bot token + installer identity via
+ * `oauth.v2.access`, then write the pending row. The installer later chooses
+ * which Lobu org to bind the workspace to via the claim flow — this never binds.
+ *
+ * This is the converged completion for BOTH marketplace ("Add to Slack", no
+ * state) AND state-carrying (logged-in) installs. `credsOrgHint` is the org the
+ * Lobu-minted state peeked to, when present: it selects THAT org's BYO per-org
+ * `connector_definitions` creds for the code exchange (self-host), mirroring
+ * install-start's resolution; absent (hosted / logged-out) → primed bundled
+ * creds. It is a creds hint ONLY, never a binding. Returns `null` when no creds
+ * resolve (so the caller can fall through to the invalid-state rejection).
  */
 export async function completeSlackPendingInstall(
   request: Request,
   redirectUri: string,
+  credsOrgHint: string | null,
 ): Promise<{
-  teamId: string;
-  teamName: string | null;
-  installerUserId: string | null;
+  /** Provider-agnostic subject reference (the claim `ref`) — the Slack team id. */
+  externalRef: string;
+  /** Human-readable subject name for the claim confirm copy. */
+  subjectName: string | null;
 } | null> {
-  const method = getPrimedBundledMethod("slack", "slack");
+  const method =
+    (credsOrgHint
+      ? await getOrgAppInstallationMethod(credsOrgHint, "slack", "slack")
+      : null) ?? getPrimedBundledMethod("slack", "slack");
   const creds = method ? resolveAppInstallCredentials(method) : null;
   if (!creds?.clientId || !creds?.clientSecret) {
     logger.warn(
-      "Slack pending-install: hosted app credentials not configured; cannot exchange code",
+      "Slack pending-install: no app credentials resolved; cannot exchange code",
     );
     return null;
   }
@@ -66,6 +83,7 @@ export async function completeSlackPendingInstall(
     botToken: result.botToken,
     installerUserId: result.authedUserId,
     isEnterpriseInstall: result.isEnterpriseInstall,
+    enterpriseId: result.enterpriseId,
   });
   logger.info(
     {
@@ -80,7 +98,7 @@ export async function completeSlackPendingInstall(
   // parked; a DM failure (installer un-DMable, un-configured web base, …) must
   // never fail the install — the workspace can still be connected via the app.
   if (result.authedUserId) {
-    await dmSlackClaimLink(web, result.botToken, result.authedUserId, result.teamId);
+    await dmProviderClaimLink(web, result.botToken, result.authedUserId, result.teamId);
   } else {
     logger.info(
       { teamId: result.teamId },
@@ -89,9 +107,8 @@ export async function completeSlackPendingInstall(
   }
 
   return {
-    teamId: result.teamId,
-    teamName: result.teamName,
-    installerUserId: result.authedUserId,
+    externalRef: result.teamId,
+    subjectName: result.teamName,
   };
 }
 
@@ -100,7 +117,7 @@ export async function completeSlackPendingInstall(
  * parked (pending) workspace to their Lobu account. Best-effort: any failure is
  * logged and swallowed — the install stays parked and claimable via the app.
  */
-async function dmSlackClaimLink(
+async function dmProviderClaimLink(
   web: SlackWebApi,
   botToken: string,
   installerUserId: string,
@@ -114,7 +131,7 @@ async function dmSlackClaimLink(
     );
     return;
   }
-  const claimUrl = `${webBase}/slack/claim?team=${encodeURIComponent(teamId)}`;
+  const claimUrl = `${webBase}/connector/slack/connection?ref=${encodeURIComponent(teamId)}`;
   const text = `👋 Thanks for adding Lobu to your workspace! Connect it to your Lobu account to finish setup: ${claimUrl}`;
   try {
     const dm = await web.openDm(botToken, installerUserId);
@@ -123,6 +140,94 @@ async function dmSlackClaimLink(
     logger.warn(
       { teamId, installerUserId, error: String(error) },
       "Slack pending-install: failed to DM the installer their claim link",
+    );
+  }
+}
+
+/** The org's display name + URL slug (for the welcome DM's dashboard link). */
+async function resolveOrgNameAndSlug(
+  organizationId: string,
+): Promise<{ name: string; slug: string } | null> {
+  const rows = (await getDb()`
+    SELECT name, slug FROM "organization" WHERE id = ${organizationId} LIMIT 1
+  `) as Array<{ name: string; slug: string }>;
+  return rows[0] ?? null;
+}
+
+/**
+ * Fire the ONE-TIME "you're all set" welcome DM to the installer, the moment a
+ * claimed + installed Slack workspace gets its FIRST agent bound to a channel.
+ * Distinct from {@link dmProviderClaimLink}, which fires at install/pending time
+ * with the claim link — this fires later, once all three onboarding steps are
+ * done (install → workspace claimed → first agent mapped), confirming the bot is
+ * live and wired to an agent.
+ *
+ * Call this AFTER any successful Slack channel binding. The three preconditions
+ * are enforced together by {@link claimSlackWelcomeDm}'s single conditional
+ * UPDATE:
+ *   - installed & workspace-mapped  → there is an ACTIVE `app_installations` row
+ *     for the team (an unclaimed workspace is only ever `pending`, never active);
+ *   - installer known               → that row carries `installer_user_id`;
+ *   - exactly once, multi-replica   → the update flips `welcome_dm_sent` unset →
+ *     true and returns the row ONLY to the winner, so concurrent pods racing the
+ *     first binding send at most one DM.
+ * When the claim returns null (any precondition unmet, or already sent) this is a
+ * no-op.
+ *
+ * Best-effort delivery: a DM failure is logged and swallowed (matching
+ * {@link dmProviderClaimLink}) — it must NEVER roll back the binding. The marker is
+ * already claimed, so a failed send is not retried (at-most-once wins over
+ * at-least-once here, per the idempotency invariant).
+ */
+export async function maybeSendSlackWorkspaceWelcome(args: {
+  teamId: string;
+  secretStore: WritableSecretStore;
+  /** Injectable Slack Web API (tests stub the DM calls). */
+  web?: SlackWebApi;
+}): Promise<void> {
+  const { teamId, secretStore } = args;
+  const claim = await claimSlackWelcomeDm(teamId);
+  if (!claim) return;
+
+  const webBase = getConfiguredPublicOrigin()?.replace(/\/+$/, "");
+  const botToken = claim.botTokenRef
+    ? await orgContext.run({ organizationId: claim.organizationId }, () =>
+        resolveSecretValue(secretStore, claim.botTokenRef),
+      )
+    : undefined;
+  if (!botToken) {
+    logger.warn(
+      { teamId, installationId: claim.installationId },
+      "Slack welcome DM: no resolvable bot token — skipping installer welcome",
+    );
+    return;
+  }
+
+  // Link the ORG NAME (not a raw URL) to its dashboard, using Slack's
+  // `<url|label>` mrkdwn link syntax — a bare URL reads as noise in a DM.
+  const org = await resolveOrgNameAndSlug(claim.organizationId);
+  const dashboard =
+    webBase && org
+      ? ` Manage it anytime in <${webBase}/${org.slug}|${org.name}>.`
+      : "";
+  const text = `🎉 You're all set! Lobu is live in your workspace and now wired up to an agent. Mention it in a channel or send it a DM to start.${dashboard}`;
+  const web = args.web ?? createSlackWebApi();
+  try {
+    const dm = await web.openDm(botToken, claim.installerUserId);
+    await web.postMessage(botToken, dm, text);
+    logger.info(
+      { teamId, installationId: claim.installationId },
+      "Slack welcome DM: sent installer the first-agent-bound welcome",
+    );
+  } catch (error) {
+    logger.warn(
+      {
+        teamId,
+        installationId: claim.installationId,
+        installerUserId: claim.installerUserId,
+        error: String(error),
+      },
+      "Slack welcome DM: failed to DM the installer the welcome message",
     );
   }
 }
@@ -297,98 +402,16 @@ export class SlackConnectionCoordinator {
     );
   }
 
-  /**
-   * Persist a per-workspace OAuth install: the workspace's bot token + tenant
-   * metadata, keyed on (org, team), as an `app_installations` row (provider=slack).
-   * This is NOT a BYO `connections` chat row — an installed workspace has no owning agent;
-   * it routes to many agents via `/lobu link` channel bindings. The token goes
-   * to the secret store (the store handles that); app-level creds
-   * (signingSecret/clientId/clientSecret) stay env-sourced at runtime. Idempotent
-   * per (org, team) — a re-install refreshes the token on the same row id, so the
-   * instance memo, secret prefix, and any existing bindings are unaffected.
-   */
-  async ensureWorkspaceInstallation(
-    organizationId: string,
-    teamId: string,
-    installation: SlackInstallation
-  ): Promise<{ installationId: string }> {
-    const row = await upsertSlackInstallByTeam(
-      this.deps.getAppInstallationStore(),
-      this.deps.getSecretStore(),
-      organizationId,
-      teamId,
-      {
-        teamName: installation.teamName,
-        botUserId: installation.botUserId,
-        botToken: installation.botToken,
-      }
-    );
-    return { installationId: row.id };
-  }
-
-  async completeOAuthInstall(
-    request: Request,
-    redirectUri: string | undefined,
-    organizationId: string
-  ): Promise<{
-    teamId: string;
-    teamName?: string;
-    installationId: string;
-  }> {
-    const { chat, adapter } = await this.createOAuthChat({
-      requireOAuth: true,
-    });
-
-    try {
-      const url = new URL(request.url);
-      if (redirectUri) {
-        url.searchParams.set("redirect_uri", redirectUri);
-      }
-
-      const callbackRequest = new Request(url.toString(), {
-        method: request.method,
-        headers: request.headers,
-      });
-
-      const { teamId, installation } =
-        await adapter.handleOAuthCallback(callbackRequest);
-      let installationId: string;
-      try {
-        ({ installationId } = await this.ensureWorkspaceInstallation(
-          organizationId,
-          teamId,
-          installation
-        ));
-      } catch (error) {
-        await adapter.deleteInstallation(teamId).catch((err) => {
-          logger.warn(
-            { teamId, error: String(err) },
-            "Failed to delete Slack installation after persistence error"
-          );
-        });
-        throw error;
-      }
-
-      return {
-        teamId,
-        teamName: installation.teamName,
-        installationId,
-      };
-    } finally {
-      await chat.shutdown().catch((err: unknown) => {
-        logger.warn(
-          { error: String(err) },
-          "Failed to shut down Slack OAuth chat"
-        );
-      });
-    }
-  }
-
   async handleAppWebhook(request: Request): Promise<Response> {
     const body = await request.text();
     const contentType = request.headers.get("content-type") || "";
     const teamJoinEvent = parseSlackTeamJoinEvent(body, contentType);
     const teamId = this.extractTeamId(body, contentType);
+    // Grid: events for a workspace inside an Enterprise Grid arrive stamped with
+    // a SIBLING workspace's `team_id` (not the install's), but carry the shared
+    // `enterprise_id`. Captured so path 2 can fall back to an enterprise match
+    // when the exact team id misses.
+    const enterpriseId = this.extractEnterpriseId(body, contentType);
 
     if (teamId) {
       // 1) A BYO agent-owned Slack connection for this workspace (created via
@@ -414,10 +437,16 @@ export class SlackConnectionCoordinator {
       //    `slackinst-` id is namespaced, so `ensureConnectionRunning`/
       //    `forwardWebhook` resolve it via the Slack install projection). Per-message
       //    routing is via `/lobu link` bindings.
-      const installation = await getSlackInstallByTeamId(
-        this.deps.getAppInstallationStore(),
-        teamId
-      );
+      const store = this.deps.getAppInstallationStore();
+      // Exact team id first; on a Grid workspace the event's team id is a sibling
+      // of the install's, so fall back to the shared enterprise id — but only
+      // when that enterprise has a SINGLE install (else it's ambiguous and the
+      // fallback returns null rather than cross-tenant misroute).
+      const installation =
+        (await getSlackInstallByTeamId(store, teamId)) ??
+        (enterpriseId
+          ? await getSlackInstallByEnterpriseId(store, enterpriseId)
+          : null);
       if (installation && installation.status !== "stopped") {
         if (!(await this.deps.ensureConnectionRunning(installation.id))) {
           return new Response("Slack connection unavailable", { status: 503 });
@@ -555,7 +584,7 @@ export class SlackConnectionCoordinator {
     if (!event) return ack;
     const webBase = getConfiguredPublicOrigin()?.replace(/\/+$/, "");
     if (!webBase) return ack;
-    const claimUrl = `${webBase}/slack/claim?team=${encodeURIComponent(teamId)}`;
+    const claimUrl = `${webBase}/connector/slack/connection?ref=${encodeURIComponent(teamId)}`;
     const text = `👋 This Slack workspace isn't connected to Lobu yet. A workspace admin can connect it here: ${claimUrl}`;
     try {
       await createSlackWebApi().postMessage(botToken, event.channel, text);
@@ -605,6 +634,47 @@ export class SlackConnectionCoordinator {
         payload.event?.team ||
         null
       );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * The Slack Enterprise Grid enterprise id for a delivery, or null for a plain
+   * workspace. Events on a Grid workspace arrive stamped with a SIBLING
+   * workspace's `team_id`, so the exact team-id install lookup misses; the
+   * enterprise id (shared across the Grid) is the fallback routing key. Read from
+   * top-level `enterprise_id` / `context_enterprise_id`, then the first
+   * authorization's `enterprise_id` (interactive `payload` for form posts).
+   */
+  extractEnterpriseId(body: string, contentType: string): string | null {
+    const fromPayload = (payload: {
+      enterprise_id?: string;
+      context_enterprise_id?: string;
+      enterprise?: { id?: string };
+      authorizations?: Array<{ enterprise_id?: string | null }>;
+    }): string | null =>
+      payload.enterprise_id ||
+      payload.context_enterprise_id ||
+      payload.enterprise?.id ||
+      payload.authorizations?.[0]?.enterprise_id ||
+      null;
+
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      const params = new URLSearchParams(body);
+      const direct = params.get("enterprise_id");
+      if (direct) return direct;
+      const payloadStr = params.get("payload");
+      if (!payloadStr) return null;
+      try {
+        return fromPayload(JSON.parse(payloadStr));
+      } catch {
+        return null;
+      }
+    }
+
+    try {
+      return fromPayload(JSON.parse(body));
     } catch {
       return null;
     }
