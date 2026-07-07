@@ -144,7 +144,7 @@ function summarizeGoogleDocsBatchUpdate(
   const input =
     args && typeof args === "object" ? (args as Record<string, unknown>) : {};
   const result = extractMcpJsonBody(raw);
-  const rawReply = result ?? raw;
+  const rawReply = sanitizeToolUseSummaryValue(result ?? raw);
   const replies = extractReplies(rawReply);
   const occurrencesChanged = sumOccurrencesChanged(replies);
   const effectVerified = occurrencesChanged > 0;
@@ -194,6 +194,46 @@ function sumOccurrencesChanged(value: unknown): number {
     total += sumOccurrencesChanged(child);
   }
   return total;
+}
+
+function sanitizeToolUseSummaryValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeToolUseSummaryValue(item));
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  if (
+    record.type === "image" &&
+    typeof record.data === "string" &&
+    typeof record.mimeType === "string"
+  ) {
+    const metadata: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(record)) {
+      if (key === "data") continue;
+      metadata[key] = child;
+    }
+    return {
+      ...sanitizeRecord(metadata),
+      type: "image",
+      mimeType: record.mimeType,
+      dataLength: record.data.length,
+    };
+  }
+
+  return sanitizeRecord(record);
+}
+
+function sanitizeRecord(
+  record: Record<string, unknown>
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(record)) {
+    sanitized[key] = sanitizeToolUseSummaryValue(child);
+  }
+  return sanitized;
 }
 
 /**
