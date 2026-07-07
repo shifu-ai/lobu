@@ -157,6 +157,7 @@ export async function normalizeToolTextForContext(params: {
   runId: string;
   toolLabel: string;
   inlineTokenCap?: number;
+  descriptorPrefix?: string;
 }): Promise<string> {
   const inlineTokenCap = params.inlineTokenCap ?? 8_000;
   if (
@@ -175,7 +176,10 @@ export async function normalizeToolTextForContext(params: {
     title: `Large tool result from ${params.toolLabel}`,
   });
 
-  return renderArtifactDescriptor(artifact);
+  const descriptor = renderArtifactDescriptor(artifact);
+  return params.descriptorPrefix
+    ? `${params.descriptorPrefix}\n${descriptor}`
+    : descriptor;
 }
 
 export async function readContextArtifactChunk(params: {

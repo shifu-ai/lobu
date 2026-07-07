@@ -1292,7 +1292,17 @@ export async function callMcpTool(
     if (!response.ok || data.isError) {
       const errorMsg =
         data.error || contentText || `${toolName} failed (${response.status})`;
-      return textResult(await normalizeResultText(`Error: ${errorMsg}`));
+      return textResult(
+        await normalizeToolTextForContext({
+          workspaceDir: gw.workspaceDir,
+          text: `Error: ${errorMsg}`,
+          source: "mcp",
+          runId: gw.conversationId,
+          toolLabel: `${mcpId}/${toolName}`,
+          descriptorPrefix:
+            "Error: Large MCP tool error output was stored as artifact.",
+        })
+      );
     }
 
     return textResult(

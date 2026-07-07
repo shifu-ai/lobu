@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   estimateContextTokens,
+  normalizeToolTextForContext,
   prepareUserPromptForContext,
   readContextArtifactChunk,
 } from "../openclaw/context-pressure";
@@ -141,6 +142,77 @@ describe("context pressure", () => {
         totalChunks: 6_667,
         text: "234567",
       });
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("spills oversized tool result to a readable artifact descriptor", async () => {
+    const workspaceDir = await mkdtemp(
+      join(tmpdir(), "lobu-context-pressure-tool-")
+    );
+    try {
+      const toolResult = "X".repeat(120_000);
+      const descriptor = await normalizeToolTextForContext({
+        workspaceDir,
+        text: toolResult,
+        source: "mcp",
+        runId: "run-tool-1",
+        toolLabel: "docs/read_big_doc",
+      });
+
+      expect(descriptor.length).toBeLessThan(4_000);
+      expect(descriptor).toContain("ctx_art_");
+      expect(descriptor).toContain("artifact_read");
+      expect(descriptor).toContain("Kind: tool_result");
+
+      const artifactId = descriptor.match(/ctx_art_[a-f0-9]+/)?.[0];
+      if (!artifactId) {
+        throw new Error("Expected artifact id in descriptor");
+      }
+
+      const chunk = await readContextArtifactChunk({
+        workspaceDir,
+        artifactId,
+        chunkIndex: 0,
+      });
+      expect(chunk.text).toBe(toolResult.slice(0, 12_000));
+      expect(chunk.totalChunks).toBe(10);
+    } finally {
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps small tool results inline", async () => {
+    const result = await normalizeToolTextForContext({
+      workspaceDir: "/unused",
+      text: "small result",
+      source: "mcp",
+      runId: "run-tool-2",
+      toolLabel: "docs/read_small_doc",
+    });
+
+    expect(result).toBe("small result");
+  });
+
+  test("preserves error prefix when oversized tool error is spilled", async () => {
+    const workspaceDir = await mkdtemp(
+      join(tmpdir(), "lobu-context-pressure-tool-error-")
+    );
+    try {
+      const descriptor = await normalizeToolTextForContext({
+        workspaceDir,
+        text: `Error: ${"upstream failure ".repeat(10_000)}`,
+        source: "mcp",
+        runId: "run-tool-3",
+        toolLabel: "docs/read_big_doc",
+        descriptorPrefix: "Error: Large MCP tool error output was stored as artifact.",
+      });
+
+      expect(descriptor).toStartWith("Error:");
+      expect(descriptor.length).toBeLessThan(4_000);
+      expect(descriptor).toContain("ctx_art_");
+      expect(descriptor).toContain("artifact_read");
     } finally {
       await rm(workspaceDir, { recursive: true, force: true });
     }
