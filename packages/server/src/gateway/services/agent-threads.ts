@@ -97,6 +97,7 @@ export async function createThreadForAgent(
     status: "created",
     provider: "claude",
     agentId,
+    organizationId,
     dryRun: false,
   };
   await sessionManager.setSession(session);
@@ -156,6 +157,9 @@ export async function enqueueAgentMessage(
     channelId,
     teamId: "api",
     agentId: realAgentId,
+    ...(session.organizationId
+      ? { organizationId: session.organizationId }
+      : {}),
     botId: "lobu-api",
     platform: "api",
     messageText,

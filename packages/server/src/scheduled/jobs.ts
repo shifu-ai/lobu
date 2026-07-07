@@ -292,9 +292,9 @@ function registerMaintenanceTasks(
       { sessionManager, queueProducer },
       {
         threadId,
-        messageText: buildScheduledWakeMessage(
-          renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick)
-        ),
+        messageText: reuseConversation
+          ? buildScheduledWakeMessage(renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick))
+          : renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
         source: 'scheduled-job',
       }
     );

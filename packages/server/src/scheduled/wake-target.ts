@@ -35,29 +35,31 @@ export async function resolveWakeThreadId(
   deps: { sql: SqlLike; sessionManager: Pick<ISessionManager, "getSession"> },
   args: { agentId: string; userId?: string | null }
 ): Promise<string | null> {
+  if (!args.userId) return null;
   try {
     const rows = (await deps.sql`
-      SELECT DISTINCT ON (action_input->>'conversationId')
-             action_input->>'conversationId' AS conversation_id,
-             max(created_at) OVER (PARTITION BY action_input->>'conversationId') AS last_at
-      FROM runs
-      WHERE run_type = 'chat_message'
-        AND status = 'completed'
-        AND action_input->>'agentId' = ${args.agentId}
-        AND (${args.userId ?? null}::text IS NULL OR action_input->>'userId' = ${args.userId ?? null})
-        AND coalesce(action_input->'platformMetadata'->>'source', '') <> 'scheduled-job'
-      ORDER BY action_input->>'conversationId', last_at DESC
-    `) as Array<{ conversation_id: string | null; last_at?: string }>;
+      SELECT conversation_id FROM (
+        SELECT DISTINCT ON (action_input->>'conversationId')
+               action_input->>'conversationId' AS conversation_id,
+               max(created_at) OVER (PARTITION BY action_input->>'conversationId') AS last_at
+        FROM runs
+        WHERE run_type = 'chat_message'
+          AND status = 'completed'
+          AND action_input->>'agentId' = ${args.agentId}
+          AND action_input->>'userId' = ${args.userId}
+          AND coalesce(action_input->'platformMetadata'->>'source', '') <> 'scheduled-job'
+          AND created_at > now() - interval '30 days'
+        ORDER BY action_input->>'conversationId', last_at DESC
+      ) t
+      ORDER BY last_at DESC
+      LIMIT 5
+    `) as Array<{ conversation_id: string | null }>;
 
-    const candidates = rows
-      .filter((r): r is { conversation_id: string } => Boolean(r.conversation_id))
-      .sort((a, b) =>
-        String((b as { last_at?: string }).last_at ?? "").localeCompare(
-          String((a as { last_at?: string }).last_at ?? "")
-        )
-      );
+    const candidates = rows.filter(
+      (r): r is { conversation_id: string } => Boolean(r.conversation_id)
+    );
 
-    for (const row of candidates.slice(0, 5)) {
+    for (const row of candidates) {
       const session = await deps.sessionManager.getSession(row.conversation_id);
       if (session) return row.conversation_id;
     }

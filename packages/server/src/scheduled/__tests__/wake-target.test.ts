@@ -62,6 +62,7 @@ describe("resolveWakeThreadId", () => {
     const sessionManager = { getSession: mock(async () => null) };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
       agentId: AGENT,
+      userId: USER,
     });
     expect(threadId).toBeNull();
   });
@@ -73,8 +74,29 @@ describe("resolveWakeThreadId", () => {
     const sessionManager = { getSession: mock(async () => null) };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
       agentId: AGENT,
+      userId: USER,
     });
     expect(threadId).toBeNull();
+  });
+
+  test("userId omitted/null returns null without ever calling sql", async () => {
+    const sql = mock(async () => {
+      throw new Error("sql should not be called when userId is missing");
+    }) as unknown as Parameters<typeof resolveWakeThreadId>[0]["sql"];
+    const sessionManager = { getSession: mock(async () => null) };
+
+    const withoutUserId = await resolveWakeThreadId({ sql, sessionManager }, {
+      agentId: AGENT,
+    });
+    expect(withoutUserId).toBeNull();
+
+    const withNullUserId = await resolveWakeThreadId({ sql, sessionManager }, {
+      agentId: AGENT,
+      userId: null,
+    });
+    expect(withNullUserId).toBeNull();
+
+    expect(sql).not.toHaveBeenCalled();
   });
 });
 
