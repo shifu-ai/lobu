@@ -7,11 +7,12 @@ import {
   selectMcpToolsForTurn,
 } from "../openclaw/dynamic-tool-loader";
 
-function tool(name: string): McpToolDef {
+function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
   return {
     name,
     description: `${name} description`,
     inputSchema: { type: "object", properties: {} },
+    ...extras,
   };
 }
 
@@ -46,6 +47,38 @@ describe("selectMcpToolsForTurn", () => {
     expect(selectedNames).not.toContain("card_studio_distractor_75");
   });
 
+  test("keeps Toolbox _meta PM verification tools ahead of crowded P3 distractors", () => {
+    const cardStudioDistractors = Array.from({ length: 60 }, (_, index) =>
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
+    );
+    const communityApprovalTool = tool("line_community_member_approve", {
+      _meta: {
+        shifuTool: {
+          domain: "community_verification",
+          priority: "P0",
+          aliases: ["審核學員", "LINE 社群審核"],
+          readOnly: false,
+          mutatesState: true,
+          requiresConfirmation: true,
+          freshness: "realtime",
+        },
+      },
+    });
+
+    const result = selectMcpToolsForTurn({
+      tools: [...cardStudioDistractors, communityApprovalTool],
+      message: "請協助審核 LINE 社群待審學員",
+      budget: 10,
+    });
+
+    const selectedNames = result.selected.map((toolDef) => toolDef.name);
+
+    expect(selectedNames).toContain("line_community_member_approve");
+    expect(selectedNames).not.toContain("card_studio_distractor_60");
+    expect(result.trace.primaryIntent).toBe("community_verification");
+    expect(result.selected).toHaveLength(10);
+  });
+
   test("preserves original order for tools with equal ranking", () => {
     const result = selectMcpToolsForTurn({
       tools: [
@@ -64,10 +97,22 @@ describe("selectMcpToolsForTurn", () => {
     ]);
   });
 
-  test("builds a runtime catalog with availability for this turn", () => {
+  test("builds a runtime catalog with metadata and availability for this turn", () => {
     const allTools = {
       toolbox: [
-        tool("sales_battle_report_run_now"),
+        tool("sales_battle_report_run_now", {
+          _meta: {
+            shifuTool: {
+              domain: "community_verification",
+              priority: "P0",
+              aliases: ["審核學員"],
+              readOnly: true,
+              mutatesState: false,
+              requiresConfirmation: true,
+              freshness: "near_realtime",
+            },
+          },
+        }),
         tool("card_studio_template_list"),
       ],
       workspace: [tool("workspace_drive_search")],
@@ -83,25 +128,134 @@ describe("selectMcpToolsForTurn", () => {
       catalog.map((entry) => ({
         name: entry.name,
         mcpId: entry.mcpId,
+        domain: entry.domain,
+        priority: entry.priority,
+        aliases: entry.aliases,
+        readOnly: entry.readOnly,
+        mutatesState: entry.mutatesState,
+        requiresConfirmation: entry.requiresConfirmation,
+        freshness: entry.freshness,
         availableThisTurn: entry.availableThisTurn,
       }))
     ).toEqual([
       {
         name: "sales_battle_report_run_now",
         mcpId: "toolbox",
+        domain: "community_verification",
+        priority: "P0",
+        aliases: ["審核學員"],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: true,
+        freshness: "near_realtime",
         availableThisTurn: true,
       },
       {
         name: "card_studio_template_list",
         mcpId: "toolbox",
+        domain: "card_studio",
+        priority: "P3",
+        aliases: [],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: false,
+        freshness: undefined,
         availableThisTurn: false,
       },
       {
         name: "workspace_drive_search",
         mcpId: "workspace",
+        domain: "unknown",
+        priority: "P2",
+        aliases: [],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: false,
+        freshness: undefined,
         availableThisTurn: true,
       },
     ]);
+  });
+
+  test("falls back when Toolbox _meta PM metadata has an invalid priority", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        tool("line_community_member_approve", {
+          _meta: {
+            shifuTool: {
+              domain: "community_verification",
+              priority: "P99",
+            },
+          },
+        }),
+        tool("card_studio_template_list"),
+      ],
+      message: "請審核 LINE 社群待審學員",
+      budget: 1,
+    });
+
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "line_community_member_approve",
+    ]);
+
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [
+          tool("line_community_member_approve", {
+            _meta: {
+              shifuTool: {
+                domain: "community_verification",
+                priority: "P99",
+                readOnly: false,
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { toolbox: [] },
+    });
+
+    expect(catalog[0]).toMatchObject({
+      domain: "unknown",
+      priority: "P2",
+      readOnly: true,
+      mutatesState: false,
+      requiresConfirmation: false,
+    });
+  });
+
+  test("keeps annotations shifuTool compatibility during metadata migration", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [
+          tool("line_community_setup", {
+            annotations: {
+              shifuTool: {
+                domain: "community_verification",
+                priority: "P0",
+                aliases: ["LINE 設定"],
+                readOnly: false,
+                mutatesState: true,
+                requiresConfirmation: true,
+                freshness: "batch",
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { toolbox: [] },
+    });
+
+    expect(catalog[0]).toMatchObject({
+      domain: "community_verification",
+      intent: "community_verification",
+      priority: "P0",
+      aliases: ["LINE 設定"],
+      readOnly: false,
+      mutatesState: true,
+      requiresConfirmation: true,
+      freshness: "batch",
+    });
   });
 
   test("selects tools across MCP servers while preserving mcpId grouping", () => {
