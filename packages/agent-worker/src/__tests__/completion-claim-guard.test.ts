@@ -15,6 +15,28 @@ describe("checkCompletionClaim", () => {
     expect(result.requiredTools).toEqual(["sales_battle_report_run_now"]);
   });
 
+  test("blocks a battle report send claim without matching tool execution", () => {
+    const result = checkCompletionClaim({
+      userMessage: "發送戰報",
+      finalText: "已發送戰報。",
+      executedTools: [],
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("mutating_claim_without_tool_execution");
+    expect(result.requiredTools).toEqual(["sales_battle_report_run_now"]);
+  });
+
+  test("allows an immediate battle report send claim with matching tool execution", () => {
+    const result = checkCompletionClaim({
+      userMessage: "立即發送戰報",
+      finalText: "已發送戰報。",
+      executedTools: ["sales_battle_report_run_now"],
+    });
+
+    expect(result.allowed).toBe(true);
+  });
+
   test("allows a battle report schedule claim with matching tool execution", () => {
     const result = checkCompletionClaim({
       userMessage: "幫我建立每週一早上的銷售戰報排程",

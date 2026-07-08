@@ -27,9 +27,9 @@ interface CompletionClaimGuardInput {
 }
 
 const DONE_CLAIM_PATTERNS = [
-  /已(?:經)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好)/i,
-  /(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好)了/i,
-  /\b(?:done|completed|created|scheduled|paused|updated|ran|generated)\b/i,
+  /已(?:經)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)/i,
+  /(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)了/i,
+  /\b(?:done|completed|created|scheduled|paused|updated|ran|generated|sent)\b/i,
 ];
 
 const SAFE_TEXT =
@@ -77,7 +77,11 @@ export function getRequiredBattleReportMutationTools(
   if (/(?:排程|定期|每週|每月|schedule|weekly|monthly)/i.test(normalized)) {
     return ["sales_battle_report_schedule_create"];
   }
-  if (/(?:現在|立即|產生|生成|跑|執行|run|generate|create now)/i.test(normalized)) {
+  if (
+    /(?:現在|立即|產生|生成|跑|執行|發送|送出|run|generate|create now|send|sent)/i.test(
+      normalized
+    )
+  ) {
     return ["sales_battle_report_run_now"];
   }
 
