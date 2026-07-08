@@ -368,49 +368,54 @@ describe('checkToolAccess', () => {
     ).toThrow(/requires organization admin access/i);
   });
 
-  it.each(['list_watchers', 'get_watcher'])(
-    'hides %s from external MCP, and now also requires admin scope via REST (not whitelisted)',
+  // Pre-branch behavior, restored: these are public-readable internal tools
+  // (PUBLIC_READ_ACTIONS), internal-flagged only to hide them from the
+  // external MCP surface. The SHIFU member-internal whitelist gate exempts
+  // `isPublicReadable` calls, so member (and no-role) REST traffic on
+  // explicit-scoped tokens keeps reaching them exactly as before the branch.
+  it.each(['list_watchers', 'get_watcher', 'read_knowledge'])(
+    'hides %s from external MCP but keeps it reachable via REST',
     (toolName) => {
       // External MCP — must look like an unknown tool to the caller.
       expect(() =>
         checkToolAccess(toolName, {}, { ...baseAuth, memberRole: 'owner' })
       ).toThrow(`Tool not found: ${toolName}`);
 
-      // REST proxy, member scope (no mcp:admin) — blocked by the whitelist gate.
+      // REST proxy — frontend reaches the same handler.
       expect(() =>
         checkToolAccess(
           toolName,
           {},
           { ...baseAuth, memberRole: 'member', allowInternalTools: true }
         )
-      ).toThrow(/requires organization admin access/i);
-
-      // REST proxy, admin scope — unrestricted, same as before this gate existed.
-      expect(() =>
-        checkToolAccess(toolName, {}, {
-          ...baseAuth,
-          memberRole: 'member',
-          scopes: ['mcp:admin'],
-          allowInternalTools: true,
-        })
       ).not.toThrow();
     }
   );
 
-  it('hides read_knowledge from external MCP but keeps it reachable via REST for member scope (whitelisted)', () => {
-    // External MCP — must look like an unknown tool to the caller.
+  it('keeps public-readable internal tools reachable for member + explicit mcp:write REST sessions (flag-off regression)', () => {
+    // resolve_path is internal, NOT on MEMBER_INTERNAL_TOOL_WHITELIST, and
+    // public-readable (PUBLIC_READ_ACTIONS: null). The frontend calls it via
+    // REST with a member-role token whose default grant is
+    // `mcp:read mcp:write` — pre-branch this always worked, and it must keep
+    // working with the fork flag off.
     expect(() =>
-      checkToolAccess('read_knowledge', {}, { ...baseAuth, memberRole: 'owner' })
-    ).toThrow('Tool not found: read_knowledge');
+      checkToolAccess('resolve_path', { path: '/acme' }, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:read', 'mcp:write'],
+        allowInternalTools: true,
+      })
+    ).not.toThrow();
 
-    // REST proxy, member scope (no mcp:admin) — allowed, `read_knowledge` is
-    // on MEMBER_INTERNAL_TOOL_WHITELIST.
+    // No-role (public workspace) explicit-scoped token — also pre-branch
+    // reachable for public-readable tools.
     expect(() =>
-      checkToolAccess(
-        'read_knowledge',
-        {},
-        { ...baseAuth, memberRole: 'member', allowInternalTools: true }
-      )
+      checkToolAccess('list_watchers', {}, {
+        ...baseAuth,
+        memberRole: null,
+        scopes: ['mcp:read', 'mcp:write'],
+        allowInternalTools: true,
+      })
     ).not.toThrow();
   });
 

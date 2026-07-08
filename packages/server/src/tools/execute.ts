@@ -141,13 +141,24 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   // that is neither owner/admin by role NOR admin by scope — the actual
   // member-owned direct-auth agent session from multi-tenant.ts — hits the
   // whitelist.
+  //
+  // Public-readable calls (`isPublicReadable` — e.g. `resolve_path`,
+  // `list_watchers`, `get_watcher`, and the read actions of the `manage_*`
+  // tools) are exempt: those are internal-flagged only to hide them from the
+  // external MCP surface, and even anonymous/no-role callers could reach
+  // them before this gate existed. Gating them here 403'd previously-working
+  // member/no-role REST traffic on explicit-scoped tokens (e.g. the
+  // frontend's `resolve_path` calls with a default `mcp:read mcp:write`
+  // grant) — a flag-off regression. Genuinely internal non-public calls
+  // (e.g. `manage_connections` writes) remain gated.
   const isPrivilegedRole = authCtx.memberRole === 'owner' || authCtx.memberRole === 'admin';
   if (
     tool.internal &&
     authCtx.allowInternalTools &&
     !isPrivilegedRole &&
     !hasRequiredMcpScope('admin', authCtx.scopes) &&
-    !MEMBER_INTERNAL_TOOL_WHITELIST.has(toolName)
+    !MEMBER_INTERNAL_TOOL_WHITELIST.has(toolName) &&
+    !isPublicReadable(toolName, args)
   ) {
     throw new Error(
       `Tool '${toolName}' requires organization admin access. Member sessions may use: ${[...MEMBER_INTERNAL_TOOL_WHITELIST].join(', ')}.`
