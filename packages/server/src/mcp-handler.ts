@@ -176,7 +176,17 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
     // tools/list matches what tools/call actually allows. `getAllTools`
     // memoizes per option tuple — we only READ a second cached tuple here,
     // never mutate the memoized arrays (spread below builds a new array).
+    //
+    // `includeInternalTools` (== `authCtx.allowInternalTools`, direct-auth
+    // or non-`/mcp` path) is required alongside the schedule-write check:
+    // `isDirectAuthMemberScheduleWrite` only inspects role/agentId/scopes,
+    // which an EXTERNAL member session (no direct-auth header, agent bound
+    // via x-lobu-agent-id) can also satisfy. Internal tools must stay
+    // invisible on the external MCP surface even though tools/call already
+    // rejects them there (`checkToolAccess`'s `tool.internal &&
+    // !authCtx.allowInternalTools` gate) — list and call must agree.
     if (
+      includeInternalTools &&
       isDirectAuthMemberScheduleWrite(
         'manage_schedules',
         authCtx.memberRole,

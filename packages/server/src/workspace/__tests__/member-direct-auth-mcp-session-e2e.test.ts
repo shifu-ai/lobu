@@ -32,6 +32,7 @@ import {
   addUserToOrganization,
   createTestAgent,
   createTestOrganization,
+  createTestPAT,
   createTestUser,
 } from '../../__tests__/setup/test-fixtures';
 import { clearInMemoryMcpSessionsForTests, handleMcp } from '../../mcp-handler';
@@ -104,6 +105,37 @@ const PROXY_INITIALIZE_BODY = {
   },
   id: 0,
 };
+
+/**
+ * POST a JSON-RPC message as an EXTERNAL member session: a plain PAT bearer
+ * (no `x-lobu-memory-direct-auth` header, so `allowInternalTools` is false)
+ * with an agent bound via `x-lobu-agent-id` — the header a normal external
+ * MCP client sends. This is the exact shape `isDirectAuthMemberScheduleWrite`
+ * cannot distinguish from a real direct-auth session on its own (it only
+ * inspects role/agentId/scopes), which is what the missing
+ * `includeInternalTools` guard let slip through.
+ */
+async function externalMemberPost(
+  app: Hono,
+  orgSlug: string,
+  patToken: string,
+  agentId: string,
+  body: unknown,
+  sessionId?: string
+): Promise<Response> {
+  return app.request(`/mcp/${orgSlug}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${patToken}`,
+      'x-lobu-agent-id': agentId,
+      'content-type': 'application/json',
+      accept: 'application/json',
+      'x-mcp-format': 'json',
+      ...(sessionId ? { 'mcp-session-id': sessionId } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+}
 
 describe('member direct-auth MCP session — real handleMcp session layer (E2E)', () => {
   it('initialize → tools/list shows the whitelist incl. manage_schedules → tools/call manage_schedules list succeeds', async () => {
@@ -215,5 +247,83 @@ describe('member direct-auth MCP session — real handleMcp session layer (E2E)'
     const callBody = await callRes.json();
     expect(callBody.result?.isError).toBe(true);
     expect(callBody.result?.content?.[0]?.text).toMatch(/requires organization admin access/i);
+  });
+
+  it('external member session (PAT, no direct-auth, agent bound via x-lobu-agent-id) hides manage_schedules from tools/list', async () => {
+    const app = buildApp();
+    const org = await createTestOrganization({ name: 'E2E External Member Org' });
+    const member = await createTestUser({ name: 'E2E External Member' });
+    await addUserToOrganization(member.id, org.id, 'member');
+    const agent = await createTestAgent({ organizationId: org.id, ownerUserId: member.id });
+    const pat = await createTestPAT(member.id, org.id, { scope: 'mcp:read mcp:write' });
+
+    // --- initialize: plain PAT bearer, NO x-lobu-memory-direct-auth header ---
+    const initRes = await externalMemberPost(app, org.slug, pat.token, agent.agentId, {
+      jsonrpc: '2.0',
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'external-mcp-client', version: '1.0.0' },
+      },
+      id: 0,
+    });
+    expect(initRes.status).toBe(200);
+    const sessionId = initRes.headers.get('mcp-session-id');
+    expect(sessionId).toBeTruthy();
+
+    await externalMemberPost(
+      app,
+      org.slug,
+      pat.token,
+      agent.agentId,
+      { jsonrpc: '2.0', method: 'notifications/initialized' },
+      sessionId!
+    );
+
+    // --- tools/list ---
+    const listRes = await externalMemberPost(
+      app,
+      org.slug,
+      pat.token,
+      agent.agentId,
+      { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
+      sessionId!
+    );
+    expect(listRes.status).toBe(200);
+    const listBody = await listRes.json();
+    expect(listBody.error).toBeUndefined();
+    const toolNames: string[] = listBody.result.tools.map((t: any) => t.name);
+
+    // Role 'member' + bound agentId + 'mcp:write' scope alone satisfies
+    // `isDirectAuthMemberScheduleWrite` — but this session is NOT
+    // direct-auth (`allowInternalTools` is false here, matching a real
+    // external MCP client), so ALL `internal: true` tools must stay
+    // invisible on this surface, including the ones the direct-auth member
+    // whitelist would otherwise allow. `save_memory`/`search_memory` are not
+    // `internal`-flagged, so they legitimately remain visible; only the
+    // internal-only entries are asserted absent here.
+    expect(toolNames).not.toContain('manage_schedules');
+    expect(toolNames).not.toContain('read_knowledge');
+    expect(toolNames).not.toContain('manage_connections');
+
+    // --- tools/call manage_schedules still rejects (no escalation) ---
+    const callRes = await externalMemberPost(
+      app,
+      org.slug,
+      pat.token,
+      agent.agentId,
+      {
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'tools/call',
+        params: { name: 'manage_schedules', arguments: { action: 'list' } },
+      },
+      sessionId!
+    );
+    expect(callRes.status).toBe(200);
+    const callBody = await callRes.json();
+    expect(callBody.result?.isError).toBe(true);
+    expect(callBody.result?.content?.[0]?.text).toMatch(/Tool not found/i);
   });
 });
