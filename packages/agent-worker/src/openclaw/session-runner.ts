@@ -88,6 +88,10 @@ import {
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
+import {
+  checkCompletionClaim,
+  getRequiredBattleReportMutationTools,
+} from "./completion-claim-guard";
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -1804,6 +1808,8 @@ Use it when the user references past discussions or you need context.`);
     let resolveTurnDone: (() => void) | null = null;
     let turnNonce = 0;
     let suppressProgressOutput = false;
+    const currentTurnExecutedTools = new Set<string>();
+    let bufferCurrentTurnOutputForCompletionClaimGuard = false;
 
     // Wire events through progress processor with delta batching
     let pendingDelta = "";
@@ -1850,6 +1856,11 @@ Use it when the user references past discussions or you need context.`);
       // Reset per-turn runaway guards so cap/identical-call tracking is scoped
       // to this turn only.
       turnController.startTurn();
+      currentTurnExecutedTools.clear();
+      bufferCurrentTurnOutputForCompletionClaimGuard =
+        options?.silent === true
+          ? false
+          : getRequiredBattleReportMutationTools(promptText).length > 0;
 
       const turnDone = new Promise<void>((resolve) => {
         resolveTurnDone = () => {
@@ -1901,7 +1912,9 @@ Use it when the user references past discussions or you need context.`);
         const delta = progressProcessor.getDelta();
         if (delta) {
           pendingDelta += delta;
-          scheduleDeltaFlush();
+          if (!bufferCurrentTurnOutputForCompletionClaimGuard) {
+            scheduleDeltaFlush();
+          }
         }
       }
 
@@ -1943,6 +1956,9 @@ Use it when the user references past discussions or you need context.`);
       // any client subscribed via `event: tool_use`). Worker emits one record
       // per tool call at `tool_execution_end` so the result is included.
       if (event.type === "tool_execution_end") {
+        if (event.isError !== true) {
+          currentTurnExecutedTools.add(event.toolName);
+        }
         const args = pendingToolArgs.get(event.toolCallId);
         pendingToolArgs.delete(event.toolCallId);
         const toolStartedAt = pendingToolStartTimes.get(event.toolCallId);
@@ -2000,7 +2016,11 @@ Use it when the user references past discussions or you need context.`);
       }
 
       if (event.type === "agent_end") {
-        flushDelta()
+        const flushBeforeDone =
+          bufferCurrentTurnOutputForCompletionClaimGuard
+            ? Promise.resolve()
+            : flushDelta();
+        flushBeforeDone
           .then(async () => {
             // Wait for any pending tool_use emits so clients don't see
             // `complete` arrive before all tool_use records (the provider
@@ -2291,8 +2311,28 @@ Use it when the user references past discussions or you need context.`);
     // the success path's checkSandboxLeak() (worker.execute) actually runs
     // against user-facing text. Without this, getFinalResult() is always
     // null in production and the sandbox-leak redaction never fires.
+    const finalText = progressProcessor.getOutputSnapshot();
+    const completionClaimDecision = checkCompletionClaim({
+      userMessage: userPrompt,
+      finalText,
+      executedTools: Array.from(currentTurnExecutedTools),
+    });
+    const guardedFinalText = completionClaimDecision.allowed
+      ? finalText
+      : completionClaimDecision.safeText;
+    if (!completionClaimDecision.allowed) {
+      logger.warn(
+        `Completion claim guard blocked final answer: reason=${completionClaimDecision.reason}; requiredTools=${completionClaimDecision.requiredTools.join(",")}`
+      );
+    }
+
+    if (getRequiredBattleReportMutationTools(userPrompt).length > 0) {
+      pendingDelta = guardedFinalText;
+      await flushDelta();
+    }
+
     progressProcessor.setFinalResult({
-      text: progressProcessor.getOutputSnapshot(),
+      text: guardedFinalText,
       isFinal: true,
     });
     await executionReporter.record({
@@ -2300,7 +2340,7 @@ Use it when the user references past discussions or you need context.`);
       message: "Agent run completed.",
       status: "completed",
       finalSummary: {
-        outputChars: progressProcessor.getOutputSnapshot().length,
+        outputChars: guardedFinalText.length,
         taskId: executionReporter.taskId,
       },
     });
