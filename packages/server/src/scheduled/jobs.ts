@@ -8,12 +8,14 @@
 
 import type { Env } from '@lobu/connector-sdk';
 import type { CoreServices } from '../gateway/services/core-services';
+import type { ISessionManager } from '../gateway/session.js';
+import type { QueueProducer } from '../gateway/infrastructure/queue/queue-producer.js';
 import { cleanupExpiredMcpSessions } from '../mcp-handler';
 import logger from '../utils/logger';
 import { runWatcherAutomationTick } from '../watchers/automation';
 import { checkStalledExecutions } from './check-stalled-executions';
 import { runClassificationReconciliation } from './classification-reconciliation';
-import { registerScheduledJobsTicker } from './scheduled-jobs-service';
+import { registerScheduledJobsTicker, resolveWakeAgentId } from './scheduled-jobs-service';
 import { TaskScheduler } from './task-scheduler';
 import { triggerEmbedBackfill } from './trigger-embed-backfill';
 import { getDb, pgTextArray } from '../db/client';
@@ -216,89 +218,126 @@ function registerMaintenanceTasks(
   // Handler: wake_agent. Creates a thread for the agent (or reuses one
   // supplied by the caller) and enqueues the prompt as a user message.
   // Lets an agent schedule its own follow-up wake-ups via manage_schedules.
+  //
+  // Body lives in `handleWakeAgentTask` (below) so it can be exercised
+  // directly in tests via dependency injection instead of `mock.module`'ing
+  // getDb/agent-threads (mirrors manage_schedules.ts's ManageSchedulesDeps
+  // pattern).
   scheduler.register('wake_agent', async (ctx) => {
-    const sql = getDb();
-    const p = ctx.payload as {
-      __organization_id?: string;
-      __created_by_user?: string | null;
-      __created_by_agent?: string | null;
-      __scheduled_job_id?: string;
-      __scheduled_job_tick?: string;
-      organization_id?: string;
-      agent_id?: string;
-      prompt?: string;
-      thread_id?: string | null;
-      reason?: string | null;
-    };
-    const orgId = p.__organization_id ?? p.organization_id;
-    if (!orgId || !p.agent_id || !p.prompt) {
-      logger.warn({ payload: ctx.payload }, '[task] wake_agent missing org/agent/prompt');
-      return;
-    }
-    // Target-agent existence check. The cascade FK on scheduled_jobs only
-    // covers `created_by_agent` (the *scheduler*'s identity), not the
-    // *target* of a wake_agent action. If a user scheduled a wake for
-    // agent X and X was deleted, we'd silently enqueue a message for a
-    // ghost — so verify the target exists and auto-pause the schedule
-    // when it doesn't.
-    const agentRows = (await sql`
-      SELECT id FROM agents WHERE id = ${p.agent_id} LIMIT 1
-    `) as unknown as Array<{ id: string }>;
-    if (agentRows.length === 0) {
-      logger.warn(
-        { scheduled_job_id: p.__scheduled_job_id, agent_id: p.agent_id },
-        '[task] wake_agent target agent no longer exists; pausing schedule'
-      );
-      if (p.__scheduled_job_id) {
-        await sql`UPDATE scheduled_jobs SET paused = true, updated_at = now() WHERE id = ${p.__scheduled_job_id}`;
-      }
-      return;
-    }
-    const sessionManager = coreServices.getSessionManager();
-    const queueProducer = coreServices.getQueueProducer();
-    const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== '0';
-    let threadId = p.thread_id ?? null;
-    if (!threadId && reuseConversation) {
-      threadId = await resolveWakeThreadId(
-        { sql, sessionManager },
-        { agentId: p.agent_id, userId: p.__created_by_user ?? null }
-      );
-      if (threadId) {
-        logger.info(
-          { scheduled_job_id: p.__scheduled_job_id, threadId },
-          '[task] wake_agent reusing existing conversation'
-        );
-      }
-    }
-    if (!threadId) {
-      const result = await createThreadForAgent(
-        { sessionManager },
-        {
-          agentId: p.agent_id,
-          organizationId: orgId,
-          // The ticker injects the scheduling user under the `__` prefix
-          // so handler payloads can mix scheduler-controlled metadata with
-          // user-supplied action_args without collision. Reading from
-          // p.__created_by_user keeps the wake-up's thread / message
-          // attribution pointing at whoever scheduled it (not the agent
-          // itself, which would obscure the audit trail).
-          createdByUserId: p.__created_by_user ?? undefined,
-          reason: p.reason ?? 'scheduled-wake',
-        }
-      );
-      threadId = result.threadId;
-    }
-    await enqueueAgentMessage(
-      { sessionManager, queueProducer },
+    await handleWakeAgentTask(
       {
-        threadId,
-        messageText: reuseConversation
-          ? buildScheduledWakeMessage(renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick))
-          : renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
-        source: 'scheduled-job',
-      }
+        sql: getDb(),
+        sessionManager: coreServices.getSessionManager(),
+        queueProducer: coreServices.getQueueProducer(),
+      },
+      ctx.payload as WakeAgentTaskPayload
     );
   });
+}
+
+export interface WakeAgentTaskPayload {
+  __organization_id?: string;
+  __created_by_user?: string | null;
+  __created_by_agent?: string | null;
+  __scheduled_job_id?: string;
+  __scheduled_job_tick?: string;
+  organization_id?: string;
+  agent_id?: string;
+  prompt?: string;
+  thread_id?: string | null;
+  reason?: string | null;
+}
+
+export interface WakeAgentTaskDeps {
+  sql: ReturnType<typeof getDb>;
+  sessionManager: ISessionManager;
+  queueProducer: QueueProducer;
+}
+
+/**
+ * Handler body for the `wake_agent` scheduled task, extracted from the
+ * `scheduler.register('wake_agent', ...)` closure above for testability
+ * (see the comment there). Exported for `jobs-wake-agent.test.ts`.
+ */
+export async function handleWakeAgentTask(
+  deps: WakeAgentTaskDeps,
+  payload: WakeAgentTaskPayload
+): Promise<void> {
+  const { sql, sessionManager, queueProducer } = deps;
+  const p = payload;
+  const orgId = p.__organization_id ?? p.organization_id;
+  if (!orgId || !p.agent_id || !p.prompt) {
+    logger.warn({ payload }, '[task] wake_agent missing org/agent/prompt');
+    return;
+  }
+  // Target-agent existence check. The cascade FK on scheduled_jobs only
+  // covers `created_by_agent` (the *scheduler*'s identity), not the
+  // *target* of a wake_agent action. If a user scheduled a wake for
+  // agent X and X was deleted, we'd silently enqueue a message for a
+  // ghost — so verify the target exists and auto-pause the schedule
+  // when it doesn't.
+  //
+  // SHIFU FORK: member-scope-internal-tools plan, Task 3 follow-up. Some
+  // callers persist `agent_id` as a full CONVERSATION id
+  // (`<agentId>_<userId>_<threadId>`) instead of the bare agent id —
+  // manage_schedules.ts now normalizes this at create time, but this
+  // resolves it defensively for rows written before that fix (or by a
+  // still-buggy caller) instead of silently auto-pausing a schedule that
+  // would otherwise fire correctly.
+  const resolvedAgentId = await resolveWakeAgentId(sql, orgId, p.agent_id);
+  if (!resolvedAgentId) {
+    logger.warn(
+      { scheduled_job_id: p.__scheduled_job_id, agent_id: p.agent_id },
+      '[task] wake_agent target agent no longer exists; pausing schedule'
+    );
+    if (p.__scheduled_job_id) {
+      await sql`UPDATE scheduled_jobs SET paused = true, updated_at = now() WHERE id = ${p.__scheduled_job_id}`;
+    }
+    return;
+  }
+  p.agent_id = resolvedAgentId;
+  const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== '0';
+  let threadId = p.thread_id ?? null;
+  if (!threadId && reuseConversation) {
+    threadId = await resolveWakeThreadId(
+      { sql, sessionManager },
+      { agentId: p.agent_id, userId: p.__created_by_user ?? null }
+    );
+    if (threadId) {
+      logger.info(
+        { scheduled_job_id: p.__scheduled_job_id, threadId },
+        '[task] wake_agent reusing existing conversation'
+      );
+    }
+  }
+  if (!threadId) {
+    const result = await createThreadForAgent(
+      { sessionManager },
+      {
+        agentId: p.agent_id,
+        organizationId: orgId,
+        // The ticker injects the scheduling user under the `__` prefix
+        // so handler payloads can mix scheduler-controlled metadata with
+        // user-supplied action_args without collision. Reading from
+        // p.__created_by_user keeps the wake-up's thread / message
+        // attribution pointing at whoever scheduled it (not the agent
+        // itself, which would obscure the audit trail).
+        createdByUserId: p.__created_by_user ?? undefined,
+        reason: p.reason ?? 'scheduled-wake',
+      }
+    );
+    threadId = result.threadId;
+  }
+  await enqueueAgentMessage(
+    { sessionManager, queueProducer },
+    {
+      threadId,
+      messageText: reuseConversation
+        ? buildScheduledWakeMessage(renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick))
+        : renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
+      source: 'scheduled-job',
+    }
+  );
 }
 
 function renderScheduledWakePrompt(prompt: string, scheduledJobTick?: string): string {

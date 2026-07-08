@@ -97,6 +97,10 @@ function makeDeps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedules
     deleteScheduledJob: mock(async () => true) as any,
     countActiveScheduledJobs: mock(async () => 0) as any,
     agentOwnedByUser: mock(async () => true) as any,
+    // Default: identity resolution — the given agent_id is already the bare
+    // form, matching every pre-existing test in this file. Tests exercising
+    // the conversation-id normalization below override this.
+    resolveWakeAgentId: mock(async (_organizationId: string, rawAgentId: string) => rawAgentId) as any,
     ...overrides,
   };
 }
@@ -148,6 +152,104 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.createdByAgent).toBe(MEMBER_AGENT);
     expect(deps.agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, MEMBER_AGENT);
+  });
+});
+
+describe("manage_schedules — wake_agent conversation-id normalization", () => {
+  // Production bug (2026-07): an agent scheduling its own wake via LINE
+  // doesn't know its bare id and sends the full CONVERSATION id instead
+  // (`<agentId>_<userId>_<threadId>`). The exact-id wake lookup then missed
+  // and the schedule silently auto-paused. manage_schedules.ts now resolves
+  // this to the bare id BEFORE the member ownership check and BEFORE
+  // persisting — see the SHIFU FORK comment ahead of that block.
+  const CONVERSATION_ID = `${MEMBER_AGENT}_${MEMBER_USER}_thread-abc`;
+
+  test("member sends conversation-id form of their OWN agent → ownership check sees the resolved bare id; persisted agent_id is bare", async () => {
+    const resolveWakeAgentId = mock(async (_organizationId: string, rawAgentId: string) =>
+      rawAgentId === CONVERSATION_ID ? MEMBER_AGENT : null
+    );
+    const agentOwnedByUser = mock(async () => true);
+    const deps = makeDeps({
+      resolveWakeAgentId: resolveWakeAgentId as any,
+      agentOwnedByUser: agentOwnedByUser as any,
+    });
+    const result = await manageSchedules(
+      wakeCreateArgs(CONVERSATION_ID) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+    expect(result.error).toBeUndefined();
+    expect(resolveWakeAgentId).toHaveBeenCalledWith(ORG, CONVERSATION_ID);
+    // The critical MS-3 guarantee: ownership is checked against the
+    // RESOLVED bare id, not the raw conversation-id string.
+    expect(agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, MEMBER_AGENT);
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.actionArgs.agent_id).toBe(MEMBER_AGENT);
+  });
+
+  test("member sends conversation-id form whose bare id is NOT owned by them → still rejected (no self-scoping bypass)", async () => {
+    const OTHER_AGENT = "shifu-u-other";
+    const otherConversationId = `${OTHER_AGENT}_someone-else_thread-xyz`;
+    const resolveWakeAgentId = mock(async (_organizationId: string, rawAgentId: string) =>
+      rawAgentId === otherConversationId ? OTHER_AGENT : null
+    );
+    const agentOwnedByUser = mock(async () => false);
+    const deps = makeDeps({
+      resolveWakeAgentId: resolveWakeAgentId as any,
+      agentOwnedByUser: agentOwnedByUser as any,
+    });
+    const result = await manageSchedules(
+      wakeCreateArgs(otherConversationId) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+    expect(result.error).toMatch(/own/i);
+    // A member cannot launder access to someone else's agent by wrapping its
+    // bare id inside a conversation-id-shaped string.
+    expect(agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, OTHER_AGENT);
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+  });
+
+  test("resolution finds no match at all → raw value passed through unchanged (existing unknown-agent handling, no new UX)", async () => {
+    const unknownId = "totally-unknown-string";
+    const resolveWakeAgentId = mock(async () => null);
+    const agentOwnedByUser = mock(async () => false);
+    const deps = makeDeps({
+      resolveWakeAgentId: resolveWakeAgentId as any,
+      agentOwnedByUser: agentOwnedByUser as any,
+    });
+    const result = await manageSchedules(
+      wakeCreateArgs(unknownId) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+    expect(result.error).toMatch(/own/i);
+    expect(agentOwnedByUser).toHaveBeenCalledWith(ORG, MEMBER_USER, unknownId);
+  });
+
+  test("admin (privileged, no ownership check) also gets agent_id normalized before persisting", async () => {
+    const adminConversationId = "shifu-u-admin-agent_user-admin_thread-1";
+    const resolveWakeAgentId = mock(async (_organizationId: string, rawAgentId: string) =>
+      rawAgentId === adminConversationId ? "shifu-u-admin-agent" : null
+    );
+    const deps = makeDeps({
+      resolveWakeAgentId: resolveWakeAgentId as any,
+      agentOwnedByUser: mock(async () => {
+        throw new Error("agentOwnedByUser must not be called for privileged roles");
+      }) as any,
+    });
+    const result = await manageSchedules(
+      wakeCreateArgs(adminConversationId) as any,
+      {} as any,
+      adminCtx(),
+      deps
+    );
+    expect(result.error).toBeUndefined();
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.actionArgs.agent_id).toBe("shifu-u-admin-agent");
   });
 });
 

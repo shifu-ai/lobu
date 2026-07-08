@@ -121,6 +121,40 @@ export async function countActiveScheduledJobs(
   return rows[0]?.count ?? 0;
 }
 
+// SHIFU FORK: member-scope-internal-tools plan, Task 3 follow-up. Some
+// LINE-side callers of manage_schedules(wake_agent) don't know their own
+// bare agent id and fill `agent_id` with the full CONVERSATION id instead
+// (`<agentId>_<userId>_<threadId>`). Agent ids never contain an underscore
+// (`/^shifu-u-[a-z0-9-]+$/`), so a conversation id is always the longest
+// `agents.id` row that is a `<id>_`-prefix of the given string. Used both at
+// schedule-create time (manage_schedules.ts, to persist the clean bare id)
+// and at wake-fire time (jobs.ts, defense in depth for rows persisted before
+// this fix or written by a still-buggy caller).
+export type SqlLike = (
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+) => Promise<unknown[]>;
+
+export async function resolveWakeAgentId(
+  sql: SqlLike,
+  organizationId: string,
+  rawAgentId: string
+): Promise<string | null> {
+  const exactRows = (await sql`
+    SELECT id FROM agents WHERE id = ${rawAgentId} AND organization_id = ${organizationId} LIMIT 1
+  `) as unknown as Array<{ id: string }>;
+  if (exactRows.length > 0) return exactRows[0].id;
+
+  const prefixRows = (await sql`
+    SELECT id FROM agents
+    WHERE organization_id = ${organizationId}
+      AND ${rawAgentId} LIKE id || '\\_%' ESCAPE '\\'
+    ORDER BY length(id) DESC
+    LIMIT 1
+  `) as unknown as Array<{ id: string }>;
+  return prefixRows[0]?.id ?? null;
+}
+
 export async function getScheduledJob(
   organizationId: string,
   id: string

@@ -30,6 +30,7 @@ import {
   getScheduledJob,
   listScheduledJobs,
   pauseScheduledJob,
+  resolveWakeAgentId,
   type ScheduledJobRow,
 } from '../../scheduled/scheduled-jobs-service';
 import type { ToolContext } from '../registry';
@@ -210,6 +211,15 @@ export interface ManageSchedulesDeps {
     userId: string | null,
     agentId: string
   ) => Promise<boolean>;
+  /**
+   * SHIFU FORK: member-scope-internal-tools plan, Task 3 follow-up. Resolve
+   * a possibly-conversation-id-shaped `agent_id`
+   * (`<agentId>_<userId>_<threadId>`) down to the bare `agents.id`. Returns
+   * null when no agents row matches either form — callers must leave the raw
+   * value untouched in that case (existing "unknown agent" behavior, not a
+   * new error path).
+   */
+  resolveWakeAgentId: (organizationId: string, rawAgentId: string) => Promise<string | null>;
 }
 
 async function dbAgentOwnedByUser(
@@ -228,6 +238,13 @@ async function dbAgentOwnedByUser(
   return rows.length > 0;
 }
 
+async function dbResolveWakeAgentId(
+  organizationId: string,
+  rawAgentId: string
+): Promise<string | null> {
+  return resolveWakeAgentId(getDb(), organizationId, rawAgentId);
+}
+
 export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   createScheduledJob,
   listScheduledJobs,
@@ -236,6 +253,7 @@ export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   deleteScheduledJob,
   countActiveScheduledJobs,
   agentOwnedByUser: dbAgentOwnedByUser,
+  resolveWakeAgentId: dbResolveWakeAgentId,
 };
 
 export async function manageSchedules(
@@ -367,6 +385,30 @@ async function handleCreate(
         error: `cron expression rejected: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+  }
+  // SHIFU FORK: member-scope-internal-tools plan, Task 3 follow-up.
+  // Normalize a possibly-conversation-id-shaped `agent_id`
+  // (`<agentId>_<userId>_<threadId>`) to the bare `agents.id` BEFORE the
+  // ownership check below and before persisting. Production bug: an agent
+  // scheduling its own wake via LINE doesn't know its bare id and sends the
+  // full conversation id instead; the wake handler's exact-id lookup then
+  // misses and the schedule silently auto-pauses (see jobs.ts). Running this
+  // BEFORE the ownership check (rather than after) is deliberate: the check
+  // must see the normalized id so (a) a member sending the conversation-id
+  // form of their OWN agent isn't wrongly rejected, and (b) a member can't
+  // bypass self-scoping by wrapping someone else's bare id inside a
+  // conversation-id string — the ownership check below always evaluates the
+  // resolved bare id, exactly as it would for the bare form. When
+  // resolution finds no match at all (truly unknown agent), leave the raw
+  // value untouched — existing "unknown agent" handling (ownership-check
+  // failure for members; unchanged persist for privileged roles) applies
+  // unmodified.
+  if (args.payload.type === 'wake_agent') {
+    const resolvedAgentId = await deps.resolveWakeAgentId(
+      ctx.organizationId,
+      args.payload.agent_id
+    );
+    if (resolvedAgentId) args.payload.agent_id = resolvedAgentId;
   }
   // SHIFU FORK: member self-scoping (member-scope-internal-tools plan, Task
   // 3). Members reach this tool only via a member-owned direct-auth session
