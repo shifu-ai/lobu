@@ -454,7 +454,13 @@ async function handleList(
  */
 function memberOwnsJob(job: ScheduledJobRow | null, ctx: ToolContext): boolean {
   if (!job) return false;
-  return job.created_by_user === ctx.userId || job.created_by_agent === ctx.agentId;
+  // Null guards matter: a system-created job carries created_by_user AND
+  // created_by_agent as null, and a ctx with a null userId/agentId would
+  // otherwise "own" every such job via null === null.
+  return (
+    (job.created_by_user != null && job.created_by_user === ctx.userId) ||
+    (job.created_by_agent != null && job.created_by_agent === ctx.agentId)
+  );
 }
 
 async function handlePause(
