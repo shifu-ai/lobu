@@ -363,8 +363,17 @@ jobs:
       - name: server lobu route suite (bun:test, needs Postgres)
         # These bun:test files live outside src/gateway and are also excluded
         # from vitest because they import bun:test directly.
+        #
+        # Keep lobu route tests and workspace auth tests in separate Bun
+        # processes: route tests install process-global module mocks for
+        # auth/middleware, while workspace tests intentionally exercise the
+        # real auth provider. Running them in one Bun process lets the first
+        # module evaluation win the cache and makes the other suite observe the
+        # wrong auth implementation.
         working-directory: packages/server
-        run: bun test src/lobu/__tests__ src/workspace/__tests__
+        run: |
+          bun test src/lobu/__tests__
+          bun test src/workspace/__tests__
 
   format-lint:
     runs-on: ubuntu-latest
