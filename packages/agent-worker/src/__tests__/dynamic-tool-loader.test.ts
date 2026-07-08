@@ -38,6 +38,20 @@ describe("selectMcpToolsForTurn", () => {
     expect(selectedNames).toContain("sales_battle_report_run_now");
     expect(result.selected).toHaveLength(48);
     expect(result.trace.primaryIntent).toBe("battle_report");
-    expect(selectedNames).not.toContain("card_studio_distractor_01");
+    expect(selectedNames).not.toContain("card_studio_distractor_75");
+  });
+
+  test("preserves original order for tools with equal ranking", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [tool("unknown_alpha"), tool("unknown_beta"), tool("unknown_gamma")],
+      message: "請幫我看看這些工具",
+      budget: 3,
+    });
+
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "unknown_alpha",
+      "unknown_beta",
+      "unknown_gamma",
+    ]);
   });
 });

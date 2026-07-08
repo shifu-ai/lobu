@@ -47,7 +47,7 @@ function compareEntries(
   const mcpDelta = left.mcpId.localeCompare(right.mcpId);
   if (mcpDelta !== 0) return mcpDelta;
 
-  return right.originalIndex - left.originalIndex;
+  return left.originalIndex - right.originalIndex;
 }
 
 export function selectMcpToolsForTurn(
