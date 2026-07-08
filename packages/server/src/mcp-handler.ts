@@ -609,10 +609,24 @@ async function resolveAuthWithInstructions(
 async function syncAgentBinding(
   authCtx: AuthContext & { instructions?: string }
 ): Promise<string | null> {
+  // SHIFU FORK: capture the token-derived agentId BEFORE the reset below.
+  // `extractAuthContext` threads it from `mcpAuthInfo.agentId`, which the
+  // direct-auth branch in multi-tenant.ts only populates after verifying the
+  // worker token's agent belongs to the URL org — it is already org-verified.
+  // The gateway direct-auth proxy sends neither an `x-lobu-agent-id` header
+  // nor `clientInfo.agentId`, so without this capture the unconditional
+  // `authCtx.agentId = null` reset killed the member session's agent
+  // identity at initialize and `isDirectAuthMemberScheduleWrite` could never
+  // fire on the real proxy path.
+  const tokenAgentId = authCtx.agentId;
   const requestedAgentId = authCtx.requestedAgentId?.trim() || null;
   authCtx.agentId = null;
 
-  if (!requestedAgentId) return null;
+  if (!requestedAgentId) {
+    // No client-supplied binding — restore the token-derived identity.
+    authCtx.agentId = tokenAgentId;
+    return null;
+  }
   if (!isValidAgentId(requestedAgentId)) {
     return 'agentId must be 3-60 lowercase alphanumeric chars with hyphens, starting with a letter';
   }
@@ -628,7 +642,14 @@ async function syncAgentBinding(
     return `Agent '${requestedAgentId}' was not found in the current organization.`;
   }
 
-  authCtx.agentId = requestedAgentId;
+  // SHIFU FORK: when the token itself carries an agent identity, it wins for
+  // the `authCtx.agentId` used by access control — the token was verified
+  // against the org by multi-tenant.ts, whereas the client-requested id is
+  // self-asserted. The client binding above is still fully validated
+  // (invalid or foreign agent ids reject the session) and
+  // `touchAgentLastUsed` keeps tracking the requested binding, preserving
+  // the existing binding behavior when no token identity is present.
+  authCtx.agentId = tokenAgentId ?? requestedAgentId;
   await touchAgentLastUsed(authCtx.organizationId, requestedAgentId);
   return null;
 }
@@ -731,6 +752,13 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       session.authCtx.userId = freshCtx.userId;
       session.authCtx.clientId = freshCtx.clientId;
       session.authCtx.scopes = freshCtx.scopes ?? null;
+      // SHIFU FORK: also refresh the token-derived agentId. Only overwrite
+      // when the fresh token actually carries one (the direct-auth worker
+      // path) — OAuth/PAT tokens have no agent claim, and overwriting with
+      // null would wipe a client-requested binding made at initialize.
+      if (freshCtx.agentId) {
+        session.authCtx.agentId = freshCtx.agentId;
+      }
 
       if (session.authCtx.scopedToOrg) {
         if (freshCtx.organizationId !== session.authCtx.organizationId) {
