@@ -16,6 +16,7 @@
  *    quirk of the test.
  */
 import { describe, expect, test } from 'bun:test';
+import { isDirectAuthMemberScheduleWrite } from '../../auth/tool-access';
 import { type AuthContext, checkToolAccess, MEMBER_INTERNAL_TOOL_WHITELIST } from '../execute';
 import { getAllTools, getTool } from '../registry';
 
@@ -37,24 +38,65 @@ const baseAuth: AuthContext = {
   allowInternalTools: true,
 };
 
-// Mirrors the `tools/list` filter in mcp-handler.ts's ListToolsRequestSchema
-// handler: same whitelist, same "internal tool the session can't reach
-// should not even be listed" rule. Kept in sync manually since that filter
-// isn't exported as a standalone function. `isPrivileged` collapses that
-// handler's `roleAccessLevel === 'admin' || scopeAccessLevel === 'admin'`
-// (role and OAuth scope are independent — either one being admin-tier
-// exempts the session from the whitelist) into a single flag; this test only
-// exercises the whitelist-filtering behavior, not the role/scope derivation
-// itself.
-function listVisibleToolNames(isPrivileged: boolean): string[] {
-  const staticTools = getAllTools({ includeInternalTools: true });
-  const memberScoped = !isPrivileged;
-  const filtered = memberScoped
+// Mirrors the `tools/list` handler in mcp-handler.ts's
+// ListToolsRequestSchema handler — INCLUDING its role/scope-derived
+// `maxAccessLevel` computation and the direct-auth manage_schedules
+// re-append. An earlier version of this helper took a pre-collapsed
+// `isPrivileged` boolean and called `getAllTools` WITHOUT `maxAccessLevel`,
+// which produced a false-green: the test asserted manage_schedules was
+// member-visible while the real handler had already dropped it at
+// `maxAccessLevel: 'write'` (manage_schedules defaults to admin tier),
+// before the whitelist filter ever ran. Kept in sync manually since the
+// handler's filter isn't exported as a standalone function — mirror EVERY
+// step, not just the whitelist.
+function listVisibleToolNames(session: {
+  memberRole: string | null;
+  scopes: string[] | null;
+  agentId?: string | null;
+}): string[] {
+  const includeInternalTools = true; // authCtx.allowInternalTools === true
+  const roleAccessLevel = !session.memberRole
+    ? 'read'
+    : session.memberRole === 'owner' || session.memberRole === 'admin'
+      ? 'admin'
+      : 'write';
+  const scopeAccessLevel = !session.scopes
+    ? 'admin'
+    : session.scopes.includes('mcp:admin')
+      ? 'admin'
+      : session.scopes.includes('mcp:write')
+        ? 'write'
+        : 'read';
+  const maxAccessLevel =
+    roleAccessLevel === 'read' || scopeAccessLevel === 'read'
+      ? 'read'
+      : roleAccessLevel === 'write' || scopeAccessLevel === 'write'
+        ? 'write'
+        : 'admin';
+  const staticTools = getAllTools({ includeInternalTools, maxAccessLevel });
+  const isPrivileged = roleAccessLevel === 'admin' || scopeAccessLevel === 'admin';
+  const memberScoped = includeInternalTools && !isPrivileged;
+  let filtered = memberScoped
     ? staticTools.filter((t) => {
         const src = getTool(t.name);
         return !src?.internal || MEMBER_INTERNAL_TOOL_WHITELIST.has(t.name);
       })
     : staticTools;
+  if (
+    isDirectAuthMemberScheduleWrite(
+      'manage_schedules',
+      session.memberRole,
+      session.agentId ?? null,
+      session.scopes
+    ) &&
+    !filtered.some((t) => t.name === 'manage_schedules')
+  ) {
+    const scheduleEntry = getAllTools({
+      includeInternalTools: true,
+      maxAccessLevel: 'admin',
+    }).find((t) => t.name === 'manage_schedules');
+    if (scheduleEntry) filtered = [...filtered, scheduleEntry];
+  }
   return filtered.map((t) => t.name);
 }
 
@@ -123,27 +165,54 @@ describe('checkToolAccess — internal tool whitelist (call layer)', () => {
 });
 
 describe('tools/list filtering (UX layer) — mirrors mcp-handler.ts', () => {
-  test('5a. member scope (no mcp:admin): internal tools are narrowed to exactly the whitelist', () => {
-    const names = new Set(listVisibleToolNames(false));
-    const visibleInternal = [...names].filter((name) => getTool(name)?.internal);
-    // Only whitelist entries that are *actually* `internal: true` show up
-    // here — `save_memory`/`search_memory` are already on the public MCP
-    // surface (not internal at all), so the internal-tool filter never
-    // touches them; they're covered by the "internal or whitelisted" OR
-    // clause, not by being in this internal-only subset.
-    expect(new Set(visibleInternal)).toEqual(
-      new Set([...MEMBER_INTERNAL_TOOL_WHITELIST].filter((name) => getTool(name)?.internal))
-    );
-    // Sanity: a real non-whitelisted internal tool is excluded, a
-    // whitelisted one remains.
+  const memberSession = { memberRole: 'member', scopes: ['mcp:read', 'mcp:write'] };
+  const directAuthMemberSession = { ...memberSession, agentId: 'shifu-u-agent1' };
+  // Note: role and scope BOTH need to be admin-tier for the full list —
+  // `maxAccessLevel` is the MIN of the two (a member-role session with an
+  // mcp:admin-scoped token still computes 'write' and loses admin-tier
+  // tools like manage_schedules; the whitelist bypass via scope only
+  // affects the internal-tool filter, not the tier filter).
+  const adminSession = {
+    memberRole: 'admin',
+    scopes: ['mcp:read', 'mcp:write', 'mcp:admin'],
+  };
+
+  test('5a. plain member scope (no agentId): whitelist narrows internals AND write tier drops manage_schedules', () => {
+    const names = new Set(listVisibleToolNames(memberSession));
+    // No direct-auth exception without an agentId: manage_schedules'
+    // default admin tier means the maxAccessLevel='write' pass already
+    // removed it — the false-green the old helper produced was asserting
+    // the opposite.
+    expect(names.has('manage_schedules')).toBe(false);
     expect(names.has('manage_connections')).toBe(false);
-    expect(names.has('manage_schedules')).toBe(true);
+    // Whitelisted read-tier internal tool survives both passes.
+    expect(names.has('read_knowledge')).toBe(true);
+    // Every visible internal tool is on the whitelist (tier filtering may
+    // hide additional whitelist entries, but never reveal extra internals).
+    const visibleInternal = [...names].filter((name) => getTool(name)?.internal);
+    for (const name of visibleInternal) {
+      expect(MEMBER_INTERNAL_TOOL_WHITELIST.has(name)).toBe(true);
+    }
   });
 
-  test('5b. admin scope: full internal tool set is returned, unfiltered', () => {
-    const memberNames = new Set(listVisibleToolNames(false));
-    const adminNames = new Set(listVisibleToolNames(true));
+  test('5a-direct-auth. member scope + agentId + mcp:write: manage_schedules is re-appended', () => {
+    const names = new Set(listVisibleToolNames(directAuthMemberSession));
+    expect(names.has('manage_schedules')).toBe(true);
+    expect(names.has('manage_connections')).toBe(false);
+    // Only whitelist entries that are *actually* `internal: true` show up
+    // in the internal subset — `save_memory`/`search_memory` are on the
+    // public MCP surface (not internal), covered by the OR clause instead.
+    const visibleInternal = [...names].filter((name) => getTool(name)?.internal);
+    for (const name of visibleInternal) {
+      expect(MEMBER_INTERNAL_TOOL_WHITELIST.has(name)).toBe(true);
+    }
+  });
+
+  test('5b. admin role + admin scope: full internal tool set is returned, unfiltered', () => {
+    const memberNames = new Set(listVisibleToolNames(directAuthMemberSession));
+    const adminNames = new Set(listVisibleToolNames(adminSession));
     expect(adminNames.has('manage_connections')).toBe(true);
+    expect(adminNames.has('manage_schedules')).toBe(true);
     // Admin list is a strict superset of the member-visible list (adding
     // back the tools the whitelist gate hid).
     for (const name of memberNames) {

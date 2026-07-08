@@ -19,7 +19,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import type { Context } from 'hono';
 import { bindRequestAbortToStream, type AbortableStream } from './events/sse-abort-bridge';
 import { OAuthClientsStore } from './auth/oauth/clients';
-import { isPublicReadable } from './auth/tool-access';
+import { isDirectAuthMemberScheduleWrite, isPublicReadable } from './auth/tool-access';
 import { createDbClientFromEnv } from './db/client';
 import type { Env } from './index';
 import { agentExistsInOrganization, isValidAgentId, touchAgentLastUsed } from './lobu/stores/postgres-stores';
@@ -161,12 +161,39 @@ function createServerForContext(env: Env, authCtx: SessionAuthContext): Server {
     // already-computed output per request.
     const isPrivileged = roleAccessLevel === 'admin' || scopeAccessLevel === 'admin';
     const memberScoped = includeInternalTools && !isPrivileged;
-    const staticToolsFiltered = memberScoped
+    let staticToolsFiltered = memberScoped
       ? staticTools.filter((t) => {
           const src = getTool(t.name);
           return !src?.internal || MEMBER_INTERNAL_TOOL_WHITELIST.has(t.name);
         })
       : staticTools;
+    // SHIFU FORK: the direct-auth member schedule exception
+    // (`isDirectAuthMemberScheduleWrite`, auth/tool-access.ts) drops
+    // manage_schedules' required tier from admin to write at the call layer,
+    // but `getAllTools` above already removed it: this session computes
+    // `maxAccessLevel === 'write'` while manage_schedules' default tier is
+    // admin. Re-append the entry from the admin-tier computed list so
+    // tools/list matches what tools/call actually allows. `getAllTools`
+    // memoizes per option tuple — we only READ a second cached tuple here,
+    // never mutate the memoized arrays (spread below builds a new array).
+    if (
+      isDirectAuthMemberScheduleWrite(
+        'manage_schedules',
+        authCtx.memberRole,
+        authCtx.agentId,
+        authCtx.scopes
+      ) &&
+      !staticToolsFiltered.some((t) => t.name === 'manage_schedules')
+    ) {
+      const scheduleEntry = getAllTools({
+        includeInternalTools: true,
+        publicOnly,
+        maxAccessLevel: 'admin',
+      }).find((t) => t.name === 'manage_schedules');
+      if (scheduleEntry) {
+        staticToolsFiltered = [...staticToolsFiltered, scheduleEntry];
+      }
+    }
     const allTools = staticToolsFiltered.map((t) => ({
       name: t.name,
       description: t.description,
