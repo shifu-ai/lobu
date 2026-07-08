@@ -130,6 +130,12 @@ const GOOGLE_WORKSPACE_DISCOVERY_TOOLS = [
   'chat_messages_list',
   'google_workspace_chat_messages_list',
   'gws_chat_messages_list',
+  'chat_mentions_list',
+  'google_workspace_chat_mentions_list',
+  'gws_chat_mentions_list',
+  'chat_attachment_read',
+  'google_workspace_chat_attachment_read',
+  'gws_chat_attachment_read',
 ];
 const SHIFU_TOOLBOX_DISCOVERY_TOOLS = [
   'meeting_search',
@@ -573,6 +579,69 @@ describe('Toolbox MCP execution routes', () => {
     );
   });
 
+  test('POST /mcp/tools/call maps Google Workspace Chat read aliases to upstream MCP tool names', async () => {
+    const app = await importMountedAgentRoutes();
+
+    for (const request of [
+      {
+        toolName: 'chat_mentions_list',
+        expectedUpstream: 'gws_chat_mentions_list',
+        args: { spaceName: 'spaces/AAA', pageSize: 20 },
+      },
+      {
+        toolName: 'google_workspace_chat_mentions_list',
+        expectedUpstream: 'gws_chat_mentions_list',
+        args: { spaceName: 'spaces/AAA', pageSize: 20 },
+      },
+      {
+        toolName: 'gws_chat_mentions_list',
+        expectedUpstream: 'gws_chat_mentions_list',
+        args: { spaceName: 'spaces/AAA', pageSize: 20 },
+      },
+      {
+        toolName: 'chat_attachment_read',
+        expectedUpstream: 'gws_chat_attachment_read',
+        args: { name: 'spaces/AAA/messages/BBB/attachments/CCC' },
+      },
+      {
+        toolName: 'google_workspace_chat_attachment_read',
+        expectedUpstream: 'gws_chat_attachment_read',
+        args: { name: 'spaces/AAA/messages/BBB/attachments/CCC' },
+      },
+      {
+        toolName: 'gws_chat_attachment_read',
+        expectedUpstream: 'gws_chat_attachment_read',
+        args: { name: 'spaces/AAA/messages/BBB/attachments/CCC' },
+      },
+    ] as const) {
+      const res = await app.request('/lobu/api/v1/mcp/tools/call', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer admin-token',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ownerUserId: OWNER_USER_ID,
+          agentId: AGENT_ID,
+          connectorKey: 'google_workspace',
+          connectionRef: CONNECTION_REF,
+          toolName: request.toolName,
+          args: request.args,
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({ ok: true });
+      expect(executeToolDirectMock).toHaveBeenLastCalledWith(
+        AGENT_ID,
+        OWNER_USER_ID,
+        CONNECTION_REF,
+        request.expectedUpstream,
+        request.args
+      );
+    }
+  });
+
   test('POST /mcp/tools/call maps Notion database read aliases to the upstream MCP tool name', async () => {
     fakeConnections.set(NOTION_CONNECTION_REF, {
       id: NOTION_CONNECTION_REF,
@@ -738,6 +807,18 @@ describe('Toolbox MCP execution routes', () => {
         connectionRef: CONNECTION_REF,
         toolName: 'docs_create',
         args: { title: 'PM summary' },
+      },
+      {
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'chat_messages_create',
+        args: { parent: 'spaces/AAA', text: 'PM summary' },
+      },
+      {
+        connectorKey: 'google_workspace',
+        connectionRef: CONNECTION_REF,
+        toolName: 'gws_chat_messages_create',
+        args: { parent: 'spaces/AAA', text: 'PM summary' },
       },
     ] as const) {
       const res = await app.request('/lobu/api/v1/mcp/tools/call', {
