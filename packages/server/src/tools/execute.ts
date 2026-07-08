@@ -6,7 +6,13 @@
 
 import { TypeCompiler, type TypeCheck } from '@sinclair/typebox/compiler';
 import type { Context } from 'hono';
-import { getRequiredAccessLevel, hasRequiredMcpScope, isPublicReadable } from '../auth/tool-access';
+import {
+  getRequiredAccessLevel,
+  hasRequiredMcpScope,
+  isDirectAuthMemberScheduleWrite,
+  isPublicReadable,
+  type ToolAccessLevel,
+} from '../auth/tool-access';
 import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
@@ -56,7 +62,12 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     tokenOrganizationId: mcpAuthInfo?.organizationId ?? null,
     userId: mcpAuthInfo?.userId || c.var.session?.userId || null,
     memberRole: c.var.memberRole,
-    agentId: null,
+    // SHIFU FORK: threaded from the worker-token direct-auth branch in
+    // multi-tenant.ts (`mcpAuthInfo.agentId`) so per-agent tool policy
+    // (internal-tool allowlisting, quotas) knows which agent is acting.
+    // Previously hardcoded null — every direct-auth session looked
+    // agent-less to downstream tool handlers.
+    agentId: mcpAuthInfo?.agentId ?? null,
     requestedAgentId: null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
@@ -75,6 +86,15 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
  * Check access control for a tool call. Throws on denial.
  */
 const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations']);
+
+// SHIFU FORK: internal tools a member-scoped (non-admin) MCP session may use.
+// Default-deny: new internal tools stay admin-only until added here.
+export const MEMBER_INTERNAL_TOOL_WHITELIST: ReadonlySet<string> = new Set([
+  'manage_schedules',
+  'save_memory',
+  'search_memory',
+  'read_knowledge',
+]);
 
 export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthContext): void {
   if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
@@ -106,9 +126,68 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     throw new Error(`Tool not found: ${toolName}`);
   }
 
+  // SHIFU FORK: member-scoped (non-admin) sessions that DO reach internal
+  // tools (REST proxy, or a degraded direct-auth MCP session — see
+  // multi-tenant.ts's member branch) are further narrowed to the whitelist
+  // above.
+  //
+  // "Privileged" is role-OR-scope, not scope alone: plenty of legitimate
+  // owner/admin-role REST/OAuth traffic (e.g. the frontend's `resolve_path`
+  // calls) carries an OAuth token scoped to only `mcp:read mcp:write` — org
+  // role and OAuth grant breadth are independent, and gating on scope alone
+  // would 403 that pre-existing, non-agent traffic. Scope-only privilege
+  // (`mcp:admin` with no/any role) still bypasses too, so an org-admin-scoped
+  // OAuth client works regardless of the caller's org role. Only a session
+  // that is neither owner/admin by role NOR admin by scope — the actual
+  // member-owned direct-auth agent session from multi-tenant.ts — hits the
+  // whitelist.
+  //
+  // Public-readable calls (`isPublicReadable` — e.g. `resolve_path`,
+  // `list_watchers`, `get_watcher`, and the read actions of the `manage_*`
+  // tools) are exempt: those are internal-flagged only to hide them from the
+  // external MCP surface, and even anonymous/no-role callers could reach
+  // them before this gate existed. Gating them here 403'd previously-working
+  // member/no-role REST traffic on explicit-scoped tokens (e.g. the
+  // frontend's `resolve_path` calls with a default `mcp:read mcp:write`
+  // grant) — a flag-off regression. Genuinely internal non-public calls
+  // (e.g. `manage_connections` writes) remain gated.
+  const isPrivilegedRole = authCtx.memberRole === 'owner' || authCtx.memberRole === 'admin';
+  if (
+    tool.internal &&
+    authCtx.allowInternalTools &&
+    !isPrivilegedRole &&
+    !hasRequiredMcpScope('admin', authCtx.scopes) &&
+    !MEMBER_INTERNAL_TOOL_WHITELIST.has(toolName) &&
+    !isPublicReadable(toolName, args)
+  ) {
+    throw new Error(
+      `Tool '${toolName}' requires organization admin access. Member sessions may use: ${[...MEMBER_INTERNAL_TOOL_WHITELIST].join(', ')}.`
+    );
+  }
+
   const isReadOnly = tool.annotations?.readOnlyHint === true;
   const { memberRole: role } = authCtx;
   const requiredAccess = getRequiredAccessLevel(toolName, args, isReadOnly);
+
+  // SHIFU FORK: `manage_schedules` has no explicit member-write policy (see
+  // `MEMBER_WRITE_ACTIONS` in `../auth/tool-access.ts`), so it defaults to
+  // admin-only like any other unlisted tool. The one legitimate member-tier
+  // caller is the degraded direct-auth MCP session minted for a member-owned
+  // agent (multi-tenant.ts's direct-auth branch) — that path is the ONLY
+  // place that populates `authCtx.agentId` (see `extractAuthContext` above),
+  // so gating on it (plus role + an explicit `mcp:write` scope, not the
+  // null-scopes-means-privileged convention) narrowly restores write access
+  // for that session without reopening the tool to every member-role caller
+  // (e.g. a plain web session-cookie member with `scopes: null`) the way
+  // d98c58e5's unconditional `MEMBER_WRITE_ACTIONS` entry did.
+  const isScheduleWriteException = isDirectAuthMemberScheduleWrite(
+    toolName,
+    role,
+    authCtx.agentId,
+    authCtx.scopes
+  );
+  const effectiveAccess: ToolAccessLevel =
+    isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
 
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {
@@ -121,7 +200,7 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     );
   }
 
-  if (requiredAccess === 'admin') {
+  if (effectiveAccess === 'admin') {
     if (role !== 'owner' && role !== 'admin') {
       throw new Error(
         'This action requires admin or owner access. Ask an organization owner to grant elevated access.'
@@ -129,13 +208,13 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     }
   }
 
-  if (!hasRequiredMcpScope(requiredAccess, authCtx.scopes)) {
-    if (requiredAccess === 'read') {
+  if (!hasRequiredMcpScope(effectiveAccess, authCtx.scopes)) {
+    if (effectiveAccess === 'read') {
       throw new Error(
         'This MCP session does not include read access. Reconnect with read access for this workspace.'
       );
     }
-    if (requiredAccess === 'write') {
+    if (effectiveAccess === 'write') {
       throw new Error(
         'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.'
       );

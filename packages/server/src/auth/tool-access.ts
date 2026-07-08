@@ -17,6 +17,19 @@ const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
   // `run_sdk` reaches admin handlers inside the script; per-call gates fire
   // on each SDK method, so the entry-point check is just write-tier.
   run_sdk: null,
+  // `manage_schedules` intentionally has NO entry here — it stays admin-only
+  // by default (see `requiresOwnerAdmin`'s no-explicit-policy fallback
+  // below). d98c58e5 briefly added `manage_schedules: null` (unconditional
+  // member-write) to make it reachable for the member-owned direct-auth
+  // agent session, but that check runs independently of the reachability
+  // whitelist (`MEMBER_INTERNAL_TOOL_WHITELIST` in `tools/execute.ts`) — it
+  // dropped the tier for EVERY member-role caller, including a plain web
+  // session-cookie member with no scopes (`hasRequiredMcpScope` treats
+  // `scopes: null` as privileged by pre-existing convention), letting any
+  // org member create/pause/cancel/delete any schedule via the generic REST
+  // tool proxy. Reverted; the narrow direct-auth exception now lives in
+  // `checkToolAccess` (`tools/execute.ts`), gated on `authCtx.agentId` — the
+  // signal only the direct-auth worker-token path populates.
   // Legacy `manage_*` policy entries — the tools themselves are no longer
   // exposed on the external MCP surface, but the handlers are still reached
   // via SDK namespace wrappers from inside `run_sdk`, and `routeAction` consults
@@ -187,6 +200,42 @@ export function hasRequiredMcpScope(
     return scopeSet.has('mcp:write') || scopeSet.has('mcp:admin');
   }
   return scopeSet.has('mcp:admin');
+}
+
+/**
+ * SHIFU FORK: member-scope-internal-tools plan, Task 3.
+ *
+ * `manage_schedules` has no explicit `MEMBER_WRITE_ACTIONS` entry (see the
+ * comment on that table above), so `getRequiredAccessLevel` returns
+ * `'admin'` for it unconditionally. The one legitimate member-tier caller is
+ * the degraded direct-auth MCP session minted for a member-owned agent
+ * (`multi-tenant.ts`'s direct-auth branch) — that path is the ONLY place
+ * that populates `agentId` on the auth/tool context. Gating on it (plus role
+ * + an explicit `mcp:write` scope, not the null-scopes-means-privileged
+ * convention) narrowly restores write access for that session without
+ * reopening the tool to every member-role caller (e.g. a plain web
+ * session-cookie member with `scopes: null`) the way d98c58e5's
+ * unconditional `MEMBER_WRITE_ACTIONS` entry did (see 1c52bc33's revert).
+ *
+ * `manage_schedules`'s own handler drives its own `routeAction()` call
+ * (`tools/admin/action-router.ts`), which re-derives the required access
+ * level independently of `checkToolAccess` (`tools/execute.ts`) — every
+ * external MCP call to `manage_schedules` passes through BOTH gates. Both
+ * must apply this same exception or the inner gate 403s a session the outer
+ * gate just approved. Exported so both call sites share one definition.
+ */
+export function isDirectAuthMemberScheduleWrite(
+  toolName: string,
+  role: string | null | undefined,
+  agentId: string | null | undefined,
+  scopes: string[] | null | undefined
+): boolean {
+  return (
+    toolName === 'manage_schedules' &&
+    role === 'member' &&
+    agentId != null &&
+    !!scopes?.includes('mcp:write')
+  );
 }
 
 export function isPublicReadable(toolName: string, args: unknown): boolean {

@@ -338,6 +338,26 @@ describe('checkToolAccess', () => {
   });
 
   it('allows REST compatibility paths to reach internal tools subject to access', () => {
+    // SHIFU FORK: `manage_entity` isn't on the member-internal whitelist
+    // (see execute.ts's MEMBER_INTERNAL_TOOL_WHITELIST), so a non-admin-scoped
+    // session reaching it via REST is now also gated — covered by the
+    // `scopes: ['mcp:write']` case below. This case keeps proving REST/legacy
+    // callers with no meaningful scope concept (`scopes: null`, or an
+    // explicit admin scope) stay unrestricted.
+    expect(() =>
+      checkToolAccess('manage_entity', { action: 'create' }, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:write', 'mcp:admin'],
+        allowInternalTools: true,
+      })
+    ).not.toThrow();
+  });
+
+  it('gates non-whitelisted internal tools for member-scoped REST/PAT sessions, not just MCP', () => {
+    // See member-internal-whitelist.test.ts for the full whitelist matrix;
+    // this pins the specific regression this gate would otherwise cause for
+    // the "REST compatibility path" scenario above.
     expect(() =>
       checkToolAccess('manage_entity', { action: 'create' }, {
         ...baseAuth,
@@ -345,9 +365,14 @@ describe('checkToolAccess', () => {
         scopes: ['mcp:write'],
         allowInternalTools: true,
       })
-    ).not.toThrow();
+    ).toThrow(/requires organization admin access/i);
   });
 
+  // Pre-branch behavior, restored: these are public-readable internal tools
+  // (PUBLIC_READ_ACTIONS), internal-flagged only to hide them from the
+  // external MCP surface. The SHIFU member-internal whitelist gate exempts
+  // `isPublicReadable` calls, so member (and no-role) REST traffic on
+  // explicit-scoped tokens keeps reaching them exactly as before the branch.
   it.each(['list_watchers', 'get_watcher', 'read_knowledge'])(
     'hides %s from external MCP but keeps it reachable via REST',
     (toolName) => {
@@ -366,6 +391,33 @@ describe('checkToolAccess', () => {
       ).not.toThrow();
     }
   );
+
+  it('keeps public-readable internal tools reachable for member + explicit mcp:write REST sessions (flag-off regression)', () => {
+    // resolve_path is internal, NOT on MEMBER_INTERNAL_TOOL_WHITELIST, and
+    // public-readable (PUBLIC_READ_ACTIONS: null). The frontend calls it via
+    // REST with a member-role token whose default grant is
+    // `mcp:read mcp:write` — pre-branch this always worked, and it must keep
+    // working with the fork flag off.
+    expect(() =>
+      checkToolAccess('resolve_path', { path: '/acme' }, {
+        ...baseAuth,
+        memberRole: 'member',
+        scopes: ['mcp:read', 'mcp:write'],
+        allowInternalTools: true,
+      })
+    ).not.toThrow();
+
+    // No-role (public workspace) explicit-scoped token — also pre-branch
+    // reachable for public-readable tools.
+    expect(() =>
+      checkToolAccess('list_watchers', {}, {
+        ...baseAuth,
+        memberRole: null,
+        scopes: ['mcp:read', 'mcp:write'],
+        allowInternalTools: true,
+      })
+    ).not.toThrow();
+  });
 
   it('lets members run query_sql (read-tier; auth/identity tables gated per-query, not at the tool gate)', () => {
     expect(() =>
