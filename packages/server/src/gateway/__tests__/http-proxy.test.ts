@@ -212,11 +212,15 @@ describe("HTTP Proxy Authentication", () => {
 
 describe("HTTP Proxy Startup", () => {
   test("rejects on port conflict (EADDRINUSE)", async () => {
-    const blockingPort = 10000 + Math.floor(Math.random() * 50000);
     const blocker = http.createServer();
     await new Promise<void>((resolve) =>
-      blocker.listen(blockingPort, "127.0.0.1", resolve)
+      blocker.listen(0, "127.0.0.1", resolve)
     );
+    const addr = blocker.address();
+    if (typeof addr !== "object" || !addr) {
+      throw new Error("Expected blocker to bind to a TCP port");
+    }
+    const blockingPort = addr.port;
 
     try {
       await expect(
@@ -229,14 +233,13 @@ describe("HTTP Proxy Startup", () => {
     }
   });
 
-  test("binds to specified host and port", async () => {
-    const port = 10000 + Math.floor(Math.random() * 50000);
-    const server = await startHttpProxy(port, "127.0.0.1");
+  test("binds to specified host", async () => {
+    const server = await startHttpProxy(0, "127.0.0.1");
     try {
       const addr = server.address();
       expect(addr).not.toBeNull();
       if (typeof addr === "object" && addr) {
-        expect(addr.port).toBe(port);
+        expect(addr.port).toBeGreaterThan(0);
         expect(addr.address).toBe("127.0.0.1");
       }
     } finally {

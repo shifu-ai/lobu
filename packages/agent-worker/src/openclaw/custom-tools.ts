@@ -32,6 +32,7 @@ import {
   type ProjectedMcpToolDef,
 } from "./mcp-tool-projection";
 import type { ToolboxPersonalAgentToolGroup } from "./session-context";
+import type { RuntimeToolCatalogEntry } from "./dynamic-tool-loader";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -86,6 +87,93 @@ function isOfficialNotionToolboxWrapper(
   );
 }
 
+function scoreRuntimeCatalogEntry(
+  entry: RuntimeToolCatalogEntry,
+  query: string
+): number {
+  const haystack = [
+    entry.name,
+    entry.mcpId,
+    entry.domain,
+    entry.intent,
+    entry.priority,
+    entry.tool.description || "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return 0;
+  if (haystack.includes(normalizedQuery)) return 100;
+
+  const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+  if (terms.length > 1) {
+    return terms.reduce(
+      (score, term) => score + (haystack.includes(term) ? 10 : 0),
+      0
+    );
+  }
+
+  return Array.from(normalizedQuery).reduce(
+    (score, char) => score + (haystack.includes(char) ? 1 : 0),
+    0
+  );
+}
+
+function createToolSearchDefinition(
+  runtimeToolCatalog: RuntimeToolCatalogEntry[]
+): ToolDefinition {
+  return defineTool({
+    name: "tool_search",
+    description:
+      "Search the full runtime MCP tool catalog. Use this when the needed integration tool is not currently exposed as a direct tool, or when you need to inspect omitted tools before deciding what to ask next.",
+    parameters: Type.Object({
+      query: Type.String({
+        description: "Natural-language search query for the needed tool.",
+      }),
+      limit: Type.Optional(
+        Type.Integer({
+          description: "Maximum number of matching catalog entries to return.",
+        })
+      ),
+    }),
+    run: async (args) => {
+      const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 10)));
+      const matches = runtimeToolCatalog
+        .map((entry) => ({
+          entry,
+          score: scoreRuntimeCatalogEntry(entry, args.query),
+        }))
+        .filter((match) => match.score > 0)
+        .sort((left, right) => {
+          if (right.score !== left.score) return right.score - left.score;
+          if (left.entry.availableThisTurn !== right.entry.availableThisTurn) {
+            return left.entry.availableThisTurn ? -1 : 1;
+          }
+          return left.entry.originalIndex - right.entry.originalIndex;
+        })
+        .slice(0, limit)
+        .map(({ entry }) => ({
+          name: entry.name,
+          mcpId: entry.mcpId,
+          description: entry.tool.description || "",
+          domain: entry.domain,
+          intent: entry.intent,
+          priority: entry.priority,
+          availableThisTurn: entry.availableThisTurn,
+        }));
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ query: args.query, matches }, null, 2),
+          },
+        ],
+      };
+    },
+  });
+}
+
 /** Adapt shared tool result content to OpenClaw's ToolResult (adds details field). */
 function toToolResult(result: ToolContentResult): ToolResult {
   return { content: result.content, details: {} };
@@ -134,6 +222,7 @@ export function createOpenClawCustomTools(params: {
    */
   onAskUserPosted?: () => void;
   toolboxPersonalAgentTools?: ToolboxPersonalAgentToolGroup[];
+  runtimeToolCatalog?: RuntimeToolCatalogEntry[];
 }): ToolDefinition[] {
   const gw: GatewayParams = {
     gatewayUrl: params.gatewayUrl,
@@ -403,6 +492,10 @@ export function createOpenClawCustomTools(params: {
       run: (args) => startProjectContextDiscovery(gw, args),
     }),
   ];
+
+  if (params.runtimeToolCatalog && params.runtimeToolCatalog.length > 0) {
+    tools.push(createToolSearchDefinition(params.runtimeToolCatalog));
+  }
 
   for (const group of params.toolboxPersonalAgentTools || []) {
     for (const tool of group.tools) {

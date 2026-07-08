@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { startMcpLogin, type GatewayParams } from "../tool-implementations";
+import {
+  startMcpLogin,
+  type GatewayParams,
+  type ToolContentResult,
+} from "../tool-implementations";
 
 const GW: GatewayParams = {
   gatewayUrl: "http://gateway.internal:8080",
@@ -31,8 +35,9 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
 });
 
-function parseResult(result: { content: Array<{ text?: string }> }) {
-  return JSON.parse(result.content[0]!.text!);
+function parseResult(result: ToolContentResult) {
+  const text = result.content.find((part) => part.type === "text")?.text;
+  return JSON.parse(text!);
 }
 
 describe("startMcpLogin message copy", () => {

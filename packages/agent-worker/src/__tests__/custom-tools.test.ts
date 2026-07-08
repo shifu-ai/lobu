@@ -56,6 +56,44 @@ describe("createOpenClawCustomTools", () => {
     ]);
   });
 
+  test("registers searchable runtime tool catalog when catalog is provided", async () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "sales_battle_report_run_now",
+            description: "立即發送課程 PM 銷售戰報",
+            inputSchema: { type: "object", properties: {} },
+          },
+          name: "sales_battle_report_run_now",
+          mcpId: "shifu-toolbox",
+          domain: "battle_report",
+          intent: "battle_report",
+          priority: "P0",
+          originalIndex: 0,
+          availableThisTurn: true,
+        },
+      ],
+    });
+
+    const searchTool = tools.find((tool) => tool.name === "tool_search");
+
+    expect(searchTool).toBeDefined();
+
+    const result = await searchTool!.execute("tool-call-1", {
+      query: "發送戰報",
+    });
+
+    expect(result.content[0]?.text).toContain("sales_battle_report_run_now");
+  });
+
   test("built-in Lobu tool schemas can be projected for Gemini function declarations", () => {
     const tools = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",

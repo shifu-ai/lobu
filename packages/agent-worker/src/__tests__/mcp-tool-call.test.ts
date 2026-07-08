@@ -257,9 +257,7 @@ describe("callMcpTool", () => {
   test("MCP response with image block is preserved", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
-        content: [
-          { type: "image", mimeType: "image/png", data: "YWJjZA==" },
-        ],
+        content: [{ type: "image", mimeType: "image/png", data: "YWJjZA==" }],
         isError: false,
       })
     ) as unknown as typeof fetch;

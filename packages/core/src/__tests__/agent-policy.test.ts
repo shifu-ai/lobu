@@ -44,7 +44,9 @@ describe("agent-policy file delivery guidance", () => {
     expect(description).toContain("downloadable link");
     expect(description).toContain("raw file bytes");
     expect(description).toContain("base64 content");
-    expect(alwaysOn).toContain("do not paste the full document, raw bytes, or base64");
+    expect(alwaysOn).toContain(
+      "do not paste the full document, raw bytes, or base64"
+    );
     expect(detected).toContain(
       "Do not inline full file contents, raw bytes, or base64"
     );

@@ -1,0 +1,386 @@
+import { describe, expect, test } from "bun:test";
+import type { McpToolDef } from "@lobu/core";
+import {
+  buildRuntimeToolCatalog,
+  resolveDynamicToolBudget,
+  selectMcpToolsByMcpForTurn,
+  selectMcpToolsForTurn,
+} from "../openclaw/dynamic-tool-loader";
+
+function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
+  return {
+    name,
+    description: `${name} description`,
+    inputSchema: { type: "object", properties: {} },
+    ...extras,
+  };
+}
+
+describe("selectMcpToolsForTurn", () => {
+  test("keeps P0 battle report tools when the Toolbox catalog is crowded", () => {
+    const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
+    );
+    const battleReportTools = [
+      tool("sales_battle_report_schedule_list"),
+      tool("sales_battle_report_schedule_create"),
+      tool("sales_battle_report_schedule_pause"),
+      tool("sales_battle_report_schedule_update"),
+      tool("sales_battle_report_run_now"),
+    ];
+
+    const result = selectMcpToolsForTurn({
+      tools: [...cardStudioDistractors, ...battleReportTools],
+      message: "請立即發送 Irene 財務自由工程計畫今天的戰報",
+      budget: 48,
+    });
+
+    const selectedNames = result.selected.map((toolDef) => toolDef.name);
+
+    expect(selectedNames).toContain("sales_battle_report_schedule_list");
+    expect(selectedNames).toContain("sales_battle_report_schedule_create");
+    expect(selectedNames).toContain("sales_battle_report_schedule_pause");
+    expect(selectedNames).toContain("sales_battle_report_schedule_update");
+    expect(selectedNames).toContain("sales_battle_report_run_now");
+    expect(result.selected).toHaveLength(48);
+    expect(result.trace.primaryIntent).toBe("battle_report");
+    expect(selectedNames).not.toContain("card_studio_distractor_75");
+  });
+
+  test("keeps Toolbox _meta PM verification tools ahead of crowded P3 distractors", () => {
+    const cardStudioDistractors = Array.from({ length: 60 }, (_, index) =>
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
+    );
+    const communityApprovalTool = tool("line_community_member_approve", {
+      _meta: {
+        shifuTool: {
+          domain: "community_verification",
+          priority: "P0",
+          aliases: ["審核學員", "LINE 社群審核"],
+          readOnly: false,
+          mutatesState: true,
+          requiresConfirmation: true,
+          freshness: "realtime",
+        },
+      },
+    });
+
+    const result = selectMcpToolsForTurn({
+      tools: [...cardStudioDistractors, communityApprovalTool],
+      message: "請協助審核 LINE 社群待審學員",
+      budget: 10,
+    });
+
+    const selectedNames = result.selected.map((toolDef) => toolDef.name);
+
+    expect(selectedNames).toContain("line_community_member_approve");
+    expect(selectedNames).not.toContain("card_studio_distractor_60");
+    expect(result.trace.primaryIntent).toBe("community_verification");
+    expect(result.selected).toHaveLength(10);
+  });
+
+  test("preserves original order for tools with equal ranking", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        tool("unknown_alpha"),
+        tool("unknown_beta"),
+        tool("unknown_gamma"),
+      ],
+      message: "請幫我看看這些工具",
+      budget: 3,
+    });
+
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "unknown_alpha",
+      "unknown_beta",
+      "unknown_gamma",
+    ]);
+  });
+
+  test("builds a runtime catalog with metadata and availability for this turn", () => {
+    const allTools = {
+      toolbox: [
+        tool("line_community_member_lookup", {
+          _meta: {
+            shifuTool: {
+              domain: "community_verification",
+              priority: "P0",
+              aliases: ["審核學員"],
+              readOnly: true,
+              mutatesState: false,
+              requiresConfirmation: true,
+              freshness: "near_realtime",
+            },
+          },
+        }),
+        tool("card_studio_template_list"),
+      ],
+      workspace: [tool("workspace_drive_search")],
+    };
+    const selectedTools = {
+      toolbox: [allTools.toolbox[0]],
+      workspace: [allTools.workspace[0]],
+    };
+
+    const catalog = buildRuntimeToolCatalog({ allTools, selectedTools });
+
+    expect(
+      catalog.map((entry) => ({
+        name: entry.name,
+        mcpId: entry.mcpId,
+        domain: entry.domain,
+        priority: entry.priority,
+        aliases: entry.aliases,
+        readOnly: entry.readOnly,
+        mutatesState: entry.mutatesState,
+        requiresConfirmation: entry.requiresConfirmation,
+        freshness: entry.freshness,
+        availableThisTurn: entry.availableThisTurn,
+      }))
+    ).toEqual([
+      {
+        name: "line_community_member_lookup",
+        mcpId: "toolbox",
+        domain: "community_verification",
+        priority: "P0",
+        aliases: ["審核學員"],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: true,
+        freshness: "near_realtime",
+        availableThisTurn: true,
+      },
+      {
+        name: "card_studio_template_list",
+        mcpId: "toolbox",
+        domain: "card_studio",
+        priority: "P3",
+        aliases: [],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: false,
+        freshness: undefined,
+        availableThisTurn: false,
+      },
+      {
+        name: "workspace_drive_search",
+        mcpId: "workspace",
+        domain: "unknown",
+        priority: "P2",
+        aliases: [],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: false,
+        freshness: undefined,
+        availableThisTurn: true,
+      },
+    ]);
+  });
+
+  test("preserves Toolbox PM metadata domains in the runtime catalog", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [
+          tool("meeting_search", {
+            _meta: {
+              shifuTool: {
+                domain: "workspace_docs",
+                priority: "P1",
+                aliases: ["會議記錄"],
+                readOnly: true,
+                freshness: "near_realtime",
+              },
+            },
+          }),
+          tool("get_course_context", {
+            _meta: {
+              shifuTool: {
+                domain: "course_context",
+                priority: "P0",
+                aliases: ["課程脈絡"],
+                readOnly: true,
+                freshness: "batch",
+              },
+            },
+          }),
+          tool("mkt_help", {
+            _meta: {
+              shifuTool: {
+                domain: "diagnostics",
+                priority: "P2",
+                aliases: ["診斷說明"],
+                readOnly: true,
+                freshness: "realtime",
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { toolbox: [] },
+    });
+
+    expect(
+      catalog.map((entry) => ({
+        name: entry.name,
+        domain: entry.domain,
+        intent: entry.intent,
+        priority: entry.priority,
+        aliases: entry.aliases,
+        freshness: entry.freshness,
+      }))
+    ).toEqual([
+      {
+        name: "meeting_search",
+        domain: "workspace_docs",
+        intent: "workspace_docs",
+        priority: "P1",
+        aliases: ["會議記錄"],
+        freshness: "near_realtime",
+      },
+      {
+        name: "get_course_context",
+        domain: "course_context",
+        intent: "course_context",
+        priority: "P0",
+        aliases: ["課程脈絡"],
+        freshness: "batch",
+      },
+      {
+        name: "mkt_help",
+        domain: "diagnostics",
+        intent: "diagnostics",
+        priority: "P2",
+        aliases: ["診斷說明"],
+        freshness: "realtime",
+      },
+    ]);
+  });
+
+  test("falls back when Toolbox _meta PM metadata has an invalid priority", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        tool("line_community_member_approve", {
+          _meta: {
+            shifuTool: {
+              domain: "community_verification",
+              priority: "P99",
+            },
+          },
+        }),
+        tool("card_studio_template_list"),
+      ],
+      message: "請審核 LINE 社群待審學員",
+      budget: 1,
+    });
+
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "line_community_member_approve",
+    ]);
+
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [
+          tool("line_community_member_approve", {
+            _meta: {
+              shifuTool: {
+                domain: "community_verification",
+                priority: "P99",
+                readOnly: false,
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { toolbox: [] },
+    });
+
+    expect(catalog[0]).toMatchObject({
+      domain: "unknown",
+      priority: "P2",
+      readOnly: true,
+      mutatesState: false,
+      requiresConfirmation: false,
+    });
+  });
+
+  test("keeps annotations shifuTool compatibility during metadata migration", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [
+          tool("line_community_setup", {
+            annotations: {
+              shifuTool: {
+                domain: "community_verification",
+                priority: "P0",
+                aliases: ["LINE 設定"],
+                readOnly: false,
+                mutatesState: true,
+                requiresConfirmation: true,
+                freshness: "batch",
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { toolbox: [] },
+    });
+
+    expect(catalog[0]).toMatchObject({
+      domain: "community_verification",
+      intent: "community_verification",
+      priority: "P0",
+      aliases: ["LINE 設定"],
+      readOnly: false,
+      mutatesState: true,
+      requiresConfirmation: true,
+      freshness: "batch",
+    });
+  });
+
+  test("selects tools across MCP servers while preserving mcpId grouping", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        toolbox: [
+          tool("sales_battle_report_run_now"),
+          tool("card_studio_template_list"),
+        ],
+        workspace: [
+          tool("workspace_drive_search"),
+          tool("workspace_docs_create"),
+        ],
+      },
+      message: "請立即發送今天的戰報",
+      budget: 2,
+    });
+
+    expect(
+      Object.fromEntries(
+        Object.entries(result.selectedTools).map(([mcpId, tools]) => [
+          mcpId,
+          tools.map((toolDef) => toolDef.name),
+        ])
+      )
+    ).toEqual({
+      toolbox: ["sales_battle_report_run_now"],
+      workspace: ["workspace_drive_search"],
+    });
+    expect(result.trace.selectedToolNames).toEqual([
+      "toolbox/sales_battle_report_run_now",
+      "workspace/workspace_drive_search",
+    ]);
+    expect(result.trace.omittedToolNames).toEqual([
+      "toolbox/card_studio_template_list",
+      "workspace/workspace_docs_create",
+    ]);
+  });
+
+  test("resolves dynamic tool budget from positive integer strings only", () => {
+    expect(resolveDynamicToolBudget(undefined)).toBe(48);
+    expect(resolveDynamicToolBudget("")).toBe(48);
+    expect(resolveDynamicToolBudget("   ")).toBe(48);
+    expect(resolveDynamicToolBudget("not-a-number")).toBe(48);
+    expect(resolveDynamicToolBudget("-2")).toBe(48);
+    expect(resolveDynamicToolBudget("0")).toBe(48);
+    expect(resolveDynamicToolBudget(" 12.9 ")).toBe(12);
+  });
+});
