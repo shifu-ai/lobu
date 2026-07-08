@@ -22,7 +22,9 @@ import { type Static, Type } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import type { Env } from '../../index';
 import { routeAction } from './action-router';
+import { getDb } from '../../db/client';
 import {
+  countActiveScheduledJobs,
   createScheduledJob,
   deleteScheduledJob,
   getScheduledJob,
@@ -33,6 +35,12 @@ import {
 import type { ToolContext } from '../registry';
 import logger from '../../utils/logger';
 import { nextRunAt as nextCronTickAt } from '../../utils/cron';
+
+// SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
+// direct-auth sessions (see 1c52bc33) can reach this tool, but must be
+// confined to their own agent / own notifications / a bounded quota — see
+// `isPrivilegedRole` and the deps below.
+const MEMBER_SCHEDULE_QUOTA = 20;
 
 // ============================================
 // Schema
@@ -180,16 +188,69 @@ interface ToolResult {
   error?: string;
 }
 
+function isPrivilegedRole(ctx: ToolContext): boolean {
+  return ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
+}
+
+/**
+ * SHIFU FORK: dependency seam for the member-scoping logic below (Task 3).
+ * Real callers get `defaultDeps` (real service functions + a real DB
+ * ownership check); tests inject fakes without reaching for `mock.module`.
+ */
+export interface ManageSchedulesDeps {
+  createScheduledJob: typeof createScheduledJob;
+  listScheduledJobs: typeof listScheduledJobs;
+  getScheduledJob: typeof getScheduledJob;
+  pauseScheduledJob: typeof pauseScheduledJob;
+  deleteScheduledJob: typeof deleteScheduledJob;
+  countActiveScheduledJobs: typeof countActiveScheduledJobs;
+  /** True iff `agentId` is a `toolbox`-owned agent belonging to `userId` in `organizationId`. */
+  agentOwnedByUser: (
+    organizationId: string,
+    userId: string | null,
+    agentId: string
+  ) => Promise<boolean>;
+}
+
+async function dbAgentOwnedByUser(
+  organizationId: string,
+  userId: string | null,
+  agentId: string
+): Promise<boolean> {
+  if (!userId) return false;
+  const sql = getDb();
+  const rows = (await sql`
+    SELECT 1 FROM agents
+    WHERE id = ${agentId} AND organization_id = ${organizationId}
+      AND owner_platform = 'toolbox' AND owner_user_id = ${userId}
+    LIMIT 1
+  `) as unknown as unknown[];
+  return rows.length > 0;
+}
+
+export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
+  createScheduledJob,
+  listScheduledJobs,
+  getScheduledJob,
+  pauseScheduledJob,
+  deleteScheduledJob,
+  countActiveScheduledJobs,
+  agentOwnedByUser: dbAgentOwnedByUser,
+};
+
 export async function manageSchedules(
   args: ManageSchedulesArgs,
   _env: Env,
-  ctx: ToolContext
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps = defaultManageSchedulesDeps
 ): Promise<ToolResult> {
   return routeAction('manage_schedules', args.action, ctx, {
-    create: () => handleCreate(args as Extract<ManageSchedulesArgs, { action: 'create' }>, ctx),
-    list: () => handleList(args as Extract<ManageSchedulesArgs, { action: 'list' }>, ctx),
-    pause: () => handlePause(args as Extract<ManageSchedulesArgs, { action: 'pause' }>, ctx),
-    cancel: () => handleCancel(args as Extract<ManageSchedulesArgs, { action: 'cancel' }>, ctx),
+    create: () =>
+      handleCreate(args as Extract<ManageSchedulesArgs, { action: 'create' }>, ctx, deps),
+    list: () => handleList(args as Extract<ManageSchedulesArgs, { action: 'list' }>, ctx, deps),
+    pause: () => handlePause(args as Extract<ManageSchedulesArgs, { action: 'pause' }>, ctx, deps),
+    cancel: () =>
+      handleCancel(args as Extract<ManageSchedulesArgs, { action: 'cancel' }>, ctx, deps),
   });
 }
 
@@ -274,7 +335,8 @@ const CREATE_SHAPE_HINT =
 
 async function handleCreate(
   rawArgs: Extract<ManageSchedulesArgs, { action: 'create' }>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
   const args = normalizeCreateArgs(
     rawArgs as unknown as Record<string, unknown>
@@ -306,6 +368,39 @@ async function handleCreate(
       };
     }
   }
+  // SHIFU FORK: member self-scoping (member-scope-internal-tools plan, Task
+  // 3). Members reach this tool only via a member-owned direct-auth session
+  // (see 1c52bc33) — confine them to their own agent, their own
+  // notification recipients, and a bounded active-schedule quota. Owner/admin
+  // sessions are unrestricted.
+  if (!isPrivilegedRole(ctx)) {
+    if (args.payload.type === 'wake_agent') {
+      const owned = await deps.agentOwnedByUser(
+        ctx.organizationId,
+        ctx.userId,
+        args.payload.agent_id
+      );
+      if (!owned) {
+        return { error: 'Members can only schedule wakes for agents they own.' };
+      }
+    }
+    if (args.payload.type === 'send_notification') {
+      const recipients = args.payload.recipients;
+      if (recipients === 'all' || recipients === 'admins') {
+        return { error: 'Members can only send scheduled notifications to themselves.' };
+      }
+      // Force the recipient list to the caller regardless of what was
+      // requested — impossible to target another user via this path.
+      args.payload.recipients = ctx.userId ? [ctx.userId] : recipients;
+    }
+    const activeCount = await deps.countActiveScheduledJobs(ctx.organizationId, ctx.userId);
+    if (activeCount >= MEMBER_SCHEDULE_QUOTA) {
+      return {
+        error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${activeCount}.`,
+      };
+    }
+  }
+
   // action_type comes from the payload's discriminant `type`.
   const actionType = args.payload.type;
   // Strip the discriminant before persisting — handlers know their own type.
@@ -313,7 +408,7 @@ async function handleCreate(
     type: string;
   };
 
-  const job = await createScheduledJob({
+  const job = await deps.createScheduledJob({
     organizationId: ctx.organizationId,
     actionType,
     actionArgs,
@@ -321,9 +416,11 @@ async function handleCreate(
     cron: args.cron ?? null,
     runAt: runAtDate,
     createdByUser: ctx.userId ?? null,
-    // ToolContext doesn't carry an agent attribution today; populated by
-    // the gateway agent path when it lands (TODO once that wiring exists).
-    createdByAgent: null,
+    // Attribution: any session with an agentId (member-owned direct-auth
+    // sessions today; potentially the gateway agent loop in the future)
+    // stamps created_by_agent. Resolves the prior TODO — this now applies
+    // to all roles, not just members.
+    createdByAgent: ctx.agentId ?? null,
     sourceRunId: args.source_run_id ?? null,
     sourceEventId: args.source_event_id ?? null,
     sourceThreadId: args.source_thread_id ?? null,
@@ -333,34 +430,61 @@ async function handleCreate(
 
 async function handleList(
   args: Extract<ManageSchedulesArgs, { action: 'list' }>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
-  const rows = await listScheduledJobs({
+  // SHIFU FORK: members can't list org-wide or spoof another user/agent via
+  // args — force the filter to themselves regardless of what was passed.
+  const privileged = isPrivilegedRole(ctx);
+  const rows = await deps.listScheduledJobs({
     organizationId: ctx.organizationId,
-    createdByAgent: args.agent_id ?? null,
-    createdByUser: args.user_id ?? null,
+    createdByAgent: privileged ? args.agent_id ?? null : null,
+    createdByUser: privileged ? args.user_id ?? null : ctx.userId ?? null,
     actionType: args.action_type ?? null,
     includePaused: args.include_paused ?? true,
   });
   return { schedules: rows.map(serializeSchedule) };
 }
 
+/**
+ * SHIFU FORK: a member may only pause/cancel a schedule they own — owned
+ * meaning created_by_user or created_by_agent matches. Returns the same
+ * not-found message as a truly missing id so the check can't be used to
+ * probe for other users' schedule ids.
+ */
+function memberOwnsJob(job: ScheduledJobRow | null, ctx: ToolContext): boolean {
+  if (!job) return false;
+  return job.created_by_user === ctx.userId || job.created_by_agent === ctx.agentId;
+}
+
 async function handlePause(
   args: Extract<ManageSchedulesArgs, { action: 'pause' }>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
-  const ok = await pauseScheduledJob(ctx.organizationId, args.id, args.paused ?? true);
-  if (!ok) return { error: `Schedule '${args.id}' not found in this organization.` };
-  const job = await getScheduledJob(ctx.organizationId, args.id);
+  const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
+  if (!isPrivilegedRole(ctx)) {
+    const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
+    if (!memberOwnsJob(existing, ctx)) return notFound;
+  }
+  const ok = await deps.pauseScheduledJob(ctx.organizationId, args.id, args.paused ?? true);
+  if (!ok) return notFound;
+  const job = await deps.getScheduledJob(ctx.organizationId, args.id);
   return { schedule: job ? serializeSchedule(job) : undefined, ok: true };
 }
 
 async function handleCancel(
   args: Extract<ManageSchedulesArgs, { action: 'cancel' }>,
-  ctx: ToolContext
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
-  const ok = await deleteScheduledJob(ctx.organizationId, args.id);
-  if (!ok) return { error: `Schedule '${args.id}' not found in this organization.` };
+  const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
+  if (!isPrivilegedRole(ctx)) {
+    const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
+    if (!memberOwnsJob(existing, ctx)) return notFound;
+  }
+  const ok = await deps.deleteScheduledJob(ctx.organizationId, args.id);
+  if (!ok) return notFound;
   logger.info({ schedule_id: args.id, org: ctx.organizationId }, '[manage_schedules] cancelled');
   return { ok: true };
 }

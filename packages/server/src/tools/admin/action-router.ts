@@ -1,4 +1,8 @@
-import { getRequiredAccessLevel, hasRequiredMcpScope } from '../../auth/tool-access';
+import {
+  getRequiredAccessLevel,
+  hasRequiredMcpScope,
+  isDirectAuthMemberScheduleWrite,
+} from '../../auth/tool-access';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
 
@@ -23,23 +27,38 @@ function enforceActionAccess(toolName: string, action: string, ctx: ToolContext)
   if (isSystemContext(ctx)) return;
 
   const requiredAccess = getRequiredAccessLevel(toolName, { action }, false);
-  if (requiredAccess === 'admin' && ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin') {
+  // SHIFU FORK: member-scope-internal-tools plan, Task 3. `manage_schedules`
+  // drives its own routeAction() call, so this gate and `checkToolAccess`
+  // (tools/execute.ts) BOTH fire on every external MCP call to it. Apply the
+  // same member-owned direct-auth exception here — without it, a session
+  // `checkToolAccess` just approved for write access gets 403'd right back
+  // by this inner, exception-unaware admin-tier check.
+  const isScheduleWriteException = isDirectAuthMemberScheduleWrite(
+    toolName,
+    ctx.memberRole,
+    ctx.agentId,
+    ctx.scopes
+  );
+  const effectiveAccess =
+    isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
+
+  if (effectiveAccess === 'admin' && ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin') {
     throw new Error(
       `Action ${toolName}.${action} requires admin or owner access. Ask an organization owner to grant elevated access.`
     );
   }
 
-  if (requiredAccess === 'write' && !ctx.memberRole) {
+  if (effectiveAccess === 'write' && !ctx.memberRole) {
     throw new Error(
       `Action ${toolName}.${action} requires workspace membership with write access.`
     );
   }
 
-  if (!hasRequiredMcpScope(requiredAccess, ctx.scopes)) {
-    if (requiredAccess === 'read') {
+  if (!hasRequiredMcpScope(effectiveAccess, ctx.scopes)) {
+    if (effectiveAccess === 'read') {
       throw new Error(`Action ${toolName}.${action} requires an MCP session with read access.`);
     }
-    if (requiredAccess === 'write') {
+    if (effectiveAccess === 'write') {
       throw new Error(`Action ${toolName}.${action} requires an MCP session with write access.`);
     }
     throw new Error(`Action ${toolName}.${action} requires an MCP session with admin access.`);

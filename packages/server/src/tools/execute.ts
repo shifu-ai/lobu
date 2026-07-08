@@ -9,6 +9,7 @@ import type { Context } from 'hono';
 import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
+  isDirectAuthMemberScheduleWrite,
   isPublicReadable,
   type ToolAccessLevel,
 } from '../auth/tool-access';
@@ -168,13 +169,14 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   // for that session without reopening the tool to every member-role caller
   // (e.g. a plain web session-cookie member with `scopes: null`) the way
   // d98c58e5's unconditional `MEMBER_WRITE_ACTIONS` entry did.
-  const isDirectAuthMemberScheduleWrite =
-    toolName === 'manage_schedules' &&
-    role === 'member' &&
-    authCtx.agentId != null &&
-    !!authCtx.scopes?.includes('mcp:write');
+  const isScheduleWriteException = isDirectAuthMemberScheduleWrite(
+    toolName,
+    role,
+    authCtx.agentId,
+    authCtx.scopes
+  );
   const effectiveAccess: ToolAccessLevel =
-    isDirectAuthMemberScheduleWrite && requiredAccess === 'admin' ? 'write' : requiredAccess;
+    isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
 
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {

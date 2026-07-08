@@ -102,6 +102,25 @@ export async function listScheduledJobs(opts: {
   `) as unknown as ScheduledJobRow[];
 }
 
+// SHIFU FORK: member self-scoping quota (member-scope-internal-tools plan,
+// Task 3). Members can create schedules for their own agent/notifications;
+// this caps how many un-paused schedules a single user can accumulate so a
+// runaway loop can't flood the ticker. Counts across the whole org for that
+// user, not per-agent, since a member may hold more than one agent.
+export async function countActiveScheduledJobs(
+  organizationId: string,
+  userId: string | null
+): Promise<number> {
+  const sql = getDb();
+  const rows = (await sql`
+    SELECT count(*)::int AS count FROM scheduled_jobs
+    WHERE organization_id = ${organizationId}
+      AND created_by_user = ${userId}
+      AND NOT paused
+  `) as unknown as Array<{ count: number }>;
+  return rows[0]?.count ?? 0;
+}
+
 export async function getScheduledJob(
   organizationId: string,
   id: string
