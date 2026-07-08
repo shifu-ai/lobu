@@ -4,7 +4,10 @@ import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 export type ToolDomain =
   | "battle_report"
   | "community_verification"
+  | "course_context"
   | "sales_performance"
+  | "workspace_docs"
+  | "diagnostics"
   | "card_studio"
   | "media_editing"
   | "unknown";
@@ -45,7 +48,10 @@ const BATTLE_REPORT_P0_TOOLS = new Set([
 const KNOWN_TOOL_DOMAINS = new Set<ToolDomain>([
   "battle_report",
   "community_verification",
+  "course_context",
   "sales_performance",
+  "workspace_docs",
+  "diagnostics",
   "card_studio",
   "media_editing",
   "unknown",

@@ -100,7 +100,7 @@ describe("selectMcpToolsForTurn", () => {
   test("builds a runtime catalog with metadata and availability for this turn", () => {
     const allTools = {
       toolbox: [
-        tool("sales_battle_report_run_now", {
+        tool("line_community_member_lookup", {
           _meta: {
             shifuTool: {
               domain: "community_verification",
@@ -139,7 +139,7 @@ describe("selectMcpToolsForTurn", () => {
       }))
     ).toEqual([
       {
-        name: "sales_battle_report_run_now",
+        name: "line_community_member_lookup",
         mcpId: "toolbox",
         domain: "community_verification",
         priority: "P0",
@@ -173,6 +173,85 @@ describe("selectMcpToolsForTurn", () => {
         requiresConfirmation: false,
         freshness: undefined,
         availableThisTurn: true,
+      },
+    ]);
+  });
+
+  test("preserves Toolbox PM metadata domains in the runtime catalog", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [
+          tool("meeting_search", {
+            _meta: {
+              shifuTool: {
+                domain: "workspace_docs",
+                priority: "P1",
+                aliases: ["會議記錄"],
+                readOnly: true,
+                freshness: "near_realtime",
+              },
+            },
+          }),
+          tool("get_course_context", {
+            _meta: {
+              shifuTool: {
+                domain: "course_context",
+                priority: "P0",
+                aliases: ["課程脈絡"],
+                readOnly: true,
+                freshness: "batch",
+              },
+            },
+          }),
+          tool("mkt_help", {
+            _meta: {
+              shifuTool: {
+                domain: "diagnostics",
+                priority: "P2",
+                aliases: ["診斷說明"],
+                readOnly: true,
+                freshness: "realtime",
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { toolbox: [] },
+    });
+
+    expect(
+      catalog.map((entry) => ({
+        name: entry.name,
+        domain: entry.domain,
+        intent: entry.intent,
+        priority: entry.priority,
+        aliases: entry.aliases,
+        freshness: entry.freshness,
+      }))
+    ).toEqual([
+      {
+        name: "meeting_search",
+        domain: "workspace_docs",
+        intent: "workspace_docs",
+        priority: "P1",
+        aliases: ["會議記錄"],
+        freshness: "near_realtime",
+      },
+      {
+        name: "get_course_context",
+        domain: "course_context",
+        intent: "course_context",
+        priority: "P0",
+        aliases: ["課程脈絡"],
+        freshness: "batch",
+      },
+      {
+        name: "mkt_help",
+        domain: "diagnostics",
+        intent: "diagnostics",
+        priority: "P2",
+        aliases: ["診斷說明"],
+        freshness: "realtime",
       },
     ]);
   });

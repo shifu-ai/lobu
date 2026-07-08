@@ -1,7 +1,10 @@
 export type ToolIntent =
   | "battle_report"
   | "community_verification"
+  | "course_context"
   | "sales_performance"
+  | "workspace_docs"
+  | "diagnostics"
   | "card_studio"
   | "media_editing"
   | "unknown";
