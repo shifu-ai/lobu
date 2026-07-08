@@ -46,6 +46,14 @@ export interface BuildRuntimeToolCatalogParams {
   selectedTools: Record<string, McpToolDef[]>;
 }
 
+export function resolveDynamicToolBudget(value: string | undefined): number {
+  const trimmed = value?.trim();
+  if (!trimmed) return 48;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 48;
+  return Math.floor(parsed);
+}
+
 function intentBoost(
   entry: ToolCatalogEntry,
   primaryIntent: ToolIntent

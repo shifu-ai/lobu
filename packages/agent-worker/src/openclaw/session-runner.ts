@@ -85,6 +85,7 @@ import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
   buildRuntimeToolCatalog,
+  resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
 const logger = createLogger("worker");
@@ -122,12 +123,6 @@ export function findDuplicateToolNames(
   return Array.from(counts.entries())
     .filter(([, count]) => count > 1)
     .map(([name, count]) => ({ name, count }));
-}
-
-function parseDynamicToolBudget(value: string | undefined): number {
-  const parsed = Number(value || "48");
-  if (!Number.isFinite(parsed)) return 48;
-  return Math.max(0, Math.floor(parsed));
 }
 
 const DEFAULT_MEMORY_FLUSH_CONFIG: ResolvedMemoryFlushConfig = {
@@ -1497,7 +1492,7 @@ Use it when the user references past discussions or you need context.`);
     },
   });
 
-  const dynamicToolBudget = parseDynamicToolBudget(
+  const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
   let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;

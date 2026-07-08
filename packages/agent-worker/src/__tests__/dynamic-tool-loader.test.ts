@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
 import {
   buildRuntimeToolCatalog,
+  resolveDynamicToolBudget,
+  selectMcpToolsByMcpForTurn,
   selectMcpToolsForTurn,
 } from "../openclaw/dynamic-tool-loader";
 
@@ -68,9 +70,11 @@ describe("selectMcpToolsForTurn", () => {
         tool("sales_battle_report_run_now"),
         tool("card_studio_template_list"),
       ],
+      workspace: [tool("workspace_drive_search")],
     };
     const selectedTools = {
       toolbox: [allTools.toolbox[0]],
+      workspace: [allTools.workspace[0]],
     };
 
     const catalog = buildRuntimeToolCatalog({ allTools, selectedTools });
@@ -92,6 +96,58 @@ describe("selectMcpToolsForTurn", () => {
         mcpId: "toolbox",
         availableThisTurn: false,
       },
+      {
+        name: "workspace_drive_search",
+        mcpId: "workspace",
+        availableThisTurn: true,
+      },
     ]);
+  });
+
+  test("selects tools across MCP servers while preserving mcpId grouping", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        toolbox: [
+          tool("sales_battle_report_run_now"),
+          tool("card_studio_template_list"),
+        ],
+        workspace: [
+          tool("workspace_drive_search"),
+          tool("workspace_docs_create"),
+        ],
+      },
+      message: "請立即發送今天的戰報",
+      budget: 2,
+    });
+
+    expect(
+      Object.fromEntries(
+        Object.entries(result.selectedTools).map(([mcpId, tools]) => [
+          mcpId,
+          tools.map((toolDef) => toolDef.name),
+        ])
+      )
+    ).toEqual({
+      toolbox: ["sales_battle_report_run_now"],
+      workspace: ["workspace_drive_search"],
+    });
+    expect(result.trace.selectedToolNames).toEqual([
+      "toolbox/sales_battle_report_run_now",
+      "workspace/workspace_drive_search",
+    ]);
+    expect(result.trace.omittedToolNames).toEqual([
+      "toolbox/card_studio_template_list",
+      "workspace/workspace_docs_create",
+    ]);
+  });
+
+  test("resolves dynamic tool budget from positive integer strings only", () => {
+    expect(resolveDynamicToolBudget(undefined)).toBe(48);
+    expect(resolveDynamicToolBudget("")).toBe(48);
+    expect(resolveDynamicToolBudget("   ")).toBe(48);
+    expect(resolveDynamicToolBudget("not-a-number")).toBe(48);
+    expect(resolveDynamicToolBudget("-2")).toBe(48);
+    expect(resolveDynamicToolBudget("0")).toBe(48);
+    expect(resolveDynamicToolBudget(" 12.9 ")).toBe(12);
   });
 });
