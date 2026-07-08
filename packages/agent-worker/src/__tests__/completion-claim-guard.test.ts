@@ -37,6 +37,28 @@ describe("checkCompletionClaim", () => {
     expect(result.allowed).toBe(true);
   });
 
+  test("blocks an English imperative send claim without matching tool execution", () => {
+    const result = checkCompletionClaim({
+      userMessage: "send battle report",
+      finalText: "Done, I sent the battle report.",
+      executedTools: [],
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("mutating_claim_without_tool_execution");
+    expect(result.requiredTools).toEqual(["sales_battle_report_run_now"]);
+  });
+
+  test("allows English sent status answers without tool execution", () => {
+    const result = checkCompletionClaim({
+      userMessage: "Was yesterday battle report sent?",
+      finalText: "Yes, it was sent.",
+      executedTools: [],
+    });
+
+    expect(result.allowed).toBe(true);
+  });
+
   test("allows a battle report schedule claim with matching tool execution", () => {
     const result = checkCompletionClaim({
       userMessage: "幫我建立每週一早上的銷售戰報排程",

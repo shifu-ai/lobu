@@ -78,7 +78,7 @@ export function getRequiredBattleReportMutationTools(
     return ["sales_battle_report_schedule_create"];
   }
   if (
-    /(?:現在|立即|產生|生成|跑|執行|發送|送出|run|generate|create now|send|sent)/i.test(
+    /(?:現在|立即|產生|生成|跑|執行|發送|送出|run|generate|create now|send)/i.test(
       normalized
     )
   ) {
