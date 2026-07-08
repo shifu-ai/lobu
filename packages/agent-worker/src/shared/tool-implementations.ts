@@ -54,7 +54,9 @@ function withErrorHandling(
   });
 }
 
-function normalizeMcpToolContent(content: unknown): ToolContentResult["content"] {
+function normalizeMcpToolContent(
+  content: unknown
+): ToolContentResult["content"] {
   if (!Array.isArray(content)) return [];
 
   const normalized: ToolContentResult["content"] = [];

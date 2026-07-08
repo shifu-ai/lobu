@@ -2016,10 +2016,9 @@ Use it when the user references past discussions or you need context.`);
       }
 
       if (event.type === "agent_end") {
-        const flushBeforeDone =
-          bufferCurrentTurnOutputForCompletionClaimGuard
-            ? Promise.resolve()
-            : flushDelta();
+        const flushBeforeDone = bufferCurrentTurnOutputForCompletionClaimGuard
+          ? Promise.resolve()
+          : flushDelta();
         flushBeforeDone
           .then(async () => {
             // Wait for any pending tool_use emits so clients don't see

@@ -208,7 +208,8 @@ describe("context pressure", () => {
         source: "mcp",
         runId: "run-tool-3",
         toolLabel: "docs/read_big_doc",
-        descriptorPrefix: "Error: Large MCP tool error output was stored as artifact.",
+        descriptorPrefix:
+          "Error: Large MCP tool error output was stored as artifact.",
       });
 
       expect(descriptor).toStartWith("Error:");
@@ -246,6 +247,8 @@ describe("context pressure", () => {
   test("does not classify unrelated provider errors as prompt-too-long", () => {
     expect(isProviderPromptTooLongError("401 invalid api key")).toBe(false);
     expect(isProviderPromptTooLongError("429 rate limit exceeded")).toBe(false);
-    expect(isProviderPromptTooLongError("network connection reset")).toBe(false);
+    expect(isProviderPromptTooLongError("network connection reset")).toBe(
+      false
+    );
   });
 });

@@ -98,7 +98,9 @@ describe("checkCompletionClaim", () => {
 
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe("mutating_claim_without_tool_execution");
-    expect(result.requiredTools).toEqual(["sales_battle_report_schedule_pause"]);
+    expect(result.requiredTools).toEqual([
+      "sales_battle_report_schedule_pause",
+    ]);
   });
 
   test("allows schedule update claims with matching update tool execution", () => {
