@@ -34,6 +34,12 @@
  */
 
 import { slugify } from '@lobu/core';
+import {
+  deferEntityCreate,
+  deferEntityFieldChange,
+  type DeferredMutation,
+  runMutationGate,
+} from '../authz/entity-mutation-gate';
 import type { DbClient } from '../db/client';
 import type { KeyingConfig } from '../types/watchers';
 import { type BlockedChange, mergeEntityFields } from './entity-field-merge';
@@ -65,25 +71,17 @@ export interface PromoteKeyedEntitiesParams {
   createdBy?: string | null;
 }
 
-/** A field a watcher tried to change on an existing entity but is human-owned. */
-export interface BlockedFieldProposal {
-  entityId: number;
-  /** field_path -> proposed value the watcher wanted to write. */
-  fields: Record<string, unknown>;
-  /** field_path -> current human-owned value (for the approval diff). */
-  current: Record<string, unknown>;
-}
-
 export interface PromoteKeyedEntitiesResult {
   /** Number of distinct keyed rows that resolved to an entity. */
   promoted: number;
   /** Of those, how many created a brand-new entity (vs. matched an existing). */
   created: number;
   /**
-   * Owned-field changes that were NOT applied — the caller queues an approval for
-   * each (post-commit), never overwriting a human value inline.
+   * Owned-field / policy-gated changes and policy-held creates that were NOT
+   * applied — packaged as deferred approvals the caller flushes POST-COMMIT
+   * (never writing inline, never on the caller's tx).
    */
-  blocked: BlockedFieldProposal[];
+  deferred: DeferredMutation[];
 }
 
 /**
@@ -257,6 +255,7 @@ async function upsertKeyedEntity(params: {
   tx: DbClient;
   organizationId: string;
   entityTypeId: number;
+  entityTypeSlug: string;
   parentEntityId: number | null;
   identifier: string;
   name: string;
@@ -265,17 +264,21 @@ async function upsertKeyedEntity(params: {
   /** Extracted entity field values to sync into metadata (excludes the stable key). */
   fieldValues: Record<string, unknown>;
   createdBy: string;
+  /** Org policy: creates of this type queue an approval instead of inserting. */
+  createNeedsApproval: boolean;
 }): Promise<{
   entityId: number;
   created: boolean;
   blocked: Record<string, BlockedChange>;
+  blockedCreate: boolean;
 }> {
   const { tx, organizationId, identifier } = params;
 
   // 1. Existing identity → reuse its entity (the idempotent fast path), and SYNC the
-  //    freshly-extracted field values into it honoring human ownership: un-owned
-  //    fields are written; human-owned fields are returned as `blocked` (the caller
-  //    queues an approval) and never overwritten.
+  //    freshly-extracted field values into it honoring human ownership AND the org's
+  //    update policy: un-gated fields are written; human-owned or policy-gated
+  //    fields are returned as `blocked` (the caller queues an approval) and never
+  //    overwritten inline.
   const existing = await tx<{ entity_id: number | string }>`
     SELECT ei.entity_id
     FROM entity_identities ei
@@ -289,14 +292,45 @@ async function upsertKeyedEntity(params: {
   `;
   if (existing.length > 0) {
     const entityId = Number(existing[0].entity_id);
+    // Owners are 'none' here on purpose: human ownership is enforced inside the
+    // merge itself; the gate only adds the org policy's field gates on top.
+    const decision = await runMutationGate({
+      action: 'update',
+      organizationId,
+      principalKind: 'watcher',
+      sql: tx,
+      attribution: 'watcher',
+      entityTypeSlug: params.entityTypeSlug,
+      entityId,
+      fields: Object.fromEntries(
+        Object.keys(params.fieldValues).map((field) => [field, 'none' as const])
+      ),
+    });
+    // Fail CLOSED on a deny: apply nothing. The throw is caught by the per-row
+    // savepoint in promoteKeyedEntities, so a denied row is skipped without
+    // rolling back the window completion.
+    if (decision.outcome === 'deny') {
+      throw new Error(
+        `Mutation gate denied watcher update to entity ${entityId}: ${decision.reason}`
+      );
+    }
+    const requireApproval = [...decision.requireApproval];
     const merge = await mergeEntityFields({
       tx,
       entityId,
       fields: params.fieldValues,
       source: 'watcher',
       actorId: null,
+      requireApproval,
     });
-    return { entityId, created: false, blocked: merge.blocked };
+    return { entityId, created: false, blocked: merge.blocked, blockedCreate: false };
+  }
+
+  // Org policy holds creates of this type for approval — no insert, no identity
+  // claim. The caller queues a durable create proposal post-commit; when it is
+  // approved and re-promoted, the identity claim above dedupes as usual.
+  if (params.createNeedsApproval) {
+    return { entityId: 0, created: false, blocked: {}, blockedCreate: true };
   }
 
   // 2. Create the entity (sequence-allocated id — multi-replica safe),
@@ -327,7 +361,7 @@ async function upsertKeyedEntity(params: {
     RETURNING entity_id
   `;
   if (claimed.length > 0) {
-    return { entityId, created: true, blocked: {} };
+    return { entityId, created: true, blocked: {}, blockedCreate: false };
   }
 
   // Lost the race: another live transaction already claimed this key. Resolve
@@ -351,11 +385,11 @@ async function upsertKeyedEntity(params: {
       DELETE FROM entities
       WHERE id = ${entityId} AND organization_id = ${organizationId}
     `;
-    return { entityId: Number(winner[0].entity_id), created: false, blocked: {} };
+    return { entityId: Number(winner[0].entity_id), created: false, blocked: {}, blockedCreate: false };
   }
   // Extremely unlikely: the conflicting claim was tombstoned between our INSERT
   // and this re-read. Keep our entity as the canonical one.
-  return { entityId, created: true, blocked: {} };
+  return { entityId, created: true, blocked: {}, blockedCreate: false };
 }
 
 /**
@@ -379,7 +413,7 @@ export async function promoteKeyedEntities(
   const result: PromoteKeyedEntitiesResult = {
     promoted: 0,
     created: 0,
-    blocked: [],
+    deferred: [],
   };
 
   const rows = getValueAtPath(extractedData, keyingConfig.entity_path);
@@ -402,6 +436,31 @@ export async function promoteKeyedEntities(
       '[promote-keyed-entities] no live user to attribute created entities to — skipping promotion'
     );
     return result;
+  }
+
+  // Gate decision for creates of this type (watchers are never human): resolved
+  // once per promotion — every row in this window is the same entity type, so
+  // one create decision governs them all. We only read the outcome here (the
+  // probe's deferral is discarded); each held-back row builds its own deferral
+  // below. Fail CLOSED: anything but an explicit 'allow' skips inline creation,
+  // and only a 'defer' queues an approval — a 'deny' creates nothing at all.
+  const createGate = await runMutationGate({
+    action: 'create',
+    organizationId,
+    principalKind: 'watcher',
+    sql: tx,
+    attribution: 'watcher',
+    watcherId,
+    entityTypeSlug,
+    entityData: { entity_type: entityTypeSlug, name: '' },
+    proposal: {},
+  });
+  const createNeedsApproval = createGate.outcome !== 'allow';
+  if (createGate.outcome === 'deny') {
+    logger.warn(
+      { watcherId, organizationId, entityTypeSlug, reason: createGate.reason },
+      '[promote-keyed-entities] mutation gate denied creates for this type — new rows will be skipped'
+    );
   }
 
   // De-dupe within this window: two extracted rows can collapse to the same
@@ -437,11 +496,12 @@ export async function promoteKeyedEntities(
     };
 
     try {
-      const { created, blocked, entityId } = await tx.savepoint((sp) =>
+      const { created, blocked, entityId, blockedCreate } = await tx.savepoint((sp) =>
         upsertKeyedEntity({
           tx: sp,
           organizationId,
           entityTypeId,
+          entityTypeSlug,
           parentEntityId,
           identifier,
           name,
@@ -449,17 +509,48 @@ export async function promoteKeyedEntities(
           metadata,
           fieldValues,
           createdBy,
+          createNeedsApproval,
         })
       );
+      if (blockedCreate) {
+        // Only a 'defer' outcome queues an approval; a 'deny' is fail-closed —
+        // the row is skipped entirely (no create, no approval card).
+        if (createGate.outcome === 'defer') {
+          const createProposal = {
+            entity_type: entityTypeSlug,
+            name,
+            parent_id: parentEntityId,
+            metadata,
+          };
+          result.deferred.push(
+            deferEntityCreate({
+              entityData: {
+                entity_type: entityTypeSlug,
+                name,
+                parent_id: parentEntityId,
+                metadata,
+              },
+              proposal: createProposal,
+              attribution: 'watcher',
+              watcherId,
+            })
+          );
+        }
+        continue;
+      }
       result.promoted += 1;
       if (created) result.created += 1;
       const blockedFields = Object.keys(blocked);
       if (blockedFields.length > 0) {
-        result.blocked.push({
-          entityId,
-          fields: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].proposed])),
-          current: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].current])),
-        });
+        result.deferred.push(
+          deferEntityFieldChange({
+            entityId,
+            fields: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].proposed])),
+            current: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].current])),
+            attribution: 'watcher',
+            watcherId,
+          })
+        );
       }
     } catch (err) {
       // Non-fatal + savepoint-isolated: a single failing row rolls back only its

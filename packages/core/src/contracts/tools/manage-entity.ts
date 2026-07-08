@@ -335,9 +335,20 @@ export const ManageEntityItemSchema = Type.Object({
 export const ManageEntityResultSchema = Type.Union([
   Type.Object({
     action: Type.Literal("create"),
-    entity: ManageEntityItemSchema,
+    entity: Type.Optional(ManageEntityItemSchema),
     warnings: Type.Optional(Type.Array(Type.String())),
-    next_steps: Type.Array(Type.String()),
+    next_steps: Type.Optional(Type.Array(Type.String())),
+    approval_queued: Type.Optional(Type.Boolean()),
+    approval_url: Type.Optional(Type.String()),
+    approval_run_id: Type.Optional(Type.Integer()),
+    approval_action: Type.Optional(Type.Literal("create")),
+    approval_proposal: Type.Optional(
+      Type.Record(Type.String(), Type.Unknown())
+    ),
+    approval_current: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    approval_attribution: Type.Optional(
+      Type.Union([Type.Literal("agent"), Type.Literal("watcher")])
+    ),
   }),
   Type.Object({
     action: Type.Literal("update"),
@@ -405,6 +416,17 @@ export const ManageEntityResultSchema = Type.Union([
     success: Type.Boolean(),
     message: Type.String(),
     deleted_count: Type.Integer(),
+    approval_queued: Type.Optional(Type.Boolean()),
+    approval_url: Type.Optional(Type.String()),
+    approval_run_id: Type.Optional(Type.Integer()),
+    approval_action: Type.Optional(Type.Literal("delete")),
+    approval_proposal: Type.Optional(
+      Type.Record(Type.String(), Type.Unknown())
+    ),
+    approval_current: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+    approval_attribution: Type.Optional(
+      Type.Union([Type.Literal("agent"), Type.Literal("watcher")])
+    ),
   }),
   Type.Object({
     action: Type.Literal("link"),

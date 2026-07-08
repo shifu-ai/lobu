@@ -1251,7 +1251,11 @@ function buildApprovalCardBody(
     return {
       interactionType: "tool_approval",
       runId: parsed.approval_run_id,
-      action: "change",
+      action:
+        typeof parsed.approval_action === "string"
+          ? parsed.approval_action
+          : "change",
+      proposal: parsed.approval_proposal ?? null,
       // entity_field_change diff: field_path -> proposed / current. The SPA
       // routes on `fields` (non-empty) to the entity-field-change card.
       fields: parsed.approval_fields ?? null,

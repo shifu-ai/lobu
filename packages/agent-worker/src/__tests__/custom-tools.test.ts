@@ -239,8 +239,51 @@ describe("maybePostApprovalCard (builder gate)", () => {
       current: { "metadata.tier": "free" },
       attribution: "agent",
     });
-    // manage_entity does not carry the manage_agents `proposal` shape.
-    expect(posts[0]!.body.proposal).toBeUndefined();
+    // Field-change manage_entity approvals route on `fields`, not `proposal`.
+    expect(posts[0]!.body.proposal).toBeNull();
+  });
+
+  test("posts a manage_entity delete approval card with proposal/current", async () => {
+    const posts: Array<{ body: any }> = [];
+    globalThis.fetch = mock(
+      async (_input: RequestInfo | URL, init?: RequestInit) => {
+        posts.push({ body: init?.body ? JSON.parse(String(init.body)) : null });
+        return Response.json({ id: "appr-delete" });
+      }
+    ) as unknown as typeof fetch;
+
+    const posted = await maybePostApprovalCard(
+      gw,
+      "manage_entity",
+      JSON.stringify({
+        action: "delete",
+        success: false,
+        deleted_count: 0,
+        approval_queued: true,
+        approval_run_id: 44,
+        approval_action: "delete",
+        approval_proposal: {
+          entity_id: 7,
+          entity_type: "task",
+          name: "Call Alice",
+        },
+        approval_current: {
+          id: 7,
+          entity_type: "task",
+          name: "Call Alice",
+        },
+        approval_attribution: "agent",
+      })
+    );
+
+    expect(posted).toBe(true);
+    expect(posts[0]!.body).toMatchObject({
+      interactionType: "tool_approval",
+      runId: 44,
+      action: "delete",
+      proposal: { entity_id: 7, entity_type: "task", name: "Call Alice" },
+      current: { id: 7, entity_type: "task", name: "Call Alice" },
+    });
   });
 
   test("carries watcher attribution when a manage_entity update was watcher-sourced", async () => {

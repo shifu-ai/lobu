@@ -1,5 +1,11 @@
 import { createLogger } from "@lobu/core";
 import { Actions, Button, Card, CardText, LinkButton } from "chat";
+import { SCOPE_CHECK_NOT_APPLICABLE } from "../../auth/tool-access.js";
+import { getDb, pgTextArray } from "../../db/client.js";
+import type { Env } from "../../index.js";
+import { ENTITY_CHANGE_ACTION_KEYS } from "../../tools/admin/entity-field-approval.js";
+import { manageOperations } from "../../tools/admin/manage_operations.js";
+import type { ToolContext } from "../../tools/registry.js";
 import {
   type PendingToolInvocation,
 	takePendingTool,
@@ -88,18 +94,102 @@ async function takePendingToolInvocation(
 }
 
 function describeDecision(decision: string): string {
-  switch (decision) {
-    case "1h":
-      return "Approved (1h)";
-    case "24h":
-      return "Approved (24h)";
-    case "always":
-      return "Approved (always)";
-    case "deny":
-      return "Denied";
-    default:
-      return `Decision: ${decision}`;
-  }
+	switch (decision) {
+		case "1h":
+			return "Approved (1h)";
+		case "24h":
+			return "Approved (24h)";
+		case "always":
+			return "Approved (always)";
+		case "deny":
+			return "Denied";
+		default:
+			return `Decision: ${decision}`;
+	}
+}
+
+function actionEventTeamId(
+	event: any,
+	connection: PlatformConnection,
+): string | null {
+	const raw = event?.raw as Record<string, any> | undefined;
+	const teamId =
+		event?.teamId ??
+		raw?.team_id ??
+		raw?.team?.id ??
+		event?.user?.teamId ??
+		event?.user?.team_id ??
+		connection.metadata?.teamId ??
+		(connection.settings?.previewMode === true ? "" : undefined);
+	return typeof teamId === "string" ? teamId : null;
+}
+
+/**
+ * Map the clicking Slack user to a Lobu member allowed to decide this run:
+ * exactly ONE chat_user_identities row for (team, platform user) that joins to
+ * an org member, AND that member is an admin/owner OR the run's recorded field
+ * owner (`ownerUserId`). A non-admin member who is not the owner resolves null,
+ * same as an unverified account.
+ */
+async function resolveSlackActionReviewer(params: {
+	connection: PlatformConnection;
+	platformUserId: string | undefined;
+	teamId: string | null;
+	ownerUserId?: string | null;
+}): Promise<{ userId: string; role: string } | null> {
+	const { connection, platformUserId, teamId, ownerUserId } = params;
+	if (connection.platform !== "slack") return null;
+	if (!connection.organizationId || !platformUserId || teamId == null)
+		return null;
+	const sql = getDb();
+	const rows = await sql<{ user_id: string; role: string }>`
+    SELECT c.lobu_user_id AS user_id, m.role
+    FROM chat_user_identities c
+    JOIN "member" m
+      ON m."userId" = c.lobu_user_id
+     AND m."organizationId" = ${connection.organizationId}
+    WHERE c.platform = 'slack'
+      AND c.team_id = ${teamId}
+      AND c.platform_user_id = ${platformUserId}
+    LIMIT 2
+  `;
+	if (rows.length !== 1) return null;
+	const { user_id: userId, role } = rows[0];
+	const isAdmin = role === "admin" || role === "owner";
+	const isOwner = ownerUserId != null && userId === ownerUserId;
+	if (!isAdmin && !isOwner) return null;
+	return { userId, role };
+}
+
+async function resolveEntityApprovalRun(
+	runId: number,
+	organizationId: string,
+): Promise<{
+	state: "pending" | "approved" | "rejected" | "not_found";
+	/** action_input.owner_user_id — the field owner allowed to decide this run. */
+	ownerUserId: string | null;
+}> {
+	const actionKeys = pgTextArray([...ENTITY_CHANGE_ACTION_KEYS]);
+	const rows = await getDb()<{
+		id: number;
+		approval_status: string | null;
+		owner_user_id: string | null;
+	}>`
+    SELECT id, approval_status, action_input->>'owner_user_id' AS owner_user_id
+    FROM runs
+    WHERE id = ${runId}
+      AND organization_id = ${organizationId}
+      AND run_type = 'internal'
+      AND action_key = ANY(${actionKeys}::text[])
+    LIMIT 1
+  `;
+	if (rows.length !== 1) return { state: "not_found", ownerUserId: null };
+	const status = rows[0].approval_status;
+	const state =
+		status === "pending" || status === "approved" || status === "rejected"
+			? status
+			: "not_found";
+	return { state, ownerUserId: rows[0].owner_user_id ?? null };
 }
 
 /**
@@ -652,29 +742,130 @@ export function registerActionHandlers(
 		conversationId: string,
 	) => Promise<any | null>,
 ): void {
-  chat.onAction(async (event: any) => {
-    const actionId: string = event.actionId ?? "";
-    const value: string = event.value ?? "";
-    const thread = event.thread;
+	chat.onAction(async (event: any) => {
+		const actionId: string = event.actionId ?? "";
+		const value: string = event.value ?? "";
+		const thread = event.thread;
 
-    if (!thread || !actionId) return;
+		if (!thread || !actionId) return;
 
-    // Handle tool approval — store grant, execute tool, post result
-    if (actionId.startsWith("tool:")) {
-      const parts = actionId.split(":");
-      const requestId = parts[1];
-      const decision = parts[2] ?? "deny";
+		// Handle durable run approvals from notification cards. This path is
+		// intentionally scoped to entity_field_change: approving connector actions
+		// from chat needs a separate env-safe execution path.
+		if (actionId.startsWith("run-approval:")) {
+			const [, runIdPart, decisionPart] = actionId.split(":");
+			const runId = Number(runIdPart);
+			const decision =
+				decisionPart === "approve" || decisionPart === "reject"
+					? decisionPart
+					: null;
+			const organizationId = connection.organizationId;
+			if (!Number.isFinite(runId) || !decision || !organizationId) return;
 
-      if (!requestId) return;
+			const { state: runState, ownerUserId } = await resolveEntityApprovalRun(
+				runId,
+				organizationId,
+			).catch(() => ({ state: "not_found" as const, ownerUserId: null }));
+			if (runState !== "pending") {
+				// Distinguish "already decided" (double-click, stale card, webhook
+				// retry) from "not an entity approval in this org" — the old single
+				// message blamed Slack support for both.
+				const message =
+					runState === "approved"
+						? "This change was already approved."
+						: runState === "rejected"
+							? "This change was already rejected."
+							: "This approval can’t be completed from Slack yet. Use the Review in Lobu link.";
+				try {
+					await thread.post(message);
+				} catch {
+					// best effort
+				}
+				return;
+			}
 
-      // GETDEL atomically claims the pending invocation. On Slack retries of
-      // the same block_actions webhook the second GETDEL returns null and we
-      // silently no-op (the first click already won). But if the card was
-      // never claimed before — i.e. the in-memory approval card is still
-      // tracked — this is a real first click landing on an expired/missing
-      // pending key, and we MUST surface that to the user. Otherwise the
-      // click looks like it did nothing.
-      const pending = await takePendingToolInvocation(requestId).catch(
+			const reviewer = await resolveSlackActionReviewer({
+				connection,
+				platformUserId: event.user?.userId,
+				teamId: actionEventTeamId(event, connection),
+				ownerUserId,
+			}).catch(() => null);
+			if (!reviewer) {
+				try {
+					await thread.post(
+						"I couldn’t verify that your Slack account maps to a Lobu admin for this workspace. Use the Review in Lobu link.",
+					);
+				} catch {
+					// best effort
+				}
+				return;
+			}
+
+			const ctx: ToolContext = {
+				organizationId,
+				userId: reviewer.userId,
+				memberRole: reviewer.role,
+				isAuthenticated: true,
+				clientId: null,
+				// Session-caller sentinel: the reviewer is authorized by verified
+				// Slack identity + role/ownership above, not by MCP token scopes —
+				// a null scope set would fail closed at the action tier.
+				scopes: [...SCOPE_CHECK_NOT_APPLICABLE],
+				tokenType: "session",
+				scopedToOrg: true,
+				allowCrossOrg: false,
+				sourceContext: {
+					platform: connection.platform,
+					connectionId: connection.id,
+					channelId: event.channelId,
+					conversationId: event.conversationId,
+					teamId: actionEventTeamId(event, connection) ?? undefined,
+					userId: event.user?.userId,
+				},
+			};
+			// Real process env, not {}: approving a create runs entity hooks that
+			// are env-gated (e.g. $member invite email needs RESEND_API_KEY) — an
+			// empty env silently skips them, diverging from web approvals.
+			const result = await manageOperations(
+				decision === "approve"
+					? { action: "approve", run_id: runId }
+					: { action: "reject", run_id: runId, reason: "Rejected from Slack" },
+				process.env as unknown as Env,
+				ctx,
+			).catch((error) => ({ error: String(error) }));
+			const resultRecord = result as Record<string, unknown>;
+			const message =
+				typeof resultRecord.message === "string"
+					? resultRecord.message
+					: typeof resultRecord.error === "string"
+						? resultRecord.error
+						: decision === "approve"
+							? "Approved."
+							: "Rejected.";
+			try {
+				await thread.post(message);
+			} catch {
+				// best effort
+			}
+			return;
+		}
+
+		// Handle tool approval — store grant, execute tool, post result
+		if (actionId.startsWith("tool:")) {
+			const parts = actionId.split(":");
+			const requestId = parts[1];
+			const decision = parts[2] ?? "deny";
+
+			if (!requestId) return;
+
+			// GETDEL atomically claims the pending invocation. On Slack retries of
+			// the same block_actions webhook the second GETDEL returns null and we
+			// silently no-op (the first click already won). But if the card was
+			// never claimed before — i.e. the in-memory approval card is still
+			// tracked — this is a real first click landing on an expired/missing
+			// pending key, and we MUST surface that to the user. Otherwise the
+			// click looks like it did nothing.
+			const pending = await takePendingToolInvocation(requestId).catch(
 				() => null,
       );
       if (!pending) {
