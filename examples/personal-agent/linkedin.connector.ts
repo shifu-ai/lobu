@@ -39,6 +39,7 @@ import path from "node:path";
 import {
   LINKEDIN_EMAIL_NAMESPACE,
   LINKEDIN_IDENTITY,
+  normalizeLinkedInMemberId,
   normalizeLinkedInSlug,
 } from "./linkedin-identity.ts";
 import {
@@ -95,6 +96,10 @@ interface LinkedInPost {
   text: string;
   author: string;
   authorHeadline?: string;
+  /** Immutable `urn:li:fsd_profile:<id>` tail — primary identity when present. */
+  authorMemberId?: string;
+  /** Canonical `/in/<slug>` vanity id — soft identity, bridges to takeout. */
+  authorSlug?: string;
   likes: number;
   comments: number;
   shares: number;
@@ -181,6 +186,53 @@ const LINKEDIN_MESSAGE_ATTRIBUTIONS: EventAttributionRule[] = [
         behavior: "prefer_non_empty",
       },
       last_linkedin_message_at: {
+        eventPath: "occurred_at",
+        behavior: "overwrite",
+      },
+    },
+  },
+];
+
+/**
+ * Link a live `post` to its author. The Voyager feed (company_updates) exposes
+ * the actor's immutable `urn:li:fsd_profile:<id>` as `author_member_id` plus the
+ * `/in/<slug>`. Both are identities; NEITHER is `primary` — they match
+ * EQUAL-WEIGHT (same as the connections/messages attributions).
+ *
+ * Why not primary member_id: takeout-ingested people already exist keyed on
+ * `linkedin_slug` (no member id — the export has none). A `primary` member_id
+ * would be authoritative: on a live post it would find no member-id match, mint
+ * a NEW person, and fork the existing slug-person (the resolver does not fall
+ * back to a secondary slug hit when a primary is present). Equal-weight instead
+ * UNIONS the hits: the live post matches the existing person by slug AND
+ * accretes the member_id onto them. Durability still holds — once the member_id
+ * is on the person, a later vanity-URL change still resolves via that member_id
+ * in the equal-weight union. Real authors, so mint on no match.
+ */
+const LINKEDIN_POST_AUTHOR_ATTRIBUTIONS: EventAttributionRule[] = [
+  {
+    role: "authored_by",
+    autoCreate: true,
+    target: {
+      entityType: "person",
+      titlePath: "author_name",
+      identities: [
+        {
+          namespace: LINKEDIN_IDENTITY.MEMBER_ID,
+          eventPath: "metadata.author_member_id",
+        },
+        {
+          namespace: LINKEDIN_IDENTITY.SLUG,
+          eventPath: "metadata.author_linkedin_slug",
+        },
+      ],
+    },
+    traits: {
+      linkedin_headline: {
+        eventPath: "metadata.author_headline",
+        behavior: "prefer_non_empty",
+      },
+      last_linkedin_post_at: {
         eventPath: "occurred_at",
         behavior: "overwrite",
       },
@@ -377,7 +429,10 @@ export function filterPostsSinceCheckpoint(
 
 // ── Voyager API Response Parsers ──────────────────────────────
 
-function parseCompanyUpdates(_url: string, json: unknown): LinkedInPost[] {
+export function parseCompanyUpdates(
+  _url: string,
+  json: unknown
+): LinkedInPost[] {
   const posts: LinkedInPost[] = [];
   const data = json as any;
 
@@ -422,6 +477,34 @@ function parseCompanyUpdates(_url: string, json: unknown): LinkedInPost[] {
     const authorDesc =
       actorObj?.description?.text ?? actorObj?.description ?? undefined;
 
+    // Actor identity: the member's immutable `urn:li:fsd_profile:<id>` and the
+    // vanity `/in/<slug>`. Voyager threads the profile urn through several
+    // shapes — the actor may be a ref into `included`, and the urn hides under
+    // `*miniProfile` (a bare urn string OR a ref to resolve), `miniProfile` (a
+    // bare urn string OR an object with `entityUrn`), `urn`, or `entityUrn`.
+    // normalizeLinkedInMemberId returns null for a non-person urn (e.g. a
+    // company actor's `urn:li:fsd_company:…`), so a company-authored post yields
+    // no member id and its attribution match-only-gates off (createWhen).
+    const authorUrn: string =
+      (typeof actorObj?.["*miniProfile"] === "string"
+        ? actorObj["*miniProfile"]
+        : resolve(actorObj?.["*miniProfile"])?.entityUrn) ??
+      (typeof actorObj?.miniProfile === "string"
+        ? actorObj.miniProfile
+        : actorObj?.miniProfile?.entityUrn) ??
+      actorObj?.urn ??
+      actorObj?.entityUrn ??
+      "";
+    const authorMemberId = normalizeLinkedInMemberId(authorUrn) ?? undefined;
+    const authorProfileUrl: string =
+      actorObj?.navigationContext?.actionTarget ??
+      actorObj?.navigationUrl ??
+      resolve(actorObj?.["*miniProfile"])?.publicIdentifier ??
+      "";
+    // normalizeLinkedInSlug pulls the `/in/<slug>` segment from a full URL (and
+    // returns null for a company `/company/…` URL or anything slug-invalid).
+    const authorSlug = normalizeLinkedInSlug(authorProfileUrl);
+
     // Get social counts
     const socialRef = el["*socialDetail"] ?? el.socialDetail;
     const social = resolve(socialRef);
@@ -446,6 +529,8 @@ function parseCompanyUpdates(_url: string, json: unknown): LinkedInPost[] {
       text,
       author: authorName,
       authorHeadline: typeof authorDesc === "string" ? authorDesc : undefined,
+      authorMemberId: authorMemberId || undefined,
+      authorSlug: authorSlug ?? undefined,
       likes: counts.numLikes ?? 0,
       comments: counts.numComments ?? 0,
       shares: counts.numShares ?? 0,
@@ -623,10 +708,13 @@ export default class LinkedInConnector extends ConnectorRuntime<
         eventKinds: {
           post: {
             description: "A company LinkedIn post",
+            attributions: LINKEDIN_POST_AUTHOR_ATTRIBUTIONS,
             metadataSchema: {
               type: "object",
               properties: {
                 author_headline: { type: "string" },
+                author_member_id: { type: "string" },
+                author_linkedin_slug: { type: "string" },
                 likes: { type: "number" },
                 comments: { type: "number" },
                 shares: { type: "number" },
@@ -964,6 +1052,10 @@ export default class LinkedInConnector extends ConnectorRuntime<
       }),
       metadata: {
         author_headline: post.authorHeadline,
+        // Author identity for the `post` attribution. member_id (primary) when
+        // Voyager exposed the actor's fsd_profile urn; slug bridges to takeout.
+        author_member_id: post.authorMemberId,
+        author_linkedin_slug: post.authorSlug,
         likes: post.likes,
         comments: post.comments,
         shares: post.shares,

@@ -44,11 +44,23 @@ export interface ConnectorIdentityModule {
 /** Connector-owned identity namespaces (not SDK-global). */
 export const LINKEDIN_IDENTITY = {
   /**
-   * Canonical `/in/<vanity>` profile slug, lowercased — primary namespace for
-   * attribution. Case- and URL-noise-insensitive, so the same person never
-   * forks across the CASE-SENSITIVE `entity_identities` UNIQUE index.
+   * Canonical `/in/<vanity>` profile slug, lowercased. Case- and URL-noise-
+   * insensitive, so the same person never forks across the CASE-SENSITIVE
+   * `entity_identities` UNIQUE index. USER-CHANGEABLE (vanity URL edit), so it
+   * is a soft key — NOT `primary` — matched equal-weight with email/member id.
    */
   SLUG: "linkedin_slug",
+  /**
+   * Immutable member id from `urn:li:fsd_profile:<id>`. The live connector's
+   * Voyager feed exposes it on the post actor; the takeout export does NOT (it
+   * only has the vanity slug). Matched EQUAL-WEIGHT with the slug (NOT primary):
+   * takeout people pre-exist keyed on slug alone, and a primary member_id would
+   * fork them (a primary that matches nothing mints a new person rather than
+   * falling back to a slug hit). Equal-weight lets a live post bind the existing
+   * slug-person AND accrete the member id — so a LATER vanity-URL change still
+   * resolves via the (now-attached) member id.
+   */
+  MEMBER_ID: "linkedin_member_id",
 } as const;
 
 export type LinkedInIdentityNamespace =
@@ -76,6 +88,31 @@ export function normalizeLinkedInSlug(
 }
 
 /**
+ * Extract the immutable member id from a LinkedIn PERSON URN or a bare id.
+ * `urn:li:fsd_profile:ACoAAB1234` and `urn:li:member:1234` reduce to the
+ * trailing id token; a bare `ACoAAB1234` passes through. Returns `null` for
+ * anything else — critically for a NON-person URN like `urn:li:fsd_company:99`,
+ * so a company id can never be normalized into a `person` member id. (Opaque
+ * fsd ids are base64-ish, so the token charset is permissive, but the URN
+ * PREFIX is checked: only `fsd_profile` / `member` are person namespaces.)
+ */
+export function normalizeLinkedInMemberId(
+  raw: string | null | undefined
+): string | null {
+  if (typeof raw !== "string") return null;
+  const value = raw.trim();
+  if (!value) return null;
+  // A colon-bearing input MUST be a person URN — reject company/other URNs so a
+  // non-person id never slips through as a person's primary key.
+  if (value.includes(":")) {
+    const m = value.match(/^urn:li:(?:fsd_profile|member):([A-Za-z0-9_-]+)$/);
+    return m ? m[1] : null;
+  }
+  // A bare id (no URN) is an already-extracted token.
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : null;
+}
+
+/**
  * Normalize a LinkedIn identity namespace value. Returns `undefined` when the
  * namespace is not LinkedIn-owned (caller falls back to generic hygiene). The
  * generic `email` namespace is deliberately NOT handled here — connector-sdk
@@ -88,6 +125,8 @@ export function normalizeLinkedInIdentityValue(
   switch (namespace) {
     case LINKEDIN_IDENTITY.SLUG:
       return normalizeLinkedInSlug(raw);
+    case LINKEDIN_IDENTITY.MEMBER_ID:
+      return normalizeLinkedInMemberId(raw);
     default:
       return undefined;
   }
