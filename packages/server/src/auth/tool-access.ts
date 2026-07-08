@@ -17,17 +17,19 @@ const MEMBER_WRITE_ACTIONS: Record<string, Set<string> | null> = {
   // `run_sdk` reaches admin handlers inside the script; per-call gates fire
   // on each SDK method, so the entry-point check is just write-tier.
   run_sdk: null,
-  // SHIFU FORK: `manage_schedules` had no policy entry, so it defaulted to
-  // owner/admin-only (the strictest tier — see `requiresOwnerAdmin`'s
-  // no-explicit-policy fallback below). That default predates the
-  // member-internal-tool whitelist (`MEMBER_INTERNAL_TOOL_WHITELIST` in
-  // `tools/execute.ts`), which lets member-scoped sessions reach this tool —
-  // the whitelist gate is a no-op if the underlying access tier still hard-403s
-  // members. `null` (unconditional, like `save_memory`/`run_sdk` above) is
-  // intentional here too: the plan's next step (member-owned agent
-  // self-scoping + per-agent quota) restricts *which* schedules a member can
-  // see/mutate inside the handler, not whether the tool is reachable at all.
-  manage_schedules: null,
+  // `manage_schedules` intentionally has NO entry here — it stays admin-only
+  // by default (see `requiresOwnerAdmin`'s no-explicit-policy fallback
+  // below). d98c58e5 briefly added `manage_schedules: null` (unconditional
+  // member-write) to make it reachable for the member-owned direct-auth
+  // agent session, but that check runs independently of the reachability
+  // whitelist (`MEMBER_INTERNAL_TOOL_WHITELIST` in `tools/execute.ts`) — it
+  // dropped the tier for EVERY member-role caller, including a plain web
+  // session-cookie member with no scopes (`hasRequiredMcpScope` treats
+  // `scopes: null` as privileged by pre-existing convention), letting any
+  // org member create/pause/cancel/delete any schedule via the generic REST
+  // tool proxy. Reverted; the narrow direct-auth exception now lives in
+  // `checkToolAccess` (`tools/execute.ts`), gated on `authCtx.agentId` — the
+  // signal only the direct-auth worker-token path populates.
   // Legacy `manage_*` policy entries — the tools themselves are no longer
   // exposed on the external MCP surface, but the handlers are still reached
   // via SDK namespace wrappers from inside `run_sdk`, and `routeAction` consults

@@ -6,7 +6,12 @@
 
 import { TypeCompiler, type TypeCheck } from '@sinclair/typebox/compiler';
 import type { Context } from 'hono';
-import { getRequiredAccessLevel, hasRequiredMcpScope, isPublicReadable } from '../auth/tool-access';
+import {
+  getRequiredAccessLevel,
+  hasRequiredMcpScope,
+  isPublicReadable,
+  type ToolAccessLevel,
+} from '../auth/tool-access';
 import type { Env } from '../index';
 import { trackMCPToolCall } from '../sentry';
 import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
@@ -152,6 +157,25 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   const { memberRole: role } = authCtx;
   const requiredAccess = getRequiredAccessLevel(toolName, args, isReadOnly);
 
+  // SHIFU FORK: `manage_schedules` has no explicit member-write policy (see
+  // `MEMBER_WRITE_ACTIONS` in `../auth/tool-access.ts`), so it defaults to
+  // admin-only like any other unlisted tool. The one legitimate member-tier
+  // caller is the degraded direct-auth MCP session minted for a member-owned
+  // agent (multi-tenant.ts's direct-auth branch) — that path is the ONLY
+  // place that populates `authCtx.agentId` (see `extractAuthContext` above),
+  // so gating on it (plus role + an explicit `mcp:write` scope, not the
+  // null-scopes-means-privileged convention) narrowly restores write access
+  // for that session without reopening the tool to every member-role caller
+  // (e.g. a plain web session-cookie member with `scopes: null`) the way
+  // d98c58e5's unconditional `MEMBER_WRITE_ACTIONS` entry did.
+  const isDirectAuthMemberScheduleWrite =
+    toolName === 'manage_schedules' &&
+    role === 'member' &&
+    authCtx.agentId != null &&
+    !!authCtx.scopes?.includes('mcp:write');
+  const effectiveAccess: ToolAccessLevel =
+    isDirectAuthMemberScheduleWrite && requiredAccess === 'admin' ? 'write' : requiredAccess;
+
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {
       throw new Error(
@@ -163,7 +187,7 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     );
   }
 
-  if (requiredAccess === 'admin') {
+  if (effectiveAccess === 'admin') {
     if (role !== 'owner' && role !== 'admin') {
       throw new Error(
         'This action requires admin or owner access. Ask an organization owner to grant elevated access.'
@@ -171,13 +195,13 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     }
   }
 
-  if (!hasRequiredMcpScope(requiredAccess, authCtx.scopes)) {
-    if (requiredAccess === 'read') {
+  if (!hasRequiredMcpScope(effectiveAccess, authCtx.scopes)) {
+    if (effectiveAccess === 'read') {
       throw new Error(
         'This MCP session does not include read access. Reconnect with read access for this workspace.'
       );
     }
-    if (requiredAccess === 'write') {
+    if (effectiveAccess === 'write') {
       throw new Error(
         'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.'
       );

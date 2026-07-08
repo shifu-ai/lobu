@@ -68,8 +68,17 @@ describe('MEMBER_INTERNAL_TOOL_WHITELIST', () => {
 
 describe('checkToolAccess — internal tool whitelist (call layer)', () => {
   test('1. whitelisted internal tool + member scopes (no mcp:admin) + allowInternalTools → passes', () => {
+    // SHIFU FORK: manage_schedules is on the reachability whitelist, but
+    // (post tool-access.ts fix) it's still admin-tier by default — the
+    // direct-auth exception in checkToolAccess also requires `agentId`,
+    // which only the member-owned direct-auth agent session populates.
+    // `baseAuth` alone (member role + mcp:write, no agentId) is exactly the
+    // PAT/OAuth shape a plain member session can have, so it must NOT be
+    // enough on its own — see the CONFIRMED-vuln regression test below.
     expect(getTool('manage_schedules')?.internal).toBe(true);
-    expect(() => checkToolAccess('manage_schedules', {}, baseAuth)).not.toThrow();
+    expect(() =>
+      checkToolAccess('manage_schedules', {}, { ...baseAuth, agentId: 'shifu-u-agent1' })
+    ).not.toThrow();
   });
 
   test('2. non-whitelisted internal tool + same member scopes → throws, listing allowed tools', () => {
@@ -141,5 +150,93 @@ describe('tools/list filtering (UX layer) — mirrors mcp-handler.ts', () => {
       expect(adminNames.has(name)).toBe(true);
     }
     expect(adminNames.size).toBeGreaterThan(memberNames.size);
+  });
+});
+
+// SHIFU FORK: regression coverage for the manage_schedules write-tier drop.
+// d98c58e5 added `manage_schedules: null` to `MEMBER_WRITE_ACTIONS`
+// (tool-access.ts), which was UNCONDITIONAL: any ordinary web-app
+// session-cookie member (`memberRole: 'member'`, `scopes: null` — and
+// `hasRequiredMcpScope` treats null scopes as privileged by pre-existing
+// convention) could create/pause/cancel/delete ANY schedule in the org via
+// the generic REST tool proxy. That entry has been reverted (manage_schedules
+// is admin-only by default again), and a narrow exception was added to
+// `checkToolAccess` (tools/execute.ts) that only re-opens write access when
+// `authCtx.agentId` is set — a signal ONLY the direct-auth worker-token path
+// (multi-tenant.ts's direct-auth branch) populates. Web session / PAT / OAuth
+// paths never set `agentId`.
+describe('manage_schedules write-tier — direct-auth-only exception (security regression)', () => {
+  const plainMemberSession: AuthContext = {
+    organizationId: 'org_123',
+    tokenOrganizationId: null,
+    userId: 'user_123',
+    memberRole: 'member',
+    agentId: null,
+    requestedAgentId: null,
+    isAuthenticated: true,
+    clientId: null,
+    scopes: null,
+    tokenType: 'session',
+    requestUrl: 'http://localhost/mcp/acme',
+    baseUrl: 'http://localhost',
+    scopedToOrg: true,
+    allowCrossOrg: false,
+    allowInternalTools: true,
+  };
+
+  test('the exact reviewer probe: plain member session-cookie (scopes null, no agentId) → create THROWS', () => {
+    expect(() =>
+      checkToolAccess('manage_schedules', { action: 'create' }, plainMemberSession)
+    ).toThrow(/admin or owner access/i);
+  });
+
+  test('the exact reviewer probe: plain member session-cookie (scopes null, no agentId) → cancel THROWS', () => {
+    expect(() =>
+      checkToolAccess('manage_schedules', { action: 'cancel', id: 1 }, plainMemberSession)
+    ).toThrow(/admin or owner access/i);
+  });
+
+  test('direct-auth member session (mcp:write scope + agentId) → manage_schedules passes', () => {
+    expect(() =>
+      checkToolAccess('manage_schedules', { action: 'create' }, {
+        ...plainMemberSession,
+        agentId: 'shifu-u-x',
+        scopes: ['mcp:read', 'mcp:write'],
+        tokenType: 'pat',
+      })
+    ).not.toThrow();
+  });
+
+  test('admin/owner via web session (scopes null, memberRole owner) → manage_schedules still passes', () => {
+    expect(() =>
+      checkToolAccess('manage_schedules', { action: 'create' }, {
+        ...plainMemberSession,
+        memberRole: 'owner',
+        agentId: null,
+      })
+    ).not.toThrow();
+  });
+
+  test('control: manage_connections still throws for the plain member session', () => {
+    // `create` is intentionally member-writable on manage_connections (members
+    // install their own OAuth connections) AND `scopes: null` bypasses the
+    // scope-based reachability gate by pre-existing convention, so use
+    // `delete` (owner/admin-only action, see OWNER_ADMIN_ACTIONS in
+    // tool-access.ts) to pin a genuinely admin-gated action that must stay
+    // blocked for a plain member regardless of the manage_schedules fix.
+    expect(() =>
+      checkToolAccess('manage_connections', { action: 'delete' }, plainMemberSession)
+    ).toThrow(/admin or owner access/i);
+  });
+
+  test('control: manage_connections still throws for the direct-auth member session (exception is manage_schedules-only)', () => {
+    expect(() =>
+      checkToolAccess('manage_connections', { action: 'delete' }, {
+        ...plainMemberSession,
+        agentId: 'shifu-u-x',
+        scopes: ['mcp:read', 'mcp:write'],
+        tokenType: 'pat',
+      })
+    ).toThrow(/requires organization admin access/i);
   });
 });
