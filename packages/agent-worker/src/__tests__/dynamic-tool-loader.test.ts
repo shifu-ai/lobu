@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
-import { selectMcpToolsForTurn } from "../openclaw/dynamic-tool-loader";
+import {
+  buildRuntimeToolCatalog,
+  selectMcpToolsForTurn,
+} from "../openclaw/dynamic-tool-loader";
 
 function tool(name: string): McpToolDef {
   return {
@@ -43,7 +46,11 @@ describe("selectMcpToolsForTurn", () => {
 
   test("preserves original order for tools with equal ranking", () => {
     const result = selectMcpToolsForTurn({
-      tools: [tool("unknown_alpha"), tool("unknown_beta"), tool("unknown_gamma")],
+      tools: [
+        tool("unknown_alpha"),
+        tool("unknown_beta"),
+        tool("unknown_gamma"),
+      ],
       message: "請幫我看看這些工具",
       budget: 3,
     });
@@ -52,6 +59,39 @@ describe("selectMcpToolsForTurn", () => {
       "unknown_alpha",
       "unknown_beta",
       "unknown_gamma",
+    ]);
+  });
+
+  test("builds a runtime catalog with availability for this turn", () => {
+    const allTools = {
+      toolbox: [
+        tool("sales_battle_report_run_now"),
+        tool("card_studio_template_list"),
+      ],
+    };
+    const selectedTools = {
+      toolbox: [allTools.toolbox[0]],
+    };
+
+    const catalog = buildRuntimeToolCatalog({ allTools, selectedTools });
+
+    expect(
+      catalog.map((entry) => ({
+        name: entry.name,
+        mcpId: entry.mcpId,
+        availableThisTurn: entry.availableThisTurn,
+      }))
+    ).toEqual([
+      {
+        name: "sales_battle_report_run_now",
+        mcpId: "toolbox",
+        availableThisTurn: true,
+      },
+      {
+        name: "card_studio_template_list",
+        mcpId: "toolbox",
+        availableThisTurn: false,
+      },
     ]);
   });
 });

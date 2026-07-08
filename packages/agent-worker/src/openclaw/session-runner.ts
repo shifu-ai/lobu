@@ -83,6 +83,10 @@ import {
 import { buildToolUseEventPayload } from "./tool-use-events";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
+import {
+  buildRuntimeToolCatalog,
+  selectMcpToolsByMcpForTurn,
+} from "./dynamic-tool-loader";
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -118,6 +122,12 @@ export function findDuplicateToolNames(
   return Array.from(counts.entries())
     .filter(([, count]) => count > 1)
     .map(([name, count]) => ({ name, count }));
+}
+
+function parseDynamicToolBudget(value: string | undefined): number {
+  const parsed = Number(value || "48");
+  if (!Number.isFinite(parsed)) return 48;
+  return Math.max(0, Math.floor(parsed));
 }
 
 const DEFAULT_MEMORY_FLUSH_CONFIG: ResolvedMemoryFlushConfig = {
@@ -1487,6 +1497,28 @@ Use it when the user references past discussions or you need context.`);
     },
   });
 
+  const dynamicToolBudget = parseDynamicToolBudget(
+    process.env.LOBU_DYNAMIC_TOOL_BUDGET
+  );
+  let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;
+
+  if (mcpExposure !== "cli") {
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: context.mcpTools,
+      message: userPrompt,
+      budget: dynamicToolBudget,
+    });
+    selectedMcpToolsForTurn = selection.selectedTools;
+    logger.info(
+      `Dynamic MCP tool selection: primaryIntent=${selection.trace.primaryIntent}, selected=${selection.trace.selectedToolNames.length}/${selection.trace.totalTools}, omitted=${selection.trace.omittedToolNames.length}, omittedPreview=${selection.trace.omittedToolNames.slice(0, 12).join(", ")}`
+    );
+  }
+
+  const runtimeToolCatalog = buildRuntimeToolCatalog({
+    allTools: context.mcpTools,
+    selectedTools: selectedMcpToolsForTurn,
+  });
+
   let customTools = createOpenClawCustomTools({
     ...gwParams,
     userId: context.userId,
@@ -1504,13 +1536,15 @@ Use it when the user references past discussions or you need context.`);
         "ask_user posted — ending the turn so the model can't re-post."
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
+    runtimeToolCatalog,
   });
 
   // Register first-class MCP tools + auth tools. Skipped entirely in CLI
   // mode — MCP tools are instead reachable via the per-server just-bash CLI
   // wired in above, and `<server> auth login|check|logout` supersedes the
   // `<id>_login` / `<id>_login_check` / `<id>_logout` trio.
-  let registeredDirectMcpTools: Record<string, McpToolDef[]> = context.mcpTools;
+  let registeredDirectMcpTools: Record<string, McpToolDef[]> =
+    selectedMcpToolsForTurn;
   let registeredMcpToolCount = 0;
   if (mcpExposure === "cli") {
     logger.info(
@@ -1528,7 +1562,7 @@ Use it when the user references past discussions or you need context.`);
       },
     });
   } else {
-    const projectedMcp = projectMcpToolsForProvider(context.mcpTools, {
+    const projectedMcp = projectMcpToolsForProvider(selectedMcpToolsForTurn, {
       provider: rawProvider,
       directToolLimit: providerDirectToolLimit,
       reservedProviderToolNames: new Set(customTools.map((tool) => tool.name)),
