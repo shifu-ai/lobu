@@ -60,6 +60,7 @@ export function buildCreateDeferral(args: {
 	proposal: Record<string, unknown>;
 	attribution: MutationAttribution;
 	watcherId?: number | null;
+	windowId?: number | null;
 }): DeferredMutation {
 	const name =
 		typeof args.entityData.name === "string" ? args.entityData.name : undefined;
@@ -74,6 +75,7 @@ export function buildCreateDeferral(args: {
 				entity_data: args.entityData,
 				proposal: args.proposal,
 				watcher_id: args.watcherId ?? null,
+				window_id: args.windowId ?? null,
 				attribution: args.attribution,
 				reason: reasonFor(
 					args.attribution,
@@ -91,6 +93,7 @@ export function buildFieldChangeDeferral(args: {
 	current: Record<string, unknown>;
 	attribution: MutationAttribution;
 	watcherId?: number | null;
+	windowId?: number | null;
 }): DeferredMutation {
 	return {
 		display: {
@@ -105,6 +108,7 @@ export function buildFieldChangeDeferral(args: {
 				fields: args.fields,
 				current: args.current,
 				watcher_id: args.watcherId ?? null,
+				window_id: args.windowId ?? null,
 				attribution: args.attribution,
 				reason: fieldChangeReason(args.attribution, Object.keys(args.fields)),
 			}),
@@ -124,6 +128,7 @@ async function evaluate(
 		const decisions = await evaluateEntityFieldUpdates({
 			organizationId: req.organizationId,
 			principalKind: req.principalKind,
+			principalId: req.principalId ?? null,
 			entityTypeSlug: req.entityTypeSlug,
 			entityId: req.entityId,
 			entityOrgId: req.entityOrgId ?? null,
@@ -146,6 +151,7 @@ async function evaluate(
 	const decision = await evaluateEntityMutation({
 		organizationId: req.organizationId,
 		principalKind: req.principalKind,
+		principalId: req.principalId ?? null,
 		action: req.action,
 		entityTypeSlug: req.entityTypeSlug,
 		entityId: req.action === "delete" ? req.entityId : undefined,
@@ -173,6 +179,7 @@ async function evaluate(
 				proposal: req.proposal,
 				attribution: req.attribution,
 				watcherId: req.watcherId,
+				windowId: req.windowId,
 			}),
 		};
 	}
@@ -205,6 +212,7 @@ async function evaluate(
 						metadata?: Record<string, unknown> | null;
 					},
 					watcher_id: req.watcherId ?? null,
+					window_id: req.windowId ?? null,
 					attribution: req.attribution,
 					reason: reasonFor(
 						req.attribution,

@@ -57,6 +57,13 @@ export interface EntityFieldChangeProposal {
 	/** field_path -> current human-owned value (for the diff card). */
 	current?: Record<string, unknown>;
 	watcher_id?: number | null;
+	/**
+	 * The watcher-run window that produced this proposal, if any. Stamped onto the
+	 * `runs.window_id` COLUMN (never into action_input, so the md5(action_input)
+	 * dedupe identity is unaffected) so a run that produced N proposals groups them
+	 * into ONE batch approval card. Stripped from action_input before the insert.
+	 */
+	window_id?: number | null;
 	/** Who proposed the change — drives the card label/author. Defaults to 'watcher'. */
 	attribution?: "watcher" | "agent";
 	reason?: string | null;
@@ -87,6 +94,8 @@ export interface EntityDeleteProposal {
 		metadata?: Record<string, unknown> | null;
 	};
 	watcher_id?: number | null;
+	/** See EntityFieldChangeProposal.window_id — batches proposals by run window. */
+	window_id?: number | null;
 	attribution?: "watcher" | "agent";
 	reason?: string | null;
 }
@@ -96,6 +105,8 @@ export interface EntityCreateProposal {
 	entity_data: EntityData;
 	proposal: Record<string, unknown>;
 	watcher_id?: number | null;
+	/** See EntityFieldChangeProposal.window_id — batches proposals by run window. */
+	window_id?: number | null;
 	attribution?: "watcher" | "agent";
 	reason?: string | null;
 }
@@ -270,6 +281,10 @@ export async function proposeEntityChange(
 ): Promise<{ runId: number; eventId: number; approvalUrl?: string }> {
 	const sql = getDb();
 	const operation = operationOf(proposal);
+	// window_id groups a run's proposals into one batch card — it rides the
+	// runs.window_id COLUMN, never action_input, so the md5(action_input) dedupe
+	// identity is byte-identical whether or not a window produced the proposal.
+	const { window_id: windowId, ...actionInputProposal } = proposal;
 	const updateProposal =
 		operation === "update" ? asUpdateProposal(proposal) : null;
 	const deleteProposal =
@@ -299,6 +314,10 @@ export async function proposeEntityChange(
       AND r.action_key = ${actionKey}
       AND r.approval_status = 'pending'
       AND r.status = 'pending'
+      -- Same proposal from a DIFFERENT window is a distinct ask (each window gets
+      -- its own batch card); only a byte-identical replay of the SAME window
+      -- collapses. Matches the runs_entity_change_pending_dedupe unique index.
+      AND r.window_id IS NOT DISTINCT FROM ${windowId ?? null}
       AND COALESCE(r.action_input->>'operation', 'update') = ${operation}
       AND COALESCE(r.action_input->>'entity_id', '') = ${"entity_id" in proposal ? String(proposal.entity_id) : ""}
 	      AND (
@@ -334,11 +353,12 @@ export async function proposeEntityChange(
 	try {
 		const inserted = await sql`
       INSERT INTO runs (
-        organization_id, run_type, action_key, action_input,
+        organization_id, run_type, action_key, action_input, window_id,
         created_by_user_id, approval_status, status, created_at
       ) VALUES (
         ${ctx.organizationId}, 'internal', ${actionKey},
-        ${sql.json(proposal as unknown as Record<string, unknown>)},
+        ${sql.json(actionInputProposal as unknown as Record<string, unknown>)},
+        ${windowId ?? null},
         null, 'pending', 'pending', current_timestamp
       )
       RETURNING id
@@ -348,7 +368,7 @@ export async function proposeEntityChange(
 		// Two replicas raced the SELECT above with a byte-identical proposal — the
 		// partial unique index (runs_entity_change_pending_dedupe) made one lose.
 		// Resolve to the winner's pending run instead of stacking a duplicate card.
-		if (isUniqueViolation(err, "runs_entity_change_pending_dedupe")) {
+		if (isUniqueViolation(err, "runs_entity_change_pending_dedupe_v2")) {
 			const winner = await findExisting();
 			if (winner.length > 0) return dedupeHit(winner[0]);
 		}
@@ -431,6 +451,10 @@ export async function proposeEntityChange(
 			watcher_id: proposal.watcher_id ?? null,
 			watcher_name: watcherName,
 			watcher_agent_id: watcherAgentId,
+			// The run window this proposal belongs to, if any. Stamped so the UI can
+			// tell this proposal is part of a BATCH (the change-set card owns the
+			// Approve/Reject decision) and suppress this card's own duplicate buttons.
+			window_id: windowId ?? null,
 			entity_name: entityName ?? null,
 			entity_type: entityType ?? null,
 			entity_slug: createProposal ? null : (entity?.slug ?? null),
@@ -653,7 +677,16 @@ export async function applyEntityChangeProposal(
 	if (operation === "create") {
 		const createProposal = asCreateProposal(proposal);
 		return createEntity(
-			{ ...createProposal.entity_data, organization_id: ctx.organizationId },
+			{
+				...createProposal.entity_data,
+				organization_id: ctx.organizationId,
+				// The watcher that PROPOSED the create is not a real user row, so
+				// entities.created_by (NOT NULL, FK → user) must attribute the create to
+				// the human who APPROVED it. Approval is human-gated (requireHuman-
+				// ApprovalContext), so ctx.userId is a verified user here — using it
+				// avoids the "system" fallback that fails the FK.
+				created_by: ctx.userId ?? createProposal.entity_data.created_by,
+			},
 			{
 				hookContext: {
 					organizationId: ctx.organizationId,

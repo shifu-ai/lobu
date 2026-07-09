@@ -9,6 +9,7 @@
 import { getErrorMessage } from "@lobu/core";
 import {
 	ApproveAction,
+	ApproveBatchAction,
 	ExecuteAction,
 	GetRunAction,
 	ListAvailableAction,
@@ -17,12 +18,23 @@ import {
 	ManageOperationsResultSchema,
 	ManageOperationsSchema,
 	RejectAction,
+	RejectBatchAction,
 } from "@lobu/core/contracts/tools/manage-operations";
 import type { Static } from "@sinclair/typebox";
-import { getDb, pgBigintArray, pgTextArray } from "../../db/client";
+import {
+	getDb,
+	parsePgNumberArray,
+	pgBigintArray,
+	pgTextArray,
+} from "../../db/client";
 import type { Env } from "../../index";
 import { callTool as callProxyTool } from "../../mcp-proxy/client";
 import { resolveCredentialsByConnectionId } from "../../mcp-proxy/credential-resolver";
+import {
+	classifyMutationPrincipal,
+	mutationPrincipalId,
+	resolveWritePolicyDecision,
+} from "../../authz/entity-policy";
 import { notifyActionApprovalNeeded } from "../../notifications/triggers";
 import { resolveActionMode } from "../../operations/action-modes";
 import {
@@ -39,7 +51,7 @@ import logger from "../../utils/logger";
 import { buildResourcePermalink } from "../../utils/url-builder";
 import { trackWatcherReaction } from "../../utils/watcher-reactions";
 import { dispatchChromeActionToExtension } from "../../worker-api/dispatch-chrome-action";
-import { isAdminOrOwnerRole, isSystemContext } from "../access-control";
+import { isAdminOrOwnerRole } from "../access-control";
 import type { ToolContext } from "../registry";
 import { getOrgUrlContext } from "../view-urls";
 import { action, defineActionTool } from "./action-tool";
@@ -80,6 +92,8 @@ const manageOperationsTool = defineActionTool('manage_operations', {
   get_run: action(GetRunAction, handleGetRun),
   approve: action(ApproveAction, handleApprove),
   reject: action(RejectAction, handleReject),
+  approve_batch: action(ApproveBatchAction, handleApproveBatch),
+  reject_batch: action(RejectBatchAction, handleRejectBatch),
 });
 
 export { ManageOperationsResultSchema, ManageOperationsSchema };
@@ -658,7 +672,35 @@ async function handleExecute(
 			error: `Operation '${operation.operation_key}' is disabled on this connection.`,
 		};
 	}
-	const shouldQueue = mode === "approval";
+
+	// Org-level connector-action policy, from the SAME write-gate the entity and
+	// agent_config classes use. It folds with the per-connection action_modes by
+	// restrictive-wins: a `deny` blocks outright; an `approval` upgrades a
+	// connection that would auto-run to queued. A human applies immediately (the
+	// policy governs non-human principals); with no policy row, the class default
+	// is auto, so the connection mode alone decides — today's behavior is intact.
+	const principalKind = classifyMutationPrincipal({
+		userId: ctx.userId,
+		agentId: ctx.agentId,
+		watcherSource: args.watcher_source ?? null,
+	});
+	const principalId = mutationPrincipalId({
+		agentId: ctx.agentId,
+		watcherId: args.watcher_source?.watcher_id ?? null,
+	});
+	const policyDecision = await resolveWritePolicyDecision({
+		organizationId: ctx.organizationId,
+		resourceClass: "connector_action",
+		principalKind,
+		principalId,
+		action: "create",
+	});
+	if (policyDecision === "deny") {
+		return {
+			error: `Policy denies '${operation.operation_key}' for this principal.`,
+		};
+	}
+	const shouldQueue = mode === "approval" || policyDecision === "require_approval";
 
 	// Detect device-bound connector by reading the connector definition's
 	// `runtime` field. When set (e.g. chrome-extension, macos, ios), the
@@ -690,6 +732,10 @@ async function handleExecute(
 		operationInput: input,
 		approvalMode,
 		requireCompiledCode: operation.backend === "local_action",
+		// Persist the TRUSTED principal so a queued run's policy is re-evaluated
+		// at approve time against who queued it, not who approves it (sol #5).
+		policyPrincipalKind: principalKind,
+		policyPrincipalId: principalId,
 	});
 
 	if (args.watcher_source) {
@@ -1299,19 +1345,48 @@ async function isPendingEntityRunOwner(
 }
 
 /**
- * The admin-or-run-owner gate shared by approve/reject. The tool-access tier
+ * Approving/rejecting a run is a HUMAN decision — it must come from a verified
+ * user session, never from any non-human context. This is the security floor
+ * beneath {@link requireApprovalAuthority}'s role check.
+ *
+ * Rejecting `ctx.clientId` alone is not enough: an in-process watcher/system
+ * context runs with `userId=null` and NO client id, so it would slip past a
+ * client-id-only guard AND past {@link isSystemContext}'s role bypass — letting
+ * an automation approve a run it queued (sol review #3). We therefore require a
+ * positive human identity: `userId` present, and no agent identity on the
+ * context. Returns an error result (surfaced to the caller) or null when the
+ * context is a genuine human. One gate, called by every approve/reject entry.
+ */
+function requireHumanApprovalContext(
+	ctx: ToolContext,
+	verb: "approve" | "reject",
+): { error: string } | null {
+	if (ctx.agentId || ctx.clientId) {
+		return {
+			error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a human web session. Agents cannot ${verb} operations.`,
+		};
+	}
+	if (!ctx.userId) {
+		return {
+			error: `Operation ${verb === "approve" ? "approval" : "rejection"} requires a signed-in user. This request has no verified human identity.`,
+		};
+	}
+	return null;
+}
+
+/**
+ * The admin-or-run-owner gate shared by approve/reject, layered ON TOP of
+ * {@link requireHumanApprovalContext} (which every caller runs first, so a
+ * verified human identity is already guaranteed here). The tool-access tier
  * admits write-tier members so a recorded field owner can decide their own
  * run; everyone else non-admin gets the same admin-access denial the action
- * tier used to throw.
+ * tier used to throw. No system-context bypass — a run decision is always human.
  */
 async function requireApprovalAuthority(
 	action: "approve" | "reject",
 	runId: number,
 	ctx: ToolContext,
 ): Promise<void> {
-	// In-process system calls (userId=null + no member role) bypass role policy
-	// here exactly as they do at the action-router tier.
-	if (isSystemContext(ctx)) return;
 	if (isAdminOrOwnerRole(ctx.memberRole)) return;
 	if (await isPendingEntityRunOwner(runId, ctx.organizationId, ctx.userId)) {
 		return;
@@ -1478,12 +1553,8 @@ async function handleApprove(
 	ctx: ToolContext,
 	env: Env,
 ): Promise<ManageOperationsResult> {
-	if (ctx.clientId) {
-		return {
-			error:
-				"Operation approval requires a web session. Agents cannot approve their own operations.",
-		};
-	}
+	const humanGate = requireHumanApprovalContext(ctx, "approve");
+	if (humanGate) return humanGate;
 	await requireApprovalAuthority("approve", args.run_id, ctx);
 
 	const sql = getDb();
@@ -1501,7 +1572,8 @@ async function handleApprove(
 	if (fieldChangeResult) return fieldChangeResult;
 
 	const pendingRows = await sql`
-    SELECT id, connection_id, action_key, action_input
+    SELECT id, connection_id, action_key, action_input,
+           policy_principal_kind, policy_principal_id
     FROM runs
     WHERE id = ${args.run_id}
       AND organization_id = ${ctx.organizationId}
@@ -1518,6 +1590,8 @@ async function handleApprove(
 		connection_id: number;
 		action_key: string;
 		action_input: Record<string, unknown> | null;
+		policy_principal_kind: string | null;
+		policy_principal_id: string | null;
 	};
 	const resolved = await getOperationForConnection(
 		ctx.organizationId,
@@ -1528,6 +1602,55 @@ async function handleApprove(
 		return {
 			error: `Operation '${pendingRun.action_key}' is no longer available for this connection.`,
 		};
+	}
+
+	// (sol #5) Re-evaluate the connector-action write-gate NOW, at approve time,
+	// against the CURRENT connection mode + org policy — using the trusted
+	// principal persisted when the run was queued (not the approver). A deny or
+	// disabled installed after queueing but before this approval must cancel it,
+	// not sail through on the stale queue-time check.
+	const currentMode = resolveActionMode(
+		resolved.operation,
+		resolved.connection.config,
+	);
+	const recheckPrincipalKind =
+		pendingRun.policy_principal_kind === "agent" ||
+		pendingRun.policy_principal_kind === "watcher"
+			? pendingRun.policy_principal_kind
+			: "user";
+	const recheckDecision =
+		recheckPrincipalKind === "user"
+			? "allow"
+			: await resolveWritePolicyDecision({
+					organizationId: ctx.organizationId,
+					resourceClass: "connector_action",
+					principalKind: recheckPrincipalKind,
+					principalId: pendingRun.policy_principal_id,
+					action: "create",
+				});
+	if (currentMode === "disabled" || recheckDecision === "deny") {
+		const why =
+			currentMode === "disabled"
+				? `Operation '${pendingRun.action_key}' is now disabled on this connection.`
+				: `Policy now denies '${pendingRun.action_key}' for the requesting principal.`;
+		const reviewer = await resolveReviewer(ctx);
+		await sql`
+      UPDATE runs
+      SET approval_status = 'rejected', status = 'cancelled',
+          error_message = ${why}, completed_at = NOW()
+      WHERE id = ${args.run_id} AND organization_id = ${ctx.organizationId}
+        AND approval_status = 'pending'
+    `;
+		await supersedeActionEvent(
+			args.run_id,
+			ctx.organizationId,
+			"rejected",
+			`${pendingRun.action_key} — blocked by policy`,
+			why,
+			{ reason: why },
+			reviewer,
+		);
+		return { error: `${why} The approval was cancelled.` };
 	}
 
 	const approvedInput = args.input ?? pendingRun.action_input ?? {};
@@ -1634,12 +1757,8 @@ async function handleReject(
 	args: Static<typeof RejectAction>,
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
-	if (ctx.clientId) {
-		return {
-			error:
-				"Operation rejection requires a web session. Agents cannot reject operations.",
-		};
-	}
+	const humanGate = requireHumanApprovalContext(ctx, "reject");
+	if (humanGate) return humanGate;
 	await requireApprovalAuthority("reject", args.run_id, ctx);
 
 	const sql = getDb();
@@ -1704,5 +1823,157 @@ async function handleReject(
 		rejected: true,
 		run_id: args.run_id,
 		event_id: eventId,
+	};
+}
+
+/** Pending proposal runs a single watcher run produced, grouped by its window. */
+async function pendingRunIdsForWindow(
+	windowId: number,
+	organizationId: string,
+): Promise<number[]> {
+	const sql = getDb();
+	const rows = await sql<{ id: number }>`
+    SELECT id FROM runs
+    WHERE window_id = ${windowId}
+      AND organization_id = ${organizationId}
+      AND approval_status = 'pending'
+      AND run_type = 'internal'
+    ORDER BY id ASC
+  `;
+	return rows.map((r) => Number(r.id));
+}
+
+/**
+ * Approve every pending proposal a watcher run produced, in one action. Reuses
+ * the single-run approve path per proposal so each still applies through its own
+ * gate/apply handler — the batch is purely the grouping, not a second code path.
+ */
+async function handleApproveBatch(
+	args: Static<typeof ApproveBatchAction>,
+	ctx: ToolContext,
+	env: Env,
+): Promise<ManageOperationsResult> {
+	const humanGate = requireHumanApprovalContext(ctx, "approve");
+	if (humanGate) return humanGate;
+	const runIds = await pendingRunIdsForWindow(args.window_id, ctx.organizationId);
+	if (runIds.length === 0) {
+		return {
+			action: "approve_batch",
+			window_id: args.window_id,
+			approved_count: 0,
+			failed_count: 0,
+			run_ids: [],
+			message: "No pending proposals for this run.",
+		};
+	}
+	let approved = 0;
+	let failed = 0;
+	for (const runId of runIds) {
+		const result = await handleApprove({ action: "approve", run_id: runId }, ctx, env);
+		if ("error" in result) failed += 1;
+		else approved += 1;
+	}
+	return {
+		action: "approve_batch",
+		window_id: args.window_id,
+		approved_count: approved,
+		failed_count: failed,
+		run_ids: runIds,
+		message: `Approved ${approved} of ${runIds.length} proposals${failed > 0 ? ` (${failed} failed)` : ""}.`,
+	};
+}
+
+/**
+ * The watcher + touched entities behind a window's proposal runs. Resolved from
+ * the change_set event the watcher run recorded for this window (it carries both
+ * watcher_id and the entity_ids the run touched), so the rejection feedback can
+ * be keyed to the watcher and associated with those entities.
+ */
+async function resolveWindowRevisionContext(
+	windowId: number,
+	organizationId: string,
+): Promise<{ watcherId: number | null; entityIds: number[] }> {
+	const sql = getDb();
+	const rows = await sql<{ watcher_id: string | null; entity_ids: unknown }>`
+    SELECT (metadata->>'watcher_id')::bigint AS watcher_id, entity_ids
+    FROM events
+    WHERE organization_id = ${organizationId}
+      AND semantic_type = 'change_set'
+      AND (metadata->>'window_id')::bigint = ${windowId}
+    ORDER BY id DESC
+    LIMIT 1
+  `;
+	if (rows.length === 0) return { watcherId: null, entityIds: [] };
+	return {
+		watcherId: rows[0].watcher_id != null ? Number(rows[0].watcher_id) : null,
+		// entity_ids arrives as a raw PG array string under fetch_types:false — never
+		// call .map on it directly. parsePgNumberArray handles both string and array.
+		entityIds: parsePgNumberArray(rows[0].entity_ids),
+	};
+}
+
+/**
+ * Reject every pending proposal a watcher run produced, feeding the reason back
+ * so the watcher's next run revises (the conversational revision loop — no inline
+ * diff editor). Reuses the single-run reject path per proposal, then records the
+ * reason as a `correction` feedback event keyed to the watcher — the SAME channel
+ * getRecentFeedbackSummary injects into future watcher runs. That closes the loop
+ * for real: the run view shows why the batch was rejected AND the watcher's next
+ * turn reads "Past Corrections from User Feedback" and adjusts, rather than the
+ * feedback sitting inert (sol review #10).
+ */
+async function handleRejectBatch(
+	args: Static<typeof RejectBatchAction>,
+	ctx: ToolContext,
+): Promise<ManageOperationsResult> {
+	const humanGate = requireHumanApprovalContext(ctx, "reject");
+	if (humanGate) return humanGate;
+	const runIds = await pendingRunIdsForWindow(args.window_id, ctx.organizationId);
+	const reason = args.reason ?? "Rejected by user";
+	let rejected = 0;
+	for (const runId of runIds) {
+		const result = await handleReject({ action: "reject", run_id: runId, reason }, ctx);
+		if (!("error" in result)) rejected += 1;
+	}
+	if (rejected > 0) {
+		const { watcherId, entityIds } = await resolveWindowRevisionContext(
+			args.window_id,
+			ctx.organizationId,
+		);
+		// A `correction` event — the durable, run-linked revision channel. Keyed to
+		// the watcher (getRecentFeedbackSummary reads by watcher_id) and associated
+		// with the entities the run touched, so both the watcher's next turn and the
+		// entity/run views surface it. field_path='$batch_reject' marks it a
+		// whole-run rejection (distinct from a single-field correction); the reason
+		// rides `note`, which the summary renders verbatim.
+		await insertEvent({
+			entityIds,
+			organizationId: ctx.organizationId,
+			originId: `window_${args.window_id}_batch_reject`,
+			title: `Batch rejected — ${rejected} proposals`,
+			content: `The user rejected this run's proposals: ${reason}`,
+			semanticType: "correction",
+			createdBy: ctx.userId ?? null,
+			metadata: {
+				kind: "watcher_batch_reject",
+				window_id: args.window_id,
+				watcher_id: watcherId,
+				field_path: "$batch_reject",
+				mutation: "set",
+				note: reason,
+				rejected_count: rejected,
+				reason,
+			},
+		});
+	}
+	return {
+		action: "reject_batch",
+		window_id: args.window_id,
+		rejected_count: rejected,
+		run_ids: runIds,
+		message:
+			rejected > 0
+				? `Rejected ${rejected} proposals. The watcher's next run will see this feedback and revise.`
+				: "No pending proposals for this run.",
 	};
 }

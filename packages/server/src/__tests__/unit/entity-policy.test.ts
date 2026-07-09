@@ -4,10 +4,15 @@ import {
 	classifyMutationPrincipal,
 	evaluateEntityFieldUpdates,
 	evaluateEntityMutation,
+	mutationPrincipalId,
+	resolveWritePolicyDecision,
 } from "../../authz/entity-policy";
 
 type PolicyRowSeed = {
 	id?: number;
+	resource_class?: string;
+	principal_kind?: string | null;
+	principal_id?: string | null;
 	entity_type_slug?: string | null;
 	field_path?: string | null;
 	entity_id?: number | null;
@@ -19,11 +24,16 @@ type PolicyRowSeed = {
 const ORG = "org-1";
 
 /** Tagged-template stub that mimics the candidate-policy query: it applies the
- * same (NULL OR match) filters the real SQL does, against seeded rows. */
+ * same (NULL OR match) filters the real SQL does, against seeded rows. Param
+ * order matches loadCandidatePolicies: org, resource_class, principal_kind,
+ * principal_id, entity_type_slug, entity_id. */
 function stubSql(seeds: PolicyRowSeed[]): DbClient {
 	const rows = seeds.map((seed, index) => ({
 		id: seed.id ?? index + 1,
 		organization_id: ORG,
+		resource_class: seed.resource_class ?? "entity",
+		principal_kind: seed.principal_kind ?? null,
+		principal_id: seed.principal_id ?? null,
 		entity_type_slug: seed.entity_type_slug ?? null,
 		field_path: seed.field_path ?? null,
 		entity_id: seed.entity_id ?? null,
@@ -36,15 +46,24 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 		approval_channel_name: null,
 	}));
 	const sql = (_strings: TemplateStringsArray, ...params: unknown[]) => {
-		const [org, entityTypeSlug, entityId] = params as [
-			string,
-			string | null,
-			number | null,
-		];
+		const [org, resourceClass, principalKind, principalId, entityTypeSlug, entityId] =
+			params as [
+				string,
+				string,
+				string | null,
+				string | null,
+				string | null,
+				number | null,
+			];
 		return Promise.resolve(
 			rows.filter(
 				(row) =>
 					row.organization_id === org &&
+					row.resource_class === resourceClass &&
+					(row.principal_kind === null ||
+						(row.principal_kind === principalKind &&
+							(row.principal_id === null ||
+								row.principal_id === principalId))) &&
 					(row.entity_type_slug === null ||
 						row.entity_type_slug === entityTypeSlug) &&
 					(row.entity_id === null || row.entity_id === entityId),
@@ -55,14 +74,21 @@ function stubSql(seeds: PolicyRowSeed[]): DbClient {
 }
 
 describe("classifyMutationPrincipal", () => {
-	test("watcher source wins", () => {
+	test("a genuine watcher (no agentId) classifies as watcher", () => {
+		expect(
+			classifyMutationPrincipal({ watcherSource: { watcher_id: 5 } }),
+		).toBe("watcher");
+	});
+
+	test("SECURITY: a trusted agentId beats a caller-supplied watcher_source", () => {
+		// An agent run cannot demote itself to a watcher (and escape its agent
+		// policy) by tagging the write with a watcher_source it controls.
 		expect(
 			classifyMutationPrincipal({
-				userId: "u1",
-				agentId: "a1",
+				agentId: "agent-A",
 				watcherSource: { watcher_id: 5 },
 			}),
-		).toBe("watcher");
+		).toBe("agent");
 	});
 
 	test("real user session is a user", () => {
@@ -77,6 +103,26 @@ describe("classifyMutationPrincipal", () => {
 
 	test("system/automation context (no user, no agent) is an agent, not a user", () => {
 		expect(classifyMutationPrincipal({})).toBe("agent");
+	});
+});
+
+describe("mutationPrincipalId", () => {
+	test("a genuine watcher (no agentId) resolves to watcher:<id>", () => {
+		expect(mutationPrincipalId({ agentId: null, watcherId: 6 })).toBe(
+			"watcher:6",
+		);
+	});
+
+	test("SECURITY: agentId wins over a caller-supplied watcherId — no spoofing", () => {
+		// An agent supplying watcher_source:{watcher_id:6} still resolves to its own
+		// agent id, so it is matched against ITS agent policy, not watcher:6's.
+		expect(mutationPrincipalId({ agentId: "agent-A", watcherId: 6 })).toBe(
+			"agent-A",
+		);
+	});
+
+	test("no principal id → null (any agent)", () => {
+		expect(mutationPrincipalId({})).toBeNull();
 	});
 });
 
@@ -152,6 +198,149 @@ describe("evaluateEntityMutation", () => {
 		).toBe("require_approval");
 	});
 
+	test("deny mode is a hard floor — the write is denied, not queued", async () => {
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				action: "create",
+				entityTypeSlug: "task",
+				sql: stubSql([{ entity_type_slug: "task", create_mode: "deny" }]),
+			}),
+		).toBe("deny");
+	});
+
+	test("per-principal row beats a broader any-principal row", async () => {
+		// Global says auto for creates; a row pinned to this one agent says approval.
+		const sql = stubSql([
+			{ create_mode: "auto" },
+			{ principal_kind: "agent", principal_id: "agent-77", create_mode: "approval" },
+		]);
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				principalId: "agent-77",
+				action: "create",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("require_approval");
+		// A different agent is unaffected and falls back to the global auto.
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				principalId: "agent-99",
+				action: "create",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("allow");
+	});
+
+	test("principal-kind row (any id) applies to every agent of that kind", async () => {
+		const sql = stubSql([
+			{ principal_kind: "watcher", delete_mode: "deny" },
+		]);
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "watcher",
+				principalId: "watcher:5",
+				action: "delete",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("deny");
+		// An agent (different kind) is not matched by a watcher-kind row.
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				principalId: "agent-1",
+				action: "delete",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("require_approval");
+	});
+
+	test("scope specificity outranks principal: entity-type row beats a principal-global row", async () => {
+		// entity-type row (any principal) says auto; an agent-global row says approval.
+		// Per the RFC, TARGET SCOPE wins over principal specificity, so the more-
+		// scoped entity-type rule governs — the pinned agent is NOT gated here.
+		const sql = stubSql([
+			{ entity_type_slug: "task", update_mode: "auto" },
+			{ principal_kind: "agent", principal_id: "agent-77", update_mode: "approval" },
+		]);
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				principalId: "agent-77",
+				action: "update",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("allow");
+	});
+
+	test("an agent-global auto must NOT shadow an entity-type-specific deny", async () => {
+		// The inverse-regression sol asked for: a broad per-principal `auto` cannot
+		// open up a narrowly-scoped `deny`. Scope specificity wins → deny.
+		const sql = stubSql([
+			{ entity_type_slug: "invoice", update_mode: "deny" },
+			{ principal_kind: "agent", principal_id: "agent-A", update_mode: "auto" },
+		]);
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				principalId: "agent-A",
+				action: "update",
+				entityTypeSlug: "invoice",
+				sql,
+			}),
+		).toBe("deny");
+	});
+
+	test("principal breaks a SCOPE tie: two global rows, the pinned one wins", async () => {
+		// Both rows are global scope (equal scope specificity), so principal
+		// specificity is the tie-break — the agent-pinned approval governs.
+		const sql = stubSql([
+			{ update_mode: "auto" },
+			{ principal_kind: "agent", principal_id: "agent-77", update_mode: "approval" },
+		]);
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				principalId: "agent-77",
+				action: "update",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("require_approval");
+	});
+
+	test("restrictive-wins breaks a full tie: deny beats auto at equal specificity", async () => {
+		// Same scope + same (null) principal → tie broken by restrictiveness: deny wins.
+		const sql = stubSql([
+			{ entity_type_slug: "task", update_mode: "auto" },
+			{ entity_type_slug: "task", update_mode: "deny" },
+		]);
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				action: "update",
+				entityTypeSlug: "task",
+				sql,
+			}),
+		).toBe("deny");
+	});
+
 	test("entity-scoped (row-level) policy beats the type policy", async () => {
 		const sql = stubSql([
 			{ entity_type_slug: "task", delete_mode: "auto" },
@@ -177,6 +366,172 @@ describe("evaluateEntityMutation", () => {
 				sql,
 			}),
 		).toBe("allow");
+	});
+});
+
+describe("resolveWritePolicyDecision (agent_config)", () => {
+	test("a human member applies immediately regardless of policy", async () => {
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "agent_config",
+				principalKind: "user",
+				action: "update",
+				sql: stubSql([{ resource_class: "agent_config", update_mode: "deny" }]),
+			}),
+		).toBe("allow");
+	});
+
+	test("default: agent create/update queue approval, delete is denied", async () => {
+		const sql = stubSql([]);
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "agent_config",
+				principalKind: "agent",
+				action: "create",
+				sql,
+			}),
+		).toBe("require_approval");
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "agent_config",
+				principalKind: "agent",
+				action: "delete",
+				sql,
+			}),
+		).toBe("deny");
+	});
+
+	test("an org policy row can loosen the agent_config default to auto", async () => {
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "agent_config",
+				principalKind: "agent",
+				action: "update",
+				sql: stubSql([{ resource_class: "agent_config", update_mode: "auto" }]),
+			}),
+		).toBe("allow");
+	});
+
+	test("an entity-class row does not leak into an agent_config decision", async () => {
+		// Only an entity row exists; agent_config falls back to its own default.
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "agent_config",
+				principalKind: "agent",
+				action: "update",
+				sql: stubSql([{ resource_class: "entity", update_mode: "auto" }]),
+			}),
+		).toBe("require_approval");
+	});
+});
+
+describe("resolveWritePolicyDecision (connector_action)", () => {
+	test("no policy row → auto, so the connection mode alone governs", async () => {
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "connector_action",
+				principalKind: "agent",
+				action: "create",
+				sql: stubSql([]),
+			}),
+		).toBe("allow");
+	});
+
+	test("an org policy can force connector-action approval or deny", async () => {
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "connector_action",
+				principalKind: "agent",
+				action: "create",
+				sql: stubSql([
+					{ resource_class: "connector_action", create_mode: "approval" },
+				]),
+			}),
+		).toBe("require_approval");
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "connector_action",
+				principalKind: "watcher",
+				principalId: "watcher:9",
+				action: "create",
+				sql: stubSql([
+					{
+						resource_class: "connector_action",
+						principal_kind: "watcher",
+						principal_id: "watcher:9",
+						create_mode: "deny",
+					},
+				]),
+			}),
+		).toBe("deny");
+	});
+
+	test("a human applies connector actions immediately regardless of policy", async () => {
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "connector_action",
+				principalKind: "user",
+				action: "create",
+				sql: stubSql([
+					{ resource_class: "connector_action", create_mode: "deny" },
+				]),
+			}),
+		).toBe("allow");
+	});
+});
+
+describe("persisted mode fails closed (sol review #7)", () => {
+	test("an UNKNOWN stored mode resolves to deny, never allow", async () => {
+		// A mode a future build introduced mid-rolling-upgrade, or corrupt data from
+		// manual SQL, must NOT read as `allow`. parsePersistedMode maps it to deny.
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				action: "create",
+				entityTypeSlug: "task",
+				sql: stubSql([
+					{ entity_type_slug: "task", create_mode: "quantum-approve" },
+				]),
+			}),
+		).toBe("deny");
+	});
+
+	test("unknown stored mode fails closed for agent_config too", async () => {
+		expect(
+			await resolveWritePolicyDecision({
+				organizationId: ORG,
+				resourceClass: "agent_config",
+				principalKind: "agent",
+				action: "update",
+				sql: stubSql([
+					{ resource_class: "agent_config", update_mode: "??" },
+				]),
+			}),
+		).toBe("deny");
+	});
+
+	test("a valid stored mode still resolves normally (no over-eager deny)", async () => {
+		expect(
+			await evaluateEntityMutation({
+				organizationId: ORG,
+				principalKind: "agent",
+				action: "create",
+				entityTypeSlug: "task",
+				sql: stubSql([
+					{ entity_type_slug: "task", create_mode: "approval" },
+				]),
+			}),
+		).toBe("require_approval");
 	});
 });
 
@@ -242,6 +597,39 @@ describe("evaluateEntityFieldUpdates", () => {
 			...baseArgs,
 			entityId: 9999,
 			principalKind: "agent",
+			fields: { status: "none" },
+			sql,
+		});
+		expect(other.status).toBe("allow");
+	});
+
+	test("deny mode on a field denies it even when human-owned", async () => {
+		const decisions = await evaluateEntityFieldUpdates({
+			...baseArgs,
+			principalKind: "agent",
+			fields: { locked: "human", status: "none" },
+			sql: stubSql([{ entity_type_slug: "task", update_mode: "deny" }]),
+		});
+		expect(decisions.locked).toBe("deny");
+		expect(decisions.status).toBe("deny");
+	});
+
+	test("per-principal update policy gates only the pinned watcher", async () => {
+		const sql = stubSql([
+			{ principal_kind: "watcher", principal_id: "watcher:6", update_mode: "approval" },
+		]);
+		const pinned = await evaluateEntityFieldUpdates({
+			...baseArgs,
+			principalKind: "watcher",
+			principalId: "watcher:6",
+			fields: { status: "none" },
+			sql,
+		});
+		expect(pinned.status).toBe("require_approval");
+		const other = await evaluateEntityFieldUpdates({
+			...baseArgs,
+			principalKind: "watcher",
+			principalId: "watcher:7",
 			fields: { status: "none" },
 			sql,
 		});

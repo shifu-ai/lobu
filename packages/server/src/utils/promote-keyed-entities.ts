@@ -40,9 +40,14 @@ import {
   type DeferredMutation,
   runMutationGate,
 } from '../authz/entity-mutation-gate';
+import { mutationPrincipalId } from '../authz/entity-policy';
 import type { DbClient } from '../db/client';
 import type { KeyingConfig } from '../types/watchers';
-import { type BlockedChange, mergeEntityFields } from './entity-field-merge';
+import {
+  type AppliedChange,
+  type BlockedChange,
+  mergeEntityFields,
+} from './entity-field-merge';
 import { getValueAtPath } from './object-path';
 import logger from './logger';
 import { isUniqueViolation } from './pg-errors';
@@ -71,6 +76,20 @@ export interface PromoteKeyedEntitiesParams {
   createdBy?: string | null;
 }
 
+/**
+ * One entity this run touched inline, for the first-class run change-set. Emitted
+ * for auto-applied changes too — the diff is a property of the run, not of the
+ * approval flow, so a fully-auto watcher run still shows exactly what it changed.
+ */
+export interface PromotedEntityChange {
+  entityId: number;
+  name: string;
+  /** `created` = brand-new entity; `updated` = existing entity whose fields changed. */
+  kind: 'created' | 'updated';
+  /** For `updated`, the fields written inline (old→new). Empty for `created`. */
+  applied: Record<string, AppliedChange>;
+}
+
 export interface PromoteKeyedEntitiesResult {
   /** Number of distinct keyed rows that resolved to an entity. */
   promoted: number;
@@ -82,6 +101,12 @@ export interface PromoteKeyedEntitiesResult {
    * (never writing inline, never on the caller's tx).
    */
   deferred: DeferredMutation[];
+  /**
+   * The applied change-set: every entity this run created or updated inline. The
+   * caller records this as a first-class event on the run so the change is
+   * visible on the run itself, independent of any approval.
+   */
+  changes: PromotedEntityChange[];
 }
 
 /**
@@ -264,12 +289,16 @@ async function upsertKeyedEntity(params: {
   /** Extracted entity field values to sync into metadata (excludes the stable key). */
   fieldValues: Record<string, unknown>;
   createdBy: string;
+  /** Watcher whose run is promoting this entity — used for per-principal policy. */
+  watcherId: number;
   /** Org policy: creates of this type queue an approval instead of inserting. */
   createNeedsApproval: boolean;
 }): Promise<{
   entityId: number;
   created: boolean;
   blocked: Record<string, BlockedChange>;
+  /** Fields the watcher actually wrote inline (auto-applied), old→new. */
+  applied: Record<string, AppliedChange>;
   blockedCreate: boolean;
 }> {
   const { tx, organizationId, identifier } = params;
@@ -300,6 +329,8 @@ async function upsertKeyedEntity(params: {
       principalKind: 'watcher',
       sql: tx,
       attribution: 'watcher',
+      watcherId: params.watcherId,
+      principalId: mutationPrincipalId({ agentId: null, watcherId: params.watcherId }),
       entityTypeSlug: params.entityTypeSlug,
       entityId,
       fields: Object.fromEntries(
@@ -323,14 +354,20 @@ async function upsertKeyedEntity(params: {
       actorId: null,
       requireApproval,
     });
-    return { entityId, created: false, blocked: merge.blocked, blockedCreate: false };
+    return {
+      entityId,
+      created: false,
+      blocked: merge.blocked,
+      applied: merge.applied,
+      blockedCreate: false,
+    };
   }
 
   // Org policy holds creates of this type for approval — no insert, no identity
   // claim. The caller queues a durable create proposal post-commit; when it is
   // approved and re-promoted, the identity claim above dedupes as usual.
   if (params.createNeedsApproval) {
-    return { entityId: 0, created: false, blocked: {}, blockedCreate: true };
+    return { entityId: 0, created: false, blocked: {}, applied: {}, blockedCreate: true };
   }
 
   // 2. Create the entity (sequence-allocated id — multi-replica safe),
@@ -361,7 +398,7 @@ async function upsertKeyedEntity(params: {
     RETURNING entity_id
   `;
   if (claimed.length > 0) {
-    return { entityId, created: true, blocked: {}, blockedCreate: false };
+    return { entityId, created: true, blocked: {}, applied: {}, blockedCreate: false };
   }
 
   // Lost the race: another live transaction already claimed this key. Resolve
@@ -385,11 +422,17 @@ async function upsertKeyedEntity(params: {
       DELETE FROM entities
       WHERE id = ${entityId} AND organization_id = ${organizationId}
     `;
-    return { entityId: Number(winner[0].entity_id), created: false, blocked: {}, blockedCreate: false };
+    return {
+      entityId: Number(winner[0].entity_id),
+      created: false,
+      blocked: {},
+      applied: {},
+      blockedCreate: false,
+    };
   }
   // Extremely unlikely: the conflicting claim was tombstoned between our INSERT
   // and this re-read. Keep our entity as the canonical one.
-  return { entityId, created: true, blocked: {}, blockedCreate: false };
+  return { entityId, created: true, blocked: {}, applied: {}, blockedCreate: false };
 }
 
 /**
@@ -414,6 +457,7 @@ export async function promoteKeyedEntities(
     promoted: 0,
     created: 0,
     deferred: [],
+    changes: [],
   };
 
   const rows = getValueAtPath(extractedData, keyingConfig.entity_path);
@@ -451,6 +495,7 @@ export async function promoteKeyedEntities(
     sql: tx,
     attribution: 'watcher',
     watcherId,
+    principalId: mutationPrincipalId({ agentId: null, watcherId }),
     entityTypeSlug,
     entityData: { entity_type: entityTypeSlug, name: '' },
     proposal: {},
@@ -496,7 +541,7 @@ export async function promoteKeyedEntities(
     };
 
     try {
-      const { created, blocked, entityId, blockedCreate } = await tx.savepoint((sp) =>
+      const { created, blocked, applied, entityId, blockedCreate } = await tx.savepoint((sp) =>
         upsertKeyedEntity({
           tx: sp,
           organizationId,
@@ -509,6 +554,7 @@ export async function promoteKeyedEntities(
           metadata,
           fieldValues,
           createdBy,
+          watcherId,
           createNeedsApproval,
         })
       );
@@ -533,6 +579,7 @@ export async function promoteKeyedEntities(
               proposal: createProposal,
               attribution: 'watcher',
               watcherId,
+              windowId,
             })
           );
         }
@@ -540,6 +587,14 @@ export async function promoteKeyedEntities(
       }
       result.promoted += 1;
       if (created) result.created += 1;
+      // Record the applied change on the run's change-set. A brand-new entity is
+      // a `created` change; an existing entity is `updated` only if the watcher
+      // actually wrote a field inline (an all-blocked or no-op sync adds nothing).
+      if (created) {
+        result.changes.push({ entityId, name, kind: 'created', applied: {} });
+      } else if (Object.keys(applied).length > 0) {
+        result.changes.push({ entityId, name, kind: 'updated', applied });
+      }
       const blockedFields = Object.keys(blocked);
       if (blockedFields.length > 0) {
         result.deferred.push(
@@ -549,6 +604,7 @@ export async function promoteKeyedEntities(
             current: Object.fromEntries(blockedFields.map((f) => [f, blocked[f].current])),
             attribution: 'watcher',
             watcherId,
+            windowId,
           })
         );
       }

@@ -63,6 +63,21 @@ interface EntityMutationBase {
 	/** Attribution + watcher id used by an interceptor to label a deferral. */
 	attribution: MutationAttribution;
 	watcherId?: number | null;
+	/**
+	 * Stable identity of the acting non-human principal, for per-principal policy
+	 * matching (a policy row may target one agent or watcher). Agent → agent id;
+	 * watcher → `watcher:<id>`; system/automation token (no agent id) → null.
+	 * Null means "any principal of this kind". Plumbed here now; consumed by the
+	 * per-principal resolver in a later commit.
+	 */
+	principalId?: string | null;
+	/**
+	 * The watcher-run window that produced this mutation, if any. Threaded so a
+	 * deferred approval lands on the `runs.window_id` COLUMN — that's what groups a
+	 * run's N proposals into ONE batch approval card, and (with the window in the
+	 * dedup key) keeps identical proposals from different windows distinct.
+	 */
+	windowId?: number | null;
 }
 
 export interface CreateMutationRequest extends EntityMutationBase {
@@ -168,6 +183,8 @@ export function deferEntityFieldChange(args: {
 	current: Record<string, unknown>;
 	attribution: MutationAttribution;
 	watcherId?: number | null;
+	/** Groups this proposal's run into a per-window batch approval card. */
+	windowId?: number | null;
 }): DeferredMutation {
 	return buildFieldChangeDeferral(args);
 }
@@ -178,6 +195,8 @@ export function deferEntityCreate(args: {
 	proposal: Record<string, unknown>;
 	attribution: MutationAttribution;
 	watcherId?: number | null;
+	/** Groups this proposal's run into a per-window batch approval card. */
+	windowId?: number | null;
 }): DeferredMutation {
 	return buildCreateDeferral(args);
 }
