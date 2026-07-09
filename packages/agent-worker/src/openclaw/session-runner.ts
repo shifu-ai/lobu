@@ -91,6 +91,7 @@ import {
 import {
   checkCompletionClaim,
   getRequiredBattleReportMutationTools,
+  getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
 const logger = createLogger("worker");
 
@@ -2103,9 +2104,6 @@ Use it when the user references past discussions or you need context.`);
       // any client subscribed via `event: tool_use`). Worker emits one record
       // per tool call at `tool_execution_end` so the result is included.
       if (event.type === "tool_execution_end") {
-        if (event.isError !== true) {
-          currentTurnExecutedTools.add(event.toolName);
-        }
         const args = pendingToolArgs.get(event.toolCallId);
         pendingToolArgs.delete(event.toolCallId);
         const toolStartedAt = pendingToolStartTimes.get(event.toolCallId);
@@ -2135,6 +2133,14 @@ Use it when the user references past discussions or you need context.`);
           result: event.result,
           isError: event.isError,
         });
+        for (const toolName of getSuccessfulCompletionClaimToolNames({
+          toolName: event.toolName,
+          args,
+          result: event.result,
+          isError: event.isError,
+        })) {
+          currentTurnExecutedTools.add(toolName);
+        }
         const executionEventPromise = executionReporter.record({
           type: event.isError ? "tool.failed" : "tool.completed",
           message: `${event.isError ? "Tool failed" : "Tool completed"}: ${event.toolName}`,

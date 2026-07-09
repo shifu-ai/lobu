@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { checkCompletionClaim } from "../openclaw/completion-claim-guard";
+import {
+  checkCompletionClaim,
+  getSuccessfulCompletionClaimToolNames,
+} from "../openclaw/completion-claim-guard";
 
 describe("checkCompletionClaim", () => {
   test("blocks a battle report run claim without matching tool execution", () => {
@@ -27,11 +30,38 @@ describe("checkCompletionClaim", () => {
     expect(result.requiredTools).toEqual(["sales_battle_report_run_now"]);
   });
 
+  test("blocks the Irene battle report completion claim without tool execution", () => {
+    const result = checkCompletionClaim({
+      userMessage: "幫我立即發送 Irene 的戰報",
+      finalText: "已幫你發送 Irene 的戰報。",
+      executedTools: [],
+    });
+
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("mutating_claim_without_tool_execution");
+    expect(result.safeText).toContain("我還沒有成功呼叫對應工具");
+  });
+
   test("allows an immediate battle report send claim with matching tool execution", () => {
     const result = checkCompletionClaim({
       userMessage: "立即發送戰報",
       finalText: "已發送戰報。",
       executedTools: ["sales_battle_report_run_now"],
+    });
+
+    expect(result.allowed).toBe(true);
+  });
+
+  test.each([
+    "sales_battle_report_run_now",
+    "sales_battle_report_schedule_create",
+    "sales_battle_report_schedule_pause",
+    "sales_battle_report_schedule_update",
+  ])("allows battle report done claims after %s succeeds", (toolName) => {
+    const result = checkCompletionClaim({
+      userMessage: "幫我立即發送 Irene 的戰報",
+      finalText: "已幫你發送 Irene 的戰報。",
+      executedTools: [toolName],
     });
 
     expect(result.allowed).toBe(true);
@@ -89,18 +119,14 @@ describe("checkCompletionClaim", () => {
     expect(result.allowed).toBe(true);
   });
 
-  test("blocks schedule pause claims unless a matching pause tool ran", () => {
+  test("allows schedule pause claims when any battle report mutating tool ran", () => {
     const result = checkCompletionClaim({
       userMessage: "暫停每週銷售戰報排程",
       finalText: "已暫停排程。",
       executedTools: ["sales_battle_report_schedule_create"],
     });
 
-    expect(result.allowed).toBe(false);
-    expect(result.reason).toBe("mutating_claim_without_tool_execution");
-    expect(result.requiredTools).toEqual([
-      "sales_battle_report_schedule_pause",
-    ]);
+    expect(result.allowed).toBe(true);
   });
 
   test("allows schedule update claims with matching update tool execution", () => {
@@ -110,6 +136,50 @@ describe("checkCompletionClaim", () => {
       executedTools: ["sales_battle_report_schedule_update"],
     });
 
+    expect(result.allowed).toBe(true);
+  });
+
+  test("does not treat failed catalog tool_call results as successful evidence", () => {
+    const executedTools = getSuccessfulCompletionClaimToolNames({
+      toolName: "tool_call",
+      args: { tool_name: "sales_battle_report_run_now" },
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "Error: Tool call requires approval.",
+          },
+        ],
+      },
+      isError: false,
+    });
+    const result = checkCompletionClaim({
+      userMessage: "幫我立即發送 Irene 的戰報",
+      finalText: "已幫你發送 Irene 的戰報。",
+      executedTools,
+    });
+
+    expect(executedTools).toEqual([]);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("mutating_claim_without_tool_execution");
+  });
+
+  test("treats successful catalog tool_call targets as completion evidence", () => {
+    const executedTools = getSuccessfulCompletionClaimToolNames({
+      toolName: "tool_call",
+      args: { tool_name: "sales_battle_report_run_now" },
+      result: {
+        content: [{ type: "text", text: "ok" }],
+      },
+      isError: false,
+    });
+    const result = checkCompletionClaim({
+      userMessage: "幫我立即發送 Irene 的戰報",
+      finalText: "已幫你發送 Irene 的戰報。",
+      executedTools,
+    });
+
+    expect(executedTools).toEqual(["tool_call", "sales_battle_report_run_now"]);
     expect(result.allowed).toBe(true);
   });
 });
