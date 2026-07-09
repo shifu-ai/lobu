@@ -4,6 +4,11 @@ import {
   TOOL_PRIORITY_WEIGHT,
   type ToolCatalogEntry,
 } from "./tool-catalog";
+export {
+  buildRuntimeToolCatalog,
+  type BuildRuntimeToolCatalogParams,
+  type RuntimeToolCatalogEntry,
+} from "./tool-catalog-dispatcher";
 import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 
 export interface DynamicToolSelectionTrace {
@@ -12,10 +17,9 @@ export interface DynamicToolSelectionTrace {
   totalTools: number;
   selectedToolNames: string[];
   omittedToolNames: string[];
-}
-
-export interface RuntimeToolCatalogEntry extends ToolCatalogEntry {
-  availableThisTurn: boolean;
+  pinnedBudgetOverflow: string[];
+  selected: string[];
+  omitted: string[];
 }
 
 export interface SelectMcpToolsForTurnParams {
@@ -30,6 +34,17 @@ export interface SelectMcpToolsForTurnResult {
   trace: DynamicToolSelectionTrace;
 }
 
+export interface SelectGroupedMcpToolsForTurnParams {
+  toolsByMcp: Record<string, McpToolDef[]>;
+  userMessage: string;
+  maxProviderVisibleTools: number;
+}
+
+export interface SelectGroupedMcpToolsForTurnResult {
+  selected: Record<string, McpToolDef[]>;
+  trace: DynamicToolSelectionTrace;
+}
+
 export interface SelectMcpToolsByMcpForTurnParams {
   toolsByMcp: Record<string, McpToolDef[]>;
   message: string;
@@ -39,11 +54,6 @@ export interface SelectMcpToolsByMcpForTurnParams {
 export interface SelectMcpToolsByMcpForTurnResult {
   selectedTools: Record<string, McpToolDef[]>;
   trace: DynamicToolSelectionTrace;
-}
-
-export interface BuildRuntimeToolCatalogParams {
-  allTools: Record<string, McpToolDef[]>;
-  selectedTools: Record<string, McpToolDef[]>;
 }
 
 export function resolveDynamicToolBudget(value: string | undefined): number {
@@ -81,24 +91,90 @@ function compareEntries(
   return left.originalIndex - right.originalIndex;
 }
 
+const PINNED_DIRECT_TOOL_NAMES = new Set([
+  "tool_search",
+  "tool_call",
+  "tool_status",
+  "meeting_list",
+  "meeting_get",
+  "meeting_search",
+  "submit_course_pm_profile",
+  "search_memory",
+  "save_memory",
+  "sales_battle_report_schedule_list",
+  "sales_battle_report_schedule_create",
+  "sales_battle_report_schedule_pause",
+  "sales_battle_report_schedule_update",
+  "sales_battle_report_run_now",
+]);
+
+function isPinnedDirectTool(entry: ToolCatalogEntry): boolean {
+  return (
+    PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
+    entry.name.startsWith("sales_battle_report_")
+  );
+}
+
+function selectRankedEntries(
+  entries: ToolCatalogEntry[],
+  primaryIntent: ToolIntent,
+  budget: number
+): {
+  selectedEntries: ToolCatalogEntry[];
+  pinnedBudgetOverflow: ToolCatalogEntry[];
+} {
+  const pinnedEntries = entries
+    .filter(isPinnedDirectTool)
+    .sort((left, right) => compareEntries(primaryIntent, left, right));
+  const nonPinnedEntries = entries
+    .filter((entry) => !isPinnedDirectTool(entry))
+    .sort((left, right) => compareEntries(primaryIntent, left, right));
+  const rankedEntries = [...pinnedEntries, ...nonPinnedEntries];
+
+  return {
+    selectedEntries: rankedEntries.slice(0, budget),
+    pinnedBudgetOverflow: pinnedEntries.slice(budget),
+  };
+}
+
 export function selectMcpToolsForTurn(
   params: SelectMcpToolsForTurnParams
-): SelectMcpToolsForTurnResult {
+): SelectMcpToolsForTurnResult;
+export function selectMcpToolsForTurn(
+  params: SelectGroupedMcpToolsForTurnParams
+): SelectGroupedMcpToolsForTurnResult;
+export function selectMcpToolsForTurn(
+  params: SelectMcpToolsForTurnParams | SelectGroupedMcpToolsForTurnParams
+): SelectMcpToolsForTurnResult | SelectGroupedMcpToolsForTurnResult {
+  if ("toolsByMcp" in params) {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: params.toolsByMcp,
+      message: params.userMessage,
+      budget: params.maxProviderVisibleTools,
+    });
+    return {
+      selected: result.selectedTools,
+      trace: result.trace,
+    };
+  }
+
   const primaryIntent = classifyToolIntent(params.message);
   const budget = Math.max(0, Math.floor(params.budget));
   const entries = params.tools.map((tool, index) =>
     catalogEntryForTool(tool, index, params.mcpId)
   );
-  const rankedEntries = [...entries].sort((left, right) =>
-    compareEntries(primaryIntent, left, right)
+  const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
+    entries,
+    primaryIntent,
+    budget
   );
-  const selectedEntries = rankedEntries.slice(0, budget);
   const selectedToolNames = new Set(
     selectedEntries.map((entry) => entry.name).filter(Boolean)
   );
   const omittedToolNames = entries
     .map((entry) => entry.name)
     .filter((name) => name && !selectedToolNames.has(name));
+  const selectedTraceNames = selectedEntries.map((entry) => entry.name);
 
   return {
     selected: selectedEntries.map((entry) => entry.tool),
@@ -106,8 +182,11 @@ export function selectMcpToolsForTurn(
       primaryIntent,
       budget,
       totalTools: params.tools.length,
-      selectedToolNames: selectedEntries.map((entry) => entry.name),
+      selectedToolNames: selectedTraceNames,
       omittedToolNames,
+      pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
+      selected: selectedTraceNames,
+      omitted: omittedToolNames,
     },
   };
 }
@@ -135,23 +214,28 @@ export function selectMcpToolsByMcpForTurn(
     }
   }
 
-  const rankedEntries = [...entries].sort((left, right) =>
-    compareEntries(primaryIntent, left, right)
+  const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
+    entries,
+    primaryIntent,
+    budget
   );
-  const selectedEntries = rankedEntries.slice(0, budget);
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
   );
   const selectedTools: Record<string, McpToolDef[]> = {};
 
-  for (const entry of entries) {
-    if (!selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))) {
-      continue;
-    }
+  for (const entry of selectedEntries) {
     const toolsForMcp = selectedTools[entry.mcpId] ?? [];
     toolsForMcp.push(entry.tool);
     selectedTools[entry.mcpId] = toolsForMcp;
   }
+
+  const selectedTraceNames = selectedEntries.map(displayToolName);
+  const omittedTraceNames = entries
+    .filter(
+      (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))
+    )
+    .map(displayToolName);
 
   return {
     selectedTools,
@@ -159,37 +243,11 @@ export function selectMcpToolsByMcpForTurn(
       primaryIntent,
       budget,
       totalTools: entries.length,
-      selectedToolNames: selectedEntries.map(displayToolName),
-      omittedToolNames: entries
-        .filter(
-          (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))
-        )
-        .map(displayToolName),
+      selectedToolNames: selectedTraceNames,
+      omittedToolNames: omittedTraceNames,
+      pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
+      selected: selectedTraceNames,
+      omitted: omittedTraceNames,
     },
   };
-}
-
-export function buildRuntimeToolCatalog(
-  params: BuildRuntimeToolCatalogParams
-): RuntimeToolCatalogEntry[] {
-  const selectedToolKeys = new Set<string>();
-  for (const [mcpId, tools] of Object.entries(params.selectedTools)) {
-    for (const tool of tools) {
-      selectedToolKeys.add(catalogToolKey(mcpId, tool.name || ""));
-    }
-  }
-
-  const catalog: RuntimeToolCatalogEntry[] = [];
-  for (const [mcpId, tools] of Object.entries(params.allTools)) {
-    for (const [index, tool] of tools.entries()) {
-      const entry = catalogEntryForTool(tool, index, mcpId);
-      catalog.push({
-        ...entry,
-        availableThisTurn: selectedToolKeys.has(
-          catalogToolKey(mcpId, entry.name)
-        ),
-      });
-    }
-  }
-  return catalog;
 }

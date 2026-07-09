@@ -65,6 +65,13 @@ const KNOWN_TOOL_FRESHNESS = new Set<ToolFreshness>([
   "batch",
 ]);
 
+const TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS = new Set([
+  "shifu-toolbox",
+  "shifu_toolbox",
+  "shifu_toolbox_mcp",
+  "toolbox",
+]);
+
 interface ShifuToolMetadata {
   domain: ToolDomain;
   priority: ToolPriority;
@@ -91,27 +98,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseShifuToolMetadata(tool: McpToolDef): ShifuToolMetadata | null {
+function parseShifuToolMetadata(
+  tool: McpToolDef,
+  mcpId: string
+): ShifuToolMetadata | null {
+  if (!TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS.has(mcpId)) return null;
+
   const looseTool = tool as unknown as {
     _meta?: { shifuTool?: unknown };
     annotations?: { shifuTool?: unknown };
   };
+  // Toolbox publishes stable selector metadata at `_meta.shifuTool`. Raw
+  // `annotations.shifuTool` is tolerated only as a migration fallback.
   const rawMetadata =
     looseTool._meta?.shifuTool ?? looseTool.annotations?.shifuTool;
 
   if (!isRecord(rawMetadata)) return null;
-  if (
-    typeof rawMetadata.priority !== "string" ||
-    !KNOWN_TOOL_PRIORITIES.has(rawMetadata.priority as ToolPriority)
-  ) {
-    return null;
-  }
 
   const domain =
     typeof rawMetadata.domain === "string" &&
     KNOWN_TOOL_DOMAINS.has(rawMetadata.domain as ToolDomain)
       ? (rawMetadata.domain as ToolDomain)
       : "unknown";
+  const priority =
+    typeof rawMetadata.priority === "string" &&
+    KNOWN_TOOL_PRIORITIES.has(rawMetadata.priority as ToolPriority)
+      ? (rawMetadata.priority as ToolPriority)
+      : "P2";
   const freshness =
     typeof rawMetadata.freshness === "string" &&
     KNOWN_TOOL_FRESHNESS.has(rawMetadata.freshness as ToolFreshness)
@@ -120,7 +133,7 @@ function parseShifuToolMetadata(tool: McpToolDef): ShifuToolMetadata | null {
 
   return {
     domain,
-    priority: rawMetadata.priority as ToolPriority,
+    priority,
     aliases: Array.isArray(rawMetadata.aliases)
       ? rawMetadata.aliases.filter((alias) => typeof alias === "string")
       : [],
@@ -144,7 +157,7 @@ export function catalogEntryForTool(
   mcpId = ""
 ): ToolCatalogEntry {
   const name = tool.name || "";
-  const shifuMetadata = parseShifuToolMetadata(tool);
+  const shifuMetadata = parseShifuToolMetadata(tool, mcpId);
 
   if (shifuMetadata) {
     return {

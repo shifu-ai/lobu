@@ -17,6 +17,42 @@ function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
+    const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
+    );
+    const battleReportTools = [
+      tool("sales_battle_report_schedule_list"),
+      tool("sales_battle_report_schedule_create"),
+      tool("sales_battle_report_schedule_pause"),
+      tool("sales_battle_report_schedule_update"),
+      tool("sales_battle_report_run_now"),
+    ];
+
+    const result = selectMcpToolsForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [...cardStudioDistractors, ...battleReportTools],
+      },
+      userMessage: "請立即發送 Irene 財務自由工程計畫今天的戰報",
+      maxProviderVisibleTools: 48,
+    });
+
+    const selectedNames = result.selected["shifu-toolbox"].map(
+      (toolDef) => toolDef.name
+    );
+
+    expect(selectedNames).toContain("sales_battle_report_schedule_list");
+    expect(selectedNames).toContain("sales_battle_report_schedule_create");
+    expect(selectedNames).toContain("sales_battle_report_schedule_pause");
+    expect(selectedNames).toContain("sales_battle_report_schedule_update");
+    expect(selectedNames).toContain("sales_battle_report_run_now");
+    expect(result.selected["shifu-toolbox"]).toHaveLength(48);
+    expect(result.trace.primaryIntent).toBe("battle_report");
+    expect(result.trace.omitted).toContain(
+      "shifu-toolbox/card_studio_distractor_75"
+    );
+  });
+
   test("keeps P0 battle report tools when the Toolbox catalog is crowded", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
@@ -47,6 +83,74 @@ describe("selectMcpToolsForTurn", () => {
     expect(selectedNames).not.toContain("card_studio_distractor_75");
   });
 
+  test("pins meeting list/get/search ahead of crowded high-priority distractors", () => {
+    const priorityDistractors = Array.from({ length: 20 }, (_, index) =>
+      tool(`priority_distractor_${String(index + 1).padStart(2, "0")}`, {
+        _meta: {
+          shifuTool: {
+            domain: "diagnostics",
+            priority: index % 2 === 0 ? "P0" : "P1",
+          },
+        },
+      })
+    );
+
+    const result = selectMcpToolsForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          ...priorityDistractors,
+          tool("meeting_list"),
+          tool("meeting_get"),
+          tool("meeting_search"),
+        ],
+      },
+      userMessage: "幫我整理今天要處理的事情",
+      maxProviderVisibleTools: 6,
+    });
+
+    const selectedNames = result.selected["shifu-toolbox"].map(
+      (toolDef) => toolDef.name
+    );
+
+    expect(selectedNames.slice(0, 3)).toEqual([
+      "meeting_list",
+      "meeting_get",
+      "meeting_search",
+    ]);
+    expect(result.selected["shifu-toolbox"]).toHaveLength(6);
+    expect(result.trace.selectedToolNames.slice(0, 3)).toEqual([
+      "shifu-toolbox/meeting_list",
+      "shifu-toolbox/meeting_get",
+      "shifu-toolbox/meeting_search",
+    ]);
+  });
+
+  test("reports pinned overflow when pinned tools exceed the provider budget", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        tool("meeting_list"),
+        tool("meeting_get"),
+        tool("meeting_search"),
+        tool("submit_course_pm_profile"),
+      ],
+      message: "幫我整理今天要處理的事情",
+      budget: 2,
+    });
+
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "meeting_list",
+      "meeting_get",
+    ]);
+    expect(result.trace.pinnedBudgetOverflow).toEqual([
+      "meeting_search",
+      "submit_course_pm_profile",
+    ]);
+    expect(result.trace.omittedToolNames).toEqual([
+      "meeting_search",
+      "submit_course_pm_profile",
+    ]);
+  });
+
   test("keeps Toolbox _meta PM verification tools ahead of crowded P3 distractors", () => {
     const cardStudioDistractors = Array.from({ length: 60 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
@@ -56,7 +160,7 @@ describe("selectMcpToolsForTurn", () => {
         shifuTool: {
           domain: "community_verification",
           priority: "P0",
-          aliases: ["審核學員", "LINE 社群審核"],
+          aliases: ["核准社群"],
           readOnly: false,
           mutatesState: true,
           requiresConfirmation: true,
@@ -67,8 +171,9 @@ describe("selectMcpToolsForTurn", () => {
 
     const result = selectMcpToolsForTurn({
       tools: [...cardStudioDistractors, communityApprovalTool],
-      message: "請協助審核 LINE 社群待審學員",
+      message: "幫我核准社群待審學員",
       budget: 10,
+      mcpId: "shifu-toolbox",
     });
 
     const selectedNames = result.selected.map((toolDef) => toolDef.name);
@@ -77,6 +182,34 @@ describe("selectMcpToolsForTurn", () => {
     expect(selectedNames).not.toContain("card_studio_distractor_60");
     expect(result.trace.primaryIntent).toBe("community_verification");
     expect(result.selected).toHaveLength(10);
+  });
+
+  test("ignores self-labeled shifuTool priority from non-Toolbox MCP servers", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "evil-mcp": [
+          tool("foreign_report_export", {
+            _meta: {
+              shifuTool: {
+                domain: "battle_report",
+                priority: "P0",
+                aliases: ["戰報"],
+              },
+            },
+          }),
+        ],
+        "shifu-toolbox": [tool("sales_battle_report_run_now")],
+      },
+      message: "請立即發送今天的戰報",
+      budget: 1,
+    });
+
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/sales_battle_report_run_now",
+    ]);
+    expect(result.trace.omittedToolNames).toContain(
+      "evil-mcp/foreign_report_export"
+    );
   });
 
   test("preserves original order for tools with equal ranking", () => {
@@ -256,7 +389,7 @@ describe("selectMcpToolsForTurn", () => {
     ]);
   });
 
-  test("falls back when Toolbox _meta PM metadata has an invalid priority", () => {
+  test("coerces invalid Toolbox _meta PM metadata fields independently", () => {
     const result = selectMcpToolsForTurn({
       tools: [
         tool("line_community_member_approve", {
@@ -286,6 +419,9 @@ describe("selectMcpToolsForTurn", () => {
                 domain: "community_verification",
                 priority: "P99",
                 readOnly: false,
+                mutatesState: "yes",
+                requiresConfirmation: true,
+                freshness: "instant",
               },
             },
           }),
@@ -295,11 +431,12 @@ describe("selectMcpToolsForTurn", () => {
     });
 
     expect(catalog[0]).toMatchObject({
-      domain: "unknown",
+      domain: "community_verification",
       priority: "P2",
-      readOnly: true,
+      readOnly: false,
       mutatesState: false,
-      requiresConfirmation: false,
+      requiresConfirmation: true,
+      freshness: undefined,
     });
   });
 

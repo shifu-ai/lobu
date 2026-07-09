@@ -26,8 +26,15 @@ interface CompletionClaimGuardInput {
   executedTools: string[];
 }
 
+interface ToolExecutionEvidenceInput {
+  toolName: string;
+  args?: unknown;
+  result?: unknown;
+  isError?: boolean;
+}
+
 const DONE_CLAIM_PATTERNS = [
-  /已(?:經)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)/i,
+  /已(?:經)?(?:幫(?:你|我|忙)?\s*)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)/i,
   /(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)了/i,
   /\b(?:done|completed|created|scheduled|paused|updated|ran|generated|sent)\b/i,
 ];
@@ -47,8 +54,14 @@ export function checkCompletionClaim(
     return { allowed: true };
   }
 
-  const executed = new Set(input.executedTools);
-  if (requiredTools.some((tool) => executed.has(tool))) {
+  const requiredToolNames = new Set<string>(requiredTools);
+  if (
+    input.executedTools.some((toolName) =>
+      normalizeCompletionClaimEvidence(toolName).some((candidate) =>
+        requiredToolNames.has(candidate)
+      )
+    )
+  ) {
     return { allowed: true };
   }
 
@@ -58,6 +71,24 @@ export function checkCompletionClaim(
     safeText: SAFE_TEXT,
     requiredTools,
   };
+}
+
+export function getSuccessfulCompletionClaimToolNames(
+  input: ToolExecutionEvidenceInput
+): string[] {
+  if (input.isError === true || resultLooksFailed(input.result)) {
+    return [];
+  }
+
+  const names = [input.toolName];
+  if (input.toolName === "tool_call") {
+    const delegatedToolName = readDelegatedToolName(input.args);
+    if (delegatedToolName) {
+      names.push(delegatedToolName);
+    }
+  }
+
+  return names;
 }
 
 export function getRequiredBattleReportMutationTools(
@@ -96,4 +127,57 @@ function mentionsBattleReport(normalizedMessage: string): boolean {
 
 function claimsDone(finalText: string): boolean {
   return DONE_CLAIM_PATTERNS.some((pattern) => pattern.test(finalText));
+}
+
+function readDelegatedToolName(args: unknown): string | null {
+  if (!args || typeof args !== "object" || Array.isArray(args)) {
+    return null;
+  }
+
+  const toolName = (args as Record<string, unknown>).tool_name;
+  if (typeof toolName !== "string") {
+    return null;
+  }
+
+  const trimmed = toolName.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeCompletionClaimEvidence(toolName: string): string[] {
+  const trimmed = toolName.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const normalized = [trimmed];
+  const slashIndex = trimmed.lastIndexOf("/");
+  if (slashIndex >= 0 && slashIndex < trimmed.length - 1) {
+    normalized.push(trimmed.slice(slashIndex + 1));
+  }
+
+  return normalized;
+}
+
+function resultLooksFailed(result: unknown): boolean {
+  if (!result || typeof result !== "object") {
+    return false;
+  }
+
+  const record = result as Record<string, unknown>;
+  if (record.isError === true) {
+    return true;
+  }
+
+  const content = record.content;
+  if (!Array.isArray(content)) {
+    return false;
+  }
+
+  return content.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      return false;
+    }
+    const text = (entry as Record<string, unknown>).text;
+    return typeof text === "string" && /^Error:/i.test(text.trim());
+  });
 }
