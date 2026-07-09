@@ -40,6 +40,23 @@ function textResult(text: string): ToolContentResult {
   return { content: [{ type: "text" as const, text }] };
 }
 
+type McpToolErrorCode =
+  | "auth_required"
+  | "approval_required"
+  | "tool_error"
+  | "server_unavailable";
+
+function mcpErrorResult(
+  text: string,
+  errorCode: McpToolErrorCode
+): ToolContentResult {
+  return {
+    content: [{ type: "text" as const, text }],
+    isError: true,
+    errorCode,
+  };
+}
+
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -122,6 +139,32 @@ async function parseErrorBody(response: Response): Promise<{ error?: string }> {
     .catch(() => ({ error: response.statusText })) as Promise<{
     error?: string;
   }>;
+}
+
+function classifyMcpToolError(
+  status: number,
+  errorMessage: string
+): McpToolErrorCode {
+  const normalized = errorMessage.toLowerCase();
+  if (
+    status === 401 ||
+    normalized.includes("auth") ||
+    normalized.includes("login") ||
+    normalized.includes("credential")
+  ) {
+    return "auth_required";
+  }
+  if (
+    normalized.includes("approval") ||
+    normalized.includes("approve") ||
+    normalized.includes("requires approval")
+  ) {
+    return "approval_required";
+  }
+  if (status >= 500 || normalized.includes("timed out")) {
+    return "server_unavailable";
+  }
+  return "tool_error";
 }
 
 interface GatewayRequestOptions {
@@ -1334,9 +1377,14 @@ export async function callMcpTool(
       );
     } catch (err) {
       if (err instanceof Error && err.name === "TimeoutError") {
-        return textResult(`Error: MCP tool ${mcpId}/${toolName} timed out`);
+        return mcpErrorResult(
+          `Error: MCP tool ${mcpId}/${toolName} timed out`,
+          "server_unavailable"
+        );
       }
-      throw err;
+      const message = formatError(err);
+      logger.error(`${mcpId}/${toolName} error:`, err);
+      return mcpErrorResult(`Error: ${message}`, "server_unavailable");
     }
 
     // MCP proxy returns JSON on success, but a misbehaving upstream (502
@@ -1357,8 +1405,9 @@ export async function callMcpTool(
     } catch (parseErr) {
       const parseMsg =
         parseErr instanceof Error ? parseErr.message : String(parseErr);
-      return textResult(
-        `Error: ${toolName} returned a non-JSON response (status ${response.status}): ${parseMsg}`
+      return mcpErrorResult(
+        `Error: ${toolName} returned a non-JSON response (status ${response.status}): ${parseMsg}`,
+        "server_unavailable"
       );
     }
 
@@ -1367,16 +1416,18 @@ export async function callMcpTool(
     if (!response.ok || data.isError) {
       const errorMsg =
         data.error || contentText || `${toolName} failed (${response.status})`;
-      return textResult(
-        await normalizeToolTextForContext({
-          workspaceDir: gw.workspaceDir,
-          text: `Error: ${errorMsg}`,
-          source: "mcp",
-          runId: gw.conversationId,
-          toolLabel: `${mcpId}/${toolName}`,
-          descriptorPrefix:
-            "Error: Large MCP tool error output was stored as artifact.",
-        })
+      const text = await normalizeToolTextForContext({
+        workspaceDir: gw.workspaceDir,
+        text: `Error: ${errorMsg}`,
+        source: "mcp",
+        runId: gw.conversationId,
+        toolLabel: `${mcpId}/${toolName}`,
+        descriptorPrefix:
+          "Error: Large MCP tool error output was stored as artifact.",
+      });
+      return mcpErrorResult(
+        text,
+        classifyMcpToolError(response.status, errorMsg)
       );
     }
 

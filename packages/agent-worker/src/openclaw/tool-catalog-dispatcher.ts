@@ -32,6 +32,7 @@ export interface RuntimeToolCatalogEntry extends ToolCatalogEntry {
 export interface BuildRuntimeToolCatalogParams {
   allTools: Record<string, McpToolDef[]>;
   selectedTools: Record<string, McpToolDef[]>;
+  providerVisibleTools?: Record<string, McpToolDef[]>;
   allowedToolNames?: Iterable<string>;
 }
 
@@ -66,6 +67,11 @@ export interface DispatchRuntimeToolCallParams {
   args: Record<string, unknown>;
   callTool: RuntimeToolCaller;
 }
+
+type RuntimeMcpToolResultMetadata = {
+  isError?: unknown;
+  errorCode?: unknown;
+};
 
 export interface RuntimeToolStatusQuery {
   toolName?: string;
@@ -127,9 +133,17 @@ export function buildRuntimeToolCatalog(
   params: BuildRuntimeToolCatalogParams
 ): RuntimeToolCatalogEntry[] {
   const selectedToolKeys = new Set<string>();
-  for (const [mcpId, tools] of Object.entries(params.selectedTools)) {
+  const directVisibleTools =
+    params.providerVisibleTools ?? params.selectedTools;
+  for (const [mcpId, tools] of Object.entries(directVisibleTools)) {
     for (const tool of tools) {
-      selectedToolKeys.add(catalogToolKey(mcpId, tool.name || ""));
+      const projectedTool = tool as McpToolDef & {
+        upstreamToolName?: string;
+        providerToolName?: string;
+      };
+      selectedToolKeys.add(
+        catalogToolKey(mcpId, projectedTool.upstreamToolName || tool.name || "")
+      );
     }
   }
 
@@ -256,6 +270,55 @@ function validateToolArgs(
   }
 }
 
+function textFromToolResult(result: ToolContentResult): string {
+  return result.content
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
+  return (
+    value === "not_discovered" ||
+    value === "not_allowed" ||
+    value === "auth_required" ||
+    value === "approval_required" ||
+    value === "schema_invalid" ||
+    value === "tool_error" ||
+    value === "server_unavailable"
+  );
+}
+
+function classifyDelegatedToolError(
+  result: ToolContentResult
+): RuntimeToolCallErrorCode | null {
+  const metadata = result as RuntimeMcpToolResultMetadata;
+  if (isStableErrorCode(metadata.errorCode)) {
+    return metadata.errorCode;
+  }
+  if (metadata.isError !== true) return null;
+
+  const text = textFromToolResult(result).toLowerCase();
+  if (
+    text.includes("auth") ||
+    text.includes("login") ||
+    text.includes("credential")
+  ) {
+    return "auth_required";
+  }
+  if (text.includes("approval") || text.includes("approve")) {
+    return "approval_required";
+  }
+  if (
+    text.includes("timed out") ||
+    text.includes("non-json response") ||
+    text.includes("server unavailable")
+  ) {
+    return "server_unavailable";
+  }
+  return "tool_error";
+}
+
 export async function dispatchRuntimeToolCall(
   params: DispatchRuntimeToolCallParams
 ): Promise<RuntimeToolCallResult> {
@@ -286,10 +349,22 @@ export async function dispatchRuntimeToolCall(
   if (schemaError) return schemaError;
 
   try {
+    const result = await params.callTool(entry.mcpId, entry.name, params.args);
+    const delegatedErrorCode = classifyDelegatedToolError(result);
+    if (delegatedErrorCode) {
+      return {
+        ok: false,
+        code: delegatedErrorCode,
+        message:
+          textFromToolResult(result) ||
+          `Tool ${externalToolKey(entry.mcpId, entry.name)} failed.`,
+        entry,
+      };
+    }
     return {
       ok: true,
       entry,
-      result: await params.callTool(entry.mcpId, entry.name, params.args),
+      result,
     };
   } catch (error) {
     return {

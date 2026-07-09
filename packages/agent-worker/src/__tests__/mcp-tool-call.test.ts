@@ -560,6 +560,8 @@ describe("callMcpTool: approval-blocked response from gateway", () => {
     const text = extractText(result);
     expect(text).toContain("Error:");
     expect(text).toContain("requires approval");
+    expect(result.isError).toBe(true);
+    expect(result.errorCode).toBe("approval_required");
   });
 });
 
