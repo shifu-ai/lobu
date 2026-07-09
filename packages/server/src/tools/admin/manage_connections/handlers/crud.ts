@@ -1573,17 +1573,39 @@ export async function handleUpdate(
     throw err;
   }
 
+	let clearedDeviceTombstone = false;
 	if (
 		hasDeviceWorkerArg ||
 		(updateProfileDeviceWorkerId && !hasDeviceWorkerArg)
 	) {
+    // Re-pinning (or clearing) the device also clears the "Device was removed"
+    // tombstone left by DELETE /api/me/devices — otherwise the connection stays
+    // active but UI-flagged error forever after the user picks a new device.
+		const previousError = (updated[0] as Record<string, unknown>)
+			.error_message;
+		clearedDeviceTombstone =
+			previousError === "Device was removed" ||
+			previousError === "Device was moved to another workspace";
     await sql`
       UPDATE connections
-      SET device_worker_id = ${nextDeviceWorkerId}, updated_at = NOW()
-      WHERE id = ${args.connection_id} AND organization_id = ${organizationId}
+      SET device_worker_id = ${nextDeviceWorkerId},
+          error_message = CASE
+            WHEN error_message IN (
+              'Device was removed',
+              'Device was moved to another workspace'
+            ) THEN NULL
+            ELSE error_message
+          END,
+          updated_at = NOW()
+      WHERE id = ${args.connection_id}
+        AND organization_id = ${organizationId}
+        AND deleted_at IS NULL
     `;
 		(updated[0] as Record<string, unknown>).device_worker_id =
 			nextDeviceWorkerId;
+		if (clearedDeviceTombstone) {
+			(updated[0] as Record<string, unknown>).error_message = null;
+		}
   }
 
   const updatedConnection = updated[0] as {
@@ -1623,6 +1645,7 @@ export async function handleUpdate(
     ...(hasAuthProfileArg ? ["auth_profile_id"] : []),
     ...(hasAppAuthProfileArg ? ["app_auth_profile_id"] : []),
     ...(hasDeviceWorkerArg ? ["device_worker_id"] : []),
+    ...(clearedDeviceTombstone ? ["error_message"] : []),
     ...(args.entity_ids !== undefined ? ["entity_ids"] : []),
     ...(args.config !== undefined ? ["config"] : []),
   ];
