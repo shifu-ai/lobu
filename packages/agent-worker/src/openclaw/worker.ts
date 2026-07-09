@@ -47,6 +47,7 @@ import {
 // module continue to resolve without change.
 export {
   countCompactionsOnCurrentBranch,
+  buildCurrentDateContext,
   buildLobuSystemPrompt,
   estimatePromptTokenCost,
   getLatestAssistantText,

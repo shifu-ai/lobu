@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
+  buildCurrentDateContext,
   buildLobuSystemPrompt,
   runModelWithObs,
   replaceBasePromptIdentity,
@@ -86,13 +87,29 @@ describe("replaceBasePromptIdentity", () => {
     const base = `${PI_OPENER}\n\nAvailable tools:\n- read`;
     const identity = "## Agent Identity\n\nYou are ShiFu onboarding agent.";
     const gateway = "## Conversation History\n\nUse get_channel_history.";
-    const out = buildLobuSystemPrompt(base, identity, gateway);
+    const out = buildLobuSystemPrompt(
+      base,
+      identity,
+      gateway,
+      new Date("2026-07-09T02:50:00.000Z")
+    );
 
     expect(out.startsWith(identity)).toBe(true);
     expect(out).not.toContain("expert coding assistant");
     expect(out).toContain("Available tools:");
+    expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
+    expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
     expect(out).toContain("---");
     expect(out).toContain(gateway);
+  });
+
+  test("builds deterministic Taipei date context instead of relying on model weekday guesses", () => {
+    const out = buildCurrentDateContext(new Date("2026-07-09T02:50:00.000Z"));
+
+    expect(out).toContain("Timezone: Asia/Taipei (UTC+08:00)");
+    expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
+    expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
+    expect(out).toContain("Tomorrow / 明天: 2026-07-10 (星期五)");
   });
 });
 
