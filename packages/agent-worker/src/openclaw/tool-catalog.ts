@@ -96,22 +96,23 @@ function parseShifuToolMetadata(tool: McpToolDef): ShifuToolMetadata | null {
     _meta?: { shifuTool?: unknown };
     annotations?: { shifuTool?: unknown };
   };
+  // Toolbox publishes stable selector metadata at `_meta.shifuTool`. Raw
+  // `annotations.shifuTool` is tolerated only as a migration fallback.
   const rawMetadata =
     looseTool._meta?.shifuTool ?? looseTool.annotations?.shifuTool;
 
   if (!isRecord(rawMetadata)) return null;
-  if (
-    typeof rawMetadata.priority !== "string" ||
-    !KNOWN_TOOL_PRIORITIES.has(rawMetadata.priority as ToolPriority)
-  ) {
-    return null;
-  }
 
   const domain =
     typeof rawMetadata.domain === "string" &&
     KNOWN_TOOL_DOMAINS.has(rawMetadata.domain as ToolDomain)
       ? (rawMetadata.domain as ToolDomain)
       : "unknown";
+  const priority =
+    typeof rawMetadata.priority === "string" &&
+    KNOWN_TOOL_PRIORITIES.has(rawMetadata.priority as ToolPriority)
+      ? (rawMetadata.priority as ToolPriority)
+      : "P2";
   const freshness =
     typeof rawMetadata.freshness === "string" &&
     KNOWN_TOOL_FRESHNESS.has(rawMetadata.freshness as ToolFreshness)
@@ -120,7 +121,7 @@ function parseShifuToolMetadata(tool: McpToolDef): ShifuToolMetadata | null {
 
   return {
     domain,
-    priority: rawMetadata.priority as ToolPriority,
+    priority,
     aliases: Array.isArray(rawMetadata.aliases)
       ? rawMetadata.aliases.filter((alias) => typeof alias === "string")
       : [],

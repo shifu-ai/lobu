@@ -92,7 +92,7 @@ describe("selectMcpToolsForTurn", () => {
         shifuTool: {
           domain: "community_verification",
           priority: "P0",
-          aliases: ["審核學員", "LINE 社群審核"],
+          aliases: ["核准社群"],
           readOnly: false,
           mutatesState: true,
           requiresConfirmation: true,
@@ -103,7 +103,7 @@ describe("selectMcpToolsForTurn", () => {
 
     const result = selectMcpToolsForTurn({
       tools: [...cardStudioDistractors, communityApprovalTool],
-      message: "請協助審核 LINE 社群待審學員",
+      message: "幫我核准社群待審學員",
       budget: 10,
     });
 
@@ -292,7 +292,7 @@ describe("selectMcpToolsForTurn", () => {
     ]);
   });
 
-  test("falls back when Toolbox _meta PM metadata has an invalid priority", () => {
+  test("coerces invalid Toolbox _meta PM metadata fields independently", () => {
     const result = selectMcpToolsForTurn({
       tools: [
         tool("line_community_member_approve", {
@@ -322,6 +322,9 @@ describe("selectMcpToolsForTurn", () => {
                 domain: "community_verification",
                 priority: "P99",
                 readOnly: false,
+                mutatesState: "yes",
+                requiresConfirmation: true,
+                freshness: "instant",
               },
             },
           }),
@@ -331,11 +334,12 @@ describe("selectMcpToolsForTurn", () => {
     });
 
     expect(catalog[0]).toMatchObject({
-      domain: "unknown",
+      domain: "community_verification",
       priority: "P2",
-      readOnly: true,
+      readOnly: false,
       mutatesState: false,
-      requiresConfirmation: false,
+      requiresConfirmation: true,
+      freshness: undefined,
     });
   });
 
