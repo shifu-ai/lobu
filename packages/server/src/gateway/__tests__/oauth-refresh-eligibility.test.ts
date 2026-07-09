@@ -18,7 +18,10 @@
 
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { PostgresSecretStore } from "../../lobu/stores/postgres-secret-store.js";
-import { CHATGPT_PROVIDER, CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
+import {
+  TEST_CHATGPT_OAUTH,
+  TEST_CLAUDE_OAUTH,
+} from "../auth/oauth/__tests__/fixtures.js";
 import {
   isOrgBucketAgentId,
   orgBucketAgentId,
@@ -48,11 +51,11 @@ beforeEach(async () => {
 
 describe("OAuth refresh eligibility", () => {
   test("both provider configs carry their exact refreshable authType literal", () => {
-    expect(CLAUDE_PROVIDER.authType).toBe("oauth");
-    expect(CHATGPT_PROVIDER.authType).toBe("device-code");
+    expect(TEST_CLAUDE_OAUTH.authType).toBe("oauth");
+    expect(TEST_CHATGPT_OAUTH.authType).toBe("device-code");
     // The refresh job's Set is keyed on these exact strings.
-    expect(REFRESHABLE_AUTH_TYPES.has(CLAUDE_PROVIDER.authType!)).toBe(true);
-    expect(REFRESHABLE_AUTH_TYPES.has(CHATGPT_PROVIDER.authType!)).toBe(true);
+    expect(REFRESHABLE_AUTH_TYPES.has(TEST_CLAUDE_OAUTH.authType!)).toBe(true);
+    expect(REFRESHABLE_AUTH_TYPES.has(TEST_CHATGPT_OAUTH.authType!)).toBe(true);
     // A stored api-key profile must NOT be selected.
     expect(REFRESHABLE_AUTH_TYPES.has("api-key")).toBe(false);
   });
@@ -82,13 +85,14 @@ describe("OAuth refresh eligibility", () => {
         createdAt: 0,
         metadata: { refreshToken: "rt-chatgpt", expiresAt: 1 },
       },
-      { makePrimary: false }
+      { makePrimary: false },
     );
 
     const profiles = await store.list("u1", "agent-1");
     // Replicate the exact predicate `doRefresh` uses on stored profiles.
     const eligible = profiles.filter(
-      (p) => REFRESHABLE_AUTH_TYPES.has(p.authType) && !!p.metadata?.refreshTokenRef
+      (p) =>
+        REFRESHABLE_AUTH_TYPES.has(p.authType) && !!p.metadata?.refreshTokenRef,
     );
     const eligibleTypes = eligible.map((p) => p.authType).sort();
     expect(eligibleTypes).toEqual(["device-code", "oauth"]);
@@ -124,7 +128,7 @@ describe("OAuth refresh eligibility", () => {
         createdAt: 0,
         metadata: { refreshToken: "rt-org", expiresAt: 1 },
       },
-      { organizationId: ORG }
+      { organizationId: ORG },
     );
 
     const seen = new Map<string, string>();

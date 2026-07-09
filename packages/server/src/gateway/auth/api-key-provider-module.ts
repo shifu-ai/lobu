@@ -29,6 +29,14 @@ interface ApiKeyProviderConfig {
   registryAlias?: string;
   /** Whether to show in "Add Provider" catalog (default: true) */
   catalogVisible?: boolean;
+  /**
+   * Primary auth type for the catalog. Defaults to `api-key`. Set to
+   * `device-code` / `oauth` when this provider also has a subscription OAuth
+   * row (e.g. xAI SuperGrok).
+   */
+  authType?: "oauth" | "device-code" | "api-key";
+  /** Full set of supported auth types for the add-provider UI. */
+  supportedAuthTypes?: ("oauth" | "device-code" | "api-key")[];
   authProfilesManager: AuthProfilesManager;
 }
 
@@ -57,14 +65,15 @@ export class ApiKeyProviderModule extends BaseProviderModule {
         baseUrlEnvVarName:
           config.baseUrlEnvVarName ||
           config.envVarName.replace("_KEY", "_BASE_URL"),
-        authType: "api-key",
+        authType: config.authType ?? "api-key",
+        supportedAuthTypes: config.supportedAuthTypes ?? ["api-key"],
         apiKeyInstructions: config.apiKeyInstructions,
         apiKeyPlaceholder: config.apiKeyPlaceholder,
         catalogVisible: config.catalogVisible,
         sdkCompat: config.sdkCompat,
         apiKeyHeader: config.apiKeyHeader,
       },
-      config.authProfilesManager
+      config.authProfilesManager,
     );
     this.apiKeyConfig = config;
     this.name = `${config.providerId}-api-key`;
@@ -86,16 +95,19 @@ export class ApiKeyProviderModule extends BaseProviderModule {
   override getProxyBaseUrlMappings(
     proxyUrl: string,
     agentId?: string,
-    context?: import("../embedded.js").ProviderCredentialContext
+    context?: import("../embedded.js").ProviderCredentialContext,
   ): Record<string, string> {
     const mappings = super.getProxyBaseUrlMappings(proxyUrl, agentId, context);
-    if (this.apiKeyConfig.sdkCompat === "openai" && this.providerId === "openai") {
+    if (
+      this.apiKeyConfig.sdkCompat === "openai" &&
+      this.providerId === "openai"
+    ) {
       const slug = this.providerConfig.slug || this.providerId;
       mappings.OPENAI_BASE_URL = this.buildAgentScopedProxyUrl(
         proxyUrl,
         slug,
         agentId,
-        context
+        context,
       );
     }
     return mappings;
@@ -125,7 +137,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
 
   async getModelOptions(
     agentId: string,
-    userId: string
+    userId: string,
   ): Promise<ModelOption[]> {
     const key = await this.getCredential(agentId, { userId });
     if (!key) return [];
@@ -141,7 +153,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
       return this.fetchModelsGeneric(
         key,
         this.apiKeyConfig.upstreamBaseUrl,
-        modelsEndpoint
+        modelsEndpoint,
       );
     }
 
@@ -155,7 +167,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
   private async fetchModelsGeneric(
     apiKey: string,
     baseUrl: string,
-    endpoint: string
+    endpoint: string,
   ): Promise<ModelOption[]> {
     return fetchModelOptions<{
       data?: Array<{ id?: string }>;
@@ -167,7 +179,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
       pick: (payload) => {
         if (payload.data) {
           return payload.data.map((m) =>
-            m.id?.trim() ? { id: m.id.trim() } : null
+            m.id?.trim() ? { id: m.id.trim() } : null,
           );
         }
         if (payload.models) {
@@ -183,7 +195,7 @@ export class ApiKeyProviderModule extends BaseProviderModule {
 
   private async fetchGeminiModels(apiKey: string): Promise<ModelOption[]> {
     const url = new URL(
-      "https://generativelanguage.googleapis.com/v1beta/models"
+      "https://generativelanguage.googleapis.com/v1beta/models",
     );
     url.searchParams.set("key", apiKey);
     return fetchModelOptions<{

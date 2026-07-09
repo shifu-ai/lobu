@@ -33,6 +33,11 @@ import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup.js";
+import { TEST_CLAUDE_OAUTH } from "../../gateway/auth/oauth/__tests__/fixtures.js";
+import {
+	clearOAuthProviderRegistry,
+	setOAuthProviderRegistry,
+} from "../../gateway/auth/oauth/providers.js";
 import { orgContext } from "../stores/org-context";
 import {
 	buildRealClaudeAuthStack,
@@ -141,6 +146,9 @@ describe("Org OAuth: redirect_uri matches between authorize and exchange", () =>
 		stack = await orgContext.run({ organizationId: ORG }, () =>
 			buildRealClaudeAuthStack(),
 		);
+		// Seed AFTER CoreServices.init — init reloads the OAuth registry from
+		// providers.json (or empties it when the path is missing in CI cwd).
+		setOAuthProviderRegistry([TEST_CLAUDE_OAUTH]);
 		coreServicesStash.services = {
 			getOAuthStateStore: () => stack.oauthStateStore,
 			getAuthProfilesManager: () => stack.authProfilesManager,
@@ -150,6 +158,7 @@ describe("Org OAuth: redirect_uri matches between authorize and exchange", () =>
 	afterEach(async () => {
 		globalThis.fetch = realFetch;
 		coreServicesStash.services = null;
+		clearOAuthProviderRegistry();
 		await stack?.shutdown();
 	});
 
