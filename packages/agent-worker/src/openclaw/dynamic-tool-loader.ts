@@ -20,25 +20,25 @@ export interface RuntimeToolCatalogEntry extends ToolCatalogEntry {
   availableThisTurn: boolean;
 }
 
-export interface SelectFlatMcpToolsForTurnParams {
+export interface SelectMcpToolsForTurnParams {
   tools: McpToolDef[];
   message: string;
   budget: number;
   mcpId?: string;
 }
 
-export interface SelectFlatMcpToolsForTurnResult {
+export interface SelectMcpToolsForTurnResult {
   selected: McpToolDef[];
   trace: DynamicToolSelectionTrace;
 }
 
-export interface SelectMcpToolsForTurnParams {
+export interface SelectGroupedMcpToolsForTurnParams {
   toolsByMcp: Record<string, McpToolDef[]>;
   userMessage: string;
   maxProviderVisibleTools: number;
 }
 
-export interface SelectMcpToolsForTurnResult {
+export interface SelectGroupedMcpToolsForTurnResult {
   selected: Record<string, McpToolDef[]>;
   trace: DynamicToolSelectionTrace;
 }
@@ -95,14 +95,14 @@ function compareEntries(
 }
 
 export function selectMcpToolsForTurn(
-  params: SelectFlatMcpToolsForTurnParams
-): SelectFlatMcpToolsForTurnResult;
-export function selectMcpToolsForTurn(
   params: SelectMcpToolsForTurnParams
 ): SelectMcpToolsForTurnResult;
 export function selectMcpToolsForTurn(
-  params: SelectFlatMcpToolsForTurnParams | SelectMcpToolsForTurnParams
-): SelectFlatMcpToolsForTurnResult | SelectMcpToolsForTurnResult {
+  params: SelectGroupedMcpToolsForTurnParams
+): SelectGroupedMcpToolsForTurnResult;
+export function selectMcpToolsForTurn(
+  params: SelectMcpToolsForTurnParams | SelectGroupedMcpToolsForTurnParams
+): SelectMcpToolsForTurnResult | SelectGroupedMcpToolsForTurnResult {
   if ("toolsByMcp" in params) {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: params.toolsByMcp,
