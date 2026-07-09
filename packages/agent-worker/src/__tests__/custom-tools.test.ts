@@ -99,6 +99,112 @@ describe("createOpenClawCustomTools", () => {
     expect(result.content[0]?.text).toContain("sales_battle_report_run_now");
   });
 
+  test("tool_call catalog failures surface as failed tool results", async () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "card_studio_heavy_export",
+            description: "Export a large course promotion card deck",
+            inputSchema: { type: "object", properties: {} },
+          },
+          name: "card_studio_heavy_export",
+          mcpId: "shifu-toolbox",
+          domain: "card_studio",
+          intent: "card_studio",
+          priority: "P3",
+          aliases: [],
+          readOnly: true,
+          mutatesState: false,
+          requiresConfirmation: false,
+          originalIndex: 0,
+          availableThisTurn: false,
+          directVisibleThisTurn: false,
+          callableViaCatalog: false,
+          callBlockedReason: "not_allowed",
+          description: "Export a large course promotion card deck",
+        },
+      ],
+      runtimeToolCaller: mock(async () => ({
+        content: [{ type: "text" as const, text: "should not run" }],
+      })),
+    });
+
+    const toolCall = tools.find((tool) => tool.name === "tool_call");
+    expect(toolCall).toBeDefined();
+
+    const result = await toolCall!.execute("tool-call-1", {
+      tool_name: "card_studio_heavy_export",
+      args: {},
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain('"code": "not_allowed"');
+  });
+
+  test("tool_call delegated MCP failures surface as failed tool results", async () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "card_studio_heavy_export",
+            description: "Export a large course promotion card deck",
+            inputSchema: { type: "object", properties: {} },
+          },
+          name: "card_studio_heavy_export",
+          mcpId: "shifu-toolbox",
+          domain: "card_studio",
+          intent: "card_studio",
+          priority: "P3",
+          aliases: [],
+          readOnly: true,
+          mutatesState: false,
+          requiresConfirmation: false,
+          originalIndex: 0,
+          availableThisTurn: false,
+          directVisibleThisTurn: false,
+          callableViaCatalog: true,
+          description: "Export a large course promotion card deck",
+        },
+      ],
+      runtimeToolCaller: mock(async () => ({
+        content: [
+          {
+            type: "text" as const,
+            text: "Error: Tool call requires approval.",
+          },
+        ],
+        isError: true,
+        errorCode: "approval_required",
+      })),
+    });
+
+    const toolCall = tools.find((tool) => tool.name === "tool_call");
+    expect(toolCall).toBeDefined();
+
+    const result = await toolCall!.execute("tool-call-1", {
+      tool_name: "card_studio_heavy_export",
+      args: {},
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain('"code": "approval_required"');
+  });
+
   test("built-in Lobu tool schemas can be projected for Gemini function declarations", () => {
     const tools = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",

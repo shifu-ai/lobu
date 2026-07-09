@@ -12,6 +12,7 @@ export type RuntimeToolCallBlockedReason =
 
 export type RuntimeToolCallErrorCode =
   | RuntimeToolCallBlockedReason
+  | "ambiguous_tool"
   | "schema_invalid"
   | "tool_error"
   | "server_unavailable";
@@ -58,6 +59,7 @@ export type RuntimeToolCallResult =
       code: RuntimeToolCallErrorCode;
       message: string;
       entry?: RuntimeToolCatalogEntry;
+      candidates?: Array<{ mcpId: string; name: string }>;
     };
 
 export interface DispatchRuntimeToolCallParams {
@@ -232,20 +234,42 @@ export function searchRuntimeToolCatalog(
     .map((match) => match.entry);
 }
 
+type RuntimeToolCatalogLookupResult =
+  | { status: "found"; entry: RuntimeToolCatalogEntry }
+  | {
+      status: "ambiguous";
+      candidates: RuntimeToolCatalogEntry[];
+    }
+  | { status: "missing" };
+
 function findRuntimeToolCatalogEntry(
   catalog: RuntimeToolCatalogEntry[],
   toolName: string,
   mcpId?: string
-): RuntimeToolCatalogEntry | undefined {
+): RuntimeToolCatalogLookupResult {
   const normalizedToolName = toolName.trim();
   const normalizedMcpId = mcpId?.trim();
-  return catalog.find((entry) => {
-    if (normalizedMcpId && entry.mcpId !== normalizedMcpId) return false;
+  const matches = catalog.filter((entry) => {
+    if (normalizedMcpId) {
+      return (
+        entry.mcpId === normalizedMcpId && entry.name === normalizedToolName
+      );
+    }
     return (
       entry.name === normalizedToolName ||
       externalToolKey(entry.mcpId, entry.name) === normalizedToolName
     );
   });
+  if (matches.length === 0) return { status: "missing" };
+  if (
+    !normalizedMcpId &&
+    !normalizedToolName.includes("/") &&
+    matches.length > 1
+  ) {
+    return { status: "ambiguous", candidates: matches };
+  }
+  const entry = matches[0];
+  return entry ? { status: "found", entry } : { status: "missing" };
 }
 
 function validateToolArgs(
@@ -281,6 +305,7 @@ function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
   return (
     value === "not_discovered" ||
     value === "not_allowed" ||
+    value === "ambiguous_tool" ||
     value === "auth_required" ||
     value === "approval_required" ||
     value === "schema_invalid" ||
@@ -322,12 +347,12 @@ function classifyDelegatedToolError(
 export async function dispatchRuntimeToolCall(
   params: DispatchRuntimeToolCallParams
 ): Promise<RuntimeToolCallResult> {
-  const entry = findRuntimeToolCatalogEntry(
+  const lookup = findRuntimeToolCatalogEntry(
     params.catalog,
     params.toolName,
     params.mcpId
   );
-  if (!entry) {
+  if (lookup.status === "missing") {
     return {
       ok: false,
       code: "not_discovered",
@@ -336,6 +361,18 @@ export async function dispatchRuntimeToolCall(
       } is not in the discovered runtime MCP catalog.`,
     };
   }
+  if (lookup.status === "ambiguous") {
+    return {
+      ok: false,
+      code: "ambiguous_tool",
+      message: `Tool ${params.toolName} exists on multiple MCP servers. Provide mcp_id to disambiguate.`,
+      candidates: lookup.candidates.map((entry) => ({
+        mcpId: entry.mcpId,
+        name: entry.name,
+      })),
+    };
+  }
+  const entry = lookup.entry;
   if (!entry.callableViaCatalog) {
     return {
       ok: false,
@@ -403,20 +440,34 @@ export function statusRuntimeToolCatalog(
   query: RuntimeToolStatusQuery
 ) {
   if (query.toolName) {
-    const entry = findRuntimeToolCatalogEntry(
+    const lookup = findRuntimeToolCatalogEntry(
       catalog,
       query.toolName,
       query.mcpId
     );
-    return entry
-      ? summarizeEntry(entry)
-      : {
-          name: query.toolName,
-          mcpId: query.mcpId,
-          directVisibleThisTurn: false,
-          callableViaCatalog: false,
-          callBlockedReason: "not_discovered" as const,
-        };
+    if (lookup.status === "found") {
+      return summarizeEntry(lookup.entry);
+    }
+    if (lookup.status === "ambiguous") {
+      return {
+        name: query.toolName,
+        mcpId: query.mcpId,
+        directVisibleThisTurn: false,
+        callableViaCatalog: false,
+        callBlockedReason: "ambiguous_tool" as const,
+        candidates: lookup.candidates.map((entry) => ({
+          mcpId: entry.mcpId,
+          name: entry.name,
+        })),
+      };
+    }
+    return {
+      name: query.toolName,
+      mcpId: query.mcpId,
+      directVisibleThisTurn: false,
+      callableViaCatalog: false,
+      callBlockedReason: "not_discovered" as const,
+    };
   }
 
   const entries = query.mcpId

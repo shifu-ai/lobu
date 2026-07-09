@@ -217,6 +217,9 @@ function createToolCallDefinition(params: {
       });
       if (result.ok) return result.result;
       return {
+        isError: true,
+        errorCode: result.code,
+        ...(result.candidates ? { candidates: result.candidates } : {}),
         content: [
           {
             type: "text" as const,
@@ -234,6 +237,7 @@ function createToolCallDefinition(params: {
                       callBlockedReason: result.entry.callBlockedReason,
                     }
                   : undefined,
+                candidates: result.candidates,
               },
               null,
               2
@@ -247,7 +251,11 @@ function createToolCallDefinition(params: {
 
 /** Adapt shared tool result content to OpenClaw's ToolResult (adds details field). */
 function toToolResult(result: ToolContentResult): ToolResult {
-  return { content: result.content, details: {} };
+  return {
+    ...(result as Record<string, unknown>),
+    content: result.content,
+    details: {},
+  } as ToolResult;
 }
 
 /**
