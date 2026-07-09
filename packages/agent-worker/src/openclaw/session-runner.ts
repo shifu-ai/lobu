@@ -559,15 +559,32 @@ function formatDatedWeekday(parts: DateParts): string {
   return `${formatDateParts(parts)} (${weekdayLabel(parts)})`;
 }
 
+function formatTaipeiTime(now: Date): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TAIPEI_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  })
+    .format(now)
+    .replace(", ", " ");
+}
+
 export function buildCurrentDateContext(now: Date = new Date()): string {
   const today = getTaipeiDateParts(now);
   const yesterday = addCalendarDays(today, -1);
   const tomorrow = addCalendarDays(today, 1);
+  const currentTime = formatTaipeiTime(now);
 
   return [
     "## Current Date Context",
     "",
     "- Timezone: Asia/Taipei (UTC+08:00)",
+    `- Current time / 現在時間: ${currentTime}`,
     `- Today / 今天: ${formatDatedWeekday(today)}`,
     `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
     `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,

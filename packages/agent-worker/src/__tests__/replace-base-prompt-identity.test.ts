@@ -97,6 +97,7 @@ describe("replaceBasePromptIdentity", () => {
     expect(out.startsWith(identity)).toBe(true);
     expect(out).not.toContain("expert coding assistant");
     expect(out).toContain("Available tools:");
+    expect(out).toContain("Current time / 現在時間: 2026-07-09 10:50:00");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
     expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
     expect(out).toContain("---");
@@ -107,6 +108,7 @@ describe("replaceBasePromptIdentity", () => {
     const out = buildCurrentDateContext(new Date("2026-07-09T02:50:00.000Z"));
 
     expect(out).toContain("Timezone: Asia/Taipei (UTC+08:00)");
+    expect(out).toContain("Current time / 現在時間: 2026-07-09 10:50:00");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
     expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
     expect(out).toContain("Tomorrow / 明天: 2026-07-10 (星期五)");
