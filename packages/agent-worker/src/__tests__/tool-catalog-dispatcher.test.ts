@@ -131,6 +131,37 @@ describe("tool catalog dispatcher", () => {
     );
   });
 
+  test("tool_call rejects ambiguous duplicate raw tool names with candidates", async () => {
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "should not run" }],
+    }));
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        google_workspace: [tool("search", "Search Google Workspace")],
+        notion: [tool("search", "Search Notion")],
+      },
+      selectedTools: {},
+      allowedToolNames: ["google_workspace/search", "notion/search"],
+    });
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "search",
+      args: {},
+      callTool,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "ambiguous_tool",
+      candidates: [
+        { mcpId: "google_workspace", name: "search" },
+        { mcpId: "notion", name: "search" },
+      ],
+    });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
   test("tool_status reports direct-visible and catalog-callable state", () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: {
