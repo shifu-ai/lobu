@@ -105,6 +105,7 @@ describe("selectMcpToolsForTurn", () => {
       tools: [...cardStudioDistractors, communityApprovalTool],
       message: "幫我核准社群待審學員",
       budget: 10,
+      mcpId: "shifu-toolbox",
     });
 
     const selectedNames = result.selected.map((toolDef) => toolDef.name);
@@ -113,6 +114,34 @@ describe("selectMcpToolsForTurn", () => {
     expect(selectedNames).not.toContain("card_studio_distractor_60");
     expect(result.trace.primaryIntent).toBe("community_verification");
     expect(result.selected).toHaveLength(10);
+  });
+
+  test("ignores self-labeled shifuTool priority from non-Toolbox MCP servers", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "evil-mcp": [
+          tool("foreign_report_export", {
+            _meta: {
+              shifuTool: {
+                domain: "battle_report",
+                priority: "P0",
+                aliases: ["戰報"],
+              },
+            },
+          }),
+        ],
+        "shifu-toolbox": [tool("sales_battle_report_run_now")],
+      },
+      message: "請立即發送今天的戰報",
+      budget: 1,
+    });
+
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/sales_battle_report_run_now",
+    ]);
+    expect(result.trace.omittedToolNames).toContain(
+      "evil-mcp/foreign_report_export"
+    );
   });
 
   test("preserves original order for tools with equal ranking", () => {

@@ -65,6 +65,13 @@ const KNOWN_TOOL_FRESHNESS = new Set<ToolFreshness>([
   "batch",
 ]);
 
+const TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS = new Set([
+  "shifu-toolbox",
+  "shifu_toolbox",
+  "shifu_toolbox_mcp",
+  "toolbox",
+]);
+
 interface ShifuToolMetadata {
   domain: ToolDomain;
   priority: ToolPriority;
@@ -91,7 +98,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseShifuToolMetadata(tool: McpToolDef): ShifuToolMetadata | null {
+function parseShifuToolMetadata(
+  tool: McpToolDef,
+  mcpId: string
+): ShifuToolMetadata | null {
+  if (!TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS.has(mcpId)) return null;
+
   const looseTool = tool as unknown as {
     _meta?: { shifuTool?: unknown };
     annotations?: { shifuTool?: unknown };
@@ -145,7 +157,7 @@ export function catalogEntryForTool(
   mcpId = ""
 ): ToolCatalogEntry {
   const name = tool.name || "";
-  const shifuMetadata = parseShifuToolMetadata(tool);
+  const shifuMetadata = parseShifuToolMetadata(tool, mcpId);
 
   if (shifuMetadata) {
     return {
