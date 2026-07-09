@@ -83,6 +83,74 @@ describe("selectMcpToolsForTurn", () => {
     expect(selectedNames).not.toContain("card_studio_distractor_75");
   });
 
+  test("pins meeting list/get/search ahead of crowded high-priority distractors", () => {
+    const priorityDistractors = Array.from({ length: 20 }, (_, index) =>
+      tool(`priority_distractor_${String(index + 1).padStart(2, "0")}`, {
+        _meta: {
+          shifuTool: {
+            domain: "diagnostics",
+            priority: index % 2 === 0 ? "P0" : "P1",
+          },
+        },
+      })
+    );
+
+    const result = selectMcpToolsForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          ...priorityDistractors,
+          tool("meeting_list"),
+          tool("meeting_get"),
+          tool("meeting_search"),
+        ],
+      },
+      userMessage: "幫我整理今天要處理的事情",
+      maxProviderVisibleTools: 6,
+    });
+
+    const selectedNames = result.selected["shifu-toolbox"].map(
+      (toolDef) => toolDef.name
+    );
+
+    expect(selectedNames.slice(0, 3)).toEqual([
+      "meeting_list",
+      "meeting_get",
+      "meeting_search",
+    ]);
+    expect(result.selected["shifu-toolbox"]).toHaveLength(6);
+    expect(result.trace.selectedToolNames.slice(0, 3)).toEqual([
+      "shifu-toolbox/meeting_list",
+      "shifu-toolbox/meeting_get",
+      "shifu-toolbox/meeting_search",
+    ]);
+  });
+
+  test("reports pinned overflow when pinned tools exceed the provider budget", () => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        tool("meeting_list"),
+        tool("meeting_get"),
+        tool("meeting_search"),
+        tool("submit_course_pm_profile"),
+      ],
+      message: "幫我整理今天要處理的事情",
+      budget: 2,
+    });
+
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "meeting_list",
+      "meeting_get",
+    ]);
+    expect(result.trace.pinnedBudgetOverflow).toEqual([
+      "meeting_search",
+      "submit_course_pm_profile",
+    ]);
+    expect(result.trace.omittedToolNames).toEqual([
+      "meeting_search",
+      "submit_course_pm_profile",
+    ]);
+  });
+
   test("keeps Toolbox _meta PM verification tools ahead of crowded P3 distractors", () => {
     const cardStudioDistractors = Array.from({ length: 60 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
