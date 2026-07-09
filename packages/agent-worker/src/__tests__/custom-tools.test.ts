@@ -56,7 +56,7 @@ describe("createOpenClawCustomTools", () => {
     ]);
   });
 
-  test("registers searchable runtime tool catalog when catalog is provided", async () => {
+  test("registers always-on runtime tool catalog tools when catalog is provided", async () => {
     const tools = createOpenClawCustomTools({
       gatewayUrl: "http://gateway",
       workerToken: "worker-token",
@@ -79,12 +79,17 @@ describe("createOpenClawCustomTools", () => {
           priority: "P0",
           originalIndex: 0,
           availableThisTurn: true,
+          directVisibleThisTurn: true,
+          callableViaCatalog: true,
         },
       ],
     });
 
-    const searchTool = tools.find((tool) => tool.name === "tool_search");
+    expect(tools.map((tool) => tool.name)).toContain("tool_search");
+    expect(tools.map((tool) => tool.name)).toContain("tool_call");
+    expect(tools.map((tool) => tool.name)).toContain("tool_status");
 
+    const searchTool = tools.find((tool) => tool.name === "tool_search");
     expect(searchTool).toBeDefined();
 
     const result = await searchTool!.execute("tool-call-1", {

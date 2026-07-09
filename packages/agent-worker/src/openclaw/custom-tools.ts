@@ -32,7 +32,13 @@ import {
   type ProjectedMcpToolDef,
 } from "./mcp-tool-projection";
 import type { ToolboxPersonalAgentToolGroup } from "./session-context";
-import type { RuntimeToolCatalogEntry } from "./dynamic-tool-loader";
+import {
+  dispatchRuntimeToolCall,
+  searchRuntimeToolCatalog,
+  statusRuntimeToolCatalog,
+  type RuntimeToolCaller,
+  type RuntimeToolCatalogEntry,
+} from "./tool-catalog-dispatcher";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
 
@@ -87,38 +93,6 @@ function isOfficialNotionToolboxWrapper(
   );
 }
 
-function scoreRuntimeCatalogEntry(
-  entry: RuntimeToolCatalogEntry,
-  query: string
-): number {
-  const haystack = [
-    entry.name,
-    entry.mcpId,
-    entry.domain,
-    entry.intent,
-    entry.priority,
-    entry.tool.description || "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return 0;
-  if (haystack.includes(normalizedQuery)) return 100;
-
-  const terms = normalizedQuery.split(/\s+/).filter(Boolean);
-  if (terms.length > 1) {
-    return terms.reduce(
-      (score, term) => score + (haystack.includes(term) ? 10 : 0),
-      0
-    );
-  }
-
-  return Array.from(normalizedQuery).reduce(
-    (score, char) => score + (haystack.includes(char) ? 1 : 0),
-    0
-  );
-}
-
 function createToolSearchDefinition(
   runtimeToolCatalog: RuntimeToolCatalogEntry[]
 ): ToolDefinition {
@@ -137,36 +111,133 @@ function createToolSearchDefinition(
       ),
     }),
     run: async (args) => {
-      const limit = Math.min(20, Math.max(1, Math.floor(args.limit ?? 10)));
-      const matches = runtimeToolCatalog
-        .map((entry) => ({
-          entry,
-          score: scoreRuntimeCatalogEntry(entry, args.query),
-        }))
-        .filter((match) => match.score > 0)
-        .sort((left, right) => {
-          if (right.score !== left.score) return right.score - left.score;
-          if (left.entry.availableThisTurn !== right.entry.availableThisTurn) {
-            return left.entry.availableThisTurn ? -1 : 1;
-          }
-          return left.entry.originalIndex - right.entry.originalIndex;
-        })
-        .slice(0, limit)
-        .map(({ entry }) => ({
-          name: entry.name,
-          mcpId: entry.mcpId,
-          description: entry.tool.description || "",
-          domain: entry.domain,
-          intent: entry.intent,
-          priority: entry.priority,
-          availableThisTurn: entry.availableThisTurn,
-        }));
+      const matches = searchRuntimeToolCatalog(runtimeToolCatalog, {
+        query: args.query,
+        limit: args.limit,
+      }).map((entry) => ({
+        name: entry.name,
+        title: entry.title,
+        mcpId: entry.mcpId,
+        description: entry.description,
+        domain: entry.domain,
+        intent: entry.intent,
+        priority: entry.priority,
+        aliases: entry.aliases,
+        readOnly: entry.readOnly,
+        mutatesState: entry.mutatesState,
+        requiresConfirmation: entry.requiresConfirmation,
+        freshness: entry.freshness,
+        directVisibleThisTurn: entry.directVisibleThisTurn,
+        callableViaCatalog: entry.callableViaCatalog,
+        callBlockedReason: entry.callBlockedReason,
+      }));
 
       return {
         content: [
           {
             type: "text" as const,
             text: JSON.stringify({ query: args.query, matches }, null, 2),
+          },
+        ],
+      };
+    },
+  });
+}
+
+function createToolStatusDefinition(
+  runtimeToolCatalog: RuntimeToolCatalogEntry[]
+): ToolDefinition {
+  return defineTool({
+    name: "tool_status",
+    description:
+      "Inspect whether a runtime MCP tool or MCP server is directly visible this turn and whether it remains callable through the runtime catalog.",
+    parameters: Type.Object({
+      tool_name: Type.Optional(
+        Type.String({
+          description:
+            "Tool name to inspect. May be either the raw tool name or mcp_id/tool_name.",
+        })
+      ),
+      mcp_id: Type.Optional(
+        Type.String({
+          description:
+            "Optional MCP server id. If tool_name is omitted, returns a server-level summary.",
+        })
+      ),
+    }),
+    run: async (args) => ({
+      content: [
+        {
+          type: "text" as const,
+          text: JSON.stringify(
+            statusRuntimeToolCatalog(runtimeToolCatalog, {
+              toolName: args.tool_name,
+              mcpId: args.mcp_id,
+            }),
+            null,
+            2
+          ),
+        },
+      ],
+    }),
+  });
+}
+
+function createToolCallDefinition(params: {
+  runtimeToolCatalog: RuntimeToolCatalogEntry[];
+  runtimeToolCaller: RuntimeToolCaller;
+}): ToolDefinition {
+  return defineTool({
+    name: "tool_call",
+    description:
+      "Call an allowed runtime MCP catalog tool that may not be directly visible as a first-class tool this turn. This uses Lobu's MCP proxy path with the same grants, approval, and schema checks as direct MCP tools.",
+    parameters: Type.Object({
+      tool_name: Type.String({
+        description:
+          "Tool name to call. Use the raw name, or mcp_id/tool_name when multiple MCP servers expose the same name.",
+      }),
+      mcp_id: Type.Optional(
+        Type.String({
+          description: "Optional MCP server id for disambiguation.",
+        })
+      ),
+      args: Type.Optional(
+        Type.Record(Type.String(), Type.Unknown(), {
+          description: "Arguments to pass to the MCP tool.",
+        })
+      ),
+    }),
+    run: async (args) => {
+      const result = await dispatchRuntimeToolCall({
+        catalog: params.runtimeToolCatalog,
+        toolName: args.tool_name,
+        mcpId: args.mcp_id,
+        args: (args.args || {}) as Record<string, unknown>,
+        callTool: params.runtimeToolCaller,
+      });
+      if (result.ok) return result.result;
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify(
+              {
+                ok: false,
+                code: result.code,
+                message: result.message,
+                tool: result.entry
+                  ? {
+                      mcpId: result.entry.mcpId,
+                      name: result.entry.name,
+                      directVisibleThisTurn: result.entry.directVisibleThisTurn,
+                      callableViaCatalog: result.entry.callableViaCatalog,
+                      callBlockedReason: result.entry.callBlockedReason,
+                    }
+                  : undefined,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -223,6 +294,8 @@ export function createOpenClawCustomTools(params: {
   onAskUserPosted?: () => void;
   toolboxPersonalAgentTools?: ToolboxPersonalAgentToolGroup[];
   runtimeToolCatalog?: RuntimeToolCatalogEntry[];
+  runtimeToolCaller?: RuntimeToolCaller;
+  shifuTrace?: WorkerShifuTraceContext;
 }): ToolDefinition[] {
   const gw: GatewayParams = {
     gatewayUrl: params.gatewayUrl,
@@ -494,7 +567,20 @@ export function createOpenClawCustomTools(params: {
   ];
 
   if (params.runtimeToolCatalog && params.runtimeToolCatalog.length > 0) {
-    tools.push(createToolSearchDefinition(params.runtimeToolCatalog));
+    const runtimeToolCaller: RuntimeToolCaller =
+      params.runtimeToolCaller ??
+      ((mcpId, toolName, args) =>
+        callMcpTool(gw, mcpId, toolName, args, {
+          shifuTrace: params.shifuTrace,
+        }));
+    tools.push(
+      createToolSearchDefinition(params.runtimeToolCatalog),
+      createToolCallDefinition({
+        runtimeToolCatalog: params.runtimeToolCatalog,
+        runtimeToolCaller,
+      }),
+      createToolStatusDefinition(params.runtimeToolCatalog)
+    );
   }
 
   for (const group of params.toolboxPersonalAgentTools || []) {

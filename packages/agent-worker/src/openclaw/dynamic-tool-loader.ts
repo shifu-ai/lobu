@@ -4,6 +4,11 @@ import {
   TOOL_PRIORITY_WEIGHT,
   type ToolCatalogEntry,
 } from "./tool-catalog";
+export {
+  buildRuntimeToolCatalog,
+  type BuildRuntimeToolCatalogParams,
+  type RuntimeToolCatalogEntry,
+} from "./tool-catalog-dispatcher";
 import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 
 export interface DynamicToolSelectionTrace {
@@ -14,10 +19,6 @@ export interface DynamicToolSelectionTrace {
   omittedToolNames: string[];
   selected: string[];
   omitted: string[];
-}
-
-export interface RuntimeToolCatalogEntry extends ToolCatalogEntry {
-  availableThisTurn: boolean;
 }
 
 export interface SelectMcpToolsForTurnParams {
@@ -52,11 +53,6 @@ export interface SelectMcpToolsByMcpForTurnParams {
 export interface SelectMcpToolsByMcpForTurnResult {
   selectedTools: Record<string, McpToolDef[]>;
   trace: DynamicToolSelectionTrace;
-}
-
-export interface BuildRuntimeToolCatalogParams {
-  allTools: Record<string, McpToolDef[]>;
-  selectedTools: Record<string, McpToolDef[]>;
 }
 
 export function resolveDynamicToolBudget(value: string | undefined): number {
@@ -206,29 +202,4 @@ export function selectMcpToolsByMcpForTurn(
       omitted: omittedTraceNames,
     },
   };
-}
-
-export function buildRuntimeToolCatalog(
-  params: BuildRuntimeToolCatalogParams
-): RuntimeToolCatalogEntry[] {
-  const selectedToolKeys = new Set<string>();
-  for (const [mcpId, tools] of Object.entries(params.selectedTools)) {
-    for (const tool of tools) {
-      selectedToolKeys.add(catalogToolKey(mcpId, tool.name || ""));
-    }
-  }
-
-  const catalog: RuntimeToolCatalogEntry[] = [];
-  for (const [mcpId, tools] of Object.entries(params.allTools)) {
-    for (const [index, tool] of tools.entries()) {
-      const entry = catalogEntryForTool(tool, index, mcpId);
-      catalog.push({
-        ...entry,
-        availableThisTurn: selectedToolKeys.has(
-          catalogToolKey(mcpId, entry.name)
-        ),
-      });
-    }
-  }
-  return catalog;
 }

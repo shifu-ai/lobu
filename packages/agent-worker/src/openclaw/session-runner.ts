@@ -1618,9 +1618,19 @@ Use it when the user references past discussions or you need context.`);
     );
   }
 
+  const catalogAllowedToolNames: string[] = [];
+  for (const [mcpId, toolsForMcp] of Object.entries(context.mcpTools)) {
+    for (const tool of toolsForMcp) {
+      const toolName = tool.name?.trim();
+      if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy)) continue;
+      catalogAllowedToolNames.push(toolName, `${mcpId}/${toolName}`);
+    }
+  }
+
   const runtimeToolCatalog = buildRuntimeToolCatalog({
     allTools: context.mcpTools,
     selectedTools: selectedMcpToolsForTurn,
+    allowedToolNames: catalogAllowedToolNames,
   });
 
   let customTools = createOpenClawCustomTools({
@@ -1641,6 +1651,7 @@ Use it when the user references past discussions or you need context.`);
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
     runtimeToolCatalog,
+    shifuTrace,
   });
 
   // Register first-class MCP tools + auth tools. Skipped entirely in CLI
