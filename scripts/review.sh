@@ -3,7 +3,7 @@
 # with the diff against the base branch. Prints a JSON verdict on the last line.
 #
 # Usage:
-#   ./scripts/review.sh                 # base = main
+#   ./scripts/review.sh                 # base = origin/main when available
 #   ./scripts/review.sh --base develop  # override base
 #   BASE=develop ./scripts/review.sh    # env-var override
 #
@@ -25,9 +25,19 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/review-lock.sh
+. "$SCRIPT_DIR/lib/review-lock.sh"
+# shellcheck source=scripts/lib/review-database-url.sh
+. "$SCRIPT_DIR/lib/review-database-url.sh"
+# shellcheck source=scripts/lib/review-process.sh
+. "$SCRIPT_DIR/lib/review-process.sh"
+# shellcheck source=scripts/lib/herdr-review-lifecycle.sh
+. "$SCRIPT_DIR/lib/herdr-review-lifecycle.sh"
+
 # --- preflight --------------------------------------------------------------
 
-for cmd in claude jq git; do
+for cmd in claude jq git node perl python3; do
   command -v "$cmd" >/dev/null 2>&1 || { echo "$cmd not found on PATH." >&2; exit 2; }
 done
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo "Not inside a git work tree." >&2; exit 2; }
@@ -40,7 +50,16 @@ fi
 
 # --- args -------------------------------------------------------------------
 
-BASE_BRANCH="${BASE:-main}"
+if [ -n "${BASE:-}" ]; then
+  BASE_BRANCH="$BASE"
+elif git show-ref --verify --quiet refs/remotes/origin/main; then
+  # Task worktrees often outlive the primary checkout's local `main` ref. Use
+  # the fetched remote-tracking branch by default so a stale local main cannot
+  # silently widen or distort the diff sent to the reviewer.
+  BASE_BRANCH="origin/main"
+else
+  BASE_BRANCH="main"
+fi
 CLAUDE_REVIEW_MODEL="${CLAUDE_REVIEW_MODEL:-opus}"
 CLAUDE_REVIEW_EFFORT="${CLAUDE_REVIEW_EFFORT:-high}"
 PI_REVIEW_STATUS_CONTEXT="${PI_REVIEW_STATUS_CONTEXT:-pi-review}"
@@ -48,6 +67,7 @@ PI_REVIEW_MIN_BUG_FREE="${PI_REVIEW_MIN_BUG_FREE:-80}"
 PI_REVIEW_MAX_SLOP="${PI_REVIEW_MAX_SLOP:-15}"
 PI_REVIEW_MIN_SIMPLICITY="${PI_REVIEW_MIN_SIMPLICITY:-70}"
 CLAUDE_REVIEW_HERDR="${CLAUDE_REVIEW_HERDR:-auto}"
+REVIEW_DATABASE_URL="${REVIEW_DATABASE_URL:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) BASE_BRANCH="$2"; shift 2 ;;
@@ -85,6 +105,7 @@ post_review_status() {
     || echo ">> warning: failed to post GitHub commit status '$PI_REVIEW_STATUS_CONTEXT'" >&2
 }
 
+REVIEW_STATUS_STARTED=0
 REVIEW_STATUS_FINALIZED=0
 finalize_review_status() {
   post_review_status "$1" "$2" "${3:-}"
@@ -93,8 +114,11 @@ finalize_review_status() {
 
 run_claude_review_inline() {
   local prompt_file="$1"
+  local raw_file
+  raw_file="$(mktemp /tmp/lobu-review-claude-inline.XXXXXX)"
+  REVIEW_INLINE_RAW_FILE="$raw_file"
   set +e
-  RAW="$(
+  run_review_child env \
     BASE_BRANCH="$BASE_BRANCH" \
     HEAD_SHA="$HEAD_SHA" \
     TYPECHECK_LOG="$TYPECHECK_LOG" TYPECHECK_EXIT="$TYPECHECK_EXIT" \
@@ -107,27 +131,56 @@ run_claude_review_inline() {
       --output-format text \
       --no-session-persistence \
       --tools Bash,Read,Grep,LS \
-      --permission-mode bypassPermissions < /dev/null
-  )"
+      --permission-mode bypassPermissions < /dev/null > "$raw_file"
   CLAUDE_EXIT=$?
   set -e
+  RAW="$(cat "$raw_file" 2>/dev/null || true)"
+  rm -f "$raw_file"
+  REVIEW_INLINE_RAW_FILE=""
 }
 
 run_claude_review_herdr() {
   local prompt_file="$1"
-  local raw_file exit_file pane_name started
+  local raw_file exit_file runner_file pane_name before_tabs tab_json tab_id pane_id started
   raw_file="$(mktemp /tmp/lobu-review-claude-raw.XXXXXX)"
   exit_file="$(mktemp /tmp/lobu-review-claude-exit.XXXXXX)"
+  runner_file="$(mktemp /tmp/lobu-review-claude-runner.XXXXXX)"
   rm -f "$exit_file"
+  herdr_review_track_files "$raw_file" "$exit_file" "$runner_file"
   pane_name="claude-review-${HEAD_SHA:0:8}-$$"
 
-  echo ">> spawning Herdr pane '$pane_name' for Claude review"
+  if ! before_tabs="$(herdr_review_snapshot_tabs "$HERDR_WORKSPACE_ID")"; then
+    rm -f "$raw_file" "$exit_file" "$runner_file"
+    herdr_review_forget_files
+    echo ">> could not snapshot Herdr tabs; running Claude inline" >&2
+    run_claude_review_inline "$prompt_file"
+    return
+  fi
+  herdr_review_track_locator "$HERDR_WORKSPACE_ID" "$pane_name" "$PWD" "$before_tabs"
+
+  cat > "$runner_file" <<'RUNNER'
+set +e
+claude -p "$(cat "$PROMPT_FILE")" \
+  --model "$CLAUDE_REVIEW_MODEL" \
+  --effort "$CLAUDE_REVIEW_EFFORT" \
+  --output-format text \
+  --no-session-persistence \
+  --tools Bash,Read,Grep,LS \
+  --permission-mode bypassPermissions < /dev/null | tee "$RAW_FILE"
+claude_exit=${PIPESTATUS[0]}
+exit_tmp="${EXIT_FILE}.tmp.$$"
+printf "%s\n" "$claude_exit" > "$exit_tmp"
+mv "$exit_tmp" "$EXIT_FILE"
+exit "$claude_exit"
+RUNNER
+
+  echo ">> spawning Herdr tab '$pane_name' for Claude review"
   set +e
-  started="$(
-    herdr agent start "$pane_name" \
+  tab_json="$(
+    herdr tab create \
       --workspace "$HERDR_WORKSPACE_ID" \
       --cwd "$PWD" \
-      --split down \
+      --label "$pane_name" \
       --no-focus \
       --env "PATH=$PATH" \
       --env "HOME=$HOME" \
@@ -145,47 +198,64 @@ run_claude_review_herdr() {
       --env "CLAUDE_REVIEW_EFFORT=$CLAUDE_REVIEW_EFFORT" \
       --env "PROMPT_FILE=$prompt_file" \
       --env "RAW_FILE=$raw_file" \
-      --env "EXIT_FILE=$exit_file" \
-      -- bash -lc '
-        set +e
-        claude -p "$(cat "$PROMPT_FILE")" \
-          --model "$CLAUDE_REVIEW_MODEL" \
-          --effort "$CLAUDE_REVIEW_EFFORT" \
-          --output-format text \
-          --no-session-persistence \
-          --tools Bash,Read,Grep,LS \
-          --permission-mode bypassPermissions < /dev/null | tee "$RAW_FILE"
-        claude_exit=${PIPESTATUS[0]}
-        printf "%s\n" "$claude_exit" > "$EXIT_FILE"
-        exit "$claude_exit"
-      ' 2>&1
+      --env "EXIT_FILE=$exit_file" 2>&1
   )"
   local start_exit=$?
+  if [ $start_exit -eq 0 ]; then
+    read -r tab_id pane_id <<<"$(herdr_review_parse_created_tab "$tab_json" 2>/dev/null || true)"
+    [ -n "$tab_id" ] && herdr_review_track_tab "$tab_id"
+    if [ -z "$tab_id" ] || [ -z "$pane_id" ]; then
+      start_exit=1
+      started="Herdr tab create returned no tab/pane id: $tab_json"
+    else
+      herdr pane rename "$pane_id" "$pane_name" >/dev/null 2>&1 || true
+      # A transport failure can still mean the command reached Herdr. Mark the
+      # runner as possibly live before dispatch so EXIT cleanup retains the
+      # global lock until exact closure or its terminal marker is confirmed.
+      herdr_review_mark_runner_may_be_live
+      started="$(herdr pane run "$pane_id" "bash $(printf '%q' "$runner_file")" 2>&1)"
+      start_exit=$?
+    fi
+  else
+    started="$tab_json"
+  fi
   set -e
   if [ $start_exit -ne 0 ]; then
-    echo ">> Herdr Claude pane failed to start; falling back to inline Claude" >&2
+    if ! herdr_review_cleanup; then
+      echo ">> Herdr tab creation state is ambiguous; refusing inline fallback" >&2
+      return 1
+    fi
+    echo ">> Herdr Claude tab failed to start; falling back to inline Claude" >&2
     printf '%s\n' "$started" >&2
     run_claude_review_inline "$prompt_file"
     return
   fi
 
-  echo ">> Claude review is visible in Herdr pane '$pane_name'"
+  echo ">> Claude review is visible in Herdr tab '$pane_name'"
   local waited=0
   while [ ! -f "$exit_file" ]; do
     sleep 2
     waited=$((waited + 2))
     if [ "$waited" -ge "${CLAUDE_REVIEW_TIMEOUT_SECONDS:-1200}" ]; then
+      # Stop the tab first so tee flushes its final partial output, then copy it
+      # into RAW before deleting the transport files.
+      if ! herdr_review_close_tab; then
+        RAW="$(cat "$raw_file" 2>/dev/null || true)"
+        CLAUDE_EXIT=124
+        echo ">> Claude review tab timed out and could not be closed" >&2
+        return 1
+      fi
       RAW="$(cat "$raw_file" 2>/dev/null || true)"
       CLAUDE_EXIT=124
-      rm -f "$raw_file" "$exit_file"
-      echo ">> Claude review pane timed out after ${waited}s" >&2
+      herdr_review_cleanup
+      echo ">> Claude review tab timed out after ${waited}s" >&2
       return
     fi
   done
 
   RAW="$(cat "$raw_file" 2>/dev/null || true)"
   CLAUDE_EXIT="$(cat "$exit_file" 2>/dev/null || echo 1)"
-  rm -f "$raw_file" "$exit_file"
+  herdr_review_cleanup
 }
 
 run_claude_review() {
@@ -280,8 +350,33 @@ process.exit(1);
   printf '%s\n' "$raw" | sed -e 's/^```json//' -e 's/^```//' -e 's/```$//'
 }
 
-trap 'ec=$?; if [ $ec -ne 0 ] && [ "${REVIEW_STATUS_FINALIZED:-0}" != "1" ]; then post_review_status error "Claude review failed before verdict (exit $ec)"; fi' EXIT
+review_exit_cleanup() {
+  local ec=$? post_failure_status=0
+  trap - EXIT INT TERM HUP
+  stop_active_review_child
+  review_process_abort_inline
+  # If the normal Herdr path completed, its tracked state is already empty.
+  # Otherwise this closes the tab/process and keeps any non-empty partial raw
+  # output for diagnosis before the script exits.
+  herdr_review_abort_until_safe_to_release_lock
+  if [ "$ec" -ne 0 ] && [ "$REVIEW_LOCK_HELD" = "1" ] && \
+     [ "$REVIEW_STATUS_STARTED" = "1" ] && [ "$REVIEW_STATUS_FINALIZED" != "1" ]; then
+    post_failure_status=1
+  fi
+  if [ "$post_failure_status" = "1" ]; then
+    post_review_status error "Claude review failed before verdict (exit $ec)"
+  fi
+  release_review_lock
+  exit "$ec"
+}
+trap review_exit_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
+acquire_review_lock
+
+REVIEW_STATUS_STARTED=1
 post_review_status pending "Claude review running"
 
 # --- env --------------------------------------------------------------------
@@ -294,12 +389,16 @@ if [ -f .env ]; then
 fi
 
 # Tests must NOT run against whatever DATABASE_URL .env points at (often a
-# shared/tailnet DB) — they run DDL like `DROP SCHEMA public`. Unset it so the
-# test harness spawns an isolated, ephemeral embedded Postgres per run (see
-# packages/server/src/__tests__/setup/embedded-postgres-backend.ts). This also
-# removes the old "ALTER SCHEMA public OWNER" hack: the embedded cluster's
-# bootstrap role already owns its schema.
-unset DATABASE_URL
+# shared/tailnet DB) — they run DDL like `DROP SCHEMA public`. By default the
+# test harness therefore spawns an isolated embedded Postgres. Parallel review
+# runs can instead opt into distinct pre-created test databases through the
+# deliberately named REVIEW_DATABASE_URL; reject non-test names defensively.
+if [ -n "$REVIEW_DATABASE_URL" ]; then
+  validate_review_database_url "$REVIEW_DATABASE_URL"
+  export DATABASE_URL="$REVIEW_DATABASE_URL"
+else
+  unset DATABASE_URL
+fi
 
 # The dev .env also sets PUBLIC_GATEWAY_URL=http://localhost:8787, which makes the
 # public-origin / public-pages-contract tests fail ("expected 'localhost' to be
@@ -311,10 +410,11 @@ unset PUBLIC_GATEWAY_URL
 # Tests need workspace packages built. Worktree's `dist/` may be stale or
 # missing — always rebuild before tests. Cheap if up-to-date.
 
-BUILD_LOG="/tmp/lobu-review-build.log"
+REVIEW_RUN_DIR="$(mktemp -d /tmp/lobu-review.XXXXXX)"
+BUILD_LOG="$REVIEW_RUN_DIR/build.log"
 echo ">> make build-packages → $BUILD_LOG"
 set +e
-make build-packages > "$BUILD_LOG" 2>&1
+run_review_child make build-packages > "$BUILD_LOG" 2>&1
 BUILD_EXIT=$?
 set -e
 if [ $BUILD_EXIT -ne 0 ]; then
@@ -323,9 +423,9 @@ fi
 
 # --- test suites ------------------------------------------------------------
 
-TYPECHECK_LOG="/tmp/lobu-review-typecheck.log"
-UNIT_LOG="/tmp/lobu-review-unit.log"
-INTEGRATION_LOG="/tmp/lobu-review-integration.log"
+TYPECHECK_LOG="$REVIEW_RUN_DIR/typecheck.log"
+UNIT_LOG="$REVIEW_RUN_DIR/unit.log"
+INTEGRATION_LOG="$REVIEW_RUN_DIR/integration.log"
 DETERMINISTIC_TEST_ENV=(
   env
   ANTHROPIC_API_KEY=
@@ -335,45 +435,65 @@ DETERMINISTIC_TEST_ENV=(
   OPENAI_AUTH_TOKEN=
 )
 
+run_deterministic() {
+  env \
+    ANTHROPIC_API_KEY= \
+    ANTHROPIC_AUTH_TOKEN= \
+    CLAUDE_CODE_OAUTH_TOKEN= \
+    OPENAI_API_KEY= \
+    OPENAI_AUTH_TOKEN= \
+    "$@"
+}
+export -f run_deterministic
+export SCRIPT_DIR
+
 echo ">> typecheck → $TYPECHECK_LOG"
 set +e
-"${DETERMINISTIC_TEST_ENV[@]}" bun run typecheck > "$TYPECHECK_LOG" 2>&1
+run_review_child "${DETERMINISTIC_TEST_ENV[@]}" bun run typecheck > "$TYPECHECK_LOG" 2>&1
 TYPECHECK_EXIT=$?
 set -e
 
 echo ">> unit tests → $UNIT_LOG"
 set +e
-UNIT_EXIT=0
-{
+run_review_unit_suites() {
+  local ec
+  UNIT_EXIT=0
+  run_deterministic bash "$SCRIPT_DIR/lib/__tests__/review-lock.test.sh";               ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic bash "$SCRIPT_DIR/lib/__tests__/review-database-url.test.sh";        ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic bash "$SCRIPT_DIR/lib/__tests__/review-process.test.sh";             ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  # Shell lifecycle regressions: Herdr task/review tabs must be owned and
+  # cleaned without invoking the real Herdr daemon.
+  run_deterministic bash "$SCRIPT_DIR/lib/__tests__/herdr-lifecycle.test.sh";            ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
   # Guard: every packages/server *.test.ts must run in >=1 runner (vitest or a
   # bun job). Fails loudly if a file drifts into running nowhere — the
   # silent-skip class this change fixes.
-  "${DETERMINISTIC_TEST_ENV[@]}" node scripts/check-test-runner-coverage.mjs;                      ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic node scripts/check-test-runner-coverage.mjs;                      ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
   # Guard: no raw JS array bound as a SQL param (the fetch_types:false trap —
   # a malformed array literal that Postgres rejects, historically silent).
-  "${DETERMINISTIC_TEST_ENV[@]}" node scripts/check-raw-array-params.mjs;                          ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic node scripts/check-raw-array-params.mjs;                          ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
   # Guard: the per-user connection-visibility READ-SEAM gate must come from the
   # one compiler (authz/connection-visibility.ts), not be re-derived inline —
   # that is how the authz gate silently drifts and leaks private-connection data.
-  "${DETERMINISTIC_TEST_ENV[@]}" node scripts/check-connection-visibility-compiler.mjs;            ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
-  "${DETERMINISTIC_TEST_ENV[@]}" bun test packages/core packages/cli packages/connectors;          ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
-  "${DETERMINISTIC_TEST_ENV[@]}" bun test packages/agent-worker;                                   ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
-  "${DETERMINISTIC_TEST_ENV[@]}" bun test packages/server/src/__tests__/unit;                      ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
-  "${DETERMINISTIC_TEST_ENV[@]}" bun test packages/server/src/auth/__tests__/tool-access.test.ts;  ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic node scripts/check-connection-visibility-compiler.mjs;            ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic bun test packages/core packages/cli packages/connectors;          ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic bun test packages/agent-worker;                                   ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic bun test packages/server/src/__tests__/unit;                      ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  run_deterministic bun test packages/server/src/auth/__tests__/tool-access.test.ts;  ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
   # NOTE: src/gateway/infrastructure/queue runs in the gateway integration loop
   # below (not here) — see #1238; running it in both jobs double-executes it.
-  "${DETERMINISTIC_TEST_ENV[@]}" bun test packages/connector-worker;                               ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
-} > "$UNIT_LOG" 2>&1
+  run_deterministic bun test packages/connector-worker;                               ec=$?; [ $ec -gt $UNIT_EXIT ] && UNIT_EXIT=$ec
+  return "$UNIT_EXIT"
+}
+run_review_child run_review_unit_suites > "$UNIT_LOG" 2>&1
+UNIT_EXIT=$?
 set -e
-
-echo ">> make clean-test-pg before integration"
-make clean-test-pg
 
 echo ">> integration tests → $INTEGRATION_LOG"
 set +e
-INTEGRATION_EXIT=0
-{
-  (cd packages/server && "${DETERMINISTIC_TEST_ENV[@]}" node ../../node_modules/.bin/vitest run --reporter=default); ec=$?; [ $ec -gt $INTEGRATION_EXIT ] && INTEGRATION_EXIT=$ec
+run_review_integration_suites() {
+  local ec
+  INTEGRATION_EXIT=0
+  (cd packages/server && run_deterministic node ../../node_modules/.bin/vitest run --reporter=default); ec=$?; [ $ec -gt $INTEGRATION_EXIT ] && INTEGRATION_EXIT=$ec
   # Each gateway test file runs in its own bun process: bun has no per-file
   # isolation and the gateway suites aren't mutually hermetic, so co-running a
   # whole __tests__ dir in one process leaks DB/module state across files (see
@@ -387,12 +507,15 @@ INTEGRATION_EXIT=0
     for d in $dirs; do
       files=$(find "$d" -maxdepth 1 -type f -name '*.test.ts' | sort)
       for f in $files; do
-        "${DETERMINISTIC_TEST_ENV[@]}" bun test "$f" || rc=1
+        run_deterministic bun test "$f" || rc=1
       done
     done
     exit $rc );                                                                        ec=$?; [ $ec -gt $INTEGRATION_EXIT ] && INTEGRATION_EXIT=$ec
-  (cd packages/server && "${DETERMINISTIC_TEST_ENV[@]}" bun test src/lobu/__tests__ src/scheduled src/workspace/__tests__ src/tools/admin/__tests__ src/auth/oauth/__tests__); ec=$?; [ $ec -gt $INTEGRATION_EXIT ] && INTEGRATION_EXIT=$ec
-} > "$INTEGRATION_LOG" 2>&1
+  (cd packages/server && run_deterministic bun test src/lobu/__tests__ src/scheduled src/workspace/__tests__ src/tools/admin/__tests__ src/auth/oauth/__tests__); ec=$?; [ $ec -gt $INTEGRATION_EXIT ] && INTEGRATION_EXIT=$ec
+  return "$INTEGRATION_EXIT"
+}
+run_review_child run_review_integration_suites > "$INTEGRATION_LOG" 2>&1
+INTEGRATION_EXIT=$?
 set -e
 
 echo ">> suite exit codes: typecheck=$TYPECHECK_EXIT unit=$UNIT_EXIT integration=$INTEGRATION_EXIT"
@@ -404,10 +527,11 @@ PROMPT_FILE="$(pwd)/prompts/review-prompt.md"
 
 echo ">> invoking Claude CLI (model: $CLAUDE_REVIEW_MODEL, effort: $CLAUDE_REVIEW_EFFORT)"
 CLAUDE_PROMPT_FILE="$(mktemp /tmp/lobu-review-prompt.XXXXXX)"
+herdr_review_track_prompt "$CLAUDE_PROMPT_FILE"
 cat "$PROMPT_FILE" > "$CLAUDE_PROMPT_FILE"
 printf '\n\nReview the diff. Emit only the JSON verdict.\n' >> "$CLAUDE_PROMPT_FILE"
 run_claude_review "$CLAUDE_PROMPT_FILE"
-rm -f "$CLAUDE_PROMPT_FILE"
+herdr_review_release_prompt
 
 VERDICT="$RAW"
 VERDICT="$(extract_json_verdict "$VERDICT")"
