@@ -138,6 +138,11 @@ const DEFAULT_MEMORY_FLUSH_CONFIG: ResolvedMemoryFlushConfig = {
 };
 const GEMINI_DIRECT_MCP_TOOL_LIMIT = 24;
 const DEFAULT_DIRECT_MCP_TOOL_LIMIT = 64;
+const RUNTIME_CATALOG_CUSTOM_TOOL_NAMES = [
+  "tool_search",
+  "tool_call",
+  "tool_status",
+];
 
 function readStringOrFallback(value: unknown, fallback: string): string {
   if (typeof value !== "string") {
@@ -1627,12 +1632,6 @@ Use it when the user references past discussions or you need context.`);
     }
   }
 
-  const runtimeToolCatalog = buildRuntimeToolCatalog({
-    allTools: context.mcpTools,
-    selectedTools: selectedMcpToolsForTurn,
-    allowedToolNames: catalogAllowedToolNames,
-  });
-
   let customTools = createOpenClawCustomTools({
     ...gwParams,
     userId: context.userId,
@@ -1650,7 +1649,6 @@ Use it when the user references past discussions or you need context.`);
         "ask_user posted — ending the turn so the model can't re-post."
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
-    runtimeToolCatalog,
     shifuTrace,
   });
 
@@ -1662,6 +1660,21 @@ Use it when the user references past discussions or you need context.`);
     selectedMcpToolsForTurn;
   let registeredMcpToolCount = 0;
   if (mcpExposure === "cli") {
+    const runtimeToolCatalog = buildRuntimeToolCatalog({
+      allTools: context.mcpTools,
+      selectedTools: selectedMcpToolsForTurn,
+      providerVisibleTools: {},
+      allowedToolNames: catalogAllowedToolNames,
+    });
+    customTools.push(
+      ...createOpenClawCustomTools({
+        ...gwParams,
+        userId: context.userId,
+        workspaceDir,
+        runtimeToolCatalog,
+        shifuTrace,
+      }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
+    );
     logger.info(
       "mcpExposure='cli' — skipping first-class MCP tool registration (tools reachable via <server> <tool> in Bash)."
     );
@@ -1680,10 +1693,28 @@ Use it when the user references past discussions or you need context.`);
     const projectedMcp = projectMcpToolsForProvider(selectedMcpToolsForTurn, {
       provider: rawProvider,
       directToolLimit: providerDirectToolLimit,
-      reservedProviderToolNames: new Set(customTools.map((tool) => tool.name)),
+      reservedProviderToolNames: new Set([
+        ...customTools.map((tool) => tool.name),
+        ...RUNTIME_CATALOG_CUSTOM_TOOL_NAMES,
+      ]),
       selectionHint: userPrompt,
     });
     registeredDirectMcpTools = projectedMcp.tools;
+    const runtimeToolCatalog = buildRuntimeToolCatalog({
+      allTools: context.mcpTools,
+      selectedTools: selectedMcpToolsForTurn,
+      providerVisibleTools: projectedMcp.tools,
+      allowedToolNames: catalogAllowedToolNames,
+    });
+    customTools.push(
+      ...createOpenClawCustomTools({
+        ...gwParams,
+        userId: context.userId,
+        workspaceDir,
+        runtimeToolCatalog,
+        shifuTrace,
+      }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
+    );
     instructionParts[0] = replaceMcpToolInventoryInstructions(
       context.gatewayInstructions,
       projectedMcp.tools,
