@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl unzip \
       python3 build-essential \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
+    && curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun \
     && npm install -g node-gyp
 
@@ -137,9 +137,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
       libgbm1 libpango-1.0-0 libcairo2 libasound2 libwayland-client0 \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -fsSL https://github.com/amacneil/dbmate/releases/download/v2.22.0/dbmate-linux-amd64 -o /usr/local/bin/dbmate \
+    && curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://github.com/amacneil/dbmate/releases/download/v2.22.0/dbmate-linux-amd64 -o /usr/local/bin/dbmate \
     && chmod +x /usr/local/bin/dbmate \
-    && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
+    && curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun
 
 ENV PATH="/usr/local/bin:${PATH}"
