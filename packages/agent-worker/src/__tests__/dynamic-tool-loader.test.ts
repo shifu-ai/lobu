@@ -17,6 +17,42 @@ function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
+    const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
+    );
+    const battleReportTools = [
+      tool("sales_battle_report_schedule_list"),
+      tool("sales_battle_report_schedule_create"),
+      tool("sales_battle_report_schedule_pause"),
+      tool("sales_battle_report_schedule_update"),
+      tool("sales_battle_report_run_now"),
+    ];
+
+    const result = selectMcpToolsForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [...cardStudioDistractors, ...battleReportTools],
+      },
+      userMessage: "請立即發送 Irene 財務自由工程計畫今天的戰報",
+      maxProviderVisibleTools: 48,
+    });
+
+    const selectedNames = result.selected["shifu-toolbox"].map(
+      (toolDef) => toolDef.name
+    );
+
+    expect(selectedNames).toContain("sales_battle_report_schedule_list");
+    expect(selectedNames).toContain("sales_battle_report_schedule_create");
+    expect(selectedNames).toContain("sales_battle_report_schedule_pause");
+    expect(selectedNames).toContain("sales_battle_report_schedule_update");
+    expect(selectedNames).toContain("sales_battle_report_run_now");
+    expect(result.selected["shifu-toolbox"]).toHaveLength(48);
+    expect(result.trace.primaryIntent).toBe("battle_report");
+    expect(result.trace.omitted).toContain(
+      "shifu-toolbox/card_studio_distractor_75"
+    );
+  });
+
   test("keeps P0 battle report tools when the Toolbox catalog is crowded", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
