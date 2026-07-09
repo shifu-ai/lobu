@@ -33,10 +33,6 @@ interface ToolExecutionEvidenceInput {
   isError?: boolean;
 }
 
-const BATTLE_REPORT_MUTATING_TOOL_NAMES = new Set<string>(
-  BATTLE_REPORT_MUTATING_TOOLS
-);
-
 const DONE_CLAIM_PATTERNS = [
   /已(?:經)?(?:幫(?:你|我|忙)?\s*)?(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)/i,
   /(?:完成|產生|生成|建立|新增|暫停|停止|更新|修改|調整|執行|跑完|排好|發送|送出)了/i,
@@ -58,11 +54,8 @@ export function checkCompletionClaim(
     return { allowed: true };
   }
 
-  if (
-    input.executedTools.some((toolName) =>
-      BATTLE_REPORT_MUTATING_TOOL_NAMES.has(toolName)
-    )
-  ) {
+  const requiredToolNames = new Set<string>(requiredTools);
+  if (input.executedTools.some((toolName) => requiredToolNames.has(toolName))) {
     return { allowed: true };
   }
 
