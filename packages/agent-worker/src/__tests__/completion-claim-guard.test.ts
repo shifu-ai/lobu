@@ -230,6 +230,28 @@ describe("checkCompletionClaim", () => {
     expect(result.allowed).toBe(true);
   });
 
+  test("treats qualified catalog tool_call targets as completion evidence", () => {
+    const executedTools = getSuccessfulCompletionClaimToolNames({
+      toolName: "tool_call",
+      args: { tool_name: "shifu-toolbox/sales_battle_report_run_now" },
+      result: {
+        content: [{ type: "text", text: "ok" }],
+      },
+      isError: false,
+    });
+    const result = checkCompletionClaim({
+      userMessage: "幫我立即發送 Irene 的戰報",
+      finalText: "已幫你發送 Irene 的戰報。",
+      executedTools,
+    });
+
+    expect(executedTools).toEqual([
+      "tool_call",
+      "shifu-toolbox/sales_battle_report_run_now",
+    ]);
+    expect(result.allowed).toBe(true);
+  });
+
   test("does not treat the tool_call wrapper alone as mutating evidence", () => {
     const executedTools = getSuccessfulCompletionClaimToolNames({
       toolName: "tool_call",
@@ -246,6 +268,29 @@ describe("checkCompletionClaim", () => {
     });
 
     expect(executedTools).toEqual(["tool_call"]);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toBe("mutating_claim_without_tool_execution");
+  });
+
+  test("does not treat a non-matching qualified catalog tool as mutating evidence", () => {
+    const executedTools = getSuccessfulCompletionClaimToolNames({
+      toolName: "tool_call",
+      args: { tool_name: "shifu_toolbox/sales_battle_report_schedule_pause" },
+      result: {
+        content: [{ type: "text", text: "ok" }],
+      },
+      isError: false,
+    });
+    const result = checkCompletionClaim({
+      userMessage: "幫我立即發送 Irene 的戰報",
+      finalText: "已幫你發送 Irene 的戰報。",
+      executedTools,
+    });
+
+    expect(executedTools).toEqual([
+      "tool_call",
+      "shifu_toolbox/sales_battle_report_schedule_pause",
+    ]);
     expect(result.allowed).toBe(false);
     expect(result.reason).toBe("mutating_claim_without_tool_execution");
   });

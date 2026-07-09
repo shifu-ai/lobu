@@ -55,7 +55,13 @@ export function checkCompletionClaim(
   }
 
   const requiredToolNames = new Set<string>(requiredTools);
-  if (input.executedTools.some((toolName) => requiredToolNames.has(toolName))) {
+  if (
+    input.executedTools.some((toolName) =>
+      normalizeCompletionClaimEvidence(toolName).some((candidate) =>
+        requiredToolNames.has(candidate)
+      )
+    )
+  ) {
     return { allowed: true };
   }
 
@@ -135,6 +141,21 @@ function readDelegatedToolName(args: unknown): string | null {
 
   const trimmed = toolName.trim();
   return trimmed ? trimmed : null;
+}
+
+function normalizeCompletionClaimEvidence(toolName: string): string[] {
+  const trimmed = toolName.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const normalized = [trimmed];
+  const slashIndex = trimmed.lastIndexOf("/");
+  if (slashIndex >= 0 && slashIndex < trimmed.length - 1) {
+    normalized.push(trimmed.slice(slashIndex + 1));
+  }
+
+  return normalized;
 }
 
 function resultLooksFailed(result: unknown): boolean {
