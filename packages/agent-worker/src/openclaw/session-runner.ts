@@ -74,6 +74,7 @@ import {
 } from "./plugin-loader";
 import type { OpenClawProgressProcessor } from "./processor";
 import { buildAgentSession } from "./session-builder";
+import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import { getOpenClawSessionContext } from "./session-context";
 import {
   buildToolPolicy,
@@ -2419,18 +2420,19 @@ Use it when the user references past discussions or you need context.`);
 
     const sessionError = modelRunResult.success ? null : modelRunResult.error;
     if (sessionError) {
+      const visibleSessionError = toUserVisibleSessionError(sessionError);
       await runPluginHooks({
         plugins: loadedPlugins,
         hook: "agent_end",
         event: {
           success: false,
-          error: sessionError,
+          error: visibleSessionError,
           messages: session.messages as unknown as Record<string, unknown>[],
         },
         ctx: pluginHookContext,
       });
       const errorWithHint = maybeBuildAuthHintMessage(
-        sessionError,
+        visibleSessionError,
         rawProvider,
         modelId
       );
@@ -2508,20 +2510,21 @@ Use it when the user references past discussions or you need context.`);
     const normalizedErrorMsg = isProviderPromptTooLongError(errorMsg)
       ? userFacingContextPressureMessage()
       : errorMsg;
+    const visibleErrorMsg = toUserVisibleSessionError(normalizedErrorMsg);
     if (session) {
       await runPluginHooks({
         plugins: loadedPlugins,
         hook: "agent_end",
         event: {
           success: false,
-          error: normalizedErrorMsg,
+          error: visibleErrorMsg,
           messages: session.messages as unknown as Record<string, unknown>[],
         },
         ctx: pluginHookContext,
       });
     }
     const errorWithHint = maybeBuildAuthHintMessage(
-      normalizedErrorMsg,
+      visibleErrorMsg,
       provider,
       modelId
     );
