@@ -115,8 +115,8 @@ describe("ensureBuilderAgent — provisioning reliability", () => {
 			true,
 		);
 		// Deterministic default from providers.json (`openai` → its curated
-		// defaultModel, currently `gpt-5.5`).
-		expect(b?.model).toBe("openai/gpt-5.5");
+		// defaultModel, currently `gpt-5.6-sol`).
+		expect(b?.model).toBe("openai/gpt-5.6-sol");
 		expect(await readPointer(org.id)).toBe(BUILDER_AGENT_ID);
 	});
 
@@ -139,7 +139,9 @@ describe("ensureBuilderAgent — provisioning reliability", () => {
 			expect(
 				b?.installed_providers?.some((p) => p.providerId === "openai"),
 			).toBe(true);
-			expect(b?.model).toBe("claude/claude-sonnet-4-6");
+			// Claude's pin comes from the provider catalog, so adding a current
+			// default there must not leave provisioning on a stale code constant.
+			expect(b?.model).toBe("claude/claude-sonnet-5");
 		} finally {
 			if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
 			else process.env.ANTHROPIC_API_KEY = prev;
@@ -167,7 +169,7 @@ describe("ensureBuilderAgent — provisioning reliability", () => {
 		expect(res.created).toBe(false);
 		const b = await readBuilder(org.id);
 		expect(b?.installed_providers?.length ?? 0).toBeGreaterThan(0);
-		expect(b?.model).toBe("openai/gpt-5.5");
+		expect(b?.model).toBe("openai/gpt-5.6-sol");
 	});
 
 	it("keeps providers + pinned model consistent when repairing a model-only gap", async () => {
@@ -192,10 +194,10 @@ describe("ensureBuilderAgent — provisioning reliability", () => {
 		);
 	});
 
-	it("provisions a usable builder when ONLY an Anthropic system key is present (not in providers.json)", async () => {
-		// Anthropic/Claude is the canonical platform key but isn't in
-		// providers.json, so this exercises the env-var fallback with an empty
-		// registry — the case that would otherwise yield 0 providers / no model.
+	it("provisions a usable builder when ONLY an Anthropic system key is present", async () => {
+		// ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN are alternate credentials
+		// for the config-driven Claude provider. They must still use that provider's
+		// current catalog default rather than a second hardcoded model source.
 		// Hermetic: clear EVERY providers.json env var (read from the file so the
 		// list can't drift) plus the Claude env vars, then set only Anthropic.
 		const raw = JSON.parse(await readFile(PROVIDERS_JSON, "utf-8")) as {
@@ -227,7 +229,7 @@ describe("ensureBuilderAgent — provisioning reliability", () => {
 			expect(
 				b?.installed_providers?.some((p) => p.providerId === "claude"),
 			).toBe(true);
-			expect(b?.model).toBe("claude/claude-sonnet-4-6");
+			expect(b?.model).toBe("claude/claude-sonnet-5");
 		} finally {
 			for (const [k, v] of Object.entries(saved)) {
 				if (v === undefined) delete process.env[k];
