@@ -10,6 +10,7 @@ import {
   summariseAuthCheck,
   summariseAuthStart,
 } from "../embedded/mcp-cli-commands";
+import { capEmbeddedBashStreamOutput } from "../embedded/just-bash-bootstrap";
 import type { GatewayParams } from "../shared/tool-implementations";
 
 const gw: GatewayParams = {
@@ -531,5 +532,23 @@ describe("MCP CLI output cap", () => {
     expect(out.stdout).toContain(
       "Use a narrower query, pagination cursor, or time_range"
     );
+  });
+
+  test("preserves MCP continuation guidance after outer bash stdout cap", async () => {
+    const huge = "x".repeat(50_000);
+    const handler = buildMcpServerHandler("shifu", stateRef, gateway, {
+      callTool: async () => ({ content: [{ type: "text", text: huge }] }),
+    } as any);
+
+    const out = await handler(["huge_tool"], {
+      stdin: "{}",
+      signal: new AbortController().signal,
+    });
+    const bashCapped = capEmbeddedBashStreamOutput("stdout", out.stdout);
+
+    expect(bashCapped).toContain("pagination cursor");
+    expect(bashCapped).toContain("time_range");
+    expect(bashCapped).toContain("[tool output truncated:");
+    expect(bashCapped).not.toContain("[stdout truncated:");
   });
 });

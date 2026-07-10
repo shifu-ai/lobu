@@ -78,7 +78,7 @@ const DEFAULT_DEPS: McpCliDeps = {
   callTool: callMcpTool,
 };
 
-const MCP_CLI_STDOUT_MAX_CHARS = 40_000;
+const MCP_CLI_STDOUT_MAX_CHARS = 39_000;
 
 /** Check whether an MCP id would collide with a bash builtin or deny-prefix. */
 export function isMcpIdReserved(mcpId: string): string | null {
