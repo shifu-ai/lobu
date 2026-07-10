@@ -102,7 +102,7 @@ describe("handleExecutionError", () => {
     expect(errors[0].message).not.toContain("tokens");
     expect(errors[0].message).not.toContain("205846");
     expect(errors[0].message).not.toContain("request_id");
-    expect(errors[0].code).toBeUndefined();
+    expect(errors[0].code).toBe("CONTEXT_OVERFLOW");
   });
 
   test("NO_MODEL_CONFIGURED signals code without a user-facing delta", async () => {
@@ -159,6 +159,16 @@ describe("classifyError", () => {
         new Error('Could not resolve a base URL for provider "z-ai".')
       )
     ).toBe("PROVIDER_BASE_URL_UNRESOLVED");
+  });
+
+  test("recognizes context overflow failures", () => {
+    expect(
+      classifyError(
+        new Error(
+          '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum","request_id":"req_123"}'
+        )
+      )
+    ).toBe("CONTEXT_OVERFLOW");
   });
 
   test("leaves unrelated crashes unclassified", () => {

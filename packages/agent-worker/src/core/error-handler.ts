@@ -1,5 +1,8 @@
 import { createLogger, getSentry, type WorkerTransport } from "@lobu/core";
-import { formatContextOverflowExecutionError } from "../openclaw/context-overflow-recovery";
+import {
+  formatContextOverflowExecutionError,
+  isContextOverflowError,
+} from "../openclaw/context-overflow-recovery";
 import { getProviderAuthHintFromError } from "../shared/provider-auth-hints";
 
 const logger = createLogger("worker");
@@ -54,6 +57,16 @@ export function classifyError(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
   const message = error.message;
   if (message === SESSION_TIMEOUT_MESSAGE) return "SESSION_TIMEOUT";
+
+  if (isContextOverflowError(message)) return "CONTEXT_OVERFLOW";
+
+  if (
+    /weekly\/monthly limit exhausted|limit exhausted|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
+      message
+    )
+  )
+    return "PROVIDER_QUOTA_EXHAUSTED";
+
   if (
     message.includes("No model configured") ||
     message.includes("No provider specified")
