@@ -27,12 +27,18 @@ import { compareWorkerToken } from "./auth/worker-token";
 import {
 	deleteEntityApprovalPolicy,
 	type EntityApprovalPolicy,
+	type EntityMutationMode,
 	getGlobalEntityApprovalPolicy,
 	isEntityApprovalUiMode,
+	isEntityMutationMode,
 	listEntityApprovalPolicies,
 	upsertEntityApprovalPolicy,
 	upsertGlobalEntityApprovalPolicy,
 } from "./authz/entity-policy";
+import {
+	isLegalActionEffect,
+	type WriteAction,
+} from "./authz/write-action-manifest";
 import { globalCatalogRoutes, orgInstalledRoutes } from "./catalog/routes";
 import { connectionTokenRoutes } from "./connect/connection-token-route";
 import { connectRoutes } from "./connect/routes";
@@ -1278,12 +1284,16 @@ function serializeEntityApprovalPolicy(policy: EntityApprovalPolicy) {
 		resource_class: policy.resourceClass,
 		principal_kind: policy.principalKind,
 		principal_id: policy.principalId,
+		principal_mode: policy.principalMode,
 		entity_type_slug: policy.entityTypeSlug,
 		field_path: policy.fieldPath,
 		entity_id: policy.entityId,
 		create_mode: policy.createMode,
 		update_mode: policy.updateMode,
 		delete_mode: policy.deleteMode,
+		// The full per-action effect map (incl. deny/disabled/execute), for the
+		// agent Permissions UI which the create/update/delete triple can't express.
+		effects: policy.effects,
 		approval_connection_id: policy.deliveryTarget.connectionId,
 		approval_channel_id: policy.deliveryTarget.channelId,
 		approval_team_id: policy.deliveryTarget.teamId,
@@ -1342,7 +1352,15 @@ app.get("/api/:orgSlug/entity-approval-policy", mcpAuth, async (c) => {
 		return c.json({ error: "Organization context required" }, 401);
 	}
 	const policy = await getGlobalEntityApprovalPolicy(organizationId);
-	const policies = await listEntityApprovalPolicies(organizationId, "entity");
+	// This legacy org-settings surface is MODE-BLIND: its PATCH/DELETE key a row by
+	// scope+principal WITHOUT principal_mode, so it can only address the both-mode
+	// (principal_mode NULL) rows. Autonomous-only rows are created and managed solely
+	// by the agent Permissions UI; surfacing them here would let a delete of the
+	// displayed autonomous row hit the same-scope attended row instead. Filter them
+	// out so this endpoint neither shows nor mutates them.
+	const policies = (
+		await listEntityApprovalPolicies(organizationId, "entity")
+	).filter((p) => p.principalMode === null);
 	const channelRows = await resolveBoundChannelRows(getDb(), {
 		organizationId,
 	});
@@ -1596,6 +1614,324 @@ app.delete("/api/:orgSlug/entity-approval-policy", mcpAuth, async (c) => {
 		entityTypeSlug,
 		fieldPath,
 		entityId,
+	});
+	invalidationEmitter.emit(organizationId, {
+		keys: ["entity-approval-policy"],
+	});
+	return c.json({ deleted });
+});
+
+// ---------------------------------------------------------------------------
+// Agent permissions ("Guardrails" is the separate LLM-judge surface; this is the
+// deterministic write-gate envelope). Returns the ORG FLOOR rows (principal_kind
+// NULL) and THIS AGENT's rows across all three write classes, so the UI can show
+// the floor as a non-loosenable baseline and the agent's overrides on top.
+app.get("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
+	const authError = await requireOrganizationSettingsAdmin(c);
+	if (authError) return authError;
+	const organizationId = c.get("organizationId");
+	if (!organizationId) {
+		return c.json({ error: "Organization context required" }, 401);
+	}
+	const agentId = c.req.param("agentId");
+	const all = await listEntityApprovalPolicies(organizationId);
+	// The matrix models ONLY blanket (null entity_type) and entity-type scopes.
+	// Field-scoped (fieldPath) and single-entity (entityId) rows are finer than the
+	// matrix can express: the client keys agent rows by (class, mode, type) alone,
+	// so a field/entity row would be misrendered as type-wide and editing it would
+	// silently widen it into a type policy. Exclude them from BOTH lists — they are
+	// managed on the entity/field surfaces, not this agent matrix.
+	const typeScoped = (p: EntityApprovalPolicy) =>
+		p.fieldPath === null && p.entityId === null;
+	// Floor = the non-loosenable baseline this agent inherits. TWO kinds of row bind
+	// it (both fold into the write-gate for this agent via loadCandidatePolicies, and
+	// neither is editable on THIS per-agent surface):
+	//  - any-principal rows (principal_kind NULL) — the org-wide floor, and
+	//  - KIND-WIDE agent rows (principal_kind 'agent', principal_id NULL) — an
+	//    "all agents" policy that applies to every agent. Omitting these made the
+	//    matrix show/permit values LOOSER than the resolver enforces.
+	// Agent = rows pinned to THIS agent id (the editable overrides). A watcher-kind
+	// row is NOT the agent's envelope (watchers inherit the agent envelope in
+	// autonomous mode; they have no separate principal here).
+	const floor = all.filter(
+		(p) =>
+			typeScoped(p) &&
+			(p.principalKind === null ||
+				(p.principalKind === "agent" && p.principalId === null)),
+	);
+	const agent = all.filter(
+		(p) =>
+			p.principalKind === "agent" &&
+			p.principalId === agentId &&
+			typeScoped(p),
+	);
+	// Types the org can create/update entities for: its own PLUS any public-catalog
+	// org's (visibility='public') — the same local-or-public resolution entity
+	// creation uses. The write gate keys on the slug, so a catalog-backed type
+	// (e.g. `company`) must be offerable as a per-type exception. Dedupe by slug,
+	// preferring the org-owned row, and drop `$member` (per-tenant, never a public
+	// catalog type) to mirror the entity-write resolver.
+	const typeRows = await getDb()<{ slug: string; name: string }>`
+    SELECT slug, name FROM (
+      SELECT DISTINCT ON (et.slug) et.slug, et.name
+      FROM entity_types et
+      LEFT JOIN organization o ON o.id = et.organization_id
+      WHERE et.deleted_at IS NULL
+        AND et.slug <> '$member'
+        AND (et.organization_id = ${organizationId} OR o.visibility = 'public')
+      ORDER BY et.slug, (et.organization_id = ${organizationId}) DESC, et.id ASC
+    ) t
+    ORDER BY name ASC
+  `;
+	return c.json({
+		floor: floor.map(serializeEntityApprovalPolicy),
+		agent: agent.map(serializeEntityApprovalPolicy),
+		entity_types: typeRows.map((r) => ({ slug: r.slug, name: r.name })),
+	});
+});
+
+// Upsert one agent policy row: a (class, entity_type?, mode?) scope with a full
+// per-action effect map. Effects may be auto/approval/deny/disabled — the UI, not
+// the create/update/delete triple, is the source of truth here.
+app.put("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
+	const authError = await requireOrganizationSettingsAdmin(c);
+	if (authError) return authError;
+	const organizationId = c.get("organizationId");
+	if (!organizationId) {
+		return c.json({ error: "Organization context required" }, 401);
+	}
+	const agentId = c.req.param("agentId");
+
+	let body: Record<string, unknown>;
+	try {
+		body = await c.req.json();
+	} catch {
+		return c.json(
+			{ error: "invalid_request", message: "Request body must be JSON." },
+			400,
+		);
+	}
+	// Valid JSON `null` / an array / a primitive parses without throwing but isn't a
+	// policy body — dereferencing body.resource_class below would 500. Require a plain
+	// object so we return the intended 400.
+	if (typeof body !== "object" || body === null || Array.isArray(body)) {
+		return c.json(
+			{ error: "invalid_request", message: "Request body must be a JSON object." },
+			400,
+		);
+	}
+
+	const resourceClass =
+		body.resource_class === "entity" ||
+		body.resource_class === "agent_config" ||
+		body.resource_class === "connector_action"
+			? body.resource_class
+			: null;
+	if (!resourceClass) {
+		return c.json(
+			{
+				error: "invalid_request",
+				message:
+					"resource_class must be entity, agent_config, or connector_action.",
+			},
+			400,
+		);
+	}
+
+	// The per-action effect map. This PUT REPLACES the row's whole child-effect set,
+	// so a silently-dropped bad entry would ERASE an existing effect (e.g. a stale
+	// client sending an entity `execute` could wipe a stored `delete=deny` back to
+	// the auto default). REJECT the request on any invalid entry instead of filtering
+	// or clamping — an unknown action, a non-effect value, or an (action,effect) pair
+	// illegal for this class all 400.
+	// Must be a plain OBJECT map. An ARRAY passes `typeof === "object"` but yields no
+	// Object.entries → the replace-all upsert would wipe the row's stored effects
+	// (erasing deny/approval). Reject arrays explicitly.
+	const rawEffects =
+		typeof body.effects === "object" &&
+		body.effects !== null &&
+		!Array.isArray(body.effects)
+			? (body.effects as Record<string, unknown>)
+			: null;
+	if (!rawEffects) {
+		return c.json(
+			{ error: "invalid_request", message: "effects must be a JSON object." },
+			400,
+		);
+	}
+	const effects: Partial<Record<WriteAction, EntityMutationMode>> = {};
+	for (const [action, effect] of Object.entries(rawEffects)) {
+		if (
+			!isEntityMutationMode(effect) ||
+			!isLegalActionEffect(resourceClass, action as WriteAction, effect)
+		) {
+			return c.json(
+				{
+					error: "invalid_request",
+					message: `Illegal effect for ${resourceClass}: '${action}' = '${String(effect)}'.`,
+				},
+				400,
+			);
+		}
+		effects[action as WriteAction] = effect;
+	}
+
+	// principal_mode selects WHICH row this write targets: omitted/null = the
+	// both-mode row, 'autonomous' = the autonomous-only override. Silently coercing
+	// any other value to null would make a typo'd/unsupported mode clobber the
+	// ATTENDED row instead of the intended autonomous one — so reject it.
+	if (
+		body.principal_mode !== undefined &&
+		body.principal_mode !== null &&
+		body.principal_mode !== "autonomous"
+	) {
+		return c.json(
+			{
+				error: "invalid_request",
+				message: "principal_mode must be omitted, null, or 'autonomous'.",
+			},
+			400,
+		);
+	}
+	const principalMode = body.principal_mode === "autonomous" ? "autonomous" : null;
+	// entity_type_slug selects the per-type row (null = the blanket all-types row).
+	// Only the `entity` class is type-scoped. A present-but-invalid slug (number,
+	// whitespace) OR a slug on a NON-entity class must not silently coerce to null and
+	// overwrite the broad blanket policy — 400, same as principal_mode.
+	const slugPresent =
+		body.entity_type_slug !== undefined && body.entity_type_slug !== null;
+	if (slugPresent && resourceClass !== "entity") {
+		return c.json(
+			{
+				error: "invalid_request",
+				message: `entity_type_slug is only valid for resource_class 'entity', not '${resourceClass}'.`,
+			},
+			400,
+		);
+	}
+	if (
+		slugPresent &&
+		(typeof body.entity_type_slug !== "string" ||
+			body.entity_type_slug.trim() === "")
+	) {
+		return c.json(
+			{
+				error: "invalid_request",
+				message: "entity_type_slug must be a non-empty string or omitted.",
+			},
+			400,
+		);
+	}
+	const entityTypeSlug =
+		resourceClass === "entity" &&
+		typeof body.entity_type_slug === "string" &&
+		body.entity_type_slug.trim()
+			? body.entity_type_slug.trim()
+			: null;
+
+	// The policy row targets this agent by id (a reusable slug). Confirm the agent
+	// EXISTS in this org before persisting — else a stale/typo'd URL would leave an
+	// orphan row that a future agent recreated with the same id silently inherits.
+	const agentExists = await getDb()<{ id: string }>`
+    SELECT id FROM agents
+    WHERE id = ${agentId} AND organization_id = ${organizationId}
+    LIMIT 1
+  `;
+	if (!agentExists[0]) {
+		return c.json(
+			{ error: "not_found", message: `Agent '${agentId}' not found in this workspace.` },
+			404,
+		);
+	}
+
+	const policy = await upsertEntityApprovalPolicy(organizationId, {
+		resourceClass,
+		principalKind: "agent",
+		principalId: agentId,
+		principalMode,
+		entityTypeSlug,
+		effects,
+		// Effect-only endpoint: keep any approval delivery target already on the row.
+		preserveDelivery: true,
+	});
+	invalidationEmitter.emit(organizationId, {
+		keys: ["entity-approval-policy"],
+	});
+	return c.json({ policy: serializeEntityApprovalPolicy(policy) });
+});
+
+// Delete one agent override row (falls back to the floor / class default).
+app.delete("/api/:orgSlug/agent/:agentId/permissions", mcpAuth, async (c) => {
+	const authError = await requireOrganizationSettingsAdmin(c);
+	if (authError) return authError;
+	const organizationId = c.get("organizationId");
+	if (!organizationId) {
+		return c.json({ error: "Organization context required" }, 401);
+	}
+	const agentId = c.req.param("agentId");
+	const resourceClassRaw = c.req.query("resource_class")?.trim();
+	const resourceClass =
+		resourceClassRaw === "entity" ||
+		resourceClassRaw === "agent_config" ||
+		resourceClassRaw === "connector_action"
+			? resourceClassRaw
+			: null;
+	if (!resourceClass) {
+		return c.json(
+			{ error: "invalid_request", message: "resource_class is required." },
+			400,
+		);
+	}
+	// Same rule as the PUT: principal_mode picks the target row (null = the both-mode
+	// row). ONLY a truly-ABSENT param maps to null — a PRESENT value that isn't exactly
+	// 'autonomous' (a typo, whitespace, or empty `?principal_mode=`) must 400, else the
+	// DELETE would fall through to null and destroy the attended/both-mode row.
+	const principalModeParam = c.req.query("principal_mode");
+	if (
+		principalModeParam !== undefined &&
+		principalModeParam.trim() !== "autonomous"
+	) {
+		return c.json(
+			{
+				error: "invalid_request",
+				message: "principal_mode must be omitted or 'autonomous'.",
+			},
+			400,
+		);
+	}
+	const principalMode =
+		principalModeParam?.trim() === "autonomous" ? "autonomous" : null;
+	// entity_type_slug picks WHICH row to delete (null = the blanket all-types row).
+	// A present-but-empty slug, or a slug on a non-entity class, must NOT coerce to
+	// null and delete the blanket policy instead of the intended per-type override.
+	const slugRaw = c.req.query("entity_type_slug");
+	if (slugRaw !== undefined && slugRaw !== "" && resourceClass !== "entity") {
+		return c.json(
+			{
+				error: "invalid_request",
+				message: `entity_type_slug is only valid for resource_class 'entity', not '${resourceClass}'.`,
+			},
+			400,
+		);
+	}
+	if (slugRaw !== undefined && slugRaw.trim() === "") {
+		return c.json(
+			{
+				error: "invalid_request",
+				message: "entity_type_slug must be a non-empty string or omitted.",
+			},
+			400,
+		);
+	}
+	const entityTypeSlug =
+		resourceClass === "entity" ? (slugRaw?.trim() ?? null) || null : null;
+	const deleted = await deleteEntityApprovalPolicy({
+		organizationId,
+		resourceClass,
+		principalKind: "agent",
+		principalId: agentId,
+		principalMode,
+		entityTypeSlug,
 	});
 	invalidationEmitter.emit(organizationId, {
 		keys: ["entity-approval-policy"],

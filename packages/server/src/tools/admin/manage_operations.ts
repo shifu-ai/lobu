@@ -31,9 +31,12 @@ import type { Env } from "../../index";
 import { callTool as callProxyTool } from "../../mcp-proxy/client";
 import { resolveCredentialsByConnectionId } from "../../mcp-proxy/credential-resolver";
 import {
-	classifyMutationPrincipal,
-	mutationPrincipalId,
+	agentExistsInOrg,
+	resolveActingPrincipal,
+	resolveWatcherOwner,
+	resolveWriteEffect,
 	resolveWritePolicyDecision,
+	watcherIdFromPrincipalId,
 } from "../../authz/entity-policy";
 import { notifyActionApprovalNeeded } from "../../notifications/triggers";
 import { resolveActionMode } from "../../operations/action-modes";
@@ -467,6 +470,38 @@ async function handleListAvailable(
 	args: Static<typeof ListAvailableAction>,
 	ctx: ToolContext,
 ): Promise<ManageOperationsResult> {
+  // A `disabled` connector_action effect turns the connector OFF for this
+  // principal — the operations shouldn't be listed at all (Disabled HIDES the
+  // action, unlike deny/approval which surface then gate on execute). The
+  // connector_action policy is one blanket `execute` per principal today (no
+  // per-op scope yet), so a disabled effect hides the whole connector's ops.
+  const actor = await resolveActingPrincipal(getDb(), {
+    organizationId: ctx.organizationId,
+    userId: ctx.userId,
+    agentId: ctx.agentId,
+    sessionWatcherId: ctx.actingWatcherId ?? null,
+    sourceForMode: ctx.sourceContext?.source,
+  });
+  const effect = await resolveWriteEffect({
+    organizationId: ctx.organizationId,
+    resourceClass: 'connector_action',
+    principalKind: actor.kind,
+    principalId: actor.id,
+    ownerAgentId: actor.ownerAgentId,
+    ownerResolved: actor.ownerResolved,
+    mode: actor.mode,
+    action: 'execute',
+  });
+  if (effect === 'disabled') {
+    return {
+      action: 'list_available',
+      operations: [],
+      total: 0,
+      limit: args.limit ?? 0,
+      offset: args.offset ?? 0,
+    };
+  }
+
   const result = await listOperations({
     organizationId: ctx.organizationId,
     connectorKey: args.connector_key,
@@ -679,20 +714,26 @@ async function handleExecute(
 	// connection that would auto-run to queued. A human applies immediately (the
 	// policy governs non-human principals); with no policy row, the class default
 	// is auto, so the connection mode alone decides — today's behavior is intact.
-	const principalKind = classifyMutationPrincipal({
+	// Resolve WHO is acting through the single seam — merges the explicit
+	// watcher_source and the reaction session's own watcher, looks up the owning
+	// agent, and pins autonomous mode for a watcher. Persisted with the run so the
+	// approve-time recheck re-evaluates in the SAME mode/principal.
+	const actor = await resolveActingPrincipal(sql, {
+		organizationId: ctx.organizationId,
 		userId: ctx.userId,
 		agentId: ctx.agentId,
-		watcherSource: args.watcher_source ?? null,
-	});
-	const principalId = mutationPrincipalId({
-		agentId: ctx.agentId,
-		watcherId: args.watcher_source?.watcher_id ?? null,
+		explicitWatcherId: args.watcher_source?.watcher_id ?? null,
+		sessionWatcherId: ctx.actingWatcherId ?? null,
+		sourceForMode: ctx.sourceContext?.source,
 	});
 	const policyDecision = await resolveWritePolicyDecision({
 		organizationId: ctx.organizationId,
 		resourceClass: "connector_action",
-		principalKind,
-		principalId,
+		principalKind: actor.kind,
+		principalId: actor.id,
+		ownerAgentId: actor.ownerAgentId,
+		ownerResolved: actor.ownerResolved,
+		mode: actor.mode,
 		action: "execute",
 	});
 	if (policyDecision === "deny") {
@@ -733,9 +774,15 @@ async function handleExecute(
 		approvalMode,
 		requireCompiledCode: operation.backend === "local_action",
 		// Persist the TRUSTED principal so a queued run's policy is re-evaluated
-		// at approve time against who queued it, not who approves it (sol #5).
-		policyPrincipalKind: principalKind,
-		policyPrincipalId: principalId,
+		// at approve time against who queued it, not who approves it (sol #5) —
+		// and in the SAME acting mode, so an autonomous run's tighter autonomous
+		// rule isn't lost to an attended recheck.
+		policyPrincipalKind: actor.kind,
+		policyPrincipalId: actor.id,
+		// Persist the acting mode EXPLICITLY ('attended' | 'autonomous') so the
+		// approve-time recheck evaluates in the same mode and doesn't over-deny a
+		// genuine attended run. NULL is reserved for legacy rows (fail-closed there).
+		policyPrincipalMode: actor.mode === "autonomous" ? "autonomous" : "attended",
 	});
 
 	if (args.watcher_source) {
@@ -1573,7 +1620,7 @@ async function handleApprove(
 
 	const pendingRows = await sql`
     SELECT id, connection_id, action_key, action_input,
-           policy_principal_kind, policy_principal_id
+           policy_principal_kind, policy_principal_id, policy_principal_mode
     FROM runs
     WHERE id = ${args.run_id}
       AND organization_id = ${ctx.organizationId}
@@ -1592,6 +1639,7 @@ async function handleApprove(
 		action_input: Record<string, unknown> | null;
 		policy_principal_kind: string | null;
 		policy_principal_id: string | null;
+		policy_principal_mode: string | null;
 	};
 	const resolved = await getOperationForConnection(
 		ctx.organizationId,
@@ -1618,6 +1666,44 @@ async function handleApprove(
 		pendingRun.policy_principal_kind === "watcher"
 			? pendingRun.policy_principal_kind
 			: "user";
+	// A watcher-attributed run must fold its OWNING AGENT'S envelope at recheck too,
+	// exactly as at queue time — else an agent-level deny installed before approval
+	// would be missed. Re-resolve the owner from the persisted `watcher:<id>` id
+	// (no need to persist it separately).
+	const recheckWatcherId = watcherIdFromPrincipalId(
+		pendingRun.policy_principal_id,
+	);
+	// Re-resolve the principal's resolvability from persistence. A WATCHER principal
+	// re-resolves its owning agent via `watcher:<id>`. A direct AGENT principal must be
+	// existence-checked too: if the agent was DELETED between queue and approve, the
+	// r16 cascade removed its deny/approval rows, so folding candidates for a gone
+	// agent would fall back to the looser org default (connector_action → auto) and let
+	// a human's Approve execute the run as a deleted agent — strictly looser than
+	// before the delete. Either GONE → resolved:false → resolveWriteEffect denies,
+	// cancelling the approval. (Same fail-closed invariant resolveActingPrincipal
+	// enforces for live sessions; this is the persisted-principal path.)
+	let recheckOwner: { ownerAgentId: string | null; resolved: boolean };
+	if (recheckWatcherId != null) {
+		recheckOwner = await resolveWatcherOwner(
+			sql,
+			recheckWatcherId,
+			ctx.organizationId,
+		);
+	} else if (
+		recheckPrincipalKind === "agent" &&
+		pendingRun.policy_principal_id != null
+	) {
+		recheckOwner = {
+			ownerAgentId: null,
+			resolved: await agentExistsInOrg(
+				sql,
+				pendingRun.policy_principal_id,
+				ctx.organizationId,
+			),
+		};
+	} else {
+		recheckOwner = { ownerAgentId: null, resolved: true };
+	}
 	const recheckDecision =
 		recheckPrincipalKind === "user"
 			? "allow"
@@ -1626,6 +1712,18 @@ async function handleApprove(
 					resourceClass: "connector_action",
 					principalKind: recheckPrincipalKind,
 					principalId: pendingRun.policy_principal_id,
+					ownerAgentId: recheckOwner.ownerAgentId,
+					ownerResolved: recheckOwner.resolved,
+					// Recheck in the SAME mode the run was queued under. Both modes are now
+					// persisted EXPLICITLY ('attended' | 'autonomous'), so an attended run
+					// isn't over-denied by an autonomous-only rule, and an autonomous run
+					// still can't dodge its autonomous-only tightening. NULL is a LEGACY row
+					// (queued before the column) whose true mode is unknown — fail closed to
+					// autonomous (the stricter direction) for those.
+					mode:
+						pendingRun.policy_principal_mode === "attended"
+							? "attended"
+							: "autonomous",
 					action: "execute",
 				});
 	if (currentMode === "disabled" || recheckDecision === "deny") {
