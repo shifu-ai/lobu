@@ -5,22 +5,11 @@
  * bookkeeping/cleanup.
  */
 
-import { beforeAll, describe, expect, mock, test } from "bun:test";
-
-mock.module("@lobu/core", () => ({
-  AgentErrorCode: {
-    PROVIDER_QUOTA_EXHAUSTED: "PROVIDER_QUOTA_EXHAUSTED",
-    PROVIDER_AUTH: "PROVIDER_AUTH",
-    PROVIDER_UNKNOWN_MODEL: "PROVIDER_UNKNOWN_MODEL",
-    PROVIDER_BASE_URL_UNRESOLVED: "PROVIDER_BASE_URL_UNRESOLVED",
-    NO_MODEL_CONFIGURED: "NO_MODEL_CONFIGURED",
-    SESSION_TIMEOUT: "SESSION_TIMEOUT",
-  },
-  createLogger: () => ({
-    error: () => undefined,
-  }),
-  getSentry: () => null,
-}));
+import { describe, expect, test } from "bun:test";
+import {
+  classifyError,
+  handleExecutionError,
+} from "../core/error-handler";
 
 type WorkerTransport = {
   setJobId(jobId: string): void;
@@ -35,15 +24,6 @@ type WorkerTransport = {
   sendStatusUpdate(status: string): Promise<void>;
   sendCustomEvent(event: unknown): Promise<void>;
 };
-
-let classifyError: typeof import("../core/error-handler").classifyError;
-let handleExecutionError: typeof import("../core/error-handler").handleExecutionError;
-
-beforeAll(async () => {
-  const errorHandler = await import("../core/error-handler");
-  classifyError = errorHandler.classifyError;
-  handleExecutionError = errorHandler.handleExecutionError;
-});
 
 type Recorder = {
   transport: WorkerTransport;
