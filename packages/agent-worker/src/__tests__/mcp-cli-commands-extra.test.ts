@@ -477,3 +477,59 @@ describe("buildMcpCliCommands edge cases", () => {
     expect(cmds.map((c) => c.name)).toEqual(["linear"]);
   });
 });
+
+describe("MCP CLI output cap", () => {
+  const stateRef = {
+    current: {
+      mcpTools: {
+        shifu: [{ name: "huge_tool", description: "Huge", inputSchema: {} }],
+      },
+      mcpStatus: [
+        {
+          id: "shifu",
+          name: "ShiFu",
+          requiresAuth: false,
+          requiresInput: false,
+          authenticated: true,
+          configured: true,
+        },
+      ],
+      mcpContext: {},
+    },
+  } as any;
+  const gateway = {
+    gatewayUrl: "https://gw.example",
+    workerToken: "token",
+  } as any;
+
+  test("leaves small tool output unchanged", async () => {
+    const handler = buildMcpServerHandler("shifu", stateRef, gateway, {
+      callTool: async () => ({
+        content: [{ type: "text", text: "small result" }],
+      }),
+    } as any);
+
+    const out = await handler(["huge_tool"], {
+      stdin: "{}",
+      signal: new AbortController().signal,
+    });
+    expect(out.stdout).toBe("small result\n");
+  });
+
+  test("truncates huge tool output with continuation guidance", async () => {
+    const huge = "x".repeat(50_000);
+    const handler = buildMcpServerHandler("shifu", stateRef, gateway, {
+      callTool: async () => ({ content: [{ type: "text", text: huge }] }),
+    } as any);
+
+    const out = await handler(["huge_tool"], {
+      stdin: "{}",
+      signal: new AbortController().signal,
+    });
+    expect(out.stdout.length).toBeLessThan(45_000);
+    expect(out.stdout).toContain("[tool output truncated:");
+    expect(out.stdout).toContain(
+      "Use a narrower query, pagination cursor, or time_range"
+    );
+  });
+});
