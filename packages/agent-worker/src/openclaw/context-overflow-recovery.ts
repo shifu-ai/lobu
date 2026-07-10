@@ -18,3 +18,13 @@ export function toUserVisibleSessionError(message: string): string {
   }
   return message;
 }
+
+export function formatContextOverflowExecutionError(
+  error: unknown
+): string | null {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!isContextOverflowError(message)) {
+    return null;
+  }
+  return buildContextOverflowRecoveryMessage();
+}

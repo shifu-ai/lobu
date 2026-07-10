@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   buildContextOverflowRecoveryMessage,
+  formatContextOverflowExecutionError,
   isContextOverflowError,
   toUserVisibleSessionError,
 } from "../openclaw/context-overflow-recovery";
@@ -48,5 +49,22 @@ describe("context overflow recovery", () => {
     const raw = '401 {"message":"No provider credentials configured"}';
 
     expect(toUserVisibleSessionError(raw)).toBe(raw);
+  });
+
+  test("formats context overflow execution errors without crash prefix", () => {
+    const raw =
+      '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum","request_id":"req_123"}';
+    const message = formatContextOverflowExecutionError(new Error(raw));
+
+    expect(message).toBe(buildContextOverflowRecoveryMessage());
+    expect(message).toContain("分段");
+    expect(message).not.toContain("💥 Worker crashed");
+    expect(message).not.toContain("tokens");
+    expect(message).not.toContain("205846");
+    expect(message).not.toContain("request_id");
+  });
+
+  test("does not format unrelated execution errors as context overflow", () => {
+    expect(formatContextOverflowExecutionError(new Error("kaboom"))).toBeNull();
   });
 });

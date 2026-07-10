@@ -1,4 +1,5 @@
 import { createLogger, getSentry, type WorkerTransport } from "@lobu/core";
+import { formatContextOverflowExecutionError } from "../openclaw/context-overflow-recovery";
 import { getProviderAuthHintFromError } from "../shared/provider-auth-hints";
 
 const logger = createLogger("worker");
@@ -15,6 +16,10 @@ export interface ExecutionErrorContext {
 }
 
 function formatErrorMessage(error: unknown): string {
+  const contextOverflowMessage = formatContextOverflowExecutionError(error);
+  if (contextOverflowMessage) {
+    return contextOverflowMessage;
+  }
   if (!(error instanceof Error)) {
     return `💥 Worker crashed: Unknown error`;
   }
