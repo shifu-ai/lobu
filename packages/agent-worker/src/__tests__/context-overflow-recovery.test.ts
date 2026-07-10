@@ -13,6 +13,11 @@ describe("context overflow recovery", () => {
         '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum"}'
       )
     ).toBe(true);
+    expect(
+      isContextOverflowError(
+        '400 {"message":"prompt too long: 205846 tokens > 200000 maximum"}'
+      )
+    ).toBe(true);
   });
 
   test("does not treat unrelated auth/tool failures as context overflow", () => {
@@ -62,6 +67,16 @@ describe("context overflow recovery", () => {
     expect(message).not.toContain("tokens");
     expect(message).not.toContain("205846");
     expect(message).not.toContain("request_id");
+  });
+
+  test("formats an existing recovery message without crash prefix", () => {
+    const message = formatContextOverflowExecutionError(
+      new Error(buildContextOverflowRecoveryMessage())
+    );
+
+    expect(message).toBe(buildContextOverflowRecoveryMessage());
+    expect(message).toContain("分段");
+    expect(message).not.toContain("💥 Worker crashed");
   });
 
   test("does not format unrelated execution errors as context overflow", () => {

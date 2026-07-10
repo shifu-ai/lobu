@@ -1,7 +1,9 @@
 export function isContextOverflowError(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
+    message === buildContextOverflowRecoveryMessage() ||
     normalized.includes("prompt is too long") ||
+    normalized.includes("prompt too long") ||
     normalized.includes("maximum context") ||
     normalized.includes("context window") ||
     normalized.includes("context length")

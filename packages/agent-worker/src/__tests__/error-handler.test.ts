@@ -5,9 +5,45 @@
  * bookkeeping/cleanup.
  */
 
-import { describe, expect, test } from "bun:test";
-import type { WorkerTransport } from "@lobu/core";
-import { classifyError, handleExecutionError } from "../core/error-handler";
+import { beforeAll, describe, expect, mock, test } from "bun:test";
+
+mock.module("@lobu/core", () => ({
+  AgentErrorCode: {
+    PROVIDER_QUOTA_EXHAUSTED: "PROVIDER_QUOTA_EXHAUSTED",
+    PROVIDER_AUTH: "PROVIDER_AUTH",
+    PROVIDER_UNKNOWN_MODEL: "PROVIDER_UNKNOWN_MODEL",
+    PROVIDER_BASE_URL_UNRESOLVED: "PROVIDER_BASE_URL_UNRESOLVED",
+    NO_MODEL_CONFIGURED: "NO_MODEL_CONFIGURED",
+    SESSION_TIMEOUT: "SESSION_TIMEOUT",
+  },
+  createLogger: () => ({
+    error: () => undefined,
+  }),
+  getSentry: () => null,
+}));
+
+type WorkerTransport = {
+  setJobId(jobId: string): void;
+  sendStreamDelta(
+    delta: string,
+    isFullReplacement?: boolean,
+    isFinal?: boolean
+  ): Promise<void>;
+  signalDone(): Promise<void>;
+  signalCompletion(content?: string): Promise<void>;
+  signalError(error: Error, errorCode?: string): Promise<void>;
+  sendStatusUpdate(status: string): Promise<void>;
+  sendCustomEvent(event: unknown): Promise<void>;
+};
+
+let classifyError: typeof import("../core/error-handler").classifyError;
+let handleExecutionError: typeof import("../core/error-handler").handleExecutionError;
+
+beforeAll(async () => {
+  const errorHandler = await import("../core/error-handler");
+  classifyError = errorHandler.classifyError;
+  handleExecutionError = errorHandler.handleExecutionError;
+});
 
 type Recorder = {
   transport: WorkerTransport;
@@ -65,6 +101,30 @@ describe("handleExecutionError", () => {
     expect(deltas[0].isFullReplacement).toBe(true);
     expect(deltas[0].isFinal).toBe(true);
     expect(errors).toHaveLength(1);
+    expect(errors[0].code).toBeUndefined();
+  });
+
+  test("context overflow errors sanitize both stream delta and terminal transport error", async () => {
+    const { transport, deltas, errors } = makeTransport();
+    const raw =
+      '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum","request_id":"req_123"}';
+
+    await handleExecutionError(new Error(raw), transport);
+
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].delta).toContain("分段");
+    expect(deltas[0].delta).not.toContain("💥 Worker crashed");
+    expect(deltas[0].delta).not.toContain("tokens");
+    expect(deltas[0].delta).not.toContain("205846");
+    expect(deltas[0].delta).not.toContain("request_id");
+    expect(deltas[0].isFullReplacement).toBe(true);
+    expect(deltas[0].isFinal).toBe(true);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain("分段");
+    expect(errors[0].message).not.toContain("tokens");
+    expect(errors[0].message).not.toContain("205846");
+    expect(errors[0].message).not.toContain("request_id");
     expect(errors[0].code).toBeUndefined();
   });
 
