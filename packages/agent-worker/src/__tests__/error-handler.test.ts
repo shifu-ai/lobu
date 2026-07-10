@@ -6,8 +6,21 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { WorkerTransport } from "@lobu/core";
 import { classifyError, handleExecutionError } from "../core/error-handler";
+
+type WorkerTransport = {
+  setJobId(jobId: string): void;
+  sendStreamDelta(
+    delta: string,
+    isFullReplacement?: boolean,
+    isFinal?: boolean
+  ): Promise<void>;
+  signalDone(): Promise<void>;
+  signalCompletion(content?: string): Promise<void>;
+  signalError(error: Error, errorCode?: string): Promise<void>;
+  sendStatusUpdate(status: string): Promise<void>;
+  sendCustomEvent(event: unknown): Promise<void>;
+};
 
 type Recorder = {
   transport: WorkerTransport;
@@ -68,6 +81,30 @@ describe("handleExecutionError", () => {
     expect(errors[0].code).toBeUndefined();
   });
 
+  test("context overflow errors sanitize both stream delta and terminal transport error", async () => {
+    const { transport, deltas, errors } = makeTransport();
+    const raw =
+      '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum","request_id":"req_123"}';
+
+    await handleExecutionError(new Error(raw), transport);
+
+    expect(deltas).toHaveLength(1);
+    expect(deltas[0].delta).toContain("分段");
+    expect(deltas[0].delta).not.toContain("💥 Worker crashed");
+    expect(deltas[0].delta).not.toContain("tokens");
+    expect(deltas[0].delta).not.toContain("205846");
+    expect(deltas[0].delta).not.toContain("request_id");
+    expect(deltas[0].isFullReplacement).toBe(true);
+    expect(deltas[0].isFinal).toBe(true);
+
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain("分段");
+    expect(errors[0].message).not.toContain("tokens");
+    expect(errors[0].message).not.toContain("205846");
+    expect(errors[0].message).not.toContain("request_id");
+    expect(errors[0].code).toBe("CONTEXT_OVERFLOW");
+  });
+
   test("NO_MODEL_CONFIGURED signals code without a user-facing delta", async () => {
     const { transport, deltas, errors } = makeTransport();
 
@@ -122,6 +159,16 @@ describe("classifyError", () => {
         new Error('Could not resolve a base URL for provider "z-ai".')
       )
     ).toBe("PROVIDER_BASE_URL_UNRESOLVED");
+  });
+
+  test("recognizes context overflow failures", () => {
+    expect(
+      classifyError(
+        new Error(
+          '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum","request_id":"req_123"}'
+        )
+      )
+    ).toBe("CONTEXT_OVERFLOW");
   });
 
   test("leaves unrelated crashes unclassified", () => {

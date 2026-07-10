@@ -1,4 +1,8 @@
 import { createLogger, getSentry, type WorkerTransport } from "@lobu/core";
+import {
+  formatContextOverflowExecutionError,
+  isContextOverflowError,
+} from "../openclaw/context-overflow-recovery";
 import { getProviderAuthHintFromError } from "../shared/provider-auth-hints";
 
 const logger = createLogger("worker");
@@ -14,7 +18,15 @@ export interface ExecutionErrorContext {
   runId?: number | string;
 }
 
-function formatErrorMessage(error: unknown): string {
+/**
+ * Format the crash delta for unclassified failures. Context-overflow failures
+ * keep a friendly recovery message instead of raw provider JSON.
+ */
+function formatErrorMessage(
+  error: unknown,
+  contextOverflowMessage?: string | null
+): string {
+  if (contextOverflowMessage) return contextOverflowMessage;
   if (!(error instanceof Error)) {
     return `💥 Worker crashed: Unknown error`;
   }
@@ -45,6 +57,16 @@ export function classifyError(error: unknown): string | undefined {
   if (!(error instanceof Error)) return undefined;
   const message = error.message;
   if (message === SESSION_TIMEOUT_MESSAGE) return "SESSION_TIMEOUT";
+
+  if (isContextOverflowError(message)) return "CONTEXT_OVERFLOW";
+
+  if (
+    /weekly\/monthly limit exhausted|limit exhausted|rate[-\s]?limit|quota (?:exceeded|exhausted)|too many requests|\b429\b|resource_exhausted/i.test(
+      message
+    )
+  )
+    return "PROVIDER_QUOTA_EXHAUSTED";
+
   if (
     message.includes("No model configured") ||
     message.includes("No provider specified")
@@ -72,9 +94,13 @@ export async function handleExecutionError(
 ): Promise<void> {
   logger.error("Worker execution failed:", error);
 
+  const contextOverflowMessage = formatContextOverflowExecutionError(error);
   const code = classifyError(error);
   const errorInstance =
     error instanceof Error ? error : new Error(String(error));
+  const transportError = contextOverflowMessage
+    ? new Error(contextOverflowMessage)
+    : errorInstance;
 
   // Report to Sentry Issues. `getSentry()` is DSN-gated and returns null when
   // the worker was spawned without SENTRY_DSN, so this is a safe no-op in dev /
@@ -97,12 +123,16 @@ export async function handleExecutionError(
     if (code && SILENT_DELTA_CODES.has(code)) {
       // SESSION_TIMEOUT (retried silently) / NO_MODEL_CONFIGURED (dedicated
       // upstream user message): signal for bookkeeping, no user-facing delta.
-      await transport.signalError(errorInstance, code);
+      await transport.signalError(transportError, code);
     } else {
       // Unclassified crashes AND PROVIDER_* failures still show the user a
-      // crash message; the classification rides along on signalError.
-      await transport.sendStreamDelta(formatErrorMessage(error), true, true);
-      await transport.signalError(errorInstance, code);
+      // crash message; context-overflow uses the friendly recovery copy.
+      await transport.sendStreamDelta(
+        formatErrorMessage(error, contextOverflowMessage),
+        true,
+        true
+      );
+      await transport.signalError(transportError, code);
     }
   } catch (gatewayError) {
     logger.error("Failed to send error via gateway:", gatewayError);

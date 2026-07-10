@@ -78,6 +78,8 @@ const DEFAULT_DEPS: McpCliDeps = {
   callTool: callMcpTool,
 };
 
+const MCP_CLI_STDOUT_MAX_CHARS = 39_000;
+
 /** Check whether an MCP id would collide with a bash builtin or deny-prefix. */
 export function isMcpIdReserved(mcpId: string): string | null {
   if (RESERVED_COMMAND_NAMES.has(mcpId)) {
@@ -103,6 +105,18 @@ function truncate(text: string, max: number): string {
   if (!text) return "";
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+function capToolStdout(
+  text: string,
+  maxChars = MCP_CLI_STDOUT_MAX_CHARS
+): string {
+  if (text.length <= maxChars) return text;
+  return [
+    text.slice(0, maxChars),
+    "",
+    `[tool output truncated: ${text.length} chars > ${maxChars}. Use a narrower query, pagination cursor, or time_range to continue.]`,
+  ].join("\n");
 }
 
 function renderHelp(
@@ -240,7 +254,8 @@ export function buildMcpServerHandler(
         .filter((c) => c.type === "text")
         .map((c) => c.text)
         .join("\n");
-      return { stdout: text ? `${text}\n` : "", stderr: "", exitCode: 0 };
+      const stdout = text ? `${capToolStdout(text)}\n` : "";
+      return { stdout, stderr: "", exitCode: 0 };
     } catch (err) {
       return {
         stdout: "",

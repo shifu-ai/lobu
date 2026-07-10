@@ -5,6 +5,7 @@ import {
   buildToolUseEventPayload,
   type ToolUseResultSummary,
 } from "./tool-use-events";
+import { toUserVisibleSessionError } from "./context-overflow-recovery";
 
 const logger = createLogger("openclaw-processor");
 
@@ -154,7 +155,10 @@ export class OpenClawProgressProcessor {
 
       case "auto_retry_end": {
         if (!event.success && event.finalError) {
-          this.chronologicalOutput += `🔄 *Retry failed: ${event.finalError}*\n`;
+          const finalError = toUserVisibleSessionError(
+            String(event.finalError)
+          );
+          this.chronologicalOutput += `🔄 *Retry failed: ${finalError}*\n`;
           return true;
         }
         return false;

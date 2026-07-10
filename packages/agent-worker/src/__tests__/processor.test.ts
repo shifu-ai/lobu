@@ -146,6 +146,28 @@ describe("OpenClawProgressProcessor", () => {
     expect(p.getDelta()).toContain("Retry failed: timeout");
   });
 
+  test("auto_retry_end with context overflow finalError hides provider internals", () => {
+    const p = new OpenClawProgressProcessor();
+    const raw =
+      '400 {"message":"prompt is too long: 205846 tokens > 200000 maximum","request_id":"req_123"}';
+
+    expect(
+      p.processEvent(
+        makeEvent("auto_retry_end", {
+          success: false,
+          finalError: raw,
+        })
+      )
+    ).toBe(true);
+
+    const delta = p.getDelta();
+    expect(delta).toContain("Retry failed:");
+    expect(delta).toContain("分段");
+    expect(delta).not.toContain("tokens");
+    expect(delta).not.toContain("205846");
+    expect(delta).not.toContain("request_id");
+  });
+
   test("auto_retry_end with success returns false", () => {
     const p = new OpenClawProgressProcessor();
     expect(p.processEvent(makeEvent("auto_retry_end", { success: true }))).toBe(
