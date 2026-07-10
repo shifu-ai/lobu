@@ -6,10 +6,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import {
-  classifyError,
-  handleExecutionError,
-} from "../core/error-handler";
+import { classifyError, handleExecutionError } from "../core/error-handler";
 
 type WorkerTransport = {
   setJobId(jobId: string): void;

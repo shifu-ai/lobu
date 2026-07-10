@@ -578,10 +578,14 @@ export async function createEmbeddedBashOps(
       });
 
       if (result.stdout) {
-        onData(Buffer.from(capEmbeddedBashStreamOutput("stdout", result.stdout)));
+        onData(
+          Buffer.from(capEmbeddedBashStreamOutput("stdout", result.stdout))
+        );
       }
       if (result.stderr) {
-        onData(Buffer.from(capEmbeddedBashStreamOutput("stderr", result.stderr)));
+        onData(
+          Buffer.from(capEmbeddedBashStreamOutput("stderr", result.stderr))
+        );
       }
 
       return { exitCode: result.exitCode };

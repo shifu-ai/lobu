@@ -155,7 +155,9 @@ export class OpenClawProgressProcessor {
 
       case "auto_retry_end": {
         if (!event.success && event.finalError) {
-          const finalError = toUserVisibleSessionError(String(event.finalError));
+          const finalError = toUserVisibleSessionError(
+            String(event.finalError)
+          );
           this.chronologicalOutput += `🔄 *Retry failed: ${finalError}*\n`;
           return true;
         }

@@ -26,9 +26,9 @@ describe("context overflow recovery", () => {
         '401 {"message":"No provider credentials configured"}'
       )
     ).toBe(false);
-    expect(
-      isContextOverflowError("Tool call failed: permission denied")
-    ).toBe(false);
+    expect(isContextOverflowError("Tool call failed: permission denied")).toBe(
+      false
+    );
   });
 
   test("builds a short recovery message without provider internals", () => {
