@@ -30,6 +30,21 @@ const EMBEDDED_BASH_LIMITS = {
   maxCallDepth: 50,
 } as const;
 
+const EMBEDDED_BASH_STREAM_MAX_CHARS = 40_000;
+
+export function capEmbeddedBashStreamOutput(
+  kind: "stdout" | "stderr",
+  text: string,
+  maxChars = EMBEDDED_BASH_STREAM_MAX_CHARS
+): string {
+  if (text.length <= maxChars) return text;
+  return [
+    text.slice(0, maxChars),
+    "",
+    `[${kind} truncated: ${text.length} chars > ${maxChars}. Use head, tail, sed -n, grep, rg, or split the file into smaller chunks.]`,
+  ].join("\n");
+}
+
 interface SandboxContext {
   strategy: SandboxStrategy;
   workspaceDir: string;
@@ -563,10 +578,10 @@ export async function createEmbeddedBashOps(
       });
 
       if (result.stdout) {
-        onData(Buffer.from(result.stdout));
+        onData(Buffer.from(capEmbeddedBashStreamOutput("stdout", result.stdout)));
       }
       if (result.stderr) {
-        onData(Buffer.from(result.stderr));
+        onData(Buffer.from(capEmbeddedBashStreamOutput("stderr", result.stderr)));
       }
 
       return { exitCode: result.exitCode };
