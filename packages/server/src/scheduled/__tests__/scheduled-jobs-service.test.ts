@@ -11,6 +11,7 @@ const baseJob: ScheduledJobRow = {
   organization_id: "org-1",
   action_type: "wake_agent",
   action_args: { agent_id: "shifu-u-1", prompt: "check schedule" },
+  delivery_context: null,
   cron: "* * * * *",
   next_run_at: "2026-07-01T00:00:00.000Z",
   schedule_metadata: null,
@@ -41,6 +42,11 @@ interface TickSqlOptions {
   now?: Date;
 }
 
+interface EventRecord {
+  type: string;
+  depth: number;
+}
+
 function isDue(row: ScheduledJobRow, now: Date): boolean {
   return new Date(row.next_run_at).getTime() <= now.getTime();
 }
@@ -64,10 +70,12 @@ function makeTickSql(rows: ScheduledJobRow[], opts: TickSqlOptions = {}) {
   const revalidateRows = opts.revalidateRows?.map(cloneRow);
   const selects: Array<{ text: string; values: unknown[] }> = [];
   const updates: UpdateCall[] = [];
+  const events: EventRecord[] = [];
+  let transactionDepth = 0;
   const sql = Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.raw.join("");
-      if (text.includes("SELECT *") && text.includes("FROM scheduled_jobs")) {
+      if (text.includes("FROM scheduled_jobs") && text.includes("SELECT")) {
         selects.push({ text, values });
         if (text.includes("WHERE id =")) {
           const candidateRows = revalidateRows ?? storedRows;
@@ -93,6 +101,7 @@ function makeTickSql(rows: ScheduledJobRow[], opts: TickSqlOptions = {}) {
       }
       if (text.includes("UPDATE scheduled_jobs")) {
         updates.push({ text, values });
+        events.push({ type: "update", depth: transactionDepth });
         const isPauseUpdate = text.includes("organization_id =");
         const isAdvanceUpdate = text.includes("next_run_at =") &&
           !text.includes("next_run_at > until_at");
@@ -122,19 +131,46 @@ function makeTickSql(rows: ScheduledJobRow[], opts: TickSqlOptions = {}) {
       return [];
     },
     {
-      begin: async (fn: (tx: typeof sql) => Promise<unknown>) => fn(sql),
+      begin: async (fn: (tx: typeof sql) => Promise<unknown>) => {
+        transactionDepth += 1;
+        events.push({ type: "begin", depth: transactionDepth });
+        try {
+          const result = await fn(sql);
+          events.push({ type: "commit", depth: transactionDepth });
+          return result;
+        } finally {
+          transactionDepth -= 1;
+        }
+      },
     }
   );
-  return { sql, selects, updates, rows: storedRows };
+  return {
+    sql,
+    selects,
+    updates,
+    events,
+    rows: storedRows,
+    getTransactionDepth: () => transactionDepth,
+  };
 }
 
-function makeTickScheduler() {
-  const spawns: Array<{ name: string; payload: unknown; options: unknown }> = [];
+function makeTickScheduler(
+  getTransactionDepth: () => number = () => 0,
+  events?: EventRecord[]
+) {
+  const spawns: Array<{
+    name: string;
+    payload: unknown;
+    options: unknown;
+    transactionDepth: number;
+  }> = [];
   return {
     spawns,
     scheduler: {
       spawn: async (name: string, payload: unknown, options: unknown) => {
-        spawns.push({ name, payload, options });
+        const transactionDepth = getTransactionDepth();
+        events?.push({ type: "spawn", depth: transactionDepth });
+        spawns.push({ name, payload, options, transactionDepth });
         return "run-1";
       },
     },
@@ -211,6 +247,38 @@ describe("createScheduledJobInDb", () => {
     expect(calls[0].text).toContain("organization_id, idempotency_key");
     expect(calls[0].values).toContain("Asia/Taipei");
     expect(calls[0].values).toContain("course-pm-schedule-1");
+  });
+
+  test("completed schedules are inserted paused so they are terminal immediately", async () => {
+    const calls: Array<{ text: string; values: unknown[] }> = [];
+    const returnedRow = {
+      ...baseJob,
+      paused: true,
+      completed_at: "2026-07-01T00:00:00.000Z",
+    };
+    const sql = Object.assign(
+      async (strings: TemplateStringsArray, ...values: unknown[]) => {
+        calls.push({ text: strings.raw.join(""), values });
+        return [returnedRow];
+      },
+      {
+        json: (value: unknown) => value,
+      }
+    );
+
+    const row = await createScheduledJobInDb(sql as any, {
+      organizationId: "org-1",
+      actionType: "wake_agent",
+      actionArgs: {},
+      description: "already done",
+      runAt: new Date("2026-07-01T00:00:00Z"),
+      completedAt: new Date("2026-07-01T00:00:00Z"),
+      createdByUser: "user-1",
+    });
+
+    expect(row.paused).toBe(true);
+    expect(calls[0].text).toContain("paused");
+    expect(calls[0].values).toContain(true);
   });
 });
 
@@ -321,6 +389,44 @@ describe("runScheduledJobsTick", () => {
 
     expect(spawns).toHaveLength(0);
     expect(updates).toHaveLength(0);
+  });
+
+  test("enqueue and schedule advancement happen before the per-row lock transaction commits", async () => {
+    const tick = makeTickSql([
+      {
+        ...baseJob,
+        cron: "* * * * *",
+        next_run_at: "2026-07-01T00:00:00.000Z",
+      },
+    ]);
+    const { scheduler, spawns } = makeTickScheduler(tick.getTransactionDepth, tick.events);
+
+    await runScheduledJobsTick(tick.sql as any, scheduler as any);
+
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].transactionDepth).toBeGreaterThan(0);
+    const spawnIndex = tick.events.findIndex((event) => event.type === "spawn");
+    const updateIndex = tick.events.findIndex((event) => event.type === "update");
+    const perRowCommitIndex = tick.events.findLastIndex((event) => event.type === "commit");
+    expect(spawnIndex).toBeGreaterThan(-1);
+    expect(updateIndex).toBeGreaterThan(spawnIndex);
+    expect(perRowCommitIndex).toBeGreaterThan(updateIndex);
+  });
+
+  test("second tick runner sees no due row after the first runner enqueues and advances in the lock", async () => {
+    const tick = makeTickSql([
+      {
+        ...baseJob,
+        cron: "* * * * *",
+        next_run_at: "2026-07-01T00:00:00.000Z",
+      },
+    ]);
+    const { scheduler, spawns } = makeTickScheduler(tick.getTransactionDepth, tick.events);
+
+    await runScheduledJobsTick(tick.sql as any, scheduler as any);
+    await runScheduledJobsTick(tick.sql as any, scheduler as any);
+
+    expect(spawns).toHaveLength(1);
   });
 
   test("one-shot job sets completed_at and pauses after execution while preserving next_run_at", async () => {

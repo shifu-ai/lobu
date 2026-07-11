@@ -3,7 +3,7 @@
  * `action_key` (chrome convention) and `operation_key` (Mac/iOS decode name).
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -13,14 +13,14 @@ import { post } from '../setup/test-helpers';
 
 const CONNECTOR_KEY = 'apple.computer_use';
 const OPERATION_KEY = 'permissions';
+const here = dirname(fileURLToPath(import.meta.url));
+const computerUseManifestPath = resolve(
+  here,
+  '../../../../owletto/apps/mac/Owletto/ConnectorManifests/apple_computer_use.json',
+);
 
 function loadComputerUseManifest(): Record<string, unknown> {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const path = resolve(
-    here,
-    '../../../../owletto/apps/mac/Owletto/ConnectorManifests/apple_computer_use.json',
-  );
-  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  return JSON.parse(readFileSync(computerUseManifestPath, 'utf8')) as Record<string, unknown>;
 }
 
 async function seedDeviceOwner() {
@@ -78,7 +78,9 @@ describe('mac computer_use action poll', () => {
     await cleanupTestDatabase();
   });
 
-  it('claims a pinned action run and returns operation_key alongside action_key', async () => {
+  const itWithOwlettoManifest = existsSync(computerUseManifestPath) ? it : it.skip;
+
+  itWithOwlettoManifest('claims a pinned action run and returns operation_key alongside action_key', async () => {
     const { orgId, workerId, deviceWorkerId } = await seedDeviceOwner();
     const manifest = loadComputerUseManifest();
     const connectorManifests = [manifest];

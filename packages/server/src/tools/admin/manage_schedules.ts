@@ -93,11 +93,6 @@ async function handleCreate(
   }
   const completedAt = parseOptionalTimestamp('completed_at', args.completed_at);
   if (!(completedAt instanceof Date) && completedAt !== null) return completedAt;
-  if (runAtDate.getTime() < Date.now() - 30_000 && !args.cron) {
-    return {
-      error: `run_at is in the past. Current server time is ${new Date().toISOString()}; provide a future ISO timestamp.`,
-    };
-  }
   // If cron is set, sanity-check it by computing the next tick from now.
   if (args.cron) {
     try {

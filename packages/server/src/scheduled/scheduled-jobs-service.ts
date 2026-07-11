@@ -8,12 +8,12 @@
  * claim/retry/idempotency/observability inherited.
  *
  * Firing flow:
- *   1. Tick claims rows WHERE next_run_at <= now AND NOT paused AND not completed.
- *   2. For each row, revalidate/claim the current row, then spawn(action_type, action_args, { idempotencyKey, runAt: now }).
- *   3. Advance last_fired_at + next_run_at (or pause if one-shot completed).
- * If the tick crashes between step 2 and 3, the next tick re-reads the
- * same row (next_run_at not advanced) and re-spawns — idempotency dedup
- * stops duplicates. Self-healing.
+ *   1. Tick reads cheap due candidates WHERE next_run_at <= now AND NOT paused AND not completed.
+ *   2. For each candidate, lock the current row, enqueue the task, then advance/pause
+ *      before releasing the row lock.
+ * If enqueue fails, the transaction rolls back and the next tick re-reads the
+ * same row. If a process crashes after enqueue before advance, task idempotency
+ * dedups a retried enqueue. Self-healing.
  */
 
 import { getDb } from '../db/client';
@@ -197,7 +197,7 @@ export async function createScheduledJobInDb(
       organization_id, action_type, action_args, delivery_context, cron, next_run_at,
       description, schedule_metadata, timezone, until_at, completed_at, idempotency_key,
       created_by_user, created_by_agent,
-      source_run_id, source_event_id, source_thread_id
+      source_run_id, source_event_id, source_thread_id, paused
     ) VALUES (
       ${params.organizationId}, ${params.actionType},
       ${sql.json(params.actionArgs)}, ${params.deliveryContext ? sql.json(params.deliveryContext) : null}, ${params.cron ?? null}, ${params.runAt},
@@ -207,7 +207,7 @@ export async function createScheduledJobInDb(
       ${params.idempotencyKey ?? null},
       ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
       ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null},
-      ${params.sourceThreadId ?? null}
+      ${params.sourceThreadId ?? null}, ${params.completedAt != null}
     )
     ON CONFLICT (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL
     DO UPDATE SET idempotency_key = scheduled_jobs.idempotency_key
@@ -362,26 +362,6 @@ async function completeExpiredScheduledJob(
   return rows.length > 0;
 }
 
-async function revalidateScheduledJobForDispatch(
-  sql: ScheduledJobsTickSql,
-  id: string
-): Promise<ScheduledJobRow | null> {
-  const rows = await sql.begin(async (tx) => {
-    return (await tx`
-      SELECT *
-      FROM scheduled_jobs
-      WHERE id = ${id}
-        AND next_run_at <= now()
-        AND NOT paused
-        AND completed_at IS NULL
-        AND (until_at IS NULL OR next_run_at <= until_at)
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    `) as unknown as ScheduledJobRow[];
-  });
-  return rows[0] ?? null;
-}
-
 async function completeScheduledJobAfterFire(
   sql: ScheduledJobsTickSql,
   id: string
@@ -404,82 +384,81 @@ function exceedsUntilAt(nextAt: string, untilAt: string | null): boolean {
   return new Date(nextAt).getTime() > new Date(untilAt).getTime();
 }
 
-export async function runScheduledJobsTick(
+async function claimEnqueueAndAdvanceScheduledJob(
   sql: ScheduledJobsTickSql,
-  scheduler: ScheduledJobsTickScheduler
+  scheduler: ScheduledJobsTickScheduler,
+  id: string
 ): Promise<void> {
-  const claimed = await sql.begin(async (tx) => {
-    return (await tx`
+  await sql.begin(async (tx) => {
+    const rows = (await tx`
       SELECT *
       FROM scheduled_jobs
-      WHERE next_run_at <= now()
+      WHERE id = ${id}
+        AND next_run_at <= now()
         AND NOT paused
         AND completed_at IS NULL
-      ORDER BY next_run_at ASC
       FOR UPDATE SKIP LOCKED
-      LIMIT 200
+      LIMIT 1
     `) as unknown as ScheduledJobRow[];
-  });
-  if (claimed.length === 0) return;
+    const row = rows[0];
+    if (!row) return;
 
-  for (const row of claimed) {
     if (exceedsUntilAt(row.next_run_at, row.until_at)) {
-      await completeExpiredScheduledJob(sql, row.id);
-      continue;
+      await completeExpiredScheduledJob(tx, row.id);
+      return;
     }
 
-    const currentRow = await revalidateScheduledJobForDispatch(sql, row.id);
-    if (!currentRow) continue;
+    const tickIso = row.next_run_at;
+    const idempotencyKey = `scheduled_job:${row.id}:${tickIso}`;
+    await scheduler.spawn(row.action_type, {
+      ...row.action_args,
+      __scheduled_job_id: row.id,
+      __delivery_context: row.delivery_context,
+      __scheduled_job_tick: tickIso,
+      __organization_id: row.organization_id,
+      __created_by_user: row.created_by_user,
+      __created_by_agent: row.created_by_agent,
+    }, { idempotencyKey });
 
-    const tickIso = currentRow.next_run_at;
-    const idempotencyKey = `scheduled_job:${currentRow.id}:${tickIso}`;
-    try {
-      await scheduler.spawn(currentRow.action_type, {
-        ...currentRow.action_args,
-        __scheduled_job_id: currentRow.id,
-        __delivery_context: currentRow.delivery_context,
-        __scheduled_job_tick: tickIso,
-        __organization_id: currentRow.organization_id,
-        __created_by_user: currentRow.created_by_user,
-        __created_by_agent: currentRow.created_by_agent,
-      }, { idempotencyKey });
-    } catch (err) {
-      logger.warn(
-        { scheduled_job_id: currentRow.id, err: errorMessage(err) },
-        '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
-      );
-      continue;
-    }
-    // Advance OR pause-when-done depending on whether this is recurring.
-    //
-    // The claim transaction (FOR UPDATE SKIP LOCKED) commits when the
-    // closure above returns, releasing the row locks BEFORE this advance
-    // runs — so SKIP LOCKED gives no cross-pod exclusion during the
-    // spawn+advance window. The spawn idempotency key collapses duplicate
-    // tasks, but the advance itself must be conditional or two pods reading
-    // the same pre-advance `next_run_at` can both write (and clobber a
-    // concurrent pause/delete/re-schedule).
-    //
-    // Guard on `next_run_at <= now()` (same predicate as the claim SELECT),
-    // NOT equality against the value we read: postgres.js parses
-    // timestamptz to a millisecond-precision JS Date while the column
-    // stores microseconds, so an equality round-trip silently never
-    // matches for µs-precision rows — leaving them eternally due and
-    // re-claimed every tick. `<= now()` is a no-op once any pod has
-    // advanced the row (next_run_at is then in the future) and never
-    // clobbers an operator re-schedule to a future time.
-    const nextAt = currentRow.cron ? nextCronTickAt(currentRow.cron) : null;
-    if (nextAt && !exceedsUntilAt(nextAt, currentRow.until_at)) {
-      await sql`
+    const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
+    if (nextAt && !exceedsUntilAt(nextAt, row.until_at)) {
+      await tx`
         UPDATE scheduled_jobs
         SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
-        WHERE id = ${currentRow.id}
+        WHERE id = ${row.id}
           AND next_run_at <= now()
           AND NOT paused
           AND completed_at IS NULL
       `;
     } else {
-      await completeScheduledJobAfterFire(sql, currentRow.id);
+      await completeScheduledJobAfterFire(tx, row.id);
+    }
+  });
+}
+
+export async function runScheduledJobsTick(
+  sql: ScheduledJobsTickSql,
+  scheduler: ScheduledJobsTickScheduler
+): Promise<void> {
+  const candidates = (await sql`
+    SELECT id
+    FROM scheduled_jobs
+    WHERE next_run_at <= now()
+      AND NOT paused
+      AND completed_at IS NULL
+    ORDER BY next_run_at ASC
+    LIMIT 200
+  `) as unknown as Array<{ id: string }>;
+  if (candidates.length === 0) return;
+
+  for (const row of candidates) {
+    try {
+      await claimEnqueueAndAdvanceScheduledJob(sql, scheduler, row.id);
+    } catch (err) {
+      logger.warn(
+        { scheduled_job_id: row.id, err: errorMessage(err) },
+        '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
+      );
     }
   }
 }
@@ -487,12 +466,12 @@ export async function runScheduledJobsTick(
 /**
  * Register the per-minute tick. Call once during bootTaskScheduler.
  *
- * The handler claims due rows transactionally (FOR UPDATE SKIP LOCKED so
- * concurrent pods coordinate without an advisory lock), spawns one task
- * per row, and advances next_run_at. A handler crash leaves rows un-
- * advanced — next minute's tick retries them. Per-row idempotency key
- * `scheduled_job:<id>:<tick-iso>` deduplicates if the same row is read
- * twice across pods.
+ * The handler reads due candidates, then claims each row transactionally
+ * (FOR UPDATE SKIP LOCKED so concurrent pods coordinate without an advisory
+ * lock), spawns one task per row, and advances next_run_at before releasing
+ * the row lock. A handler crash before advance leaves rows due — next minute's
+ * tick retries them. Per-row idempotency key `scheduled_job:<id>:<tick-iso>`
+ * deduplicates if a crash happens after enqueue but before advance.
  */
 export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
   scheduler.register(

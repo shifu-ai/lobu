@@ -7,13 +7,7 @@ ALTER TABLE scheduled_jobs
   ADD COLUMN IF NOT EXISTS completed_at timestamptz,
   ADD COLUMN IF NOT EXISTS idempotency_key text;
 
-CREATE UNIQUE INDEX IF NOT EXISTS scheduled_jobs_org_idempotency_key_uniq
-  ON scheduled_jobs (organization_id, idempotency_key)
-  WHERE idempotency_key IS NOT NULL;
-
 -- migrate:down
-
-DROP INDEX IF EXISTS scheduled_jobs_org_idempotency_key_uniq;
 
 ALTER TABLE scheduled_jobs
   DROP COLUMN IF EXISTS idempotency_key,
