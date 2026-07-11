@@ -105,6 +105,7 @@ export class MessageConsumer {
   private guardrailRegistry?: GuardrailRegistry;
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
+  private readonly journeyEmitter: typeof emitJourneyObsEvent;
   private sessionManager?: ISessionManager;
   private courseMemorySearch?:CourseMemorySearch;
   constructor(
@@ -112,12 +113,14 @@ export class MessageConsumer {
     deploymentManager: BaseDeploymentManager,
     queue?: IMessageQueue,
     courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
+    journeyEmitter: typeof emitJourneyObsEvent = emitJourneyObsEvent,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
     this.queue = queue ?? new RunsQueue();
     this.courseContextResolver = courseContextResolver;
     this.courseContextRollout = parseCourseContextRolloutConfig();
+    this.journeyEmitter = journeyEmitter;
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
@@ -142,9 +145,9 @@ export class MessageConsumer {
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);
-    }} catch(error) { if(this.courseContextRollout.mode!=="shadow")throw error; result={status:"not_required"}; await emitJourneyObsEvent({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
+    }} catch(error) { if(this.courseContextRollout.mode!=="shadow")throw error; result={status:"not_required"}; await this.journeyEmitter({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
     if(this.courseContextRollout.mode==="shadow"){
-      const resolved=result?.status==="ready"?result.context.course:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await emitJourneyObsEvent({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
+      const resolved=result?.status==="ready"?result.context.course:result?.status==="context_unavailable"?result.resolvedCourse:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await this.journeyEmitter({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
     }
     if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
     if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match"&&legacy){const context:NonNullable<MessagePayload['resolvedCourseContext']>={course:result.resolvedCourse,resolution:{confidence:'high',matchedBy:['single_course_default']},context:{contextPackId:legacy.contextPackId,contextVersion:legacy.contextVersion,stale:legacy.stale,confirmedSummary:legacy.confirmedSummary},retrieval:{status:'failed',crossCourseGuard:'passed',eventIds:[],evidenceRefs:[],snippets:[]}};data.resolvedCourseContext=context;result={status:'ready',context};}}
