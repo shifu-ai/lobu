@@ -2,7 +2,6 @@ import type { MessagePayload } from "@lobu/core";
 import { describe, expect, test, vi } from "vitest";
 import { ConversationStateStore } from "../connections/conversation-state-store.js";
 import { attachCourseContextForReviewedScope } from "../orchestration/course-context-gate.js";
-import { MessageConsumer } from "../orchestration/message-consumer.js";
 import {
 	SessionManager,
 	StateAdapterSessionStore,
@@ -13,6 +12,7 @@ import {
 	type ThreadSession,
 } from "../session.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
+import { MessageConsumer } from "../orchestration/message-consumer.js";
 
 function payload(): MessagePayload {
 	return {
@@ -68,25 +68,14 @@ function fetcher() {
 }
 
 describe("course context binding", () => {
-	test("blocks reviewed-scope dispatch until the shared session manager is wired", async () => {
-		const queue = { createQueue: vi.fn(), send: vi.fn() };
-		const consumer = new MessageConsumer(
-			{ queues: { expireInSeconds: 1, retryLimit: 1 } } as never,
-			{} as never,
-			queue as never,
-		);
-		await expect(
-			(
-				consumer as unknown as {
-					dispatchCourseContextBoundary(
-						data: MessagePayload,
-						deployment: string,
-					): Promise<void>;
-				}
-			).dispatchCourseContextBoundary(payload(), "deployment"),
-		).rejects.toThrow("Course context persistence is not initialized");
-		expect(queue.send).not.toHaveBeenCalled();
-	});
+  test("blocks reviewed-scope dispatch until the shared session manager is wired", async () => {
+    const queue = { createQueue: vi.fn(), send: vi.fn() };
+    const consumer = new MessageConsumer({ queues: { expireInSeconds: 1, retryLimit: 1 } } as never, {} as never, queue as never);
+    await expect((consumer as unknown as { dispatchCourseContextBoundary(data: MessagePayload, deployment: string): Promise<void> })
+      .dispatchCourseContextBoundary(payload(), "deployment"))
+      .rejects.toThrow("Course context persistence is not initialized");
+    expect(queue.send).not.toHaveBeenCalled();
+  });
 
 	test("persists a high-confidence resolved course in the shared thread session", async () => {
 		const adapter = new InMemoryStateAdapter();
@@ -112,9 +101,9 @@ describe("course context binding", () => {
 			sessionKey: computeSessionKey(session),
 		});
 
-		expect(result).toMatchObject({
+		expect(result).toEqual({
 			status: "ready",
-			bindingStatus: { status: "persisted" },
+			binding: { status: "persisted" },
 		});
 		const replica = new SessionManager(
 			new StateAdapterSessionStore(new ConversationStateStore(adapter)),
@@ -158,12 +147,9 @@ describe("course context binding", () => {
 			sessionKey: "channel-1:conv-1",
 		});
 
-		expect(result).toMatchObject({
+		expect(result).toEqual({
 			status: "ready",
-			bindingStatus: {
-				status: "binding_write_failed",
-				code: "binding_write_failed",
-			},
+			binding: { status: "binding_write_failed", code: "binding_write_failed" },
 		});
 		expect(data.resolvedCourseContext?.course.courseKey).toBe("course-a");
 		expect(data.platformMetadata.courseContextBinding).toEqual({
