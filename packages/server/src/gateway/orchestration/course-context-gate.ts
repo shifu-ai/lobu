@@ -21,7 +21,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const secret = options?.secret ?? process.env.TOOLBOX_INTERNAL_SECRET?.trim();
   if (!baseUrl || !secret) return { status: 'context_unavailable', reasonCode: 'not_configured' };
   const client = new ToolboxCourseContextClient({ ...options, baseUrl, secret });
-  let resolution; try { resolution = await client.resolve({ ownerUserId: data.userId, agentId: data.agentId, conversationId: data.conversationId, message: data.messageText }); } catch { return { status: 'context_unavailable', reasonCode: 'resolver_unavailable' }; }
+  let resolution; try { resolution = await client.resolve({ ownerUserId: data.userId, agentId: data.agentId, conversationId: data.conversationId, message: data.messageText, boundCourseKey: session?.shifuCourseContext?.courseKey }); } catch { return { status: 'context_unavailable', reasonCode: 'resolver_unavailable' }; }
   if (resolution.status === 'ambiguous') return { status: 'clarification_required', candidates: resolution.candidates.map(({courseKey,displayName}) => ({courseKey,displayName})) };
   if (resolution.status === 'missing') return { status: 'onboarding_required' };
   const course = resolution.course;

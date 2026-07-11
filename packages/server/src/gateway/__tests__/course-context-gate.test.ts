@@ -10,14 +10,14 @@ describe('course context gate', () => {
     expect(requiresCourseContext(payload('提醒我明天整理課程文件'),{courseSkillEnabled:true,hasActiveCourse:true})).toBe(true);
   });
   test('accepts the complete canonical ambiguous contract and preserves order',async()=>{
-    const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'ambiguous',reason:'multiple_matches',candidates:[candidate,{...candidate,courseKey:'a',courseEntityId:'course:a',displayName:'A 課'}]}),{status:200}));
+    const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'ambiguous',reason:'alias_overlap',candidates:[candidate,{...candidate,courseKey:'a',courseEntityId:'course:a',displayName:'A 課'}]}),{status:200}));
     await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'clarification_required',candidates:[{courseKey:'b',displayName:'B 課'},{courseKey:'a',displayName:'A 課'}]});
   });
   test.each([
-    [{status:'ambiguous',reason:'multiple_matches',candidates:[{courseKey:'b',displayName:'B'}]}],
+    [{status:'ambiguous',reason:'alias_overlap',candidates:[{courseKey:'b',displayName:'B'}]}],
     [{status:'ambiguous',reason:'unknown',candidates:[candidate]}],
-    [{status:'ambiguous',reason:'multiple_matches',candidates:[{...candidate,reasons:[]}]}],
-    [{status:'ambiguous',reason:'multiple_matches',candidates:[{...candidate,reasons:['unknown']}]}],
+    [{status:'ambiguous',reason:'alias_overlap',candidates:[{...candidate,status:'archived'}]}],
+    [{status:'ambiguous',reason:'alias_overlap',candidates:[{...candidate,reasons:['unknown']}]}],
     [{status:'missing',reason:'no_match'}],
   ])('maps malformed closed contract %# to unavailable',async(body)=>{
     const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify(body),{status:200}));
@@ -26,5 +26,9 @@ describe('course context gate', () => {
   test.each(['no_courses','archived_only'] as const)('maps missing/%s to onboarding',async(reason)=>{
     const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'missing',reason}),{status:200}));
     await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'onboarding_required'});
+  });
+  test.each(['multiple_active_courses','explicit_course_key_not_found'] as const)('allows empty candidate reasons for %s',async(reason)=>{
+    const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'ambiguous',reason,candidates:[{...candidate,reasons:[]}]}),{status:200}));
+    await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toMatchObject({status:'clarification_required'});
   });
 });
