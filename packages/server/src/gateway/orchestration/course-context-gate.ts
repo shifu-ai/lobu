@@ -46,7 +46,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   let bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>; try { bundle = await client.bundle(course.courseKey, { ownerUserId: data.userId, agentId: data.agentId }); } catch { logger.warn({ category: 'bundle' }, 'Course context bundle unavailable'); return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_unavailable' }; }
   if (bundle.course.courseKey !== course.courseKey || bundle.course.courseEntityId !== course.courseEntityId) return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_identity_mismatch' };
   const context = bundle.context;
-  const skillTerms=options?.courseSkillEnabled?[...(options.courseSkillRetrievalTerms??[]),...(options.courseSkillContextFields??[])]:[];
+  const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
   const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'failed' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]};
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
     course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },

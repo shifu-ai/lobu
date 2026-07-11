@@ -11,7 +11,7 @@ metadata:
   course-context-contract: 1
   scope: course
   context-fields: audience,dream_result,course_promise,key_learning,delivery_mechanism,evidence,offer
-  retrieval-terms: Key Learning,三個秘密,英雄之旅,銷講,逐字稿,Offer,課程承諾,交付,案例,證據
+  retrieval-terms: Key Learning,Offer
   retrieval-limit: 8
 ---`;
 
@@ -30,26 +30,15 @@ describe("course skill context metadata", () => {
 				"evidence",
 				"offer",
 			],
-			retrievalTerms: [
-				"Key Learning",
-				"三個秘密",
-				"英雄之旅",
-				"銷講",
-				"逐字稿",
-				"Offer",
-				"課程承諾",
-				"交付",
-				"案例",
-				"證據",
-			],
+			retrievalTerms: ["Key Learning", "Offer"],
 			retrievalLimit: 8,
 		});
 	});
 
-	test("accepts bounded inline lists and ignores malformed or out-of-bounds values", () => {
+	test("accepts bounded inline lists and rejects malformed or out-of-bounds values", () => {
 		expect(
 			parseCourseSkillContextMetadata(
-				`---\nmetadata:\n  scope: course\n  context-fields: [audience, offer]\n  retrieval-terms: [Offer, 案例]\n  retrieval-limit: 2\n---`,
+				`---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: [audience, offer]\n  retrieval-terms: [Offer, 案例]\n  retrieval-limit: 2\n---`,
 			),
 		).toMatchObject({
 			contextFields: ["audience", "offer"],
@@ -64,17 +53,25 @@ describe("course skill context metadata", () => {
 		expect(parseCourseSkillContextMetadata("scope: course")).toBeNull();
 	});
 
+	test.each([
+		`---\nmetadata:\n  scope: course\n  retrieval-terms: [Offer]\n---`,
+		`---\nmetadata:\n  course-context-contract: 0\n  scope: course\n  retrieval-terms: [Offer]\n---`,
+		`---\nmetadata:\n  course-context-contract: 2\n  scope: course\n  retrieval-terms: [Offer]\n---`,
+		`---\nmetadata:\n  course-context-contract: "1"\n  scope: course\n  retrieval-terms: [Offer]\n---`,
+	])("rejects missing or unsupported contract version %#", (content) => {
+		expect(parseCourseSkillContextMetadata(content)).toBeNull();
+	});
+
 	test("merges only enabled course skills within global bounds", () => {
 		const resolved = resolveCourseSkillContextMetadata([
 			{ enabled: false, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
 			{ enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
 			{
 				enabled: true,
-				instructions: `---\nmetadata:\n  scope: course\n  retrieval-terms: [第十一, 第十二, 第十三]\n  retrieval-limit: 4\n---`,
+				instructions: `---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  retrieval-terms: [第二詞]\n  retrieval-limit: 4\n---`,
 			},
 		]);
 		expect(resolved).toMatchObject({ enabled: true, retrievalLimit: 8 });
-		expect(resolved.retrievalTerms).toHaveLength(12);
-		expect(resolved.retrievalTerms).not.toContain("第十三");
+		expect(resolved.retrievalTerms).toEqual(["Key Learning", "Offer"]);
 	});
 });

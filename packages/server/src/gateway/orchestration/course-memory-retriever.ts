@@ -1,6 +1,6 @@
 import type {Env} from '@lobu/connector-sdk';
 export const COURSE_MEMORY_RETRIEVAL_TIMEOUT_MS=800;
-const MAX_HITS=8,MAX_SEARCH_ROWS=64,MAX_TASK_CHARS=560,MAX_SKILL_TERMS=8,MAX_TITLE_CHARS=200,MAX_SNIPPET_CHARS=300,MAX_SOURCE_URL_CHARS=256,MAX_RETRIEVAL_JSON_CHARS=8000;
+const MAX_HITS=8,MAX_SEARCH_ROWS=64,MAX_TASK_CHARS=560,MAX_SKILL_TERMS=2,MAX_TITLE_CHARS=200,MAX_SNIPPET_CHARS=300,MAX_SOURCE_URL_CHARS=256,MAX_RETRIEVAL_JSON_CHARS=8000;
 interface SearchRow{id:number;payload_text:string;title:string|null;source_url:string|null;organization_id:string;metadata:Record<string,unknown>}
 export interface CourseMemoryRetrieval{status:'loaded'|'partial'|'failed';crossCourseGuard:'passed'|'failed';eventIds:number[];evidenceRefs:string[];snippets:Array<{eventId:number;title:string|null;text:string;sourceUrl:string|null}>}
 export interface CourseMemoryRetrievalInput{organizationId:string;ownerUserId:string;agentId:string;courseEntityId:string;task:string;skillTerms?:string[];limit?:number;env?:Env}

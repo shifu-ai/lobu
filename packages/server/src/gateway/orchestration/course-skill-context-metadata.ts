@@ -1,5 +1,5 @@
 const MAX_CONTEXT_FIELDS = 8;
-const MAX_RETRIEVAL_TERMS = 12;
+const MAX_RETRIEVAL_TERMS = 2;
 const MAX_TERM_CHARS = 100;
 const ALLOWED_CONTEXT_FIELDS = new Set([
 	"audience",
@@ -41,6 +41,7 @@ export function parseCourseSkillContextMetadata(
 	const metadataLines = frontmatter
 		.slice(metadataStart + 1)
 		.filter((line) => /^\s{2,}/u.test(line));
+	if (scalar(metadataLines, "course-context-contract") !== "1") return null;
 	if (scalar(metadataLines, "scope") !== "course") return null;
 	const contextFields = list(metadataLines, "context-fields");
 	const retrievalTerms = list(metadataLines, "retrieval-terms");
