@@ -54,6 +54,23 @@ describe("course skill context metadata", () => {
 	});
 
 	test.each([
+		`---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  retrieval-terms: [Offer]\n  retrieval-limit: 8\n---`,
+		`---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: [audience]\n  retrieval-limit: 8\n---`,
+		`---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: []\n  retrieval-terms: [Offer]\n  retrieval-limit: 8\n---`,
+		`---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: [audience]\n  retrieval-terms: []\n  retrieval-limit: 8\n---`,
+		`---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: [audience]\n  retrieval-terms: [Offer]\n---`,
+	])("requires nonempty fields, terms, and an explicit limit %#", (content) => {
+		expect(parseCourseSkillContextMetadata(content)).toBeNull();
+	});
+
+	test("supports CRLF and confines keys to the metadata block", () => {
+		const crlf = TOOLBOX_OPP_SKILL_FRONTMATTER.replace(/\n/gu, "\r\n");
+		expect(parseCourseSkillContextMetadata(crlf)?.retrievalTerms).toEqual(["Key Learning", "Offer"]);
+		const escaped = `---\nmetadata:\n  course-context-contract: 1\nother:\n  scope: course\n  context-fields: [audience]\n  retrieval-terms: [Offer]\n  retrieval-limit: 8\n---`;
+		expect(parseCourseSkillContextMetadata(escaped)).toBeNull();
+	});
+
+	test.each([
 		`---\nmetadata:\n  scope: course\n  retrieval-terms: [Offer]\n---`,
 		`---\nmetadata:\n  course-context-contract: 0\n  scope: course\n  retrieval-terms: [Offer]\n---`,
 		`---\nmetadata:\n  course-context-contract: 2\n  scope: course\n  retrieval-terms: [Offer]\n---`,
@@ -73,5 +90,12 @@ describe("course skill context metadata", () => {
 		]);
 		expect(resolved).toMatchObject({ enabled: true, retrievalLimit: 8 });
 		expect(resolved.retrievalTerms).toEqual(["Key Learning", "Offer"]);
+	});
+
+	test("falls back to instructions only when content is invalid", () => {
+		const validInstructions = TOOLBOX_OPP_SKILL_FRONTMATTER;
+		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "", instructions: validInstructions }]).enabled).toBe(true);
+		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "---\nmetadata:\n  scope: course\n---", instructions: validInstructions }]).enabled).toBe(true);
+		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: validInstructions, instructions: "invalid" }]).retrievalTerms).toEqual(["Key Learning", "Offer"]);
 	});
 });

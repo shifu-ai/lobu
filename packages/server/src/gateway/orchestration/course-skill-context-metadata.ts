@@ -38,23 +38,28 @@ export function parseCourseSkillContextMetadata(
 		/^metadata:\s*$/u.test(line),
 	);
 	if (metadataStart < 0) return null;
-	const metadataLines = frontmatter
-		.slice(metadataStart + 1)
-		.filter((line) => /^\s{2,}/u.test(line));
+	const metadataLines: string[] = [];
+	for (const line of frontmatter.slice(metadataStart + 1)) {
+		if (line && !/^\s/u.test(line)) break;
+		if (/^\s{2,}/u.test(line)) metadataLines.push(line);
+	}
 	if (scalar(metadataLines, "course-context-contract") !== "1") return null;
 	if (scalar(metadataLines, "scope") !== "course") return null;
 	const contextFields = list(metadataLines, "context-fields");
 	const retrievalTerms = list(metadataLines, "retrieval-terms");
 	const rawLimit = scalar(metadataLines, "retrieval-limit");
-	const retrievalLimit = rawLimit === null ? 8 : Number(rawLimit);
+	if (rawLimit === null) return null;
+	const retrievalLimit = Number(rawLimit);
 	if (
 		!contextFields ||
+		contextFields.length === 0 ||
 		contextFields.length > MAX_CONTEXT_FIELDS ||
 		contextFields.some((field) => !ALLOWED_CONTEXT_FIELDS.has(field))
 	)
 		return null;
 	if (
 		!retrievalTerms ||
+		retrievalTerms.length === 0 ||
 		retrievalTerms.length > MAX_RETRIEVAL_TERMS ||
 		retrievalTerms.some(
 			(term) => term.length < 2 || term.length > MAX_TERM_CHARS,
@@ -75,11 +80,7 @@ export function resolveCourseSkillContextMetadata(
 ): ResolvedCourseSkillContextMetadata {
 	const parsed = skills
 		.filter((skill) => skill.enabled)
-		.map((skill) =>
-			parseCourseSkillContextMetadata(
-				skill.content ?? skill.instructions ?? "",
-			),
-		)
+		.map((skill) => parseCourseSkillContextMetadata(skill.content ?? "") ?? parseCourseSkillContextMetadata(skill.instructions ?? ""))
 		.filter(
 			(metadata): metadata is CourseSkillContextMetadata => metadata !== null,
 		);
@@ -99,9 +100,10 @@ export function resolveCourseSkillContextMetadata(
 }
 
 function extractFrontmatter(content: string): string[] | null {
-	if (!content.startsWith("---\n")) return null;
-	const end = content.indexOf("\n---", 4);
-	return end < 0 ? null : content.slice(4, end).split("\n");
+	const normalized = content.replace(/\r\n?/gu, "\n");
+	if (!normalized.startsWith("---\n")) return null;
+	const end = normalized.indexOf("\n---", 4);
+	return end < 0 ? null : normalized.slice(4, end).split("\n");
 }
 function scalar(lines: string[], key: string): string | null {
 	const pattern = new RegExp(`^\\s{2}${key}:\\s*(.*?)\\s*$`, "u");

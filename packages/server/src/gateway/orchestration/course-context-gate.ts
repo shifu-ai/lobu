@@ -9,6 +9,20 @@ export type CourseContextGateResult = { status: 'not_required' } | {status:'alre
 const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
 const logger = createLogger('course-context-gate');
+const STRUCTURED_CONTEXT_FIELDS=new Set(['audience','dream_result','course_promise','key_learning','delivery_mechanism','evidence','offer']);
+function projectRequiredCourseContext(bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>,fields:string[]):string{
+  const lines=['Required course context (canonical structured fields only):'];
+  for(const field of fields.filter((value)=>STRUCTURED_CONTEXT_FIELDS.has(value))){
+    if(field==='audience')lines.push(`audience: ${bundle.profile.audience??'[missing]'}`);
+    else if(field==='course_promise')lines.push(`course_promise: ${bundle.profile.coursePromise??'[missing]'}`);
+    else if(field==='evidence'){
+      lines.push('evidence:');
+      if(bundle.evidence.confirmed.length===0)lines.push('- [missing]');
+      else for(const item of bundle.evidence.confirmed.slice(0,8)){const title=(item.sourceTitle??item.sourceId).slice(0,200);const preview=item.excerptPreview?.slice(0,500);lines.push(`- ${item.id.slice(0,200)} | ${title}${preview?` | ${preview}`:''}`);}
+    }else lines.push(`${field}: [missing]`);
+  }
+  return lines.join('\n').slice(0,8000);
+}
 export function requiresCourseContext(data: MessagePayload, options: {courseSkillEnabled?:boolean;hasActiveCourse?:boolean} = {}): boolean {
   const message = data.messageText?.trim() ?? '';
   if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message)) return false;
@@ -51,7 +65,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
     course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },
     resolution: { confidence: 'high', matchedBy: resolution.matchedBy },
-    context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: context.agentMd.slice(0, 8000) },
+    context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: options?.courseSkillEnabled&&options.courseSkillContextFields?.length?projectRequiredCourseContext(bundle,options.courseSkillContextFields):context.agentMd.slice(0, 8000) },
     retrieval,
   };
   data.resolvedCourseContext=resolvedCourseContext;
