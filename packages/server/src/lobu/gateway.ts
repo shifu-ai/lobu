@@ -334,8 +334,6 @@ export async function initLobuGateway(): Promise<Hono | null> {
 
     logger.info('[Lobu] Starting embedded orchestrator');
     orchestrator = new Orchestrator(gatewayConfig.orchestration);
-    await orchestrator.start();
-    logger.info('[Lobu] Embedded orchestrator started');
 
     // Create PostgreSQL-backed stores
     const configStore = createPostgresAgentConfigStore();
@@ -370,6 +368,8 @@ export async function initLobuGateway(): Promise<Hono | null> {
       coreServices.getSessionManager()
     );
     logger.info('[Lobu] Embedded orchestrator injected core services');
+    await orchestrator.start();
+    logger.info('[Lobu] Embedded orchestrator started');
 
     coreServices
       .getWorkerGateway()
@@ -387,7 +387,10 @@ export async function initLobuGateway(): Promise<Hono | null> {
       // Wire ChatResponseBridge into unified thread consumer
       const unifiedConsumer = gateway.getUnifiedConsumer();
       if (unifiedConsumer) {
-        const bridge = new ChatResponseBridge(chatInstanceManager);
+        const bridge = new ChatResponseBridge(
+          chatInstanceManager,
+          coreServices.getSessionManager()
+        );
         bridge.setGuardrails(
           coreServices.getGuardrailRegistry(),
           coreServices.getAgentSettingsStore()

@@ -12,6 +12,7 @@ import {
 	type ThreadSession,
 } from "../session.js";
 import { InMemoryStateAdapter } from "./fixtures/in-memory-state-adapter.js";
+import { MessageConsumer } from "../orchestration/message-consumer.js";
 
 function payload(): MessagePayload {
 	return {
@@ -67,6 +68,15 @@ function fetcher() {
 }
 
 describe("course context binding", () => {
+  test("blocks reviewed-scope dispatch until the shared session manager is wired", async () => {
+    const queue = { createQueue: vi.fn(), send: vi.fn() };
+    const consumer = new MessageConsumer({ queues: { expireInSeconds: 1, retryLimit: 1 } } as never, {} as never, queue as never);
+    await expect((consumer as unknown as { dispatchCourseContextBoundary(data: MessagePayload, deployment: string): Promise<void> })
+      .dispatchCourseContextBoundary(payload(), "deployment"))
+      .rejects.toThrow("Course context persistence is not initialized");
+    expect(queue.send).not.toHaveBeenCalled();
+  });
+
 	test("persists a high-confidence resolved course in the shared thread session", async () => {
 		const adapter = new InMemoryStateAdapter();
 		const manager = new SessionManager(

@@ -98,6 +98,9 @@ export class MessageConsumer {
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<void> {
     if (this.courseContextResolver === attachCourseContextForReviewedScope) {
+      if (data.platformMetadata?.courseScope === "reviewed" && !this.sessionManager) {
+        throw new Error("Course context persistence is not initialized");
+      }
       await attachCourseContextForReviewedScope(data, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
         sessionManager: this.sessionManager, sessionKey: computeSessionKey(data),

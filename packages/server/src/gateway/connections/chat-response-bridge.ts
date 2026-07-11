@@ -21,6 +21,7 @@ import {
 import { getDb } from "../../db/client.js";
 import { getOrganizationSlug } from "../../utils/url-builder.js";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { computeSessionKey, type ISessionManager } from "../session.js";
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
 import type { ThreadResponsePayload } from "../infrastructure/queue/index.js";
@@ -130,7 +131,10 @@ export class ChatResponseBridge implements ResponseRenderer {
   private guardrailRegistry?: GuardrailRegistry;
   private agentSettingsStore?: AgentSettingsStore;
 
-  constructor(private manager: ChatInstanceManager) {}
+  constructor(
+    private manager: ChatInstanceManager,
+    private sessionManager?: ISessionManager
+  ) {}
 
   /**
    * Wire output-stage guardrails. Both must be set for guardrails to run;
@@ -511,6 +515,21 @@ export class ChatResponseBridge implements ResponseRenderer {
     const completionMd = readPlatformMetadata(payload.platformMetadata);
     if (completionMd.sessionReset) {
       const agentId = completionMd.agentId;
+      if (this.sessionManager) {
+        try {
+          await this.sessionManager.deleteSession(
+            computeSessionKey({
+              channelId: payload.channelId,
+              conversationId: payload.conversationId,
+            })
+          );
+        } catch (error) {
+          logger.warn(
+            { error: String(error) },
+            "Failed to clear shared thread session on session reset"
+          );
+        }
+      }
       try {
         await conversationState?.clearHistory(connectionId, channelId);
         logger.info(
