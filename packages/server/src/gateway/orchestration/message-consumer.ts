@@ -105,8 +105,8 @@ export class MessageConsumer {
   private guardrailRegistry?: GuardrailRegistry;
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
-  private readonly journeyEmitter: typeof emitJourneyObsEvent;
-  private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{try{await Promise.race([this.journeyEmitter(event).catch(()=>{}),new Promise<void>(resolve=>setTimeout(resolve,20))]);}catch{}}
+  private readonly journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void>;
+  private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),20);try{await this.journeyEmitter(event,controller.signal);}catch{}finally{clearTimeout(timer);}}
   private sessionManager?: ISessionManager;
   private courseMemorySearch?:CourseMemorySearch;
   constructor(
@@ -114,7 +114,7 @@ export class MessageConsumer {
     deploymentManager: BaseDeploymentManager,
     queue?: IMessageQueue,
     courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
-    journeyEmitter: typeof emitJourneyObsEvent = emitJourneyObsEvent,
+    journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void> = emitJourneyObsEvent,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;

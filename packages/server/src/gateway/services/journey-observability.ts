@@ -237,12 +237,14 @@ function resolveJourneyIngestConfig():
 }
 
 export async function emitJourneyEvent(
-	input: JourneyEventPayload
+	input: JourneyEventPayload,
+	externalSignal?: AbortSignal
 ): Promise<void> {
 	const config = resolveJourneyIngestConfig();
 	if (!config) return;
 
 	const controller = new AbortController();
+	const abortFromExternal=()=>controller.abort();externalSignal?.addEventListener("abort",abortFromExternal,{once:true});
 	const timeout = setTimeout(() => controller.abort(), getTimeoutMs());
 	try {
 		const response = await fetch(config.endpoint, {
@@ -264,5 +266,6 @@ export async function emitJourneyEvent(
 		);
 	} finally {
 		clearTimeout(timeout);
+		externalSignal?.removeEventListener("abort",abortFromExternal);
 	}
 }
