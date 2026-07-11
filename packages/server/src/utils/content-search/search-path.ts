@@ -289,7 +289,7 @@ export async function searchContentBySingleQuery(
   let searchCandidatesCteSql = '';
   const requestedTimeout = options.statement_timeout_ms;
   const queryTimeoutMs = requestedTimeout == null ? (useCandidatePath ? CANDIDATE_QUERY_TIMEOUT_MS : null) : Math.max(1,Math.min(CANDIDATE_QUERY_TIMEOUT_MS,Math.floor(requestedTimeout)));
-  if (queryTimeoutMs !== null) {
+  if (useCandidatePath) {
     // $tsq is appended last in queryParams; offsetParamIdx is the current tail
     // (useDateFeed is false here, so there is no cursor block before it).
     const tsqueryParamIdx = offsetParamIdx + 1;
@@ -450,7 +450,7 @@ export async function searchContentBySingleQuery(
   }
 
   let rawRows: any[];
-  if (useCandidatePath) {
+  if (queryTimeoutMs !== null) {
     // Backstop: a pathological candidate scan degrades to "no content" (every
     // caller tolerates an empty list) rather than hanging the request.
     try {
@@ -459,6 +459,7 @@ export async function searchContentBySingleQuery(
         return await tx.unsafe(querySQL, queryParams);
       })) as any[];
     } catch (err) {
+      if (requestedTimeout != null) throw err;
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },
         '[content-search] candidate query failed; returning empty content'
