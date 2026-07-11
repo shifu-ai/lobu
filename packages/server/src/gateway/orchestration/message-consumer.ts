@@ -13,9 +13,12 @@ import {
   runGuardrailInstances,
   SpanStatusCode,
 } from "@lobu/core";
+import type {Env} from '@lobu/connector-sdk';
+import { createHash } from "node:crypto";
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
 import * as Sentry from "@sentry/node";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { computeSessionKey, type ISessionManager } from "../session.js";
 import { platformMetadataString } from "../connections/platform-metadata.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
 import type {
@@ -27,6 +30,10 @@ import {
   TERMINAL_DELIVERY_SEND_OPTS,
 } from "../infrastructure/queue/index.js";
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
+import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
+import type {CourseMemorySearch} from './course-memory-retriever.js';
+import {resolveCourseSkillContextMetadata} from './course-skill-context-metadata.js';
+import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -35,6 +42,17 @@ import {
 } from "./base-deployment-manager.js";
 
 const logger = createLogger("orchestrator");
+export type CourseContextGateMode = "off" | "shadow" | "single_course" | "enforce";
+export function parseCourseContextRolloutConfig(source: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env): { mode: CourseContextGateMode; legacyFallback: boolean } {
+  const rawMode = source.COURSE_CONTEXT_GATE_MODE?.trim().toLowerCase();
+  const mode: CourseContextGateMode = rawMode === undefined ? "enforce" : rawMode === "off" || rawMode === "shadow" || rawMode === "single_course" || rawMode === "enforce" ? rawMode : "off";
+  return { mode, legacyFallback: source.COURSE_CONTEXT_LEGACY_FALLBACK?.trim().toLowerCase() === "true" };
+}
+export type LegacyComparison = "match"|"mismatch"|"legacy_missing"|"resolved_missing";
+export function compareCourseContextIdentity(resolved:{courseKey:string;courseEntityId:string}|undefined,legacy:{courseKey:string;courseEntityId:string}|undefined):LegacyComparison{if(!resolved)return"resolved_missing";if(!legacy)return"legacy_missing";return resolved.courseKey===legacy.courseKey&&resolved.courseEntityId===legacy.courseEntityId?"match":"mismatch";}
+type LegacyCourseContext={courseKey:string;courseEntityId:string;contextPackId:string;contextVersion:number;stale:boolean;confirmedSummary:string};
+async function readLegacyCourseContext(data:MessagePayload):Promise<LegacyCourseContext|undefined>{const root=process.env.COURSE_CONTEXT_LEGACY_COMPARE_URL?.trim();const secret=process.env.TOOLBOX_INTERNAL_SECRET?.trim();if(!root||!secret)return undefined;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),500);try{const url=new URL(root);url.searchParams.set('ownerUserId',data.userId);url.searchParams.set('agentId',data.agentId);const response=await fetch(url,{headers:{'x-internal-secret':secret},signal:controller.signal});if(response.status===404)return undefined;if(!response.ok)return undefined;const value=await response.json() as Record<string,unknown>;if(typeof value.courseKey!=="string"||value.courseKey.length>200||typeof value.courseEntityId!=="string"||value.courseEntityId.length>300||typeof value.contextPackId!=="string"||value.contextPackId.length>300||!Number.isInteger(value.contextVersion)||typeof value.stale!=="boolean"||typeof value.confirmedSummary!=="string"||value.confirmedSummary.length>8000)return undefined;return value as LegacyCourseContext;}catch{return undefined;}finally{clearTimeout(timer);}}
+export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
 
 function getStringField(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -65,6 +83,22 @@ export function mintRunJobToken(
   });
 }
 
+export function workerMessageSingletonKey(data: MessagePayload): string {
+  const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
+  return `worker-message:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId}`).digest("hex")}`;
+}
+
+export function terminalCourseContextSingletonKey(
+  data: MessagePayload,
+  result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}|{status:"already_dispatched"}>,
+): string {
+  const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
+  const outcome = result.status === "clarification_required"
+    ? `${result.status}:${result.candidates.map((candidate) => candidate.courseKey).sort().join(",")}`
+    : result.status;
+  return `course-terminal:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId ?? ""}\0${outcome}`).digest("hex")}`;
+}
+
 export class MessageConsumer {
   private queue: IMessageQueue;
   private deploymentManager: BaseDeploymentManager;
@@ -80,13 +114,97 @@ export class MessageConsumer {
   private deploymentLocks = new Set<string>();
   private agentSettingsStore?: AgentSettingsStore;
   private guardrailRegistry?: GuardrailRegistry;
+  private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
+  private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
+  private readonly journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void>;
+  private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();let timeout:ReturnType<typeof setTimeout>|undefined;try{const operation=this.journeyEmitter(event,controller.signal);const guarded=operation.catch(()=>{});await Promise.race([guarded,new Promise<void>(resolve=>{timeout=setTimeout(()=>{controller.abort();resolve();},20);})]);}catch{}finally{if(timeout)clearTimeout(timeout);}}
+  private sessionManager?: ISessionManager;
+  private courseMemorySearch?:CourseMemorySearch;
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
+    queue?: IMessageQueue,
+    courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
+    journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void> = emitJourneyObsEvent,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
-    this.queue = new RunsQueue();
+    this.queue = queue ?? new RunsQueue();
+    this.courseContextResolver = courseContextResolver;
+    this.courseContextRollout = parseCourseContextRolloutConfig();
+    this.journeyEmitter = journeyEmitter;
+  }
+
+  private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
+    if (this.courseContextRollout.mode === "off") {
+      await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
+      await this.sendToWorkerQueue(data, deploymentName);
+      return true;
+    }
+    let result: CourseContextGateResult | void;
+    const isNonBindingEvaluation = this.courseContextRollout.mode === "shadow" || this.courseContextRollout.mode === "single_course";
+    const shadowPayload = isNonBindingEvaluation ? { ...data, platformMetadata: { ...data.platformMetadata }, resolvedCourseContext: undefined } : data;
+    try { if (this.courseContextResolver === attachCourseContextForReviewedScope) {
+      const personalBypass = isExplicitPersonalBypass(shadowPayload);
+      if (!personalBypass && data.platformMetadata?.courseScope === "reviewed" && !this.sessionManager) {
+        throw new Error("Course context persistence is not initialized");
+      }
+      let settings = null; if (!personalBypass) try { settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null; } catch { logger.warn({ category: "course_skill_settings", agentId: data.agentId }, "Course skill settings unavailable; using deterministic message scope"); }
+      const courseSkillContext=resolveCourseSkillContextMetadata(settings?.skillsConfig?.skills??[]);
+      result = await attachCourseContextForReviewedScope(shadowPayload, {
+        baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
+        sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+      });
+    } else {
+      result = await this.courseContextResolver(shadowPayload);
+    }} catch(error) { if(this.courseContextRollout.mode!=="shadow")throw error; result={status:"not_required"}; await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
+    if(this.courseContextRollout.mode==="shadow"){
+      const resolved=result?.status==="ready"?result.context.course:result?.status==="context_unavailable"?result.resolvedCourse:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
+    }
+    if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
+    if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match"&&legacy){const context:NonNullable<MessagePayload['resolvedCourseContext']>={course:result.resolvedCourse,resolution:{confidence:'high',matchedBy:['single_course_default']},context:{contextPackId:legacy.contextPackId,contextVersion:legacy.contextVersion,stale:legacy.stale,confirmedSummary:legacy.confirmedSummary},retrieval:{status:'failed',crossCourseGuard:'passed',eventIds:[],evidenceRefs:[],snippets:[]}};data.resolvedCourseContext=context;result={status:'ready',context};}}
+    if (this.courseContextRollout.mode === "single_course") {
+      const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
+      if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
+      // Only the gate's deterministic non-course/personal classification may
+      // bypass. A course-scoped timeout, unavailable bundle, mismatch,
+      // onboarding gap, or ambiguity remains terminal and can never reach the
+      // worker without canonical context.
+      else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
+    }
+    if (result?.status === "already_dispatched") return false;
+    if (result?.status === "clarification_required" || result?.status === "onboarding_required" || result?.status === "context_unavailable") {
+      await this.deliverCourseContextTerminal(data, result);
+      return false;
+    }
+    await armTurnTimeout(this.queue, {
+      messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
+      userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
+      deploymentName, organizationId: data.organizationId,
+    });
+    await this.sendToWorkerQueue(data, deploymentName);
+    if (result?.status === "ready" && result.replay && this.sessionManager) {
+      let marked = await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data), result.replay.pendingId, data.userId, data.agentId, result.replay.messageId);
+      for(let attempt=1;marked.status==='failed'&&attempt<3;attempt++)marked=await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data),result.replay.pendingId,data.userId,data.agentId,result.replay.messageId);
+      if(marked.status==='failed')logger.warn({category:"pending_dispatch_mark",pendingId:result.replay.pendingId},"Course selection dispatched; dispatch marker deferred");
+      const cleared = await this.sessionManager.clearPendingCourseSelection(computeSessionKey(data), result.replay.pendingId, data.userId, data.agentId, result.replay.messageId);
+      if (cleared.status !== "cleared" && cleared.status !== "stale") logger.warn({ category:"pending_cleanup", pendingId:result.replay.pendingId }, "Course selection dispatched; pending cleanup deferred");
+    }
+    return true;
+  }
+
+  private async deliverCourseContextTerminal(data: MessagePayload, result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}|{status:"already_dispatched"}>): Promise<void> {
+    const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ").slice(0, 200);
+    const finalText = result.status === "clarification_required"
+      ? `請選擇這次要處理的課程：\n${result.candidates.map((candidate, index) => `${index + 1}. ${clean(candidate.displayName)}`).join("\n")}`
+      : result.status === "onboarding_required" ? "目前還沒有可用的課程資料，請先完成課程設定後再試。"
+      : result.status==='context_unavailable'&&result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
+    await this.queue.createQueue("thread_response");
+    await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,agentId:data.agentId,organizationId:data.organizationId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, {
+      ...TERMINAL_DELIVERY_SEND_OPTS,
+      singletonKey: terminalCourseContextSingletonKey(data, result),
+      durableSingleton: true,
+    });
   }
 
   /**
@@ -103,6 +221,11 @@ export class MessageConsumer {
     this.guardrailRegistry = registry;
     this.agentSettingsStore = settingsStore;
   }
+
+  setSessionManager(sessionManager: ISessionManager): void {
+    this.sessionManager = sessionManager;
+  }
+  setCourseMemorySearch(search:CourseMemorySearch):void{this.courseMemorySearch=search;}
 
   async start(): Promise<void> {
     try {
@@ -379,19 +502,9 @@ export class MessageConsumer {
       // worker could reply before the marker exists — the discharge would
       // no-op, then a stale marker would be armed and the sweep would emit a
       // spurious error after a successful turn.
-      await armTurnTimeout(this.queue, {
-        messageId: data.messageId,
-        channelId: data.channelId,
-        conversationId: effectiveConversationId,
-        userId: data.userId,
-        platform: data.platform,
-        platformMetadata: data.platformMetadata,
-        deploymentName,
-        organizationId: data.organizationId,
-      });
-
-      // 1) Send to thread queue immediately (queue persists; worker will drain on attach)
-      await Sentry.startSpan(
+      // 1) Resolve the reviewed course scope, durably arm the turn, then send
+      // without unrelated awaited work between arming and dispatch.
+      const workerDispatched = await Sentry.startSpan(
         {
           name: "orchestrator.send_to_worker_queue",
           op: "orchestrator.message_routing",
@@ -402,9 +515,11 @@ export class MessageConsumer {
           },
         },
         async () => {
-          await this.sendToWorkerQueue(data, deploymentName);
+          return await this.dispatchCourseContextBoundary(data, deploymentName);
         }
       );
+
+      if (!workerDispatched) { queueSpan?.setStatus({ code: SpanStatusCode.OK }); queueSpan?.end(); return; }
 
       logger.info(
         { traceId, traceparent: childTraceparent, deploymentName },
@@ -494,6 +609,8 @@ export class MessageConsumer {
         retryLimit: this.config.queues.retryLimit,
         retryDelay: 2, // 2 seconds — fast retry for stale connection recovery
         priority: 10, // Thread messages have high priority
+        singletonKey: workerMessageSingletonKey(data),
+        durableSingleton: true,
       });
 
       if (!jobId) {

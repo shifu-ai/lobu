@@ -1,8 +1,11 @@
 #!/usr/bin/env bun
 
 import { createLogger } from "@lobu/core";
+import { randomUUID } from "node:crypto";
 import type { ConversationStateStore } from "../connections/conversation-state-store.js";
 import {
+  type ActiveCourseBinding,
+  type ActiveCourseBindingWriteResult,
   computeSessionKey,
   type ISessionManager,
   type SessionStore,
@@ -28,6 +31,8 @@ export class StateAdapterSessionStore implements SessionStore {
     }
   }
 
+  async getStrict(sessionKey: string): Promise<ThreadSession | null> { return this.conversations.getSession(sessionKey); }
+
   async set(sessionKey: string, session: ThreadSession): Promise<void> {
     await this.conversations.setSession(sessionKey, session);
     logger.debug(`Stored session ${sessionKey}`);
@@ -36,6 +41,13 @@ export class StateAdapterSessionStore implements SessionStore {
   async delete(sessionKey: string): Promise<void> {
     await this.conversations.deleteSession(sessionKey);
     logger.debug(`Deleted session ${sessionKey}`);
+  }
+
+  async mutate(
+    sessionKey: string,
+    update: (session: ThreadSession) => ThreadSession
+  ): Promise<boolean> {
+    return this.conversations.mutateSession(sessionKey, update);
   }
 
   async getByThread(
@@ -101,11 +113,7 @@ export class SessionManager implements ISessionManager {
     sessionKey: string,
     updates: Partial<ThreadSession>
   ): Promise<void> {
-    const session = await this.getSession(sessionKey);
-    if (session) {
-      const updated = { ...session, ...updates };
-      await this.store.set(sessionKey, updated);
-    }
+    await this.store.mutate(sessionKey, (session) => ({ ...session, ...updates }));
   }
 
   /**
@@ -114,6 +122,8 @@ export class SessionManager implements ISessionManager {
   async getSession(sessionKey: string): Promise<ThreadSession | null> {
     return await this.store.get(sessionKey);
   }
+
+  async getSessionStrict(sessionKey: string): Promise<ThreadSession | null> { return this.store.getStrict ? this.store.getStrict(sessionKey) : this.store.get(sessionKey); }
 
   /**
    * Create or update a session
@@ -170,11 +180,10 @@ export class SessionManager implements ISessionManager {
    * Update session activity timestamp
    */
   async touchSession(sessionKey: string): Promise<void> {
-    const session = await this.getSession(sessionKey);
-    if (session) {
-      session.lastActivity = Date.now();
-      await this.setSession(session);
-    }
+    await this.store.mutate(sessionKey, (session) => ({
+      ...session,
+      lastActivity: Date.now(),
+    }));
   }
 
   /**
@@ -184,4 +193,47 @@ export class SessionManager implements ISessionManager {
   async cleanupExpired(ttl: number): Promise<number> {
     return (await this.store.cleanup?.(ttl)) || 0;
   }
+
+  /** Shared StateAdapter read-merge-write; follows existing last-write semantics. */
+  async bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult> {
+    try {
+      const updated = await this.store.mutate(sessionKey, (session) => ({
+        ...session,
+        shifuCourseContext: binding,
+      }));
+      if (!updated) return { status: "binding_write_failed", code: "binding_write_failed" };
+      return { status: "persisted" };
+    } catch (error) {
+      logger.error(`Failed to bind active course for session ${sessionKey}:`, error);
+      return { status: "binding_write_failed", code: "binding_write_failed" };
+    }
+  }
+
+  async clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult> {
+    try {
+      const updated = await this.store.mutate(sessionKey, (session) => {
+        const { shifuCourseContext: _removed, ...remaining } = session;
+        return remaining;
+      });
+      if (!updated) return { status: "binding_write_failed", code: "binding_write_failed" };
+      return { status: "persisted" };
+    } catch (error) {
+      logger.error(`Failed to clear active course for session ${sessionKey}:`, error);
+      return { status: "binding_write_failed", code: "binding_write_failed" };
+    }
+  }
+
+  async createPendingCourseSelection(sessionKey: string, input: Pick<NonNullable<ThreadSession["pendingCourseSelection"]>, "ownerUserId"|"agentId"|"candidates"|"originalMessage"|"createdAt">): Promise<{ status: "persisted"; pending: NonNullable<ThreadSession["pendingCourseSelection"]> }|{status:"failed"}> {
+    const pending = { ...input, pendingId: randomUUID(), version: Date.now(), status: "pending" as const };
+    try { return await this.store.mutate(sessionKey, (session) => ({ ...session, pendingCourseSelection: pending })) ? { status: "persisted", pending } : { status: "failed" }; } catch { return { status: "failed" }; }
+  }
+
+  async claimPendingCourseSelection(sessionKey:string, expectedPendingId:string, ownerUserId:string, agentId:string, courseKey:string, messageId:string):Promise<{status:"claimed";pending:NonNullable<ThreadSession["pendingCourseSelection"]>}|{status:"conflict"|"failed"}>{
+    let outcome:{status:"claimed";pending:NonNullable<ThreadSession["pendingCourseSelection"]>}|{status:"conflict"|"failed"}={status:"conflict"};
+    try { const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId||current.ownerUserId!==ownerUserId||current.agentId!==agentId)return session;if(current.status==="claimed"){if(current.claimedCourseKey===courseKey&&current.claimedMessageId===messageId)outcome={status:"claimed",pending:current};return session;}const claimed={...current,status:"claimed" as const,claimedAt:Date.now(),claimedCourseKey:courseKey,claimedMessageId:messageId};outcome={status:"claimed",pending:claimed};return {...session,pendingCourseSelection:claimed};});return ok?outcome:{status:"failed"};}catch{return {status:"failed"};}
+  }
+
+  async clearPendingCourseSelection(sessionKey:string,expectedPendingId:string,ownerUserId:string,agentId:string,messageId?:string):Promise<{status:"cleared"|"stale"|"failed"}>{let outcome:"cleared"|"stale"="stale";try{const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId||current.ownerUserId!==ownerUserId||current.agentId!==agentId||(messageId&&current.claimedMessageId!==messageId))return session;outcome="cleared";const{pendingCourseSelection:_removed,...remaining}=session;return remaining;});return ok?{status:outcome}:{status:"failed"};}catch{return{status:"failed"};}}
+
+  async markPendingCourseSelectionDispatched(sessionKey:string,expectedPendingId:string,ownerUserId:string,agentId:string,messageId:string):Promise<{status:"dispatched"|"stale"|"failed"}>{let outcome:"dispatched"|"stale"="stale";try{const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId||current.ownerUserId!==ownerUserId||current.agentId!==agentId||current.claimedMessageId!==messageId)return session;if(current.status==="dispatched"){outcome="dispatched";return session;}if(current.status!=="claimed")return session;outcome="dispatched";return{...session,pendingCourseSelection:{...current,status:"dispatched",dispatchedAt:Date.now()}};});return ok?{status:outcome}:{status:"failed"};}catch{return{status:"failed"};}}
 }

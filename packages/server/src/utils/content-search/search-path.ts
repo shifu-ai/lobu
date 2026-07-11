@@ -52,9 +52,11 @@ export async function searchContentBySingleQuery(
     : null;
   if (!queryEmbedding && env?.EMBEDDINGS_SERVICE_URL) {
     try {
-      const embeddings = await generateEmbeddings([trimmedQuery], env);
+      if (options.abort_signal?.aborted) throw options.abort_signal.reason ?? new Error('Course memory search aborted');
+      const embeddings = await generateEmbeddings([trimmedQuery], env, options.abort_signal);
       queryEmbedding = embeddings[0] ?? null;
     } catch (err) {
+      if (options.abort_signal?.aborted) throw err;
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },
         '[content-search] Embedding generation failed, falling back to text-only search'
@@ -94,15 +96,15 @@ export async function searchContentBySingleQuery(
   const searchEntityScopes =
     entityId != null ? await fetchEntityIdentityScopes(sql, entityId) : [];
 
-  // Slot $11 is the agent_id memory-scope filter — bumps orgScope to $12.
+  // Slots $11/$12 are agent/course memory-scope filters.
   const orgScope = buildOrgScopeWhere({
     entity_id: entityId,
     organization_id: options.organization_id,
-    baseParamIndex: 12,
+    baseParamIndex: 13,
   });
   // Exclude-watcher param slot sits immediately after orgScope so its $N index
   // is stable regardless of whether an embedding param follows.
-  const excludeParamIdx = 12 + orgScope.params.length;
+  const excludeParamIdx = 13 + orgScope.params.length;
   const excludeClause = buildExcludeWatcherClause(
     options.exclude_watcher_id,
     excludeParamIdx
@@ -163,6 +165,7 @@ export async function searchContentBySingleQuery(
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
           AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)
+          AND ($12::text[] IS NULL OR (jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND f.metadata->'course_entity_ids' ?| $12::text[]))
           ${excludeClause.sql}
           ${visibilityClause.sql}
           ${orgScope.sql}`;
@@ -286,6 +289,8 @@ export async function searchContentBySingleQuery(
     hasEmbedding;
   const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
   let searchCandidatesCteSql = '';
+  const requestedTimeout = options.statement_timeout_ms;
+  const queryTimeoutMs = requestedTimeout == null ? (useCandidatePath ? CANDIDATE_QUERY_TIMEOUT_MS : null) : Math.max(1,Math.min(CANDIDATE_QUERY_TIMEOUT_MS,Math.floor(requestedTimeout)));
   if (useCandidatePath) {
     // $tsq is appended last in queryParams; offsetParamIdx is the current tail
     // (useDateFeed is false here, so there is no cursor block before it).
@@ -374,7 +379,7 @@ export async function searchContentBySingleQuery(
         FROM filtered_ids fi
         WHERE 1=1 ${cursorClause.sql}
         ORDER BY ${buildDateCandidateOrderBy(cursor, 'fi')}
-        LIMIT $${limitParamIdx}
+        LIMIT $${limitParamIdx}::int
       ),
       result_set AS (
         SELECT
@@ -405,8 +410,8 @@ export async function searchContentBySingleQuery(
           NULL::bigint as cursor_fetched_count
         FROM filtered_ids fi
         ORDER BY ${resultSetOrderBy}
-        LIMIT $${limitParamIdx}
-        OFFSET $${offsetParamIdx}
+        LIMIT $${limitParamIdx}::int
+        OFFSET $${offsetParamIdx}::int
       ),
       ${ctes}
       ${searchFinalSelect}`;
@@ -431,6 +436,7 @@ export async function searchContentBySingleQuery(
     // Slot $11 — per-agent memory scope. See buildStandardParams for the
     // mirror call site. Bumps orgScope to $12 (set above).
     options.agent_id ?? null,
+    options.course_entity_ids ? pgTextArray(options.course_entity_ids) : null,
     ...orgScope.params,
     ...excludeClause.params,
     ...visibilityClause.params,
@@ -446,15 +452,17 @@ export async function searchContentBySingleQuery(
   }
 
   let rawRows: any[];
-  if (useCandidatePath) {
+  if (options.abort_signal?.aborted) throw options.abort_signal.reason ?? new Error('Course memory search aborted');
+  if (queryTimeoutMs !== null) {
     // Backstop: a pathological candidate scan degrades to "no content" (every
     // caller tolerates an empty list) rather than hanging the request.
     try {
       rawRows = (await sql.begin(async (tx: DbClient) => {
-        await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+        await tx.unsafe(`SET LOCAL statement_timeout = ${queryTimeoutMs}`);
         return await tx.unsafe(querySQL, queryParams);
       })) as any[];
     } catch (err) {
+      if (requestedTimeout != null) throw err;
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },
         '[content-search] candidate query failed; returning empty content'

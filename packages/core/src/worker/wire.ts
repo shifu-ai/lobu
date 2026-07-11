@@ -29,6 +29,38 @@ import type {
  */
 export type JobType = "message" | "exec";
 
+export interface ResolvedCourseExecutionContext {
+  course: { courseKey: string; courseEntityId: string; displayName: string };
+  resolution: {
+    confidence: "high";
+    matchedBy: [
+      | "explicit_course_key"
+      | "message_name"
+      | "message_alias"
+      | "conversation_binding"
+      | "single_course_default",
+    ];
+  };
+  context: {
+    contextPackId: string;
+    contextVersion: number;
+    stale: boolean;
+    confirmedSummary: string;
+  };
+  retrieval: {
+    status: "loaded" | "partial" | "failed";
+    crossCourseGuard: "passed" | "failed";
+    eventIds: number[];
+    evidenceRefs: string[];
+    snippets: Array<{
+      eventId: number;
+      title: string | null;
+      text: string;
+      sourceUrl: string | null;
+    }>;
+  };
+}
+
 /**
  * Universal message payload for every gateway → worker hop.
  * Used by: platform inbound → runs queue → MessageConsumer → worker.
@@ -64,6 +96,7 @@ export interface MessagePayload {
 
   // ── Message content (used by worker) ───────────────────────────────
   messageText: string;
+  resolvedCourseContext?: ResolvedCourseExecutionContext;
 
   // ── Platform-specific data (used by worker for context) ────────────
   platformMetadata: Record<string, unknown>;

@@ -21,7 +21,7 @@ class TestPlatformInstructionProvider extends BaseInstructionProvider {
 }
 
 const context: InstructionContext = {
-  agentId: "shifu-u-agent-1",
+  agentId: "legacy-generic-agent-1",
   userId: "toolbox-user-1",
   sessionKey: "session-1",
   workingDirectory: "/workspace/session-1",
@@ -70,6 +70,15 @@ afterEach(() => {
 describe("Toolbox active context instructions", () => {
   beforeEach(() => {
     restoreEnv();
+  });
+
+  test("does not consult latest-project context for production personal agents", async () => {
+    configureToolboxEnv();
+    const fetchMock = mock(async () => new Response(JSON.stringify({ contextPack: { title: "Legacy B", summary: "Wrong course B" } })));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const sessionContext = await createService().getSessionContext("test", { ...context, agentId: "shifu-u-agent-1" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(sessionContext.platformInstructions).not.toContain("Legacy B");
   });
 
   test("injects compact active project context from Toolbox", async () => {
@@ -155,7 +164,7 @@ describe("Toolbox active context instructions", () => {
       RequestInit,
     ];
     expect(String(input)).toBe(
-      "https://toolbox.example/internal/active-context?ownerUserId=toolbox-user-1&agentId=shifu-u-agent-1"
+      "https://toolbox.example/internal/active-context?ownerUserId=toolbox-user-1&agentId=legacy-generic-agent-1"
     );
     expect(init.method).toBe("GET");
     expect(init.headers).toEqual({ "X-Internal-Secret": "internal-secret" });

@@ -8,6 +8,7 @@ import {
   moduleRegistry,
 } from "@lobu/core";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import type { ISessionManager } from "../session.js";
 import type { ProviderCatalogService } from "../auth/provider-catalog.js";
 import {
   getModelProviderModules,
@@ -23,6 +24,7 @@ import type {
 import { buildModuleEnvVars } from "./deployment-utils.js";
 import { EmbeddedDeploymentManager } from "./impl/embedded-deployment.js";
 import { MessageConsumer } from "./message-consumer.js";
+import {searchCourseMemoryRows} from './course-memory-search.js';
 
 const logger = createLogger("orchestrator");
 
@@ -46,6 +48,7 @@ export class Orchestrator {
       providerModules
     );
     this.queueConsumer = new MessageConsumer(config, this.deploymentManager);
+    this.queueConsumer.setCourseMemorySearch(searchCourseMemoryRows);
   }
 
   /**
@@ -60,7 +63,8 @@ export class Orchestrator {
     grantStore?: GrantStore,
     policyStore?: PolicyStore,
     guardrailRegistry?: GuardrailRegistry,
-    agentSettingsStore?: AgentSettingsStore
+    agentSettingsStore?: AgentSettingsStore,
+    sessionManager?: ISessionManager
   ): Promise<void> {
     this.deploymentManager.setSecretStore(secretStore);
 
@@ -83,6 +87,7 @@ export class Orchestrator {
       this.queueConsumer.setGuardrails(guardrailRegistry, agentSettingsStore);
       logger.debug("Input-stage guardrails wired into MessageConsumer");
     }
+    if (sessionManager) this.queueConsumer.setSessionManager(sessionManager);
 
     const providerModules = getModelProviderModules();
     this.deploymentManager.setProviderModules(providerModules);

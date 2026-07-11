@@ -50,7 +50,22 @@ export interface ThreadSession {
   dryRun?: boolean;
   /** Internal automation intent for one-shot system sessions. */
   intent?: { kind: "watcher_run"; runId: number; watcherId: number };
+  /** Convenience binding only; Toolbox must revalidate ownership/status on use. */
+  shifuCourseContext?: ActiveCourseBinding;
+  pendingCourseSelection?: { pendingId: string; version: number; status: "pending" | "claimed" | "dispatched"; ownerUserId: string; agentId: string; candidates: Array<{ courseKey: string; displayName: string }>; originalMessage: string; createdAt: number; claimedAt?: number; dispatchedAt?: number; claimedCourseKey?: string; claimedMessageId?: string };
 }
+
+export interface ActiveCourseBinding {
+  courseKey: string;
+  courseEntityId: string;
+  source: "resolver" | "user_confirmation" | "event";
+  boundAt: string;
+  contextPackId: string | null;
+}
+
+export type ActiveCourseBindingWriteResult =
+  | { status: "persisted" }
+  | { status: "binding_write_failed"; code: "binding_write_failed" };
 
 /**
  * Compute session key for the session store.
@@ -79,8 +94,13 @@ export function computeSessionKey(session: {
  */
 export interface SessionStore {
   get(sessionKey: string): Promise<ThreadSession | null>;
+  getStrict?(sessionKey: string): Promise<ThreadSession | null>;
   set(sessionKey: string, session: ThreadSession): Promise<void>;
   delete(sessionKey: string): Promise<void>;
+  mutate(
+    sessionKey: string,
+    update: (session: ThreadSession) => ThreadSession
+  ): Promise<boolean>;
   getByThread(
     channelId: string,
     threadTs: string
@@ -101,6 +121,7 @@ export interface ISessionManager {
     threadCreator?: string
   ): Promise<ThreadSession>;
   getSession(sessionKey: string): Promise<ThreadSession | null>;
+  getSessionStrict(sessionKey: string): Promise<ThreadSession | null>;
   findSessionByThread(
     channelId: string,
     threadTs: string
@@ -118,4 +139,10 @@ export interface ISessionManager {
   ): Promise<{ allowed: boolean; owner?: string }>;
   touchSession(sessionKey: string): Promise<void>;
   cleanupExpired(ttl: number): Promise<number>;
+  bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult>;
+  clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult>;
+  createPendingCourseSelection(sessionKey: string, pending: Pick<NonNullable<ThreadSession["pendingCourseSelection"]>, "ownerUserId"|"agentId"|"candidates"|"originalMessage"|"createdAt">): Promise<{ status: "persisted"; pending: NonNullable<ThreadSession["pendingCourseSelection"]> }|{status:"failed"}>;
+  claimPendingCourseSelection(sessionKey: string, expectedPendingId: string, ownerUserId: string, agentId: string, courseKey: string, messageId: string): Promise<{status:"claimed";pending:NonNullable<ThreadSession["pendingCourseSelection"]>}|{status:"conflict"|"failed"}>;
+  markPendingCourseSelectionDispatched(sessionKey:string,expectedPendingId:string,ownerUserId:string,agentId:string,messageId:string):Promise<{status:"dispatched"|"stale"|"failed"}>;
+  clearPendingCourseSelection(sessionKey: string, expectedPendingId: string, ownerUserId: string, agentId: string, messageId?: string): Promise<{status:"cleared"|"stale"|"failed"}>;
 }

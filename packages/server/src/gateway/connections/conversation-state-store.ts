@@ -27,6 +27,9 @@ export const MAX_HISTORY_MESSAGES = 10;
 export const HISTORY_TTL_MS = 86_400_000; // 24 hours
 const SESSION_TTL_MS = DEFAULTS.SESSION_TTL_MS;
 const HISTORY_INDEX_LOCK_TTL_MS = 5_000;
+const SESSION_LOCK_LEASE_MS = 30_000;
+const SESSION_LOCK_ACQUIRE_TIMEOUT_MS = 1_000;
+const SESSION_LOCK_RETRY_MS = 25;
 
 function historyKey(connectionId: string, channelId: string): string {
   return `history:${connectionId}:${channelId}`;
@@ -61,6 +64,8 @@ export class ConversationStateStore {
     session: ThreadSession,
     ttlMs: number = SESSION_TTL_MS
   ): Promise<void> {
+    // Explicit whole-session replacement (creation/restoration) retains
+    // last-write semantics. Partial updates and deletion use withSessionLock.
     await Promise.all([
       this.state.set(sessionKey(sessionId), session, ttlMs),
       this.state.set(
@@ -71,7 +76,23 @@ export class ConversationStateStore {
     ]);
   }
 
+  async mutateSession(
+    sessionId: string,
+    update: (session: ThreadSession) => ThreadSession
+  ): Promise<boolean> {
+    return this.withSessionLock(sessionId, async () => {
+      const current = await this.getSession(sessionId);
+      if (!current) return false;
+      await this.setSession(sessionId, update(current));
+      return true;
+    });
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
+    await this.withSessionLock(sessionId, () => this.deleteSessionUnlocked(sessionId));
+  }
+
+  private async deleteSessionUnlocked(sessionId: string): Promise<void> {
     const session = await this.getSession(sessionId);
     await this.state.delete(sessionKey(sessionId));
 
@@ -79,6 +100,25 @@ export class ConversationStateStore {
       await this.state.delete(
         threadIndexKey(session.channelId, session.conversationId)
       );
+    }
+  }
+
+  private async withSessionLock<T>(
+    sessionId: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const lockId = `lock:${sessionKey(sessionId)}`;
+    const deadline = Date.now() + SESSION_LOCK_ACQUIRE_TIMEOUT_MS;
+    let lock: Awaited<ReturnType<typeof this.state.acquireLock>> = null;
+    do {
+      lock = await this.state.acquireLock(lockId, SESSION_LOCK_LEASE_MS);
+      if (!lock) await new Promise((resolve) => setTimeout(resolve, SESSION_LOCK_RETRY_MS));
+    } while (!lock && Date.now() < deadline);
+    if (!lock) throw new Error(`Session lock unavailable: ${sessionId}`);
+    try {
+      return await operation();
+    } finally {
+      await this.state.releaseLock(lock).catch(() => undefined);
     }
   }
 

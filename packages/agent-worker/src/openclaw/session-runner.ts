@@ -16,6 +16,7 @@ import {
   type McpStatus,
   type McpToolDef,
   type PluginsConfig,
+  type ResolvedCourseExecutionContext,
   type ToolsConfig,
 } from "@lobu/core";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
@@ -75,7 +76,11 @@ import {
 import type { OpenClawProgressProcessor } from "./processor";
 import { buildAgentSession } from "./session-builder";
 import { toUserVisibleSessionError } from "./context-overflow-recovery";
-import { getOpenClawSessionContext } from "./session-context";
+import {
+  buildResolvedCourseContextInstructions,
+  getOpenClawSessionContext,
+  removeLegacyToolboxActiveContext,
+} from "./session-context";
 import {
   buildToolPolicy,
   enforceBashCommandPolicy,
@@ -694,6 +699,7 @@ export interface RunAISessionParams {
    * current agent/user/run context.
    */
   runJobToken?: string;
+  resolvedCourseContext?: ResolvedCourseExecutionContext;
 
   // Resolved workspace directory (from WorkspaceManager)
   workspaceDir: string;
@@ -1064,6 +1070,7 @@ export async function runAISession(
     platformMetadata,
     agentId,
     runJobToken,
+    resolvedCourseContext,
     workspaceDir,
     progressProcessor,
     onSessionFilePathResolved,
@@ -1563,7 +1570,17 @@ export async function runAISession(
   }
 
   // Merge gateway instructions into custom instructions
-  const instructionParts = [context.gatewayInstructions, customInstructions];
+  const resolvedCourseInstructions = buildResolvedCourseContextInstructions(
+    resolvedCourseContext
+  );
+  const gatewayInstructions = resolvedCourseContext
+    ? removeLegacyToolboxActiveContext(context.gatewayInstructions)
+    : context.gatewayInstructions;
+  const instructionParts = [
+    gatewayInstructions,
+    resolvedCourseInstructions,
+    customInstructions,
+  ];
 
   // CLI backends are delivered via session context from the gateway.
   const cliBackends = pc.cliBackends;
