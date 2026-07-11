@@ -3,6 +3,8 @@
 import { createLogger } from "@lobu/core";
 import type { ConversationStateStore } from "../connections/conversation-state-store.js";
 import {
+  type ActiveCourseBinding,
+  type ActiveCourseBindingWriteResult,
   computeSessionKey,
   type ISessionManager,
   type SessionStore,
@@ -183,5 +185,31 @@ export class SessionManager implements ISessionManager {
    */
   async cleanupExpired(ttl: number): Promise<number> {
     return (await this.store.cleanup?.(ttl)) || 0;
+  }
+
+  /** Shared StateAdapter read-merge-write; follows existing last-write semantics. */
+  async bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult> {
+    try {
+      const session = await this.store.get(sessionKey);
+      if (!session) return { status: "binding_write_failed", code: "binding_write_failed" };
+      await this.store.set(sessionKey, { ...session, shifuCourseContext: binding });
+      return { status: "persisted" };
+    } catch (error) {
+      logger.error(`Failed to bind active course for session ${sessionKey}:`, error);
+      return { status: "binding_write_failed", code: "binding_write_failed" };
+    }
+  }
+
+  async clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult> {
+    try {
+      const session = await this.store.get(sessionKey);
+      if (!session) return { status: "binding_write_failed", code: "binding_write_failed" };
+      const { shifuCourseContext: _removed, ...remaining } = session;
+      await this.store.set(sessionKey, remaining);
+      return { status: "persisted" };
+    } catch (error) {
+      logger.error(`Failed to clear active course for session ${sessionKey}:`, error);
+      return { status: "binding_write_failed", code: "binding_write_failed" };
+    }
   }
 }

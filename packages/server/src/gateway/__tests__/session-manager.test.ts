@@ -226,4 +226,33 @@ describe("SessionManager", () => {
     expect(retrieved).not.toBeNull();
     expect(["running", "completed"]).toContain(retrieved?.status);
   });
+
+  test("persists active course binding across manager replicas and preserves session fields", async () => {
+    const session = await manager.createSession("C123", "U123", "course.123456", "U123");
+    const key = computeSessionKey(session);
+    await manager.updateSession(key, { status: "running", turnCount: 4 });
+    await expect(manager.bindActiveCourse(key, {
+      courseKey: "course-a", courseEntityId: "course:U123:a", source: "resolver",
+      boundAt: "2026-07-11T01:00:00.000Z", contextPackId: "pack-a",
+    })).resolves.toEqual({ status: "persisted" });
+
+    const replica = new SessionManager(new StateAdapterSessionStore(new ConversationStateStore(state)));
+    expect(await replica.getSession(key)).toMatchObject({ status: "running", turnCount: 4, shifuCourseContext: { courseKey: "course-a", contextPackId: "pack-a" } });
+    await replica.bindActiveCourse(key, {
+      courseKey: "course-b", courseEntityId: "course:U123:b", source: "user_confirmation",
+      boundAt: "2026-07-11T02:00:00.000Z", contextPackId: null,
+    });
+    expect((await manager.getSession(key))?.shifuCourseContext?.courseKey).toBe("course-b");
+  });
+
+  test("deleting a session naturally clears its active course binding", async () => {
+    const session = await manager.createSession("C123", "U123", "delete-course");
+    const key = computeSessionKey(session);
+    await manager.bindActiveCourse(key, {
+      courseKey: "course-a", courseEntityId: "course:U123:a", source: "event",
+      boundAt: "2026-07-11T01:00:00.000Z", contextPackId: null,
+    });
+    await manager.deleteSession(key);
+    expect(await manager.getSession(key)).toBeNull();
+  });
 });

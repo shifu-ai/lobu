@@ -16,6 +16,7 @@ import {
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
 import * as Sentry from "@sentry/node";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
+import { computeSessionKey, type ISessionManager } from "../session.js";
 import { platformMetadataString } from "../connections/platform-metadata.js";
 import { recordGuardrailTrip } from "../guardrails/audit.js";
 import type {
@@ -82,6 +83,7 @@ export class MessageConsumer {
   private agentSettingsStore?: AgentSettingsStore;
   private guardrailRegistry?: GuardrailRegistry;
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<void>;
+  private sessionManager?: ISessionManager;
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
@@ -95,7 +97,14 @@ export class MessageConsumer {
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<void> {
-    await this.courseContextResolver(data);
+    if (this.courseContextResolver === attachCourseContextForReviewedScope) {
+      await attachCourseContextForReviewedScope(data, {
+        baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
+        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data),
+      });
+    } else {
+      await this.courseContextResolver(data);
+    }
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
@@ -117,6 +126,10 @@ export class MessageConsumer {
   ): void {
     this.guardrailRegistry = registry;
     this.agentSettingsStore = settingsStore;
+  }
+
+  setSessionManager(sessionManager: ISessionManager): void {
+    this.sessionManager = sessionManager;
   }
 
   async start(): Promise<void> {

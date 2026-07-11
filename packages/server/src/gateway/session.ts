@@ -50,7 +50,21 @@ export interface ThreadSession {
   dryRun?: boolean;
   /** Internal automation intent for one-shot system sessions. */
   intent?: { kind: "watcher_run"; runId: number; watcherId: number };
+  /** Convenience binding only; Toolbox must revalidate ownership/status on use. */
+  shifuCourseContext?: ActiveCourseBinding;
 }
+
+export interface ActiveCourseBinding {
+  courseKey: string;
+  courseEntityId: string;
+  source: "resolver" | "user_confirmation" | "event";
+  boundAt: string;
+  contextPackId: string | null;
+}
+
+export type ActiveCourseBindingWriteResult =
+  | { status: "persisted" }
+  | { status: "binding_write_failed"; code: "binding_write_failed" };
 
 /**
  * Compute session key for the session store.
@@ -118,4 +132,6 @@ export interface ISessionManager {
   ): Promise<{ allowed: boolean; owner?: string }>;
   touchSession(sessionKey: string): Promise<void>;
   cleanupExpired(ttl: number): Promise<number>;
+  bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult>;
+  clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult>;
 }
