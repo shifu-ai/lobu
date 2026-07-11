@@ -95,6 +95,10 @@ export interface SessionStore {
   get(sessionKey: string): Promise<ThreadSession | null>;
   set(sessionKey: string, session: ThreadSession): Promise<void>;
   delete(sessionKey: string): Promise<void>;
+  mutate(
+    sessionKey: string,
+    update: (session: ThreadSession) => ThreadSession
+  ): Promise<boolean>;
   getByThread(
     channelId: string,
     threadTs: string

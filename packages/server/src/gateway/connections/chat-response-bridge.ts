@@ -517,7 +517,7 @@ export class ChatResponseBridge implements ResponseRenderer {
       const agentId = completionMd.agentId;
       if (this.sessionManager) {
         try {
-          await this.sessionManager.deleteSession(
+          await this.sessionManager.clearActiveCourse(
             computeSessionKey({
               channelId: payload.channelId,
               conversationId: payload.conversationId,

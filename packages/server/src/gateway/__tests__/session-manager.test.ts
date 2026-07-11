@@ -255,4 +255,39 @@ describe("SessionManager", () => {
     await manager.deleteSession(key);
     expect(await manager.getSession(key)).toBeNull();
   });
+
+  test("serializes cross-replica partial updates so unrelated fields and binding both survive", async () => {
+    let releaseWrite!: () => void;
+    let writeStarted!: () => void;
+    const writeStartedPromise = new Promise<void>((resolve) => { writeStarted = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    class PausingAdapter extends InMemoryStateAdapter {
+      pause = false;
+      override async set<T>(key: string, value: T, ttlMs?: number): Promise<void> {
+        if (this.pause && key.startsWith("session:") && (value as ThreadSession).status === "running") {
+          this.pause = false;
+          writeStarted();
+          await releasePromise;
+        }
+        await super.set(key, value, ttlMs);
+      }
+    }
+    const adapter = new PausingAdapter();
+    const first = new SessionManager(new StateAdapterSessionStore(new ConversationStateStore(adapter)));
+    const second = new SessionManager(new StateAdapterSessionStore(new ConversationStateStore(adapter)));
+    const session = await first.createSession("C123", "U123", "locked-update");
+    const key = computeSessionKey(session);
+    adapter.pause = true;
+    const update = first.updateSession(key, { status: "running", model: "model-a" });
+    await writeStartedPromise;
+    const binding = second.bindActiveCourse(key, {
+      courseKey: "course-a", courseEntityId: "course:U123:a", source: "resolver",
+      boundAt: "2026-07-11T01:00:00.000Z", contextPackId: "pack-a",
+    });
+    releaseWrite();
+    await Promise.all([update, binding]);
+    expect(await first.getSession(key)).toMatchObject({
+      status: "running", model: "model-a", shifuCourseContext: { courseKey: "course-a" },
+    });
+  });
 });

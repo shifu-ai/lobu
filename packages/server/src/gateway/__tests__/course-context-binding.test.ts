@@ -132,6 +132,9 @@ describe("course context binding", () => {
 			set: async () => {
 				throw new Error("state unavailable");
 			},
+			mutate: async () => {
+				throw new Error("state unavailable");
+			},
 			delete: async () => {},
 			getByThread: async () => existing,
 		};

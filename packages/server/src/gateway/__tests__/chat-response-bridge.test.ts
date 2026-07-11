@@ -113,6 +113,7 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
     const { state, conversationState, manager } = createHarness(target);
     const sessions = new SessionManager(new StateAdapterSessionStore(conversationState));
     const session = await sessions.createSession("123", "u1", "123");
+    await sessions.updateSession(computeSessionKey(session), { status: "running", model: "model-a", organizationId: "org-1" });
     await sessions.bindActiveCourse(computeSessionKey(session), {
       courseKey: "course-a", courseEntityId: "course:u1:a", source: "resolver",
       boundAt: "2026-07-11T01:00:00.000Z", contextPackId: "pack-a",
@@ -140,7 +141,10 @@ describe("ChatResponseBridge.handleDelta — AsyncIterable streaming", () => {
     const history = await conversationState.getHistory("conn-1", "123");
     expect(history).toEqual([]);
     const replica = new SessionManager(new StateAdapterSessionStore(new ConversationStateStore(state)));
-    expect(await replica.getSession(computeSessionKey(session))).toBeNull();
+    expect(await replica.getSession(computeSessionKey(session))).toMatchObject({
+      status: "running", model: "model-a", organizationId: "org-1",
+    });
+    expect((await replica.getSession(computeSessionKey(session)))?.shifuCourseContext).toBeUndefined();
   });
 
   test("handleError after partial stream posts fallback so truncation is visible", async () => {

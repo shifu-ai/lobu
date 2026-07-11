@@ -27,6 +27,7 @@ export const MAX_HISTORY_MESSAGES = 10;
 export const HISTORY_TTL_MS = 86_400_000; // 24 hours
 const SESSION_TTL_MS = DEFAULTS.SESSION_TTL_MS;
 const HISTORY_INDEX_LOCK_TTL_MS = 5_000;
+const SESSION_MUTATION_LOCK_TTL_MS = 5_000;
 
 function historyKey(connectionId: string, channelId: string): string {
   return `history:${connectionId}:${channelId}`;
@@ -69,6 +70,27 @@ export class ConversationStateStore {
         ttlMs
       ),
     ]);
+  }
+
+  async mutateSession(
+    sessionId: string,
+    update: (session: ThreadSession) => ThreadSession
+  ): Promise<boolean> {
+    const lockId = `lock:${sessionKey(sessionId)}`;
+    let lock: Awaited<ReturnType<typeof this.state.acquireLock>> = null;
+    for (let attempt = 0; attempt < 20 && !lock; attempt++) {
+      lock = await this.state.acquireLock(lockId, SESSION_MUTATION_LOCK_TTL_MS);
+      if (!lock) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    if (!lock) throw new Error(`Session mutation lock unavailable: ${sessionId}`);
+    try {
+      const current = await this.getSession(sessionId);
+      if (!current) return false;
+      await this.setSession(sessionId, update(current));
+      return true;
+    } finally {
+      await this.state.releaseLock(lock).catch(() => undefined);
+    }
   }
 
   async deleteSession(sessionId: string): Promise<void> {

@@ -40,6 +40,13 @@ export class StateAdapterSessionStore implements SessionStore {
     logger.debug(`Deleted session ${sessionKey}`);
   }
 
+  async mutate(
+    sessionKey: string,
+    update: (session: ThreadSession) => ThreadSession
+  ): Promise<boolean> {
+    return this.conversations.mutateSession(sessionKey, update);
+  }
+
   async getByThread(
     channelId: string,
     threadTs: string
@@ -103,11 +110,7 @@ export class SessionManager implements ISessionManager {
     sessionKey: string,
     updates: Partial<ThreadSession>
   ): Promise<void> {
-    const session = await this.getSession(sessionKey);
-    if (session) {
-      const updated = { ...session, ...updates };
-      await this.store.set(sessionKey, updated);
-    }
+    await this.store.mutate(sessionKey, (session) => ({ ...session, ...updates }));
   }
 
   /**
@@ -172,11 +175,10 @@ export class SessionManager implements ISessionManager {
    * Update session activity timestamp
    */
   async touchSession(sessionKey: string): Promise<void> {
-    const session = await this.getSession(sessionKey);
-    if (session) {
-      session.lastActivity = Date.now();
-      await this.setSession(session);
-    }
+    await this.store.mutate(sessionKey, (session) => ({
+      ...session,
+      lastActivity: Date.now(),
+    }));
   }
 
   /**
@@ -190,9 +192,11 @@ export class SessionManager implements ISessionManager {
   /** Shared StateAdapter read-merge-write; follows existing last-write semantics. */
   async bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult> {
     try {
-      const session = await this.store.get(sessionKey);
-      if (!session) return { status: "binding_write_failed", code: "binding_write_failed" };
-      await this.store.set(sessionKey, { ...session, shifuCourseContext: binding });
+      const updated = await this.store.mutate(sessionKey, (session) => ({
+        ...session,
+        shifuCourseContext: binding,
+      }));
+      if (!updated) return { status: "binding_write_failed", code: "binding_write_failed" };
       return { status: "persisted" };
     } catch (error) {
       logger.error(`Failed to bind active course for session ${sessionKey}:`, error);
@@ -202,10 +206,11 @@ export class SessionManager implements ISessionManager {
 
   async clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult> {
     try {
-      const session = await this.store.get(sessionKey);
-      if (!session) return { status: "binding_write_failed", code: "binding_write_failed" };
-      const { shifuCourseContext: _removed, ...remaining } = session;
-      await this.store.set(sessionKey, remaining);
+      const updated = await this.store.mutate(sessionKey, (session) => {
+        const { shifuCourseContext: _removed, ...remaining } = session;
+        return remaining;
+      });
+      if (!updated) return { status: "binding_write_failed", code: "binding_write_failed" };
       return { status: "persisted" };
     } catch (error) {
       logger.error(`Failed to clear active course for session ${sessionKey}:`, error);
