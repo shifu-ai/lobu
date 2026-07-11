@@ -18,7 +18,9 @@ export function requiresCourseContext(data: MessagePayload, options: {courseSkil
 export async function attachCourseContextForReviewedScope(data: MessagePayload, options?: CourseContextGateOptions): Promise<CourseContextGateResult> {
   if (!requiresCourseContext(data) && PERSONAL_REMINDER.test(data.messageText ?? '')) return { status: 'not_required' };
   let session = null; try { session = options?.sessionManager && options.sessionKey ? await options.sessionManager.getSession(options.sessionKey) : null; } catch { logger.warn({ category: 'session_read' }, 'Course context session unavailable'); return { status: 'context_unavailable', reasonCode: 'session_unavailable' }; }
-  const pending = session?.pendingCourseSelection && Date.now() - session.pendingCourseSelection.createdAt <= 10 * 60_000 ? session.pendingCourseSelection : undefined;
+  const pendingExpired = Boolean(session?.pendingCourseSelection && Date.now() - session.pendingCourseSelection.createdAt > 10 * 60_000);
+  if (pendingExpired && options?.sessionManager && options.sessionKey) await options.sessionManager.takePendingCourseSelection(options.sessionKey);
+  const pending = !pendingExpired ? session?.pendingCourseSelection : undefined;
   const choice = pending ? pending.candidates.find((candidate, index) => data.messageText.trim() === String(index + 1) || data.messageText.trim() === candidate.courseKey || data.messageText.trim() === candidate.displayName) : undefined;
   if (!choice && !pending && !requiresCourseContext(data, { courseSkillEnabled: options?.courseSkillEnabled, hasActiveCourse: Boolean(session?.shifuCourseContext) })) return { status: 'not_required' };
   const baseUrl = options?.baseUrl ?? process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim();
