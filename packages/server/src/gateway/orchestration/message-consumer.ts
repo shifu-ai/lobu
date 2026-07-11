@@ -84,10 +84,22 @@ export class MessageConsumer {
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
+    queue?: IMessageQueue,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
-    this.queue = new RunsQueue();
+    this.queue = queue ?? new RunsQueue();
+  }
+
+  async dispatchCourseContextBoundary(
+    data: MessagePayload,
+    arm: () => Promise<void>,
+    send: (payload: MessagePayload) => Promise<void>,
+    resolve: (payload: MessagePayload) => Promise<void> = attachCourseContextForReviewedScope
+  ): Promise<void> {
+    await resolve(data);
+    await arm();
+    await send(data);
   }
 
   /**
@@ -372,8 +384,6 @@ export class MessageConsumer {
         return;
       }
 
-      await attachCourseContextForReviewedScope(data);
-
       // Arm the turn-liveness marker BEFORE the message is deliverable to the
       // worker. The marker is the durable record that this turn owes the client
       // a terminal event; it is discharged on the worker's reply and otherwise
@@ -382,18 +392,8 @@ export class MessageConsumer {
       // worker could reply before the marker exists — the discharge would
       // no-op, then a stale marker would be armed and the sweep would emit a
       // spurious error after a successful turn.
-      await armTurnTimeout(this.queue, {
-        messageId: data.messageId,
-        channelId: data.channelId,
-        conversationId: effectiveConversationId,
-        userId: data.userId,
-        platform: data.platform,
-        platformMetadata: data.platformMetadata,
-        deploymentName,
-        organizationId: data.organizationId,
-      });
-
-      // 1) Send to thread queue immediately (queue persists; worker will drain on attach)
+      // 1) Resolve the reviewed course scope, durably arm the turn, then send
+      // without unrelated awaited work between arming and dispatch.
       await Sentry.startSpan(
         {
           name: "orchestrator.send_to_worker_queue",
@@ -405,7 +405,20 @@ export class MessageConsumer {
           },
         },
         async () => {
-          await this.sendToWorkerQueue(data, deploymentName);
+          await this.dispatchCourseContextBoundary(
+            data,
+            () => armTurnTimeout(this.queue, {
+              messageId: data.messageId,
+              channelId: data.channelId,
+              conversationId: effectiveConversationId,
+              userId: data.userId,
+              platform: data.platform,
+              platformMetadata: data.platformMetadata,
+              deploymentName,
+              organizationId: data.organizationId,
+            }),
+            (payload) => this.sendToWorkerQueue(payload, deploymentName)
+          );
         }
       );
 
