@@ -15,7 +15,7 @@ const STRUCTURED_CONTEXT_FIELDS=new Set(['audience','dream_result','course_promi
 function hashIdentity(value:string):string{return createHash('sha256').update(value).digest('hex');}
 async function traceCourse(data:MessagePayload,options:CourseContextGateOptions|undefined,event:string,status:string,fields:Record<string,unknown>={}):Promise<void>{
   const emitter=options?.traceEmitter??emitJourneyEvent;
-  try{await emitter({trace_id:extractTraceId(data)??`tr_${hashIdentity(data.messageId??data.conversationId).slice(0,32)}`,journey_id:typeof data.platformMetadata?.journeyId==='string'?data.platformMetadata.journeyId:'course_context_gate',event,service:'lobu',module:'course-context-gate',status,owner_hash:hashIdentity(data.userId),conversation_hash:hashIdentity(data.conversationId),agent_key:data.agentId,...fields});}catch{}
+  try{void emitter({trace_id:extractTraceId(data)??`tr_${hashIdentity(data.messageId??data.conversationId).slice(0,32)}`,journey_id:typeof data.platformMetadata?.journeyId==='string'?data.platformMetadata.journeyId:'course_context_gate',event,service:'lobu',module:'course-context-gate',status,owner_hash:hashIdentity(data.userId),conversation_hash:hashIdentity(data.conversationId),agent_key:data.agentId,...fields}).catch(()=>{});}catch{}
 }
 function projectRequiredCourseContext(bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>,fields:string[]):string{
   const lines=['Required course context (canonical structured fields only):'];
