@@ -27,6 +27,7 @@ import {
   TERMINAL_DELIVERY_SEND_OPTS,
 } from "../infrastructure/queue/index.js";
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
+import { attachCourseContextForReviewedScope } from "./course-context-gate.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -370,6 +371,8 @@ export class MessageConsumer {
         queueSpan?.end();
         return;
       }
+
+      await attachCourseContextForReviewedScope(data);
 
       // Arm the turn-liveness marker BEFORE the message is deliverable to the
       // worker. The marker is the durable record that this turn owes the client
