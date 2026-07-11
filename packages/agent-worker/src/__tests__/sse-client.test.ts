@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { GatewayClient } from "../gateway/sse-client";
 
+const basePayload = () => ({ botId: "lobu-bot", userId: "user-1", agentId: "agent-1", conversationId: "conversation-1", platform: "line", channelId: "channel-1", messageId: "message-1", messageText: "hello", platformMetadata: {}, agentOptions: {} });
+
 describe("GatewayClient heartbeat ACKs", () => {
   const originalFetch = globalThis.fetch;
 
@@ -121,6 +123,24 @@ describe("GatewayClient heartbeat ACKs", () => {
     expect(config.messageId).toBe("6570514069:29");
     expect(config.runId).toBe(67890);
     expect(config.runJobToken).toBe("per-run-jwt-xyz");
+  });
+
+  test("validates and preserves resolved course context instead of relying on passthrough", async () => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext = { course: { courseKey: "course-a", courseEntityId: "course:user:course-a", displayName: "Course A" }, resolution: { confidence: "high", matchedBy: ["message_name"] }, context: { contextPackId: "pack-a", contextVersion: 2, stale: false, confirmedSummary: "Confirmed A" }, retrieval: { status: "loaded", crossCourseGuard: "passed", eventIds: [5], evidenceRefs: ["lobu:event:5"], snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null }] } };
+    await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } }));
+    expect(handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext).toEqual(resolvedCourseContext);
+    expect((client as any).payloadToWorkerConfig(handleThreadMessage.mock.calls[0]?.[0]).resolvedCourseContext).toEqual(resolvedCourseContext);
+  });
+
+  test("rejects malformed resolved course context at the worker wire boundary", async () => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext: { course: { courseKey: "a", courseEntityId: "course:a" }, resolution: { confidence: "high", matchedBy: ["latest"] }, context: { contextPackId: "p", contextVersion: 0, stale: "false", confirmedSummary: "x" }, retrieval: { status: "loaded", snippets: [] } } } }));
+    expect(handleThreadMessage).not.toHaveBeenCalled();
   });
 
   test("payloadToWorkerConfig leaves runId/runJobToken undefined when absent (legacy direct-enqueue path)", async () => {

@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import type { WorkerTransport } from "@lobu/core";
+import type { ResolvedCourseExecutionContext, WorkerTransport } from "@lobu/core";
 
 /**
  * Interface for worker executors. Allows different agent implementations.
@@ -47,6 +47,8 @@ export interface WorkerConfig {
    * When absent (legacy direct-enqueue), the snapshot write is skipped.
    */
   runJobToken?: string;
+  /** Trusted, per-turn course resolution supplied by the gateway. */
+  resolvedCourseContext?: ResolvedCourseExecutionContext;
 }
 
 export interface WorkspaceSetupConfig {

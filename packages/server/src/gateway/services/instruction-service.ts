@@ -236,6 +236,8 @@ class ToolboxActiveContextInstructionProvider extends BaseInstructionProvider {
   protected async buildInstructions(
     context: InstructionContext
   ): Promise<string> {
+    // Personal agents are course-context-gated per turn; global "latest" is never authoritative.
+    if (context.agentId?.startsWith("shifu-u-")) return "";
     const baseUrl = process.env.TOOLBOX_ACTIVE_CONTEXT_URL?.trim();
     const secret = process.env.TOOLBOX_INTERNAL_SECRET?.trim();
     if (!baseUrl || !secret || !context.userId || !context.agentId) {

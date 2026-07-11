@@ -540,6 +540,7 @@ export class OpenClawWorker implements WorkerExecutor {
       platformMetadata: this.config.platformMetadata,
       agentId: this.config.agentId,
       runJobToken: this.config.runJobToken,
+      resolvedCourseContext: this.config.resolvedCourseContext,
       workspaceDir: this.workspaceManager.getCurrentWorkingDirectory(),
       progressProcessor: this.progressProcessor,
       onSessionFilePathResolved: (filePath) => {

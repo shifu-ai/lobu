@@ -81,6 +81,13 @@ const AgentOptionsSchema = z
   })
   .passthrough();
 
+const ResolvedCourseContextSchema = z.object({
+  course: z.object({ courseKey: z.string().min(1), courseEntityId: z.string().min(1), displayName: z.string().min(1) }),
+  resolution: z.object({ confidence: z.literal("high"), matchedBy: z.tuple([z.enum(["explicit_course_key", "message_name", "message_alias", "conversation_binding", "single_course_default"])]) }),
+  context: z.object({ contextPackId: z.string().min(1), contextVersion: z.number().int().positive(), stale: z.boolean(), confirmedSummary: z.string().max(8000) }),
+  retrieval: z.object({ status: z.enum(["loaded", "partial", "failed"]), crossCourseGuard: z.enum(["passed", "failed"]), eventIds: z.array(z.number().int().positive()), evidenceRefs: z.array(z.string()), snippets: z.array(z.object({ eventId: z.number().int().positive(), title: z.string().nullable(), text: z.string(), sourceUrl: z.string().nullable() })) }),
+});
+
 const JobEventSchema = z.object({
   payload: z
     .object({
@@ -107,6 +114,7 @@ const JobEventSchema = z.object({
       // from regressing the same way.
       runId: z.number().optional(),
       runJobToken: z.string().optional(),
+      resolvedCourseContext: ResolvedCourseContextSchema.optional(),
     })
     .passthrough(),
   processedIds: z.array(z.string()).optional(),
@@ -949,6 +957,7 @@ export class GatewayClient {
         typeof payload.runJobToken === "string" && payload.runJobToken
           ? payload.runJobToken
           : undefined,
+      resolvedCourseContext: payload.resolvedCourseContext,
     };
   }
 
