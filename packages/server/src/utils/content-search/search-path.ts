@@ -52,9 +52,11 @@ export async function searchContentBySingleQuery(
     : null;
   if (!queryEmbedding && env?.EMBEDDINGS_SERVICE_URL) {
     try {
+      if (options.abort_signal?.aborted) throw options.abort_signal.reason ?? new Error('Course memory search aborted');
       const embeddings = await generateEmbeddings([trimmedQuery], env, options.abort_signal);
       queryEmbedding = embeddings[0] ?? null;
     } catch (err) {
+      if (options.abort_signal?.aborted) throw err;
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },
         '[content-search] Embedding generation failed, falling back to text-only search'
@@ -450,6 +452,7 @@ export async function searchContentBySingleQuery(
   }
 
   let rawRows: any[];
+  if (options.abort_signal?.aborted) throw options.abort_signal.reason ?? new Error('Course memory search aborted');
   if (queryTimeoutMs !== null) {
     // Backstop: a pathological candidate scan degrades to "no content" (every
     // caller tolerates an empty list) rather than hanging the request.
