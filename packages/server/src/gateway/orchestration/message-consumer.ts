@@ -33,6 +33,7 @@ import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
 import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {resolveCourseSkillContextMetadata} from './course-skill-context-metadata.js';
+import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -47,6 +48,10 @@ export function parseCourseContextRolloutConfig(source: NodeJS.ProcessEnv | Reco
   const mode: CourseContextGateMode = rawMode === undefined ? "enforce" : rawMode === "off" || rawMode === "shadow" || rawMode === "single_course" || rawMode === "enforce" ? rawMode : "off";
   return { mode, legacyFallback: source.COURSE_CONTEXT_LEGACY_FALLBACK?.trim().toLowerCase() === "true" };
 }
+export type LegacyComparison = "match"|"mismatch"|"legacy_missing"|"resolved_missing";
+export function compareCourseContextIdentity(resolved:{courseKey:string;courseEntityId:string}|undefined,legacy:{courseKey:string;courseEntityId:string}|undefined):LegacyComparison{if(!resolved)return"resolved_missing";if(!legacy)return"legacy_missing";return resolved.courseKey===legacy.courseKey&&resolved.courseEntityId===legacy.courseEntityId?"match":"mismatch";}
+type LegacyCourseContext={courseKey:string;courseEntityId:string;contextPackId:string;contextVersion:number;stale:boolean;confirmedSummary:string};
+async function readLegacyCourseContext(data:MessagePayload):Promise<LegacyCourseContext|undefined>{const root=process.env.TOOLBOX_ACTIVE_CONTEXT_URL?.trim();const secret=process.env.TOOLBOX_INTERNAL_SECRET?.trim();if(!root||!secret)return undefined;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),500);try{const url=new URL(root);url.searchParams.set('ownerUserId',data.userId);url.searchParams.set('agentId',data.agentId);const response=await fetch(url,{headers:{'x-internal-secret':secret},signal:controller.signal});if(response.status===404)return undefined;if(!response.ok)return undefined;const value=await response.json() as Record<string,unknown>;if(typeof value.courseKey!=="string"||value.courseKey.length>200||typeof value.courseEntityId!=="string"||value.courseEntityId.length>300||typeof value.contextPackId!=="string"||value.contextPackId.length>300||!Number.isInteger(value.contextVersion)||typeof value.stale!=="boolean"||typeof value.confirmedSummary!=="string"||value.confirmedSummary.length>8000)return undefined;return value as LegacyCourseContext;}catch{return undefined;}finally{clearTimeout(timer);}}
 export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
 
 function getStringField(value: unknown, key: string): string | undefined {
@@ -124,7 +129,7 @@ export class MessageConsumer {
     let result: CourseContextGateResult | void;
     const isNonBindingEvaluation = this.courseContextRollout.mode === "shadow" || this.courseContextRollout.mode === "single_course";
     const shadowPayload = isNonBindingEvaluation ? { ...data, platformMetadata: { ...data.platformMetadata }, resolvedCourseContext: undefined } : data;
-    if (this.courseContextResolver === attachCourseContextForReviewedScope) {
+    try { if (this.courseContextResolver === attachCourseContextForReviewedScope) {
       const personalBypass = isExplicitPersonalBypass(shadowPayload);
       if (!personalBypass && data.platformMetadata?.courseScope === "reviewed" && !this.sessionManager) {
         throw new Error("Course context persistence is not initialized");
@@ -137,8 +142,12 @@ export class MessageConsumer {
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);
+    }} catch(error) { if(this.courseContextRollout.mode!=="shadow")throw error; result={status:"not_required"}; await emitJourneyObsEvent({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
+    if(this.courseContextRollout.mode==="shadow"){
+      const resolved=result?.status==="ready"?result.context.course:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await emitJourneyObsEvent({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
     }
     if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
+    if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match"&&legacy){const context:NonNullable<MessagePayload['resolvedCourseContext']>={course:result.resolvedCourse,resolution:{confidence:'high',matchedBy:['single_course_default']},context:{contextPackId:legacy.contextPackId,contextVersion:legacy.contextVersion,stale:legacy.stale,confirmedSummary:legacy.confirmedSummary},retrieval:{status:'failed',crossCourseGuard:'passed',eventIds:[],evidenceRefs:[],snippets:[]}};data.resolvedCourseContext=context;result={status:'ready',context};}}
     if (this.courseContextRollout.mode === "single_course") {
       const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
       if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
