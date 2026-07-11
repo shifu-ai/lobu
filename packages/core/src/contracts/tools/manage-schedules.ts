@@ -34,6 +34,8 @@ export const WakeAgentArgs = Type.Object({
 
 export const ActionUnion = Type.Union([SendNotificationArgs, WakeAgentArgs]);
 
+export const ScheduleMetadata = Type.Record(Type.String(), Type.Unknown());
+
 export const CreateAction = Type.Object({
   action: Type.Literal("create", {
     description:
@@ -52,7 +54,12 @@ export const CreateAction = Type.Object({
    * Cron expression. When set, the job re-fires on this cron after
    * each firing. When omitted, the job is one-shot.
    */
-  cron: Type.Optional(Type.String()),
+  cron: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  schedule_metadata: Type.Optional(ScheduleMetadata),
+  timezone: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+  until_at: Type.Optional(Type.String()),
+  completed_at: Type.Optional(Type.String()),
+  idempotency_key: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
   /** Handler-specific payload. The `type` field selects the handler. */
   payload: ActionUnion,
   /**

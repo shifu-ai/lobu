@@ -17,6 +17,7 @@
  */
 
 import { getDb } from '../db/client';
+import type { DbClient } from '../db/client';
 import { runtimeConnectionIdToSlug } from '../lobu/stores/connections-projection';
 import { nextRunAt as nextCronTickAt } from '../utils/cron';
 import logger from '../utils/logger';
@@ -131,6 +132,11 @@ export interface ScheduledJobRow {
   delivery_context: ScheduledDeliveryContext | null;
   cron: string | null;
   next_run_at: string;
+  schedule_metadata: Record<string, unknown> | null;
+  timezone: string | null;
+  until_at: string | null;
+  completed_at: string | null;
+  idempotency_key: string | null;
   last_fired_at: string | null;
   last_fired_run_id: number | null;
   paused: boolean;
@@ -152,6 +158,11 @@ interface CreateScheduledJobParams {
   description: string;
   cron?: string | null;
   runAt: Date;
+  scheduleMetadata?: Record<string, unknown> | null;
+  timezone?: string | null;
+  untilAt?: Date | null;
+  completedAt?: Date | null;
+  idempotencyKey?: string | null;
   createdByUser?: string | null;
   createdByAgent?: string | null;
   sourceRunId?: number | null;
@@ -166,23 +177,51 @@ export async function createScheduledJob(
     throw new Error('scheduled_jobs requires created_by_user or created_by_agent');
   }
   const sql = getDb();
+  return createScheduledJobInDb(sql, params);
+}
+
+export async function createScheduledJobInDb(
+  sql: Pick<DbClient, 'json'> & ((
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ) => Promise<unknown[]>),
+  params: CreateScheduledJobParams
+): Promise<ScheduledJobRow> {
   const rows = (await sql`
     INSERT INTO scheduled_jobs (
       organization_id, action_type, action_args, delivery_context, cron, next_run_at,
-      description,
+      description, schedule_metadata, timezone, until_at, completed_at, idempotency_key,
       created_by_user, created_by_agent,
       source_run_id, source_event_id, source_thread_id
     ) VALUES (
       ${params.organizationId}, ${params.actionType},
       ${sql.json(params.actionArgs)}, ${params.deliveryContext ? sql.json(params.deliveryContext) : null}, ${params.cron ?? null}, ${params.runAt},
       ${params.description},
+      ${params.scheduleMetadata == null ? null : sql.json(params.scheduleMetadata)},
+      ${params.timezone ?? null}, ${params.untilAt ?? null}, ${params.completedAt ?? null},
+      ${params.idempotencyKey ?? null},
       ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
       ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null},
       ${params.sourceThreadId ?? null}
     )
+    ON CONFLICT (organization_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+    DO UPDATE SET idempotency_key = scheduled_jobs.idempotency_key
     RETURNING *
   `) as unknown as ScheduledJobRow[];
   return rows[0];
+}
+
+export async function getScheduledJobByIdempotencyKey(
+  organizationId: string,
+  idempotencyKey: string
+): Promise<ScheduledJobRow | null> {
+  const sql = getDb();
+  const rows = (await sql`
+    SELECT * FROM scheduled_jobs
+    WHERE organization_id = ${organizationId} AND idempotency_key = ${idempotencyKey}
+    LIMIT 1
+  `) as unknown as ScheduledJobRow[];
+  return rows[0] ?? null;
 }
 
 export async function listScheduledJobs(opts: {

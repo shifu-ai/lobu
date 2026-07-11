@@ -33,6 +33,7 @@ import {
   type DeliveryAuthzDenyReason,
   deleteScheduledJob,
   getScheduledJob,
+  getScheduledJobByIdempotencyKey,
   isDeliverableChatPlatform,
   listScheduledJobs,
   pauseScheduledJob,
@@ -68,6 +69,15 @@ const manageSchedulesTool = defineActionTool('manage_schedules', {
 export { ManageSchedulesSchema };
 export const manageSchedules = manageSchedulesTool.run;
 
+function parseOptionalTimestamp(field: string, value: string | undefined): Date | null | ToolResult {
+  if (value === undefined) return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return { error: `${field} is not a valid ISO timestamp: ${value}` };
+  }
+  return parsed;
+}
+
 async function handleCreate(
   args: Static<typeof CreateAction>,
   ctx: ToolContext
@@ -75,6 +85,18 @@ async function handleCreate(
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
     return { error: `run_at is not a valid ISO timestamp: ${args.run_at}` };
+  }
+  const untilAt = parseOptionalTimestamp('until_at', args.until_at);
+  if (!(untilAt instanceof Date) && untilAt !== null) return untilAt;
+  if (untilAt && untilAt.getTime() < runAtDate.getTime()) {
+    return { error: 'until_at must not be before run_at for a new schedule.' };
+  }
+  const completedAt = parseOptionalTimestamp('completed_at', args.completed_at);
+  if (!(completedAt instanceof Date) && completedAt !== null) return completedAt;
+  if (runAtDate.getTime() < Date.now() - 30_000 && !args.cron) {
+    return {
+      error: `run_at is in the past. Current server time is ${new Date().toISOString()}; provide a future ISO timestamp.`,
+    };
   }
   // If cron is set, sanity-check it by computing the next tick from now.
   if (args.cron) {
@@ -85,6 +107,13 @@ async function handleCreate(
         error: `cron expression rejected: ${getErrorMessage(err)}`,
       };
     }
+  }
+  if (args.idempotency_key) {
+    const existing = await getScheduledJobByIdempotencyKey(
+      ctx.organizationId,
+      args.idempotency_key
+    );
+    if (existing) return { schedule: serializeSchedule(existing) };
   }
   // action_type comes from the payload's discriminant `type`.
   const actionType = args.payload.type;
@@ -104,6 +133,11 @@ async function handleCreate(
     description: args.description,
     cron: args.cron ?? null,
     runAt: runAtDate,
+    scheduleMetadata: args.schedule_metadata ?? null,
+    timezone: args.timezone ?? null,
+    untilAt,
+    completedAt,
+    idempotencyKey: args.idempotency_key ?? null,
     createdByUser: ctx.userId ?? null,
     createdByAgent: ctx.agentId ?? null,
     sourceRunId: args.source_run_id ?? null,
@@ -287,6 +321,11 @@ function serializeSchedule(row: ScheduledJobRow) {
     delivery_context: row.delivery_context,
     cron: row.cron,
     next_run_at: row.next_run_at,
+    schedule_metadata: row.schedule_metadata,
+    timezone: row.timezone,
+    until_at: row.until_at,
+    completed_at: row.completed_at,
+    idempotency_key: row.idempotency_key,
     last_fired_at: row.last_fired_at,
     last_fired_run_id: row.last_fired_run_id,
     paused: row.paused,
