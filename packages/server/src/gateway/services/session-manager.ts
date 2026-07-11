@@ -222,9 +222,8 @@ export class SessionManager implements ISessionManager {
     return this.store.mutate(sessionKey, (session) => ({ ...session, pendingCourseSelection: pending }));
   }
 
-  async takePendingCourseSelection(sessionKey: string): Promise<ThreadSession["pendingCourseSelection"]> {
+  async takePendingCourseSelection(sessionKey: string): Promise<{ success: boolean; pending?: ThreadSession["pendingCourseSelection"] }> {
     let pending: ThreadSession["pendingCourseSelection"];
-    await this.store.mutate(sessionKey, (session) => { pending = session.pendingCourseSelection; const { pendingCourseSelection: _removed, ...remaining } = session; return remaining; });
-    return pending;
+    try { const success = await this.store.mutate(sessionKey, (session) => { pending = session.pendingCourseSelection; const { pendingCourseSelection: _removed, ...remaining } = session; return remaining; }); return { success, pending }; } catch { return { success: false }; }
   }
 }

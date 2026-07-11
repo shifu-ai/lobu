@@ -140,5 +140,5 @@ export interface ISessionManager {
   bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult>;
   clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult>;
   setPendingCourseSelection(sessionKey: string, pending: NonNullable<ThreadSession["pendingCourseSelection"]>): Promise<boolean>;
-  takePendingCourseSelection(sessionKey: string): Promise<ThreadSession["pendingCourseSelection"]>;
+  takePendingCourseSelection(sessionKey: string): Promise<{ success: boolean; pending?: ThreadSession["pendingCourseSelection"] }>;
 }
