@@ -8,8 +8,8 @@
  * claim/retry/idempotency/observability inherited.
  *
  * Firing flow:
- *   1. Tick claims rows WHERE next_run_at <= now AND NOT paused.
- *   2. For each row, spawn(action_type, action_args, { idempotencyKey, runAt: now }).
+ *   1. Tick claims rows WHERE next_run_at <= now AND NOT paused AND not completed.
+ *   2. For each row, revalidate/claim the current row, then spawn(action_type, action_args, { idempotencyKey, runAt: now }).
  *   3. Advance last_fired_at + next_run_at (or pause if one-shot completed).
  * If the tick crashes between step 2 and 3, the next tick re-reads the
  * same row (next_run_at not advanced) and re-spawns — idempotency dedup
@@ -268,10 +268,21 @@ export async function pauseScheduledJob(
   paused: boolean
 ): Promise<boolean> {
   const sql = getDb();
+  return pauseScheduledJobInDb(sql, organizationId, id, paused);
+}
+
+export async function pauseScheduledJobInDb(
+  sql: SqlLike,
+  organizationId: string,
+  id: string,
+  paused: boolean
+): Promise<boolean> {
   const rows = (await sql`
     UPDATE scheduled_jobs
     SET paused = ${paused}, updated_at = now()
-    WHERE organization_id = ${organizationId} AND id = ${id}
+    WHERE organization_id = ${organizationId}
+      AND id = ${id}
+      AND (${paused} OR completed_at IS NULL)
     RETURNING id
   `) as unknown as Array<{ id: string }>;
   return rows.length > 0;
@@ -343,11 +354,32 @@ async function completeExpiredScheduledJob(
     WHERE id = ${id}
       AND next_run_at <= now()
       AND NOT paused
+      AND completed_at IS NULL
       AND until_at IS NOT NULL
-      AND until_at < now()
+      AND next_run_at > until_at
     RETURNING id
   `) as unknown as Array<{ id: string }>;
   return rows.length > 0;
+}
+
+async function revalidateScheduledJobForDispatch(
+  sql: ScheduledJobsTickSql,
+  id: string
+): Promise<ScheduledJobRow | null> {
+  const rows = await sql.begin(async (tx) => {
+    return (await tx`
+      SELECT *
+      FROM scheduled_jobs
+      WHERE id = ${id}
+        AND next_run_at <= now()
+        AND NOT paused
+        AND completed_at IS NULL
+        AND (until_at IS NULL OR next_run_at <= until_at)
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    `) as unknown as ScheduledJobRow[];
+  });
+  return rows[0] ?? null;
 }
 
 async function completeScheduledJobAfterFire(
@@ -360,18 +392,16 @@ async function completeScheduledJobAfterFire(
         paused = true,
         completed_at = COALESCE(completed_at, now()),
         updated_at = now()
-    WHERE id = ${id} AND next_run_at <= now()
+    WHERE id = ${id}
+      AND next_run_at <= now()
+      AND NOT paused
+      AND completed_at IS NULL
   `;
 }
 
 function exceedsUntilAt(nextAt: string, untilAt: string | null): boolean {
   if (!untilAt) return false;
   return new Date(nextAt).getTime() > new Date(untilAt).getTime();
-}
-
-function isPastUntilAt(untilAt: string | null): boolean {
-  if (!untilAt) return false;
-  return new Date(untilAt).getTime() < Date.now();
 }
 
 export async function runScheduledJobsTick(
@@ -382,7 +412,9 @@ export async function runScheduledJobsTick(
     return (await tx`
       SELECT *
       FROM scheduled_jobs
-      WHERE next_run_at <= now() AND NOT paused
+      WHERE next_run_at <= now()
+        AND NOT paused
+        AND completed_at IS NULL
       ORDER BY next_run_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 200
@@ -391,26 +423,29 @@ export async function runScheduledJobsTick(
   if (claimed.length === 0) return;
 
   for (const row of claimed) {
-    if (row.until_at) {
-      const completedExpired = await completeExpiredScheduledJob(sql, row.id);
-      if (completedExpired || isPastUntilAt(row.until_at)) continue;
+    if (exceedsUntilAt(row.next_run_at, row.until_at)) {
+      await completeExpiredScheduledJob(sql, row.id);
+      continue;
     }
 
-    const tickIso = row.next_run_at;
-    const idempotencyKey = `scheduled_job:${row.id}:${tickIso}`;
+    const currentRow = await revalidateScheduledJobForDispatch(sql, row.id);
+    if (!currentRow) continue;
+
+    const tickIso = currentRow.next_run_at;
+    const idempotencyKey = `scheduled_job:${currentRow.id}:${tickIso}`;
     try {
-      await scheduler.spawn(row.action_type, {
-        ...row.action_args,
-        __scheduled_job_id: row.id,
-        __delivery_context: row.delivery_context,
+      await scheduler.spawn(currentRow.action_type, {
+        ...currentRow.action_args,
+        __scheduled_job_id: currentRow.id,
+        __delivery_context: currentRow.delivery_context,
         __scheduled_job_tick: tickIso,
-        __organization_id: row.organization_id,
-        __created_by_user: row.created_by_user,
-        __created_by_agent: row.created_by_agent,
+        __organization_id: currentRow.organization_id,
+        __created_by_user: currentRow.created_by_user,
+        __created_by_agent: currentRow.created_by_agent,
       }, { idempotencyKey });
     } catch (err) {
       logger.warn(
-        { scheduled_job_id: row.id, err: errorMessage(err) },
+        { scheduled_job_id: currentRow.id, err: errorMessage(err) },
         '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
       );
       continue;
@@ -433,15 +468,18 @@ export async function runScheduledJobsTick(
     // re-claimed every tick. `<= now()` is a no-op once any pod has
     // advanced the row (next_run_at is then in the future) and never
     // clobbers an operator re-schedule to a future time.
-    const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
-    if (nextAt && !exceedsUntilAt(nextAt, row.until_at)) {
+    const nextAt = currentRow.cron ? nextCronTickAt(currentRow.cron) : null;
+    if (nextAt && !exceedsUntilAt(nextAt, currentRow.until_at)) {
       await sql`
         UPDATE scheduled_jobs
         SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
-        WHERE id = ${row.id} AND next_run_at <= now()
+        WHERE id = ${currentRow.id}
+          AND next_run_at <= now()
+          AND NOT paused
+          AND completed_at IS NULL
       `;
     } else {
-      await completeScheduledJobAfterFire(sql, row.id);
+      await completeScheduledJobAfterFire(sql, currentRow.id);
     }
   }
 }

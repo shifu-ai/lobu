@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   createScheduledJobInDb,
+  pauseScheduledJobInDb,
   runScheduledJobsTick,
   type ScheduledJobRow,
 } from "../scheduled-jobs-service";
@@ -35,28 +36,88 @@ interface UpdateCall {
   values: unknown[];
 }
 
-function makeTickSql(
-  rows: ScheduledJobRow[],
-  opts: { expiredCompletionAlreadyClaimed?: boolean } = {}
-) {
+interface TickSqlOptions {
+  revalidateRows?: ScheduledJobRow[];
+  now?: Date;
+}
+
+function isDue(row: ScheduledJobRow, now: Date): boolean {
+  return new Date(row.next_run_at).getTime() <= now.getTime();
+}
+
+function exceedsUntil(row: ScheduledJobRow): boolean {
+  if (!row.until_at) return false;
+  return new Date(row.next_run_at).getTime() > new Date(row.until_at).getTime();
+}
+
+function cloneRow(row: ScheduledJobRow): ScheduledJobRow {
+  return {
+    ...row,
+    action_args: { ...row.action_args },
+    schedule_metadata: row.schedule_metadata ? { ...row.schedule_metadata } : null,
+  };
+}
+
+function makeTickSql(rows: ScheduledJobRow[], opts: TickSqlOptions = {}) {
+  const now = opts.now ?? new Date("2026-07-01T00:00:30.000Z");
+  const storedRows = rows.map(cloneRow);
+  const revalidateRows = opts.revalidateRows?.map(cloneRow);
+  const selects: Array<{ text: string; values: unknown[] }> = [];
   const updates: UpdateCall[] = [];
   const sql = Object.assign(
     async (strings: TemplateStringsArray, ...values: unknown[]) => {
       const text = strings.raw.join("");
       if (text.includes("SELECT *") && text.includes("FROM scheduled_jobs")) {
-        return rows;
+        selects.push({ text, values });
+        if (text.includes("WHERE id =")) {
+          const candidateRows = revalidateRows ?? storedRows;
+          const id = values[0] as string;
+          let selected = candidateRows.filter((row) => row.id === id && isDue(row, now));
+          if (text.includes("NOT paused")) {
+            selected = selected.filter((row) => !row.paused);
+          }
+          if (text.includes("completed_at IS NULL")) {
+            selected = selected.filter((row) => row.completed_at == null);
+          }
+          if (text.includes("next_run_at <= until_at")) {
+            selected = selected.filter((row) => !exceedsUntil(row));
+          }
+          return selected;
+        }
+
+        let selected = storedRows.filter((row) => isDue(row, now) && !row.paused);
+        if (text.includes("completed_at IS NULL")) {
+          selected = selected.filter((row) => row.completed_at == null);
+        }
+        return selected;
       }
       if (text.includes("UPDATE scheduled_jobs")) {
         updates.push({ text, values });
-        if (text.includes("until_at < now()")) {
-          const id = values[0] as string;
-          const row = rows.find((candidate) => candidate.id === id);
-          if (opts.expiredCompletionAlreadyClaimed) return [];
-          if (!row?.until_at || new Date(row.until_at).getTime() >= Date.now()) {
-            return [];
-          }
+        const isPauseUpdate = text.includes("organization_id =");
+        const isAdvanceUpdate = text.includes("next_run_at =") &&
+          !text.includes("next_run_at > until_at");
+        const id = isPauseUpdate
+          ? values[2] as string
+          : isAdvanceUpdate
+            ? values[1] as string
+            : values[0] as string;
+        const row = storedRows.find((candidate) => candidate.id === id);
+        if (!row || !isDue(row, now)) return [];
+        if (text.includes("NOT paused") && row.paused) return [];
+        if (text.includes("completed_at IS NULL") && row.completed_at != null) return [];
+        if (text.includes("next_run_at > until_at") && !exceedsUntil(row)) return [];
+
+        if (text.includes("paused = true")) row.paused = true;
+        if (isPauseUpdate) {
+          row.paused = values[0] as boolean;
         }
-        return [{ id: values[0] ?? "job-1" }];
+        if (text.includes("completed_at = COALESCE")) {
+          row.completed_at ??= now.toISOString();
+        }
+        if (isAdvanceUpdate) {
+          row.next_run_at = values[0] as string;
+        }
+        return [{ id }];
       }
       return [];
     },
@@ -64,7 +125,7 @@ function makeTickSql(
       begin: async (fn: (tx: typeof sql) => Promise<unknown>) => fn(sql),
     }
   );
-  return { sql, updates };
+  return { sql, selects, updates, rows: storedRows };
 }
 
 function makeTickScheduler() {
@@ -158,7 +219,9 @@ describe("runScheduledJobsTick", () => {
     const { sql, updates } = makeTickSql([
       {
         ...baseJob,
-        until_at: "2099-01-01T00:00:00.000Z",
+        cron: "* * * * *",
+        next_run_at: "2026-07-01T00:00:00.000Z",
+        until_at: "9999-01-01T00:00:00.000Z",
       },
     ]);
     const { scheduler, spawns } = makeTickScheduler();
@@ -166,19 +229,20 @@ describe("runScheduledJobsTick", () => {
     await runScheduledJobsTick(sql as any, scheduler as any);
 
     expect(spawns).toHaveLength(1);
-    expect(updates).toHaveLength(2);
+    expect(updates).toHaveLength(1);
     const finalUpdate = updates.at(-1);
     expect(finalUpdate?.text).toContain("next_run_at =");
-    expect(finalUpdate?.text).not.toContain("completed_at");
-    expect(finalUpdate?.values[1]).toBeString();
+    expect(finalUpdate?.text).not.toContain("completed_at = COALESCE");
+    expect(finalUpdate?.values[0]).toBeString();
   });
 
   test("recurring cron with until_at fires the due occurrence then pauses/completes when the next occurrence exceeds the bound", async () => {
     const { sql, updates } = makeTickSql([
       {
         ...baseJob,
-        cron: "0 0 1 1 *",
-        until_at: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+        cron: "1 0 1 7 *",
+        next_run_at: "2026-07-01T00:00:00.000Z",
+        until_at: "2026-07-01T00:00:00.000Z",
       },
     ]);
     const { scheduler, spawns } = makeTickScheduler();
@@ -186,7 +250,7 @@ describe("runScheduledJobsTick", () => {
     await runScheduledJobsTick(sql as any, scheduler as any);
 
     expect(spawns).toHaveLength(1);
-    expect(updates).toHaveLength(2);
+    expect(updates).toHaveLength(1);
     const finalUpdate = updates.at(-1);
     expect(finalUpdate?.text).toContain("paused = true");
     expect(finalUpdate?.text).toContain("completed_at = COALESCE(completed_at, now())");
@@ -195,13 +259,33 @@ describe("runScheduledJobsTick", () => {
     expect(finalUpdate?.text).not.toContain("next_run_at =");
   });
 
-  test("job already past until_at is paused/completed without dispatching the action", async () => {
+  test("final due fire exactly at until_at still dispatches when the ticker wakes late", async () => {
     const { sql, updates } = makeTickSql([
       {
         ...baseJob,
-        until_at: new Date(Date.now() - 60_000).toISOString(),
+        cron: "1 0 1 7 *",
+        next_run_at: "2026-07-01T00:00:00.000Z",
+        until_at: "2026-07-01T00:00:00.000Z",
       },
     ]);
+    const { scheduler, spawns } = makeTickScheduler();
+
+    await runScheduledJobsTick(sql as any, scheduler as any);
+
+    expect(spawns).toHaveLength(1);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].text).toContain("paused = true");
+    expect(updates[0].text).toContain("completed_at = COALESCE(completed_at, now())");
+  });
+
+  test("job whose due instant is after until_at is paused/completed without dispatching the action", async () => {
+    const { sql, updates } = makeTickSql([
+      {
+        ...baseJob,
+        next_run_at: "2026-07-01T00:01:00.000Z",
+        until_at: "2026-07-01T00:00:00.000Z",
+      },
+    ], { now: new Date("2026-07-01T00:01:30.000Z") });
     const { scheduler, spawns } = makeTickScheduler();
 
     await runScheduledJobsTick(sql as any, scheduler as any);
@@ -210,27 +294,33 @@ describe("runScheduledJobsTick", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0].text).toContain("paused = true");
     expect(updates[0].text).toContain("completed_at = COALESCE(completed_at, now())");
-    expect(updates[0].text).not.toContain("next_run_at =");
-    expect(updates[0].text).toContain("until_at < now()");
+    expect(updates[0].text).toContain("next_run_at > until_at");
   });
 
-  test("expired bounded job already completed by another replica is not dispatched", async () => {
-    const { sql, updates } = makeTickSql(
-      [
-        {
-          ...baseJob,
-          until_at: new Date(Date.now() - 60_000).toISOString(),
-        },
-      ],
-      { expiredCompletionAlreadyClaimed: true }
-    );
+  test("completed schedule rows are not selected or fired", async () => {
+    const completedRow = {
+      ...baseJob,
+      completed_at: "2026-07-01T00:00:10.000Z",
+      paused: false,
+    };
+    const completed = makeTickSql([completedRow]);
+    const { scheduler, spawns } = makeTickScheduler();
+
+    await runScheduledJobsTick(completed.sql as any, scheduler as any);
+
+    expect(spawns).toHaveLength(0);
+    expect(completed.updates).toHaveLength(0);
+    expect(completed.selects[0].text).toContain("completed_at IS NULL");
+  });
+
+  test("stale selected row is revalidated before dispatch", async () => {
+    const { sql, updates } = makeTickSql([baseJob], { revalidateRows: [] });
     const { scheduler, spawns } = makeTickScheduler();
 
     await runScheduledJobsTick(sql as any, scheduler as any);
 
     expect(spawns).toHaveLength(0);
-    expect(updates).toHaveLength(1);
-    expect(updates[0].text).toContain("until_at < now()");
+    expect(updates).toHaveLength(0);
   });
 
   test("one-shot job sets completed_at and pauses after execution while preserving next_run_at", async () => {
@@ -272,5 +362,23 @@ describe("runScheduledJobsTick", () => {
     expect(updates).toHaveLength(1);
     expect(updates[0].text).toContain("paused = true");
     expect(updates[0].text).not.toContain("next_run_at =");
+  });
+});
+
+describe("pauseScheduledJobInDb", () => {
+  test("does not unpause a completed schedule", async () => {
+    const { sql, updates } = makeTickSql([
+      {
+        ...baseJob,
+        paused: true,
+        completed_at: "2026-07-01T00:00:10.000Z",
+      },
+    ]);
+
+    const ok = await pauseScheduledJobInDb(sql as any, "org-1", "job-1", false);
+
+    expect(ok).toBe(false);
+    expect(updates).toHaveLength(1);
+    expect(updates[0].text).toContain("completed_at IS NULL");
   });
 });
