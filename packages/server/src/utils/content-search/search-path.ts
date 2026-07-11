@@ -163,7 +163,7 @@ export async function searchContentBySingleQuery(
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
           AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)
-          AND ($12::text[] IS NULL OR f.metadata->>'course_entity_id' = ANY($12::text[]) OR f.metadata->'course_entity_ids' ?| $12::text[])
+          AND ($12::text[] IS NULL OR (jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND f.metadata->'course_entity_ids' ?| $12::text[]))
           ${excludeClause.sql}
           ${visibilityClause.sql}
           ${orgScope.sql}`;
