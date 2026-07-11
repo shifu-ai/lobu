@@ -13,6 +13,7 @@ import {
   runGuardrailInstances,
   SpanStatusCode,
 } from "@lobu/core";
+import type {Env} from '@lobu/connector-sdk';
 import { createHash } from "node:crypto";
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
 import * as Sentry from "@sentry/node";
@@ -115,7 +116,7 @@ export class MessageConsumer {
       const courseSkillEnabled = (settings?.skillsConfig?.skills ?? []).some((skill) => skill.enabled && /(?:^|\n)\s*scope\s*:\s*course\s*(?:\n|$)/iu.test(skill.content ?? skill.instructions ?? ""));
       result = await attachCourseContextForReviewedScope(data, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled, memorySearch:this.courseMemorySearch,
+        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled, memorySearch:this.courseMemorySearch, env:this.config.worker.env as Env|undefined,
       });
     } else {
       result = await this.courseContextResolver(data);

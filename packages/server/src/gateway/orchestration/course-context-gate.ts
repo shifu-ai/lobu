@@ -1,9 +1,10 @@
 import { createLogger, type MessagePayload } from '@lobu/core';
+import type {Env} from '@lobu/connector-sdk';
 import type { ActiveCourseBindingWriteResult, ISessionManager } from '../session.js';
 import { ToolboxCourseContextClient, type ToolboxCourseContextClientOptions } from '../services/toolbox-course-context-client.js';
 import { retrieveCourseMemory, type CourseMemorySearch } from './course-memory-retriever.js';
 
-export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean; memorySearch?:CourseMemorySearch }
+export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean; memorySearch?:CourseMemorySearch; env?:Env }
 export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string };
 const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
@@ -46,7 +47,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   let bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>; try { bundle = await client.bundle(course.courseKey, { ownerUserId: data.userId, agentId: data.agentId }); } catch { logger.warn({ category: 'bundle' }, 'Course context bundle unavailable'); return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_unavailable' }; }
   if (bundle.course.courseKey !== course.courseKey || bundle.course.courseEntityId !== course.courseEntityId) return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_identity_mismatch' };
   const context = bundle.context;
-  const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms:options.courseSkillEnabled?OPPORTUNITY_COACH_MEMORY_TERMS:[]},{search:options.memorySearch}):{status:'failed' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]};
+  const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms:options.courseSkillEnabled?OPPORTUNITY_COACH_MEMORY_TERMS:[],env:options.env},{search:options.memorySearch}):{status:'failed' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]};
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
     course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },
     resolution: { confidence: 'high', matchedBy: resolution.matchedBy },

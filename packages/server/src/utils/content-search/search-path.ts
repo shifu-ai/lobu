@@ -287,7 +287,9 @@ export async function searchContentBySingleQuery(
     hasEmbedding;
   const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
   let searchCandidatesCteSql = '';
-  if (useCandidatePath) {
+  const requestedTimeout = options.statement_timeout_ms;
+  const queryTimeoutMs = requestedTimeout == null ? (useCandidatePath ? CANDIDATE_QUERY_TIMEOUT_MS : null) : Math.max(1,Math.min(CANDIDATE_QUERY_TIMEOUT_MS,Math.floor(requestedTimeout)));
+  if (queryTimeoutMs !== null) {
     // $tsq is appended last in queryParams; offsetParamIdx is the current tail
     // (useDateFeed is false here, so there is no cursor block before it).
     const tsqueryParamIdx = offsetParamIdx + 1;
@@ -453,7 +455,7 @@ export async function searchContentBySingleQuery(
     // caller tolerates an empty list) rather than hanging the request.
     try {
       rawRows = (await sql.begin(async (tx: DbClient) => {
-        await tx.unsafe(`SET LOCAL statement_timeout = ${CANDIDATE_QUERY_TIMEOUT_MS}`);
+        await tx.unsafe(`SET LOCAL statement_timeout = ${queryTimeoutMs}`);
         return await tx.unsafe(querySQL, queryParams);
       })) as any[];
     } catch (err) {

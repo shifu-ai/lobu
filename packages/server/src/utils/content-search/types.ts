@@ -75,6 +75,7 @@ export interface ContentSearchOptions {
   // use a bounded hybrid candidate set instead of the exact full match set. Do
   // not use for user-visible get_content pagination/totals.
   approximate_candidate_search?: boolean;
+  statement_timeout_ms?: number;
 }
 
 /**
