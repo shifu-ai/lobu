@@ -346,6 +346,24 @@ export class RunsQueue implements IMessageQueue {
     // because postgres-js can't parameterize an `interval` argument that is
     // itself a JS number-of-ms — we just compose the SQL.
     const id = await sql.begin(async (tx: DbClient) => {
+      if (options?.durableSingleton && idempotencyKey) {
+        const receipt = await tx<{ idempotency_key: string }>`
+          INSERT INTO public.queue_dispatch_receipts (idempotency_key, organization_id, queue_name)
+          VALUES (${idempotencyKey}, ${organizationIdFromPayload}, ${queueName})
+          ON CONFLICT (idempotency_key) DO NOTHING
+          RETURNING idempotency_key
+        `;
+        if (receipt.length === 0) {
+          const existing = await tx<{ run_id: number | string | null }>`
+            SELECT run_id FROM public.queue_dispatch_receipts
+            WHERE idempotency_key = ${idempotencyKey}
+              AND queue_name = ${queueName}
+              AND organization_id IS NOT DISTINCT FROM ${organizationIdFromPayload}
+            LIMIT 1
+          `;
+          return String(existing[0]?.run_id ?? `receipt:${idempotencyKey}`);
+        }
+      }
       // ON CONFLICT must match the index predicate exactly. The
       // `runs_idempotency_key_uniq` index is partial:
       //   WHERE idempotency_key IS NOT NULL
@@ -399,7 +417,11 @@ export class RunsQueue implements IMessageQueue {
         `;
         return String(existing[0]?.id ?? "");
       }
-      return String(result[0]?.id ?? "");
+      const insertedId = String(result[0]?.id ?? "");
+      if (options?.durableSingleton && idempotencyKey && insertedId) {
+        await tx`UPDATE public.queue_dispatch_receipts SET run_id = ${Number(insertedId)} WHERE idempotency_key = ${idempotencyKey}`;
+      }
+      return insertedId;
     });
 
     // Wake listeners post-commit. Failure here is non-fatal; pollers catch

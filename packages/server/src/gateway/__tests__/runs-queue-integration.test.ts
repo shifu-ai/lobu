@@ -81,6 +81,17 @@ describe("RunsQueue — SKIP LOCKED claim concurrency", () => {
 });
 
 describe("RunsQueue — caller options", () => {
+  test("durable singleton survives terminal run state while distinct canonical keys remain independent", async () => {
+    if (!queue) throw new Error("queue not started");
+    const sql=getDb();
+    const first=await queue.send("thread_message_a",{},{singletonKey:"worker-message:turn-a",durableSingleton:true});
+    await sql`UPDATE runs SET status='completed', completed_at=now() WHERE id=${Number(first)}`;
+    const retry=await queue.send("thread_message_a",{},{singletonKey:"worker-message:turn-a",durableSingleton:true});
+    expect(retry).toBe(first);
+    await queue.send("thread_message_b",{},{singletonKey:"worker-message:turn-b",durableSingleton:true});
+    const rows=await sql<{count:number}>`SELECT count(*)::int AS count FROM runs WHERE idempotency_key LIKE 'worker-message:turn-%'`;
+    expect(rows[0]?.count).toBe(2);
+  });
   test("priority orders claim across same queue", async () => {
     if (!queue) throw new Error("queue not started");
     await queue.send("test-priority", { tag: "low" }, { priority: 1 });

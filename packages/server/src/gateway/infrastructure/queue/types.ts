@@ -19,6 +19,8 @@ export interface QueueOptions {
   retryDelay?: number;
   expireInSeconds?: number;
   singletonKey?: string;
+  /** Retain uniqueness after the run becomes terminal via queue_dispatch_receipts. */
+  durableSingleton?: boolean;
   /** Delay in milliseconds before the job is processed */
   delayMs?: number;
   /** Optional `runs.action_key` value — the task lane uses this to encode the

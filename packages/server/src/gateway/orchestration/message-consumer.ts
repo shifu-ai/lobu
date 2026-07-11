@@ -70,7 +70,7 @@ export function mintRunJobToken(
 
 export function workerMessageSingletonKey(data: MessagePayload): string {
   const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
-  return `worker-message:${createHash("sha256").update(`${data.agentId ?? ""}\0${canonical}\0${data.messageId}`).digest("hex")}`;
+  return `worker-message:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId}`).digest("hex")}`;
 }
 
 export class MessageConsumer {
@@ -548,6 +548,7 @@ export class MessageConsumer {
         retryDelay: 2, // 2 seconds — fast retry for stale connection recovery
         priority: 10, // Thread messages have high priority
         singletonKey: workerMessageSingletonKey(data),
+        durableSingleton: true,
       });
 
       if (!jobId) {
