@@ -41,6 +41,12 @@ import {
 } from "./base-deployment-manager.js";
 
 const logger = createLogger("orchestrator");
+export type CourseContextGateMode = "off" | "shadow" | "single_course" | "enforce";
+export function parseCourseContextRolloutConfig(source: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env): { mode: CourseContextGateMode; legacyFallback: boolean } {
+  const rawMode = source.COURSE_CONTEXT_GATE_MODE?.trim().toLowerCase();
+  const mode: CourseContextGateMode = rawMode === undefined ? "enforce" : rawMode === "off" || rawMode === "shadow" || rawMode === "single_course" || rawMode === "enforce" ? rawMode : "off";
+  return { mode, legacyFallback: source.COURSE_CONTEXT_LEGACY_FALLBACK?.trim().toLowerCase() === "true" };
+}
 export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
 
 function getStringField(value: unknown, key: string): string | undefined {
@@ -93,6 +99,7 @@ export class MessageConsumer {
   private agentSettingsStore?: AgentSettingsStore;
   private guardrailRegistry?: GuardrailRegistry;
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
+  private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
   private sessionManager?: ISessionManager;
   private courseMemorySearch?:CourseMemorySearch;
   constructor(
@@ -105,23 +112,37 @@ export class MessageConsumer {
     this.deploymentManager = deploymentManager;
     this.queue = queue ?? new RunsQueue();
     this.courseContextResolver = courseContextResolver;
+    this.courseContextRollout = parseCourseContextRolloutConfig();
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
+    if (this.courseContextRollout.mode === "off") {
+      await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
+      await this.sendToWorkerQueue(data, deploymentName);
+      return true;
+    }
     let result: CourseContextGateResult | void;
+    const isNonBindingEvaluation = this.courseContextRollout.mode === "shadow" || this.courseContextRollout.mode === "single_course";
+    const shadowPayload = isNonBindingEvaluation ? { ...data, platformMetadata: { ...data.platformMetadata }, resolvedCourseContext: undefined } : data;
     if (this.courseContextResolver === attachCourseContextForReviewedScope) {
-      const personalBypass = isExplicitPersonalBypass(data);
+      const personalBypass = isExplicitPersonalBypass(shadowPayload);
       if (!personalBypass && data.platformMetadata?.courseScope === "reviewed" && !this.sessionManager) {
         throw new Error("Course context persistence is not initialized");
       }
       let settings = null; if (!personalBypass) try { settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null; } catch { logger.warn({ category: "course_skill_settings", agentId: data.agentId }, "Course skill settings unavailable; using deterministic message scope"); }
       const courseSkillContext=resolveCourseSkillContextMetadata(settings?.skillsConfig?.skills??[]);
-      result = await attachCourseContextForReviewedScope(data, {
+      result = await attachCourseContextForReviewedScope(shadowPayload, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager:this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+        sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
       });
     } else {
-      result = await this.courseContextResolver(data);
+      result = await this.courseContextResolver(shadowPayload);
+    }
+    if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
+    if (this.courseContextRollout.mode === "single_course") {
+      const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
+      if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
+      else result = { status: "not_required" };
     }
     if (result?.status === "already_dispatched") return false;
     if (result && result.status !== "ready" && result.status !== "not_required") { await this.deliverCourseContextTerminal(data, result); return false; }
