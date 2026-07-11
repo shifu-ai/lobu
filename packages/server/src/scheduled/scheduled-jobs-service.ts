@@ -170,6 +170,11 @@ interface CreateScheduledJobParams {
   sourceThreadId?: string | null;
 }
 
+export type SqlLike = (
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+) => Promise<unknown[]>;
+
 export async function createScheduledJob(
   params: CreateScheduledJobParams
 ): Promise<ScheduledJobRow> {
@@ -323,6 +328,124 @@ export async function deleteScheduledJob(
   return rows.length > 0;
 }
 
+type ScheduledJobsTickSql = Pick<DbClient, 'begin'> & SqlLike;
+type ScheduledJobsTickScheduler = Pick<TaskScheduler, 'spawn'>;
+
+async function completeExpiredScheduledJob(
+  sql: ScheduledJobsTickSql,
+  id: string
+): Promise<boolean> {
+  const rows = (await sql`
+    UPDATE scheduled_jobs
+    SET paused = true,
+        completed_at = COALESCE(completed_at, now()),
+        updated_at = now()
+    WHERE id = ${id}
+      AND next_run_at <= now()
+      AND NOT paused
+      AND until_at IS NOT NULL
+      AND until_at < now()
+    RETURNING id
+  `) as unknown as Array<{ id: string }>;
+  return rows.length > 0;
+}
+
+async function completeScheduledJobAfterFire(
+  sql: ScheduledJobsTickSql,
+  id: string
+): Promise<void> {
+  await sql`
+    UPDATE scheduled_jobs
+    SET last_fired_at = now(),
+        paused = true,
+        completed_at = COALESCE(completed_at, now()),
+        updated_at = now()
+    WHERE id = ${id} AND next_run_at <= now()
+  `;
+}
+
+function exceedsUntilAt(nextAt: string, untilAt: string | null): boolean {
+  if (!untilAt) return false;
+  return new Date(nextAt).getTime() > new Date(untilAt).getTime();
+}
+
+function isPastUntilAt(untilAt: string | null): boolean {
+  if (!untilAt) return false;
+  return new Date(untilAt).getTime() < Date.now();
+}
+
+export async function runScheduledJobsTick(
+  sql: ScheduledJobsTickSql,
+  scheduler: ScheduledJobsTickScheduler
+): Promise<void> {
+  const claimed = await sql.begin(async (tx) => {
+    return (await tx`
+      SELECT *
+      FROM scheduled_jobs
+      WHERE next_run_at <= now() AND NOT paused
+      ORDER BY next_run_at ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 200
+    `) as unknown as ScheduledJobRow[];
+  });
+  if (claimed.length === 0) return;
+
+  for (const row of claimed) {
+    if (row.until_at) {
+      const completedExpired = await completeExpiredScheduledJob(sql, row.id);
+      if (completedExpired || isPastUntilAt(row.until_at)) continue;
+    }
+
+    const tickIso = row.next_run_at;
+    const idempotencyKey = `scheduled_job:${row.id}:${tickIso}`;
+    try {
+      await scheduler.spawn(row.action_type, {
+        ...row.action_args,
+        __scheduled_job_id: row.id,
+        __delivery_context: row.delivery_context,
+        __scheduled_job_tick: tickIso,
+        __organization_id: row.organization_id,
+        __created_by_user: row.created_by_user,
+        __created_by_agent: row.created_by_agent,
+      }, { idempotencyKey });
+    } catch (err) {
+      logger.warn(
+        { scheduled_job_id: row.id, err: errorMessage(err) },
+        '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
+      );
+      continue;
+    }
+    // Advance OR pause-when-done depending on whether this is recurring.
+    //
+    // The claim transaction (FOR UPDATE SKIP LOCKED) commits when the
+    // closure above returns, releasing the row locks BEFORE this advance
+    // runs — so SKIP LOCKED gives no cross-pod exclusion during the
+    // spawn+advance window. The spawn idempotency key collapses duplicate
+    // tasks, but the advance itself must be conditional or two pods reading
+    // the same pre-advance `next_run_at` can both write (and clobber a
+    // concurrent pause/delete/re-schedule).
+    //
+    // Guard on `next_run_at <= now()` (same predicate as the claim SELECT),
+    // NOT equality against the value we read: postgres.js parses
+    // timestamptz to a millisecond-precision JS Date while the column
+    // stores microseconds, so an equality round-trip silently never
+    // matches for µs-precision rows — leaving them eternally due and
+    // re-claimed every tick. `<= now()` is a no-op once any pod has
+    // advanced the row (next_run_at is then in the future) and never
+    // clobbers an operator re-schedule to a future time.
+    const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
+    if (nextAt && !exceedsUntilAt(nextAt, row.until_at)) {
+      await sql`
+        UPDATE scheduled_jobs
+        SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
+        WHERE id = ${row.id} AND next_run_at <= now()
+      `;
+    } else {
+      await completeScheduledJobAfterFire(sql, row.id);
+    }
+  }
+}
+
 /**
  * Register the per-minute tick. Call once during bootTaskScheduler.
  *
@@ -338,73 +461,7 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
     'scheduled-jobs-tick',
     async () => {
       const sql = getDb();
-      const claimed = await sql.begin(async (tx) => {
-        return (await tx`
-          SELECT *
-          FROM scheduled_jobs
-          WHERE next_run_at <= now() AND NOT paused
-          ORDER BY next_run_at ASC
-          FOR UPDATE SKIP LOCKED
-          LIMIT 200
-        `) as unknown as ScheduledJobRow[];
-      });
-      if (claimed.length === 0) return;
-
-      for (const row of claimed) {
-        const tickIso = row.next_run_at;
-        const idempotencyKey = `scheduled_job:${row.id}:${tickIso}`;
-        try {
-          await scheduler.spawn(row.action_type, {
-            ...row.action_args,
-            __scheduled_job_id: row.id,
-            __delivery_context: row.delivery_context,
-            __scheduled_job_tick: tickIso,
-            __organization_id: row.organization_id,
-            __created_by_user: row.created_by_user,
-            __created_by_agent: row.created_by_agent,
-          }, { idempotencyKey });
-        } catch (err) {
-          logger.warn(
-            { scheduled_job_id: row.id, err: errorMessage(err) },
-            '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
-          );
-          continue;
-        }
-        // Advance OR pause-when-done depending on whether this is recurring.
-        //
-        // The claim transaction (FOR UPDATE SKIP LOCKED) commits when the
-        // closure above returns, releasing the row locks BEFORE this advance
-        // runs — so SKIP LOCKED gives no cross-pod exclusion during the
-        // spawn+advance window. The spawn idempotency key collapses duplicate
-        // tasks, but the advance itself must be conditional or two pods reading
-        // the same pre-advance `next_run_at` can both write (and clobber a
-        // concurrent pause/delete/re-schedule).
-        //
-        // Guard on `next_run_at <= now()` (same predicate as the claim SELECT),
-        // NOT equality against the value we read: postgres.js parses
-        // timestamptz to a millisecond-precision JS Date while the column
-        // stores microseconds, so an equality round-trip silently never
-        // matches for µs-precision rows — leaving them eternally due and
-        // re-claimed every tick. `<= now()` is a no-op once any pod has
-        // advanced the row (next_run_at is then in the future) and never
-        // clobbers an operator re-schedule to a future time.
-        const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
-        if (nextAt) {
-          await sql`
-            UPDATE scheduled_jobs
-            SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
-            WHERE id = ${row.id} AND next_run_at <= now()
-          `;
-        } else {
-          // One-shot: mark as fired + paused so the index ignores it.
-          // Re-pausing an already-paused row is idempotent.
-          await sql`
-            UPDATE scheduled_jobs
-            SET last_fired_at = now(), paused = true, updated_at = now()
-            WHERE id = ${row.id} AND next_run_at <= now()
-          `;
-        }
-      }
+      await runScheduledJobsTick(sql, scheduler);
     },
     { cron: '* * * * *' }
   );
