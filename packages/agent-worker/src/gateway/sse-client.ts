@@ -21,6 +21,14 @@ import { MessageBatcher } from "./message-batcher";
 
 const logger = createLogger("sse-client");
 
+function stableCanonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableCanonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableCanonicalJson(item)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
 type AbortControllerLike = {
   abort(): void;
   readonly signal: AbortSignal;
@@ -732,6 +740,32 @@ export class GatewayClient {
     messages: QueuedMessage[]
   ): Promise<void> {
     if (messages.length === 0) return;
+
+    const groups: QueuedMessage[][] = [];
+    for (const message of messages) {
+      const current = groups[groups.length - 1];
+      if (current?.[0] && this.areBatchCompatible(current[0], message)) current.push(message);
+      else groups.push([message]);
+    }
+    for (const group of groups) await this.processCompatibleBatch(group);
+  }
+
+  private areBatchCompatible(first: QueuedMessage, next: QueuedMessage): boolean {
+    const identity = (message: QueuedMessage) => ({
+      userId: message.payload.userId,
+      agentId: message.payload.agentId,
+      organizationId: message.payload.organizationId,
+      conversationId: message.payload.conversationId,
+      channelId: message.payload.channelId,
+      teamId: message.payload.teamId,
+      botId: message.payload.botId,
+      platform: message.payload.platform,
+      resolvedCourseContext: message.payload.resolvedCourseContext,
+    });
+    return stableCanonicalJson(identity(first)) === stableCanonicalJson(identity(next));
+  }
+
+  private async processCompatibleBatch(messages: QueuedMessage[]): Promise<void> {
 
     if (messages.length === 1) {
       const singleMessage = messages[0];

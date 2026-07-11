@@ -192,6 +192,27 @@ describe("GatewayClient heartbeat ACKs", () => {
     expect(handleThreadMessage).toHaveBeenCalledTimes(1);
   });
 
+  test.each([
+    ["course A and B", validResolvedCourseContext(), { ...validResolvedCourseContext(), course: { courseKey: "course-b", courseEntityId: "course:b", displayName: "Course B" } }, 2],
+    ["undefined and B", undefined, validResolvedCourseContext(), 2],
+    ["same exact snapshot", validResolvedCourseContext(), validResolvedCourseContext(), 1],
+    ["same course different version", validResolvedCourseContext(), { ...validResolvedCourseContext(), context: { ...validResolvedCourseContext().context, contextVersion: 3 } }, 2],
+    ["same course different retrieval", validResolvedCourseContext(), { ...validResolvedCourseContext(), retrieval: { ...validResolvedCourseContext().retrieval, evidenceRefs: ["lobu:event:99"] } }, 2],
+  ])("batches only compatible resolved context snapshots: %s", async (_name, firstContext, secondContext, expectedTurns) => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const processSingleMessage = mock(async () => undefined);
+    (client as any).processSingleMessage = processSingleMessage;
+    await (client as any).processBatchedMessages([
+      { timestamp: 1, payload: { ...basePayload(), messageId: "m1", resolvedCourseContext: firstContext } },
+      { timestamp: 2, payload: { ...basePayload(), messageId: "m2", resolvedCourseContext: secondContext } },
+    ]);
+    expect(processSingleMessage).toHaveBeenCalledTimes(expectedTurns);
+    if (expectedTurns === 2) {
+      expect(processSingleMessage.mock.calls[0]?.[0].payload.resolvedCourseContext).toEqual(firstContext);
+      expect(processSingleMessage.mock.calls[1]?.[0].payload.resolvedCourseContext).toEqual(secondContext);
+    }
+  });
+
   test("payloadToWorkerConfig leaves runId/runJobToken undefined when absent (legacy direct-enqueue path)", async () => {
     // Backwards-compat: legacy direct-enqueue paths don't set runId. The
     // fields must survive end-to-end as `undefined`, not be coerced into

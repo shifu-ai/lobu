@@ -74,8 +74,16 @@ interface SessionContextResponse {
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_RESOLVED_COURSE_CONTEXT_CHARS = 6000;
 
+function codePointSlice(value: string, maxChars: number): string {
+  return Array.from(value).slice(0, maxChars).join("");
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
 function normalizeIdentity(value: string, maxChars = 240): string {
-  return Array.from(value).map((char) => char.charCodeAt(0) < 32 || (char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159) ? " " : char).join("").replace(/\s+/g, " ").trim().slice(0, maxChars);
+  return codePointSlice(Array.from(value).map((char) => char.charCodeAt(0) < 32 || (char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159) ? " " : char).join("").replace(/\s+/g, " ").trim(), maxChars);
 }
 
 function safeSourceUrl(value: string | null): string {
@@ -84,7 +92,7 @@ function safeSourceUrl(value: string | null): string {
 }
 
 function quoteUntrusted(value: string, maxChars: number): string[] {
-  const clean = Array.from(value).map((char) => { const code = char.charCodeAt(0); return code < 32 && char !== "\n" && char !== "\r" ? " " : code >= 127 && code <= 159 ? " " : char; }).join("").replace(/\r\n?/g, "\n").slice(0, maxChars);
+  const clean = codePointSlice(Array.from(value).map((char) => { const code = char.charCodeAt(0); return code < 32 && char !== "\n" && char !== "\r" ? " " : code >= 127 && code <= 159 ? " " : char; }).join("").replace(/\r\n?/g, "\n"), maxChars);
   return clean.split("\n").map((line) => `> ${line}`);
 }
 
@@ -96,7 +104,7 @@ export function buildResolvedCourseContextInstructions(resolved: ResolvedCourseE
     for (const snippet of resolved.retrieval.snippets.slice(0, 6)) { const source = safeSourceUrl(snippet.sourceUrl); lines.push(`> [${snippet.eventId}] ${normalizeIdentity(snippet.title || `Event ${snippet.eventId}`, 160)}${source ? ` (${source})` : ""}`, ...quoteUntrusted(snippet.text, 600)); }
   }
   const rendered = lines.join("\n");
-  return rendered.length <= MAX_RESOLVED_COURSE_CONTEXT_CHARS ? rendered : `${rendered.slice(0, MAX_RESOLVED_COURSE_CONTEXT_CHARS - 3).trimEnd()}...`;
+  return codePointLength(rendered) <= MAX_RESOLVED_COURSE_CONTEXT_CHARS ? rendered : `${codePointSlice(rendered, MAX_RESOLVED_COURSE_CONTEXT_CHARS - 3).trimEnd()}...`;
 }
 
 export function removeLegacyToolboxActiveContext(instructions: string): string {

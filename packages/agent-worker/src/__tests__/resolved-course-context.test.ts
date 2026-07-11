@@ -132,7 +132,7 @@ describe("resolved course context instructions", () => {
 		expect(buildResolvedCourseContextInstructions(undefined)).toBe("");
 	});
 
-	test("resolved A removes legacy latest-project B without removing generic instructions", () => {
+  test("resolved A removes legacy latest-project B without removing generic instructions", () => {
 		const legacy = [
 			"## Platform Context",
 			"LINE behavior.",
@@ -157,5 +157,19 @@ describe("resolved course context instructions", () => {
 		expect(rendered).not.toContain("B only");
 		expect(rendered).toContain("## Platform Context");
 		expect(rendered).toContain("## Network Access");
-	});
+  });
+
+  test("truncates astral text by code point without dangling surrogates", () => {
+    const rendered = buildResolvedCourseContextInstructions(context({
+      context: { contextPackId: "pack-a", contextVersion: 1, stale: false, confirmedSummary: `${"a".repeat(3599)}😀${"b".repeat(5000)}` },
+      retrieval: { status: "loaded", crossCourseGuard: "passed", eventIds: [1, 2, 3, 4, 5, 6], evidenceRefs: ["lobu:event:1"], snippets: Array.from({ length: 6 }, (_, index) => ({ eventId: index + 1, title: `${"t".repeat(159)}😀more`, text: `${"x".repeat(599)}😀more`, sourceUrl: null })) },
+    }));
+    expect(Array.from(rendered).length).toBe(6000);
+    expect(rendered).toEndWith("...");
+    expect(rendered).toContain(`${"a".repeat(20)}😀`);
+    expect(rendered).not.toContain("�");
+    expect(() => new TextDecoder("utf-8", { fatal: true }).decode(new TextEncoder().encode(rendered))).not.toThrow();
+    const last = rendered.charCodeAt(rendered.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+  });
 });
