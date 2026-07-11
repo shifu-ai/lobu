@@ -82,10 +82,12 @@ const AgentOptionsSchema = z
   .passthrough();
 
 const ResolvedCourseContextSchema = z.object({
-  course: z.object({ courseKey: z.string().min(1), courseEntityId: z.string().min(1), displayName: z.string().min(1) }),
+  course: z.object({ courseKey: z.string().min(1).max(200), courseEntityId: z.string().min(1).max(200), displayName: z.string().min(1).max(500) }),
   resolution: z.object({ confidence: z.literal("high"), matchedBy: z.tuple([z.enum(["explicit_course_key", "message_name", "message_alias", "conversation_binding", "single_course_default"])]) }),
-  context: z.object({ contextPackId: z.string().min(1), contextVersion: z.number().int().positive(), stale: z.boolean(), confirmedSummary: z.string().max(8000) }),
-  retrieval: z.object({ status: z.enum(["loaded", "partial", "failed"]), crossCourseGuard: z.enum(["passed", "failed"]), eventIds: z.array(z.number().int().positive()), evidenceRefs: z.array(z.string()), snippets: z.array(z.object({ eventId: z.number().int().positive(), title: z.string().nullable(), text: z.string(), sourceUrl: z.string().nullable() })) }),
+  context: z.object({ contextPackId: z.string().min(1).max(200), contextVersion: z.number().int().positive(), stale: z.boolean(), confirmedSummary: z.string().max(8000) }),
+  retrieval: z.object({ status: z.enum(["loaded", "partial", "failed"]), crossCourseGuard: z.enum(["passed", "failed"]), eventIds: z.array(z.number().int().positive()).max(8), evidenceRefs: z.array(z.string().max(256)).max(8), snippets: z.array(z.object({ eventId: z.number().int().positive(), title: z.string().max(200).nullable(), text: z.string().max(300), sourceUrl: z.string().max(256).nullable() })).max(8) }),
+}).superRefine((value, ctx) => {
+  if (JSON.stringify(value).length > 20_000) ctx.addIssue({ code: "custom", message: "Resolved course context exceeds wire size limit" });
 });
 
 const JobEventSchema = z.object({

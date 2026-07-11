@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import { GatewayClient } from "../gateway/sse-client";
 
 const basePayload = () => ({ botId: "lobu-bot", userId: "user-1", agentId: "agent-1", conversationId: "conversation-1", platform: "line", channelId: "channel-1", messageId: "message-1", messageText: "hello", platformMetadata: {}, agentOptions: {} });
+const validResolvedCourseContext = () => ({ course: { courseKey: "course-a", courseEntityId: "course:user:course-a", displayName: "Course A" }, resolution: { confidence: "high", matchedBy: ["message_name"] }, context: { contextPackId: "pack-a", contextVersion: 2, stale: false, confirmedSummary: "Confirmed A" }, retrieval: { status: "loaded", crossCourseGuard: "passed", eventIds: [5], evidenceRefs: ["lobu:event:5"], snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null }] } });
 
 describe("GatewayClient heartbeat ACKs", () => {
   const originalFetch = globalThis.fetch;
@@ -141,6 +142,54 @@ describe("GatewayClient heartbeat ACKs", () => {
     (client as any).handleThreadMessage = handleThreadMessage;
     await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext: { course: { courseKey: "a", courseEntityId: "course:a" }, resolution: { confidence: "high", matchedBy: ["latest"] }, context: { contextPackId: "p", contextVersion: 0, stale: "false", confirmedSummary: "x" }, retrieval: { status: "loaded", snippets: [] } } } }));
     expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ["course key", (value: any) => { value.course.courseKey = "x".repeat(201); }],
+    ["course entity", (value: any) => { value.course.courseEntityId = "x".repeat(201); }],
+    ["display name", (value: any) => { value.course.displayName = "x".repeat(501); }],
+    ["context pack", (value: any) => { value.context.contextPackId = "x".repeat(201); }],
+    ["confirmed summary", (value: any) => { value.context.confirmedSummary = "x".repeat(8001); }],
+    ["event ids", (value: any) => { value.retrieval.eventIds = Array.from({ length: 9 }, (_, index) => index + 1); }],
+    ["evidence refs", (value: any) => { value.retrieval.evidenceRefs = Array.from({ length: 9 }, (_, index) => `lobu:event:${index + 1}`); }],
+    ["snippets", (value: any) => { value.retrieval.snippets = Array.from({ length: 9 }, (_, index) => ({ eventId: index + 1, title: null, text: "x", sourceUrl: null })); }],
+    ["evidence ref length", (value: any) => { value.retrieval.evidenceRefs = ["x".repeat(257)]; }],
+    ["snippet title", (value: any) => { value.retrieval.snippets[0].title = "x".repeat(201); }],
+    ["snippet text", (value: any) => { value.retrieval.snippets[0].text = "x".repeat(301); }],
+    ["source url", (value: any) => { value.retrieval.snippets[0].sourceUrl = `https://example.com/${"x".repeat(237)}`; }],
+  ])("rejects oversized resolved context %s", async (_name, mutate) => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext: any = validResolvedCourseContext();
+    mutate(resolvedCourseContext);
+    await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } }));
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
+  test("rejects aggregate resolved context above the serialized wire cap", async () => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext: any = validResolvedCourseContext();
+    resolvedCourseContext.context.confirmedSummary = "\\".repeat(8000);
+    resolvedCourseContext.retrieval.evidenceRefs = Array.from({ length: 8 }, () => "\\".repeat(256));
+    await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } }));
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
+  test("accepts a legitimate payload at all producer field and array limits", async () => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext: any = validResolvedCourseContext();
+    resolvedCourseContext.course = { courseKey: "k".repeat(200), courseEntityId: "e".repeat(200), displayName: "d".repeat(500) };
+    resolvedCourseContext.context = { ...resolvedCourseContext.context, contextPackId: "p".repeat(200), confirmedSummary: "s".repeat(8000) };
+    resolvedCourseContext.retrieval.eventIds = Array.from({ length: 8 }, (_, index) => index + 1);
+    resolvedCourseContext.retrieval.evidenceRefs = Array.from({ length: 8 }, () => "r".repeat(256));
+    resolvedCourseContext.retrieval.snippets = Array.from({ length: 8 }, (_, index) => ({ eventId: index + 1, title: "t".repeat(200), text: "x".repeat(300), sourceUrl: "u".repeat(256) }));
+    await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } }));
+    expect(handleThreadMessage).toHaveBeenCalledTimes(1);
   });
 
   test("payloadToWorkerConfig leaves runId/runJobToken undefined when absent (legacy direct-enqueue path)", async () => {
