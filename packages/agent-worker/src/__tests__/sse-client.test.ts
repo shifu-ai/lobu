@@ -203,14 +203,34 @@ describe("GatewayClient heartbeat ACKs", () => {
     const processSingleMessage = mock(async () => undefined);
     (client as any).processSingleMessage = processSingleMessage;
     await (client as any).processBatchedMessages([
-      { timestamp: 1, payload: { ...basePayload(), messageId: "m1", resolvedCourseContext: firstContext } },
-      { timestamp: 2, payload: { ...basePayload(), messageId: "m2", resolvedCourseContext: secondContext } },
+      { timestamp: 1, payload: { ...basePayload(), messageId: "m1", platformMetadata: { responseId: "shared" }, resolvedCourseContext: firstContext } },
+      { timestamp: 2, payload: { ...basePayload(), messageId: "m2", platformMetadata: { responseId: "shared" }, resolvedCourseContext: secondContext } },
     ]);
     expect(processSingleMessage).toHaveBeenCalledTimes(expectedTurns);
     if (expectedTurns === 2) {
       expect(processSingleMessage.mock.calls[0]?.[0].payload.resolvedCourseContext).toEqual(firstContext);
       expect(processSingleMessage.mock.calls[1]?.[0].payload.resolvedCourseContext).toEqual(secondContext);
     }
+  });
+
+  test.each([
+    ["responseChannel", (payload: any) => { payload.platformMetadata.responseChannel = "other-channel"; }],
+    ["responseId", (payload: any) => { payload.platformMetadata.responseId = "other-response"; }],
+    ["botResponseId", (payload: any) => { payload.platformMetadata.botResponseId = "other-bot-response"; }],
+    ["top-level teamId", (payload: any) => { payload.teamId = "other-team"; }],
+    ["metadata teamId", (payload: any) => { delete payload.teamId; payload.platformMetadata.teamId = "other-team"; }],
+    ["responseThreadId", (payload: any) => { payload.platformMetadata.responseThreadId = "other-thread"; }],
+    ["chatId", (payload: any) => { payload.platformMetadata.chatId = "other-chat"; }],
+    ["connectionId", (payload: any) => { payload.platformMetadata.connectionId = "other-connection"; }],
+  ])("splits identical context when routing field differs: %s", async (_name, mutate) => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const processSingleMessage = mock(async () => undefined);
+    (client as any).processSingleMessage = processSingleMessage;
+    const first: any = { ...basePayload(), messageId: "m1", teamId: "team", platformMetadata: { responseChannel: "channel", responseId: "response", botResponseId: "bot-response", teamId: "team", responseThreadId: "thread", chatId: "chat", connectionId: "connection" }, resolvedCourseContext: validResolvedCourseContext() };
+    const second: any = structuredClone({ ...first, messageId: "m2" });
+    mutate(second);
+    await (client as any).processBatchedMessages([{ timestamp: 1, payload: first }, { timestamp: 2, payload: second }]);
+    expect(processSingleMessage).toHaveBeenCalledTimes(2);
   });
 
   test("payloadToWorkerConfig leaves runId/runJobToken undefined when absent (legacy direct-enqueue path)", async () => {

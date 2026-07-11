@@ -752,6 +752,13 @@ export class GatewayClient {
 
   private areBatchCompatible(first: QueuedMessage, next: QueuedMessage): boolean {
     const identity = (message: QueuedMessage) => ({
+      responseChannel: String(message.payload.platformMetadata.responseChannel || message.payload.channelId),
+      responseId: String(message.payload.platformMetadata.responseId || message.payload.messageId),
+      botResponseId: message.payload.platformMetadata.botResponseId ? String(message.payload.platformMetadata.botResponseId) : undefined,
+      effectiveTeamId: (message.payload.teamId ?? message.payload.platformMetadata.teamId) ? String(message.payload.teamId ?? message.payload.platformMetadata.teamId) : undefined,
+      responseThreadId: message.payload.platformMetadata.responseThreadId,
+      chatId: message.payload.platformMetadata.chatId,
+      connectionId: message.payload.platformMetadata.connectionId,
       userId: message.payload.userId,
       agentId: message.payload.agentId,
       organizationId: message.payload.organizationId,
