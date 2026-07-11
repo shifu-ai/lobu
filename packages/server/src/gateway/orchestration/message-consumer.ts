@@ -106,7 +106,7 @@ export class MessageConsumer {
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
   private readonly journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void>;
-  private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),20);try{await this.journeyEmitter(event,controller.signal);}catch{}finally{clearTimeout(timer);}}
+  private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();let timeout:ReturnType<typeof setTimeout>|undefined;try{const operation=this.journeyEmitter(event,controller.signal);const guarded=operation.catch(()=>{});await Promise.race([guarded,new Promise<void>(resolve=>{timeout=setTimeout(()=>{controller.abort();resolve();},20);})]);}catch{}finally{if(timeout)clearTimeout(timeout);}}
   private sessionManager?: ISessionManager;
   private courseMemorySearch?:CourseMemorySearch;
   constructor(
