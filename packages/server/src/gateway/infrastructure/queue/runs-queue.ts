@@ -49,6 +49,7 @@ const MAX_BACKOFF_SECONDS = 300;
 const STALE_SWEEP_INTERVAL_MS = 30_000;
 /** Max time to wait for in-flight handlers during graceful stop. */
 const SHUTDOWN_DRAIN_MS = 30_000;
+export const MIN_DISPATCH_RECEIPT_RETENTION_DAYS = 30;
 
 function queueBreadcrumb(
   category: string,
@@ -346,6 +347,7 @@ export class RunsQueue implements IMessageQueue {
     // because postgres-js can't parameterize an `interval` argument that is
     // itself a JS number-of-ms — we just compose the SQL.
     const id = await sql.begin(async (tx: DbClient) => {
+      let durableReceiptCreated = false;
       if (options?.durableSingleton && idempotencyKey) {
         const receipt = await tx<{ idempotency_key: string }>`
           INSERT INTO public.queue_dispatch_receipts (idempotency_key, organization_id, queue_name)
@@ -362,6 +364,7 @@ export class RunsQueue implements IMessageQueue {
           if (!existing[0] || existing[0].queue_name !== queueName || existing[0].organization_id !== organizationIdFromPayload) throw new Error("Durable dispatch receipt scope collision");
           return String(existing[0]?.run_id ?? `receipt:${idempotencyKey}`);
         }
+        durableReceiptCreated = true;
       }
       // ON CONFLICT must match the index predicate exactly. The
       // `runs_idempotency_key_uniq` index is partial:
@@ -414,7 +417,9 @@ export class RunsQueue implements IMessageQueue {
           ORDER BY id DESC
           LIMIT 1
         `;
-        return String(existing[0]?.id ?? "");
+        const existingId=String(existing[0]?.id??"");
+        if(options?.durableSingleton&&durableReceiptCreated&&existingId)await tx`UPDATE public.queue_dispatch_receipts SET run_id=${Number(existingId)} WHERE idempotency_key=${idempotencyKey} AND queue_name=${queueName} AND organization_id IS NOT DISTINCT FROM ${organizationIdFromPayload}`;
+        return existingId;
       }
       const insertedId = String(result[0]?.id ?? "");
       if (options?.durableSingleton && idempotencyKey && insertedId) {
@@ -909,7 +914,7 @@ export async function sweepCompletedRuns(): Promise<number> {
    * Default 30d and never shorter than ordinary runs retention. */
   const receiptRetentionDays = (() => {
     const raw = Number(process.env.DISPATCH_RECEIPT_RETENTION_DAYS);
-    return Math.max(retentionDays, Number.isFinite(raw) && raw > 0 ? raw : 30);
+    return Math.max(MIN_DISPATCH_RECEIPT_RETENTION_DAYS, retentionDays, Number.isFinite(raw) && raw > 0 ? raw : MIN_DISPATCH_RECEIPT_RETENTION_DAYS);
   })();
 
   let total = 0;
