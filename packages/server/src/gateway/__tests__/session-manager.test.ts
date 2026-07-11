@@ -290,4 +290,48 @@ describe("SessionManager", () => {
       status: "running", model: "model-a", shifuCourseContext: { courseKey: "course-a" },
     });
   });
+
+  test("serializes delete against an in-flight update without resurrecting session or thread index", async () => {
+    let releaseWrite!: () => void;
+    let writeStarted!: () => void;
+    const writeStartedPromise = new Promise<void>((resolve) => { writeStarted = resolve; });
+    const releasePromise = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    const releasedTokens: string[] = [];
+    class PausingAdapter extends InMemoryStateAdapter {
+      pause = false;
+      override async set<T>(key: string, value: T, ttlMs?: number): Promise<void> {
+        if (this.pause && key.startsWith("session:") && (value as ThreadSession).status === "running") {
+          this.pause = false;
+          writeStarted();
+          await releasePromise;
+        }
+        await super.set(key, value, ttlMs);
+      }
+      override async releaseLock(lock: import("chat").Lock): Promise<void> {
+        releasedTokens.push(lock.token);
+        await super.releaseLock(lock);
+      }
+    }
+    const adapter = new PausingAdapter();
+    const first = new SessionManager(new StateAdapterSessionStore(new ConversationStateStore(adapter)));
+    const second = new SessionManager(new StateAdapterSessionStore(new ConversationStateStore(adapter)));
+    const session = await first.createSession("C123", "U123", "delete-race");
+    const key = computeSessionKey(session);
+    adapter.pause = true;
+    const update = first.updateSession(key, { status: "running" });
+    await writeStartedPromise;
+    const deletion = second.deleteSession(key);
+    await Promise.race([
+      deletion,
+      new Promise<void>((resolve) => setTimeout(resolve, 10)),
+    ]);
+    releaseWrite();
+    await Promise.all([update, deletion]);
+
+    expect(await first.getSession(key)).toBeNull();
+    expect(await second.findSessionByThread("C123", "delete-race")).toBeNull();
+    expect(await adapter.get(threadIndexKey("C123", "delete-race"))).toBeNull();
+    expect(new Set(releasedTokens).size).toBe(releasedTokens.length);
+    expect(releasedTokens).toHaveLength(2);
+  });
 });
