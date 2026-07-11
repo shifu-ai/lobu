@@ -52,7 +52,7 @@ export async function searchContentBySingleQuery(
     : null;
   if (!queryEmbedding && env?.EMBEDDINGS_SERVICE_URL) {
     try {
-      const embeddings = await generateEmbeddings([trimmedQuery], env);
+      const embeddings = await generateEmbeddings([trimmedQuery], env, options.abort_signal);
       queryEmbedding = embeddings[0] ?? null;
     } catch (err) {
       logger.warn(

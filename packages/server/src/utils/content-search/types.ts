@@ -76,6 +76,7 @@ export interface ContentSearchOptions {
   // not use for user-visible get_content pagination/totals.
   approximate_candidate_search?: boolean;
   statement_timeout_ms?: number;
+  abort_signal?: AbortSignal;
 }
 
 /**

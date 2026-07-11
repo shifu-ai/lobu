@@ -107,7 +107,7 @@ export async function validateEmbeddingsService(env: Env): Promise<void> {
  * @param env - Environment with embeddings service configuration
  * @returns Array of 768-dimensional embedding vectors
  */
-export async function generateEmbeddings(texts: string[], env: Env): Promise<number[][]> {
+export async function generateEmbeddings(texts: string[], env: Env, signal?: AbortSignal): Promise<number[][]> {
   if (texts.length === 0) {
     return [];
   }
@@ -116,6 +116,8 @@ export async function generateEmbeddings(texts: string[], env: Env): Promise<num
   const parsedTimeout = Number.parseInt(env.EMBEDDINGS_TIMEOUT_MS || '', 10);
   const timeoutMs = Number.isFinite(parsedTimeout) ? parsedTimeout : DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
+  const abortFromCaller = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abortFromCaller(); else signal?.addEventListener('abort', abortFromCaller, { once: true });
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
@@ -185,6 +187,7 @@ export async function generateEmbeddings(texts: string[], env: Env): Promise<num
     return payload.embeddings;
   } finally {
     clearTimeout(timeout);
+    signal?.removeEventListener('abort', abortFromCaller);
   }
 }
 

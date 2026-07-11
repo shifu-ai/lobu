@@ -40,6 +40,7 @@ import {
 } from "./base-deployment-manager.js";
 
 const logger = createLogger("orchestrator");
+export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
 
 function getStringField(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -116,7 +117,7 @@ export class MessageConsumer {
       const courseSkillEnabled = (settings?.skillsConfig?.skills ?? []).some((skill) => skill.enabled && /(?:^|\n)\s*scope\s*:\s*course\s*(?:\n|$)/iu.test(skill.content ?? skill.instructions ?? ""));
       result = await attachCourseContextForReviewedScope(data, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled, memorySearch:this.courseMemorySearch, env:this.config.worker.env as Env|undefined,
+        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled, memorySearch:this.courseMemorySearch, env:buildCourseMemorySearchEnv(),
       });
     } else {
       result = await this.courseContextResolver(data);
