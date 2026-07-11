@@ -101,10 +101,7 @@ describe("course context binding", () => {
 			sessionKey: computeSessionKey(session),
 		});
 
-		expect(result).toEqual({
-			status: "ready",
-			binding: { status: "persisted" },
-		});
+		expect(result).toMatchObject({ status: "ready", bindingStatus: { status: "persisted" } });
 		const replica = new SessionManager(
 			new StateAdapterSessionStore(new ConversationStateStore(adapter)),
 		);
@@ -147,10 +144,7 @@ describe("course context binding", () => {
 			sessionKey: "channel-1:conv-1",
 		});
 
-		expect(result).toEqual({
-			status: "ready",
-			binding: { status: "binding_write_failed", code: "binding_write_failed" },
-		});
+		expect(result).toMatchObject({ status: "ready", bindingStatus: { status: "binding_write_failed", code: "binding_write_failed" } });
 		expect(data.resolvedCourseContext?.course.courseKey).toBe("course-a");
 		expect(data.platformMetadata.courseContextBinding).toEqual({
 			status: "binding_write_failed",

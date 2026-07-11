@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { MessagePayload } from '@lobu/core';
 import { attachCourseContextForReviewedScope } from '../orchestration/course-context-gate.js';
 import { MessageConsumer } from '../orchestration/message-consumer.js';
-import { ToolboxCourseContextResponseError } from '../services/toolbox-course-context-client.js';
 
 describe('course context tracer', () => {
   it('uses the Toolbox resolver and bundle contract to attach bounded context', async () => {
@@ -32,10 +31,10 @@ describe('course context tracer', () => {
     ['string false', [new Response(JSON.stringify({ status: 'resolved', confidence: 'high', matchedBy: ['single_course_default'], course: { courseKey: 'super-ai', courseEntityId: 'course:1', displayName: 'AI' } })), new Response(JSON.stringify({ course: { courseKey: 'super-ai', courseEntityId: 'course:1', displayName: 'AI' }, context: { contextPackId: 'p', version: 1, stale: 'false', confirmedSummary: 'ok' } }))]],
     ['invalid version', [new Response(JSON.stringify({ status: 'resolved', confidence: 'high', matchedBy: ['single_course_default'], course: { courseKey: 'super-ai', courseEntityId: 'course:1', displayName: 'AI' } })), new Response(JSON.stringify({ course: { courseKey: 'super-ai', courseEntityId: 'course:1', displayName: 'AI' }, context: { contextPackId: 'p', version: 0, stale: false, confirmedSummary: 'ok' } }))]],
     ['oversized summary', [new Response(JSON.stringify({ status: 'resolved', confidence: 'high', matchedBy: ['single_course_default'], course: { courseKey: 'super-ai', courseEntityId: 'course:1', displayName: 'AI' } })), new Response(JSON.stringify({ course: { courseKey: 'super-ai', courseEntityId: 'course:1', displayName: 'AI' }, context: { contextPackId: 'p', version: 1, stale: false, confirmedSummary: 'x'.repeat(8001) } }))]],
-  ])('rejects %s without attaching context', async (_name, responses) => {
+  ])('terminalizes %s without attaching context', async (_name, responses) => {
     const fetcher = vi.fn(); for (const response of responses) fetcher.mockResolvedValueOnce(response);
     const payload = { userId: 'pm-1', agentId: 'shifu-u-pm-1', conversationId: 'conv-1', messageText: 'x', platformMetadata: { courseScope: 'reviewed' } } as MessagePayload;
-    await expect(attachCourseContextForReviewedScope(payload, { baseUrl: 'https://toolbox.test', secret: 'secret', fetcher })).rejects.toBeInstanceOf(ToolboxCourseContextResponseError);
+    await expect(attachCourseContextForReviewedScope(payload, { baseUrl: 'https://toolbox.test', secret: 'secret', fetcher })).resolves.toMatchObject({ status: 'context_unavailable' });
     expect(payload.resolvedCourseContext).toBeUndefined();
   });
 });

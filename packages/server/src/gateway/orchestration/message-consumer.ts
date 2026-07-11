@@ -28,7 +28,7 @@ import {
   TERMINAL_DELIVERY_SEND_OPTS,
 } from "../infrastructure/queue/index.js";
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
-import { attachCourseContextForReviewedScope } from "./course-context-gate.js";
+import { attachCourseContextForReviewedScope, type CourseContextGateResult } from "./course-context-gate.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -82,13 +82,13 @@ export class MessageConsumer {
   private deploymentLocks = new Set<string>();
   private agentSettingsStore?: AgentSettingsStore;
   private guardrailRegistry?: GuardrailRegistry;
-  private readonly courseContextResolver: (payload: MessagePayload) => Promise<void>;
+  private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private sessionManager?: ISessionManager;
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
     queue?: IMessageQueue,
-    courseContextResolver: (payload: MessagePayload) => Promise<void> = attachCourseContextForReviewedScope,
+    courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
@@ -96,24 +96,39 @@ export class MessageConsumer {
     this.courseContextResolver = courseContextResolver;
   }
 
-  private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<void> {
+  private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
+    let result: CourseContextGateResult | void;
     if (this.courseContextResolver === attachCourseContextForReviewedScope) {
       if (data.platformMetadata?.courseScope === "reviewed" && !this.sessionManager) {
         throw new Error("Course context persistence is not initialized");
       }
-      await attachCourseContextForReviewedScope(data, {
+      const settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null;
+      const courseSkillEnabled = (settings?.skillsConfig?.skills ?? []).some((skill) => skill.enabled && /(?:^|\n)\s*scope\s*:\s*course\s*(?:\n|$)/iu.test(skill.content ?? skill.instructions ?? ""));
+      result = await attachCourseContextForReviewedScope(data, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data),
+        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled,
       });
     } else {
-      await this.courseContextResolver(data);
+      result = await this.courseContextResolver(data);
     }
+    if (result && result.status !== "ready" && result.status !== "not_required") { await this.deliverCourseContextTerminal(data, result); return false; }
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
       deploymentName, organizationId: data.organizationId,
     });
     await this.sendToWorkerQueue(data, deploymentName);
+    return true;
+  }
+
+  private async deliverCourseContextTerminal(data: MessagePayload, result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}>): Promise<void> {
+    const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ").slice(0, 200);
+    const finalText = result.status === "clarification_required"
+      ? `請選擇這次要處理的課程：\n${result.candidates.map((candidate, index) => `${index + 1}. ${clean(candidate.displayName)}`).join("\n")}`
+      : result.status === "onboarding_required" ? "目前還沒有可用的課程資料，請先完成課程設定後再試。"
+      : result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
+    await this.queue.createQueue("thread_response");
+    await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, TERMINAL_DELIVERY_SEND_OPTS);
   }
 
   /**
@@ -412,7 +427,7 @@ export class MessageConsumer {
       // spurious error after a successful turn.
       // 1) Resolve the reviewed course scope, durably arm the turn, then send
       // without unrelated awaited work between arming and dispatch.
-      await Sentry.startSpan(
+      const workerDispatched = await Sentry.startSpan(
         {
           name: "orchestrator.send_to_worker_queue",
           op: "orchestrator.message_routing",
@@ -423,9 +438,11 @@ export class MessageConsumer {
           },
         },
         async () => {
-          await this.dispatchCourseContextBoundary(data, deploymentName);
+          return await this.dispatchCourseContextBoundary(data, deploymentName);
         }
       );
+
+      if (!workerDispatched) { queueSpan?.setStatus({ code: SpanStatusCode.OK }); queueSpan?.end(); return; }
 
       logger.info(
         { traceId, traceparent: childTraceparent, deploymentName },
