@@ -76,7 +76,11 @@ import {
 import type { OpenClawProgressProcessor } from "./processor";
 import { buildAgentSession } from "./session-builder";
 import { toUserVisibleSessionError } from "./context-overflow-recovery";
-import { buildResolvedCourseContextInstructions, getOpenClawSessionContext, removeLegacyToolboxActiveContext } from "./session-context";
+import {
+  buildResolvedCourseContextInstructions,
+  getOpenClawSessionContext,
+  removeLegacyToolboxActiveContext,
+} from "./session-context";
 import {
   buildToolPolicy,
   enforceBashCommandPolicy,
@@ -1566,9 +1570,17 @@ export async function runAISession(
   }
 
   // Merge gateway instructions into custom instructions
-  const resolvedCourseInstructions = buildResolvedCourseContextInstructions(resolvedCourseContext);
-  const gatewayInstructions = resolvedCourseContext ? removeLegacyToolboxActiveContext(context.gatewayInstructions) : context.gatewayInstructions;
-  const instructionParts = [gatewayInstructions, resolvedCourseInstructions, customInstructions];
+  const resolvedCourseInstructions = buildResolvedCourseContextInstructions(
+    resolvedCourseContext
+  );
+  const gatewayInstructions = resolvedCourseContext
+    ? removeLegacyToolboxActiveContext(context.gatewayInstructions)
+    : context.gatewayInstructions;
+  const instructionParts = [
+    gatewayInstructions,
+    resolvedCourseInstructions,
+    customInstructions,
+  ];
 
   // CLI backends are delivered via session context from the gateway.
   const cliBackends = pc.cliBackends;

@@ -1,6 +1,9 @@
 #!/usr/bin/env bun
 
-import type { ResolvedCourseExecutionContext, WorkerTransport } from "@lobu/core";
+import type {
+  ResolvedCourseExecutionContext,
+  WorkerTransport,
+} from "@lobu/core";
 
 /**
  * Interface for worker executors. Allows different agent implementations.

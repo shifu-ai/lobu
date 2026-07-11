@@ -22,9 +22,16 @@ import { MessageBatcher } from "./message-batcher";
 const logger = createLogger("sse-client");
 
 function stableCanonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableCanonicalJson).join(",")}]`;
+  if (Array.isArray(value))
+    return `[${value.map(stableCanonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>).filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableCanonicalJson(item)}`).join(",")}}`;
+    return `{${Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(
+        ([key, item]) => `${JSON.stringify(key)}:${stableCanonicalJson(item)}`
+      )
+      .join(",")}}`;
   }
   return JSON.stringify(value) ?? "null";
 }
@@ -89,14 +96,55 @@ const AgentOptionsSchema = z
   })
   .passthrough();
 
-const ResolvedCourseContextSchema = z.object({
-  course: z.object({ courseKey: z.string().min(1).max(200), courseEntityId: z.string().min(1).max(200), displayName: z.string().min(1).max(500) }),
-  resolution: z.object({ confidence: z.literal("high"), matchedBy: z.tuple([z.enum(["explicit_course_key", "message_name", "message_alias", "conversation_binding", "single_course_default"])]) }),
-  context: z.object({ contextPackId: z.string().min(1).max(200), contextVersion: z.number().int().positive(), stale: z.boolean(), confirmedSummary: z.string().max(8000) }),
-  retrieval: z.object({ status: z.enum(["loaded", "partial", "failed"]), crossCourseGuard: z.enum(["passed", "failed"]), eventIds: z.array(z.number().int().positive()).max(8), evidenceRefs: z.array(z.string().max(256)).max(8), snippets: z.array(z.object({ eventId: z.number().int().positive(), title: z.string().max(200).nullable(), text: z.string().max(300), sourceUrl: z.string().max(256).nullable() })).max(8) }),
-}).superRefine((value, ctx) => {
-  if (JSON.stringify(value).length > 20_000) ctx.addIssue({ code: "custom", message: "Resolved course context exceeds wire size limit" });
-});
+const ResolvedCourseContextSchema = z
+  .object({
+    course: z.object({
+      courseKey: z.string().min(1).max(200),
+      courseEntityId: z.string().min(1).max(200),
+      displayName: z.string().min(1).max(500),
+    }),
+    resolution: z.object({
+      confidence: z.literal("high"),
+      matchedBy: z.tuple([
+        z.enum([
+          "explicit_course_key",
+          "message_name",
+          "message_alias",
+          "conversation_binding",
+          "single_course_default",
+        ]),
+      ]),
+    }),
+    context: z.object({
+      contextPackId: z.string().min(1).max(200),
+      contextVersion: z.number().int().positive(),
+      stale: z.boolean(),
+      confirmedSummary: z.string().max(8000),
+    }),
+    retrieval: z.object({
+      status: z.enum(["loaded", "partial", "failed"]),
+      crossCourseGuard: z.enum(["passed", "failed"]),
+      eventIds: z.array(z.number().int().positive()).max(8),
+      evidenceRefs: z.array(z.string().max(256)).max(8),
+      snippets: z
+        .array(
+          z.object({
+            eventId: z.number().int().positive(),
+            title: z.string().max(200).nullable(),
+            text: z.string().max(300),
+            sourceUrl: z.string().max(256).nullable(),
+          })
+        )
+        .max(8),
+    }),
+  })
+  .superRefine((value, ctx) => {
+    if (JSON.stringify(value).length > 20_000)
+      ctx.addIssue({
+        code: "custom",
+        message: "Resolved course context exceeds wire size limit",
+      });
+  });
 
 const JobEventSchema = z.object({
   payload: z
@@ -744,18 +792,34 @@ export class GatewayClient {
     const groups: QueuedMessage[][] = [];
     for (const message of messages) {
       const current = groups[groups.length - 1];
-      if (current?.[0] && this.areBatchCompatible(current[0], message)) current.push(message);
+      if (current?.[0] && this.areBatchCompatible(current[0], message))
+        current.push(message);
       else groups.push([message]);
     }
     for (const group of groups) await this.processCompatibleBatch(group);
   }
 
-  private areBatchCompatible(first: QueuedMessage, next: QueuedMessage): boolean {
+  private areBatchCompatible(
+    first: QueuedMessage,
+    next: QueuedMessage
+  ): boolean {
     const identity = (message: QueuedMessage) => ({
-      responseChannel: String(message.payload.platformMetadata.responseChannel || message.payload.channelId),
-      responseId: String(message.payload.platformMetadata.responseId || message.payload.messageId),
-      botResponseId: message.payload.platformMetadata.botResponseId ? String(message.payload.platformMetadata.botResponseId) : undefined,
-      effectiveTeamId: (message.payload.teamId ?? message.payload.platformMetadata.teamId) ? String(message.payload.teamId ?? message.payload.platformMetadata.teamId) : undefined,
+      responseChannel: String(
+        message.payload.platformMetadata.responseChannel ||
+          message.payload.channelId
+      ),
+      responseId: String(
+        message.payload.platformMetadata.responseId || message.payload.messageId
+      ),
+      botResponseId: message.payload.platformMetadata.botResponseId
+        ? String(message.payload.platformMetadata.botResponseId)
+        : undefined,
+      effectiveTeamId:
+        (message.payload.teamId ?? message.payload.platformMetadata.teamId)
+          ? String(
+              message.payload.teamId ?? message.payload.platformMetadata.teamId
+            )
+          : undefined,
       responseThreadId: message.payload.platformMetadata.responseThreadId,
       chatId: message.payload.platformMetadata.chatId,
       connectionId: message.payload.platformMetadata.connectionId,
@@ -769,11 +833,15 @@ export class GatewayClient {
       platform: message.payload.platform,
       resolvedCourseContext: message.payload.resolvedCourseContext,
     });
-    return stableCanonicalJson(identity(first)) === stableCanonicalJson(identity(next));
+    return (
+      stableCanonicalJson(identity(first)) ===
+      stableCanonicalJson(identity(next))
+    );
   }
 
-  private async processCompatibleBatch(messages: QueuedMessage[]): Promise<void> {
-
+  private async processCompatibleBatch(
+    messages: QueuedMessage[]
+  ): Promise<void> {
     if (messages.length === 1) {
       const singleMessage = messages[0];
       if (singleMessage) {
