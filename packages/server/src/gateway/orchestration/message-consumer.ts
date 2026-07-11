@@ -13,6 +13,7 @@ import {
   runGuardrailInstances,
   SpanStatusCode,
 } from "@lobu/core";
+import { createHash } from "node:crypto";
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
 import * as Sentry from "@sentry/node";
 import type { AgentSettingsStore } from "../auth/settings/agent-settings-store.js";
@@ -65,6 +66,11 @@ export function mintRunJobToken(
     processedMessageIds: [data.messageId],
     tokenKind: "run",
   });
+}
+
+export function workerMessageSingletonKey(data: MessagePayload): string {
+  const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
+  return `worker-message:${createHash("sha256").update(`${data.agentId ?? ""}\0${canonical}\0${data.messageId}`).digest("hex")}`;
 }
 
 export class MessageConsumer {
@@ -121,7 +127,7 @@ export class MessageConsumer {
     await this.sendToWorkerQueue(data, deploymentName);
     if (result?.status === "ready" && result.replay && this.sessionManager) {
       const cleared = await this.sessionManager.clearPendingCourseSelection(computeSessionKey(data), result.replay.pendingId, result.replay.messageId);
-      if (cleared.status !== "cleared" && cleared.status !== "stale") throw new Error("Course selection replay cleanup failed");
+      if (cleared.status !== "cleared" && cleared.status !== "stale") logger.warn({ category:"pending_cleanup", pendingId:result.replay.pendingId }, "Course selection dispatched; pending cleanup deferred");
     }
     return true;
   }
@@ -537,7 +543,7 @@ export class MessageConsumer {
         retryLimit: this.config.queues.retryLimit,
         retryDelay: 2, // 2 seconds — fast retry for stale connection recovery
         priority: 10, // Thread messages have high priority
-        singletonKey: data.messageId,
+        singletonKey: workerMessageSingletonKey(data),
       });
 
       if (!jobId) {

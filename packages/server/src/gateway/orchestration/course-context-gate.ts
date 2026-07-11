@@ -19,7 +19,7 @@ export function isExplicitPersonalBypass(data: MessagePayload): boolean { const 
 export async function attachCourseContextForReviewedScope(data: MessagePayload, options?: CourseContextGateOptions): Promise<CourseContextGateResult> {
   if (isExplicitPersonalBypass(data)) return { status: 'not_required' };
   let session = null; try { session = options?.sessionManager && options.sessionKey ? await options.sessionManager.getSessionStrict(options.sessionKey) : null; } catch { logger.warn({ category: 'session_read' }, 'Course context session unavailable'); return { status: 'context_unavailable', reasonCode: 'session_unavailable' }; }
-  const pendingExpired = Boolean(session?.pendingCourseSelection && Date.now() - session.pendingCourseSelection.createdAt > 10 * 60_000);
+  const pendingExpired = Boolean(session?.pendingCourseSelection?.status === 'pending' && Date.now() - session.pendingCourseSelection.createdAt > 10 * 60_000);
   if (pendingExpired && options?.sessionManager && options.sessionKey && (await options.sessionManager.clearPendingCourseSelection(options.sessionKey, session!.pendingCourseSelection!.pendingId)).status !== 'cleared') return { status: 'context_unavailable', reasonCode: 'pending_clear_failed' };
   const pending = !pendingExpired ? session?.pendingCourseSelection : undefined;
   const text = typeof data.messageText === 'string' ? data.messageText.trim() : '';

@@ -52,7 +52,7 @@ export interface ThreadSession {
   intent?: { kind: "watcher_run"; runId: number; watcherId: number };
   /** Convenience binding only; Toolbox must revalidate ownership/status on use. */
   shifuCourseContext?: ActiveCourseBinding;
-  pendingCourseSelection?: { pendingId: string; version: number; status: "pending" | "claimed"; candidates: Array<{ courseKey: string; displayName: string }>; originalMessage: string; createdAt: number; claimedCourseKey?: string; claimedMessageId?: string };
+  pendingCourseSelection?: { pendingId: string; version: number; status: "pending" | "claimed"; candidates: Array<{ courseKey: string; displayName: string }>; originalMessage: string; createdAt: number; claimedAt?: number; claimedCourseKey?: string; claimedMessageId?: string };
 }
 
 export interface ActiveCourseBinding {
