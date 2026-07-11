@@ -92,7 +92,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
     boundAt: new Date().toISOString(), contextPackId: context.contextPackId,
   });
   const bindingSucceeded = binding.status === 'persisted';
-  await traceCourse(data,options,`context.binding.${bindingSucceeded?'updated':'failed'}`,bindingSucceeded?'success':'failed',{course_key:course.courseKey,course_entity_id:course.courseEntityId,reason_code:binding.status});
+  await traceCourse(data,options,`context.binding.${bindingSucceeded?'updated':'failed'}`,bindingSucceeded?'ok':'failed',{course_key:course.courseKey,course_entity_id:course.courseEntityId,reason_code:binding.status});
   data.platformMetadata.courseContextBinding = binding;
   return { status: 'ready', context: resolvedCourseContext, bindingStatus: binding, replay };
 }

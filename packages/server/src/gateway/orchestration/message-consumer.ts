@@ -88,6 +88,17 @@ export function workerMessageSingletonKey(data: MessagePayload): string {
   return `worker-message:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId}`).digest("hex")}`;
 }
 
+export function terminalCourseContextSingletonKey(
+  data: MessagePayload,
+  result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}|{status:"already_dispatched"}>,
+): string {
+  const canonical = buildCanonicalConversationKey({ platform:data.platform,channelId:data.channelId,conversationId:data.conversationId });
+  const outcome = result.status === "clarification_required"
+    ? `${result.status}:${result.candidates.map((candidate) => candidate.courseKey).sort().join(",")}`
+    : result.status;
+  return `course-terminal:${createHash("sha256").update(`${data.organizationId ?? ""}\0${data.agentId ?? ""}\0${canonical}\0${data.messageId ?? ""}\0${outcome}`).digest("hex")}`;
+}
+
 export class MessageConsumer {
   private queue: IMessageQueue;
   private deploymentManager: BaseDeploymentManager;
@@ -179,14 +190,18 @@ export class MessageConsumer {
     return true;
   }
 
-  private async deliverCourseContextTerminal(data: MessagePayload, result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}>): Promise<void> {
+  private async deliverCourseContextTerminal(data: MessagePayload, result: Exclude<CourseContextGateResult, {status:"ready"}|{status:"not_required"}|{status:"already_dispatched"}>): Promise<void> {
     const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ").slice(0, 200);
     const finalText = result.status === "clarification_required"
       ? `請選擇這次要處理的課程：\n${result.candidates.map((candidate, index) => `${index + 1}. ${clean(candidate.displayName)}`).join("\n")}`
       : result.status === "onboarding_required" ? "目前還沒有可用的課程資料，請先完成課程設定後再試。"
       : result.status==='context_unavailable'&&result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
     await this.queue.createQueue("thread_response");
-    await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, TERMINAL_DELIVERY_SEND_OPTS);
+    await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,agentId:data.agentId,organizationId:data.organizationId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, {
+      ...TERMINAL_DELIVERY_SEND_OPTS,
+      singletonKey: terminalCourseContextSingletonKey(data, result),
+      durableSingleton: true,
+    });
   }
 
   /**
