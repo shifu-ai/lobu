@@ -8,13 +8,13 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   if (!baseUrl || !secret) return;
   const client = new ToolboxCourseContextClient({ ...options, baseUrl, secret });
   const resolution = await client.resolve({ ownerUserId: data.userId, agentId: data.agentId, conversationId: data.conversationId, message: data.messageText });
-  const course = resolution.course as Record<string, unknown>;
-  const bundle = await client.bundle(String(course.courseKey), { ownerUserId: data.userId, agentId: data.agentId });
-  const context = bundle.context as Record<string, unknown>;
+  const course = resolution.course;
+  const bundle = await client.bundle(course.courseKey, { ownerUserId: data.userId, agentId: data.agentId });
+  const context = bundle.context;
   data.resolvedCourseContext = {
-    course: { courseKey: String(course.courseKey), courseEntityId: String(course.courseEntityId), displayName: String(course.displayName) },
+    course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },
     resolution: { confidence: 'high', matchedBy: ['single_course_default'] },
-    context: { contextPackId: String(context.contextPackId), contextVersion: Number(context.version), stale: Boolean(context.stale), confirmedSummary: String(context.confirmedSummary) },
+    context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: context.confirmedSummary },
     retrieval: { status: 'skipped', eventIds: [], evidenceRefs: [] },
   };
 }

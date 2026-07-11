@@ -81,25 +81,27 @@ export class MessageConsumer {
   private deploymentLocks = new Set<string>();
   private agentSettingsStore?: AgentSettingsStore;
   private guardrailRegistry?: GuardrailRegistry;
+  private readonly courseContextResolver: (payload: MessagePayload) => Promise<void>;
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
     queue?: IMessageQueue,
+    courseContextResolver: (payload: MessagePayload) => Promise<void> = attachCourseContextForReviewedScope,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
     this.queue = queue ?? new RunsQueue();
+    this.courseContextResolver = courseContextResolver;
   }
 
-  async dispatchCourseContextBoundary(
-    data: MessagePayload,
-    arm: () => Promise<void>,
-    send: (payload: MessagePayload) => Promise<void>,
-    resolve: (payload: MessagePayload) => Promise<void> = attachCourseContextForReviewedScope
-  ): Promise<void> {
-    await resolve(data);
-    await arm();
-    await send(data);
+  private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<void> {
+    await this.courseContextResolver(data);
+    await armTurnTimeout(this.queue, {
+      messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
+      userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
+      deploymentName, organizationId: data.organizationId,
+    });
+    await this.sendToWorkerQueue(data, deploymentName);
   }
 
   /**
@@ -405,20 +407,7 @@ export class MessageConsumer {
           },
         },
         async () => {
-          await this.dispatchCourseContextBoundary(
-            data,
-            () => armTurnTimeout(this.queue, {
-              messageId: data.messageId,
-              channelId: data.channelId,
-              conversationId: effectiveConversationId,
-              userId: data.userId,
-              platform: data.platform,
-              platformMetadata: data.platformMetadata,
-              deploymentName,
-              organizationId: data.organizationId,
-            }),
-            (payload) => this.sendToWorkerQueue(payload, deploymentName)
-          );
+          await this.dispatchCourseContextBoundary(data, deploymentName);
         }
       );
 
