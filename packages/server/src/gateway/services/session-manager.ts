@@ -234,4 +234,6 @@ export class SessionManager implements ISessionManager {
   }
 
   async clearPendingCourseSelection(sessionKey:string,expectedPendingId:string,messageId?:string):Promise<{status:"cleared"|"stale"|"failed"}>{let outcome:"cleared"|"stale"="stale";try{const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId||(messageId&&current.claimedMessageId!==messageId))return session;outcome="cleared";const{pendingCourseSelection:_removed,...remaining}=session;return remaining;});return ok?{status:outcome}:{status:"failed"};}catch{return{status:"failed"};}}
+
+  async markPendingCourseSelectionDispatched(sessionKey:string,expectedPendingId:string,messageId:string):Promise<{status:"dispatched"|"stale"|"failed"}>{let outcome:"dispatched"|"stale"="stale";try{const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId||current.claimedMessageId!==messageId)return session;if(current.status==="dispatched"){outcome="dispatched";return session;}if(current.status!=="claimed")return session;outcome="dispatched";return{...session,pendingCourseSelection:{...current,status:"dispatched",dispatchedAt:Date.now()}};});return ok?{status:outcome}:{status:"failed"};}catch{return{status:"failed"};}}
 }

@@ -118,6 +118,7 @@ export class MessageConsumer {
     } else {
       result = await this.courseContextResolver(data);
     }
+    if (result?.status === "already_dispatched") return false;
     if (result && result.status !== "ready" && result.status !== "not_required") { await this.deliverCourseContextTerminal(data, result); return false; }
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
@@ -126,6 +127,9 @@ export class MessageConsumer {
     });
     await this.sendToWorkerQueue(data, deploymentName);
     if (result?.status === "ready" && result.replay && this.sessionManager) {
+      let marked = await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data), result.replay.pendingId, result.replay.messageId);
+      for(let attempt=1;marked.status==='failed'&&attempt<3;attempt++)marked=await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data),result.replay.pendingId,result.replay.messageId);
+      if(marked.status==='failed')logger.warn({category:"pending_dispatch_mark",pendingId:result.replay.pendingId},"Course selection dispatched; dispatch marker deferred");
       const cleared = await this.sessionManager.clearPendingCourseSelection(computeSessionKey(data), result.replay.pendingId, result.replay.messageId);
       if (cleared.status !== "cleared" && cleared.status !== "stale") logger.warn({ category:"pending_cleanup", pendingId:result.replay.pendingId }, "Course selection dispatched; pending cleanup deferred");
     }

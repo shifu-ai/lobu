@@ -3,7 +3,7 @@ import type { ActiveCourseBindingWriteResult, ISessionManager } from '../session
 import { ToolboxCourseContextClient, type ToolboxCourseContextClientOptions } from '../services/toolbox-course-context-client.js';
 
 export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean }
-export type CourseContextGateResult = { status: 'not_required' } | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string };
+export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string };
 const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
 const logger = createLogger('course-context-gate');
@@ -21,7 +21,10 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   let session = null; try { session = options?.sessionManager && options.sessionKey ? await options.sessionManager.getSessionStrict(options.sessionKey) : null; } catch { logger.warn({ category: 'session_read' }, 'Course context session unavailable'); return { status: 'context_unavailable', reasonCode: 'session_unavailable' }; }
   const pendingExpired = Boolean(session?.pendingCourseSelection?.status === 'pending' && Date.now() - session.pendingCourseSelection.createdAt > 10 * 60_000);
   if (pendingExpired && options?.sessionManager && options.sessionKey && (await options.sessionManager.clearPendingCourseSelection(options.sessionKey, session!.pendingCourseSelection!.pendingId)).status !== 'cleared') return { status: 'context_unavailable', reasonCode: 'pending_clear_failed' };
-  const pending = !pendingExpired ? session?.pendingCourseSelection : undefined;
+  let pending = !pendingExpired ? session?.pendingCourseSelection : undefined;
+  if(pending?.status==='dispatched'){if(pending.claimedMessageId===data.messageId)return{status:'already_dispatched'};if(!options?.sessionManager||!options.sessionKey||(await options.sessionManager.clearPendingCourseSelection(options.sessionKey,pending.pendingId,pending.claimedMessageId)).status!=='cleared')return{status:'context_unavailable',reasonCode:'dispatched_cleanup_failed'};pending=undefined;}
+  const CLAIMED_RECOVERY_GRACE_MS=5*60_000;
+  if(pending?.status==='claimed'&&pending.claimedMessageId!==data.messageId&&pending.claimedAt&&Date.now()-pending.claimedAt>CLAIMED_RECOVERY_GRACE_MS){if(!options?.sessionManager||!options.sessionKey||(await options.sessionManager.clearPendingCourseSelection(options.sessionKey,pending.pendingId,pending.claimedMessageId)).status!=='cleared')return{status:'context_unavailable',reasonCode:'claimed_recovery_failed'};pending=undefined;}
   const text = typeof data.messageText === 'string' ? data.messageText.trim() : '';
   let choice = pending?.status === 'claimed' && pending.claimedMessageId === data.messageId ? pending.candidates.find((candidate)=>candidate.courseKey===pending.claimedCourseKey) : pending ? pending.candidates.find((candidate, index) => text === String(index + 1) || text === candidate.courseKey || text === candidate.displayName) : undefined;
   if (!choice && !pending && !requiresCourseContext(data, { courseSkillEnabled: options?.courseSkillEnabled, hasActiveCourse: Boolean(session?.shifuCourseContext) })) return { status: 'not_required' };
