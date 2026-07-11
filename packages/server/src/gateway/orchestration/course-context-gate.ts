@@ -29,7 +29,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const context = bundle.context;
   data.resolvedCourseContext = {
     course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },
-    resolution: { confidence: 'high', matchedBy: ['single_course_default'] },
+    resolution: { confidence: 'high', matchedBy: resolution.matchedBy },
     context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: context.confirmedSummary },
     retrieval: { status: 'skipped', eventIds: [], evidenceRefs: [] },
   };
