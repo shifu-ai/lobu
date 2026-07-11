@@ -62,14 +62,25 @@ describe("SessionManager", () => {
   test("course selection CAS permits one claimant and cannot clear a newer pending value", async () => {
     await manager.setSession({ channelId:"C",userId:"U",conversationId:"T",createdAt:1,lastActivity:1 });
     const key=computeSessionKey({channelId:"C",conversationId:"T"});
-    const first=await manager.createPendingCourseSelection(key,{candidates:[{courseKey:"a",displayName:"A"}],originalMessage:"task",createdAt:1});
+    const first=await manager.createPendingCourseSelection(key,{ownerUserId:"owner-a",agentId:"agent-a",candidates:[{courseKey:"a",displayName:"A"}],originalMessage:"task",createdAt:1});
     expect(first.status).toBe("persisted"); if(first.status!=="persisted")return;
-    const claims=await Promise.all([manager.claimPendingCourseSelection(key,first.pending.pendingId,"a","m1"),manager.claimPendingCourseSelection(key,first.pending.pendingId,"a","m2")]);
+    const claims=await Promise.all([manager.claimPendingCourseSelection(key,first.pending.pendingId,"owner-a","agent-a","a","m1"),manager.claimPendingCourseSelection(key,first.pending.pendingId,"owner-a","agent-a","a","m2")]);
     expect(claims.filter((value)=>value.status==="claimed")).toHaveLength(1);
-    const newer=await manager.createPendingCourseSelection(key,{candidates:[{courseKey:"b",displayName:"B"}],originalMessage:"new",createdAt:2});
+    const newer=await manager.createPendingCourseSelection(key,{ownerUserId:"owner-a",agentId:"agent-a",candidates:[{courseKey:"b",displayName:"B"}],originalMessage:"new",createdAt:2});
     expect(newer.status).toBe("persisted");
-    expect(await manager.clearPendingCourseSelection(key,first.pending.pendingId,"m1")).toEqual({status:"stale"});
+    expect(await manager.clearPendingCourseSelection(key,first.pending.pendingId,"owner-a","agent-a","m1")).toEqual({status:"stale"});
     expect((await manager.getSessionStrict(key))?.pendingCourseSelection?.originalMessage).toBe("new");
+  });
+
+  test("course selection CAS rejects a different owner or agent", async () => {
+    await manager.setSession({ channelId:"C",userId:"U",conversationId:"T",createdAt:1,lastActivity:1 });
+    const key=computeSessionKey({channelId:"C",conversationId:"T"});
+    const created=await manager.createPendingCourseSelection(key,{ownerUserId:"owner-a",agentId:"agent-a",candidates:[{courseKey:"a",displayName:"A"}],originalMessage:"private task",createdAt:1});
+    expect(created.status).toBe("persisted"); if(created.status!=="persisted")return;
+    expect(await manager.claimPendingCourseSelection(key,created.pending.pendingId,"owner-b","agent-a","a","m1")).toEqual({status:"conflict"});
+    expect(await manager.claimPendingCourseSelection(key,created.pending.pendingId,"owner-a","agent-b","a","m1")).toEqual({status:"conflict"});
+    expect(await manager.clearPendingCourseSelection(key,created.pending.pendingId,"owner-b","agent-a")).toEqual({status:"stale"});
+    expect((await manager.getSessionStrict(key))?.pendingCourseSelection?.originalMessage).toBe("private task");
   });
 
   test("deletes both session and thread index", async () => {

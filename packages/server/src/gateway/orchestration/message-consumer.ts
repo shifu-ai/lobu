@@ -155,7 +155,11 @@ export class MessageConsumer {
     if (this.courseContextRollout.mode === "single_course") {
       const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
       if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
-      else result = { status: "not_required" };
+      // Only the gate's deterministic non-course/personal classification may
+      // bypass. A course-scoped timeout, unavailable bundle, mismatch,
+      // onboarding gap, or ambiguity remains terminal and can never reach the
+      // worker without canonical context.
+      else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
     }
     if (result?.status === "already_dispatched") return false;
     if (result && result.status !== "ready" && result.status !== "not_required") { await this.deliverCourseContextTerminal(data, result); return false; }
@@ -166,10 +170,10 @@ export class MessageConsumer {
     });
     await this.sendToWorkerQueue(data, deploymentName);
     if (result?.status === "ready" && result.replay && this.sessionManager) {
-      let marked = await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data), result.replay.pendingId, result.replay.messageId);
-      for(let attempt=1;marked.status==='failed'&&attempt<3;attempt++)marked=await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data),result.replay.pendingId,result.replay.messageId);
+      let marked = await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data), result.replay.pendingId, data.userId, data.agentId, result.replay.messageId);
+      for(let attempt=1;marked.status==='failed'&&attempt<3;attempt++)marked=await this.sessionManager.markPendingCourseSelectionDispatched(computeSessionKey(data),result.replay.pendingId,data.userId,data.agentId,result.replay.messageId);
       if(marked.status==='failed')logger.warn({category:"pending_dispatch_mark",pendingId:result.replay.pendingId},"Course selection dispatched; dispatch marker deferred");
-      const cleared = await this.sessionManager.clearPendingCourseSelection(computeSessionKey(data), result.replay.pendingId, result.replay.messageId);
+      const cleared = await this.sessionManager.clearPendingCourseSelection(computeSessionKey(data), result.replay.pendingId, data.userId, data.agentId, result.replay.messageId);
       if (cleared.status !== "cleared" && cleared.status !== "stale") logger.warn({ category:"pending_cleanup", pendingId:result.replay.pendingId }, "Course selection dispatched; pending cleanup deferred");
     }
     return true;
