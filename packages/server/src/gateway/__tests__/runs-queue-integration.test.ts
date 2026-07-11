@@ -19,7 +19,7 @@ import {
   expect,
   test,
 } from "bun:test";
-import { RunsQueue } from "../infrastructure/queue/runs-queue.js";
+import { RunsQueue, sweepCompletedRuns } from "../infrastructure/queue/runs-queue.js";
 import { getDb } from "../../db/client.js";
 import {
   ensureDbForGatewayTests,
@@ -92,6 +92,10 @@ describe("RunsQueue — caller options", () => {
     const rows=await sql<{count:number}>`SELECT count(*)::int AS count FROM runs WHERE idempotency_key LIKE 'worker-message:turn-%'`;
     expect(rows[0]?.count).toBe(2);
   });
+
+  test("durable receipt scope collisions fail closed",async()=>{if(!queue)throw new Error("queue not started");const sql=getDb();await sql`INSERT INTO queue_dispatch_receipts(idempotency_key,queue_name)VALUES('collision','other')`;await expect(queue.send('expected',{}, {singletonKey:'collision',durableSingleton:true})).rejects.toThrow('scope collision');});
+
+  test("receipt sweep prunes only old terminal receipts and permits a later fresh event",async()=>{if(!queue)throw new Error("queue not started");const sql=getDb();const terminal=await queue.send('receipt-terminal',{}, {singletonKey:'receipt-terminal',durableSingleton:true});const active=await queue.send('receipt-active',{}, {singletonKey:'receipt-active',durableSingleton:true});const recent=await queue.send('receipt-recent',{}, {singletonKey:'receipt-recent',durableSingleton:true});await sql`UPDATE runs SET status='completed',completed_at=now() WHERE id IN (${Number(terminal)},${Number(recent)})`;await sql`UPDATE queue_dispatch_receipts SET created_at=now()-interval '31 days' WHERE idempotency_key IN ('receipt-terminal','receipt-active')`;await sweepCompletedRuns();const receipts=await sql<{idempotency_key:string}>`SELECT idempotency_key FROM queue_dispatch_receipts ORDER BY idempotency_key`;expect(receipts.map((r)=>r.idempotency_key)).toEqual(['receipt-active','receipt-recent']);const fresh=await queue.send('receipt-terminal',{}, {singletonKey:'receipt-terminal',durableSingleton:true});expect(fresh).not.toBe(terminal);});
   test("priority orders claim across same queue", async () => {
     if (!queue) throw new Error("queue not started");
     await queue.send("test-priority", { tag: "low" }, { priority: 1 });

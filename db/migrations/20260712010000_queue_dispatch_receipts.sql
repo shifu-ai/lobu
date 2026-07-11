@@ -1,3 +1,5 @@
+-- migrate:up
+
 CREATE TABLE IF NOT EXISTS public.queue_dispatch_receipts (
   idempotency_key text PRIMARY KEY,
   organization_id text,
@@ -8,3 +10,8 @@ CREATE TABLE IF NOT EXISTS public.queue_dispatch_receipts (
 
 CREATE INDEX IF NOT EXISTS queue_dispatch_receipts_created_at_idx
   ON public.queue_dispatch_receipts (created_at);
+
+-- migrate:down
+
+DROP INDEX IF EXISTS public.queue_dispatch_receipts_created_at_idx;
+DROP TABLE IF EXISTS public.queue_dispatch_receipts;

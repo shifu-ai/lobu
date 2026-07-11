@@ -354,13 +354,12 @@ export class RunsQueue implements IMessageQueue {
           RETURNING idempotency_key
         `;
         if (receipt.length === 0) {
-          const existing = await tx<{ run_id: number | string | null }>`
-            SELECT run_id FROM public.queue_dispatch_receipts
+          const existing = await tx<{ run_id: number | string | null; queue_name:string; organization_id:string|null }>`
+            SELECT run_id, queue_name, organization_id FROM public.queue_dispatch_receipts
             WHERE idempotency_key = ${idempotencyKey}
-              AND queue_name = ${queueName}
-              AND organization_id IS NOT DISTINCT FROM ${organizationIdFromPayload}
             LIMIT 1
           `;
+          if (!existing[0] || existing[0].queue_name !== queueName || existing[0].organization_id !== organizationIdFromPayload) throw new Error("Durable dispatch receipt scope collision");
           return String(existing[0]?.run_id ?? `receipt:${idempotencyKey}`);
         }
       }
@@ -906,6 +905,12 @@ export async function sweepCompletedRuns(): Promise<number> {
       ? Math.max(raw, retentionDays)
       : retentionDays;
   })();
+  /** Durable dispatch receipts outlive every source/platform retry horizon.
+   * Default 30d and never shorter than ordinary runs retention. */
+  const receiptRetentionDays = (() => {
+    const raw = Number(process.env.DISPATCH_RECEIPT_RETENTION_DAYS);
+    return Math.max(retentionDays, Number.isFinite(raw) && raw > 0 ? raw : 30);
+  })();
 
   let total = 0;
 
@@ -948,6 +953,24 @@ export async function sweepCompletedRuns(): Promise<number> {
     SELECT count(*)::int AS count FROM d
   `;
   total += Number((agedFailed[0] as { count?: number } | undefined)?.count ?? 0);
+
+  const agedReceipts = await sql`
+    WITH candidates AS (
+      SELECT receipt.idempotency_key
+      FROM public.queue_dispatch_receipts receipt
+      LEFT JOIN public.runs run ON run.id = receipt.run_id
+      WHERE receipt.created_at < now() - (${receiptRetentionDays}::int * interval '1 day')
+        AND (run.id IS NULL OR run.status IN ('completed','failed','cancelled','timeout'))
+      ORDER BY receipt.created_at ASC
+      LIMIT 1000
+    ), deleted AS (
+      DELETE FROM public.queue_dispatch_receipts receipt
+      USING candidates
+      WHERE receipt.idempotency_key = candidates.idempotency_key
+      RETURNING receipt.idempotency_key
+    ) SELECT count(*)::int AS count FROM deleted
+  `;
+  total += Number((agedReceipts[0] as { count?: number } | undefined)?.count ?? 0);
 
   return total;
 }
