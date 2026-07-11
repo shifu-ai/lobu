@@ -24,6 +24,7 @@ import type {
 import { buildModuleEnvVars } from "./deployment-utils.js";
 import { EmbeddedDeploymentManager } from "./impl/embedded-deployment.js";
 import { MessageConsumer } from "./message-consumer.js";
+import {searchCourseMemoryRows} from './course-memory-search.js';
 
 const logger = createLogger("orchestrator");
 
@@ -47,6 +48,7 @@ export class Orchestrator {
       providerModules
     );
     this.queueConsumer = new MessageConsumer(config, this.deploymentManager);
+    this.queueConsumer.setCourseMemorySearch(searchCourseMemoryRows);
   }
 
   /**

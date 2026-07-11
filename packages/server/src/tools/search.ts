@@ -108,6 +108,7 @@ export const SearchSchema = Type.Object({
         "Limit results to memory written by this agent. Filters events where `metadata.agent_id` matches the given id. Agents that opt in (via the `@lobu/openclaw-plugin` autoCapture path) get their saves stamped with their own id automatically; pass the same id here to scope recall to that agent's own writes.",
     })
   ),
+  entity_ids: Type.Optional(Type.Array(Type.String(), { description: 'Limit memory results to exact external course entity ids stored by context-pack ingestion.', maxItems: 20 })),
   limit: Type.Optional(
     Type.Number({
       description: 'Max results (default: 5, max: 100)',
@@ -261,7 +262,8 @@ async function fetchContentSnippets(
   contentLimit: number,
   env: Env,
   queryEmbedding?: number[],
-  agentId?: string
+  agentId?: string,
+  entityIds?: string[]
 ): Promise<ContentSnippet[]> {
   const result = await searchContentByText(
     query,
@@ -277,6 +279,7 @@ async function fetchContentSnippets(
       min_similarity: 0.4,
       query_embedding: queryEmbedding,
       agent_id: agentId,
+      course_entity_ids: entityIds,
       // Recall wants the most *relevant* matching content, not the most recent.
       // This also opts into the bounded recall-only candidate path (the implicit
       // default is a chronological date feed).
@@ -307,6 +310,7 @@ export async function search(
 ): Promise<UnifiedSearchResult> {
   const includeContent = args.include_content ?? true;
   const contentLimit = Math.min(args.content_limit ?? 5, 50);
+  const entityIds = validateCourseEntityIds(args.entity_ids);
 
   if (!ctx.organizationId) {
     return emptyResult({ suggestion: 'No accessible entities found in this workspace scope' });
@@ -332,7 +336,8 @@ export async function search(
           contentLimit,
           env,
           args.query_embedding,
-          agentIdScope
+          agentIdScope,
+          entityIds
         ).catch((err) => {
           logger.warn(
             `[search] content search failed: ${err instanceof Error ? err.message : String(err)}`
@@ -423,6 +428,15 @@ export async function search(
     emptyResult({ suggestion: suggestionText, existing_entities }),
     contentSnippets
   );
+}
+
+const COURSE_ENTITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
+function validateCourseEntityIds(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 20) throw new ToolUserError('entity_ids must be an array of at most 20 course ids', 400);
+  const ids = value.map((item) => typeof item === 'string' ? item.trim() : '');
+  if (ids.some((item) => !COURSE_ENTITY_ID_PATTERN.test(item))) throw new ToolUserError('entity_ids contains an invalid course entity id', 400);
+  return [...new Set(ids)];
 }
 
 // ============================================

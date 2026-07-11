@@ -94,15 +94,15 @@ export async function searchContentBySingleQuery(
   const searchEntityScopes =
     entityId != null ? await fetchEntityIdentityScopes(sql, entityId) : [];
 
-  // Slot $11 is the agent_id memory-scope filter — bumps orgScope to $12.
+  // Slots $11/$12 are agent/course memory-scope filters.
   const orgScope = buildOrgScopeWhere({
     entity_id: entityId,
     organization_id: options.organization_id,
-    baseParamIndex: 12,
+    baseParamIndex: 13,
   });
   // Exclude-watcher param slot sits immediately after orgScope so its $N index
   // is stable regardless of whether an embedding param follows.
-  const excludeParamIdx = 12 + orgScope.params.length;
+  const excludeParamIdx = 13 + orgScope.params.length;
   const excludeClause = buildExcludeWatcherClause(
     options.exclude_watcher_id,
     excludeParamIdx
@@ -163,6 +163,7 @@ export async function searchContentBySingleQuery(
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
           AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)
+          AND ($12::text[] IS NULL OR f.metadata->>'course_entity_id' = ANY($12::text[]) OR f.metadata->'course_entity_ids' ?| $12::text[])
           ${excludeClause.sql}
           ${visibilityClause.sql}
           ${orgScope.sql}`;
@@ -374,7 +375,7 @@ export async function searchContentBySingleQuery(
         FROM filtered_ids fi
         WHERE 1=1 ${cursorClause.sql}
         ORDER BY ${buildDateCandidateOrderBy(cursor, 'fi')}
-        LIMIT $${limitParamIdx}
+        LIMIT $${limitParamIdx}::int
       ),
       result_set AS (
         SELECT
@@ -405,8 +406,8 @@ export async function searchContentBySingleQuery(
           NULL::bigint as cursor_fetched_count
         FROM filtered_ids fi
         ORDER BY ${resultSetOrderBy}
-        LIMIT $${limitParamIdx}
-        OFFSET $${offsetParamIdx}
+        LIMIT $${limitParamIdx}::int
+        OFFSET $${offsetParamIdx}::int
       ),
       ${ctes}
       ${searchFinalSelect}`;
@@ -431,6 +432,7 @@ export async function searchContentBySingleQuery(
     // Slot $11 — per-agent memory scope. See buildStandardParams for the
     // mirror call site. Bumps orgScope to $12 (set above).
     options.agent_id ?? null,
+    options.course_entity_ids ? pgTextArray(options.course_entity_ids) : null,
     ...orgScope.params,
     ...excludeClause.params,
     ...visibilityClause.params,

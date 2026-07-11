@@ -30,6 +30,7 @@ import {
 } from "../infrastructure/queue/index.js";
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
+import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -90,6 +91,7 @@ export class MessageConsumer {
   private guardrailRegistry?: GuardrailRegistry;
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private sessionManager?: ISessionManager;
+  private courseMemorySearch?:CourseMemorySearch;
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
@@ -113,7 +115,7 @@ export class MessageConsumer {
       const courseSkillEnabled = (settings?.skillsConfig?.skills ?? []).some((skill) => skill.enabled && /(?:^|\n)\s*scope\s*:\s*course\s*(?:\n|$)/iu.test(skill.content ?? skill.instructions ?? ""));
       result = await attachCourseContextForReviewedScope(data, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled,
+        sessionManager: this.sessionManager, sessionKey: computeSessionKey(data), courseSkillEnabled, memorySearch:this.courseMemorySearch,
       });
     } else {
       result = await this.courseContextResolver(data);
@@ -141,7 +143,7 @@ export class MessageConsumer {
     const finalText = result.status === "clarification_required"
       ? `請選擇這次要處理的課程：\n${result.candidates.map((candidate, index) => `${index + 1}. ${clean(candidate.displayName)}`).join("\n")}`
       : result.status === "onboarding_required" ? "目前還沒有可用的課程資料，請先完成課程設定後再試。"
-      : result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
+      : result.status==='context_unavailable'&&result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
     await this.queue.createQueue("thread_response");
     await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, TERMINAL_DELIVERY_SEND_OPTS);
   }
@@ -164,6 +166,7 @@ export class MessageConsumer {
   setSessionManager(sessionManager: ISessionManager): void {
     this.sessionManager = sessionManager;
   }
+  setCourseMemorySearch(search:CourseMemorySearch):void{this.courseMemorySearch=search;}
 
   async start(): Promise<void> {
     try {
