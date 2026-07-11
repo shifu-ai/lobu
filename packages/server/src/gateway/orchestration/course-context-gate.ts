@@ -77,7 +77,8 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const context = bundle.context;
   const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
   const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'failed' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]};
-  await traceCourse(data,options,`context.memory.${retrieval.status==='ok'?'retrieved':retrieval.status}` ,retrieval.status==='failed'?'degraded':'ok',{course_entity_id:course.courseEntityId,result_count:retrieval.eventIds.length});
+  const retrievalEvent = retrieval.status === 'loaded' ? 'retrieved' : retrieval.status;
+  await traceCourse(data,options,`context.memory.${retrievalEvent}` ,retrieval.status==='failed'?'degraded':'ok',{course_entity_id:course.courseEntityId,result_count:retrieval.eventIds.length});
   await traceCourse(data,options,`context.guard.${retrieval.crossCourseGuard}` ,retrieval.crossCourseGuard==='passed'?'ok':'failed',{course_entity_id:course.courseEntityId});
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
     course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },

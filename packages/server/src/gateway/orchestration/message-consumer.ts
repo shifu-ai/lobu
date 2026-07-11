@@ -173,7 +173,10 @@ export class MessageConsumer {
       else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
     }
     if (result?.status === "already_dispatched") return false;
-    if (result && result.status !== "ready" && result.status !== "not_required") { await this.deliverCourseContextTerminal(data, result); return false; }
+    if (result?.status === "clarification_required" || result?.status === "onboarding_required" || result?.status === "context_unavailable") {
+      await this.deliverCourseContextTerminal(data, result);
+      return false;
+    }
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
