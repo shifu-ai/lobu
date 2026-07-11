@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { createLogger } from "@lobu/core";
+import { randomUUID } from "node:crypto";
 import type { ConversationStateStore } from "../connections/conversation-state-store.js";
 import {
   type ActiveCourseBinding,
@@ -29,6 +30,8 @@ export class StateAdapterSessionStore implements SessionStore {
       return null;
     }
   }
+
+  async getStrict(sessionKey: string): Promise<ThreadSession | null> { return this.conversations.getSession(sessionKey); }
 
   async set(sessionKey: string, session: ThreadSession): Promise<void> {
     await this.conversations.setSession(sessionKey, session);
@@ -119,6 +122,8 @@ export class SessionManager implements ISessionManager {
   async getSession(sessionKey: string): Promise<ThreadSession | null> {
     return await this.store.get(sessionKey);
   }
+
+  async getSessionStrict(sessionKey: string): Promise<ThreadSession | null> { return this.store.getStrict ? this.store.getStrict(sessionKey) : this.store.get(sessionKey); }
 
   /**
    * Create or update a session
@@ -218,12 +223,15 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  async setPendingCourseSelection(sessionKey: string, pending: NonNullable<ThreadSession["pendingCourseSelection"]>): Promise<boolean> {
-    return this.store.mutate(sessionKey, (session) => ({ ...session, pendingCourseSelection: pending }));
+  async createPendingCourseSelection(sessionKey: string, input: Pick<NonNullable<ThreadSession["pendingCourseSelection"]>, "candidates"|"originalMessage"|"createdAt">): Promise<{ status: "persisted"; pending: NonNullable<ThreadSession["pendingCourseSelection"]> }|{status:"failed"}> {
+    const pending = { ...input, pendingId: randomUUID(), version: Date.now(), status: "pending" as const };
+    try { return await this.store.mutate(sessionKey, (session) => ({ ...session, pendingCourseSelection: pending })) ? { status: "persisted", pending } : { status: "failed" }; } catch { return { status: "failed" }; }
   }
 
-  async takePendingCourseSelection(sessionKey: string): Promise<{ success: boolean; pending?: ThreadSession["pendingCourseSelection"] }> {
-    let pending: ThreadSession["pendingCourseSelection"];
-    try { const success = await this.store.mutate(sessionKey, (session) => { pending = session.pendingCourseSelection; const { pendingCourseSelection: _removed, ...remaining } = session; return remaining; }); return { success, pending }; } catch { return { success: false }; }
+  async claimPendingCourseSelection(sessionKey:string, expectedPendingId:string, courseKey:string, messageId:string):Promise<{status:"claimed";pending:NonNullable<ThreadSession["pendingCourseSelection"]>}|{status:"conflict"|"failed"}>{
+    let outcome:{status:"claimed";pending:NonNullable<ThreadSession["pendingCourseSelection"]>}|{status:"conflict"|"failed"}={status:"conflict"};
+    try { const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId)return session;if(current.status==="claimed"){if(current.claimedCourseKey===courseKey&&current.claimedMessageId===messageId)outcome={status:"claimed",pending:current};return session;}const claimed={...current,status:"claimed" as const,claimedCourseKey:courseKey,claimedMessageId:messageId};outcome={status:"claimed",pending:claimed};return {...session,pendingCourseSelection:claimed};});return ok?outcome:{status:"failed"};}catch{return {status:"failed"};}
   }
+
+  async clearPendingCourseSelection(sessionKey:string,expectedPendingId:string,messageId?:string):Promise<{status:"cleared"|"stale"|"failed"}>{let outcome:"cleared"|"stale"="stale";try{const ok=await this.store.mutate(sessionKey,(session)=>{const current=session.pendingCourseSelection;if(!current||current.pendingId!==expectedPendingId||(messageId&&current.claimedMessageId!==messageId))return session;outcome="cleared";const{pendingCourseSelection:_removed,...remaining}=session;return remaining;});return ok?{status:outcome}:{status:"failed"};}catch{return{status:"failed"};}}
 }

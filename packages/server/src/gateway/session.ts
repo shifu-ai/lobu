@@ -52,7 +52,7 @@ export interface ThreadSession {
   intent?: { kind: "watcher_run"; runId: number; watcherId: number };
   /** Convenience binding only; Toolbox must revalidate ownership/status on use. */
   shifuCourseContext?: ActiveCourseBinding;
-  pendingCourseSelection?: { candidates: Array<{ courseKey: string; displayName: string }>; originalMessage: string; createdAt: number };
+  pendingCourseSelection?: { pendingId: string; version: number; status: "pending" | "claimed"; candidates: Array<{ courseKey: string; displayName: string }>; originalMessage: string; createdAt: number; claimedCourseKey?: string; claimedMessageId?: string };
 }
 
 export interface ActiveCourseBinding {
@@ -94,6 +94,7 @@ export function computeSessionKey(session: {
  */
 export interface SessionStore {
   get(sessionKey: string): Promise<ThreadSession | null>;
+  getStrict?(sessionKey: string): Promise<ThreadSession | null>;
   set(sessionKey: string, session: ThreadSession): Promise<void>;
   delete(sessionKey: string): Promise<void>;
   mutate(
@@ -120,6 +121,7 @@ export interface ISessionManager {
     threadCreator?: string
   ): Promise<ThreadSession>;
   getSession(sessionKey: string): Promise<ThreadSession | null>;
+  getSessionStrict(sessionKey: string): Promise<ThreadSession | null>;
   findSessionByThread(
     channelId: string,
     threadTs: string
@@ -139,6 +141,7 @@ export interface ISessionManager {
   cleanupExpired(ttl: number): Promise<number>;
   bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult>;
   clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult>;
-  setPendingCourseSelection(sessionKey: string, pending: NonNullable<ThreadSession["pendingCourseSelection"]>): Promise<boolean>;
-  takePendingCourseSelection(sessionKey: string): Promise<{ success: boolean; pending?: ThreadSession["pendingCourseSelection"] }>;
+  createPendingCourseSelection(sessionKey: string, pending: Pick<NonNullable<ThreadSession["pendingCourseSelection"]>, "candidates"|"originalMessage"|"createdAt">): Promise<{ status: "persisted"; pending: NonNullable<ThreadSession["pendingCourseSelection"]> }|{status:"failed"}>;
+  claimPendingCourseSelection(sessionKey: string, expectedPendingId: string, courseKey: string, messageId: string): Promise<{status:"claimed";pending:NonNullable<ThreadSession["pendingCourseSelection"]>}|{status:"conflict"|"failed"}>;
+  clearPendingCourseSelection(sessionKey: string, expectedPendingId: string, messageId?: string): Promise<{status:"cleared"|"stale"|"failed"}>;
 }

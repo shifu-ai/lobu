@@ -119,6 +119,10 @@ export class MessageConsumer {
       deploymentName, organizationId: data.organizationId,
     });
     await this.sendToWorkerQueue(data, deploymentName);
+    if (result?.status === "ready" && result.replay && this.sessionManager) {
+      const cleared = await this.sessionManager.clearPendingCourseSelection(computeSessionKey(data), result.replay.pendingId, result.replay.messageId);
+      if (cleared.status !== "cleared" && cleared.status !== "stale") throw new Error("Course selection replay cleanup failed");
+    }
     return true;
   }
 
@@ -533,6 +537,7 @@ export class MessageConsumer {
         retryLimit: this.config.queues.retryLimit,
         retryDelay: 2, // 2 seconds — fast retry for stale connection recovery
         priority: 10, // Thread messages have high priority
+        singletonKey: data.messageId,
       });
 
       if (!jobId) {

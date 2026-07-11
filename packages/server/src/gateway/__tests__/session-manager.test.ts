@@ -59,6 +59,19 @@ describe("SessionManager", () => {
     });
   });
 
+  test("course selection CAS permits one claimant and cannot clear a newer pending value", async () => {
+    await manager.setSession({ channelId:"C",userId:"U",conversationId:"T",createdAt:1,lastActivity:1 });
+    const key=computeSessionKey({channelId:"C",conversationId:"T"});
+    const first=await manager.createPendingCourseSelection(key,{candidates:[{courseKey:"a",displayName:"A"}],originalMessage:"task",createdAt:1});
+    expect(first.status).toBe("persisted"); if(first.status!=="persisted")return;
+    const claims=await Promise.all([manager.claimPendingCourseSelection(key,first.pending.pendingId,"a","m1"),manager.claimPendingCourseSelection(key,first.pending.pendingId,"a","m2")]);
+    expect(claims.filter((value)=>value.status==="claimed")).toHaveLength(1);
+    const newer=await manager.createPendingCourseSelection(key,{candidates:[{courseKey:"b",displayName:"B"}],originalMessage:"new",createdAt:2});
+    expect(newer.status).toBe("persisted");
+    expect(await manager.clearPendingCourseSelection(key,first.pending.pendingId,"m1")).toEqual({status:"stale"});
+    expect((await manager.getSessionStrict(key))?.pendingCourseSelection?.originalMessage).toBe("new");
+  });
+
   test("deletes both session and thread index", async () => {
     const session: ThreadSession = {
       channelId: "C123",
