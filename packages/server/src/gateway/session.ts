@@ -52,6 +52,7 @@ export interface ThreadSession {
   intent?: { kind: "watcher_run"; runId: number; watcherId: number };
   /** Convenience binding only; Toolbox must revalidate ownership/status on use. */
   shifuCourseContext?: ActiveCourseBinding;
+  pendingCourseSelection?: { candidates: Array<{ courseKey: string; displayName: string }>; originalMessage: string; createdAt: number };
 }
 
 export interface ActiveCourseBinding {
@@ -138,4 +139,6 @@ export interface ISessionManager {
   cleanupExpired(ttl: number): Promise<number>;
   bindActiveCourse(sessionKey: string, binding: ActiveCourseBinding): Promise<ActiveCourseBindingWriteResult>;
   clearActiveCourse(sessionKey: string): Promise<ActiveCourseBindingWriteResult>;
+  setPendingCourseSelection(sessionKey: string, pending: NonNullable<ThreadSession["pendingCourseSelection"]>): Promise<boolean>;
+  takePendingCourseSelection(sessionKey: string): Promise<ThreadSession["pendingCourseSelection"]>;
 }

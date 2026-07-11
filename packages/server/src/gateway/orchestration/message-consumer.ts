@@ -102,7 +102,7 @@ export class MessageConsumer {
       if (data.platformMetadata?.courseScope === "reviewed" && !this.sessionManager) {
         throw new Error("Course context persistence is not initialized");
       }
-      const settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null;
+      let settings = null; try { settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null; } catch { logger.warn({ category: "course_skill_settings", agentId: data.agentId }, "Course skill settings unavailable; using deterministic message scope"); }
       const courseSkillEnabled = (settings?.skillsConfig?.skills ?? []).some((skill) => skill.enabled && /(?:^|\n)\s*scope\s*:\s*course\s*(?:\n|$)/iu.test(skill.content ?? skill.instructions ?? ""));
       result = await attachCourseContextForReviewedScope(data, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",

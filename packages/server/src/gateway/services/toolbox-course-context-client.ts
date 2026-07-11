@@ -4,6 +4,7 @@ export class ToolboxCourseContextResponseError extends Error { readonly code = '
 function obj(v: unknown): Record<string, unknown> { if (!v || typeof v !== 'object' || Array.isArray(v)) throw new ToolboxCourseContextResponseError(); return v as Record<string, unknown>; }
 function str(v: unknown, max = MAX_ID): string { if (typeof v !== 'string' || !v.trim() || v.length > max) throw new ToolboxCourseContextResponseError(); return v; }
 function course(v: unknown) { const x = obj(v); return { courseKey: str(x.courseKey), courseEntityId: str(x.courseEntityId), displayName: str(x.displayName) }; }
+function canonicalCourse(v: unknown) { const x = obj(v); if (!Array.isArray(x.aliases) || x.aliases.length > 20 || x.status !== 'active') throw new ToolboxCourseContextResponseError(); return { ...course(x), aliases: x.aliases.map((a) => str(a)), status: 'active' as const }; }
 const CANDIDATE_REASONS = new Set(['message_name', 'message_alias']);
 type ResolutionMatch = 'explicit_course_key' | 'message_name' | 'message_alias' | 'conversation_binding' | 'single_course_default';
 const RESOLUTION_MATCHES = new Set(['explicit_course_key', 'message_name', 'message_alias', 'conversation_binding', 'single_course_default']);
@@ -17,14 +18,14 @@ function candidate(v: unknown) {
 }
 export type ValidResolution = { status: 'resolved'; confidence: 'high'; matchedBy: [ResolutionMatch]; course: ReturnType<typeof course> };
 export type ValidCourseResolution = ValidResolution | { status: 'ambiguous'; reason: AmbiguousReason; candidates: Array<ReturnType<typeof candidate>> } | { status: 'missing'; reason: 'no_courses' | 'archived_only' };
-export type ValidBundle = { course: ReturnType<typeof course>; context: { contextPackId: string; version: number; stale: boolean; confirmedSummary: string } };
+export type ValidBundle = { course: ReturnType<typeof canonicalCourse>; context: { agentMd: string; contextPackId: string; version: number; confidence: 'high'|'medium'|'low'; generatedAt: string; lastIndexedAt: string|null; stale: boolean } };
 function parseResolution(v: unknown): ValidCourseResolution {
   const x = obj(v);
   if (x.status === 'ambiguous') { if (typeof x.reason !== 'string' || !AMBIGUOUS_REASONS.has(x.reason) || !Array.isArray(x.candidates) || x.candidates.length < 1 || x.candidates.length > 20) throw new ToolboxCourseContextResponseError(); const candidates = x.candidates.map(candidate); if (JSON.stringify(candidates).length > MAX_TOTAL) throw new ToolboxCourseContextResponseError(); return { status: 'ambiguous', reason: x.reason as AmbiguousReason, candidates }; }
   if (x.status === 'missing') { if (x.reason !== 'no_courses' && x.reason !== 'archived_only') throw new ToolboxCourseContextResponseError(); return { status: 'missing', reason: x.reason }; }
   if (x.status !== 'resolved' || x.confidence !== 'high' || !Array.isArray(x.matchedBy) || x.matchedBy.length !== 1 || typeof x.matchedBy[0] !== 'string' || !RESOLUTION_MATCHES.has(x.matchedBy[0])) throw new ToolboxCourseContextResponseError(); return { status: 'resolved', confidence: 'high', matchedBy: [x.matchedBy[0] as ResolutionMatch], course: course(x.course) };
 }
-function parseBundle(v: unknown): ValidBundle { const x = obj(v); const c = obj(x.context); const version = c.version; if (!Number.isInteger(version) || (version as number) <= 0 || typeof c.stale !== 'boolean') throw new ToolboxCourseContextResponseError(); const result = { course: course(x.course), context: { contextPackId: str(c.contextPackId), version: version as number, stale: c.stale, confirmedSummary: str(c.confirmedSummary, MAX_SUMMARY) } }; if (JSON.stringify(result).length > MAX_TOTAL) throw new ToolboxCourseContextResponseError(); return result; }
+function parseBundle(v: unknown): ValidBundle { const x = obj(v); const c = obj(x.context); const version = c.version; if (!Number.isInteger(version) || (version as number) <= 0 || typeof c.stale !== 'boolean') throw new ToolboxCourseContextResponseError(); if (c.agentMd !== undefined) { const profile = obj(x.profile); const evidence = obj(x.evidence); if ((c.confidence !== 'high' && c.confidence !== 'medium' && c.confidence !== 'low') || !Array.isArray(evidence.confirmed) || !Array.isArray(evidence.candidates) || evidence.confirmed.length > 100 || evidence.candidates.length > 100 || !('teacher' in profile) || !Array.isArray(profile.collaborators)) throw new ToolboxCourseContextResponseError(); const result = { course: canonicalCourse(x.course), context: { agentMd: str(c.agentMd, MAX_SUMMARY), contextPackId: str(c.contextPackId), version: version as number, confidence: c.confidence, generatedAt: str(c.generatedAt), lastIndexedAt: c.lastIndexedAt === null ? null : str(c.lastIndexedAt), stale: c.stale } }; if (JSON.stringify(x).length > MAX_TOTAL) throw new ToolboxCourseContextResponseError(); return result; } return { course: { ...course(x.course), aliases: [], status: 'active' as const }, context: { agentMd: str(c.confirmedSummary, MAX_SUMMARY), contextPackId: str(c.contextPackId), version: version as number, confidence: 'high', generatedAt: new Date(0).toISOString(), lastIndexedAt: null, stale: c.stale } }; }
 
 export type ToolboxCourseContextClientOptions = { baseUrl: string; secret: string; timeoutMs?: number; fetcher?: Fetcher };
 
@@ -41,7 +42,7 @@ export class ToolboxCourseContextClient {
     } finally { clearTimeout(timeout); }
   }
 
-  async resolve(input: { ownerUserId: string; agentId: string; conversationId: string; message: string; boundCourseKey?: string }) {
+  async resolve(input: { ownerUserId: string; agentId: string; conversationId: string; message: string; boundCourseKey?: string; explicitCourseKey?: string }) {
     return parseResolution(await this.request('/internal/resolve', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }));
   }
   async bundle(courseKey: string, input: { ownerUserId: string; agentId: string }) {

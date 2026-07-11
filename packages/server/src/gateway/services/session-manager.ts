@@ -217,4 +217,14 @@ export class SessionManager implements ISessionManager {
       return { status: "binding_write_failed", code: "binding_write_failed" };
     }
   }
+
+  async setPendingCourseSelection(sessionKey: string, pending: NonNullable<ThreadSession["pendingCourseSelection"]>): Promise<boolean> {
+    return this.store.mutate(sessionKey, (session) => ({ ...session, pendingCourseSelection: pending }));
+  }
+
+  async takePendingCourseSelection(sessionKey: string): Promise<ThreadSession["pendingCourseSelection"]> {
+    let pending: ThreadSession["pendingCourseSelection"];
+    await this.store.mutate(sessionKey, (session) => { pending = session.pendingCourseSelection; const { pendingCourseSelection: _removed, ...remaining } = session; return remaining; });
+    return pending;
+  }
 }
