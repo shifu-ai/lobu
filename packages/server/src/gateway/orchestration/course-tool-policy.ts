@@ -6,13 +6,24 @@ export interface TrustedCourseToolScope {
 
 export type CourseToolPolicyResult =
   | { ok: true; arguments: Record<string, unknown> }
-  | { ok: false; code: "COURSE_SCOPE_MISMATCH"; message: string };
+  | { ok: false; code: "COURSE_SCOPE_MISMATCH" | "COURSE_MEETING_SCOPE_UNAVAILABLE"; message: string };
 
 const MISMATCH: CourseToolPolicyResult = {
   ok: false,
   code: "COURSE_SCOPE_MISMATCH",
   message: "Memory search scope does not match the trusted course execution context.",
 };
+
+const MEETING_SCOPE_UNAVAILABLE: CourseToolPolicyResult = {
+  ok: false,
+  code: "COURSE_MEETING_SCOPE_UNAVAILABLE",
+  message: "Course meeting ownership is not verified yet. Provide a specific meeting or link, or use canonical course evidence instead.",
+};
+
+// Exact names emitted by Lobu's MCP registries. Do not broaden this to suffix
+// matching. Remove once trusted Toolbox scope + Meeting-Course Binding enforce
+// ownership at the upstream meeting_search boundary.
+const COURSE_MEETING_TOOL_NAMES = new Set(["meeting_search", "shifu_toolbox__meeting_search"]);
 
 export function isPlainToolArguments(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -25,6 +36,7 @@ export function applyTrustedCourseToolPolicy(
   args: Record<string, unknown>,
   scope?: TrustedCourseToolScope
 ): CourseToolPolicyResult {
+  if (scope && COURSE_MEETING_TOOL_NAMES.has(toolName)) return MEETING_SCOPE_UNAVAILABLE;
   if (toolName !== "search_memory" && toolName !== "lobu_search_memory" || !scope) {
     return { ok: true, arguments: args };
   }

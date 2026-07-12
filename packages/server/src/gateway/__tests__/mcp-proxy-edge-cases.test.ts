@@ -226,6 +226,32 @@ describe("trusted course memory tool policy", () => {
     expect(applyTrustedCourseToolPolicy("search_memory", { query: "x" }, undefined)).toEqual({ ok: true, arguments: { query: "x" } });
   });
 
+  test.each(["meeting_search", "shifu_toolbox__meeting_search"])("blocks course-scoped %s without leaking scope identifiers", (toolName) => {
+    expect(applyTrustedCourseToolPolicy(toolName, { query: "weekly" }, scope)).toEqual({ ok: false, code: "COURSE_MEETING_SCOPE_UNAVAILABLE", message: "Course meeting ownership is not verified yet. Provide a specific meeting or link, or use canonical course evidence instead." });
+  });
+
+  test("REST blocks course meeting search before upstream and forwards non-course meeting search", async () => {
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 11, courseToolScope: scope });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_input, init) => { const body = JSON.parse(String(init?.body)); bodies.push(body); return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [] } }), { headers: { "content-type": "application/json" } }); }) as typeof fetch;
+    const proxy = new McpProxy(createConfigSource({ toolbox: { id: "toolbox", upstreamUrl: "https://toolbox.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const blocked = await proxy.getApp().request("/toolbox/tools/meeting_search", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "weekly", bypassCourseScope: true }) });
+    expect(blocked.status).toBe(409); expect(await blocked.json()).toMatchObject({ diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" }); expect(bodies).toHaveLength(0);
+    const forwarded = await proxy.getApp().request("/toolbox/tools/meeting_search", { method: "POST", headers: { authorization: `Bearer ${agent1Token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "weekly" }) });
+    expect(forwarded.status).toBe(200); expect(bodies.some((body) => body.params?.name === "meeting_search")).toBe(true);
+  });
+
+  test("JSON-RPC blocks registered alias before upstream and leaves course search_memory available", async () => {
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 12, courseToolScope: scope });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_input, init) => { const body = JSON.parse(String(init?.body)); bodies.push(body); return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [] } }), { headers: { "content-type": "application/json" } }); }) as typeof fetch;
+    const proxy = new McpProxy(createConfigSource({ toolbox: { id: "toolbox", upstreamUrl: "https://toolbox.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const blocked = await proxy.getApp().request("/toolbox", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 51, method: "tools/call", params: { name: "shifu_toolbox__meeting_search", arguments: { query: "weekly" } } }) });
+    expect(blocked.status).toBe(409); expect(await blocked.json()).toMatchObject({ result: { diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" } }); expect(bodies).toHaveLength(0);
+    const memory = await proxy.getApp().request("/toolbox", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 52, method: "tools/call", params: { name: "search_memory", arguments: { query: "weekly" } } }) });
+    expect(memory.status).toBe(200); expect(bodies.some((body) => body.params?.name === "search_memory")).toBe(true);
+  });
+
   test("REST proxy rewrites from the encrypted run scope before upstream search", async () => {
     const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
       channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 7, courseToolScope: scope,
