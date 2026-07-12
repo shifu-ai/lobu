@@ -133,12 +133,7 @@ const ResolvedCourseContextSchema = z
       confirmedSummary: z.string().max(8000),
     }),
     retrieval: z.object({
-      status: z.enum([
-        "loaded",
-        "empty",
-        "degraded",
-        "invariant_violation",
-      ]),
+      status: z.enum(["loaded", "empty", "degraded", "invariant_violation"]),
       crossCourseGuard: z.enum(["passed", "failed"]),
       eventIds: z.array(z.number().int().positive()).max(8),
       evidenceRefs: z.array(z.string().max(256)).max(8),
