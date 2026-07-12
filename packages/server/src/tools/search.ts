@@ -9,7 +9,6 @@
 
 import { type Static, Type } from '@sinclair/typebox';
 import { getDb } from '../db/client';
-import { incrementCounter } from '../gateway/metrics/prometheus';
 import type { Env } from '../index';
 import { entityLinkMatchSql, searchContentByText } from '../utils/content-search';
 import { toVectorLiteral } from '../utils/entity-management';
@@ -18,10 +17,8 @@ import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
-import {
-  resolvePersonalMemoryReadScope,
-  resolvePersonalOrganizationOwner,
-} from './memory-read-scope';
+import { incrementCounter } from '../gateway/metrics/prometheus';
+import { resolvePersonalMemoryReadScope, resolvePersonalOrganizationOwner } from './memory-read-scope';
 import type { ToolContext } from './registry';
 
 // ============================================
@@ -33,38 +30,38 @@ export const SearchSchema = Type.Object({
     Type.String({
       description: 'Search query (entity name). Required unless entity_id is provided.',
       minLength: 1,
-    }),
+    })
   ),
   entity_type: Type.Optional(
     Type.String({
       description: 'Entity type filter. If not provided, searches all entities.',
-    }),
+    })
   ),
   entity_id: Type.Optional(
     Type.Number({
       description: 'Entity ID for direct lookup. Can be used instead of query for exact fetch.',
-    }),
+    })
   ),
   parent_id: Type.Optional(
     Type.Number({
       description: 'Filter by parent entity ID.',
-    }),
+    })
   ),
   market: Type.Optional(
     Type.String({
       description: 'Market/region code (ISO 3166-1 alpha-2)',
-    }),
+    })
   ),
   category: Type.Optional(
     Type.String({
       description: 'Filter by category metadata field',
-    }),
+    })
   ),
   fuzzy: Type.Optional(
     Type.Boolean({
       description: 'Enable fuzzy name matching',
       default: true,
-    }),
+    })
   ),
   min_similarity: Type.Optional(
     Type.Number({
@@ -72,20 +69,20 @@ export const SearchSchema = Type.Object({
       default: 0.3,
       minimum: 0,
       maximum: 1,
-    }),
+    })
   ),
   include_connections: Type.Optional(
     Type.Boolean({
       description: 'Include connection details in response (max 20, active first)',
       default: true,
-    }),
+    })
   ),
   include_content: Type.Optional(
     Type.Boolean({
       description:
         'Include semantic content search results alongside entity matches (default: true). Uses the query for vector similarity search across all content in the organization.',
       default: true,
-    }),
+    })
   ),
   content_limit: Type.Optional(
     Type.Number({
@@ -93,45 +90,40 @@ export const SearchSchema = Type.Object({
       default: 5,
       minimum: 1,
       maximum: 50,
-    }),
+    })
   ),
   query_embedding: Type.Optional(
     Type.Array(Type.Number(), {
       description:
         'Embedding vector for semantic similarity search. When provided, results are ranked by cosine similarity.',
-    }),
+    })
   ),
   metadata_filter: Type.Optional(
     Type.Record(Type.String(), Type.String(), {
-      description: 'Filter entities by metadata key-value pairs (e.g. {"category": "preference"})',
-    }),
+      description:
+        'Filter entities by metadata key-value pairs (e.g. {"category": "preference"})',
+    })
   ),
   agent_id: Type.Optional(
     Type.String({
       description:
         "Limit results to memory written by this agent. Filters events where `metadata.agent_id` matches the given id. Agents that opt in (via the `@lobu/openclaw-plugin` autoCapture path) get their saves stamped with their own id automatically; pass the same id here to scope recall to that agent's own writes.",
-    }),
+    })
   ),
-  entity_ids: Type.Optional(
-    Type.Array(Type.String(), {
-      description:
-        'Limit memory results to exact external course entity ids stored by context-pack ingestion.',
-      maxItems: 20,
-    }),
-  ),
+  entity_ids: Type.Optional(Type.Array(Type.String(), { description: 'Limit memory results to exact external course entity ids stored by context-pack ingestion.', maxItems: 20 })),
   limit: Type.Optional(
     Type.Number({
       description: 'Max results (default: 5, max: 100)',
       minimum: 1,
       maximum: 100,
-    }),
+    })
   ),
   include_public_catalogs: Type.Optional(
     Type.Boolean({
       description:
         'Also search public-catalog orgs (visibility=public) — canonical world entities like HMRC, banks, currencies. Defaults to true so agents can discover entities to reference cross-org.',
       default: true,
-    }),
+    })
   ),
 });
 
@@ -234,10 +226,7 @@ interface UnifiedSearchResult {
   discovery_status?: 'not_found' | 'complete' | 'discovering';
   suggestion?: string;
   view_url?: string;
-  existing_entities?: Array<{
-    entity_type: string;
-    entities: Array<{ id: number; name: string }>;
-  }>;
+  existing_entities?: Array<{ entity_type: string; entities: Array<{ id: number; name: string }> }>;
   metadata: {
     total_matches: number;
     page_size: number;
@@ -277,7 +266,7 @@ async function fetchContentSnippets(
   queryEmbedding?: number[],
   agentId?: string,
   ownerUserId?: string,
-  entityIds?: string[],
+  entityIds?: string[]
 ): Promise<ContentSnippet[]> {
   const result = await searchContentByText(
     query,
@@ -301,7 +290,7 @@ async function fetchContentSnippets(
       sort_by: 'score',
       approximate_candidate_search: true,
     },
-    env,
+    env
   );
 
   if (agentId && ownerUserId) {
@@ -329,16 +318,14 @@ async function fetchContentSnippets(
 export async function search(
   args: SearchArgs,
   env: Env,
-  ctx: ToolContext,
+  ctx: ToolContext
 ): Promise<UnifiedSearchResult> {
   const includeContent = args.include_content ?? true;
   const contentLimit = Math.min(args.content_limit ?? 5, 50);
   const entityIds = validateCourseEntityIds(args.entity_ids);
 
   if (!ctx.organizationId) {
-    return emptyResult({
-      suggestion: 'No accessible entities found in this workspace scope',
-    });
+    return emptyResult({ suggestion: 'No accessible entities found in this workspace scope' });
   }
 
   // Validate: must have either query, ID, or embedding
@@ -352,10 +339,9 @@ export async function search(
   const hasContentSignal = Boolean(args.query || args.query_embedding?.length);
   const requestedAgentId = args.agent_id ?? (args.metadata_filter?.agent_id as string | undefined);
   const personalOrgOwner = await resolvePersonalOrganizationOwner(ctx);
-  const personalScope =
-    ctx.agentId || requestedAgentId || personalOrgOwner
-      ? await resolvePersonalMemoryReadScope(ctx, requestedAgentId)
-      : undefined;
+  const personalScope = ctx.agentId || requestedAgentId || personalOrgOwner
+    ? await resolvePersonalMemoryReadScope(ctx, requestedAgentId)
+    : undefined;
   const contentSearchPromise =
     includeContent && hasContentSignal
       ? fetchContentSnippets(
@@ -367,10 +353,10 @@ export async function search(
           args.query_embedding,
           personalScope?.agentId,
           personalScope?.ownerUserId,
-          entityIds,
+          entityIds
         ).catch((err) => {
           logger.warn(
-            `[search] content search failed: ${err instanceof Error ? err.message : String(err)}`,
+            `[search] content search failed: ${err instanceof Error ? err.message : String(err)}`
           );
           return [] as ContentSnippet[];
         })
@@ -393,7 +379,7 @@ export async function search(
         entity_type: args.entity_type || null,
         suggestion: `Entity with ID ${args.entity_id} not found`,
       }),
-      contentSnippets,
+      contentSnippets
     );
   }
 
@@ -408,7 +394,7 @@ export async function search(
   }
 
   logger.info(
-    `[search] Querying entities for "${query ?? '(vector)'}" (entity_type=${args.entity_type}, fuzzy=${args.fuzzy}, market=${args.market}, has_embedding=${!!args.query_embedding})`,
+    `[search] Querying entities for "${query ?? '(vector)'}" (entity_type=${args.entity_type}, fuzzy=${args.fuzzy}, market=${args.market}, has_embedding=${!!args.query_embedding})`
   );
 
   let [results, contentSnippets] = await Promise.all([
@@ -417,19 +403,17 @@ export async function search(
   ]);
 
   if (results.length === 0 && query && !args.query_embedding?.length) {
-    const fallbackQueries = expandSearchQueries(query, {
-      maxVariants: 8,
-    }).slice(1);
+    const fallbackQueries = expandSearchQueries(query, { maxVariants: 8 }).slice(1);
     for (const fallbackQuery of fallbackQueries) {
       results = await queryEntities(
         fallbackQuery.slice(0, 200).trim() || null,
         args,
         env,
-        ctx.organizationId,
+        ctx.organizationId
       );
       if (results.length > 0) {
         logger.info(
-          `[search] Recovered entity matches for "${query}" via fallback variant "${fallbackQuery}"`,
+          `[search] Recovered entity matches for "${query}" via fallback variant "${fallbackQuery}"`
         );
         break;
       }
@@ -458,18 +442,16 @@ export async function search(
 
   return withContent(
     emptyResult({ suggestion: suggestionText, existing_entities }),
-    contentSnippets,
+    contentSnippets
   );
 }
 
 const COURSE_ENTITY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,199}$/;
 function validateCourseEntityIds(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || value.length > 20)
-    throw new ToolUserError('entity_ids must be an array of at most 20 course ids', 400);
-  const ids = value.map((item) => (typeof item === 'string' ? item.trim() : ''));
-  if (ids.some((item) => !COURSE_ENTITY_ID_PATTERN.test(item)))
-    throw new ToolUserError('entity_ids contains an invalid course entity id', 400);
+  if (!Array.isArray(value) || value.length > 20) throw new ToolUserError('entity_ids must be an array of at most 20 course ids', 400);
+  const ids = value.map((item) => typeof item === 'string' ? item.trim() : '');
+  if (ids.some((item) => !COURSE_ENTITY_ID_PATTERN.test(item))) throw new ToolUserError('entity_ids contains an invalid course entity id', 400);
   return [...new Set(ids)];
 }
 
@@ -478,7 +460,7 @@ function validateCourseEntityIds(value: unknown): string[] | undefined {
 // ============================================
 
 async function fetchTopEntitiesByType(
-  organizationId: string,
+  organizationId: string
 ): Promise<Array<{ entity_type: string; entities: Array<{ id: number; name: string }> }>> {
   const sql = getDb();
   const rows = await sql`
@@ -501,10 +483,7 @@ async function fetchTopEntitiesByType(
     }
   }
 
-  return [...byType.entries()].map(([entity_type, entities]) => ({
-    entity_type,
-    entities,
-  }));
+  return [...byType.entries()].map(([entity_type, entities]) => ({ entity_type, entities }));
 }
 
 // ============================================
@@ -579,7 +558,7 @@ async function queryEntities(
   query: string | null,
   args: SearchArgs,
   _env: Env,
-  organizationId: string,
+  organizationId: string
 ) {
   const sql = getDb();
   const fuzzyEnabled = args.fuzzy ?? true;
@@ -608,7 +587,7 @@ async function queryEntities(
     if (fuzzyEnabled) {
       const textCondition = `(LOWER(e.name) LIKE '%' || LOWER($${queryParamIdx}) || '%' OR LOWER(e.name) = LOWER($${queryParamIdx}) OR similarity(LOWER(e.name), LOWER($${queryParamIdx})) > 0.3 OR e.content_tsv @@ websearch_to_tsquery('english', $${queryParamIdx}))`;
       conditions.push(
-        hasEmbedding ? `(${textCondition} OR e.embedding IS NOT NULL)` : textCondition,
+        hasEmbedding ? `(${textCondition} OR e.embedding IS NOT NULL)` : textCondition
       );
     } else {
       conditions.push(`LOWER(e.name) = LOWER($${queryParamIdx})`);
@@ -628,7 +607,7 @@ async function queryEntities(
   const orgParamIdx = addParam(organizationId);
   if (includePublic) {
     conditions.push(
-      `(e.organization_id = $${orgParamIdx} OR EXISTS (SELECT 1 FROM organization o WHERE o.id = e.organization_id AND o.visibility = 'public'))`,
+      `(e.organization_id = $${orgParamIdx} OR EXISTS (SELECT 1 FROM organization o WHERE o.id = e.organization_id AND o.visibility = 'public'))`
     );
   } else {
     conditions.push(`e.organization_id = $${orgParamIdx}`);
@@ -641,7 +620,7 @@ async function queryEntities(
   if (args.market) {
     const idx = addParam(args.market);
     conditions.push(
-      `(e.metadata::jsonb->>'main_market' = $${idx} OR e.metadata::jsonb->>'market' = $${idx})`,
+      `(e.metadata::jsonb->>'main_market' = $${idx} OR e.metadata::jsonb->>'market' = $${idx})`
     );
   }
 
@@ -654,7 +633,8 @@ async function queryEntities(
 
   // Structured agent_id filter (also accepted under metadata_filter; the
   // top-level form is the documented contract so agents can't typo the key).
-  const agentIdFilter = args.agent_id ?? (args.metadata_filter?.agent_id as string | undefined);
+  const agentIdFilter =
+    args.agent_id ?? (args.metadata_filter?.agent_id as string | undefined);
   if (agentIdFilter) {
     conditions.push(`e.metadata->>'agent_id' = $${addParam(agentIdFilter)}`);
   }
@@ -696,7 +676,7 @@ async function queryEntities(
     WHERE ${whereClause}
     ORDER BY (e.organization_id = $${orgParamIdx}) DESC, match_score DESC
     LIMIT ${limit}`,
-    params,
+    params
   );
 
   await attachOrganizationSlugs(rows);
@@ -718,7 +698,7 @@ async function fetchEntityById(entityId: number, _env: Env, organizationId: stri
     WHERE e.id = $1
       AND (e.organization_id = $2 OR eo.visibility = 'public')
       AND e.deleted_at IS NULL`,
-    [entityId, organizationId],
+    [entityId, organizationId]
   );
 
   if (result.length === 0) return null;
@@ -734,7 +714,7 @@ async function fetchEntityById(entityId: number, _env: Env, organizationId: stri
 async function formatEntityResult(
   entityRows: EntityQueryRow[],
   args: SearchArgs,
-  ctx: ToolContext,
+  ctx: ToolContext
 ): Promise<UnifiedSearchResult> {
   // Map rows to unified Entity format (all fields, nulls where not applicable)
   const matches: Entity[] = entityRows.map((row) => ({
@@ -772,7 +752,8 @@ async function formatEntityResult(
   // operational data, never canonical, so skip them entirely for cross-org
   // public results.
   let connections: ConnectionInfo[] | undefined;
-  const primaryIsCallerOrg = String(primaryRow.organization_id) === ctx.organizationId;
+  const primaryIsCallerOrg =
+    String(primaryRow.organization_id) === ctx.organizationId;
   if ((args.include_connections ?? true) && primaryIsCallerOrg) {
     connections = await fetchConnectionsForEntity(primaryEntity.id);
   }
@@ -843,7 +824,7 @@ async function formatEntityResult(
         parentType: primaryEntity.parent_entity_type ?? null,
         parentSlug: primaryEntity.parent_slug ?? null,
       },
-      baseUrl,
+      baseUrl
     );
   }
 

@@ -199,7 +199,7 @@ export function buildDateCursorClause(
   cursor: DateCursor | null,
   occurredAtColumn: string,
   idColumn: string,
-  baseParamIndex: number,
+  baseParamIndex: number
 ): { sql: string; params: unknown[] } {
   if (!cursor) return { sql: '', params: [] };
 

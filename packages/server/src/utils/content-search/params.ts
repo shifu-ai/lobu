@@ -11,7 +11,7 @@ export function buildStandardParams(
   extra: {
     sinceDate: Date | null;
     untilDate: Date | null;
-  },
+  }
 ): any[] {
   return [
     options.entity_id ?? null,
@@ -28,16 +28,16 @@ export function buildStandardParams(
     // `sql.unsafe(...)` binding doesn't auto-cast JS arrays.
     options.semantic_type
       ? pgTextArray(
-          Array.isArray(options.semantic_type) ? options.semantic_type : [options.semantic_type],
+          Array.isArray(options.semantic_type) ? options.semantic_type : [options.semantic_type]
         )
       : null,
     options.interaction_status ?? null,
     // Slot $11 — trusted personal-memory identity scope.
     options.agent_id
-      ? {
+      ? ({
           agent_id: options.agent_id,
           ...(options.owner_user_id ? { owner_user_id: options.owner_user_id } : {}),
-        }
+        })
       : null,
   ];
 }

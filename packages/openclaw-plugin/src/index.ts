@@ -63,7 +63,7 @@ const RECALL_TIMEOUT_MS = 8_000;
 export async function runWithAbortDeadline<T>(
   work: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
-  onTimeout: T,
+  onTimeout: T
 ): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -112,7 +112,7 @@ async function mcpFetch(
   url: string,
   body: unknown,
   extraHeaders?: Record<string, string>,
-  signal?: AbortSignal,
+  signal?: AbortSignal
 ): Promise<{ data: unknown; response: Response }> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -233,7 +233,7 @@ function saveStoredSession(
     clientSecret?: string | null;
     refreshToken: string;
     accessToken: string;
-  },
+  }
 ): void {
   const storePath = getTokenStorePath();
   let store: AuthStore;
@@ -260,9 +260,7 @@ function saveStoredSession(
 
   // 0o700 on the parent dir, 0o600 on the file — both hold OAuth tokens.
   mkdirSync(dirname(storePath), { recursive: true, mode: 0o700 });
-  writeFileSync(storePath, JSON.stringify(store, null, 2) + '\n', {
-    mode: 0o600,
-  });
+  writeFileSync(storePath, JSON.stringify(store, null, 2) + '\n', { mode: 0o600 });
 }
 
 const fallbackLogger: PluginLogger = {
@@ -305,7 +303,7 @@ function getLogger(api: Record<string, unknown>): PluginLogger {
 
 type HookRegistrar = (
   event: string,
-  handler: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown,
+  handler: (event: Record<string, unknown>, ctx: Record<string, unknown>) => unknown
 ) => void;
 
 function getHookRegistrar(api: Record<string, unknown>): HookRegistrar {
@@ -343,7 +341,8 @@ function resolvePluginConfig(api: Record<string, unknown>, pluginId: string): Re
   const mcpUrl = asString(cfg.mcpUrl);
   const webUrl = asString(cfg.webUrl) ?? asString(process.env.LOBU_WEB_URL);
   const token = asString(cfg.token) ?? asString(process.env.LOBU_MCP_TOKEN);
-  const tokenCommand = asString(cfg.tokenCommand) ?? asString(process.env.LOBU_MCP_TOKEN_COMMAND);
+  const tokenCommand =
+    asString(cfg.tokenCommand) ?? asString(process.env.LOBU_MCP_TOKEN_COMMAND);
   const gatewayAuthUrl = asString(cfg.gatewayAuthUrl) ?? asString(process.env.GATEWAY_AUTH_URL);
   const agentId = asString(cfg.agentId) ?? asString(process.env.LOBU_AGENT_ID);
 
@@ -433,6 +432,7 @@ function clearSessionTokens(): void {
   sessionRefreshToken = null;
 }
 
+
 function spawnWorkerDaemon(mcpUrl: string, accessToken: string, log: PluginLogger): void {
   if (workerProcess) {
     // Already running — check if the process is still alive
@@ -459,7 +459,7 @@ function spawnWorkerDaemon(mcpUrl: string, accessToken: string, log: PluginLogge
     // a listener Node treats the error as uncaught and crashes the gateway.
     workerProcess.on('error', (err: unknown) => {
       log.warn(
-        `lobu: worker daemon process error: ${err instanceof Error ? err.message : String(err)}`,
+        `lobu: worker daemon process error: ${err instanceof Error ? err.message : String(err)}`
       );
       workerProcess = null;
     });
@@ -469,7 +469,7 @@ function spawnWorkerDaemon(mcpUrl: string, accessToken: string, log: PluginLogge
     registerWorkerCleanupOnce();
   } catch (err) {
     log.warn(
-      `lobu: failed to spawn worker daemon: ${err instanceof Error ? err.message : String(err)}`,
+      `lobu: failed to spawn worker daemon: ${err instanceof Error ? err.message : String(err)}`
     );
   }
 }
@@ -489,7 +489,7 @@ type DeviceLoginState = {
 async function initiateDeviceLogin(
   mcpUrl: string,
   scope: string,
-  resource: string | null,
+  resource: string | null
 ): Promise<DeviceLoginState> {
   const issuer = deriveMcpBaseUrl(mcpUrl);
 
@@ -556,7 +556,7 @@ async function initiateDeviceLogin(
 }
 
 async function pollDeviceLogin(
-  state: DeviceLoginState,
+  state: DeviceLoginState
 ): Promise<
   | { status: 'pending'; message: string }
   | { status: 'complete'; accessToken: string; refreshToken?: string }
@@ -590,10 +590,7 @@ async function pollDeviceLogin(
   const error = typeof data.error === 'string' ? data.error : '';
 
   if (error === 'authorization_pending') {
-    return {
-      status: 'pending',
-      message: 'Waiting for user to approve in browser...',
-    };
+    return { status: 'pending', message: 'Waiting for user to approve in browser...' };
   }
 
   if (error === 'slow_down') {
@@ -601,17 +598,11 @@ async function pollDeviceLogin(
   }
 
   if (error === 'expired_token') {
-    return {
-      status: 'error',
-      message: 'Device code expired. Please start login again.',
-    };
+    return { status: 'error', message: 'Device code expired. Please start login again.' };
   }
 
   if (error === 'access_denied') {
-    return {
-      status: 'error',
-      message: 'User denied the authorization request.',
-    };
+    return { status: 'error', message: 'User denied the authorization request.' };
   }
 
   const desc = typeof data.error_description === 'string' ? data.error_description : error;
@@ -665,10 +656,7 @@ function refreshStoredTokenSync(mcpUrl: string): void {
       .trim();
     if (!out) return;
 
-    const tokens = JSON.parse(out) as {
-      access_token?: string;
-      refresh_token?: string;
-    };
+    const tokens = JSON.parse(out) as { access_token?: string; refresh_token?: string };
     if (typeof tokens.access_token !== 'string') return;
 
     sessionToken = tokens.access_token;
@@ -766,11 +754,7 @@ async function reinitializeMcpSession(config: ResolvedPluginConfig): Promise<boo
         params: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: {
-            name: 'openclaw-lobu',
-            version: '1.0.0',
-            agentId: config.agentId,
-          },
+          clientInfo: { name: 'openclaw-lobu', version: '1.0.0', agentId: config.agentId },
         },
       }),
     });
@@ -789,7 +773,7 @@ async function callMcpTool(
   config: ResolvedPluginConfig,
   toolName: string,
   args: Record<string, unknown>,
-  options?: { rawJson?: boolean; signal?: AbortSignal },
+  options?: { rawJson?: boolean; signal?: AbortSignal }
 ): Promise<McpToolResponse | null> {
   if (!config.mcpUrl) return null;
   const token = await resolveAuthToken(config);
@@ -810,7 +794,12 @@ async function callMcpTool(
     params: { name: toolName, arguments: args },
   };
 
-  let { data, response } = await mcpFetch(config.mcpUrl, rpcBody, authHeaders, options?.signal);
+  let { data, response } = await mcpFetch(
+    config.mcpUrl,
+    rpcBody,
+    authHeaders,
+    options?.signal
+  );
 
   // Auto-refresh on 401/403 if we have a refresh token
   if ((response.status === 401 || response.status === 403) && config.mcpUrl) {
@@ -904,7 +893,7 @@ function extractTextFromContent(content: Array<{ type: string; text: string }>):
 
 async function fetchWorkspaceInstructions(
   config: ResolvedPluginConfig,
-  log: PluginLogger,
+  log: PluginLogger
 ): Promise<void> {
   // Called fire-and-forget from `lobu_login_check`. Without a deadline a
   // hanging MCP server keeps the awaiter alive indefinitely (and pins the
@@ -925,15 +914,11 @@ async function fetchWorkspaceInstructions(
         params: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: {
-            name: 'openclaw-lobu',
-            version: '1.0.0',
-            agentId: config.agentId,
-          },
+          clientInfo: { name: 'openclaw-lobu', version: '1.0.0', agentId: config.agentId },
         },
       },
       authHeaders,
-      controller.signal,
+      controller.signal
     );
 
     if (!response.ok) return;
@@ -948,7 +933,7 @@ async function fetchWorkspaceInstructions(
     }
   } catch (err) {
     log.warn(
-      `lobu: failed to fetch workspace instructions: ${err instanceof Error ? err.message : String(err)}`,
+      `lobu: failed to fetch workspace instructions: ${err instanceof Error ? err.message : String(err)}`
     );
   } finally {
     clearTimeout(timer);
@@ -1026,7 +1011,7 @@ function fetchMcpBootstrapSync(config: ResolvedPluginConfig): McpBootstrap {
 function registerMcpTools(
   config: ResolvedPluginConfig,
   registerTool: (def: Record<string, unknown>) => void,
-  log: PluginLogger,
+  log: PluginLogger
 ): void {
   const { tools, instructions, sessionId } = fetchMcpBootstrapSync(config);
 
@@ -1048,7 +1033,7 @@ function registerMcpTools(
   for (const tool of tools) {
     if (!KNOWN_MCP_TOOL_NAMES.has(tool.name)) {
       log.warn(
-        `lobu: MCP server exposes tool "${tool.name}" not declared in contracts.tools; skipping. Update @lobu/openclaw-plugin to register it.`,
+        `lobu: MCP server exposes tool "${tool.name}" not declared in contracts.tools; skipping. Update @lobu/openclaw-plugin to register it.`
       );
       continue;
     }
@@ -1235,7 +1220,7 @@ const plugin = {
                   log.info('lobu: persisted auth token to disk');
                 } catch (err) {
                   log.warn(
-                    `lobu: failed to persist auth token: ${err instanceof Error ? err.message : String(err)}`,
+                    `lobu: failed to persist auth token: ${err instanceof Error ? err.message : String(err)}`
                   );
                 }
               }
@@ -1339,7 +1324,7 @@ const plugin = {
               include_connections: false,
               limit: 3,
             },
-            { signal },
+            { signal }
           );
           if (!result) return '';
 
@@ -1386,7 +1371,7 @@ const plugin = {
         const block = await runWithAbortDeadline(
           (signal) => recallOnce(query, signal),
           RECALL_TIMEOUT_MS,
-          '',
+          ''
         );
         lastRecallQuery = query;
         lastRecallBlock = block;
@@ -1512,14 +1497,14 @@ const plugin = {
           .then(() => log.info('lobu: captured conversation observation'))
           .catch((err) =>
             log.warn(
-              `lobu: autoCapture failed: ${err instanceof Error ? err.message : String(err)}`,
-            ),
+              `lobu: autoCapture failed: ${err instanceof Error ? err.message : String(err)}`
+            )
           );
       });
     }
 
     log.info(
-      `lobu: initialized (configured=${!!config.mcpUrl}, token=${!!config.token}, tokenCommand=${!!config.tokenCommand}, tools=${!!registerTool})`,
+      `lobu: initialized (configured=${!!config.mcpUrl}, token=${!!config.token}, tokenCommand=${!!config.tokenCommand}, tools=${!!registerTool})`
     );
 
     // OpenClaw 2026.5.x only surfaces plugin tools to agents when the host's
@@ -1557,7 +1542,7 @@ const plugin = {
             'tools.allow with [group:plugins], [*], and explicit tool names, ' +
             'and tools.alsoAllow variants — none surface plugin tools on ' +
             'OpenClaw 2026.5.2. If you find a host config that works, please ' +
-            'file at https://github.com/lobu-ai/lobu/issues.',
+            'file at https://github.com/lobu-ai/lobu/issues.'
         );
       }
     }

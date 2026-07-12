@@ -3,9 +3,9 @@
  * Exposes basic gateway metrics in Prometheus text format
  */
 
-import { createLogger } from '@lobu/core';
+import { createLogger } from "@lobu/core";
 
-const logger = createLogger('metrics');
+const logger = createLogger("metrics");
 
 interface MetricValue {
   value: number;
@@ -15,7 +15,7 @@ interface MetricValue {
 interface Metric {
   name: string;
   help: string;
-  type: 'counter' | 'gauge' | 'histogram';
+  type: "counter" | "gauge" | "histogram";
   /** Keyed by JSON.stringify(labels) for O(1) lookup. */
   valuesByKey: Map<string, MetricValue>;
 }
@@ -24,28 +24,40 @@ const metrics: Map<string, Metric> = new Map();
 
 function initializeMetrics() {
   registerMetric(
-    'lobu_worker_deployments_total',
-    'Total number of worker deployments created',
-    'counter',
+    "lobu_worker_deployments_total",
+    "Total number of worker deployments created",
+    "counter"
   );
   registerMetric(
-    'lobu_worker_deployments_failed_total',
-    'Total number of failed worker deployments',
-    'counter',
+    "lobu_worker_deployments_failed_total",
+    "Total number of failed worker deployments",
+    "counter"
   );
   registerMetric(
-    'lobu_worker_deployments_active',
-    'Current number of active worker deployments',
-    'gauge',
+    "lobu_worker_deployments_active",
+    "Current number of active worker deployments",
+    "gauge"
   );
-  registerMetric('lobu_messages_received_total', 'Total number of messages received', 'counter');
-  registerMetric('lobu_messages_processed_total', 'Total number of messages processed', 'counter');
-  registerMetric('lobu_queue_length', 'Current message queue length', 'gauge');
-  registerMetric('lobu_proxy_requests_total', 'Total number of HTTP proxy requests', 'counter');
   registerMetric(
-    'lobu_proxy_requests_blocked_total',
-    'Total number of blocked proxy requests',
-    'counter',
+    "lobu_messages_received_total",
+    "Total number of messages received",
+    "counter"
+  );
+  registerMetric(
+    "lobu_messages_processed_total",
+    "Total number of messages processed",
+    "counter"
+  );
+  registerMetric("lobu_queue_length", "Current message queue length", "gauge");
+  registerMetric(
+    "lobu_proxy_requests_total",
+    "Total number of HTTP proxy requests",
+    "counter"
+  );
+  registerMetric(
+    "lobu_proxy_requests_blocked_total",
+    "Total number of blocked proxy requests",
+    "counter"
   );
   // Terminal run failures (exhausted retries) by run_type + queue. A
   // user-facing reply (run_type='chat_message') that lands here was dropped —
@@ -53,9 +65,9 @@ function initializeMetrics() {
   // failed `runs` rows are the durable dead-letter record (see
   // FAILED_RUNS_RETENTION_DAYS); this counter is the actionable signal.
   registerMetric(
-    'lobu_runs_failed_total',
+    "lobu_runs_failed_total",
     "Runs that reached terminal 'failed' after exhausting retries, by run_type and queue",
-    'counter',
+    "counter"
   );
   // Transient DB connection-drop retries (db/with-retry.ts). The prod pooler
   // (or an intermediary LB) silently closes idle/reloaded sockets; postgres.js
@@ -65,19 +77,19 @@ function initializeMetrics() {
   // used to always emit). Alert on
   // rate(lobu_db_conn_retry_total{outcome="exhausted"}[5m]).
   registerMetric(
-    'lobu_db_conn_retry_total',
-    'Transient DB connection drops retried, by call-site op and outcome (retried|exhausted)',
-    'counter',
+    "lobu_db_conn_retry_total",
+    "Transient DB connection drops retried, by call-site op and outcome (retried|exhausted)",
+    "counter"
   );
   registerMetric(
-    'lobu_memory_legacy_owner_compat_total',
-    'Legacy personal-memory rows recalled through exact-agent owner-null compatibility',
-    'counter',
+    "lobu_memory_legacy_owner_compat_total",
+    "Legacy personal-memory rows recalled through exact-agent owner-null compatibility",
+    "counter"
   );
   registerMetric(
-    'lobu_process_start_time_seconds',
-    'Start time of the process since unix epoch in seconds',
-    'gauge',
+    "lobu_process_start_time_seconds",
+    "Start time of the process since unix epoch in seconds",
+    "gauge"
   );
 
   // Scheduler + watcher-automation health. These back the prod alerting rules
@@ -87,37 +99,45 @@ function initializeMetrics() {
   // /metrics is scraped and summed across pods; counter resets on restart are
   // handled by rate()/increase().
   registerMetric(
-    'lobu_scheduled_job_runs_total',
-    'Scheduled (cron) task ticks by task name and outcome (success|error)',
-    'counter',
+    "lobu_scheduled_job_runs_total",
+    "Scheduled (cron) task ticks by task name and outcome (success|error)",
+    "counter"
   );
   registerMetric(
-    'lobu_watcher_automation_phase_failures_total',
-    'watcher-automation phases that threw, by phase (reset|reconcile|materialize|dispatch)',
-    'counter',
+    "lobu_watcher_automation_phase_failures_total",
+    "watcher-automation phases that threw, by phase (reset|reconcile|materialize|dispatch)",
+    "counter"
   );
   registerMetric(
-    'lobu_watcher_runs_created_total',
-    'Watcher runs materialized (enqueued) by the scheduler',
-    'counter',
+    "lobu_watcher_runs_created_total",
+    "Watcher runs materialized (enqueued) by the scheduler",
+    "counter"
   );
   registerMetric(
-    'lobu_watchers_unrunnable',
-    'Due active watchers skipped this tick for lacking a runnable executor (no device pin, no agent row)',
-    'gauge',
+    "lobu_watchers_unrunnable",
+    "Due active watchers skipped this tick for lacking a runnable executor (no device pin, no agent row)",
+    "gauge"
   );
 
-  setGaugeInternal('lobu_process_start_time_seconds', Math.floor(Date.now() / 1000));
-  logger.info('Prometheus metrics initialized');
+  setGaugeInternal("lobu_process_start_time_seconds", Math.floor(Date.now() / 1000));
+  logger.info("Prometheus metrics initialized");
 }
 
-function registerMetric(name: string, help: string, type: 'counter' | 'gauge' | 'histogram') {
+function registerMetric(
+  name: string,
+  help: string,
+  type: "counter" | "gauge" | "histogram"
+) {
   metrics.set(name, { name, help, type, valuesByKey: new Map() });
 }
 
-function setGaugeInternal(name: string, value: number, labels: Record<string, string> = {}) {
+function setGaugeInternal(
+  name: string,
+  value: number,
+  labels: Record<string, string> = {}
+) {
   const metric = metrics.get(name);
-  if (!metric || metric.type !== 'gauge') {
+  if (!metric || metric.type !== "gauge") {
     logger.warn(`Gauge metric ${name} not found`);
     return;
   }
@@ -131,13 +151,21 @@ function setGaugeInternal(name: string, value: number, labels: Record<string, st
   }
 }
 
-export function setGauge(name: string, value: number, labels: Record<string, string> = {}): void {
+export function setGauge(
+  name: string,
+  value: number,
+  labels: Record<string, string> = {}
+): void {
   setGaugeInternal(name, value, labels);
 }
 
-export function incrementCounter(name: string, labels: Record<string, string> = {}, by = 1): void {
+export function incrementCounter(
+  name: string,
+  labels: Record<string, string> = {},
+  by = 1
+): void {
   const metric = metrics.get(name);
-  if (!metric || metric.type !== 'counter') {
+  if (!metric || metric.type !== "counter") {
     logger.warn(`Counter metric ${name} not found`);
     return;
   }
@@ -165,7 +193,7 @@ export function getMetricsText(): string {
     for (const { value, labels } of metric.valuesByKey.values()) {
       const labelStr = Object.entries(labels)
         .map(([key, labelValue]) => `${key}="${labelValue}"`)
-        .join(',');
+        .join(",");
       if (labelStr) {
         lines.push(`${metric.name}{${labelStr}} ${value}`);
       } else {
@@ -175,15 +203,17 @@ export function getMetricsText(): string {
   }
 
   const memUsage = process.memoryUsage();
-  lines.push('# HELP nodejs_heap_size_bytes Node.js heap size in bytes');
-  lines.push('# TYPE nodejs_heap_size_bytes gauge');
+  lines.push("# HELP nodejs_heap_size_bytes Node.js heap size in bytes");
+  lines.push("# TYPE nodejs_heap_size_bytes gauge");
   lines.push(`nodejs_heap_size_bytes{type="used"} ${memUsage.heapUsed}`);
   lines.push(`nodejs_heap_size_bytes{type="total"} ${memUsage.heapTotal}`);
-  lines.push('# HELP nodejs_external_memory_bytes Node.js external memory in bytes');
-  lines.push('# TYPE nodejs_external_memory_bytes gauge');
+  lines.push(
+    "# HELP nodejs_external_memory_bytes Node.js external memory in bytes"
+  );
+  lines.push("# TYPE nodejs_external_memory_bytes gauge");
   lines.push(`nodejs_external_memory_bytes ${memUsage.external}`);
 
-  return `${lines.join('\n')}\n`;
+  return `${lines.join("\n")}\n`;
 }
 
 initializeMetrics();

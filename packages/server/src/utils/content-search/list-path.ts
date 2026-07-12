@@ -12,28 +12,27 @@ import {
 } from '../content-query-filters';
 import { parseDateAlias, toEndOfDay } from '../date-aliases';
 import { validateNumericId } from '../sql-validation';
-import { buildClassificationExistsClauses, resolveClassifierVersionIds } from './classification';
+import {
+  buildClassificationExistsClauses,
+  resolveClassifierVersionIds,
+} from './classification';
 import { buildLatestClassificationsCteSql, buildThreadMetaCteSql } from './ctes';
-import type { EntityIdentityScope } from './entity-link';
 import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from './entity-link';
-import { buildStandardParams, buildStandardWhereSql, WINDOW_JOIN_SQL } from './params';
+import type { EntityIdentityScope } from './entity-link';
 import { buildFinalSelect, deduplicateWithClassifications } from './sql-fragments';
 import {
   buildDateCandidateOrderBy,
   buildDateCursorClause,
   buildPageInfo,
-  type ContentSearchOptions,
-  type ContentSearchResponse,
-  type ContentSearchResult,
   emptyListResponse,
   isDateFeedMode,
   resolveDateCursor,
+  type ContentSearchOptions,
+  type ContentSearchResponse,
+  type ContentSearchResult,
 } from './types';
-import {
-  buildConnectionVisibilityClause,
-  buildExcludeWatcherClause,
-  buildOrgScopeWhere,
-} from './visibility';
+import { buildConnectionVisibilityClause, buildExcludeWatcherClause, buildOrgScopeWhere } from './visibility';
+import { buildStandardParams, buildStandardWhereSql, WINDOW_JOIN_SQL } from './params';
 
 /**
  * Shared count + query-pair execution for both `listContentInternal` branches.
@@ -68,7 +67,7 @@ export async function executeListQuery(args: {
       LEFT JOIN connections c ON c.id = f.connection_id
       ${joinSql}
       WHERE ${whereExpr}`,
-    countParams,
+    countParams
   );
   const total = parseInt(String(countResult[0]?.total ?? '0'), 10);
 
@@ -90,7 +89,7 @@ export async function executeListQuery(args: {
     args.cursor,
     'f.occurred_at',
     'f.id',
-    countParams.length + 1,
+    countParams.length + 1
   );
   const queryBaseParams = [...countParams, ...cursorClause.params];
   const limitIdx = queryBaseParams.length + 1;
@@ -169,7 +168,7 @@ export async function listContentInternal(
   sql: DbClient,
   options: ContentSearchOptions & { offset?: number },
   limit: number,
-  offset: number,
+  offset: number
 ): Promise<ContentSearchResponse> {
   const entityId = options.entity_id;
   const organizationId = options.organization_id;
@@ -182,20 +181,22 @@ export async function listContentInternal(
   const untilDate = options.until ? toEndOfDay(parseDateAlias(options.until).date) : null;
   const connectionIdsArray =
     options.connection_ids && options.connection_ids.length > 0 ? options.connection_ids : null;
-  const feedIdsArray = options.feed_ids && options.feed_ids.length > 0 ? options.feed_ids : null;
-  const runIdsArray = options.run_ids && options.run_ids.length > 0 ? options.run_ids : null;
+  const feedIdsArray =
+    options.feed_ids && options.feed_ids.length > 0 ? options.feed_ids : null;
+  const runIdsArray =
+    options.run_ids && options.run_ids.length > 0 ? options.run_ids : null;
 
   const orderByForResultSet = buildOrderByClause(
     options.sort_by,
     options.sort_order,
     'f',
-    'result_set',
+    'result_set'
   );
   const orderByForFinalSelect = buildOrderByClause(
     options.sort_by,
     options.sort_order,
     'rs',
-    'final_select',
+    'final_select'
   );
 
   const needClassifications = !!(
@@ -269,7 +270,7 @@ export async function listContentInternal(
     } else if (organizationId) {
       baseParams.push(organizationId);
       baseConditions.push(
-        `f.entity_ids && ARRAY(SELECT id FROM entities WHERE organization_id = $${baseParams.length})::bigint[]`,
+        `f.entity_ids && ARRAY(SELECT id FROM entities WHERE organization_id = $${baseParams.length})::bigint[]`
       );
     }
 
@@ -292,7 +293,7 @@ export async function listContentInternal(
     if (options.window_id != null) {
       baseParams.push(options.window_id);
       baseConditions.push(
-        `EXISTS (SELECT 1 FROM watcher_window_events iwf WHERE iwf.event_id = f.id AND iwf.window_id = $${baseParams.length})`,
+        `EXISTS (SELECT 1 FROM watcher_window_events iwf WHERE iwf.event_id = f.id AND iwf.window_id = $${baseParams.length})`
       );
     }
     if (options.engagement_min != null) {
@@ -322,7 +323,7 @@ export async function listContentInternal(
       if (options.owner_user_id) {
         baseParams.push(options.owner_user_id);
         baseConditions.push(
-          `(f.metadata->>'owner_user_id' = $${baseParams.length} OR f.metadata->>'owner_user_id' IS NULL)`,
+          `(f.metadata->>'owner_user_id' = $${baseParams.length} OR f.metadata->>'owner_user_id' IS NULL)`
         );
       }
     }
@@ -331,7 +332,7 @@ export async function listContentInternal(
       filtersBySlug,
       classifierVersionIds,
       options.classification_source,
-      baseParams.length + 1,
+      baseParams.length + 1
     );
     if (!classificationExists) {
       return emptyListResponse({ limit, effectiveOffset, useDateFeed, cursor });
@@ -342,7 +343,7 @@ export async function listContentInternal(
     const filterParamsBeforeExclude = [...baseParams, ...classificationExists.params];
     const excludeClause = buildExcludeWatcherClause(
       options.exclude_watcher_id,
-      filterParamsBeforeExclude.length + 1,
+      filterParamsBeforeExclude.length + 1
     );
     const filterParamsBeforeVisibility = [...filterParamsBeforeExclude, ...excludeClause.params];
     const visibilityClause = buildConnectionVisibilityClause({
@@ -416,7 +417,7 @@ export async function listContentInternal(
   const paramsBeforeExclude = [...paramsAfterEntityLink, ...orgScope.params];
   const excludeClause = buildExcludeWatcherClause(
     options.exclude_watcher_id,
-    paramsBeforeExclude.length + 1,
+    paramsBeforeExclude.length + 1
   );
   const paramsBeforeVisibility = [...paramsBeforeExclude, ...excludeClause.params];
   const visibilityClause = buildConnectionVisibilityClause({

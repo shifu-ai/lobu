@@ -18,20 +18,16 @@ describe('runWithAbortDeadline', () => {
           });
         }),
       30,
-      'TIMEOUT',
+      'TIMEOUT'
     );
     expect(result).toBe('TIMEOUT');
     expect(abortedDuringWork).toBe(true);
   });
 
   it('swallows a rejection from work and returns the sentinel', async () => {
-    const result = await runWithAbortDeadline(
-      async () => {
-        throw new Error('boom');
-      },
-      1_000,
-      'FALLBACK',
-    );
+    const result = await runWithAbortDeadline(async () => {
+      throw new Error('boom');
+    }, 1_000, 'FALLBACK');
     expect(result).toBe('FALLBACK');
   });
 });
