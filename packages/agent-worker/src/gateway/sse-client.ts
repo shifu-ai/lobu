@@ -98,6 +98,7 @@ const AgentOptionsSchema = z
 
 const ResolvedCourseContextSchema = z
   .object({
+    trust:z.object({ownerUserId:z.string().min(1).max(200),agentId:z.string().min(1).max(200),conversationId:z.string().min(1).max(200),courseKey:z.string().min(1).max(200),courseEntityId:z.string().min(1).max(200),contextPackId:z.string().min(1).max(200),contextVersion:z.number().int().positive()}),
     course: z.object({
       courseKey: z.string().min(1).max(200),
       courseEntityId: z.string().min(1).max(200),

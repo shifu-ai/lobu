@@ -14,6 +14,7 @@ const basePayload = () => ({
   agentOptions: {},
 });
 const validResolvedCourseContext = () => ({
+  trust:{ownerUserId:"user-1",agentId:"agent-1",conversationId:"conversation-1",courseKey:"course-a",courseEntityId:"course:user:course-a",contextPackId:"pack-a",contextVersion:2},
   course: {
     courseKey: "course-a",
     courseEntityId: "course:user:course-a",
@@ -166,27 +167,7 @@ describe("GatewayClient heartbeat ACKs", () => {
     );
     const handleThreadMessage = mock(async () => undefined);
     (client as any).handleThreadMessage = handleThreadMessage;
-    const resolvedCourseContext = {
-      course: {
-        courseKey: "course-a",
-        courseEntityId: "course:user:course-a",
-        displayName: "Course A",
-      },
-      resolution: { confidence: "high", matchedBy: ["message_name"] },
-      context: {
-        contextPackId: "pack-a",
-        contextVersion: 2,
-        stale: false,
-        confirmedSummary: "Confirmed A",
-      },
-      retrieval: {
-        status: "loaded",
-        crossCourseGuard: "passed",
-        eventIds: [5],
-        evidenceRefs: ["lobu:event:5"],
-        snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null }],
-      },
-    };
+    const resolvedCourseContext = validResolvedCourseContext();
     await (client as any).handleEvent(
       "job",
       JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } })
@@ -376,6 +357,7 @@ describe("GatewayClient heartbeat ACKs", () => {
       contextPackId: "p".repeat(200),
       confirmedSummary: "s".repeat(8000),
     };
+    resolvedCourseContext.trust={...resolvedCourseContext.trust,courseKey:resolvedCourseContext.course.courseKey,courseEntityId:resolvedCourseContext.course.courseEntityId,contextPackId:resolvedCourseContext.context.contextPackId};
     resolvedCourseContext.retrieval.eventIds = Array.from(
       { length: 8 },
       (_, index) => index + 1
