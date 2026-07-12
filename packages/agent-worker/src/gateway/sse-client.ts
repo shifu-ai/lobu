@@ -170,6 +170,9 @@ const ResolvedCourseContextSchema = z
             title: z.string().max(200).nullable(),
             text: z.string().max(300),
             sourceUrl: z.string().max(256).nullable(),
+            sourceRef: z.string().min(1).max(256).optional(),
+            provenanceKind: z.literal("fresh_course_retrieval").optional(),
+            readinessFields: z.partialRecord(CourseReadinessFieldSchema, z.string().min(1).max(500)).optional(),
           })
         )
         .max(8),

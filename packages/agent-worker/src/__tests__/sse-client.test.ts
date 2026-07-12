@@ -196,6 +196,7 @@ describe("GatewayClient heartbeat ACKs", () => {
     (client as any).handleThreadMessage = handleThreadMessage;
     const resolvedCourseContext = {
       ...validResolvedCourseContext(),
+      retrieval: {...validResolvedCourseContext().retrieval,snippets:[{eventId:5,title:'A',text:'A only',sourceUrl:null,sourceRef:'drive:file-1',provenanceKind:'fresh_course_retrieval',readinessFields:{audience:'課程 PM'}}]},
       readiness: {
         level: "partial",
         answerPolicy: "answer_with_assumptions",
