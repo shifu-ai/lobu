@@ -40,7 +40,18 @@ const validResolvedCourseContext = () => ({
     crossCourseGuard: "passed",
     eventIds: [5],
     evidenceRefs: ["lobu:event:5"],
-    snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null }],
+    snippets: [
+      {
+        eventId: 5,
+        title: "A",
+        text: "A only",
+        sourceUrl: null,
+        sourceRef: "lobu:event:5",
+        provenanceKind: "fresh_course_retrieval",
+        courseEntityId: "course:user:course-a",
+        readinessFields: {},
+      },
+    ],
   },
 });
 
@@ -188,6 +199,235 @@ describe("GatewayClient heartbeat ACKs", () => {
         handleThreadMessage.mock.calls[0]?.[0]
       ).resolvedCourseContext
     ).toEqual(resolvedCourseContext);
+  });
+
+  test("preserves bounded course readiness and evidence through job event parsing", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext = {
+      ...validResolvedCourseContext(),
+      retrieval: {
+        ...validResolvedCourseContext().retrieval,
+        snippets: [
+          {
+            eventId: 5,
+            title: "A",
+            text: "A only",
+            sourceUrl: null,
+            sourceRef: "drive:file-1",
+            provenanceKind: "fresh_course_retrieval",
+            courseEntityId: "course:user:course-a",
+            readinessFields: { audience: "課程 PM" },
+          },
+        ],
+      },
+      readiness: {
+        level: "partial",
+        answerPolicy: "answer_with_assumptions",
+        availableFields: ["audience", "key_learning"],
+        missingFields: ["course_promise", "existing_sales_talk"],
+        suggestedQuestions: ["課程承諾是什麼？", "目前有哪些銷講？"],
+      },
+      evidence: [
+        {
+          kind: "canonical_context",
+          fields: ["audience", "key_learning"],
+          sourceLabel: "已驗證的課程脈絡",
+          sourceHash: "abcd1234",
+        },
+      ],
+    };
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } })
+    );
+
+    expect(
+      handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext
+    ).toEqual(resolvedCourseContext);
+  });
+
+  test("accepts a partial bounded readiness field map through transport", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const context = validResolvedCourseContext();
+    context.retrieval.snippets[0].readinessFields = { audience: "course PMs" };
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext: context },
+      })
+    );
+
+    expect(handleThreadMessage).toHaveBeenCalledTimes(1);
+    expect(
+      handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext.retrieval
+        .snippets[0].readinessFields
+    ).toEqual({ audience: "course PMs" });
+  });
+
+  test.each([
+    ["unknown", { audience: "course PMs", internal_notes: "do not transport" }],
+    ["restricted", { audience: "course PMs", constructor: "do not transport" }],
+    ["oversized", { audience: "a".repeat(501) }],
+  ])("rejects %s readiness fields", async (_case, readinessFields) => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const context: any = validResolvedCourseContext();
+    context.retrieval.snippets[0].readinessFields = readinessFields;
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext: context },
+      })
+    );
+
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    "sourceRef",
+    "provenanceKind",
+    "courseEntityId",
+  ])("rejects a fresh snippet missing required %s", async (field) => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const context: any = validResolvedCourseContext();
+    delete context.retrieval.snippets[0][field];
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext: context },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+  test("rejects a fresh snippet stamped for a different course", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const context: any = validResolvedCourseContext();
+    context.retrieval.snippets[0].courseEntityId = "course:other";
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext: context },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+  test("rejects a retrieval envelope above 8KB even when individual fields are bounded", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const context: any = validResolvedCourseContext();
+    const readinessFields = {
+      audience: "a".repeat(500),
+      key_learning: "k".repeat(500),
+      course_promise: "p".repeat(500),
+      existing_sales_talk: "s".repeat(500),
+    };
+    context.retrieval.snippets = Array.from({ length: 4 }, (_, index) => ({
+      ...context.retrieval.snippets[0],
+      eventId: index + 1,
+      sourceRef: `lobu:event:${index + 1}`,
+      readinessFields,
+    }));
+    context.retrieval.eventIds = [1, 2, 3, 4];
+    context.retrieval.evidenceRefs = [
+      "lobu:event:1",
+      "lobu:event:2",
+      "lobu:event:3",
+      "lobu:event:4",
+    ];
+    expect(JSON.stringify(context.retrieval).length).toBeGreaterThan(8000);
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext: context },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+  test("normalizes an exact trusted pre-Task2 retrieval and sends its delivery receipt", async () => {
+    const requests: unknown[] = [];
+    globalThis.fetch = mock(async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response("ok");
+    }) as typeof fetch;
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const context: any = validResolvedCourseContext();
+    context.retrieval.snippets = [
+      { eventId: 5, title: "A", text: "A only", sourceUrl: null },
+    ];
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "legacy-job",
+        payload: { ...basePayload(), resolvedCourseContext: context },
+      })
+    );
+    expect(requests).toContainEqual({ jobId: "legacy-job", received: true });
+    expect(handleThreadMessage).toHaveBeenCalledTimes(1);
+    expect(
+      handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext.retrieval
+        .snippets
+    ).toEqual([
+      {
+        eventId: 5,
+        title: "A",
+        text: "A only",
+        sourceUrl: null,
+        sourceRef: "lobu:event:5",
+        provenanceKind: "fresh_course_retrieval",
+        courseEntityId: "course:user:course-a",
+        readinessFields: {},
+      },
+    ]);
   });
 
   test("accepts every canonical retrieval status and sends a delivery receipt", async () => {
@@ -505,9 +745,13 @@ describe("GatewayClient heartbeat ACKs", () => {
       { length: 8 },
       (_, index) => ({
         eventId: index + 1,
-        title: "t".repeat(200),
-        text: "x".repeat(300),
-        sourceUrl: "u".repeat(256),
+        title: index === 0 ? "t".repeat(200) : "t",
+        text: index === 0 ? "x".repeat(300) : "x",
+        sourceUrl: null,
+        sourceRef: `lobu:event:${index + 1}`,
+        provenanceKind: "fresh_course_retrieval",
+        courseEntityId: resolvedCourseContext.course.courseEntityId,
+        readinessFields: {},
       })
     );
     await (client as any).handleEvent(

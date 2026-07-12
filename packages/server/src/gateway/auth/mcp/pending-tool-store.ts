@@ -6,6 +6,7 @@
  */
 
 import { getDb } from "../../../db/client.js";
+import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
 
 const SCOPE = "pending-tool";
 
@@ -21,6 +22,7 @@ export interface PendingToolInvocation {
   connectionId?: string;
   originMessageId?: string;
   processedMessageIds?: string[];
+  courseToolScope?: TrustedCourseToolScope;
 }
 
 export async function storePendingTool(

@@ -5,6 +5,8 @@ import type { ActiveCourseBindingWriteResult, ISessionManager } from '../session
 import { ToolboxCourseContextClient, type ToolboxCourseContextClientOptions } from '../services/toolbox-course-context-client.js';
 import { retrieveCourseMemory, type CourseMemorySearch } from './course-memory-retriever.js';
 import { emitJourneyEvent, type JourneyEventPayload } from '../services/journey-observability.js';
+import { gradeCourseEvidenceReadiness } from './course-evidence-readiness.js';
+import type {CourseReadinessField} from '@lobu/core';
 
 export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
 export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
@@ -13,6 +15,9 @@ const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話
 const logger = createLogger('course-context-gate');
 const STRUCTURED_CONTEXT_FIELDS=new Set(['audience','dream_result','course_promise','key_learning','delivery_mechanism','evidence','offer']);
 function hashIdentity(value:string):string{return createHash('sha256').update(value).digest('hex');}
+const READINESS_FIELDS:CourseReadinessField[]=['audience','key_learning','course_promise','existing_sales_talk'];
+const CONFLICT_QUESTIONS:Record<CourseReadinessField,string>={audience:'課程受眾資料有衝突，請確認應以哪一個版本為準？',key_learning:'核心學習成果資料有衝突，請確認應以哪一個版本為準？',course_promise:'課程承諾資料有衝突，請確認應以哪一個版本為準？',existing_sales_talk:'既有銷講資料有衝突，請確認應以哪一個版本為準？'};
+function mergeReadiness(canonical:Partial<Record<CourseReadinessField,string|null>>,retrieval:Awaited<ReturnType<typeof retrieveCourseMemory>>){const values:Partial<Record<CourseReadinessField,string>>={};const conflictedFields:CourseReadinessField[]=[];const retrievedFields=new Set<CourseReadinessField>();for(const field of READINESS_FIELDS){const canonicalValue=canonical[field]?.trim();const retrieved=[...new Set(retrieval.snippets.map((snippet)=>snippet.readinessFields[field]?.trim()).filter((value):value is string=>Boolean(value)))];if(canonicalValue){values[field]=canonicalValue;if(retrieved.some((value)=>value!==canonicalValue))conflictedFields.push(field);}else if(retrieved.length===1)values[field]=retrieved[0];else if(retrieved.length>1)conflictedFields.push(field);if(retrieved.length>0)retrievedFields.add(field);}const assessment=gradeCourseEvidenceReadiness(values);if(conflictedFields.length){assessment.level='conflicted';assessment.answerPolicy='answer_conservatively';assessment.suggestedQuestions=[...conflictedFields.map((field)=>CONFLICT_QUESTIONS[field]),...assessment.suggestedQuestions].slice(0,3);}return{assessment,retrievedFields:[...retrievedFields]};}
 async function traceCourse(data:MessagePayload,options:CourseContextGateOptions|undefined,event:string,status:string,fields:Record<string,unknown>={}):Promise<void>{
   const emitter=options?.traceEmitter??emitJourneyEvent;
   const isMemoryEvent=event.startsWith('context.memory.');
@@ -78,6 +83,8 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const context = bundle.context;
   const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
   const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'degraded' as const,crossCourseGuard:'passed' as const,candidateCount:0,safeCount:0,droppedCount:0,durationMs:0,eventIds:[],evidenceRefs:[],snippets:[]};
+  const canonicalReadiness={audience:bundle.profile.audience,course_promise:bundle.profile.coursePromise};
+  const mergedReadiness=mergeReadiness(canonicalReadiness,retrieval);
   await traceCourse(data,options,`context.memory.${retrieval.status}` ,retrieval.status==='degraded'?'degraded':retrieval.status==='invariant_violation'?'failed':'ok',{candidate_count:retrieval.candidateCount,safe_count:retrieval.safeCount,dropped_count:retrieval.droppedCount,duration_ms:retrieval.durationMs});
   await traceCourse(data,options,`context.guard.${retrieval.crossCourseGuard}` ,retrieval.crossCourseGuard==='passed'?'ok':'failed',{course_entity_id:course.courseEntityId});
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
@@ -86,6 +93,8 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
     resolution: { confidence: 'high', matchedBy: resolution.matchedBy },
     context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: options?.courseSkillEnabled&&options.courseSkillContextFields?.length?projectRequiredCourseContext(bundle,options.courseSkillContextFields):context.agentMd.slice(0, 8000) },
     retrieval,
+    readiness:mergedReadiness.assessment,
+    evidence:[{kind:'canonical_context',fields:[...new Set([...(bundle.profile.audience?['audience' as const]:[]),...(bundle.profile.coursePromise?['course_promise' as const]:[])])],sourceLabel:'已驗證的課程脈絡',sourceHash:hashIdentity(`${course.courseEntityId}:${context.contextPackId}`).slice(0,16)},...(mergedReadiness.retrievedFields.length?[{kind:'fresh_course_retrieval' as const,fields:mergedReadiness.retrievedFields,sourceLabel:'本次課程限定檢索',sourceHash:hashIdentity(retrieval.evidenceRefs.join('|')).slice(0,16)}]:[])],
   };
   data.resolvedCourseContext=resolvedCourseContext;
   if (!options?.sessionManager || !options.sessionKey) return { status: 'ready', context: resolvedCourseContext };

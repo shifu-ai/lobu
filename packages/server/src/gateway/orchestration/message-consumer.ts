@@ -64,7 +64,8 @@ function getStringField(value: unknown, key: string): string | undefined {
 export function mintRunJobToken(
   data: MessagePayload,
   effectiveConversationId: string,
-  deploymentName: string
+  deploymentName: string,
+  includeTrustedCourseScope = false
 ): string | undefined {
   if (data.runId === undefined) return undefined;
   return generateWorkerToken(data.userId, effectiveConversationId, deploymentName, {
@@ -81,6 +82,11 @@ export function mintRunJobToken(
     messageId: data.messageId,
     processedMessageIds: [data.messageId],
     tokenKind: "run",
+    courseToolScope: includeTrustedCourseScope && data.resolvedCourseContext?.trust ? {
+      ownerUserId: data.resolvedCourseContext.trust.ownerUserId,
+      agentId: data.resolvedCourseContext.trust.agentId,
+      courseEntityId: data.resolvedCourseContext.trust.courseEntityId,
+    } : undefined,
   });
 }
 
@@ -139,6 +145,7 @@ export class MessageConsumer {
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
     if(this.courseContextRollout.mode==='off'||this.courseContextRollout.mode==='shadow')delete data.resolvedCourseContext;
     if (this.courseContextRollout.mode === "off") {
+      data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);
       return true;
@@ -181,6 +188,7 @@ export class MessageConsumer {
       await this.deliverCourseContextTerminal(data, result);
       return false;
     }
+    data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, this.courseContextRollout.mode === "enforce" && result?.status === "ready");
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
@@ -365,12 +373,6 @@ export class MessageConsumer {
       // A on PR #865. Without a parsed runId (legacy direct-enqueue
       // path) we skip the mint; the snapshot path then declines to write
       // (worker-side runId is undefined and writeSnapshot bails).
-      data.runJobToken = mintRunJobToken(
-        data,
-        effectiveConversationId,
-        deploymentName
-      );
-
       logger.info(
         `Conversation routing - effectiveConversationId: ${effectiveConversationId}, canonicalKey: ${canonicalConversationKey}, deploymentName: ${deploymentName}`
       );

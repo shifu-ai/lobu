@@ -162,6 +162,11 @@ export type {
 } from "./worker/transport";
 // Gateway ↔ worker wire contract (MessagePayload, JobType, QueuedMessage).
 export type {
+  CourseAnswerPolicy,
+  CourseEvidenceProvenance,
+  CourseReadinessAssessment,
+  CourseReadinessField,
+  CourseReadinessLevel,
   JobType,
   MessagePayload,
   QueuedMessage,

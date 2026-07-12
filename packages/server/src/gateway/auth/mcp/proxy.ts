@@ -35,6 +35,7 @@ import {
 } from "../../trace-context.js";
 import { emitAgentObsEvent } from "@lobu/core";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
+import { applyTrustedCourseToolPolicy, isPlainToolArguments, type TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -756,6 +757,7 @@ export class McpProxy {
       connectionId?: string;
       teamId?: string;
       platform?: string;
+      courseToolScope?: TrustedCourseToolScope;
     } = {}
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -774,8 +776,15 @@ export class McpProxy {
       connectionId: tokenContext.connectionId,
       teamId: tokenContext.teamId,
       platform: tokenContext.platform,
+      courseToolScope: tokenContext.courseToolScope,
     };
     const token = tokenContext.token ?? "";
+
+    const coursePolicy = applyTrustedCourseToolPolicy(toolName, args, tokenData.courseToolScope);
+    if (!coursePolicy.ok) {
+      return { status: "executed", content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code };
+    }
+    args = coursePolicy.arguments;
 
     if (await this.runPreToolGuardrails(agentId, tokenData, toolName, args)) {
       return {
@@ -820,13 +829,9 @@ export class McpProxy {
       };
     }
 
-    const result = await this.executeToolDirect(
-      agentId,
-      userId,
-      mcpId,
-      toolName,
-      args
-    );
+    const result = tokenData.courseToolScope
+      ? await this.executeToolDirect(agentId, userId, mcpId, toolName, args, { courseToolScope: tokenData.courseToolScope })
+      : await this.executeToolDirect(agentId, userId, mcpId, toolName, args);
     return { status: "executed", ...result };
   }
 
@@ -836,12 +841,17 @@ export class McpProxy {
     mcpId: string,
     toolName: string,
     args: Record<string, unknown>,
-    options?: { trace?: ShifuTraceContext }
+    options?: { trace?: ShifuTraceContext; courseToolScope?: TrustedCourseToolScope }
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
     diagnosticCode?: string;
   }> {
+    const coursePolicy = applyTrustedCourseToolPolicy(toolName, args, options?.courseToolScope);
+    if (!coursePolicy.ok) {
+      return { content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code };
+    }
+    args = coursePolicy.arguments;
     const trace = options?.trace ?? generatedMcpTrace();
     const toolCallStartedAt = Date.now();
     const emitToolCallCompleted = (
@@ -1789,17 +1799,34 @@ export class McpProxy {
 
     // Parse body early so tool arguments are available for the approval message.
     let toolArguments: Record<string, unknown> = {};
+    let parsedArguments: unknown = {};
     try {
       const body = await c.req.text();
       if (body) {
         if (body.length > MAX_BODY_SIZE) {
           return c.json({ error: "Request body too large" }, 413);
         }
-        toolArguments = JSON.parse(body);
+        parsedArguments = JSON.parse(body);
       }
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
+    if (!isPlainToolArguments(parsedArguments)) return c.json({ error: "Tool arguments must be a plain object.", diagnosticCode: "INVALID_TOOL_ARGUMENTS" }, 400);
+    toolArguments = parsedArguments;
+
+    const coursePolicy = applyTrustedCourseToolPolicy(
+      toolName,
+      toolArguments,
+      auth.tokenData.courseToolScope
+    );
+    if (!coursePolicy.ok) {
+      return c.json({
+        content: [{ type: "text", text: coursePolicy.message }],
+        isError: true,
+        diagnosticCode: coursePolicy.code,
+      }, 409);
+    }
+    toolArguments = coursePolicy.arguments;
 
     // Pre-tool guardrails — same enforcement as the JSON-RPC path so this REST
     // entrypoint can't bypass the stage. Runs before approval and independently
@@ -2380,6 +2407,7 @@ export class McpProxy {
     // forwardRequest). NOTE: this runs on any POST, NOT gated on grantStore —
     // guardrail enforcement must not depend on the approval subsystem being
     // configured (the approval check below is what's gated on grantStore).
+    let trustedBodyOverride: string | undefined;
     if (c.req.method === "POST") {
       try {
         const clonedReq = c.req.raw.clone();
@@ -2400,7 +2428,16 @@ export class McpProxy {
             }
           } else if (jsonRpc.method === "tools/call" && jsonRpc.params?.name) {
             const toolName = jsonRpc.params.name;
-            const toolArgs = jsonRpc.params.arguments || {};
+            const rawToolArgs = Object.hasOwn(jsonRpc.params, "arguments") ? jsonRpc.params.arguments : {};
+            if (!isPlainToolArguments(rawToolArgs)) return c.json({ jsonrpc: "2.0", id: jsonRpc.id, error: { code: -32602, message: "Tool arguments must be a plain object." } }, 400);
+            let toolArgs = rawToolArgs;
+            const coursePolicy = applyTrustedCourseToolPolicy(toolName, toolArgs, tokenData.courseToolScope);
+            if (!coursePolicy.ok) {
+              return c.json({ jsonrpc: "2.0", id: jsonRpc.id, result: { content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code } }, 409);
+            }
+            toolArgs = coursePolicy.arguments;
+            jsonRpc.params.arguments = toolArgs;
+            trustedBodyOverride = JSON.stringify(jsonRpc);
 
             // Pre-tool guardrails run before approval so a blocked tool never
             // enters the approval funnel, and independently of grantStore.
@@ -2477,7 +2514,8 @@ export class McpProxy {
           teamId: tokenData.teamId,
           connectionId: tokenData.connectionId,
           workerToken: sessionToken,
-        }
+        },
+        trustedBodyOverride
       );
     } catch (error) {
       logger.error("Failed to proxy MCP request", { error, mcpId });
@@ -2655,6 +2693,7 @@ export class McpProxy {
         connectionId: tokenData.connectionId,
         originMessageId,
         processedMessageIds,
+        courseToolScope: tokenData.courseToolScope,
       },
       this.PENDING_TOOL_TTL
     ).catch((err: unknown) =>
@@ -2959,7 +2998,8 @@ export class McpProxy {
       teamId?: string;
       connectionId?: string;
       workerToken?: string;
-    }
+    },
+    trustedBodyOverride?: string
   ): Promise<Response> {
     const ssrfBlock = await this.ssrfBlockResponse(httpServer, mcpId, agentId);
     if (ssrfBlock) {
@@ -2974,7 +3014,7 @@ export class McpProxy {
     let sessionId = this.getSession(sessionKey);
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
-    const bodyText = await this.getRequestBodyAsText(c);
+    const bodyText = trustedBodyOverride ?? await this.getRequestBodyAsText(c);
 
     // Body size validation
     if (bodyText.length > MAX_BODY_SIZE) {

@@ -50,6 +50,11 @@ export interface WorkerTokenData {
    * run/session credentials. Older tokens omit this and keep the short TTL.
    */
   tokenKind?: "deployment" | "session" | "run";
+  courseToolScope?: {
+    ownerUserId: string;
+    agentId: string;
+    courseEntityId: string;
+  };
 }
 
 export function generateWorkerToken(
@@ -76,6 +81,7 @@ export function generateWorkerToken(
     messageId?: string;
     processedMessageIds?: string[];
     tokenKind?: WorkerTokenData["tokenKind"];
+    courseToolScope?: WorkerTokenData["courseToolScope"];
   }
 ): string {
   if (!options.channelId) {
@@ -100,6 +106,7 @@ export function generateWorkerToken(
     messageId: options.messageId,
     processedMessageIds: options.processedMessageIds,
     tokenKind: options.tokenKind,
+    courseToolScope: options.courseToolScope,
   };
 
   return encrypt(JSON.stringify(payload));
@@ -161,6 +168,24 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
         logger.error("Worker token rejected: runId must be a positive integer");
         return null;
       }
+    }
+    if (data.courseToolScope !== undefined) {
+      const scope = data.courseToolScope;
+      if (
+        data.tokenKind !== "run" ||
+        !Number.isInteger(data.runId) ||
+        (data.runId ?? 0) <= 0 ||
+        !scope ||
+        typeof scope.ownerUserId !== "string" ||
+        !scope.ownerUserId ||
+        scope.ownerUserId !== data.userId ||
+        typeof scope.agentId !== "string" ||
+        !scope.agentId ||
+        scope.agentId !== data.agentId ||
+        typeof scope.courseEntityId !== "string" ||
+        !scope.courseEntityId
+      )
+        return null;
     }
     if (
       data.messageId !== undefined &&

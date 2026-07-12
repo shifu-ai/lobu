@@ -347,13 +347,16 @@ export function createGatewayApp(
             decision in expiresMap ? expiresMap[decision]! : null
           );
           if (approveMcpProxy) {
-            const result = await approveMcpProxy.executeToolDirect(
+            const result = pending.courseToolScope
+              ? await approveMcpProxy.executeToolDirect(
               pending.agentId,
               pending.userId,
               pending.mcpId,
               pending.toolName,
-              pending.args
-            );
+              pending.args,
+              { courseToolScope: pending.courseToolScope }
+            )
+              : await approveMcpProxy.executeToolDirect(pending.agentId, pending.userId, pending.mcpId, pending.toolName, pending.args);
             return { success: true, result } as any;
           }
           return { success: true };
