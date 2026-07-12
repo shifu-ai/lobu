@@ -47,6 +47,10 @@ export interface ContentSearchOptions {
   agent_id?: string;
   owner_user_id?: string;
   course_entity_ids?: string[];
+  // Internal opt-ins for canonical personal course-memory retrieval. General
+  // memory search keeps its legacy owner-null and multi-entity compatibility.
+  strict_owner_scope?: boolean;
+  exact_single_course_scope?: boolean;
 
   // Classification options (only JOINs when needed)
   include_classifications?: boolean; // Include classifications in results
