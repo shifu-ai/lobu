@@ -232,30 +232,30 @@ describe("GatewayClient heartbeat ACKs", () => {
     );
   });
 
-  test.each(["partial", "failed"])(
-    "rejects obsolete retrieval status %s",
-    async (status) => {
-      const client = new GatewayClient(
-        "https://gateway.example.com",
-        "worker-token",
-        "user-1",
-        "worker-1"
-      );
-      const handleThreadMessage = mock(async () => undefined);
-      (client as any).handleThreadMessage = handleThreadMessage;
-      const resolvedCourseContext = validResolvedCourseContext();
-      resolvedCourseContext.retrieval.status = status;
+  test.each([
+    "partial",
+    "failed",
+  ])("rejects obsolete retrieval status %s", async (status) => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext = validResolvedCourseContext();
+    resolvedCourseContext.retrieval.status = status;
 
-      await (client as any).handleEvent(
-        "job",
-        JSON.stringify({
-          payload: { ...basePayload(), resolvedCourseContext },
-        })
-      );
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext },
+      })
+    );
 
-      expect(handleThreadMessage).not.toHaveBeenCalled();
-    }
-  );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
 
   test("terminally rejects a queued legacy course context without executing it", async () => {
     const client = new GatewayClient(
