@@ -43,7 +43,7 @@ export async function authorizeMemoryAgentOwner(
       'authenticated agent owner mapping is missing',
     );
   }
-  if (!isTrustedMemoryScopeOverride(ctx) && (!ctx.userId || ownerUserId !== ctx.userId)) {
+  if (!ctx.userId || ownerUserId !== ctx.userId) {
     throw scopeError(
       'memory_scope_mismatch',
       'authenticated user does not own the authenticated agent',

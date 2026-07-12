@@ -186,4 +186,38 @@ describe('save_memory personal-agent scope', () => {
       memory_visibility: 'personal_private',
     });
   });
+
+  it('rejects trusted admin OAuth/PAT bound to another owner\'s non-null agent', async () => {
+    const org = await createTestOrganization({ name: 'Owned Agent Admin Scope' });
+    const admin = await createTestUser({ email: 'owned-save-admin@example.com' });
+    const owner = await createTestUser({ email: 'owned-save-owner@example.com' });
+    await addUserToOrganization(admin.id, org.id, 'owner');
+    await addUserToOrganization(owner.id, org.id, 'member');
+    const agent = await createTestAgent({
+      organizationId: org.id,
+      agentId: 'other-owner-agent',
+      ownerUserId: owner.id,
+    });
+    for (const tokenType of ['oauth', 'pat'] as const) {
+      await expect(
+        saveContent(
+          { content: 'cross-owner admin write', semantic_type: 'content' },
+          {} as never,
+          {
+            organizationId: org.id,
+            userId: admin.id,
+            memberRole: 'owner',
+            agentId: agent.agentId,
+            isAuthenticated: true,
+            tokenType,
+            scopes: ['mcp:write', 'mcp:admin'],
+            scopedToOrg: true,
+            allowCrossOrg: false,
+          },
+        ),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('memory_scope_mismatch'),
+      });
+    }
+  });
 });
