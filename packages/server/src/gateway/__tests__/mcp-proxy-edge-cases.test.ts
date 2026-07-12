@@ -248,6 +248,42 @@ describe("trusted course memory tool policy", () => {
     const response = await proxy.getApp().request("/memory/tools/search_memory", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "x", entity_ids: [] }) });
     expect(response.status).toBe(409); expect((await response.json()).diagnosticCode).toBe("COURSE_SCOPE_MISMATCH"); expect(calls).toBe(0);
   });
+
+  test("JSON-RPC proxy injects encrypted run scope into upstream tools/call params", async () => {
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
+      channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 9, courseToolScope: scope,
+    });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body)); bodies.push(body);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: body.method === "initialize" ? {} : { content: [] } }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const response = await proxy.getApp().request("/memory", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 41, method: "tools/call", params: { name: "search_memory", arguments: { query: "launch" } } }),
+    });
+    expect(response.status).toBe(200);
+    expect(bodies.find((body) => body.method === "tools/call")?.params.arguments).toEqual({ query: "launch", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] });
+  });
+
+  test.each([
+    { owner_user_id: "other" },
+    { owner_user_id: null },
+    { entity_ids: [] },
+    { entity_ids: ["course:owner-1:a", "course:owner-1:b"] },
+  ])("JSON-RPC proxy rejects conflicting or cleared encrypted run scope before upstream", async (override) => {
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 10, courseToolScope: scope });
+    let calls = 0; globalThis.fetch = mock(async () => { calls++; return new Response("{}"); }) as typeof fetch;
+    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const response = await proxy.getApp().request("/memory", {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 42, method: "tools/call", params: { name: "search_memory", arguments: { query: "x", ...override } } }),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ jsonrpc: "2.0", id: 42, result: { isError: true, diagnosticCode: "COURSE_SCOPE_MISMATCH" } });
+    expect(calls).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
