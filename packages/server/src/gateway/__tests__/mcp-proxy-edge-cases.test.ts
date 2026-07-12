@@ -29,6 +29,7 @@ import { McpProxy } from "../auth/mcp/proxy.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
 import { tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { GrantStore } from "../permissions/grant-store.js";
+import { applyTrustedCourseToolPolicy } from "../orchestration/course-tool-policy.js";
 import type {
   SecretListEntry,
   WritableSecretStore,
@@ -193,6 +194,60 @@ beforeEach(() => {
   delete process.env.SHIFU_AGENT_OBS_TOKEN;
   delete process.env.TOOLBOX_AGENT_OBSERVABILITY_URL;
   delete process.env.TOOLBOX_INTERNAL_SECRET;
+});
+
+describe("trusted course memory tool policy", () => {
+  const scope = { ownerUserId: "owner-1", agentId: "agent1", courseEntityId: "course:owner-1:a" };
+
+  test("injects the trusted owner, agent, and single course into an unscoped search", () => {
+    expect(applyTrustedCourseToolPolicy("search_memory", { query: "launch" }, scope)).toEqual({
+      ok: true,
+      arguments: { query: "launch", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] },
+    });
+  });
+
+  test.each([
+    { owner_user_id: "other" },
+    { agent_id: "other" },
+    { entity_ids: ["course:owner-1:b"] },
+    { entity_ids: ["course:owner-1:a", "course:owner-1:b"] },
+    { owner_user_id: null },
+    { entity_ids: [] },
+  ])("rejects an attempt to alter or clear trusted course scope", (override) => {
+    expect(applyTrustedCourseToolPolicy("search_memory", { query: "launch", ...override }, scope)).toEqual({
+      ok: false,
+      code: "COURSE_SCOPE_MISMATCH",
+      message: "Memory search scope does not match the trusted course execution context.",
+    });
+  });
+
+  test("accepts redundant matching values and leaves non-course calls compatible", () => {
+    expect(applyTrustedCourseToolPolicy("search_memory", { query: "x", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] }, scope).ok).toBe(true);
+    expect(applyTrustedCourseToolPolicy("search_memory", { query: "x" }, undefined)).toEqual({ ok: true, arguments: { query: "x" } });
+  });
+
+  test("REST proxy rewrites from the encrypted run scope before upstream search", async () => {
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
+      channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 7, courseToolScope: scope,
+    });
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body)); bodies.push(body);
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [] } }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const response = await proxy.getApp().request("/memory/tools/search_memory", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "launch" }) });
+    expect(response.status).toBe(200);
+    expect(bodies.find((body) => body.method === "tools/call")?.params.arguments).toEqual({ query: "launch", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] });
+  });
+
+  test("REST proxy rejects a conflicting course before any upstream request", async () => {
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 8, courseToolScope: scope });
+    let calls = 0; globalThis.fetch = mock(async () => { calls++; return new Response("{}"); }) as typeof fetch;
+    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const response = await proxy.getApp().request("/memory/tools/search_memory", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "x", entity_ids: [] }) });
+    expect(response.status).toBe(409); expect((await response.json()).diagnosticCode).toBe("COURSE_SCOPE_MISMATCH"); expect(calls).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

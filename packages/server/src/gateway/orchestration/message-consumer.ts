@@ -81,6 +81,11 @@ export function mintRunJobToken(
     messageId: data.messageId,
     processedMessageIds: [data.messageId],
     tokenKind: "run",
+    courseToolScope: data.resolvedCourseContext?.trust ? {
+      ownerUserId: data.resolvedCourseContext.trust.ownerUserId,
+      agentId: data.resolvedCourseContext.trust.agentId,
+      courseEntityId: data.resolvedCourseContext.trust.courseEntityId,
+    } : undefined,
   });
 }
 
@@ -181,6 +186,7 @@ export class MessageConsumer {
       await this.deliverCourseContextTerminal(data, result);
       return false;
     }
+    data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
@@ -365,12 +371,6 @@ export class MessageConsumer {
       // A on PR #865. Without a parsed runId (legacy direct-enqueue
       // path) we skip the mint; the snapshot path then declines to write
       // (worker-side runId is undefined and writeSnapshot bails).
-      data.runJobToken = mintRunJobToken(
-        data,
-        effectiveConversationId,
-        deploymentName
-      );
-
       logger.info(
         `Conversation routing - effectiveConversationId: ${effectiveConversationId}, canonicalKey: ${canonicalConversationKey}, deploymentName: ${deploymentName}`
       );

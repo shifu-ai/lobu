@@ -35,6 +35,7 @@ import {
 } from "../../trace-context.js";
 import { emitAgentObsEvent } from "@lobu/core";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
+import { applyTrustedCourseToolPolicy } from "../../orchestration/course-tool-policy.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -1801,6 +1802,20 @@ export class McpProxy {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
 
+    const coursePolicy = applyTrustedCourseToolPolicy(
+      toolName,
+      toolArguments,
+      auth.tokenData.courseToolScope
+    );
+    if (!coursePolicy.ok) {
+      return c.json({
+        content: [{ type: "text", text: coursePolicy.message }],
+        isError: true,
+        diagnosticCode: coursePolicy.code,
+      }, 409);
+    }
+    toolArguments = coursePolicy.arguments;
+
     // Pre-tool guardrails — same enforcement as the JSON-RPC path so this REST
     // entrypoint can't bypass the stage. Runs before approval and independently
     // of grantStore.
@@ -2380,6 +2395,7 @@ export class McpProxy {
     // forwardRequest). NOTE: this runs on any POST, NOT gated on grantStore —
     // guardrail enforcement must not depend on the approval subsystem being
     // configured (the approval check below is what's gated on grantStore).
+    let trustedBodyOverride: string | undefined;
     if (c.req.method === "POST") {
       try {
         const clonedReq = c.req.raw.clone();
@@ -2400,7 +2416,14 @@ export class McpProxy {
             }
           } else if (jsonRpc.method === "tools/call" && jsonRpc.params?.name) {
             const toolName = jsonRpc.params.name;
-            const toolArgs = jsonRpc.params.arguments || {};
+            let toolArgs = jsonRpc.params.arguments || {};
+            const coursePolicy = applyTrustedCourseToolPolicy(toolName, toolArgs, tokenData.courseToolScope);
+            if (!coursePolicy.ok) {
+              return c.json({ jsonrpc: "2.0", id: jsonRpc.id, result: { content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code } }, 409);
+            }
+            toolArgs = coursePolicy.arguments;
+            jsonRpc.params.arguments = toolArgs;
+            trustedBodyOverride = JSON.stringify(jsonRpc);
 
             // Pre-tool guardrails run before approval so a blocked tool never
             // enters the approval funnel, and independently of grantStore.
@@ -2477,7 +2500,8 @@ export class McpProxy {
           teamId: tokenData.teamId,
           connectionId: tokenData.connectionId,
           workerToken: sessionToken,
-        }
+        },
+        trustedBodyOverride
       );
     } catch (error) {
       logger.error("Failed to proxy MCP request", { error, mcpId });
@@ -2959,7 +2983,8 @@ export class McpProxy {
       teamId?: string;
       connectionId?: string;
       workerToken?: string;
-    }
+    },
+    trustedBodyOverride?: string
   ): Promise<Response> {
     const ssrfBlock = await this.ssrfBlockResponse(httpServer, mcpId, agentId);
     if (ssrfBlock) {
@@ -2974,7 +2999,7 @@ export class McpProxy {
     let sessionId = this.getSession(sessionKey);
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
-    const bodyText = await this.getRequestBodyAsText(c);
+    const bodyText = trustedBodyOverride ?? await this.getRequestBodyAsText(c);
 
     // Body size validation
     if (bodyText.length > MAX_BODY_SIZE) {
