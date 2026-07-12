@@ -170,9 +170,10 @@ const ResolvedCourseContextSchema = z
             title: z.string().max(200).nullable(),
             text: z.string().max(300),
             sourceUrl: z.string().max(256).nullable(),
-            sourceRef: z.string().min(1).max(256).optional(),
-            provenanceKind: z.literal("fresh_course_retrieval").optional(),
-            readinessFields: z.partialRecord(CourseReadinessFieldSchema, z.string().min(1).max(500)).optional(),
+            sourceRef: z.string().min(1).max(256),
+            provenanceKind: z.literal("fresh_course_retrieval"),
+            courseEntityId: z.string().min(1).max(200),
+            readinessFields: z.partialRecord(CourseReadinessFieldSchema, z.string().min(1).max(500)),
           })
         )
         .max(8),
@@ -193,6 +194,8 @@ const ResolvedCourseContextSchema = z
         code: "custom",
         message: "Resolved course context trust does not match context",
       });
+    for(const [index,snippet] of value.retrieval.snippets.entries())if(snippet.courseEntityId!==value.course.courseEntityId)ctx.addIssue({code:"custom",path:["retrieval","snippets",index,"courseEntityId"],message:"Retrieved snippet course does not match active course"});
+    if(JSON.stringify(value.retrieval).length>8000)ctx.addIssue({code:"custom",path:["retrieval"],message:"Course retrieval exceeds wire size limit"});
     if (JSON.stringify(value).length > 20_000)
       ctx.addIssue({
         code: "custom",

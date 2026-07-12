@@ -72,9 +72,10 @@ export interface ResolvedCourseExecutionContext {
       title: string | null;
       text: string;
       sourceUrl: string | null;
-      sourceRef?: string;
-      provenanceKind?: "fresh_course_retrieval";
-      readinessFields?: Partial<Record<CourseReadinessField, string>>;
+      sourceRef: string;
+      provenanceKind: "fresh_course_retrieval";
+      courseEntityId: string;
+      readinessFields: Partial<Record<CourseReadinessField, string>>;
     }>;
   };
   /** Advisory completeness metadata. Older gateway payloads omit it. */

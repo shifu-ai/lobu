@@ -40,7 +40,7 @@ const validResolvedCourseContext = () => ({
     crossCourseGuard: "passed",
     eventIds: [5],
     evidenceRefs: ["lobu:event:5"],
-    snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null }],
+    snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null, sourceRef: "lobu:event:5", provenanceKind: "fresh_course_retrieval", courseEntityId: "course:user:course-a", readinessFields: {} }],
   },
 });
 
@@ -196,7 +196,7 @@ describe("GatewayClient heartbeat ACKs", () => {
     (client as any).handleThreadMessage = handleThreadMessage;
     const resolvedCourseContext = {
       ...validResolvedCourseContext(),
-      retrieval: {...validResolvedCourseContext().retrieval,snippets:[{eventId:5,title:'A',text:'A only',sourceUrl:null,sourceRef:'drive:file-1',provenanceKind:'fresh_course_retrieval',readinessFields:{audience:'課程 PM'}}]},
+      retrieval: {...validResolvedCourseContext().retrieval,snippets:[{eventId:5,title:'A',text:'A only',sourceUrl:null,sourceRef:'drive:file-1',provenanceKind:'fresh_course_retrieval',courseEntityId:'course:user:course-a',readinessFields:{audience:'課程 PM'}}]},
       readiness: {
         level: "partial",
         answerPolicy: "answer_with_assumptions",
@@ -211,6 +211,10 @@ describe("GatewayClient heartbeat ACKs", () => {
 
     expect(handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext).toEqual(resolvedCourseContext);
   });
+
+  test.each(['sourceRef','provenanceKind','courseEntityId'])('rejects a fresh snippet missing required %s',async(field)=>{const client=new GatewayClient('https://gateway.example.com','worker-token','user-1','worker-1');const handleThreadMessage=mock(async()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;const context:any=validResolvedCourseContext();delete context.retrieval.snippets[0][field];await (client as any).handleEvent('job',JSON.stringify({payload:{...basePayload(),resolvedCourseContext:context}}));expect(handleThreadMessage).not.toHaveBeenCalled();});
+  test('rejects a fresh snippet stamped for a different course',async()=>{const client=new GatewayClient('https://gateway.example.com','worker-token','user-1','worker-1');const handleThreadMessage=mock(async()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;const context:any=validResolvedCourseContext();context.retrieval.snippets[0].courseEntityId='course:other';await (client as any).handleEvent('job',JSON.stringify({payload:{...basePayload(),resolvedCourseContext:context}}));expect(handleThreadMessage).not.toHaveBeenCalled();});
+  test('rejects a retrieval envelope above 8KB even when individual fields are bounded',async()=>{const client=new GatewayClient('https://gateway.example.com','worker-token','user-1','worker-1');const handleThreadMessage=mock(async()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;const context:any=validResolvedCourseContext();const readinessFields={audience:'a'.repeat(500),key_learning:'k'.repeat(500),course_promise:'p'.repeat(500),existing_sales_talk:'s'.repeat(500)};context.retrieval.snippets=Array.from({length:4},(_,index)=>({...context.retrieval.snippets[0],eventId:index+1,sourceRef:`lobu:event:${index+1}`,readinessFields}));context.retrieval.eventIds=[1,2,3,4];context.retrieval.evidenceRefs=['lobu:event:1','lobu:event:2','lobu:event:3','lobu:event:4'];expect(JSON.stringify(context.retrieval).length).toBeGreaterThan(8000);await (client as any).handleEvent('job',JSON.stringify({payload:{...basePayload(),resolvedCourseContext:context}}));expect(handleThreadMessage).not.toHaveBeenCalled();});
 
   test("accepts every canonical retrieval status and sends a delivery receipt", async () => {
     const canonicalStatuses = [
@@ -527,9 +531,13 @@ describe("GatewayClient heartbeat ACKs", () => {
       { length: 8 },
       (_, index) => ({
         eventId: index + 1,
-        title: "t".repeat(200),
-        text: "x".repeat(300),
-        sourceUrl: "u".repeat(256),
+        title: index===0?"t".repeat(200):"t",
+        text: index===0?"x".repeat(300):"x",
+        sourceUrl: null,
+        sourceRef: `lobu:event:${index + 1}`,
+        provenanceKind: "fresh_course_retrieval",
+        courseEntityId: resolvedCourseContext.course.courseEntityId,
+        readinessFields: {},
       })
     );
     await (client as any).handleEvent(
