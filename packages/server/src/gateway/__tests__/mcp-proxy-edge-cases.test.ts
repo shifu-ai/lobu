@@ -284,6 +284,20 @@ describe("trusted course memory tool policy", () => {
     expect(await response.json()).toMatchObject({ jsonrpc: "2.0", id: 42, result: { isError: true, diagnosticCode: "COURSE_SCOPE_MISMATCH" } });
     expect(calls).toBe(0);
   });
+
+  test.each([{value:null},{value:[]},{value:"query"}])('REST rejects non-object arguments before upstream', async ({value:args}) => {
+    let calls=0; globalThis.fetch=mock(async()=>{calls++;return new Response('{}')}) as typeof fetch;
+    const proxy=new McpProxy(createConfigSource({memory:{id:'memory',upstreamUrl:'https://memory.test/mcp',internal:true}}),{secretStore:new InMemoryWritableStore()});
+    const response=await proxy.getApp().request('/memory/tools/search_memory',{method:'POST',headers:{authorization:`Bearer ${agent1Token}`,'content-type':'application/json'},body:JSON.stringify(args)});
+    expect(response.status).toBe(400); expect(await response.json()).toMatchObject({diagnosticCode:'INVALID_TOOL_ARGUMENTS'}); expect(calls).toBe(0);
+  });
+
+  test.each([{value:null},{value:[]},{value:"query"}])('JSON-RPC rejects non-object arguments before upstream', async ({value:args}) => {
+    let calls=0; globalThis.fetch=mock(async()=>{calls++;return new Response('{}')}) as typeof fetch;
+    const proxy=new McpProxy(createConfigSource({memory:{id:'memory',upstreamUrl:'https://memory.test/mcp',internal:true}}),{secretStore:new InMemoryWritableStore()});
+    const response=await proxy.getApp().request('/memory',{method:'POST',headers:{authorization:`Bearer ${agent1Token}`,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:77,method:'tools/call',params:{name:'search_memory',arguments:args}})});
+    expect(response.status).toBe(400); expect(await response.json()).toMatchObject({jsonrpc:'2.0',id:77,error:{code:-32602}}); expect(calls).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

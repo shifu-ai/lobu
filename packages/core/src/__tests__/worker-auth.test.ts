@@ -154,6 +154,16 @@ describe("worker auth token", () => {
     expect(verifyWorkerToken(token)).toBeNull();
   });
 
+  test.each([
+    { tokenKind: "session", runId: 1, userId: "u", agentId: "a" },
+    { tokenKind: "run", runId: undefined, userId: "u", agentId: "a" },
+    { tokenKind: "run", runId: 1, userId: "other", agentId: "a" },
+    { tokenKind: "run", runId: 1, userId: "u", agentId: "other" },
+  ])("rejects forged scoped run-token identity or missing run binding", (override) => {
+    const token = encrypt(JSON.stringify({ userId: "u", conversationId: "c", channelId: "ch", deploymentName: "d", timestamp: Date.now(), tokenKind: "run", runId: 1, agentId: "a", courseToolScope: { ownerUserId: "u", agentId: "a", courseEntityId: "course:u:a" }, ...override }));
+    expect(verifyWorkerToken(token)).toBeNull();
+  });
+
   test("verifyWorkerToken returns null for tampered ciphertext", () => {
     const token = generateWorkerToken("u", "c", "d", { channelId: "ch" });
     const parts = token.split(":");

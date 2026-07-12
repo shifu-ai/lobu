@@ -14,6 +14,12 @@ const MISMATCH: CourseToolPolicyResult = {
   message: "Memory search scope does not match the trusted course execution context.",
 };
 
+export function isPlainToolArguments(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 export function applyTrustedCourseToolPolicy(
   toolName: string,
   args: Record<string, unknown>,

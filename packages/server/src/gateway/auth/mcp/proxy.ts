@@ -35,7 +35,7 @@ import {
 } from "../../trace-context.js";
 import { emitAgentObsEvent } from "@lobu/core";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
-import { applyTrustedCourseToolPolicy } from "../../orchestration/course-tool-policy.js";
+import { applyTrustedCourseToolPolicy, isPlainToolArguments } from "../../orchestration/course-tool-policy.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -1790,17 +1790,20 @@ export class McpProxy {
 
     // Parse body early so tool arguments are available for the approval message.
     let toolArguments: Record<string, unknown> = {};
+    let parsedArguments: unknown = {};
     try {
       const body = await c.req.text();
       if (body) {
         if (body.length > MAX_BODY_SIZE) {
           return c.json({ error: "Request body too large" }, 413);
         }
-        toolArguments = JSON.parse(body);
+        parsedArguments = JSON.parse(body);
       }
     } catch {
       return c.json({ error: "Invalid JSON body" }, 400);
     }
+    if (!isPlainToolArguments(parsedArguments)) return c.json({ error: "Tool arguments must be a plain object.", diagnosticCode: "INVALID_TOOL_ARGUMENTS" }, 400);
+    toolArguments = parsedArguments;
 
     const coursePolicy = applyTrustedCourseToolPolicy(
       toolName,
@@ -2416,7 +2419,9 @@ export class McpProxy {
             }
           } else if (jsonRpc.method === "tools/call" && jsonRpc.params?.name) {
             const toolName = jsonRpc.params.name;
-            let toolArgs = jsonRpc.params.arguments || {};
+            const rawToolArgs = Object.hasOwn(jsonRpc.params, "arguments") ? jsonRpc.params.arguments : {};
+            if (!isPlainToolArguments(rawToolArgs)) return c.json({ jsonrpc: "2.0", id: jsonRpc.id, error: { code: -32602, message: "Tool arguments must be a plain object." } }, 400);
+            let toolArgs = rawToolArgs;
             const coursePolicy = applyTrustedCourseToolPolicy(toolName, toolArgs, tokenData.courseToolScope);
             if (!coursePolicy.ok) {
               return c.json({ jsonrpc: "2.0", id: jsonRpc.id, result: { content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code } }, 409);

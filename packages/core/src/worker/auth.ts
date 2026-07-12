@@ -167,7 +167,7 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
     }
     if (data.courseToolScope !== undefined) {
       const scope = data.courseToolScope;
-      if (data.tokenKind !== "run" || !scope || typeof scope.ownerUserId !== "string" || !scope.ownerUserId || typeof scope.agentId !== "string" || !scope.agentId || typeof scope.courseEntityId !== "string" || !scope.courseEntityId) return null;
+      if (data.tokenKind !== "run" || !Number.isInteger(data.runId) || (data.runId ?? 0) <= 0 || !scope || typeof scope.ownerUserId !== "string" || !scope.ownerUserId || scope.ownerUserId !== data.userId || typeof scope.agentId !== "string" || !scope.agentId || scope.agentId !== data.agentId || typeof scope.courseEntityId !== "string" || !scope.courseEntityId) return null;
     }
     if (
       data.messageId !== undefined &&
