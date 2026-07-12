@@ -137,6 +137,7 @@ export class MessageConsumer {
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
+    if(this.courseContextRollout.mode==='off'||this.courseContextRollout.mode==='shadow')delete data.resolvedCourseContext;
     if (this.courseContextRollout.mode === "off") {
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);

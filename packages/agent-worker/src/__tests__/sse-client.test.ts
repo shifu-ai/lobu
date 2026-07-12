@@ -182,6 +182,24 @@ describe("GatewayClient heartbeat ACKs", () => {
     ).toEqual(resolvedCourseContext);
   });
 
+  test("terminally rejects a queued legacy course context without executing it", async () => {
+    const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");
+    const handleThreadMessage=mock(async()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;
+    const legacy:any=validResolvedCourseContext();delete legacy.trust;
+    const requests:unknown[]=[];globalThis.fetch=mock(async(_url,init)=>{requests.push(JSON.parse(String(init?.body)));return new Response("ok");}) as typeof fetch;
+    await (client as any).handleEvent("job",JSON.stringify({jobId:"queued-old-job",payload:{...basePayload(),resolvedCourseContext:legacy}}));
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+    expect(requests).toContainEqual(expect.objectContaining({jobId:"queued-old-job",messageId:"message-1",error:"Course context is unavailable. Please retry.",errorCode:"course_context_unavailable"}));
+  });
+
+  test("rejects fabricated trust that disagrees with payload and context", async () => {
+    const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");
+    const handleThreadMessage=mock(async()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;
+    const fabricated:any=validResolvedCourseContext();fabricated.trust.ownerUserId="other";fabricated.trust.contextPackId="other-pack";
+    await (client as any).handleEvent("job",JSON.stringify({payload:{...basePayload(),resolvedCourseContext:fabricated}}));
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
   test("rejects malformed resolved course context at the worker wire boundary", async () => {
     const client = new GatewayClient(
       "https://gateway.example.com",
