@@ -151,7 +151,7 @@ export function buildResolvedCourseContextInstructions(
     ...quoteUntrusted(resolved.context.confirmedSummary, 3600),
   ];
   if (
-    resolved.retrieval.status !== "failed" &&
+    resolved.retrieval.status === "loaded" &&
     resolved.retrieval.crossCourseGuard === "passed" &&
     resolved.retrieval.snippets.length > 0
   ) {

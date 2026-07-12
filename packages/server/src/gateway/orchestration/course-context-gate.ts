@@ -76,9 +76,9 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   if (bundle.course.courseKey !== course.courseKey || bundle.course.courseEntityId !== course.courseEntityId) return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_identity_mismatch' };
   const context = bundle.context;
   const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
-  const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'failed' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]};
+  const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'degraded' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]};
   const retrievalEvent = retrieval.status === 'loaded' ? 'retrieved' : retrieval.status;
-  await traceCourse(data,options,`context.memory.${retrievalEvent}` ,retrieval.status==='failed'?'degraded':'ok',{course_entity_id:course.courseEntityId,result_count:retrieval.eventIds.length});
+  await traceCourse(data,options,`context.memory.${retrievalEvent}` ,retrieval.status==='degraded'?'degraded':retrieval.status==='invariant_violation'?'failed':'ok',{course_entity_id:course.courseEntityId,result_count:retrieval.eventIds.length});
   await traceCourse(data,options,`context.guard.${retrieval.crossCourseGuard}` ,retrieval.crossCourseGuard==='passed'?'ok':'failed',{course_entity_id:course.courseEntityId});
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
     trust:{ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseKey:course.courseKey,courseEntityId:course.courseEntityId,contextPackId:context.contextPackId,contextVersion:context.version},

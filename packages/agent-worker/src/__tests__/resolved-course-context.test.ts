@@ -93,7 +93,7 @@ describe("resolved course context instructions", () => {
           confirmedSummary: `essential-confirmed ${"c".repeat(20_000)}`,
         },
         retrieval: {
-          status: "partial",
+          status: "loaded",
           crossCourseGuard: "passed",
           eventIds: [1, 2],
           evidenceRefs: ["lobu:event:1", "lobu:event:2"],
@@ -108,17 +108,17 @@ describe("resolved course context instructions", () => {
     );
 
     expect(rendered).toContain("essential-confirmed");
-    expect(rendered).toContain("Retrieval status: partial");
+    expect(rendered).toContain("Retrieval status: loaded");
     expect(rendered).toContain("Version: 99");
     expect(rendered.length).toBeLessThanOrEqual(6000);
     expect(rendered).not.toContain("retrieval-19");
   });
 
-  test("shows failed retrieval only as metadata and injects nothing without context", () => {
+  test("shows degraded retrieval only as metadata and injects nothing without context", () => {
     const rendered = buildResolvedCourseContextInstructions(
       context({
         retrieval: {
-          status: "failed",
+          status: "degraded",
           crossCourseGuard: "passed",
           eventIds: [],
           evidenceRefs: [],
@@ -127,7 +127,7 @@ describe("resolved course context instructions", () => {
       })
     );
 
-    expect(rendered).toContain("Retrieval status: failed");
+    expect(rendered).toContain("Retrieval status: degraded");
     expect(rendered).not.toContain("Retrieved background:");
     expect(buildResolvedCourseContextInstructions(undefined)).toBe("");
   });
