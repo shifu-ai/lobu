@@ -15,43 +15,45 @@ describe("HTTP logger redaction", () => {
 			return true;
 		});
 
+		const sensitiveHeaderNames = [
+			"authorization",
+			"cookie",
+			"set-cookie",
+			"x-internal-secret",
+			"proxy-authorization",
+			"x-lobu-memory-direct-auth",
+			"x-telegram-bot-api-secret-token",
+			"x-lobu-worker-token",
+			"x-internal-token",
+			"x-api-key",
+			"x-goog-api-key",
+		] as const;
+		const secretFixtures = sensitiveHeaderNames.map(
+			(name) => `secret-fixture-${name}`,
+		);
+
 		const app = new Hono();
 		app.use("*", pinoLogger({ pino: logger }));
 		app.get("/logged", (c) => {
-			c.header("set-cookie", "session=secret-response-cookie");
-			c.header("x-lobu-worker-token", "secret-worker-token");
-			c.header("x-internal-token", "secret-internal-token");
-			c.header("x-api-key", "secret-api-key");
-			c.header("x-goog-api-key", "secret-google-api-key");
+			for (const [index, name] of sensitiveHeaderNames.entries()) {
+				c.header(name, secretFixtures[index]);
+			}
 			return c.text("ok");
 		});
 
-		const secretFixtures = [
-			"Bearer secret-authorization",
-			"session=secret-request-cookie",
-			"secret-internal",
-			"Basic secret-proxy-authorization",
-			"secret-direct-auth",
-			"secret-telegram-token",
-			"secret-worker-token",
-			"secret-internal-token",
-			"secret-api-key",
-			"secret-google-api-key",
-			"secret-response-cookie",
-		];
-
 		await app.request("/logged", {
 			headers: {
-				authorization: secretFixtures[0],
-				cookie: secretFixtures[1],
-				"x-internal-secret": secretFixtures[2],
-				"proxy-authorization": secretFixtures[3],
-				"x-lobu-memory-direct-auth": secretFixtures[4],
-				"x-telegram-bot-api-secret-token": secretFixtures[5],
-				"x-lobu-worker-token": secretFixtures[6],
-				"x-internal-token": secretFixtures[7],
-				"x-api-key": secretFixtures[8],
-				"x-goog-api-key": secretFixtures[9],
+				Authorization: secretFixtures[0],
+				Cookie: secretFixtures[1],
+				"Set-Cookie": secretFixtures[2],
+				"X-Internal-Secret": secretFixtures[3],
+				"Proxy-Authorization": secretFixtures[4],
+				"X-Lobu-Memory-Direct-Auth": secretFixtures[5],
+				"X-Telegram-Bot-Api-Secret-Token": secretFixtures[6],
+				"X-Lobu-Worker-Token": secretFixtures[7],
+				"X-Internal-Token": secretFixtures[8],
+				"X-Api-Key": secretFixtures[9],
+				"X-Goog-Api-Key": secretFixtures[10],
 			},
 		});
 
@@ -62,6 +64,14 @@ describe("HTTP logger redaction", () => {
 		expect(completedLine).toContain("[Redacted]");
 		expect(completedLine).toContain('"method":"GET"');
 		expect(completedLine).toContain('"status":200');
+		const completedLog = JSON.parse(completedLine as string) as {
+			req: { headers: Record<string, string> };
+			res: { headers: Record<string, string> };
+		};
+		for (const name of sensitiveHeaderNames) {
+			expect(completedLog.req.headers).toHaveProperty(name, "[Redacted]");
+			expect(completedLog.res.headers).toHaveProperty(name, "[Redacted]");
+		}
 		for (const secret of secretFixtures) {
 			expect(completedLine).not.toContain(secret);
 		}
