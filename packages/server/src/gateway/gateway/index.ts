@@ -41,6 +41,7 @@ import { orgContext } from "../../lobu/stores/org-context.js";
 import { createPostgresAgentConnectionStore } from "../../lobu/stores/postgres-stores.js";
 import { createExecutionTaskStatusRoutes } from "../routes/public/execution-tasks.js";
 import { createExecutionEventRoutes } from "../routes/internal/execution-events.js";
+import { applyTrustedCourseToolPolicy, type TrustedCourseToolScope } from "../orchestration/course-tool-policy.js";
 
 const logger = createLogger("worker-gateway");
 
@@ -497,6 +498,7 @@ type ToolboxPersonalAgentMcpProxy = {
 			connectionId?: string;
 			teamId?: string;
 			platform?: string;
+			courseToolScope?: TrustedCourseToolScope;
 		},
 	) => Promise<ToolboxPersonalAgentToolExecutionResult>;
 };
@@ -876,6 +878,22 @@ export class WorkerGateway {
 				);
 			}
 
+			const coursePolicy = applyTrustedCourseToolPolicy(
+				connectorToolName,
+				args,
+				auth.tokenData.courseToolScope,
+			);
+			if (!coursePolicy.ok) {
+				return c.json({
+					...safeToolboxPersonalAgentToolError(
+						coursePolicy.code,
+						coursePolicy.message,
+						coursePolicy.code,
+					),
+					content: [{ type: "text", text: coursePolicy.message }],
+				}, 409);
+			}
+
 			const connection = await this.getReadyToolboxPersonalAgentConnection({
 				organizationId,
 				agentId,
@@ -929,15 +947,19 @@ export class WorkerGateway {
 									connectionId: auth.tokenData.connectionId,
 									teamId: auth.tokenData.teamId,
 									platform: auth.tokenData.platform,
+									courseToolScope: auth.tokenData.courseToolScope,
 								},
 							)
-						: await mcpProxy.executeToolDirect!(
+						: auth.tokenData.courseToolScope
+							? await mcpProxy.executeToolDirect!(
 								agentId,
 								userId,
 								mcpId,
 								connectorToolName,
 								args,
-							);
+								{ courseToolScope: auth.tokenData.courseToolScope },
+							)
+							: await mcpProxy.executeToolDirect!(agentId, userId, mcpId, connectorToolName, args);
 				if (
 					result?.status === "blocked-notified" ||
 					result?.status === "blocked-no-channel"

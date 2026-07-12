@@ -5,6 +5,7 @@ import {
 } from "../../permissions/grant-store.js";
 import { orgContext } from "../../../lobu/stores/org-context.js";
 import type { UserAgentsStore } from "../user-agents-store.js";
+import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
 
@@ -51,7 +52,8 @@ interface McpProxyDirectExecution {
     userId: string,
     mcpId: string,
     toolName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    options?: { courseToolScope?: TrustedCourseToolScope }
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
@@ -138,14 +140,16 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         );
       }
 
-      const execute = () =>
-        deps.mcpProxy.executeToolDirect(
+      const execute = () => pending.courseToolScope
+        ? deps.mcpProxy.executeToolDirect(
           pending.agentId,
           pending.userId,
           pending.mcpId,
           pending.toolName,
-          pending.args
-        );
+          pending.args,
+          { courseToolScope: pending.courseToolScope }
+        )
+        : deps.mcpProxy.executeToolDirect(pending.agentId, pending.userId, pending.mcpId, pending.toolName, pending.args);
       const result = organizationId
         ? await orgContext.run({ organizationId }, execute)
         : await execute();

@@ -35,7 +35,7 @@ import {
 } from "../../trace-context.js";
 import { emitAgentObsEvent } from "@lobu/core";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
-import { applyTrustedCourseToolPolicy, isPlainToolArguments } from "../../orchestration/course-tool-policy.js";
+import { applyTrustedCourseToolPolicy, isPlainToolArguments, type TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
 
 const logger = createLogger("mcp-proxy");
 
@@ -757,6 +757,7 @@ export class McpProxy {
       connectionId?: string;
       teamId?: string;
       platform?: string;
+      courseToolScope?: TrustedCourseToolScope;
     } = {}
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -775,8 +776,15 @@ export class McpProxy {
       connectionId: tokenContext.connectionId,
       teamId: tokenContext.teamId,
       platform: tokenContext.platform,
+      courseToolScope: tokenContext.courseToolScope,
     };
     const token = tokenContext.token ?? "";
+
+    const coursePolicy = applyTrustedCourseToolPolicy(toolName, args, tokenData.courseToolScope);
+    if (!coursePolicy.ok) {
+      return { status: "executed", content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code };
+    }
+    args = coursePolicy.arguments;
 
     if (await this.runPreToolGuardrails(agentId, tokenData, toolName, args)) {
       return {
@@ -821,13 +829,9 @@ export class McpProxy {
       };
     }
 
-    const result = await this.executeToolDirect(
-      agentId,
-      userId,
-      mcpId,
-      toolName,
-      args
-    );
+    const result = tokenData.courseToolScope
+      ? await this.executeToolDirect(agentId, userId, mcpId, toolName, args, { courseToolScope: tokenData.courseToolScope })
+      : await this.executeToolDirect(agentId, userId, mcpId, toolName, args);
     return { status: "executed", ...result };
   }
 
@@ -837,12 +841,17 @@ export class McpProxy {
     mcpId: string,
     toolName: string,
     args: Record<string, unknown>,
-    options?: { trace?: ShifuTraceContext }
+    options?: { trace?: ShifuTraceContext; courseToolScope?: TrustedCourseToolScope }
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
     diagnosticCode?: string;
   }> {
+    const coursePolicy = applyTrustedCourseToolPolicy(toolName, args, options?.courseToolScope);
+    if (!coursePolicy.ok) {
+      return { content: [{ type: "text", text: coursePolicy.message }], isError: true, diagnosticCode: coursePolicy.code };
+    }
+    args = coursePolicy.arguments;
     const trace = options?.trace ?? generatedMcpTrace();
     const toolCallStartedAt = Date.now();
     const emitToolCallCompleted = (
@@ -2684,6 +2693,7 @@ export class McpProxy {
         connectionId: tokenData.connectionId,
         originMessageId,
         processedMessageIds,
+        courseToolScope: tokenData.courseToolScope,
       },
       this.PENDING_TOOL_TTL
     ).catch((err: unknown) =>

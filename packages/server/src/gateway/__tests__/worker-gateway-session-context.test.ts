@@ -478,6 +478,31 @@ describe("WorkerGateway session context", () => {
 		);
 	});
 
+	test("fails closed for catalog meeting_search on a course run before personal-agent execution", async () => {
+		fakeConnections.set("toolbox-mcp:ref", {
+			id: "toolbox-mcp:ref", organizationId: "org-1", agentId: "agent-1", platform: "shifu_toolbox", config: {}, settings: {},
+			metadata: { source: "toolbox-personal-agent-materialized", ownerUserId: "user-1", connectorKey: "shifu_toolbox", mcpId: "shifu_toolbox" }, status: "active",
+		});
+		const executeToolDirect = mock(async () => ({ content: [], isError: false }));
+		const callToolWithApproval = mock(async () => ({ status: "executed" as const, content: [], isError: false }));
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any, "https://gateway.example.com", { getWorkerConfig: async () => ({ mcpServers: {} }) } as any,
+			{ getSessionContext: async () => ({ agentInstructions: "", platformInstructions: "", networkInstructions: "", skillsInstructions: "", mcpStatus: [] }) } as any,
+			{ executeToolDirect, callToolWithApproval } as any, undefined, undefined, undefined, createFakeConnectionStore(),
+		);
+		const scopedToken = generateWorkerToken("user-1", "conv-1", "worker-a", { channelId: "channel-1", agentId: "agent-1", organizationId: "org-1", tokenKind: "run", runId: 81, courseToolScope: { ownerUserId: "user-1", agentId: "agent-1", courseEntityId: "course:user-1:a" } });
+		const request = (token: string, connectorToolName: string) => gateway.getApp().request("/internal/toolbox-personal-agent-tools/call", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ connectorKey: "shifu_toolbox", connectionRef: "toolbox-mcp:ref", connectorToolName, args: { query: "weekly", bypassCourseScope: true } }) });
+		const blocked = await request(scopedToken, "meeting_search");
+		expect(blocked.status).toBe(409);
+		expect(await blocked.json()).toMatchObject({ ok: false, errorCode: "COURSE_MEETING_SCOPE_UNAVAILABLE", diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" });
+		expect(callToolWithApproval).not.toHaveBeenCalled(); expect(executeToolDirect).not.toHaveBeenCalled();
+
+		const unscopedToken = generateWorkerToken("user-1", "conv-1", "worker-a", { channelId: "channel-1", agentId: "agent-1", organizationId: "org-1" });
+		expect((await request(unscopedToken, "meeting_search")).status).toBe(200);
+		expect((await request(scopedToken, "submit_course_pm_profile")).status).toBe(200);
+		expect(callToolWithApproval).toHaveBeenCalledTimes(2);
+	});
+
 	test("approval-blocks materialized personal-agent write tools before direct execution", async () => {
 		fakeConnections.set("toolbox-mcp:ref", {
 			id: "toolbox-mcp:ref",

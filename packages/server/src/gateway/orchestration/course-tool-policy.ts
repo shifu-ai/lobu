@@ -20,10 +20,10 @@ const MEETING_SCOPE_UNAVAILABLE: CourseToolPolicyResult = {
   message: "Course meeting ownership is not verified yet. Provide a specific meeting or link, or use canonical course evidence instead.",
 };
 
-// Exact names emitted by Lobu's MCP registries. Do not broaden this to suffix
-// matching. Remove once trusted Toolbox scope + Meeting-Course Binding enforce
-// ownership at the upstream meeting_search boundary.
-const COURSE_MEETING_TOOL_NAMES = new Set(["meeting_search", "shifu_toolbox__meeting_search"]);
+// Canonical name registered by the personal-agent and MCP catalogs. Remove
+// once trusted Toolbox scope + Meeting-Course Binding enforce ownership at the
+// upstream meeting_search boundary.
+const COURSE_MEETING_TOOL_NAME = "meeting_search";
 
 export function isPlainToolArguments(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
@@ -36,7 +36,7 @@ export function applyTrustedCourseToolPolicy(
   args: Record<string, unknown>,
   scope?: TrustedCourseToolScope
 ): CourseToolPolicyResult {
-  if (scope && COURSE_MEETING_TOOL_NAMES.has(toolName)) return MEETING_SCOPE_UNAVAILABLE;
+  if (scope && toolName === COURSE_MEETING_TOOL_NAME) return MEETING_SCOPE_UNAVAILABLE;
   if (toolName !== "search_memory" && toolName !== "lobu_search_memory" || !scope) {
     return { ok: true, arguments: args };
   }
