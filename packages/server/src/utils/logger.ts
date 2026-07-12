@@ -31,6 +31,16 @@ const getLogLevel = (): pino.Level => {
 // and hid `column "events.search_tsv" does not exist`.
 const errSerializer = pino.stdSerializers.err;
 
+const responseSerializer = (response: unknown): unknown => {
+  if (!response || typeof response !== 'object') return response;
+  const value = response as { headers?: unknown } & Record<string, unknown>;
+  if (!(value.headers instanceof Headers)) return response;
+  return {
+    ...value,
+    headers: Object.fromEntries(value.headers.entries()),
+  };
+};
+
 /**
  * Sentry forwarding for logger.error() and logger.fatal().
  *
@@ -129,9 +139,30 @@ const sentryAwareStream: pino.DestinationStream = {
   },
 };
 
+const SENSITIVE_HEADER_PATHS = [
+  'req.headers.authorization',
+  'req.headers.cookie',
+  "req.headers['set-cookie']",
+  "req.headers['x-internal-secret']",
+  "req.headers['proxy-authorization']",
+  "req.headers['x-lobu-memory-direct-auth']",
+  "req.headers['x-telegram-bot-api-secret-token']",
+  'res.headers.authorization',
+  'res.headers.cookie',
+  "res.headers['set-cookie']",
+  "res.headers['x-internal-secret']",
+  "res.headers['proxy-authorization']",
+  "res.headers['x-lobu-memory-direct-auth']",
+  "res.headers['x-telegram-bot-api-secret-token']",
+];
+
 const logger = pino(
   {
     level: getLogLevel(),
+    redact: {
+      paths: SENSITIVE_HEADER_PATHS,
+      censor: '[Redacted]',
+    },
     browser: {
       asObject: false,
     },
@@ -143,6 +174,7 @@ const logger = pino(
     serializers: {
       err: errSerializer,
       error: errSerializer,
+      res: responseSerializer,
     },
   },
   sentryAwareStream
