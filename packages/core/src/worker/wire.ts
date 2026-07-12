@@ -29,6 +29,12 @@ import type {
  */
 export type JobType = "message" | "exec";
 
+export type CourseReadinessLevel = "ready" | "partial" | "minimal" | "conflicted";
+export type CourseReadinessField = "audience" | "key_learning" | "course_promise" | "existing_sales_talk";
+export type CourseAnswerPolicy = "answer" | "answer_with_assumptions" | "answer_conservatively";
+export interface CourseReadinessAssessment { level: CourseReadinessLevel; answerPolicy: CourseAnswerPolicy; availableFields: CourseReadinessField[]; missingFields: CourseReadinessField[]; suggestedQuestions: string[]; }
+export interface CourseEvidenceProvenance { kind: "canonical_context" | "fresh_course_retrieval" | "session_history" | "organization_reference" | "user_provided_current_turn"; fields: CourseReadinessField[]; sourceLabel: string; sourceHash?: string; }
+
 export interface ResolvedCourseExecutionContext {
   trust: {
     ownerUserId: string;
@@ -68,6 +74,10 @@ export interface ResolvedCourseExecutionContext {
       sourceUrl: string | null;
     }>;
   };
+  /** Advisory completeness metadata. Older gateway payloads omit it. */
+  readiness?: CourseReadinessAssessment;
+  /** Bounded provenance labels only; never raw owner identifiers. */
+  evidence?: CourseEvidenceProvenance[];
 }
 
 /**

@@ -5,6 +5,7 @@ import type { ActiveCourseBindingWriteResult, ISessionManager } from '../session
 import { ToolboxCourseContextClient, type ToolboxCourseContextClientOptions } from '../services/toolbox-course-context-client.js';
 import { retrieveCourseMemory, type CourseMemorySearch } from './course-memory-retriever.js';
 import { emitJourneyEvent, type JourneyEventPayload } from '../services/journey-observability.js';
+import { gradeCourseEvidenceReadiness } from './course-evidence-readiness.js';
 
 export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
 export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
@@ -86,6 +87,8 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
     resolution: { confidence: 'high', matchedBy: resolution.matchedBy },
     context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: options?.courseSkillEnabled&&options.courseSkillContextFields?.length?projectRequiredCourseContext(bundle,options.courseSkillContextFields):context.agentMd.slice(0, 8000) },
     retrieval,
+    readiness:gradeCourseEvidenceReadiness({audience:bundle.profile.audience,course_promise:bundle.profile.coursePromise}),
+    evidence:[{kind:'canonical_context',fields:[...new Set([...(bundle.profile.audience?['audience' as const]:[]),...(bundle.profile.coursePromise?['course_promise' as const]:[])])],sourceLabel:'已驗證的課程脈絡',sourceHash:hashIdentity(`${course.courseEntityId}:${context.contextPackId}`).slice(0,16)}],
   };
   data.resolvedCourseContext=resolvedCourseContext;
   if (!options?.sessionManager || !options.sessionKey) return { status: 'ready', context: resolvedCourseContext };
