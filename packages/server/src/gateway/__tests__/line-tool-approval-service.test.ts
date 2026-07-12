@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
+  getPendingTool,
   storePendingTool,
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
@@ -12,6 +13,7 @@ import {
   ensureDbForGatewayTests,
   resetTestDatabase,
 } from "./helpers/db-setup.js";
+import { McpProxy } from "../auth/mcp/proxy.js";
 
 const LINE_PENDING: PendingToolInvocation = {
   agentId: "shifu-u-1",
@@ -204,6 +206,71 @@ describe("createToolApprovalService", () => {
       "gws_calendar_events_create",
       { summary: "Demo" }
     );
+  });
+
+  test("durable legacy approval replay preserves course scope and denies meeting_search before execution upstream", async () => {
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      fetchCalls.push(body.method);
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: body.method === "tools/list"
+          ? { tools: [{ name: "meeting_search", annotations: { destructiveHint: true } }] }
+          : {},
+      }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const grantStore = {
+      grant: mock(async () => undefined),
+      hasGrant: mock(async () => false),
+      revoke: mock(async () => undefined),
+    };
+    let approvalId = "";
+    const proxy = new McpProxy({
+      getHttpServer: async () => ({ id: "shifu_toolbox", upstreamUrl: "https://toolbox.test/mcp", internal: true }),
+      getAllHttpServers: async () => new Map(),
+    }, {
+      secretStore: {
+        get: async () => null,
+        put: async () => "secret://test" as const,
+        delete: async () => undefined,
+        list: async () => [],
+      },
+      grantStore,
+      onToolBlocked: async (requestId) => { approvalId = requestId; },
+    });
+    const courseToolScope = { ownerUserId: "toolbox-user-1", agentId: "shifu-u-1", courseEntityId: "course:toolbox-user-1:a" };
+    const blocked = await proxy.callToolWithApproval(
+      "shifu-u-1", "toolbox-user-1", "shifu_toolbox", "meeting_search", { query: "weekly" },
+      { token: "verified-run-token", channelId: "line-user-1", conversationId: "conv-1", organizationId: "org-1", courseToolScope },
+    );
+    expect(blocked).toMatchObject({ status: "executed", isError: true, diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" });
+    expect(approvalId).toBe("");
+    expect(fetchCalls).toHaveLength(0);
+
+    approvalId = "ta-legacy-course-meeting";
+    await storePendingTool(approvalId, {
+      agentId: "shifu-u-1", userId: "toolbox-user-1", mcpId: "shifu_toolbox", toolName: "meeting_search",
+      args: { query: "weekly" }, channelId: "line-user-1", conversationId: "conv-1", courseToolScope,
+    }, 60);
+    courseToolScope.courseEntityId = "mutated-after-persist";
+    const serialized = await getPendingTool(approvalId);
+    expect(serialized?.courseToolScope).toEqual({ ownerUserId: "toolbox-user-1", agentId: "shifu-u-1", courseEntityId: "course:toolbox-user-1:a" });
+    expect(serialized?.courseToolScope).not.toBe(courseToolScope);
+
+    fetchCalls.length = 0;
+    const service = createToolApprovalService({
+      grantStore,
+      mcpProxy: proxy,
+      userAgentsStore: { ownsAgent: mock(async () => true) },
+      organizationId: "org-1",
+    });
+    const replay = await service.submit({
+      action: "approve_once", approvalId, toolboxUserId: "toolbox-user-1", lineUserId: "line-user-1", agentId: "shifu-u-1",
+    });
+    expect(replay).toMatchObject({ status: "executed", result: { isError: true, diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" } });
+    expect(fetchCalls).toHaveLength(0);
   });
 
   test("executes the approved tool inside the organization context", async () => {
