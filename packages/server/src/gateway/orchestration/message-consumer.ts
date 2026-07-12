@@ -4,6 +4,7 @@ import {
   ErrorCode,
   extractTraceId,
   generateTraceId,
+  generateWorkerToken,
   getTraceparent,
   type GuardrailRegistry,
   type MessagePayload,
@@ -12,7 +13,6 @@ import {
   runGuardrailInstances,
   SpanStatusCode,
 } from "@lobu/core";
-import { generateWorkerToken } from "../../../../core/src/worker/auth.js";
 import type {Env} from '@lobu/connector-sdk';
 import { createHash } from "node:crypto";
 import { resolveAgentGuardrails } from "../guardrails/aggregator.js";
