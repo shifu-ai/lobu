@@ -160,6 +160,7 @@ describe('save_memory personal-agent scope', () => {
       organizationId: org.id,
       agentId: 'shared-owner-null-agent',
     });
+    await getDb()`UPDATE agents SET owner_user_id = NULL WHERE id = ${agent.agentId}`;
     const saved = await saveContent(
       {
         content: 'trusted shared ingestion',
@@ -230,6 +231,7 @@ describe('save_memory personal-agent scope', () => {
       organizationId: otherOrg.id,
       agentId: 'cross-org-owner-null-agent',
     });
+    await getDb()`UPDATE agents SET owner_user_id = NULL WHERE id = ${crossOrgAgent.agentId}`;
     for (const tokenType of ['oauth', 'pat'] as const) {
       for (const agentId of ['nonexistent-agent', crossOrgAgent.agentId]) {
         await expect(
