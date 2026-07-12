@@ -203,6 +203,8 @@ const ResolvedCourseContextSchema = z
       });
   });
 
+function normalizeLegacyCourseRetrieval(value:unknown):void{if(!value||typeof value!=="object")return;const context=(value as any).payload?.resolvedCourseContext;if(!context?.trust||context.trust.courseEntityId!==context.course?.courseEntityId)return;const retrieval=context.retrieval;if(!retrieval||!Array.isArray(retrieval.snippets)||retrieval.snippets.length===0)return;const legacyKeys=new Set(["eventId","title","text","sourceUrl"]);if(!retrieval.snippets.every((snippet:unknown)=>snippet&&typeof snippet==="object"&&Object.keys(snippet).every((key)=>legacyKeys.has(key))))return;if(!Array.isArray(retrieval.eventIds)||!Array.isArray(retrieval.evidenceRefs)||retrieval.eventIds.length!==retrieval.snippets.length||retrieval.evidenceRefs.length!==retrieval.snippets.length)return;for(let index=0;index<retrieval.snippets.length;index++){const snippet=retrieval.snippets[index];const eventId=retrieval.eventIds[index];const sourceRef=retrieval.evidenceRefs[index];if(snippet.eventId!==eventId||typeof sourceRef!=="string"||sourceRef.length<1||sourceRef.length>256)return;}retrieval.snippets=retrieval.snippets.map((snippet:Record<string,unknown>,index:number)=>({...snippet,sourceRef:retrieval.evidenceRefs[index],provenanceKind:"fresh_course_retrieval",courseEntityId:context.course.courseEntityId,readinessFields:{}}));}
+
 const JobEventSchema = z
   .object({
     payload: z
@@ -574,6 +576,7 @@ export class GatewayClient {
       if (eventType === "job") {
         try {
           const parsedData = JSON.parse(data);
+          normalizeLegacyCourseRetrieval(parsedData);
           const validationResult = JobEventSchema.safeParse(parsedData);
 
           if (!validationResult.success) {
