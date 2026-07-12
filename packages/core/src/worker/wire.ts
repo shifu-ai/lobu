@@ -57,7 +57,7 @@ export interface ResolvedCourseExecutionContext {
     confirmedSummary: string;
   };
   retrieval: {
-    status: "loaded" | "partial" | "failed";
+    status: "loaded" | "empty" | "degraded" | "invariant_violation";
     crossCourseGuard: "passed" | "failed";
     eventIds: number[];
     evidenceRefs: string[];

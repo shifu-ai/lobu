@@ -152,6 +152,17 @@ export async function searchContentBySingleQuery(
   // present) so a hostile float can't break out of the comparison expression.
   const minSimilarityParamIdx = baseParamIdx + (hasEmbedding ? 1 : 0);
 
+  const courseScopePredicate=options.exact_single_course_scope
+    ? `(jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND jsonb_array_length(f.metadata->'course_entity_ids') = 1 AND (f.metadata->'course_entity_ids'->>0) = ANY($12::text[])${options.strict_owner_scope?` AND f.metadata->>'owner_user_id' = $11::jsonb->>'owner_user_id'`:''})`
+    : `(jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND f.metadata->'course_entity_ids' ?| $12::text[])`;
+  const courseScopeParam='$12::text[]';
+  const agentScopePredicate=`($11::jsonb IS NULL OR (
+            f.metadata->>'agent_id' = $11::jsonb->>'agent_id'
+            AND (NOT ($11::jsonb ? 'owner_user_id') OR (
+              f.metadata->>'owner_user_id' = $11::jsonb->>'owner_user_id'
+              OR (f.metadata->>'owner_user_id' IS NULL AND f.metadata->>'agent_id' = $11::jsonb->>'agent_id')
+            ))
+          ))`;
   const standardFiltersSQL = `($2::bigint IS NULL OR ${searchEntityLinkSql})
           AND ${connectionCondition}
           AND ${feedCondition}
@@ -164,14 +175,8 @@ export async function searchContentBySingleQuery(
           AND ($8::numeric IS NULL OR f.score <= $8::numeric)
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
-          AND ($11::jsonb IS NULL OR (
-            f.metadata->>'agent_id' = $11::jsonb->>'agent_id'
-            AND (NOT ($11::jsonb ? 'owner_user_id') OR (
-              f.metadata->>'owner_user_id' = $11::jsonb->>'owner_user_id'
-              OR (f.metadata->>'owner_user_id' IS NULL AND f.metadata->>'agent_id' = $11::jsonb->>'agent_id')
-            ))
-          ))
-          AND ($12::text[] IS NULL OR (jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND f.metadata->'course_entity_ids' ?| $12::text[]))
+          AND ${agentScopePredicate}
+          AND (${courseScopeParam} IS NULL OR ${courseScopePredicate})
           ${excludeClause.sql}
           ${visibilityClause.sql}
           ${orgScope.sql}`;

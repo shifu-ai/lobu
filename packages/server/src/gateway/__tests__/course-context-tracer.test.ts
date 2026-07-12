@@ -58,7 +58,7 @@ describe('course context tracer', () => {
     const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({status:'resolved',confidence:'high',matchedBy:['single_course_default'],course:{courseKey:'x',courseEntityId:'course:x',displayName:'X',aliases:[],status:'active'}}))).mockResolvedValueOnce(new Response(JSON.stringify({course:{courseKey:'x',courseEntityId:'course:x',displayName:'X',aliases:[],status:'active'},profile:{pmRole:null,teacher:null,collaborators:[],audience:null,coursePromise:null,resourceLocations:{}},context:{agentMd:'SECRET CONTEXT',contextPackId:'p',version:2,confidence:'high',generatedAt:'2026-07-11T00:00:00Z',lastIndexedAt:null,stale:false},evidence:{confirmed:[],candidates:[]}})));
     const payload={userId:'owner-secret',agentId:'agent-key',conversationId:'conversation-secret',messageId:'m1',messageText:'SECRET MESSAGE',platformMetadata:{courseScope:'reviewed'}} as MessagePayload;
     await attachCourseContextForReviewedScope(payload,{baseUrl:'https://toolbox.test',secret:'TOKEN SECRET',fetcher,traceEmitter:async(event)=>{events.push(event);}});
-    expect(events.map(event=>event.event)).toEqual(['context.gate.started','context.course.resolved','context.bundle.loaded','context.memory.failed','context.guard.passed']);
+    expect(events.map(event=>event.event)).toEqual(['context.gate.started','context.course.resolved','context.bundle.loaded','context.memory.degraded','context.guard.passed']);
     const serialized=JSON.stringify(events);expect(serialized).not.toContain('SECRET MESSAGE');expect(serialized).not.toContain('SECRET CONTEXT');expect(serialized).not.toContain('TOKEN SECRET');expect(serialized).not.toContain('owner-secret');expect(serialized).not.toContain('conversation-secret');
   });
 
