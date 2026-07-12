@@ -160,7 +160,21 @@ describe("worker auth token", () => {
     { tokenKind: "run", runId: 1, userId: "other", agentId: "a" },
     { tokenKind: "run", runId: 1, userId: "u", agentId: "other" },
   ])("rejects forged scoped run-token identity or missing run binding", (override) => {
-    const defaults = { userId: "u", conversationId: "c", channelId: "ch", deploymentName: "d", timestamp: Date.now(), tokenKind: "run", runId: 1, agentId: "a", courseToolScope: { ownerUserId: "u", agentId: "a", courseEntityId: "course:u:a" } };
+    const defaults = {
+      userId: "u",
+      conversationId: "c",
+      channelId: "ch",
+      deploymentName: "d",
+      timestamp: Date.now(),
+      tokenKind: "run",
+      runId: 1,
+      agentId: "a",
+      courseToolScope: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseEntityId: "course:u:a",
+      },
+    };
     const token = encrypt(JSON.stringify({ ...defaults, ...override }));
     expect(verifyWorkerToken(token)).toBeNull();
   });

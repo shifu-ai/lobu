@@ -104,7 +104,11 @@ const CourseReadinessFieldSchema = z.enum([
 ]);
 const CourseReadinessAssessmentSchema = z.object({
   level: z.enum(["ready", "partial", "minimal", "conflicted"]),
-  answerPolicy: z.enum(["answer", "answer_with_assumptions", "answer_conservatively"]),
+  answerPolicy: z.enum([
+    "answer",
+    "answer_with_assumptions",
+    "answer_conservatively",
+  ]),
   availableFields: z.array(CourseReadinessFieldSchema).max(4),
   missingFields: z.array(CourseReadinessFieldSchema).max(4),
   suggestedQuestions: z.array(z.string().min(1).max(240)).max(3),
@@ -173,7 +177,14 @@ const ResolvedCourseContextSchema = z
             sourceRef: z.string().min(1).max(256),
             provenanceKind: z.literal("fresh_course_retrieval"),
             courseEntityId: z.string().min(1).max(200),
-            readinessFields: z.partialRecord(CourseReadinessFieldSchema, z.string().min(1).max(500)),
+            readinessFields: z
+              .object({
+                audience: z.string().min(1).max(500).optional(),
+                key_learning: z.string().min(1).max(500).optional(),
+                course_promise: z.string().min(1).max(500).optional(),
+                existing_sales_talk: z.string().min(1).max(500).optional(),
+              })
+              .strict(),
           })
         )
         .max(8),
@@ -194,8 +205,19 @@ const ResolvedCourseContextSchema = z
         code: "custom",
         message: "Resolved course context trust does not match context",
       });
-    for(const [index,snippet] of value.retrieval.snippets.entries())if(snippet.courseEntityId!==value.course.courseEntityId)ctx.addIssue({code:"custom",path:["retrieval","snippets",index,"courseEntityId"],message:"Retrieved snippet course does not match active course"});
-    if(JSON.stringify(value.retrieval).length>8000)ctx.addIssue({code:"custom",path:["retrieval"],message:"Course retrieval exceeds wire size limit"});
+    for (const [index, snippet] of value.retrieval.snippets.entries())
+      if (snippet.courseEntityId !== value.course.courseEntityId)
+        ctx.addIssue({
+          code: "custom",
+          path: ["retrieval", "snippets", index, "courseEntityId"],
+          message: "Retrieved snippet course does not match active course",
+        });
+    if (JSON.stringify(value.retrieval).length > 8000)
+      ctx.addIssue({
+        code: "custom",
+        path: ["retrieval"],
+        message: "Course retrieval exceeds wire size limit",
+      });
     if (JSON.stringify(value).length > 20_000)
       ctx.addIssue({
         code: "custom",
@@ -203,7 +225,60 @@ const ResolvedCourseContextSchema = z
       });
   });
 
-function normalizeLegacyCourseRetrieval(value:unknown):void{if(!value||typeof value!=="object")return;const context=(value as any).payload?.resolvedCourseContext;if(!context?.trust||context.trust.courseEntityId!==context.course?.courseEntityId)return;const retrieval=context.retrieval;if(!retrieval||!Array.isArray(retrieval.snippets)||retrieval.snippets.length===0)return;const legacyKeys=new Set(["eventId","title","text","sourceUrl"]);if(!retrieval.snippets.every((snippet:unknown)=>snippet&&typeof snippet==="object"&&Object.keys(snippet).every((key)=>legacyKeys.has(key))))return;if(!Array.isArray(retrieval.eventIds)||!Array.isArray(retrieval.evidenceRefs)||retrieval.eventIds.length!==retrieval.snippets.length||retrieval.evidenceRefs.length!==retrieval.snippets.length)return;for(let index=0;index<retrieval.snippets.length;index++){const snippet=retrieval.snippets[index];const eventId=retrieval.eventIds[index];const sourceRef=retrieval.evidenceRefs[index];if(snippet.eventId!==eventId||typeof sourceRef!=="string"||sourceRef.length<1||sourceRef.length>256)return;}retrieval.snippets=retrieval.snippets.map((snippet:Record<string,unknown>,index:number)=>({...snippet,sourceRef:retrieval.evidenceRefs[index],provenanceKind:"fresh_course_retrieval",courseEntityId:context.course.courseEntityId,readinessFields:{}}));}
+function normalizeLegacyCourseRetrieval(value: unknown): void {
+  if (!value || typeof value !== "object") return;
+  const context = (value as any).payload?.resolvedCourseContext;
+  if (
+    !context?.trust ||
+    context.trust.courseEntityId !== context.course?.courseEntityId
+  )
+    return;
+  const retrieval = context.retrieval;
+  if (
+    !retrieval ||
+    !Array.isArray(retrieval.snippets) ||
+    retrieval.snippets.length === 0
+  )
+    return;
+  const legacyKeys = new Set(["eventId", "title", "text", "sourceUrl"]);
+  if (
+    !retrieval.snippets.every(
+      (snippet: unknown) =>
+        snippet &&
+        typeof snippet === "object" &&
+        Object.keys(snippet).every((key) => legacyKeys.has(key))
+    )
+  )
+    return;
+  if (
+    !Array.isArray(retrieval.eventIds) ||
+    !Array.isArray(retrieval.evidenceRefs) ||
+    retrieval.eventIds.length !== retrieval.snippets.length ||
+    retrieval.evidenceRefs.length !== retrieval.snippets.length
+  )
+    return;
+  for (let index = 0; index < retrieval.snippets.length; index++) {
+    const snippet = retrieval.snippets[index];
+    const eventId = retrieval.eventIds[index];
+    const sourceRef = retrieval.evidenceRefs[index];
+    if (
+      snippet.eventId !== eventId ||
+      typeof sourceRef !== "string" ||
+      sourceRef.length < 1 ||
+      sourceRef.length > 256
+    )
+      return;
+  }
+  retrieval.snippets = retrieval.snippets.map(
+    (snippet: Record<string, unknown>, index: number) => ({
+      ...snippet,
+      sourceRef: retrieval.evidenceRefs[index],
+      provenanceKind: "fresh_course_retrieval",
+      courseEntityId: context.course.courseEntityId,
+      readinessFields: {},
+    })
+  );
+}
 
 const JobEventSchema = z
   .object({

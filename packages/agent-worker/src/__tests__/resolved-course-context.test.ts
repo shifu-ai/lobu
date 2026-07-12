@@ -131,8 +131,65 @@ describe("resolved course context instructions", () => {
     expect(rendered).not.toContain("Retrieved background:");
     expect(buildResolvedCourseContextInstructions(undefined)).toBe("");
   });
-  test("renders partial readiness as answer-first guidance instead of unavailability",()=>{const rendered=buildResolvedCourseContextInstructions(context({readiness:{level:"partial",answerPolicy:"answer_with_assumptions",availableFields:["audience","key_learning"],missingFields:["course_promise","existing_sales_talk"],suggestedQuestions:["這門課對學員承諾的具體改變是什麼？","目前是否已有招生文案、銷講或常用說法可參考？"]},evidence:[{kind:"canonical_context",fields:["audience","key_learning"],sourceLabel:"已驗證的課程脈絡",sourceHash:"abcd1234"}]}));expect(rendered).toContain("資料完整度不會阻擋回答");expect(rendered).toContain("先用已確認資料給出有用答案");expect(rendered).toContain("清楚標示假設");expect(rendered).toContain("最多詢問 3 個高價值缺口");expect(rendered).not.toContain("課程資料不可用");expect(rendered).not.toContain("我剛確認了課程資料");});
-  test("uses provenance-specific wording for fresh retrieval and session history",()=>{const fresh=buildResolvedCourseContextInstructions(context({evidence:[{kind:"fresh_course_retrieval",fields:["audience"],sourceLabel:"課程搜尋",sourceHash:"fresh1"}]}));const history=buildResolvedCourseContextInstructions(context({evidence:[{kind:"session_history",fields:["audience"],sourceLabel:"對話紀錄",sourceHash:"history1"}]}));expect(fresh).toContain("我剛確認了課程資料");expect(history).toContain("依照前面對話中的紀錄");expect(history).not.toContain("我剛確認了課程資料");});
+  test("renders partial readiness as answer-first guidance instead of unavailability", () => {
+    const rendered = buildResolvedCourseContextInstructions(
+      context({
+        readiness: {
+          level: "partial",
+          answerPolicy: "answer_with_assumptions",
+          availableFields: ["audience", "key_learning"],
+          missingFields: ["course_promise", "existing_sales_talk"],
+          suggestedQuestions: [
+            "這門課對學員承諾的具體改變是什麼？",
+            "目前是否已有招生文案、銷講或常用說法可參考？",
+          ],
+        },
+        evidence: [
+          {
+            kind: "canonical_context",
+            fields: ["audience", "key_learning"],
+            sourceLabel: "已驗證的課程脈絡",
+            sourceHash: "abcd1234",
+          },
+        ],
+      })
+    );
+    expect(rendered).toContain("資料完整度不會阻擋回答");
+    expect(rendered).toContain("先用已確認資料給出有用答案");
+    expect(rendered).toContain("清楚標示假設");
+    expect(rendered).toContain("最多詢問 3 個高價值缺口");
+    expect(rendered).not.toContain("課程資料不可用");
+    expect(rendered).not.toContain("我剛確認了課程資料");
+  });
+  test("uses provenance-specific wording for fresh retrieval and session history", () => {
+    const fresh = buildResolvedCourseContextInstructions(
+      context({
+        evidence: [
+          {
+            kind: "fresh_course_retrieval",
+            fields: ["audience"],
+            sourceLabel: "課程搜尋",
+            sourceHash: "fresh1",
+          },
+        ],
+      })
+    );
+    const history = buildResolvedCourseContextInstructions(
+      context({
+        evidence: [
+          {
+            kind: "session_history",
+            fields: ["audience"],
+            sourceLabel: "對話紀錄",
+            sourceHash: "history1",
+          },
+        ],
+      })
+    );
+    expect(fresh).toContain("我剛確認了課程資料");
+    expect(history).toContain("依照前面對話中的紀錄");
+    expect(history).not.toContain("我剛確認了課程資料");
+  });
 
   test("resolved A removes legacy latest-project B without removing generic instructions", () => {
     const legacy = [
