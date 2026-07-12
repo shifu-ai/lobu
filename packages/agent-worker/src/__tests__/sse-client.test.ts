@@ -190,6 +190,73 @@ describe("GatewayClient heartbeat ACKs", () => {
     ).toEqual(resolvedCourseContext);
   });
 
+  test("accepts every canonical retrieval status and sends a delivery receipt", async () => {
+    const canonicalStatuses = [
+      "loaded",
+      "empty",
+      "degraded",
+      "invariant_violation",
+    ] as const;
+    const requests: unknown[] = [];
+    globalThis.fetch = mock(async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response("ok");
+    }) as typeof fetch;
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+
+    for (const status of canonicalStatuses) {
+      const resolvedCourseContext = validResolvedCourseContext();
+      resolvedCourseContext.retrieval.status = status;
+      await (client as any).handleEvent(
+        "job",
+        JSON.stringify({
+          jobId: `job-${status}`,
+          payload: { ...basePayload(), resolvedCourseContext },
+        })
+      );
+    }
+
+    expect(handleThreadMessage).toHaveBeenCalledTimes(canonicalStatuses.length);
+    expect(requests).toEqual(
+      canonicalStatuses.map((status) => ({
+        jobId: `job-${status}`,
+        received: true,
+      }))
+    );
+  });
+
+  test.each([
+    "partial",
+    "failed",
+  ])("rejects obsolete retrieval status %s", async (status) => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext = validResolvedCourseContext();
+    resolvedCourseContext.retrieval.status = status;
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext },
+      })
+    );
+
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
   test("terminally rejects a queued legacy course context without executing it", async () => {
     const client = new GatewayClient(
       "https://gateway.example.com",
