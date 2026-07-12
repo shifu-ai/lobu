@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { verifyWorkerToken, type MessagePayload } from '@lobu/core';
+import type { MessagePayload } from '@lobu/core';
+import { verifyWorkerToken } from '../../../../core/src/worker/auth.js';
 import { attachCourseContextForReviewedScope } from '../orchestration/course-context-gate.js';
 import { MessageConsumer, compareCourseContextIdentity, parseCourseContextRolloutConfig } from '../orchestration/message-consumer.js';
 import { gradeCourseEvidenceReadiness } from '../orchestration/course-evidence-readiness.js';
