@@ -15,7 +15,8 @@ const STRUCTURED_CONTEXT_FIELDS=new Set(['audience','dream_result','course_promi
 function hashIdentity(value:string):string{return createHash('sha256').update(value).digest('hex');}
 async function traceCourse(data:MessagePayload,options:CourseContextGateOptions|undefined,event:string,status:string,fields:Record<string,unknown>={}):Promise<void>{
   const emitter=options?.traceEmitter??emitJourneyEvent;
-  try{void emitter({trace_id:extractTraceId(data)??`tr_${hashIdentity(data.messageId??data.conversationId).slice(0,32)}`,journey_id:typeof data.platformMetadata?.journeyId==='string'?data.platformMetadata.journeyId:'course_context_gate',event,service:'lobu',module:'course-context-gate',status,owner_hash:hashIdentity(data.userId),...(event.startsWith('context.memory.')?{}:{conversation_hash:hashIdentity(data.conversationId)}),agent_key:hashIdentity(data.agentId),...fields}).catch(()=>{});}catch{}
+  const isMemoryEvent=event.startsWith('context.memory.');
+  try{void emitter({trace_id:extractTraceId(data)??`tr_${hashIdentity(data.messageId??data.conversationId).slice(0,32)}`,journey_id:typeof data.platformMetadata?.journeyId==='string'?data.platformMetadata.journeyId:'course_context_gate',event,service:'lobu',module:'course-context-gate',status,...(isMemoryEvent?{}:{owner_hash:hashIdentity(data.userId),conversation_hash:hashIdentity(data.conversationId),agent_key:hashIdentity(data.agentId)}),...fields}).catch(()=>{});}catch{}
 }
 function projectRequiredCourseContext(bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>,fields:string[]):string{
   const lines=['Required course context (canonical structured fields only):'];
@@ -77,7 +78,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const context = bundle.context;
   const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
   const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'degraded' as const,crossCourseGuard:'passed' as const,candidateCount:0,safeCount:0,droppedCount:0,durationMs:0,eventIds:[],evidenceRefs:[],snippets:[]};
-  await traceCourse(data,options,`context.memory.${retrieval.status}` ,retrieval.status==='degraded'?'degraded':retrieval.status==='invariant_violation'?'failed':'ok',{course_entity_id:course.courseEntityId,candidate_count:retrieval.candidateCount,safe_count:retrieval.safeCount,dropped_count:retrieval.droppedCount,duration_ms:retrieval.durationMs});
+  await traceCourse(data,options,`context.memory.${retrieval.status}` ,retrieval.status==='degraded'?'degraded':retrieval.status==='invariant_violation'?'failed':'ok',{candidate_count:retrieval.candidateCount,safe_count:retrieval.safeCount,dropped_count:retrieval.droppedCount,duration_ms:retrieval.durationMs});
   await traceCourse(data,options,`context.guard.${retrieval.crossCourseGuard}` ,retrieval.crossCourseGuard==='passed'?'ok':'failed',{course_entity_id:course.courseEntityId});
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
     trust:{ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseKey:course.courseKey,courseEntityId:course.courseEntityId,contextPackId:context.contextPackId,contextVersion:context.version},
