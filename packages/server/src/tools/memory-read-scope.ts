@@ -35,6 +35,12 @@ export async function authorizeMemoryAgentOwner(
     WHERE id = ${agentId} AND organization_id = ${ctx.organizationId}
     LIMIT 1
   `;
+  if (rows.length === 0) {
+    throw scopeError(
+      'memory_scope_identity_mismatch',
+      'authenticated agent mapping was not found in the organization',
+    );
+  }
   const ownerUserId = rows[0]?.owner_user_id;
   if (!ownerUserId && isTrustedMemoryScopeOverride(ctx)) return null;
   if (!ownerUserId) {

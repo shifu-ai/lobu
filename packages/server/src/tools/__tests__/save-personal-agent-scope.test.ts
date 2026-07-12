@@ -220,4 +220,38 @@ describe('save_memory personal-agent scope', () => {
       });
     }
   });
+
+  it('rejects trusted admin OAuth/PAT bound to nonexistent or cross-org agents', async () => {
+    const org = await createTestOrganization({ name: 'Missing Agent Admin Scope' });
+    const otherOrg = await createTestOrganization({ name: 'Cross Org Agent Scope' });
+    const admin = await createTestUser({ email: 'missing-save-admin@example.com' });
+    await addUserToOrganization(admin.id, org.id, 'owner');
+    const crossOrgAgent = await createTestAgent({
+      organizationId: otherOrg.id,
+      agentId: 'cross-org-owner-null-agent',
+    });
+    for (const tokenType of ['oauth', 'pat'] as const) {
+      for (const agentId of ['nonexistent-agent', crossOrgAgent.agentId]) {
+        await expect(
+          saveContent(
+            { content: 'invalid agent binding', semantic_type: 'content' },
+            {} as never,
+            {
+              organizationId: org.id,
+              userId: admin.id,
+              memberRole: 'owner',
+              agentId,
+              isAuthenticated: true,
+              tokenType,
+              scopes: ['mcp:write', 'mcp:admin'],
+              scopedToOrg: true,
+              allowCrossOrg: false,
+            },
+          ),
+        ).rejects.toMatchObject({
+          message: expect.stringContaining('memory_scope_identity_mismatch'),
+        });
+      }
+    }
+  });
 });
