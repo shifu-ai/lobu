@@ -96,6 +96,32 @@ const AgentOptionsSchema = z
   })
   .passthrough();
 
+const CourseReadinessFieldSchema = z.enum([
+  "audience",
+  "key_learning",
+  "course_promise",
+  "existing_sales_talk",
+]);
+const CourseReadinessAssessmentSchema = z.object({
+  level: z.enum(["ready", "partial", "minimal", "conflicted"]),
+  answerPolicy: z.enum(["answer", "answer_with_assumptions", "answer_conservatively"]),
+  availableFields: z.array(CourseReadinessFieldSchema).max(4),
+  missingFields: z.array(CourseReadinessFieldSchema).max(4),
+  suggestedQuestions: z.array(z.string().min(1).max(240)).max(3),
+});
+const CourseEvidenceProvenanceSchema = z.object({
+  kind: z.enum([
+    "canonical_context",
+    "fresh_course_retrieval",
+    "session_history",
+    "organization_reference",
+    "user_provided_current_turn",
+  ]),
+  fields: z.array(CourseReadinessFieldSchema).max(4),
+  sourceLabel: z.string().min(1).max(160),
+  sourceHash: z.string().min(1).max(64).optional(),
+});
+
 const ResolvedCourseContextSchema = z
   .object({
     trust: z
@@ -148,6 +174,8 @@ const ResolvedCourseContextSchema = z
         )
         .max(8),
     }),
+    readiness: CourseReadinessAssessmentSchema.optional(),
+    evidence: z.array(CourseEvidenceProvenanceSchema).max(8).optional(),
   })
   .superRefine((value, ctx) => {
     const trust = value.trust;

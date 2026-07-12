@@ -190,6 +190,27 @@ describe("GatewayClient heartbeat ACKs", () => {
     ).toEqual(resolvedCourseContext);
   });
 
+  test("preserves bounded course readiness and evidence through job event parsing", async () => {
+    const client = new GatewayClient("https://gateway.example.com", "worker-token", "user-1", "worker-1");
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const resolvedCourseContext = {
+      ...validResolvedCourseContext(),
+      readiness: {
+        level: "partial",
+        answerPolicy: "answer_with_assumptions",
+        availableFields: ["audience", "key_learning"],
+        missingFields: ["course_promise", "existing_sales_talk"],
+        suggestedQuestions: ["課程承諾是什麼？", "目前有哪些銷講？"],
+      },
+      evidence: [{ kind: "canonical_context", fields: ["audience", "key_learning"], sourceLabel: "已驗證的課程脈絡", sourceHash: "abcd1234" }],
+    };
+
+    await (client as any).handleEvent("job", JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } }));
+
+    expect(handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext).toEqual(resolvedCourseContext);
+  });
+
   test("accepts every canonical retrieval status and sends a delivery receipt", async () => {
     const canonicalStatuses = [
       "loaded",
