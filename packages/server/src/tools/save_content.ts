@@ -20,6 +20,10 @@ import { ensureMemberEntityType } from '../utils/member-entity-type';
 import { requireWriteAccess } from '../utils/organization-access';
 import { buildEventPermalink, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import { trackWatcherReaction } from '../utils/watcher-reactions';
+import {
+  resolvePersonalMemoryReadScope,
+  resolvePersonalOrganizationOwner,
+} from './memory-read-scope';
 import type { ToolContext } from './registry';
 import type { SaveContentArgs } from './save_content_schema';
 
@@ -48,7 +52,7 @@ interface SaveContentResult {
 export async function saveContent(
   args: SaveContentArgs,
   _env: Env,
-  ctx: ToolContext
+  ctx: ToolContext,
 ): Promise<SaveContentResult> {
   // SDK delegates (`client.knowledge.save`) skip `checkToolAccess`, so apply
   // the same member+scope gate here. System contexts (userId=null + auth=true)
@@ -64,6 +68,10 @@ export async function saveContent(
   }
 
   const sql = getDb();
+  const personalOrganizationOwner = await resolvePersonalOrganizationOwner(ctx);
+  const personalScope = personalOrganizationOwner
+    ? await resolvePersonalMemoryReadScope(ctx)
+    : null;
 
   // 0. Ensure $member entity type exists for this org
   await ensureMemberEntityType(ctx.organizationId);
@@ -92,7 +100,7 @@ export async function saveContent(
     semanticType,
     args.metadata,
     ctx.organizationId,
-    entityIds.length > 0 ? entityIds : undefined
+    entityIds.length > 0 ? entityIds : undefined,
   );
   if (!kindValidation.valid) {
     throw new ToolUserError(kindValidation.errors.join('\n'), 422);
@@ -158,7 +166,7 @@ export async function saveContent(
           `;
           logger.info(
             { memberId, userId: ctx.userId, email: userEmail },
-            '$member linked via email → auth_user_id claim'
+            '$member linked via email → auth_user_id claim',
           );
         }
       }
@@ -181,7 +189,7 @@ export async function saveContent(
     `;
     if (existing.length === 0) {
       throw new Error(
-        `Cannot supersede event ${args.supersedes_event_id}: not found in this organization`
+        `Cannot supersede event ${args.supersedes_event_id}: not found in this organization`,
       );
     }
     const superseding = await sql`
@@ -191,7 +199,7 @@ export async function saveContent(
     `;
     if (superseding.length > 0) {
       throw new Error(
-        `Cannot supersede event ${args.supersedes_event_id}: already superseded by event ${superseding[0].id}`
+        `Cannot supersede event ${args.supersedes_event_id}: already superseded by event ${superseding[0].id}`,
       );
     }
   }
@@ -213,7 +221,14 @@ export async function saveContent(
     sourceUrl: args.source_url ?? null,
     occurredAt: args.occurred_at ?? null,
     semanticType,
-    metadata: args.metadata,
+    metadata: personalScope
+      ? {
+          ...args.metadata,
+          agent_id: personalScope.agentId,
+          owner_user_id: personalScope.ownerUserId,
+          memory_visibility: 'personal_private',
+        }
+      : args.metadata,
     embedding: args.embedding,
     embeddingModel: args.embedding_model,
     createdBy: ctx.userId,
@@ -243,7 +258,7 @@ export async function saveContent(
       semantic_type: semanticType,
       supersedes: args.supersedes_event_id,
     },
-    'Content saved via save_memory'
+    'Content saved via save_memory',
   );
 
   // Track watcher reaction if attribution source is provided
@@ -254,7 +269,11 @@ export async function saveContent(
       windowId: args.watcher_source.window_id,
       reactionType: 'content_saved',
       toolName: 'save_memory',
-      toolArgs: { entity_ids: finalEntityIds, semantic_type: semanticType, title: args.title },
+      toolArgs: {
+        entity_ids: finalEntityIds,
+        semantic_type: semanticType,
+        title: args.title,
+      },
       entityId: finalEntityIds[0],
     }).catch((err) => {
       logger.warn({ err, watcherSource: args.watcher_source }, 'trackWatcherReaction failed');

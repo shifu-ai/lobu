@@ -2,9 +2,14 @@
  * Content search path: searchContentBySingleQuery.
  */
 
-import type { Env } from '../../index';
 import { type DbClient, pgTextArray } from '../../db/client';
-import { buildConnectionFilter, buildFeedFilter, buildOrderByClause, buildRunFilter } from '../content-query-filters';
+import type { Env } from '../../index';
+import {
+  buildConnectionFilter,
+  buildFeedFilter,
+  buildOrderByClause,
+  buildRunFilter,
+} from '../content-query-filters';
 import { parseDateAlias, toEndOfDay } from '../date-aliases';
 import { configuredEmbeddingModelSqlLiteral, generateEmbeddings } from '../embeddings';
 import { toVectorLiteral } from '../entity-management';
@@ -13,30 +18,34 @@ import { validateNumericId } from '../sql-validation';
 import { buildLatestClassificationsCteSql, buildThreadMetaCteSql } from './ctes';
 import { buildEntityLinkUnion, entityLinkMatchSql, fetchEntityIdentityScopes } from './entity-link';
 import {
+  buildSearchDocumentExpr,
+  buildTsqueryString,
   CANDIDATE_QUERY_TIMEOUT_MS,
   CANDIDATE_VECTOR_LIMIT,
   TSQUERY_SQL,
-  buildSearchDocumentExpr,
-  buildTsqueryString,
 } from './fts';
 import { buildFinalSelect, deduplicateWithClassifications } from './sql-fragments';
 import {
   buildDateCandidateOrderBy,
   buildDateCursorClause,
   buildPageInfo,
-  isDateFeedMode,
-  resolveDateCursor,
   type ContentSearchOptions,
   type ContentSearchResponse,
   type ContentSearchResult,
+  isDateFeedMode,
+  resolveDateCursor,
 } from './types';
-import { buildConnectionVisibilityClause, buildExcludeWatcherClause, buildOrgScopeWhere } from './visibility';
+import {
+  buildConnectionVisibilityClause,
+  buildExcludeWatcherClause,
+  buildOrgScopeWhere,
+} from './visibility';
 
 export async function searchContentBySingleQuery(
   sql: DbClient,
   queryText: string,
   options: ContentSearchOptions & { offset?: number },
-  env?: Env
+  env?: Env,
 ): Promise<ContentSearchResponse> {
   const entityId = options.entity_id;
   const limit = Math.min(options.limit ?? 50, 500);
@@ -52,14 +61,15 @@ export async function searchContentBySingleQuery(
     : null;
   if (!queryEmbedding && env?.EMBEDDINGS_SERVICE_URL) {
     try {
-      if (options.abort_signal?.aborted) throw options.abort_signal.reason ?? new Error('Course memory search aborted');
+      if (options.abort_signal?.aborted)
+        throw options.abort_signal.reason ?? new Error('Course memory search aborted');
       const embeddings = await generateEmbeddings([trimmedQuery], env, options.abort_signal);
       queryEmbedding = embeddings[0] ?? null;
     } catch (err) {
       if (options.abort_signal?.aborted) throw err;
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },
-        '[content-search] Embedding generation failed, falling back to text-only search'
+        '[content-search] Embedding generation failed, falling back to text-only search',
       );
     }
   }
@@ -77,10 +87,8 @@ export async function searchContentBySingleQuery(
   const untilDate = options.until ? toEndOfDay(parseDateAlias(options.until).date) : null;
   const connectionIdsArray =
     options.connection_ids && options.connection_ids.length > 0 ? options.connection_ids : null;
-  const feedIdsArray =
-    options.feed_ids && options.feed_ids.length > 0 ? options.feed_ids : null;
-  const runIdsArray =
-    options.run_ids && options.run_ids.length > 0 ? options.run_ids : null;
+  const feedIdsArray = options.feed_ids && options.feed_ids.length > 0 ? options.feed_ids : null;
+  const runIdsArray = options.run_ids && options.run_ids.length > 0 ? options.run_ids : null;
 
   const needClassifications =
     options.include_classifications ||
@@ -93,8 +101,7 @@ export async function searchContentBySingleQuery(
   // Pre-fetch the entity's identity claims so the entity-link UNION trims
   // unused namespaces. Search path benefits even more than the chronological
   // path because filtered_ids re-evaluates on every query variant attempt.
-  const searchEntityScopes =
-    entityId != null ? await fetchEntityIdentityScopes(sql, entityId) : [];
+  const searchEntityScopes = entityId != null ? await fetchEntityIdentityScopes(sql, entityId) : [];
 
   // Slots $11/$12 are agent/course memory-scope filters.
   const orgScope = buildOrgScopeWhere({
@@ -105,10 +112,7 @@ export async function searchContentBySingleQuery(
   // Exclude-watcher param slot sits immediately after orgScope so its $N index
   // is stable regardless of whether an embedding param follows.
   const excludeParamIdx = 13 + orgScope.params.length;
-  const excludeClause = buildExcludeWatcherClause(
-    options.exclude_watcher_id,
-    excludeParamIdx
-  );
+  const excludeClause = buildExcludeWatcherClause(options.exclude_watcher_id, excludeParamIdx);
   // Connection-visibility predicate. Same helper used by every other
   // get_content branch, so authed/unauthed/private/system-event semantics
   // are guaranteed identical across the search/text-query path and the
@@ -164,7 +168,13 @@ export async function searchContentBySingleQuery(
           AND ($8::numeric IS NULL OR f.score <= $8::numeric)
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
-          AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)
+          AND ($11::jsonb IS NULL OR (
+            f.metadata->>'agent_id' = $11::jsonb->>'agent_id'
+            AND (NOT ($11::jsonb ? 'owner_user_id') OR (
+              f.metadata->>'owner_user_id' = $11::jsonb->>'owner_user_id'
+              OR (f.metadata->>'owner_user_id' IS NULL AND f.metadata->>'agent_id' = $11::jsonb->>'agent_id')
+            ))
+          ))
           AND ($12::text[] IS NULL OR (jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND f.metadata->'course_entity_ids' ?| $12::text[]))
           ${excludeClause.sql}
           ${visibilityClause.sql}
@@ -218,8 +228,12 @@ export async function searchContentBySingleQuery(
     const textWeight = 1 - vectorWeight;
     if (process.env.LOBU_DEBUG_SEARCH === '1') {
       logger.info(
-        { vector_weight: vectorWeight, text_weight: textWeight, q: queryText.slice(0, 40) },
-        '[content-search] weights'
+        {
+          vector_weight: vectorWeight,
+          text_weight: textWeight,
+          q: queryText.slice(0, 40),
+        },
+        '[content-search] weights',
       );
     }
     // Same model scope as matchCondition: a row whose stamp differs from the
@@ -256,11 +270,7 @@ export async function searchContentBySingleQuery(
     orderBy: orderByExpr,
   });
 
-  const searchThreadCteSql = buildThreadMetaCteSql(
-    '$2',
-    'result_set',
-    searchEntityLinkSqlForP
-  );
+  const searchThreadCteSql = buildThreadMetaCteSql('$2', 'result_set', searchEntityLinkSqlForP);
   const latestClassificationsCteSql = buildLatestClassificationsCteSql();
   const ctes = needClassifications
     ? `${searchThreadCteSql},\n      ${latestClassificationsCteSql}`
@@ -290,7 +300,12 @@ export async function searchContentBySingleQuery(
   const hasTextCandidates = useCandidatePath && trimmedQuery.length >= 3;
   let searchCandidatesCteSql = '';
   const requestedTimeout = options.statement_timeout_ms;
-  const queryTimeoutMs = requestedTimeout == null ? (useCandidatePath ? CANDIDATE_QUERY_TIMEOUT_MS : null) : Math.max(1,Math.min(CANDIDATE_QUERY_TIMEOUT_MS,Math.floor(requestedTimeout)));
+  const queryTimeoutMs =
+    requestedTimeout == null
+      ? useCandidatePath
+        ? CANDIDATE_QUERY_TIMEOUT_MS
+        : null
+      : Math.max(1, Math.min(CANDIDATE_QUERY_TIMEOUT_MS, Math.floor(requestedTimeout)));
   if (useCandidatePath) {
     // $tsq is appended last in queryParams; offsetParamIdx is the current tail
     // (useDateFeed is false here, so there is no cursor block before it).
@@ -429,13 +444,18 @@ export async function searchContentBySingleQuery(
     // the search template is `= ANY($9::text[])`.
     options.semantic_type
       ? pgTextArray(
-          Array.isArray(options.semantic_type) ? options.semantic_type : [options.semantic_type]
+          Array.isArray(options.semantic_type) ? options.semantic_type : [options.semantic_type],
         )
       : null,
     options.interaction_status ?? null,
     // Slot $11 — per-agent memory scope. See buildStandardParams for the
     // mirror call site. Bumps orgScope to $12 (set above).
-    options.agent_id ?? null,
+    options.agent_id
+      ? {
+          agent_id: options.agent_id,
+          ...(options.owner_user_id ? { owner_user_id: options.owner_user_id } : {}),
+        }
+      : null,
     options.course_entity_ids ? pgTextArray(options.course_entity_ids) : null,
     ...orgScope.params,
     ...excludeClause.params,
@@ -452,7 +472,8 @@ export async function searchContentBySingleQuery(
   }
 
   let rawRows: any[];
-  if (options.abort_signal?.aborted) throw options.abort_signal.reason ?? new Error('Course memory search aborted');
+  if (options.abort_signal?.aborted)
+    throw options.abort_signal.reason ?? new Error('Course memory search aborted');
   if (queryTimeoutMs !== null) {
     // Backstop: a pathological candidate scan degrades to "no content" (every
     // caller tolerates an empty list) rather than hanging the request.
@@ -465,7 +486,7 @@ export async function searchContentBySingleQuery(
       if (requestedTimeout != null) throw err;
       logger.warn(
         { err: err instanceof Error ? err.message : String(err) },
-        '[content-search] candidate query failed; returning empty content'
+        '[content-search] candidate query failed; returning empty content',
       );
       rawRows = [];
     }
@@ -478,7 +499,9 @@ export async function searchContentBySingleQuery(
     const countSQL = `
       WITH RECURSIVE ${useCandidatePath ? searchCandidatesCteSql : ''}${nonDateFilteredIdsCteSql}
       SELECT COUNT(*) as total_count FROM filtered_ids`;
-    const countParams = useCandidatePath ? queryParams : queryParams.slice(0, cursorBaseParamIdx - 1);
+    const countParams = useCandidatePath
+      ? queryParams
+      : queryParams.slice(0, cursorBaseParamIdx - 1);
     const countRows = (await sql.unsafe(countSQL, countParams)) as any[];
     emptyPageTotal = parseInt(String(countRows[0]?.total_count ?? '0'), 10);
   }

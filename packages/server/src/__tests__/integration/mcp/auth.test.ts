@@ -40,7 +40,10 @@ describe('MCP Authentication', () => {
     await cleanupTestDatabase();
     await seedSystemEntityTypes();
     org = await createTestOrganization({ name: 'Test Org' });
-    publicOrg = await createTestOrganization({ name: 'Public Org', visibility: 'public' });
+    publicOrg = await createTestOrganization({
+      name: 'Public Org',
+      visibility: 'public',
+    });
     org2 = await createTestOrganization({ name: 'Second Org' });
     user = await createTestUser({});
     await addUserToOrganization(user.id, org.id);
@@ -73,7 +76,7 @@ describe('MCP Authentication', () => {
 
       expect(response.status).toBe(401);
       expect(response.headers.get('WWW-Authenticate')).toContain(
-        '/.well-known/oauth-protected-resource'
+        '/.well-known/oauth-protected-resource',
       );
     });
 
@@ -109,7 +112,7 @@ describe('MCP Authentication', () => {
 
       expect(response.status).toBe(401);
       expect(response.headers.get('WWW-Authenticate')).toContain(
-        '/.well-known/oauth-protected-resource'
+        '/.well-known/oauth-protected-resource',
       );
     });
 
@@ -314,7 +317,7 @@ describe('MCP Authentication', () => {
 
       expect(response.status).toBe(401);
       expect(response.headers.get('WWW-Authenticate')).toContain(
-        '/.well-known/oauth-protected-resource'
+        '/.well-known/oauth-protected-resource',
       );
       const body = await response.json();
       expect(body.error).toBe('unauthorized');
@@ -416,7 +419,7 @@ describe('MCP Authentication', () => {
           name: 'search_memory',
           arguments: { query: 'nonexistent-brand-12345' },
         },
-        { token }
+        { token },
       );
 
       // Should succeed (even if entity not found) because auth works
@@ -498,7 +501,7 @@ describe('MCP Authentication', () => {
       await mcpToolsCall(
         'search_memory',
         { query: 'nonexistent-brand-12345' },
-        { token, agentId: agent.agentId }
+        { token, agentId: agent.agentId },
       );
 
       const rows = await getTestDb()`
@@ -513,11 +516,13 @@ describe('MCP Authentication', () => {
     });
 
     it('revokes an MCP client only within the current organization', async () => {
-      const scopedClient = await createTestOAuthClient({ client_name: 'Scoped Revoke Client' });
+      const scopedClient = await createTestOAuthClient({
+        client_name: 'Scoped Revoke Client',
+      });
       const { token: orgToken } = await createTestAccessToken(
         user.id,
         org.id,
-        scopedClient.client_id
+        scopedClient.client_id,
       );
       await createTestAccessToken(user.id, org2.id, scopedClient.client_id);
 
@@ -611,7 +616,7 @@ describe('MCP Authentication', () => {
       `;
       expect(tokenRows).toHaveLength(2);
       const tokensByOrg = new Map(
-        tokenRows.map((row) => [row.organization_id as string, row.revoked_at as Date | null])
+        tokenRows.map((row) => [row.organization_id as string, row.revoked_at as Date | null]),
       );
       expect(tokensByOrg.get(org.id)).toBeTruthy();
       expect(tokensByOrg.get(org2.id)).toBeNull();
@@ -674,6 +679,95 @@ describe('MCP Authentication', () => {
       expect(body.error?.message).toContain("Agent 'missing-agent' was not found");
     });
 
+    it('rejects initialize when Owner A declares Agent B owned by another user', async () => {
+      const otherOwner = await createTestUser({
+        email: 'mcp-agent-b-owner@example.com',
+      });
+      await addUserToOrganization(otherOwner.id, org.id, 'member');
+      await createTestAgent({
+        organizationId: org.id,
+        agentId: 'lobu-other-owner-agent',
+        ownerUserId: otherOwner.id,
+      });
+      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const response = await post('/mcp', {
+        body: {
+          jsonrpc: '2.0',
+          id: 'cross-owner-init',
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: {
+              name: 'lobu-test',
+              version: '1',
+              agentId: 'lobu-other-owner-agent',
+            },
+          },
+        },
+        token,
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error?.message).toContain('memory_scope_mismatch');
+    });
+
+    it('allows only trusted admin OAuth/PAT callers to bind a shared owner-null agent', async () => {
+      const shared = await createTestAgent({
+        organizationId: org.id,
+        agentId: 'lobu-shared-owner-null',
+      });
+      await getTestDb()`UPDATE agents SET owner_user_id = NULL WHERE id = ${shared.agentId}`;
+      const ordinaryToken = await createTestAccessToken(user.id, org.id, client.client_id);
+      const ordinary = await post('/mcp', {
+        body: {
+          jsonrpc: '2.0',
+          id: 'ordinary-shared',
+          method: 'initialize',
+          params: {
+            protocolVersion: '2025-03-26',
+            capabilities: {},
+            clientInfo: { name: 'test', version: '1', agentId: shared.agentId },
+          },
+        },
+        token: ordinaryToken.token,
+      });
+      expect(ordinary.status).toBe(400);
+      expect((await ordinary.json()).error?.message).toContain('memory_scope_identity_mismatch');
+      const admin = await createTestUser({
+        email: 'shared-agent-admin@example.com',
+      });
+      await addUserToOrganization(admin.id, org.id, 'owner');
+      const oauthAdmin = await createTestAccessToken(admin.id, org.id, client.client_id, {
+        scope: 'mcp:read mcp:admin',
+      });
+      const patAdmin = await createTestPAT(admin.id, org.id, {
+        scope: 'mcp:read mcp:admin',
+      });
+      for (const [id, token] of [
+        ['oauth-admin-shared', oauthAdmin.token],
+        ['pat-admin-shared', patAdmin.token],
+      ]) {
+        const response = await post('/mcp', {
+          body: {
+            jsonrpc: '2.0',
+            id,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-03-26',
+              capabilities: {},
+              clientInfo: {
+                name: 'test',
+                version: '1',
+                agentId: shared.agentId,
+              },
+            },
+          },
+          token,
+        });
+        expect(response.status).toBe(200);
+      }
+    });
+
     it('exposes list_organizations on scoped /mcp/:org routes too', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
       const result = await mcpListTools({ token, orgSlug: org.slug });
@@ -713,7 +807,7 @@ describe('MCP Authentication', () => {
             name: publicEntity.name,
             entity_type: publicEntity.entity_type,
           }),
-        ])
+        ]),
       );
     });
 
@@ -781,7 +875,7 @@ describe('MCP Authentication', () => {
       const body = await response.json();
       expect(body.error).toBe('forbidden');
       expect(body.error_description).toContain(
-        'Token organization does not match URL organization'
+        'Token organization does not match URL organization',
       );
     });
 
@@ -795,7 +889,9 @@ describe('MCP Authentication', () => {
       // We assert the auth gate passes (not 403 with the cross-org message),
       // not full MCP-handshake success — that needs initialize + notify and
       // is covered elsewhere.
-      const org2 = await createTestOrganization({ name: 'OAuth Cross-Org Target' });
+      const org2 = await createTestOrganization({
+        name: 'OAuth Cross-Org Target',
+      });
       await addUserToOrganization(user.id, org2.id);
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
@@ -856,7 +952,6 @@ describe('MCP Authentication', () => {
   // before they ever reach the org-context guard. That contract is covered
   // by "challenges unauthenticated requests…" in the Unauthenticated block.
   describe('JSON-RPC Error Handling', () => {
-
     it('should handle malformed JSON-RPC requests', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
 
@@ -1011,7 +1106,11 @@ describe('MCP Authentication', () => {
 
       // User approves the device on the OAuth page, picking `org`.
       const approveRes = await post('/oauth/device/approve', {
-        body: { user_code: dc.userCode, approved: true, organization_id: org.id },
+        body: {
+          user_code: dc.userCode,
+          approved: true,
+          organization_id: org.id,
+        },
         cookie: sessionCookie,
         headers: { Origin: 'http://localhost' },
       });
@@ -1027,7 +1126,9 @@ describe('MCP Authentication', () => {
         },
       });
       expect(tokenRes.status).toBe(200);
-      const { access_token: accessToken } = (await tokenRes.json()) as { access_token: string };
+      const { access_token: accessToken } = (await tokenRes.json()) as {
+        access_token: string;
+      };
       expect(accessToken).toBeTruthy();
 
       // First poll registers the device worker; its home is the approved org.

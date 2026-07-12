@@ -45,6 +45,7 @@ export interface ContentSearchOptions {
   // is the memory-scope axis, NOT the identity-namespace column
   // (`entity_identities.namespace`) — see identity-normalize.ts.
   agent_id?: string;
+  owner_user_id?: string;
   course_entity_ids?: string[];
 
   // Classification options (only JOINs when needed)
@@ -198,7 +199,7 @@ export function buildDateCursorClause(
   cursor: DateCursor | null,
   occurredAtColumn: string,
   idColumn: string,
-  baseParamIndex: number
+  baseParamIndex: number,
 ): { sql: string; params: unknown[] } {
   if (!cursor) return { sql: '', params: [] };
 
