@@ -140,32 +140,22 @@ describe('search_memory personal-agent scope', () => {
     });
   });
 
-  it('allows trusted owner OAuth/PAT with effective mcp:admin to select another owned agent', async () => {
-    const { agentA, agentB, ctx, org } = await seedScope();
-    const eventA = await createTestEvent({
-      organization_id: org.id,
-      content: 'trusted admin sentinel',
-      metadata: { agent_id: agentA.agentId },
-    });
-    const eventB = await createTestEvent({
-      organization_id: org.id,
-      content: 'trusted admin sentinel',
-      metadata: { agent_id: agentB.agentId },
-    });
+  it('rejects model-requested cross-agent scope even for trusted owner OAuth/PAT', async () => {
+    const { agentB, ctx } = await seedScope();
     for (const tokenType of ['oauth', 'pat'] as const) {
-      const result = await search(
-        {
-          query: 'trusted admin sentinel',
-          agent_id: agentB.agentId,
-          include_public_catalogs: false,
-          content_limit: 20,
-        },
-        {} as never,
-        { ...ctx, tokenType, scopes: ['mcp:read', 'mcp:admin'] },
-      );
-      const ids = result.content?.map((row) => row.id) ?? [];
-      expect(ids).toContain(eventB.id);
-      expect(ids).not.toContain(eventA.id);
+      await expect(
+        search(
+          {
+            query: 'trusted admin sentinel',
+            agent_id: agentB.agentId,
+            include_public_catalogs: false,
+          },
+          {} as never,
+          { ...ctx, tokenType, scopes: ['mcp:read', 'mcp:admin'] },
+        ),
+      ).rejects.toMatchObject({
+        message: expect.stringContaining('memory_scope_mismatch'),
+      });
     }
   });
 

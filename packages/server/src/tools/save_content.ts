@@ -20,7 +20,7 @@ import { ensureMemberEntityType } from '../utils/member-entity-type';
 import { requireWriteAccess } from '../utils/organization-access';
 import { buildEventPermalink, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import { trackWatcherReaction } from '../utils/watcher-reactions';
-import { resolvePersonalMemoryReadScope, resolvePersonalOrganizationOwner } from './memory-read-scope';
+import { authorizeMemoryAgentOwner } from './memory-read-scope';
 import type { ToolContext } from './registry';
 import type { SaveContentArgs } from './save_content_schema';
 
@@ -65,9 +65,12 @@ export async function saveContent(
   }
 
   const sql = getDb();
-  const personalOrganizationOwner = await resolvePersonalOrganizationOwner(ctx);
-  const personalScope = personalOrganizationOwner
-    ? await resolvePersonalMemoryReadScope(ctx)
+  const authenticatedAgentId = ctx.isAuthenticated ? ctx.agentId : null;
+  const personalScope = authenticatedAgentId
+    ? {
+        agentId: authenticatedAgentId,
+        ownerUserId: await authorizeMemoryAgentOwner(ctx, authenticatedAgentId),
+      }
     : null;
 
   // 0. Ensure $member entity type exists for this org

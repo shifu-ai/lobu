@@ -87,4 +87,103 @@ describe('save_memory personal-agent scope', () => {
       custom: 'kept',
     });
   });
+
+  it('stamps authenticated agent ownership in a shared organization and rejects a forged binding', async () => {
+    const org = await createTestOrganization({
+      name: 'Shared Agent Save Scope',
+    });
+    const ownerA = await createTestUser({ email: 'shared-save-a@example.com' });
+    const ownerB = await createTestUser({ email: 'shared-save-b@example.com' });
+    await addUserToOrganization(ownerA.id, org.id, 'owner');
+    await addUserToOrganization(ownerB.id, org.id, 'member');
+    const agentA = await createTestAgent({
+      organizationId: org.id,
+      agentId: 'shared-save-agent-a',
+      ownerUserId: ownerA.id,
+    });
+    const agentB = await createTestAgent({
+      organizationId: org.id,
+      agentId: 'shared-save-agent-b',
+      ownerUserId: ownerB.id,
+    });
+    const baseCtx: ToolContext = {
+      organizationId: org.id,
+      userId: ownerA.id,
+      memberRole: 'owner',
+      agentId: agentA.agentId,
+      isAuthenticated: true,
+      tokenType: 'oauth',
+      scopes: ['mcp:write'],
+      scopedToOrg: true,
+      allowCrossOrg: false,
+    };
+    const saved = await saveContent(
+      {
+        content: 'shared trusted write',
+        semantic_type: 'content',
+        metadata: {
+          agent_id: agentB.agentId,
+          owner_user_id: ownerB.id,
+          memory_visibility: 'public',
+        },
+      },
+      {} as never,
+      baseCtx,
+    );
+    const rows = await getDb()`SELECT metadata FROM events WHERE id = ${saved.id}`;
+    expect(rows[0].metadata).toMatchObject({
+      agent_id: agentA.agentId,
+      owner_user_id: ownerA.id,
+      memory_visibility: 'personal_private',
+    });
+
+    await expect(
+      saveContent({ content: 'forged agent binding', semantic_type: 'content' }, {} as never, {
+        ...baseCtx,
+        userId: ownerB.id,
+        memberRole: 'member',
+      }),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('memory_scope_mismatch'),
+    });
+  });
+
+  it('preserves trusted admin ingestion bound to an owner-null shared agent', async () => {
+    const org = await createTestOrganization({
+      name: 'Shared Admin Ingestion Scope',
+    });
+    const admin = await createTestUser({
+      email: 'shared-save-admin@example.com',
+    });
+    await addUserToOrganization(admin.id, org.id, 'owner');
+    const agent = await createTestAgent({
+      organizationId: org.id,
+      agentId: 'shared-owner-null-agent',
+    });
+    const saved = await saveContent(
+      {
+        content: 'trusted shared ingestion',
+        semantic_type: 'content',
+        metadata: { agent_id: 'forged', owner_user_id: 'forged' },
+      },
+      {} as never,
+      {
+        organizationId: org.id,
+        userId: admin.id,
+        memberRole: 'owner',
+        agentId: agent.agentId,
+        isAuthenticated: true,
+        tokenType: 'pat',
+        scopes: ['mcp:write', 'mcp:admin'],
+        scopedToOrg: true,
+        allowCrossOrg: false,
+      },
+    );
+    const rows = await getDb()`SELECT metadata FROM events WHERE id = ${saved.id}`;
+    expect(rows[0].metadata).toMatchObject({
+      agent_id: agent.agentId,
+      owner_user_id: null,
+      memory_visibility: 'personal_private',
+    });
+  });
 });

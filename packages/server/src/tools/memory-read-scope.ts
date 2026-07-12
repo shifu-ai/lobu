@@ -62,14 +62,13 @@ export async function resolvePersonalMemoryReadScope(
       'organization and agent identity are required for personal memory recall',
     );
   }
-  const trustedOverride = isTrustedMemoryScopeOverride(ctx);
-  if (requestedAgentId && requestedAgentId !== ctx.agentId && !trustedOverride) {
+  if (requestedAgentId && requestedAgentId !== ctx.agentId) {
     throw scopeError(
       'memory_scope_mismatch',
       'requested agent does not match the authenticated agent',
     );
   }
-  const scopedAgentId = trustedOverride && requestedAgentId ? requestedAgentId : ctx.agentId;
+  const scopedAgentId = ctx.agentId;
   const ownerUserId = await authorizeMemoryAgentOwner(ctx, scopedAgentId);
   if (!ownerUserId) {
     throw scopeError(
