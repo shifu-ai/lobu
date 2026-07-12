@@ -19,6 +19,10 @@ describe("HTTP logger redaction", () => {
 		app.use("*", pinoLogger({ pino: logger }));
 		app.get("/logged", (c) => {
 			c.header("set-cookie", "session=secret-response-cookie");
+			c.header("x-lobu-worker-token", "secret-worker-token");
+			c.header("x-internal-token", "secret-internal-token");
+			c.header("x-api-key", "secret-api-key");
+			c.header("x-goog-api-key", "secret-google-api-key");
 			return c.text("ok");
 		});
 
@@ -29,6 +33,10 @@ describe("HTTP logger redaction", () => {
 			"Basic secret-proxy-authorization",
 			"secret-direct-auth",
 			"secret-telegram-token",
+			"secret-worker-token",
+			"secret-internal-token",
+			"secret-api-key",
+			"secret-google-api-key",
 			"secret-response-cookie",
 		];
 
@@ -40,6 +48,10 @@ describe("HTTP logger redaction", () => {
 				"proxy-authorization": secretFixtures[3],
 				"x-lobu-memory-direct-auth": secretFixtures[4],
 				"x-telegram-bot-api-secret-token": secretFixtures[5],
+				"x-lobu-worker-token": secretFixtures[6],
+				"x-internal-token": secretFixtures[7],
+				"x-api-key": secretFixtures[8],
+				"x-goog-api-key": secretFixtures[9],
 			},
 		});
 

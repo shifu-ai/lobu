@@ -139,22 +139,24 @@ const sentryAwareStream: pino.DestinationStream = {
   },
 };
 
-const SENSITIVE_HEADER_PATHS = [
-  'req.headers.authorization',
-  'req.headers.cookie',
-  "req.headers['set-cookie']",
-  "req.headers['x-internal-secret']",
-  "req.headers['proxy-authorization']",
-  "req.headers['x-lobu-memory-direct-auth']",
-  "req.headers['x-telegram-bot-api-secret-token']",
-  'res.headers.authorization',
-  'res.headers.cookie',
-  "res.headers['set-cookie']",
-  "res.headers['x-internal-secret']",
-  "res.headers['proxy-authorization']",
-  "res.headers['x-lobu-memory-direct-auth']",
-  "res.headers['x-telegram-bot-api-secret-token']",
-];
+const SENSITIVE_HEADER_NAMES = [
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'x-internal-secret',
+  'proxy-authorization',
+  'x-lobu-memory-direct-auth',
+  'x-telegram-bot-api-secret-token',
+  'x-lobu-worker-token',
+  'x-internal-token',
+  'x-api-key',
+  'x-goog-api-key',
+] as const;
+
+const SENSITIVE_HEADER_PATHS = SENSITIVE_HEADER_NAMES.flatMap((header) => [
+  `req.headers['${header}']`,
+  `res.headers['${header}']`,
+]);
 
 const logger = pino(
   {
