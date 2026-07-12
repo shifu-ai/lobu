@@ -31,6 +31,16 @@ const getLogLevel = (): pino.Level => {
 // and hid `column "events.search_tsv" does not exist`.
 const errSerializer = pino.stdSerializers.err;
 
+const responseSerializer = (response: unknown): unknown => {
+  if (!response || typeof response !== 'object') return response;
+  const value = response as { headers?: unknown } & Record<string, unknown>;
+  if (!(value.headers instanceof Headers)) return response;
+  return {
+    ...value,
+    headers: Object.fromEntries(value.headers.entries()),
+  };
+};
+
 /**
  * Sentry forwarding for logger.error() and logger.fatal().
  *
@@ -129,9 +139,32 @@ const sentryAwareStream: pino.DestinationStream = {
   },
 };
 
+const SENSITIVE_HEADER_NAMES = [
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'x-internal-secret',
+  'proxy-authorization',
+  'x-lobu-memory-direct-auth',
+  'x-telegram-bot-api-secret-token',
+  'x-lobu-worker-token',
+  'x-internal-token',
+  'x-api-key',
+  'x-goog-api-key',
+] as const;
+
+const SENSITIVE_HEADER_PATHS = SENSITIVE_HEADER_NAMES.flatMap((header) => [
+  `req.headers['${header}']`,
+  `res.headers['${header}']`,
+]);
+
 const logger = pino(
   {
     level: getLogLevel(),
+    redact: {
+      paths: SENSITIVE_HEADER_PATHS,
+      censor: '[Redacted]',
+    },
     browser: {
       asObject: false,
     },
@@ -143,6 +176,7 @@ const logger = pino(
     serializers: {
       err: errSerializer,
       error: errSerializer,
+      res: responseSerializer,
     },
   },
   sentryAwareStream

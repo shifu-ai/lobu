@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runWithAbortDeadline } from '../../src/index.js';
+import { canAutoRecall, runWithAbortDeadline } from '../../src/index.js';
 
 describe('runWithAbortDeadline', () => {
   it('returns the work result when it finishes before the deadline', async () => {
@@ -29,5 +29,13 @@ describe('runWithAbortDeadline', () => {
       throw new Error('boom');
     }, 1_000, 'FALLBACK');
     expect(result).toBe('FALLBACK');
+  });
+});
+
+describe('autoRecall identity gate', () => {
+  it('fails closed without verified personal agent identity', () => {
+    const base = { autoRecall: true, token: 'token' } as never;
+    expect(canAutoRecall(base)).toBe(false);
+    expect(canAutoRecall({ ...base, agentId: 'personal-agent-a' })).toBe(true);
   });
 });

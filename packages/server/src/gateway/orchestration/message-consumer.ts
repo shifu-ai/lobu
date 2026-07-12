@@ -50,6 +50,7 @@ export function parseCourseContextRolloutConfig(source: NodeJS.ProcessEnv | Reco
 }
 export type LegacyComparison = "match"|"mismatch"|"legacy_missing"|"resolved_missing";
 export function compareCourseContextIdentity(resolved:{courseKey:string;courseEntityId:string}|undefined,legacy:{courseKey:string;courseEntityId:string}|undefined):LegacyComparison{if(!resolved)return"resolved_missing";if(!legacy)return"legacy_missing";return resolved.courseKey===legacy.courseKey&&resolved.courseEntityId===legacy.courseEntityId?"match":"mismatch";}
+function hasTrustedCourseContext(data:MessagePayload,context:NonNullable<MessagePayload['resolvedCourseContext']>):boolean{const trust=context.trust;return Boolean(trust&&trust.ownerUserId===data.userId&&trust.agentId===data.agentId&&trust.conversationId===data.conversationId&&trust.courseKey===context.course.courseKey&&trust.courseEntityId===context.course.courseEntityId&&trust.contextPackId===context.context.contextPackId&&trust.contextVersion===context.context.contextVersion&&Number.isSafeInteger(trust.contextVersion)&&trust.contextVersion>0&&context.retrieval.crossCourseGuard==='passed');}
 type LegacyCourseContext={courseKey:string;courseEntityId:string;contextPackId:string;contextVersion:number;stale:boolean;confirmedSummary:string};
 async function readLegacyCourseContext(data:MessagePayload):Promise<LegacyCourseContext|undefined>{const root=process.env.COURSE_CONTEXT_LEGACY_COMPARE_URL?.trim();const secret=process.env.TOOLBOX_INTERNAL_SECRET?.trim();if(!root||!secret)return undefined;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),500);try{const url=new URL(root);url.searchParams.set('ownerUserId',data.userId);url.searchParams.set('agentId',data.agentId);const response=await fetch(url,{headers:{'x-internal-secret':secret},signal:controller.signal});if(response.status===404)return undefined;if(!response.ok)return undefined;const value=await response.json() as Record<string,unknown>;if(typeof value.courseKey!=="string"||value.courseKey.length>200||typeof value.courseEntityId!=="string"||value.courseEntityId.length>300||typeof value.contextPackId!=="string"||value.contextPackId.length>300||!Number.isInteger(value.contextVersion)||typeof value.stale!=="boolean"||typeof value.confirmedSummary!=="string"||value.confirmedSummary.length>8000)return undefined;return value as LegacyCourseContext;}catch{return undefined;}finally{clearTimeout(timer);}}
 export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
@@ -136,6 +137,7 @@ export class MessageConsumer {
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
+    if(this.courseContextRollout.mode==='off'||this.courseContextRollout.mode==='shadow')delete data.resolvedCourseContext;
     if (this.courseContextRollout.mode === "off") {
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);
@@ -162,7 +164,8 @@ export class MessageConsumer {
       const resolved=result?.status==="ready"?result.context.course:result?.status==="context_unavailable"?result.resolvedCourse:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
     }
     if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
-    if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match"&&legacy){const context:NonNullable<MessagePayload['resolvedCourseContext']>={course:result.resolvedCourse,resolution:{confidence:'high',matchedBy:['single_course_default']},context:{contextPackId:legacy.contextPackId,contextVersion:legacy.contextVersion,stale:legacy.stale,confirmedSummary:legacy.confirmedSummary},retrieval:{status:'failed',crossCourseGuard:'passed',eventIds:[],evidenceRefs:[],snippets:[]}};data.resolvedCourseContext=context;result={status:'ready',context};}}
+    if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match")await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison:"match"});}
+    if(result?.status==='ready'&&!hasTrustedCourseContext(data,result.context)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
     if (this.courseContextRollout.mode === "single_course") {
       const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
       if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
@@ -172,6 +175,7 @@ export class MessageConsumer {
       // worker without canonical context.
       else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
     }
+    if(data.resolvedCourseContext&&!hasTrustedCourseContext(data,data.resolvedCourseContext)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
     if (result?.status === "already_dispatched") return false;
     if (result?.status === "clarification_required" || result?.status === "onboarding_required" || result?.status === "context_unavailable") {
       await this.deliverCourseContextTerminal(data, result);

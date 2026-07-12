@@ -17,6 +17,8 @@ import logger from '../utils/logger';
 import { expandSearchQueries } from '../utils/query-expansion';
 import { buildEntityUrl, getPublicWebUrl } from '../utils/url-builder';
 import { getWorkspaceProvider } from '../workspace';
+import { incrementCounter } from '../gateway/metrics/prometheus';
+import { resolvePersonalMemoryReadScope, resolvePersonalOrganizationOwner } from './memory-read-scope';
 import type { ToolContext } from './registry';
 
 // ============================================
@@ -263,6 +265,7 @@ async function fetchContentSnippets(
   env: Env,
   queryEmbedding?: number[],
   agentId?: string,
+  ownerUserId?: string,
   entityIds?: string[]
 ): Promise<ContentSnippet[]> {
   const result = await searchContentByText(
@@ -279,6 +282,7 @@ async function fetchContentSnippets(
       min_similarity: 0.4,
       query_embedding: queryEmbedding,
       agent_id: agentId,
+      owner_user_id: ownerUserId,
       course_entity_ids: entityIds,
       // Recall wants the most *relevant* matching content, not the most recent.
       // This also opts into the bounded recall-only candidate path (the implicit
@@ -288,6 +292,14 @@ async function fetchContentSnippets(
     },
     env
   );
+
+  if (agentId && ownerUserId) {
+    const legacyCount = result.content.filter((item) => {
+      const metadata = item.metadata as Record<string, unknown> | null;
+      return metadata?.agent_id === agentId && metadata.owner_user_id == null;
+    }).length;
+    if (legacyCount > 0) incrementCounter('lobu_memory_legacy_owner_compat_total', {}, legacyCount);
+  }
 
   return result.content.map((c) => ({
     id: c.id,
@@ -325,8 +337,11 @@ export async function search(
   // query or a pre-computed embedding — forwarding the embedding lets the
   // content layer skip regenerating it from text.
   const hasContentSignal = Boolean(args.query || args.query_embedding?.length);
-  const agentIdScope =
-    args.agent_id ?? (args.metadata_filter?.agent_id as string | undefined);
+  const requestedAgentId = args.agent_id ?? (args.metadata_filter?.agent_id as string | undefined);
+  const personalOrgOwner = await resolvePersonalOrganizationOwner(ctx);
+  const personalScope = ctx.agentId || requestedAgentId || personalOrgOwner
+    ? await resolvePersonalMemoryReadScope(ctx, requestedAgentId)
+    : undefined;
   const contentSearchPromise =
     includeContent && hasContentSignal
       ? fetchContentSnippets(
@@ -336,7 +351,8 @@ export async function search(
           contentLimit,
           env,
           args.query_embedding,
-          agentIdScope,
+          personalScope?.agentId,
+          personalScope?.ownerUserId,
           entityIds
         ).catch((err) => {
           logger.warn(

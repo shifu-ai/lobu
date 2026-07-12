@@ -14,6 +14,15 @@ const basePayload = () => ({
   agentOptions: {},
 });
 const validResolvedCourseContext = () => ({
+  trust: {
+    ownerUserId: "user-1",
+    agentId: "agent-1",
+    conversationId: "conversation-1",
+    courseKey: "course-a",
+    courseEntityId: "course:user:course-a",
+    contextPackId: "pack-a",
+    contextVersion: 2,
+  },
   course: {
     courseKey: "course-a",
     courseEntityId: "course:user:course-a",
@@ -166,27 +175,7 @@ describe("GatewayClient heartbeat ACKs", () => {
     );
     const handleThreadMessage = mock(async () => undefined);
     (client as any).handleThreadMessage = handleThreadMessage;
-    const resolvedCourseContext = {
-      course: {
-        courseKey: "course-a",
-        courseEntityId: "course:user:course-a",
-        displayName: "Course A",
-      },
-      resolution: { confidence: "high", matchedBy: ["message_name"] },
-      context: {
-        contextPackId: "pack-a",
-        contextVersion: 2,
-        stale: false,
-        confirmedSummary: "Confirmed A",
-      },
-      retrieval: {
-        status: "loaded",
-        crossCourseGuard: "passed",
-        eventIds: [5],
-        evidenceRefs: ["lobu:event:5"],
-        snippets: [{ eventId: 5, title: "A", text: "A only", sourceUrl: null }],
-      },
-    };
+    const resolvedCourseContext = validResolvedCourseContext();
     await (client as any).handleEvent(
       "job",
       JSON.stringify({ payload: { ...basePayload(), resolvedCourseContext } })
@@ -199,6 +188,61 @@ describe("GatewayClient heartbeat ACKs", () => {
         handleThreadMessage.mock.calls[0]?.[0]
       ).resolvedCourseContext
     ).toEqual(resolvedCourseContext);
+  });
+
+  test("terminally rejects a queued legacy course context without executing it", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const legacy: any = validResolvedCourseContext();
+    delete legacy.trust;
+    const requests: unknown[] = [];
+    globalThis.fetch = mock(async (_url, init) => {
+      requests.push(JSON.parse(String(init?.body)));
+      return new Response("ok");
+    }) as typeof fetch;
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "queued-old-job",
+        payload: { ...basePayload(), resolvedCourseContext: legacy },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+    expect(requests).toContainEqual(
+      expect.objectContaining({
+        jobId: "queued-old-job",
+        messageId: "message-1",
+        error: "Course context is unavailable. Please retry.",
+        errorCode: "course_context_unavailable",
+      })
+    );
+  });
+
+  test("rejects fabricated trust that disagrees with payload and context", async () => {
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const fabricated: any = validResolvedCourseContext();
+    fabricated.trust.ownerUserId = "other";
+    fabricated.trust.contextPackId = "other-pack";
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: { ...basePayload(), resolvedCourseContext: fabricated },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
   });
 
   test("rejects malformed resolved course context at the worker wire boundary", async () => {
@@ -375,6 +419,12 @@ describe("GatewayClient heartbeat ACKs", () => {
       ...resolvedCourseContext.context,
       contextPackId: "p".repeat(200),
       confirmedSummary: "s".repeat(8000),
+    };
+    resolvedCourseContext.trust = {
+      ...resolvedCourseContext.trust,
+      courseKey: resolvedCourseContext.course.courseKey,
+      courseEntityId: resolvedCourseContext.course.courseEntityId,
+      contextPackId: resolvedCourseContext.context.contextPackId,
     };
     resolvedCourseContext.retrieval.eventIds = Array.from(
       { length: 8 },

@@ -38,6 +38,7 @@ import { getAllTools, getTool } from './tools/registry';
 import { formatToolResult } from './utils/markdown-formatter';
 import { getConfiguredPublicOrigin } from './utils/public-origin';
 import { buildWorkspaceInstructions } from './utils/workspace-instructions';
+import { authorizeMemoryAgentOwner } from './tools/memory-read-scope';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -677,6 +678,12 @@ async function syncAgentBinding(
   const exists = await agentExistsInOrganization(authCtx.organizationId, requestedAgentId);
   if (!exists) {
     return `Agent '${requestedAgentId}' was not found in the current organization.`;
+  }
+
+  try {
+    await authorizeMemoryAgentOwner(authCtx, requestedAgentId);
+  } catch (error) {
+    return error instanceof Error ? error.message : 'memory_scope_mismatch: agent binding denied';
   }
 
   // SHIFU FORK: when the token itself carries an agent identity, it wins for

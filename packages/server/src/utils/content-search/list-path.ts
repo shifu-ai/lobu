@@ -320,6 +320,12 @@ export async function listContentInternal(
     if (options.agent_id) {
       baseParams.push(options.agent_id);
       baseConditions.push(`f.metadata->>'agent_id' = $${baseParams.length}`);
+      if (options.owner_user_id) {
+        baseParams.push(options.owner_user_id);
+        baseConditions.push(
+          `(f.metadata->>'owner_user_id' = $${baseParams.length} OR f.metadata->>'owner_user_id' IS NULL)`
+        );
+      }
     }
 
     const classificationExists = buildClassificationExistsClauses(

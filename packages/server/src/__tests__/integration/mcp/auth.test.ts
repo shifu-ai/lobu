@@ -674,6 +674,49 @@ describe('MCP Authentication', () => {
       expect(body.error?.message).toContain("Agent 'missing-agent' was not found");
     });
 
+    it('rejects initialize when Owner A declares Agent B owned by another user', async () => {
+      const otherOwner = await createTestUser({ email: 'mcp-agent-b-owner@example.com' });
+      await addUserToOrganization(otherOwner.id, org.id, 'member');
+      await createTestAgent({
+        organizationId: org.id,
+        agentId: 'lobu-other-owner-agent',
+        ownerUserId: otherOwner.id,
+      });
+      const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
+      const response = await post('/mcp', {
+        body: {
+          jsonrpc: '2.0', id: 'cross-owner-init', method: 'initialize',
+          params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'lobu-test', version: '1', agentId: 'lobu-other-owner-agent' } },
+        },
+        token,
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error?.message).toContain('memory_scope_mismatch');
+    });
+
+    it('allows only trusted admin OAuth/PAT callers to bind a shared owner-null agent', async () => {
+      const shared = await createTestAgent({ organizationId: org.id, agentId: 'lobu-shared-owner-null' });
+      await getTestDb()`UPDATE agents SET owner_user_id = NULL WHERE id = ${shared.agentId}`;
+      const ordinaryToken = await createTestAccessToken(user.id, org.id, client.client_id);
+      const ordinary = await post('/mcp', {
+        body: { jsonrpc: '2.0', id: 'ordinary-shared', method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '1', agentId: shared.agentId } } },
+        token: ordinaryToken.token,
+      });
+      expect(ordinary.status).toBe(400);
+      expect((await ordinary.json()).error?.message).toContain('memory_scope_identity_mismatch');
+      const admin = await createTestUser({ email: 'shared-agent-admin@example.com' });
+      await addUserToOrganization(admin.id, org.id, 'owner');
+      const oauthAdmin = await createTestAccessToken(admin.id, org.id, client.client_id, { scope: 'mcp:read mcp:admin' });
+      const patAdmin = await createTestPAT(admin.id, org.id, { scope: 'mcp:read mcp:admin' });
+      for (const [id, token] of [['oauth-admin-shared', oauthAdmin.token], ['pat-admin-shared', patAdmin.token]]) {
+        const response = await post('/mcp', {
+          body: { jsonrpc: '2.0', id, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'test', version: '1', agentId: shared.agentId } } },
+          token,
+        });
+        expect(response.status).toBe(200);
+      }
+    });
+
     it('exposes list_organizations on scoped /mcp/:org routes too', async () => {
       const { token } = await createTestAccessToken(user.id, org.id, client.client_id);
       const result = await mcpListTools({ token, orgSlug: org.slug });

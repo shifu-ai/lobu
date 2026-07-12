@@ -82,6 +82,11 @@ function initializeMetrics() {
     "counter"
   );
   registerMetric(
+    "lobu_memory_legacy_owner_compat_total",
+    "Legacy personal-memory rows recalled through exact-agent owner-null compatibility",
+    "counter"
+  );
+  registerMetric(
     "lobu_process_start_time_seconds",
     "Start time of the process since unix epoch in seconds",
     "gauge"

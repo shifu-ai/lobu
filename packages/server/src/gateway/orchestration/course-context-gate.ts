@@ -81,6 +81,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   await traceCourse(data,options,`context.memory.${retrievalEvent}` ,retrieval.status==='failed'?'degraded':'ok',{course_entity_id:course.courseEntityId,result_count:retrieval.eventIds.length});
   await traceCourse(data,options,`context.guard.${retrieval.crossCourseGuard}` ,retrieval.crossCourseGuard==='passed'?'ok':'failed',{course_entity_id:course.courseEntityId});
   const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
+    trust:{ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseKey:course.courseKey,courseEntityId:course.courseEntityId,contextPackId:context.contextPackId,contextVersion:context.version},
     course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },
     resolution: { confidence: 'high', matchedBy: resolution.matchedBy },
     context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: options?.courseSkillEnabled&&options.courseSkillContextFields?.length?projectRequiredCourseContext(bundle,options.courseSkillContextFields):context.agentMd.slice(0, 8000) },

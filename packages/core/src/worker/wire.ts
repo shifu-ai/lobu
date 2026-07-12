@@ -30,6 +30,15 @@ import type {
 export type JobType = "message" | "exec";
 
 export interface ResolvedCourseExecutionContext {
+  trust: {
+    ownerUserId: string;
+    agentId: string;
+    conversationId: string;
+    courseKey: string;
+    courseEntityId: string;
+    contextPackId: string;
+    contextVersion: number;
+  };
   course: { courseKey: string; courseEntityId: string; displayName: string };
   resolution: {
     confidence: "high";

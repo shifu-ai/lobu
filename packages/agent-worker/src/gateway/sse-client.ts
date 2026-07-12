@@ -98,6 +98,17 @@ const AgentOptionsSchema = z
 
 const ResolvedCourseContextSchema = z
   .object({
+    trust: z
+      .object({
+        ownerUserId: z.string().min(1).max(200),
+        agentId: z.string().min(1).max(200),
+        conversationId: z.string().min(1).max(200),
+        courseKey: z.string().min(1).max(200),
+        courseEntityId: z.string().min(1).max(200),
+        contextPackId: z.string().min(1).max(200),
+        contextVersion: z.number().int().positive(),
+      })
+      .optional(),
     course: z.object({
       courseKey: z.string().min(1).max(200),
       courseEntityId: z.string().min(1).max(200),
@@ -139,6 +150,18 @@ const ResolvedCourseContextSchema = z
     }),
   })
   .superRefine((value, ctx) => {
+    const trust = value.trust;
+    if (
+      trust &&
+      (trust.courseKey !== value.course.courseKey ||
+        trust.courseEntityId !== value.course.courseEntityId ||
+        trust.contextPackId !== value.context.contextPackId ||
+        trust.contextVersion !== value.context.contextVersion)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Resolved course context trust does not match context",
+      });
     if (JSON.stringify(value).length > 20_000)
       ctx.addIssue({
         code: "custom",
@@ -146,37 +169,53 @@ const ResolvedCourseContextSchema = z
       });
   });
 
-const JobEventSchema = z.object({
-  payload: z
-    .object({
-      botId: z.string(),
-      userId: z.string(),
-      agentId: z.string(),
-      conversationId: z.string(),
-      platform: z.string(),
-      channelId: z.string(),
-      messageId: z.string(),
-      messageText: z.string(),
-      platformMetadata: PlatformMetadataSchema,
-      agentOptions: AgentOptionsSchema,
-      jobId: z.string().optional(),
-      teamId: z.string().optional(), // Optional for WhatsApp (top-level) and Slack (in platformMetadata)
-      // Threaded through from MessageConsumer's runs-queue claim. The worker
-      // asserts these — see worker.ts:353-360. The default zod object mode
-      // strips unknown keys,
-      // which silently dropped these fields and broke every Telegram chat
-      // when snapshot mode became the default in PR #871. Declare them
-      // explicitly so they survive parsing, and `.passthrough()` keeps any
-      // future MessagePayload field (mcpConfig, nixConfig, egressConfig,
-      // preApprovedTools, exec* fields, organizationId, networkConfig...)
-      // from regressing the same way.
-      runId: z.number().optional(),
-      runJobToken: z.string().optional(),
-      resolvedCourseContext: ResolvedCourseContextSchema.optional(),
-    })
-    .passthrough(),
-  processedIds: z.array(z.string()).optional(),
-});
+const JobEventSchema = z
+  .object({
+    payload: z
+      .object({
+        botId: z.string(),
+        userId: z.string(),
+        agentId: z.string(),
+        conversationId: z.string(),
+        platform: z.string(),
+        channelId: z.string(),
+        messageId: z.string(),
+        messageText: z.string(),
+        platformMetadata: PlatformMetadataSchema,
+        agentOptions: AgentOptionsSchema,
+        jobId: z.string().optional(),
+        teamId: z.string().optional(), // Optional for WhatsApp (top-level) and Slack (in platformMetadata)
+        // Threaded through from MessageConsumer's runs-queue claim. The worker
+        // asserts these — see worker.ts:353-360. The default zod object mode
+        // strips unknown keys,
+        // which silently dropped these fields and broke every Telegram chat
+        // when snapshot mode became the default in PR #871. Declare them
+        // explicitly so they survive parsing, and `.passthrough()` keeps any
+        // future MessagePayload field (mcpConfig, nixConfig, egressConfig,
+        // preApprovedTools, exec* fields, organizationId, networkConfig...)
+        // from regressing the same way.
+        runId: z.number().optional(),
+        runJobToken: z.string().optional(),
+        resolvedCourseContext: ResolvedCourseContextSchema.optional(),
+      })
+      .passthrough(),
+    processedIds: z.array(z.string()).optional(),
+  })
+  .superRefine((value, ctx) => {
+    const context = value.payload.resolvedCourseContext;
+    const trust = context?.trust;
+    if (
+      trust &&
+      (trust.ownerUserId !== value.payload.userId ||
+        trust.agentId !== value.payload.agentId ||
+        trust.conversationId !== value.payload.conversationId)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Resolved course context trust does not match execution",
+        path: ["payload", "resolvedCourseContext", "trust"],
+      });
+  });
 
 /**
  * Gateway client for workers - connects to dispatcher via SSE
@@ -523,9 +562,34 @@ export class GatewayClient {
             this.sendDeliveryReceipt(jobId);
           }
 
+          const payload = validationResult.data.payload;
+          if (
+            payload.resolvedCourseContext &&
+            !payload.resolvedCourseContext.trust
+          ) {
+            const transport = new HttpWorkerTransport({
+              gatewayUrl: this.dispatcherUrl,
+              workerToken: this.workerToken,
+              userId: payload.userId,
+              channelId: payload.channelId,
+              conversationId: payload.conversationId,
+              originalMessageTs: payload.messageId,
+              teamId: payload.teamId ?? "",
+              platform: payload.platform,
+              platformMetadata: payload.platformMetadata,
+              processedMessageIds: [payload.messageId],
+            });
+            if (jobId) transport.setJobId(jobId);
+            await transport.signalError(
+              new Error("Course context is unavailable. Please retry."),
+              "course_context_unavailable"
+            );
+            return;
+          }
+
           // Zod validates structure but passthrough allows extra fields
           // The validated payload matches MessagePayload interface
-          await this.handleThreadMessage(validationResult.data.payload);
+          await this.handleThreadMessage(payload as MessagePayload);
         } catch (parseError) {
           logger.error(
             `Failed to parse or validate job event data:`,

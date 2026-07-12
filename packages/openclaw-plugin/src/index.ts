@@ -419,6 +419,10 @@ function hasAuthConfigured(config: ResolvedPluginConfig): boolean {
   return !!(sessionToken || config.token || config.tokenCommand);
 }
 
+export function canAutoRecall(config: ResolvedPluginConfig): boolean {
+  return Boolean(config.autoRecall && config.agentId && hasAuthConfigured(config));
+}
+
 function getWorkerToken(): string | null {
   return asString(process.env.WORKER_TOKEN);
 }
@@ -750,7 +754,7 @@ async function reinitializeMcpSession(config: ResolvedPluginConfig): Promise<boo
         params: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: 'openclaw-lobu', version: '1.0.0' },
+          clientInfo: { name: 'openclaw-lobu', version: '1.0.0', agentId: config.agentId },
         },
       }),
     });
@@ -910,7 +914,7 @@ async function fetchWorkspaceInstructions(
         params: {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: 'openclaw-lobu', version: '1.0.0' },
+          clientInfo: { name: 'openclaw-lobu', version: '1.0.0', agentId: config.agentId },
         },
       },
       authHeaders,
@@ -967,10 +971,11 @@ function fetchMcpBootstrapSync(config: ResolvedPluginConfig): McpBootstrap {
   const script = `
     const url = process.env.__MCP_URL;
     const token = process.env.__MCP_TOKEN;
+    const agentId = process.env.__MCP_AGENT_ID || undefined;
     const base = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
     if (token) base.Authorization = 'Bearer ' + token;
     async function run() {
-      const initRes = await fetch(url, { method: 'POST', headers: base, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: ${JSON.stringify(MCP_PROTOCOL_VERSION)}, capabilities: {}, clientInfo: { name: 'openclaw-lobu', version: '1.0.0' } } }) });
+      const initRes = await fetch(url, { method: 'POST', headers: base, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: ${JSON.stringify(MCP_PROTOCOL_VERSION)}, capabilities: {}, clientInfo: { name: 'openclaw-lobu', version: '1.0.0', agentId } } }) });
       const initData = await initRes.json();
       const sid = initRes.headers.get('mcp-session-id');
       const h2 = { ...base };
@@ -991,6 +996,7 @@ function fetchMcpBootstrapSync(config: ResolvedPluginConfig): McpBootstrap {
         ...process.env,
         __MCP_URL: config.mcpUrl,
         __MCP_TOKEN: token ?? '',
+        __MCP_AGENT_ID: config.agentId ?? '',
       },
     })
       .stdout?.toString()
@@ -1356,7 +1362,7 @@ const plugin = {
       let lastRecallQuery: string | null = null;
       let lastRecallBlock = '';
       const doRecall = async (query: string): Promise<string> => {
-        if (!config.autoRecall || !hasAuthConfigured(config)) {
+        if (!canAutoRecall(config)) {
           return '';
         }
         if (query === lastRecallQuery) {

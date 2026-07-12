@@ -32,9 +32,13 @@ export function buildStandardParams(
         )
       : null,
     options.interaction_status ?? null,
-    // Slot $11 — per-agent memory scope. WHERE template uses
-    // `($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)`.
-    options.agent_id ?? null,
+    // Slot $11 — trusted personal-memory identity scope.
+    options.agent_id
+      ? ({
+          agent_id: options.agent_id,
+          ...(options.owner_user_id ? { owner_user_id: options.owner_user_id } : {}),
+        })
+      : null,
   ];
 }
 
@@ -62,7 +66,13 @@ export function buildStandardWhereSql(entityLinkSql: string): string {
           ))
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
-          AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)`;
+          AND ($11::jsonb IS NULL OR (
+            f.metadata->>'agent_id' = $11::jsonb->>'agent_id'
+            AND (NOT ($11::jsonb ? 'owner_user_id') OR (
+              f.metadata->>'owner_user_id' = $11::jsonb->>'owner_user_id'
+              OR (f.metadata->>'owner_user_id' IS NULL AND f.metadata->>'agent_id' = $11::jsonb->>'agent_id')
+            ))
+          ))`;
 }
 
 export const WINDOW_JOIN_SQL = `LEFT JOIN watcher_window_events iwf

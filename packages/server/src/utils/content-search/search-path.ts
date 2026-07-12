@@ -164,7 +164,13 @@ export async function searchContentBySingleQuery(
           AND ($8::numeric IS NULL OR f.score <= $8::numeric)
           AND ($9::text[] IS NULL OR f.semantic_type = ANY($9::text[]))
           AND ($10::text IS NULL OR f.interaction_status = $10::text)
-          AND ($11::text IS NULL OR f.metadata->>'agent_id' = $11::text)
+          AND ($11::jsonb IS NULL OR (
+            f.metadata->>'agent_id' = $11::jsonb->>'agent_id'
+            AND (NOT ($11::jsonb ? 'owner_user_id') OR (
+              f.metadata->>'owner_user_id' = $11::jsonb->>'owner_user_id'
+              OR (f.metadata->>'owner_user_id' IS NULL AND f.metadata->>'agent_id' = $11::jsonb->>'agent_id')
+            ))
+          ))
           AND ($12::text[] IS NULL OR (jsonb_typeof(f.metadata->'course_entity_ids') = 'array' AND f.metadata->'course_entity_ids' ?| $12::text[]))
           ${excludeClause.sql}
           ${visibilityClause.sql}
@@ -435,7 +441,12 @@ export async function searchContentBySingleQuery(
     options.interaction_status ?? null,
     // Slot $11 — per-agent memory scope. See buildStandardParams for the
     // mirror call site. Bumps orgScope to $12 (set above).
-    options.agent_id ?? null,
+    options.agent_id
+      ? ({
+          agent_id: options.agent_id,
+          ...(options.owner_user_id ? { owner_user_id: options.owner_user_id } : {}),
+        })
+      : null,
     options.course_entity_ids ? pgTextArray(options.course_entity_ids) : null,
     ...orgScope.params,
     ...excludeClause.params,
