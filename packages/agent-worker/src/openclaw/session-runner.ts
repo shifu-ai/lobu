@@ -75,6 +75,7 @@ import {
 } from "./plugin-loader";
 import type { OpenClawProgressProcessor } from "./processor";
 import { buildAgentSession } from "./session-builder";
+import { buildTrustedAutomationModificationTurnContext } from "./automation-modification-context";
 import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import {
   buildResolvedCourseContextInstructions,
@@ -1059,7 +1060,7 @@ export async function runAISession(
   params: RunAISessionParams
 ): Promise<SessionExecutionResult> {
   const {
-    userPrompt,
+    userPrompt: rawUserPrompt,
     customInstructions,
     onProgress,
     agentOptions,
@@ -1081,6 +1082,11 @@ export async function runAISession(
     maybeRunPreCompactionMemoryFlush,
     maybeBuildAuthHintMessage,
   } = params;
+  const automationModificationTurn = buildTrustedAutomationModificationTurnContext({
+    userPrompt: rawUserPrompt,
+    platformMetadata,
+  });
+  const userPrompt = automationModificationTurn.userPrompt;
 
   let rawOptions: Record<string, unknown>;
   try {
@@ -1582,6 +1588,7 @@ export async function runAISession(
   const instructionParts = [
     gatewayInstructions,
     resolvedCourseInstructions,
+    automationModificationTurn.systemInstructions,
     customInstructions,
   ];
 
