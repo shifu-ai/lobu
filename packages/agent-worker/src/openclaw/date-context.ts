@@ -133,7 +133,7 @@ export function buildCurrentDateContext(now: Date = new Date()): string {
     "- Current Date Context overrides relative dates in old conversation history.",
     "- Old today/yesterday/tomorrow/this week references describe the old message time, not this turn.",
     "- Never guess a weekday. Use the deterministic date/weekday pairs above.",
-    "- Dates outside the calendar above require trusted tool data or deterministic computation; otherwise, say that you cannot confirm them.",
-    "- For the next occurrence, choose the earliest candidate at or after the current Taipei time. Do not guess without trusted candidates or an explicit recurrence.",
+    "- For dates outside this table, use trusted tool data or deterministic computation; otherwise say you cannot confirm.",
+    "- For a next occurrence, choose the earliest candidate at or after the current Taipei time; without trusted candidates or an explicit recurrence, do not guess.",
   ].join("\n");
 }

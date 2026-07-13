@@ -54,5 +54,11 @@ describe("date context", () => {
       "Current Date Context overrides relative dates in old conversation history"
     );
     expect(context).toContain("Never guess a weekday");
+    expect(context).toContain(
+      "- For dates outside this table, use trusted tool data or deterministic computation; otherwise say you cannot confirm."
+    );
+    expect(context).toContain(
+      "- For a next occurrence, choose the earliest candidate at or after the current Taipei time; without trusted candidates or an explicit recurrence, do not guess."
+    );
   });
 });
