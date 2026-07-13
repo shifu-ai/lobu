@@ -295,10 +295,12 @@ describe("guardDateOutput", () => {
     }
   });
 
-  test("applies request negation to backward possessive targets", () => {
+  test("applies bounded request negation to forward and backward targets", () => {
     for (const userMessage of [
-      "不要查銷講的下一場",
-      "忽略銷講的下一場",
+      "我不想查下一場銷講",
+      "不用查下一場銷講",
+      "先不要查銷講的下一場",
+      "暫時忽略銷講的下一場",
     ]) {
       expect(
         guardDateOutput({
@@ -312,7 +314,12 @@ describe("guardDateOutput", () => {
 
     for (const [userMessage, finalText, expected] of [
       [
-        "不要查銷講的下一場，幫我查內部會議的下一場",
+        "我不想查下一場銷講，幫我查下一場內部會議",
+        "下一場內部會議是 7/22（三）。",
+        "下一場內部會議是 7/16（四）。",
+      ],
+      [
+        "先不要查銷講的下一場，幫我查內部會議的下一場",
         "下一場內部會議是 7/22（三）。",
         "下一場內部會議是 7/16（四）。",
       ],

@@ -531,6 +531,25 @@ function normalizeTemporalEvidenceLabel(value: string): string {
 
 const REQUEST_PREFIX_RE =
   /^(?:(?:請幫我查|请帮我查|幫我查|帮我查|請問|请问|我想知道|麻煩查|麻烦查)\s*)+/u;
+const NEGATED_OCCURRENCE_REQUEST_RE =
+  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:不要|別|别|不必|不用|無需|无需|忽略|不想)\s*(?:管|查|看)?/gu;
+
+function hasBoundedOccurrenceRequestNegation(
+  value: string,
+  boundary: "start" | "end"
+): boolean {
+  const normalized = value.trim();
+  for (const match of normalized.matchAll(NEGATED_OCCURRENCE_REQUEST_RE)) {
+    if (
+      (boundary === "start" && match.index === 0) ||
+      (boundary === "end" &&
+        (match.index ?? 0) + match[0].length === normalized.length)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function normalizeRequestedOccurrenceTarget(value: string): string | null {
   const normalized = normalizeTemporalEvidenceLabel(value)
@@ -575,7 +594,7 @@ function requestedOccurrenceTargetState(
   for (const occurrence of userMessage.matchAll(/(?:下一場|下次)/g)) {
     const index = occurrence.index ?? 0;
     const prefix = userMessage.slice(Math.max(0, index - 24), index);
-    if (/(?:不要|別|别|不必|無需|无需|忽略)\s*(?:管|查|看)?\s*$/.test(prefix)) {
+    if (hasBoundedOccurrenceRequestNegation(prefix, "end")) {
       continue;
     }
     hasPositiveOccurrence = true;
@@ -595,11 +614,7 @@ function requestedOccurrenceTargetState(
     /(?:^|[\s，,。！？；;])([\p{L}\p{N}]{2,64})的(?:下一場|下次)/gu
   )) {
     const rawTarget = backward[1] ?? "";
-    if (
-      /^(?:(?:請|请)\s*)?(?:不要|別|别|不必|無需|无需|忽略)\s*(?:管|查|看)?/u.test(
-        rawTarget
-      )
-    ) {
+    if (hasBoundedOccurrenceRequestNegation(rawTarget, "start")) {
       continue;
     }
     if (!addTarget(rawTarget)) hasInvalidPositiveTarget = true;
