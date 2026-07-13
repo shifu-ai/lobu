@@ -51,6 +51,8 @@ describe("isDateSensitiveTurn", () => {
       "Compare today, tomorrow, and yesterday",
       "Show this week, last week, and next week",
       "Is Monday a weekday?",
+      "When is the next session?",
+      "When will it happen?",
     ]) {
       expect(isDateSensitiveTurn(prompt)).toBe(true);
     }
@@ -64,6 +66,7 @@ describe("isDateSensitiveTurn", () => {
       "this wedding summary",
       "the next sunset photo",
       "the latest update",
+      "What happens when I click save?",
     ]) {
       expect(isDateSensitiveTurn(prompt)).toBe(false);
     }
@@ -147,6 +150,22 @@ describe("guardDateOutput", () => {
       "release-2026-02-30",
       "/2026-02-30/report",
       "version_2026-02-30",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "請核對這些日期格式 token",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("does not treat dotted filenames as invalid date claims", () => {
+    for (const finalText of [
+      "report.2026-02-30.txt",
+      "report.2026-02-30",
+      "2026-02-30.txt",
     ]) {
       expect(
         guardDateOutput({
@@ -869,6 +888,60 @@ describe("guardDateOutput", () => {
     });
     expect(result.status).toBe("corrected");
     expect(result.text).toBe("日期是 2026-07-16 (星期四)。");
+  });
+
+  test("does not correct explicit ISO dates embedded in identifier or path tokens", () => {
+    for (const finalText of [
+      "version_2026-07-16 (星期三)",
+      "release-2026-07-16 (星期三)",
+      "/2026-07-16 (星期三)",
+      "report.2026-07-16 (星期三)",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "請核對這些日期格式 token",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("still corrects a punctuated natural-language ISO date claim", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "請核對日期",
+        finalText: "日期：（2026-07-16 (星期三)）",
+        now: NOW,
+      }).text
+    ).toBe("日期：（2026-07-16 (星期四)）");
+  });
+
+  test("does not correct short dates embedded in identifier or path tokens", () => {
+    for (const finalText of [
+      "version_7/16（三）",
+      "release-7/16（三）",
+      "/7/16（三）",
+      "report.7/16（三）",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "請核對這些日期格式 token",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("still corrects a punctuated natural-language short date claim", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "請核對日期",
+        finalText: "日期：（7/16（三））",
+        now: NOW,
+      }).text
+    ).toBe("日期：（7/16（四））");
   });
 
   test("preserves the 星期天 spelling for a correct Sunday", () => {
