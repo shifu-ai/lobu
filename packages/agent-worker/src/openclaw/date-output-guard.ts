@@ -546,7 +546,7 @@ function normalizedRequestedOccurrenceTarget(
       continue;
     }
     const tail = userMessage.slice(index + occurrence[0].length, index + 80);
-    const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?:(?:的)?(?:目前|当前)?(?:報名狀況|报名状况|報名人數|报名人数|報名數|报名数)|的(?:日期|時間|时间))?(?=\s*(?:是|為|为|在|於|于|哪|何|[？?，,。！!；;]|$))/u.exec(
+    const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?:(?:的)?(?:目前|当前)?(?:報名狀況|报名状况|報名人數|报名人数|報名數|报名数)(?:\s*(?:嗎|吗|呢|如何|怎樣|怎样|怎麼樣|怎么样))?|的(?:日期|時間|时间))?(?=\s*(?:是|為|为|在|於|于|哪|何|[？?，,。！!；;]|$))/u.exec(
       tail
     );
     addTarget(forward?.[1]);
