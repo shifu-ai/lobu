@@ -143,6 +143,21 @@ describe("selectMcpToolsForTurn", () => {
     ]);
   });
 
+  test("does not directly select pinned automation tools denied by policy", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [tool("plan_automation"), tool("create_automation")],
+      },
+      message: "提醒我明天回覆 Irene",
+      budget: 2,
+      isToolAllowed: () => false,
+    });
+
+    expect(result.selectedTools).toEqual({});
+    expect(result.trace.totalTools).toBe(0);
+    expect(result.trace.selectedToolNames).toEqual([]);
+  });
+
   test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)

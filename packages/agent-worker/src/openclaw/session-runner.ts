@@ -1635,6 +1635,7 @@ Use it when the user references past discussions or you need context.`);
       toolsByMcp: context.mcpTools,
       message: userPrompt,
       budget: dynamicToolBudget,
+      isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
     });
     selectedMcpToolsForTurn = selection.selectedTools;
     logger.info(

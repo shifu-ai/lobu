@@ -30,6 +30,7 @@ export interface SelectMcpToolsForTurnParams {
   message: string;
   budget: number;
   mcpId?: string;
+  isToolAllowed?: (toolName: string, mcpId: string) => boolean;
 }
 
 export interface SelectMcpToolsForTurnResult {
@@ -41,6 +42,7 @@ export interface SelectGroupedMcpToolsForTurnParams {
   toolsByMcp: Record<string, McpToolDef[]>;
   userMessage: string;
   maxProviderVisibleTools: number;
+  isToolAllowed?: (toolName: string, mcpId: string) => boolean;
 }
 
 export interface SelectGroupedMcpToolsForTurnResult {
@@ -52,6 +54,7 @@ export interface SelectMcpToolsByMcpForTurnParams {
   toolsByMcp: Record<string, McpToolDef[]>;
   message: string;
   budget: number;
+  isToolAllowed?: (toolName: string, mcpId: string) => boolean;
 }
 
 export interface SelectMcpToolsByMcpForTurnResult {
@@ -161,6 +164,7 @@ export function selectMcpToolsForTurn(
       toolsByMcp: params.toolsByMcp,
       message: params.userMessage,
       budget: params.maxProviderVisibleTools,
+      isToolAllowed: params.isToolAllowed,
     });
     return {
       selected: result.selectedTools,
@@ -170,9 +174,12 @@ export function selectMcpToolsForTurn(
 
   const primaryIntent = classifyToolIntent(params.message);
   const budget = Math.max(0, Math.floor(params.budget));
-  const entries = params.tools.map((tool, index) =>
-    catalogEntryForTool(tool, index, params.mcpId)
-  );
+  const entries = params.tools
+    .map((tool, index) => catalogEntryForTool(tool, index, params.mcpId))
+    .filter(
+      (entry) =>
+        !params.isToolAllowed || params.isToolAllowed(entry.name, entry.mcpId)
+    );
   const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
     entries,
     primaryIntent,
@@ -191,7 +198,7 @@ export function selectMcpToolsForTurn(
     trace: {
       primaryIntent,
       budget,
-      totalTools: params.tools.length,
+      totalTools: entries.length,
       selectedToolNames: selectedTraceNames,
       omittedToolNames,
       pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
@@ -219,8 +226,15 @@ export function selectMcpToolsByMcpForTurn(
 
   for (const [mcpId, tools] of Object.entries(params.toolsByMcp)) {
     for (const tool of tools) {
-      entries.push(catalogEntryForTool(tool, originalIndex, mcpId));
+      const entry = catalogEntryForTool(tool, originalIndex, mcpId);
       originalIndex++;
+      if (
+        params.isToolAllowed &&
+        !params.isToolAllowed(entry.name, entry.mcpId)
+      ) {
+        continue;
+      }
+      entries.push(entry);
     }
   }
 
