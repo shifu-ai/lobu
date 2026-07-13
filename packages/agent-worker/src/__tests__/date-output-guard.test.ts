@@ -95,6 +95,10 @@ describe("guardDateOutput", () => {
       "這週三天有課，日期是 7/16（四）",
       "本週四個活動，日期是 7/17（五）",
       "本週日曆標示 7/16（四）",
+      "這週一共有三場課，日期是 7/16（四）",
+      "本週日常安排：7/16（四）",
+      "這週六人參加，日期是 7/17（五）",
+      "本週五門課，下一堂是 7/16（四）",
     ]) {
       expect(
         guardDateOutput({ userMessage: finalText, finalText, now: NOW })

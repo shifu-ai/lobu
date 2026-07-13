@@ -93,27 +93,13 @@ function sameShortDate(parts: CalendarDate, month: number, day: number) {
   return parts.month === month && parts.day === day;
 }
 
-function isBareRelativeWeekdayClaim(
-  weekdayText: string,
-  continuation: string
-): boolean {
-  const nextCharacter = continuation.trimStart().charAt(0);
+function isBareRelativeWeekdayClaim(continuation: string): boolean {
+  const normalized = continuation.trim();
+  if (normalized === "" || normalized === "是") return true;
 
-  if (
-    (weekdayText === "日" || weekdayText === "天") &&
-    /[期程曆]/.test(nextCharacter)
-  ) {
-    return false;
-  }
-
-  if (
-    /[一二三四五六]/.test(weekdayText) &&
-    /[天個場堂次]/.test(nextCharacter)
-  ) {
-    return false;
-  }
-
-  return true;
+  return /^(?:期中考|期末考|考試|課程|會議|活動|銷講|講座|上課|開會)是$/.test(
+    normalized
+  );
 }
 
 function validUtcDate(year: number, month: number, day: number): Date | null {
@@ -149,7 +135,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       const weekdayText = explicitWeekdayText ?? bareWeekdayText;
       if (
         !explicitWeekdayMarker &&
-        !isBareRelativeWeekdayClaim(weekdayText, between)
+        !isBareRelativeWeekdayClaim(between)
       ) {
         return match;
       }
