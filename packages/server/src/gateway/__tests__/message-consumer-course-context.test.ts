@@ -10,12 +10,6 @@ import {
 	workerMessageSingletonKey,
 } from "../orchestration/message-consumer.js";
 const originalFetch = globalThis.fetch;
-const oppSkill = {
-	name: "opp-coach",
-	repo: "local",
-	enabled: true,
-	content: `---\nname: opp-coach\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: [audience, offer]\n  retrieval-terms: [Key Learning, Offer]\n  retrieval-limit: 3\n---`,
-};
 afterEach(() => {
 	delete process.env.TOOLBOX_COURSE_CONTEXT_URL;
 	delete process.env.TOOLBOX_INTERNAL_SECRET;
@@ -36,6 +30,7 @@ function setup(
 		| undefined;
 	const sends: Array<[string, unknown, unknown]> = [];
 	const order: string[] = [];
+	const recordScheduledExecutionTrace = vi.fn(async () => {});
 	let workerRejected = false;
 	const queue = {
 		start: vi.fn(),
@@ -76,7 +71,7 @@ function setup(
 		queue as never,
 		undefined,
 		undefined,
-		vi.fn(async () => {}),
+		recordScheduledExecutionTrace,
 	);
 	let cleanupFailed = false;
 	let pending: any;
@@ -179,6 +174,7 @@ function setup(
 		order,
 		fetcher,
 		consumer,
+		recordScheduledExecutionTrace,
 		data,
 		run: async (nextText?: string, nextId?: string) => {
 			if (nextText) data.messageText = nextText;
@@ -288,6 +284,7 @@ describe("message consumer course boundary", () => {
 				executionMode: "course",
 				courseToolScope: { activeSpecializedSkill: "opp-coach" },
 			});
+			expect(h.recordScheduledExecutionTrace).toHaveBeenCalledTimes(1);
 		} finally {
 			if (previousKey === undefined) delete process.env.ENCRYPTION_KEY;
 			else process.env.ENCRYPTION_KEY = previousKey;
