@@ -82,6 +82,7 @@ describe("course context gate", () => {
 				}),
 			bindActiveCourse: vi.fn(),
 		};
+		const recordScheduledExecutionTrace = vi.fn(async () => {});
 		const fetcher = vi
 			.fn()
 			.mockResolvedValueOnce(
@@ -108,6 +109,7 @@ describe("course context gate", () => {
 			fetcher,
 			sessionManager: manager as never,
 			sessionKey: "session",
+			recordScheduledExecutionTrace,
 		});
 		const request = JSON.parse(
 			(fetcher.mock.calls[0]?.[1] as RequestInit).body as string,
@@ -119,6 +121,11 @@ describe("course context gate", () => {
 			context: { course: { courseKey: "a" } },
 		});
 		expect(manager.bindActiveCourse).not.toHaveBeenCalled();
+		expect(recordScheduledExecutionTrace).toHaveBeenCalledWith(expect.objectContaining({
+			status: "context_ready", runId: 42, courseEntityId: "course:a",
+			conversationBindingCourseEntityId: "course:b", contextVersion: 1,
+			evidenceReadiness: "canonical_only",
+		}));
 	});
 	test.each([
 		[

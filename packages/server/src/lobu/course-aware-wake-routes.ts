@@ -227,11 +227,36 @@ export function createCourseAwareWakeRoutes(
 		if (!row) return c.json({ error: "course_wake_not_found" }, 404);
 		const wake = row.action_args.trustedCourseWake as Record<string, unknown>;
 		const scope = wake.trustedCourseScope as Record<string, unknown>;
+		const eventRef = wake.calendarEventRef as Record<string, unknown>;
+		const execution = row.action_args.courseWakeExecutionTrace as Record<string, unknown> | undefined;
+		let runStatus: string | null = null;
+		if (execution && Number.isSafeInteger(execution.runId) && Number(execution.runId) > 0) {
+			const runRows = await getDb()<{ status: string }>`
+				SELECT status FROM runs
+				WHERE id = ${Number(execution.runId)}
+				LIMIT 1
+			`;
+			runStatus = runRows[0]?.status ?? null;
+		}
 		return c.json({
 			engineRef: row.id, externalKey: row.external_key, paused: row.paused,
 			scheduleRevision: row.schedule_revision, nextRunAt: row.next_run_at.toISOString(),
 			source: wake.source, automationId: wake.automationId,
 			resolutionSource: scope.resolutionSource,
+			courseEntityId: scope.courseEntityId, courseKey: scope.courseKey,
+			scopeVersion: scope.scopeVersion, taskKind: wake.taskKind,
+			eventStartAt: parseStrictRfc3339(eventRef.eventStartAt, "eventStartAt").toISOString(),
+			scheduledFor: parseStrictRfc3339(wake.scheduledFor, "scheduledFor").toISOString(),
+			fire: execution ? {
+				status: execution.status, runId: execution.runId,
+				conversationId: execution.conversationId,
+				conversationBindingCourseEntityId: execution.conversationBindingCourseEntityId,
+				courseEntityId: execution.courseEntityId,
+				scopeVersion: execution.scopeVersion,
+				contextVersion: execution.contextVersion,
+				evidenceReadiness: execution.evidenceReadiness,
+				runStatus,
+			} : { status: "not_fired", runId: null },
 			runtime: { service: "lobu-api", ...getRuntimeInfo() },
 		});
 	});

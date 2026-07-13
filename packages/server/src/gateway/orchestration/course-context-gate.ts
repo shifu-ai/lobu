@@ -31,6 +31,12 @@ export interface CourseContextGateOptions
 	memorySearch?: CourseMemorySearch;
 	env?: Env;
 	traceEmitter?: (event: JourneyEventPayload) => Promise<void>;
+	recordScheduledExecutionTrace?: (trace: {
+		status: "context_ready"; runId: number; conversationId: string;
+		conversationBindingCourseEntityId: string | null; courseEntityId: string;
+		scopeVersion: 1; contextVersion: number;
+		evidenceReadiness: "canonical_only" | "same_course_evidence";
+	}) => Promise<void>;
 	/** Fire-time only: let the durable task runner retry transient Toolbox failures. */
 	propagateInfrastructureErrors?: boolean;
 }
@@ -251,11 +257,14 @@ export async function attachCourseContextForReviewedScope(
 		gate_mode: process.env.COURSE_CONTEXT_GATE_MODE ?? "enforce",
 	});
 	let session = null;
+	let scheduledConversationBindingCourseEntityId: string | null = null;
 	try {
-		session =
-			!scheduled && options?.sessionManager && options.sessionKey
-				? await options.sessionManager.getSessionStrict(options.sessionKey)
-				: null;
+		if (options?.sessionManager && options.sessionKey) {
+			const loaded = await options.sessionManager.getSessionStrict(options.sessionKey);
+			if (scheduled) {
+				scheduledConversationBindingCourseEntityId = loaded?.shifuCourseContext?.courseEntityId ?? null;
+			} else session = loaded;
+		}
 	} catch (error) {
 		logger.warn(
 			{ category: "session_read" },
@@ -407,17 +416,26 @@ export async function attachCourseContextForReviewedScope(
 					)
 				: existing.retrieval;
 		existing.retrieval = retrieval;
+		const evidenceReadiness =
+			retrieval.status === "loaded" &&
+			retrieval.crossCourseGuard === "passed" &&
+			retrieval.snippets.some((snippet) => Boolean(snippet.trustedEvidenceKind))
+				? "same_course_evidence" as const
+				: "canonical_only" as const;
 		data.scheduledCourseContext = {
 			...scheduled,
-			evidenceReadiness:
-				retrieval.status === "loaded" &&
-				retrieval.crossCourseGuard === "passed" &&
-				retrieval.snippets.some((snippet) =>
-					Boolean(snippet.trustedEvidenceKind),
-				)
-					? "same_course_evidence"
-					: "canonical_only",
+			evidenceReadiness,
 		};
+		if (retrieval.crossCourseGuard === "passed" && options?.recordScheduledExecutionTrace) {
+			await options.recordScheduledExecutionTrace({
+				status: "context_ready", runId: scheduled.runId,
+				conversationId: data.conversationId,
+				conversationBindingCourseEntityId: scheduledConversationBindingCourseEntityId,
+				courseEntityId: scheduled.course.courseEntityId, scopeVersion: 1,
+				contextVersion: existing.context.contextVersion,
+				evidenceReadiness,
+			});
+		}
 		return retrieval.crossCourseGuard === "passed"
 			? { status: "ready", context: existing }
 			: {
@@ -716,7 +734,20 @@ export async function attachCourseContextForReviewedScope(
 		],
 	};
 	data.resolvedCourseContext = resolvedCourseContext;
-	if (scheduled || !options?.sessionManager || !options.sessionKey)
+	if (scheduled) {
+		const evidenceReadiness = retrieval.status === "loaded" && retrieval.crossCourseGuard === "passed"
+			&& retrieval.snippets.some((snippet) => Boolean(snippet.trustedEvidenceKind))
+			? "same_course_evidence" as const : "canonical_only" as const;
+		data.scheduledCourseContext = { ...scheduled, evidenceReadiness };
+		if (options?.recordScheduledExecutionTrace) await options.recordScheduledExecutionTrace({
+			status: "context_ready", runId: scheduled.runId, conversationId: data.conversationId,
+			conversationBindingCourseEntityId: scheduledConversationBindingCourseEntityId,
+			courseEntityId: scheduled.course.courseEntityId, scopeVersion: 1,
+			contextVersion: resolvedCourseContext.context.contextVersion, evidenceReadiness,
+		});
+		return { status: "ready", context: resolvedCourseContext };
+	}
+	if (!options?.sessionManager || !options.sessionKey)
 		return { status: "ready", context: resolvedCourseContext };
 	const binding = await options.sessionManager.bindActiveCourse(
 		options.sessionKey,
