@@ -32,6 +32,7 @@ describe('getRuntimeInfo', () => {
         NODE_ENV: 'production',
         APP_GIT_SHA: 'abc123',
         APP_BUILD_TIME: '2026-04-12T23:00:00Z',
+        SHIFU_MEMBER_AGENT_DIRECT_AUTH: '1',
       })
     ).toMatchObject({
       environment: 'production',
@@ -43,5 +44,17 @@ describe('getRuntimeInfo', () => {
         'lobu-runtime:turn.release_context.v1',
       ],
     });
+  });
+
+  it('only advertises member schedule direct auth when the runtime flag is enabled', () => {
+    expect(
+      getRuntimeInfo({ SHIFU_MEMBER_AGENT_DIRECT_AUTH: '1' }).carrier_capabilities
+    ).toContain('lobu-runtime:member-schedule-direct-auth.v1');
+    expect(
+      getRuntimeInfo({ SHIFU_MEMBER_AGENT_DIRECT_AUTH: '0' }).carrier_capabilities
+    ).not.toContain('lobu-runtime:member-schedule-direct-auth.v1');
+    expect(getRuntimeInfo({}).carrier_capabilities).not.toContain(
+      'lobu-runtime:member-schedule-direct-auth.v1'
+    );
   });
 });

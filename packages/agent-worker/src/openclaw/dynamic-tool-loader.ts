@@ -75,6 +75,61 @@ export interface SelectMcpToolsByMcpForTurnResult {
   trace: DynamicToolSelectionTrace;
 }
 
+export interface CliMcpToolEligibilityParams {
+  tool: McpToolDef;
+  mcpId: string;
+  isToolAllowed?: (toolName: string, mcpId: string) => boolean;
+  mcpProvenanceById?: McpCatalogProvenanceById;
+  trustedShifuToolboxOrigins?: ReadonlySet<string>;
+}
+
+export function isMcpToolEligibleForCliExposure(
+  params: CliMcpToolEligibilityParams
+): boolean {
+  const toolName = params.tool.name?.trim();
+  if (!toolName) return false;
+  if (params.isToolAllowed && !params.isToolAllowed(toolName, params.mcpId)) {
+    return false;
+  }
+  if (
+    isReservedAutomationToolName(toolName) &&
+    !isTrustedShifuToolMetadataSource({
+      mcpId: params.mcpId,
+      provenance: params.mcpProvenanceById?.[params.mcpId],
+      trustedOrigins: params.trustedShifuToolboxOrigins,
+    })
+  ) {
+    return false;
+  }
+  if (
+    toolName === "resolve_calendar_date" &&
+    !isTrustedShifuCalendarResolver({
+      tool: params.tool,
+      mcpId: params.mcpId,
+      provenance: params.mcpProvenanceById?.[params.mcpId],
+      trustedOrigins: params.trustedShifuToolboxOrigins,
+    })
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function filterMcpToolsForCliExposure(
+  params: Omit<CliMcpToolEligibilityParams, "tool" | "mcpId"> & {
+    toolsByMcp: Record<string, McpToolDef[]>;
+  }
+): Record<string, McpToolDef[]> {
+  const filtered: Record<string, McpToolDef[]> = {};
+  for (const [mcpId, tools] of Object.entries(params.toolsByMcp)) {
+    const eligible = tools.filter((tool) =>
+      isMcpToolEligibleForCliExposure({ ...params, tool, mcpId })
+    );
+    if (eligible.length > 0) filtered[mcpId] = eligible;
+  }
+  return filtered;
+}
+
 export function resolveDynamicToolBudget(value: string | undefined): number {
   const trimmed = value?.trim();
   if (!trimmed) return 48;
@@ -288,28 +343,14 @@ export function selectMcpToolsForTurn(
         trustedOrigins: params.trustedShifuToolboxOrigins,
       })
     )
-    .filter(
-      (entry) =>
-        !params.isToolAllowed || params.isToolAllowed(entry.name, entry.mcpId)
-    )
-    .filter(
-      (entry) =>
-        !isReservedAutomationToolName(entry.name) ||
-        isTrustedShifuToolMetadataSource({
-          mcpId: entry.mcpId,
-          provenance: params.mcpProvenanceById?.[entry.mcpId],
-          trustedOrigins: params.trustedShifuToolboxOrigins,
-        })
-    )
-    .filter(
-      (entry) =>
-        entry.name !== "resolve_calendar_date" ||
-        isTrustedShifuCalendarResolver({
-          tool: entry.tool,
-          mcpId: entry.mcpId,
-          provenance: params.mcpProvenanceById?.[entry.mcpId],
-          trustedOrigins: params.trustedShifuToolboxOrigins,
-        })
+    .filter((entry) =>
+      isMcpToolEligibleForCliExposure({
+        tool: entry.tool,
+        mcpId: entry.mcpId,
+        isToolAllowed: params.isToolAllowed,
+        mcpProvenanceById: params.mcpProvenanceById,
+        trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
+      })
     )
     .filter(
       (entry) =>
@@ -376,28 +417,12 @@ export function selectMcpToolsByMcpForTurn(
       });
       originalIndex++;
       if (
-        params.isToolAllowed &&
-        !params.isToolAllowed(entry.name, entry.mcpId)
-      ) {
-        continue;
-      }
-      if (
-        isReservedAutomationToolName(entry.name) &&
-        !isTrustedShifuToolMetadataSource({
-          mcpId: entry.mcpId,
-          provenance: params.mcpProvenanceById?.[entry.mcpId],
-          trustedOrigins: params.trustedShifuToolboxOrigins,
-        })
-      ) {
-        continue;
-      }
-      if (
-        entry.name === "resolve_calendar_date" &&
-        !isTrustedShifuCalendarResolver({
+        !isMcpToolEligibleForCliExposure({
           tool: entry.tool,
           mcpId: entry.mcpId,
-          provenance: params.mcpProvenanceById?.[entry.mcpId],
-          trustedOrigins: params.trustedShifuToolboxOrigins,
+          isToolAllowed: params.isToolAllowed,
+          mcpProvenanceById: params.mcpProvenanceById,
+          trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
         })
       ) {
         continue;

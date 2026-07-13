@@ -16,16 +16,32 @@ function includesAny(text: string, keywords: string[]): boolean {
 }
 
 function hasAutomationIntent(text: string): boolean {
+  const englishTemporal =
+    /\b(?:tomorrow|later|every|daily|weekly|monthly|recurring|continuously|until|(?:this|next)\s+(?:hour|day|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)|in\s+\d+\s+(?:minutes?|hours?|days?)|for\s+\d+\s+(?:minutes?|hours?|days?)|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|on\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b/.test(
+      text
+    );
+  const chineseTemporal =
+    /(?:明天|後天|后天|這週|这周|本週|本周|下週|下周|未來|未来|每隔|每天|每日|每週|每周|每月|定期|持續|持续|直到|分鐘後|分钟后|小時後|小时后|\d+[點点時时])/.test(
+      text
+    );
+  const reminderRequest =
+    /(?:提醒我|提醒他|提醒她|提醒大家|提醒團隊|提醒团队)/.test(text) ||
+    /\bremind(?:\s+(?:me|us|him|her|them))?\b/.test(text);
+
   if (
     /\b(?:plan_automation|create_automation|wake[ -]agent|automations?|automate|automatically)\b/.test(
       text
     ) ||
     /(?:自動化|自動工作)/.test(text) ||
-    /(?:建立|新增|取消|列出|查看|停止|刪除|删除|設定|设定).{0,12}(?:提醒|自動工作|自动工作|排程)/.test(
-      text
-    ) ||
-    /(?:提醒我|提醒他|提醒她|提醒大家|提醒團隊|提醒团队)/.test(text) ||
-    /\bremind(?:\s+(?:me|us|him|her|them))?\b/.test(text)
+    /(?:列出|查看|停止|刪除|删除).{0,12}(?:自動工作|自动工作|排程)/.test(text)
+  ) {
+    return true;
+  }
+
+  if (reminderRequest && (englishTemporal || chineseTemporal)) return true;
+  if (
+    (englishTemporal || chineseTemporal) &&
+    /(?:建立|新增|取消|設定|设定).{0,12}(?:提醒|排程)/.test(text)
   ) {
     return true;
   }
@@ -34,18 +50,10 @@ function hasAutomationIntent(text: string): boolean {
     /\b(?:schedule|track(?:ing)?|monitor|follow[ -]?up|check|notify)\b/.test(
       text
     );
-  const englishTemporal =
-    /\b(?:tomorrow|later|every|daily|weekly|monthly|recurring|continuously|until|(?:this|next)\s+(?:hour|day|week|month)|in\s+\d+\s+(?:minutes?|hours?|days?)|for\s+\d+\s+(?:minutes?|hours?|days?))\b/.test(
-      text
-    );
   if (englishAction && englishTemporal) return true;
 
   const chineseAction =
     /(?:建立|新增|安排|設定|设定|排程|追蹤|追踪|監控|监控|檢查|检查|告訴|告诉|回報|回报|通知|觀察|观察)/.test(
-      text
-    );
-  const chineseTemporal =
-    /(?:明天|後天|后天|這週|这周|本週|本周|下週|下周|未來|未来|每隔|每天|每日|每週|每周|每月|定期|持續|持续|直到|分鐘後|分钟后|小時後|小时后|\d+[點点時时])/.test(
       text
     );
   return chineseAction && chineseTemporal;

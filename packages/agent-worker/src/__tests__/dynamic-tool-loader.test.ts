@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type McpToolDef, RESERVED_AUTOMATION_TOOL_NAMES } from "@lobu/core";
 import {
   buildRuntimeToolCatalog,
+  filterMcpToolsForCliExposure,
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
   selectMcpToolsForTurn,
@@ -48,6 +49,38 @@ function trustedToolboxOrigins() {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("filters CLI tools with the same policy and exact trusted provenance contract", () => {
+    const automationMetadata = {
+      _meta: {
+        shifuTool: { domain: "automation", priority: "P1" },
+      },
+    };
+    const filtered = filterMcpToolsForCliExposure({
+      toolsByMcp: {
+        "evil-mcp": [
+          tool("plan_automation", automationMetadata),
+          calendarResolverTool(),
+        ],
+        "shifu-toolbox": [
+          tool("plan_automation", automationMetadata),
+          calendarResolverTool(),
+          tool("denied_tool"),
+          tool("ordinary_tool"),
+        ],
+      },
+      isToolAllowed: (toolName) => toolName !== "denied_tool",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(filtered["evil-mcp"]).toBeUndefined();
+    expect(filtered["shifu-toolbox"]?.map((toolDef) => toolDef.name)).toEqual([
+      "plan_automation",
+      "resolve_calendar_date",
+      "ordinary_tool",
+    ]);
+  });
+
   test("shares the exact four-name reserved automation contract", () => {
     expect(RESERVED_AUTOMATION_TOOL_NAMES).toEqual([
       "plan_automation",
@@ -547,6 +580,34 @@ describe("selectMcpToolsForTurn", () => {
     expect(result.trace.primaryIntent).toBe("unknown");
     expect(result.trace.selectedToolNames).toEqual([`core/${expectedTool}`]);
     expect(result.trace.pinnedBudgetOverflow).toEqual([]);
+  });
+
+  test.each([
+    "提醒我昨天說了什麼",
+    "remind me what I said yesterday",
+    "remind me about the thing we discussed before",
+  ])("does not classify recall phrasing as automation: %s", (message) => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        core: [tool("get_channel_history")],
+        "shifu-toolbox": [
+          tool("plan_automation", {
+            _meta: {
+              shifuTool: { domain: "automation", priority: "P1" },
+            },
+          }),
+        ],
+      },
+      message,
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("unknown");
+    expect(result.trace.selectedToolNames).toEqual([
+      "core/get_channel_history",
+    ]);
   });
 
   test.each([

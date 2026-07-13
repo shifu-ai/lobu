@@ -12,6 +12,7 @@ interface RuntimeEnvLike {
   NODE_ENV?: string;
   APP_GIT_SHA?: string;
   APP_BUILD_TIME?: string;
+  SHIFU_MEMBER_AGENT_DIRECT_AUTH?: string;
 }
 
 function cleanString(value: unknown): string | undefined {
@@ -29,6 +30,9 @@ export function resolveRuntimeEnvironment(env?: RuntimeEnvLike | null): string {
 }
 
 export function getRuntimeInfo(env?: RuntimeEnvLike | null) {
+  const memberScheduleDirectAuth =
+    cleanString(env?.SHIFU_MEMBER_AGENT_DIRECT_AUTH) ??
+    cleanString(process.env.SHIFU_MEMBER_AGENT_DIRECT_AUTH);
   return {
     version: packageJson.version,
     revision:
@@ -40,6 +44,10 @@ export function getRuntimeInfo(env?: RuntimeEnvLike | null) {
       cleanString(process.env.APP_BUILD_TIME) ||
       null,
     environment: resolveRuntimeEnvironment(env),
-    carrier_capabilities: [...RUNTIME_CARRIER_CAPABILITIES],
+    carrier_capabilities: RUNTIME_CARRIER_CAPABILITIES.filter(
+      (capability) =>
+        capability !== 'lobu-runtime:member-schedule-direct-auth.v1' ||
+        memberScheduleDirectAuth === '1'
+    ),
   };
 }

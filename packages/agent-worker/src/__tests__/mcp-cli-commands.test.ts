@@ -103,6 +103,36 @@ describe("isMcpIdReserved", () => {
 });
 
 describe("buildMcpServerHandler", () => {
+  test("revalidates the CLI exposure policy for help, schema, and call", async () => {
+    let allowed = false;
+    const ref = makeRef({ mcpTools: { lobu: [lobuTool] } });
+    ref.isToolInvocationAllowed = (mcpId, tool) =>
+      allowed && mcpId === "lobu" && tool.name === "search_memory";
+    let calls = 0;
+    const handler = buildMcpServerHandler("lobu", ref, gw, {
+      callTool: async () => {
+        calls++;
+        return { content: [] };
+      },
+    });
+
+    const deniedHelp = await handler(["--help"], {});
+    expect(deniedHelp.stdout).not.toContain("search_memory");
+    expect((await handler(["search_memory", "--schema"], {})).exitCode).toBe(2);
+    expect((await handler(["search_memory"], { stdin: "{}" })).exitCode).toBe(
+      2
+    );
+    expect(calls).toBe(0);
+
+    allowed = true;
+    expect((await handler(["--help"], {})).stdout).toContain("search_memory");
+    expect((await handler(["search_memory", "--schema"], {})).exitCode).toBe(0);
+    expect((await handler(["search_memory"], { stdin: "{}" })).exitCode).toBe(
+      0
+    );
+    expect(calls).toBe(1);
+  });
+
   test("--help lists tools and usage", async () => {
     const ref = makeRef({
       mcpTools: { lobu: [lobuTool] },

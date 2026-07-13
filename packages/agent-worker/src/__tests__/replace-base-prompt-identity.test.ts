@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   buildCurrentDateContext,
   buildLobuSystemPrompt,
+  resolveTurnTimeZone,
   runModelWithObs,
   replaceBasePromptIdentity,
 } from "../openclaw/worker";
@@ -148,6 +149,16 @@ describe("replaceBasePromptIdentity", () => {
     expect(out).toContain(
       "Current timestamp / 現在時間: 2026-07-13T18:15:00+08:00"
     );
+  });
+
+  test("uses the first valid timezone from platform, agent config, then Taipei", () => {
+    expect(resolveTurnTimeZone("America/New_York", "Asia/Tokyo")).toBe(
+      "America/New_York"
+    );
+    expect(resolveTurnTimeZone("Mars/Olympus", "Asia/Tokyo")).toBe(
+      "Asia/Tokyo"
+    );
+    expect(resolveTurnTimeZone("Mars/Olympus", "Moon/Sea")).toBe("Asia/Taipei");
   });
 });
 

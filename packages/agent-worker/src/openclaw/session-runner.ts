@@ -91,6 +91,8 @@ import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
   buildRuntimeToolCatalog,
+  filterMcpToolsForCliExposure,
+  isMcpToolEligibleForCliExposure,
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
@@ -542,6 +544,18 @@ function resolveIanaTimeZone(value: unknown): {
   } catch {
     return { timeZone: TAIPEI_TIME_ZONE, invalidInput: true };
   }
+}
+
+export function resolveTurnTimeZone(
+  platformTimeZone: unknown,
+  agentTimeZone: unknown
+): string {
+  for (const candidate of [platformTimeZone, agentTimeZone]) {
+    if (candidate === undefined || candidate === null) continue;
+    const resolved = resolveIanaTimeZone(candidate);
+    if (!resolved.invalidInput) return resolved.timeZone;
+  }
+  return TAIPEI_TIME_ZONE;
 }
 
 function getZonedDateParts(now: Date, timeZone: string): DateParts {
@@ -1456,6 +1470,37 @@ export async function runAISession(
       | string[]
       | undefined,
   });
+  const trustedShifuToolboxOrigins = resolveTrustedShifuToolboxOrigins(
+    process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS
+  );
+  const provenanceFromStatuses = (statuses: typeof context.mcpStatus) =>
+    Object.fromEntries(
+      statuses.map((status) => [
+        status.id,
+        {
+          upstreamOrigin: status.upstreamOrigin,
+          configSource: status.configSource,
+          configDigest: status.configDigest,
+        },
+      ])
+    );
+  const buildCliRuntimeState = (snapshot: {
+    mcpTools: Record<string, McpToolDef[]>;
+    mcpStatus: typeof context.mcpStatus;
+    mcpContext: Record<string, string>;
+  }) => {
+    const mcpProvenanceById = provenanceFromStatuses(snapshot.mcpStatus);
+    return {
+      ...snapshot,
+      mcpTools: filterMcpToolsForCliExposure({
+        toolsByMcp: applyCapabilityLimitNotes(snapshot.mcpTools),
+        isToolAllowed: (toolName) =>
+          isToolAllowedByPolicy(toolName, toolsPolicy),
+        mcpProvenanceById,
+        trustedShifuToolboxOrigins,
+      }),
+    };
+  };
 
   // Build a mutable snapshot of MCP runtime state. The embedded CLI handlers
   // read through `mcpRuntimeRef.current` so that `auth check` / `logout` can
@@ -1463,11 +1508,28 @@ export async function runAISession(
   // fetches session context — `checkMcpLogin`/`logoutMcp` already invalidate
   // the gateway cache, so the next fetch reaches the gateway.
   const mcpRuntimeRef = {
-    current: {
-      mcpTools: applyCapabilityLimitNotes(context.mcpTools),
+    current: buildCliRuntimeState({
+      mcpTools: context.mcpTools,
       mcpStatus: context.mcpStatus,
       mcpContext: context.mcpContext,
-    },
+    }),
+    isToolInvocationAllowed: (
+      mcpId: string,
+      tool: McpToolDef,
+      state: {
+        mcpTools: Record<string, McpToolDef[]>;
+        mcpStatus: typeof context.mcpStatus;
+        mcpContext: Record<string, string>;
+      }
+    ) =>
+      isMcpToolEligibleForCliExposure({
+        tool,
+        mcpId,
+        isToolAllowed: (toolName) =>
+          isToolAllowedByPolicy(toolName, toolsPolicy),
+        mcpProvenanceById: provenanceFromStatuses(state.mcpStatus),
+        trustedShifuToolboxOrigins,
+      }),
     ...(mcpExposure === "cli" && {
       refresh: async () => {
         try {
@@ -1475,11 +1537,11 @@ export async function runAISession(
             mcpExposure,
             shifuTrace,
           });
-          return {
-            mcpTools: applyCapabilityLimitNotes(fresh.mcpTools),
+          return buildCliRuntimeState({
+            mcpTools: fresh.mcpTools,
             mcpStatus: fresh.mcpStatus,
             mcpContext: fresh.mcpContext,
-          };
+          });
         } catch (err) {
           logger.warn(
             `Failed to refresh MCP session context after auth: ${err instanceof Error ? err.message : String(err)}`
@@ -1666,19 +1728,7 @@ Use it when the user references past discussions or you need context.`);
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
-  const mcpProvenanceById = Object.fromEntries(
-    context.mcpStatus.map((status) => [
-      status.id,
-      {
-        upstreamOrigin: status.upstreamOrigin,
-        configSource: status.configSource,
-        configDigest: status.configDigest,
-      },
-    ])
-  );
-  const trustedShifuToolboxOrigins = resolveTrustedShifuToolboxOrigins(
-    process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS
-  );
+  const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
   let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;
 
   if (mcpExposure !== "cli") {
@@ -1969,9 +2019,10 @@ Use it when the user references past discussions or you need context.`);
   const finalInstructionsUpdated = instructionParts
     .filter(Boolean)
     .join("\n\n");
-  const turnTimeZone = isRecord(platformMetadata)
-    ? (platformMetadata.timeZone ?? rawOptions.timeZone)
-    : rawOptions.timeZone;
+  const turnTimeZone = resolveTurnTimeZone(
+    isRecord(platformMetadata) ? platformMetadata.timeZone : undefined,
+    rawOptions.timeZone
+  );
 
   const resourceLoader = new DefaultResourceLoader({
     cwd: workspaceDir,
