@@ -324,6 +324,20 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
     }
   }
 
+  if (payload.type === 'wake_agent') {
+    for (const key of Object.keys(payload)) {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (
+        normalizedKey.startsWith('trustedcourse') ||
+        normalizedKey === 'internaltrustedprovenance' ||
+        normalizedKey === 'trustedprovenance' ||
+        (normalizedKey.startsWith('trusted') && normalizedKey.includes('provenance'))
+      ) {
+        delete payload[key];
+      }
+    }
+  }
+
   const liftFields =
     payload.type === 'send_notification' ? NOTIFICATION_FIELDS : WAKE_AGENT_FIELDS;
   for (const field of liftFields) {
