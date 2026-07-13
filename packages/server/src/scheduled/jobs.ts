@@ -431,7 +431,7 @@ export async function handleWakeAgentTask(
 		threadId = result.threadId;
 	}
 	if (trustedEligibility) {
-		resolvedCourseContext = await resolveTrustedCourseFireContext(
+		const firedCourseContext = await resolveTrustedCourseFireContext(
 			trustedEligibility,
 			{
 				resolveContext: async ({ trustedWake, scheduledCourseContext }) => {
@@ -456,7 +456,7 @@ export async function handleWakeAgentTask(
 				},
 			},
 		);
-		if (!resolvedCourseContext) {
+		if (!firedCourseContext) {
 			logger.warn(
 				{
 					category: "trusted_course_context_gate",
@@ -467,6 +467,7 @@ export async function handleWakeAgentTask(
 			);
 			return;
 		}
+		resolvedCourseContext = firedCourseContext;
 	}
 	await enqueueAgentMessage(
 		{ sessionManager, queueProducer },
