@@ -5,6 +5,7 @@ import type {
 	ThreadResponsePayload,
 } from "../../infrastructure/queue/types.js";
 import { UnifiedThreadResponseConsumer } from "../../platform/unified-thread-consumer.js";
+import type { ResponseRenderer } from "../../platform/response-renderer.js";
 import { type PlatformAdapter, PlatformRegistry } from "../../platform.js";
 import { SseManager } from "../../services/sse-manager.js";
 
@@ -81,6 +82,11 @@ describe("API terminal completion contract", () => {
 			terminalPayload({ finalText: undefined, error: "provider unavailable" }),
 		);
 
+		expect(events.map((event) => event.event)).toEqual([
+			"error",
+			"agent-error",
+			"complete",
+		]);
 		expect(events.filter((event) => event.event === "error")).toHaveLength(1);
 		expect(events.filter((event) => event.event === "agent-error")).toHaveLength(
 			1,
@@ -96,13 +102,58 @@ describe("API terminal completion contract", () => {
 		});
 	});
 
-	test("preserves an explicit undefined finalText from an older worker", async () => {
+	test("preserves finalText for an older worker that omits it", async () => {
+		const payload = terminalPayload();
+		delete payload.finalText;
 		const completions = (
-			await renderTerminalPayload(terminalPayload({ finalText: undefined }))
+			await renderTerminalPayload(payload)
 		).filter((event) => event.event === "complete");
 
 		expect(completions).toHaveLength(1);
 		expect(Object.hasOwn(completions[0]?.data ?? {}, "finalText")).toBe(true);
 		expect(completions[0]?.data.finalText).toBeUndefined();
+	});
+
+	test("preserves ordered CLI terminal events for a non-API renderer", async () => {
+		const sseManager = new SseManager();
+		sseManager.addConnection("cli-session-1", {});
+
+		const renderer: ResponseRenderer = {
+			handleError: async () => undefined,
+			handleCompletion: async () => undefined,
+		};
+		const platformRegistry = new PlatformRegistry();
+		platformRegistry.register({
+			name: "telegram",
+			initialize: async () => undefined,
+			start: async () => undefined,
+			stop: async () => undefined,
+			isHealthy: () => true,
+			getResponseRenderer: () => renderer,
+		});
+		const consumer = new UnifiedThreadResponseConsumer(
+			{} as IMessageQueue,
+			platformRegistry,
+			sseManager,
+		);
+		const handleThreadResponse = Reflect.get(
+			consumer,
+			"handleThreadResponse",
+		) as (job: QueueJob<ThreadResponsePayload>) => Promise<void>;
+		await handleThreadResponse.call(consumer, {
+			id: "job-1",
+			data: terminalPayload({
+				platform: "telegram",
+				teamId: "telegram",
+				platformMetadata: { sessionId: "cli-session-1" },
+				error: "provider unavailable",
+			}),
+		});
+
+		const cliEvents = sseManager.getRecentEvents("cli-session-1");
+		expect(cliEvents.map((event) => event.event)).toEqual([
+			"error",
+			"complete",
+		]);
 	});
 });

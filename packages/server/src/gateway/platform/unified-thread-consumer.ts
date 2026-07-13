@@ -288,8 +288,24 @@ export class UnifiedThreadResponseConsumer {
 
     // Handle error
     if (data.error) {
+      if (cliSessionId && !isApiRow) {
+        this.sseManager.broadcast(cliSessionId, "error", {
+          type: "error",
+          error: data.error,
+          messageId: data.messageId,
+          timestamp: data.timestamp,
+        });
+      }
       await renderer.handleError(data, sessionKey);
       // Also complete session on error
+      if (cliSessionId && !isApiRow) {
+        this.sseManager.broadcast(cliSessionId, "complete", {
+          type: "complete",
+          messageId: data.messageId,
+          processedMessageIds: data.processedMessageIds,
+          timestamp: data.timestamp,
+        });
+      }
       await renderer.handleCompletion(data, sessionKey);
       return;
     }
