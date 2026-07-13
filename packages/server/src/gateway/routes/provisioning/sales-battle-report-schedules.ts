@@ -166,7 +166,7 @@ async function findExistingJob(
 		  AND action_type = 'wake_agent'
 		  AND action_args->>'toolboxScheduleId' = ${toolboxScheduleId}
 		  AND action_args->>'salesTalkWeekday' = ${String(weekday)}
-		ORDER BY created_at ASC
+		ORDER BY CASE WHEN state = 'active' THEN 0 ELSE 1 END, created_at ASC
 		LIMIT 1
 	`) as unknown as ScheduledJobRow[];
 	return rows[0] ?? null;

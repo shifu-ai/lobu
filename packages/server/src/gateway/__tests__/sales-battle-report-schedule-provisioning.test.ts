@@ -204,4 +204,76 @@ describe("sales battle report schedule provisioning", () => {
 		`;
 		expect(rows.map((row) => row.state)).toEqual(["staged"]);
 	});
+
+	test("reuses active matching job when it was created before a staged match", async () => {
+		const body = { ...requestBody(), salesTalkWeekdays: [0] };
+		const app = buildApp();
+		const createResponse = await app.request(
+			"/api/provisioning/sales-battle-report-schedules",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			},
+		);
+		expect(createResponse.status).toBe(201);
+		const activeBody = (await createResponse.json()) as { scheduleRefs: string[] };
+		const [job] = buildSalesBattleReportScheduledJobs(body);
+		const staged = await stageScheduledJobByExternalKey({
+			...job,
+			externalKey: "toolbox:sales-battle-report:active-first-staged",
+		});
+		expect(staged.status).toBe("ok");
+
+		const response = await app.request(
+			"/api/provisioning/sales-battle-report-schedules",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			ok: true,
+			scheduleRefs: activeBody.scheduleRefs,
+		});
+	});
+
+	test("reuses active matching job when it was created after a staged match", async () => {
+		const body = { ...requestBody(), salesTalkWeekdays: [0] };
+		const [job] = buildSalesBattleReportScheduledJobs(body);
+		const staged = await stageScheduledJobByExternalKey({
+			...job,
+			externalKey: "toolbox:sales-battle-report:staged-first",
+		});
+		expect(staged.status).toBe("ok");
+		const [active] = await getDb()<Array<{ id: string }>>`
+			INSERT INTO scheduled_jobs (
+				organization_id, action_type, action_args, cron, next_run_at,
+				description, created_by_user, created_by_agent
+			) VALUES (
+				${job.organizationId}, ${job.actionType}, ${getDb().json(job.actionArgs)},
+				${job.cron}, ${job.runAt}, ${job.description},
+				${job.createdByUser ?? null}, ${job.createdByAgent ?? null}
+			)
+			RETURNING id
+		`;
+
+		const response = await buildApp().request(
+			"/api/provisioning/sales-battle-report-schedules",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			},
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			ok: true,
+			scheduleRefs: [active.id],
+		});
+	});
 });

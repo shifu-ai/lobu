@@ -51,6 +51,21 @@ describe("scheduled jobs state migration", () => {
 		expect(sql).toContain("WHERE state = 'active' AND NOT paused");
 	});
 
+	test("down migration locks writers before checking for staged rows", () => {
+		const sql = downSql();
+		const lockPosition = sql.indexOf(
+			"LOCK TABLE public.scheduled_jobs IN SHARE ROW EXCLUSIVE MODE",
+		);
+		const stagedCheckPosition = sql.indexOf("WHERE state = 'staged'");
+		const dropIndexPosition = sql.indexOf(
+			"DROP INDEX IF EXISTS public.idx_scheduled_jobs_due",
+		);
+
+		expect(lockPosition).toBeGreaterThanOrEqual(0);
+		expect(lockPosition).toBeLessThan(stagedCheckPosition);
+		expect(stagedCheckPosition).toBeLessThan(dropIndexPosition);
+	});
+
 	test("down migration aborts before changing schema when staged rows exist", async () => {
 		const job = await createScheduledJob({
 			organizationId: ORGANIZATION_ID,

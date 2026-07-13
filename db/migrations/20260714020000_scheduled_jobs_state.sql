@@ -18,6 +18,8 @@ CREATE INDEX idx_scheduled_jobs_due
 
 -- migrate:down
 
+LOCK TABLE public.scheduled_jobs IN SHARE ROW EXCLUSIVE MODE;
+
 DO $$
 BEGIN
   IF EXISTS (
