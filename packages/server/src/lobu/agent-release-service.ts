@@ -1,7 +1,9 @@
 import {
 	createHash,
+	createPrivateKey,
 	createPublicKey,
 	type KeyObject,
+	sign as signBytes,
 	verify as verifySignature,
 } from "node:crypto";
 import { canonicalize } from "json-canonicalize";
@@ -24,7 +26,16 @@ const RFC3339_PATTERN =
 	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 type AgentReleaseEnvironment = "local" | "staging" | "production";
-type PublicationKind = "release" | "rollback";
+type PublicationKind = "release" | "rollback" | "pause";
+
+interface ControlPlanePolicy {
+	baseline: null | {
+		settingsHash: string;
+		fullBundleDigest: string;
+		patches: unknown[];
+	};
+	[key: string]: unknown;
+}
 
 interface ManagedModelSelection {
 	mode: "auto" | "pinned";
@@ -59,6 +70,7 @@ interface SignedManifest {
 	releaseKind: "capability_activation" | "runtime_carrier";
 	createdAt: string;
 	managedSettings: ManagedSettings;
+	controlPlanePolicy?: ControlPlanePolicy;
 	rollbackToSequence?: number;
 	rollbackTo?: string;
 	signing: SigningMetadata;
@@ -86,6 +98,12 @@ interface SignedFeed {
 	channel: "candidate" | "stable";
 	generatedAt: string;
 	publications: FeedPublication[];
+	activationMode?: "per_agent" | "shared_carrier";
+	rollout?: {
+		percentage: number;
+		paused: boolean;
+		cohortAlgorithmVersion: "hmac-sha256-toolbox-user-v1";
+	};
 	feedSigning: SigningMetadata;
 }
 
@@ -101,6 +119,10 @@ export interface AgentReleaseApplyCommand {
 	signedFeed: SignedFeed;
 	assignment: ReleaseAssignment;
 	expectedCurrentReleaseSequence: number | null;
+	assignmentRevision?: string;
+	claimToken?: string;
+	stepOrdinal?: number;
+	stepLeaseToken?: string;
 	commandDigest: string;
 }
 
@@ -118,6 +140,30 @@ export interface AgentReleaseEvidence {
 	settingsHash: string;
 	liveSettingsHash?: string;
 	appliedAt: string;
+}
+
+export interface AgentReleasePostApplyEvidence {
+	evidenceKind: "post_apply";
+	environment: AgentReleaseEnvironment;
+	targetId: string;
+	agentId: string;
+	assignmentRevision: string;
+	claimToken: string;
+	stepOrdinal: number;
+	stepLeaseToken: string;
+	releaseId: string;
+	releaseSequence: number;
+	feedSequence: number;
+	feedDigest: string;
+	manifestDigest: string;
+	revisionRef: string | null;
+	settingsHash: string;
+	drifted: boolean;
+	postApplySmoke: { passed: boolean; digest: string };
+	observedAt: string;
+	expiresAt: string;
+	evidenceRef: string;
+	evidenceSigning: SigningMetadata;
 }
 
 export interface AgentReleaseApplyResult extends AgentReleaseEvidence {
@@ -138,6 +184,7 @@ export class AgentReleaseError extends Error {
 
 export function createAgentReleaseService(options: {
 	trustedPublicKeysJson?: string;
+	evidenceSigningPrivateKeysJson?: string;
 	expectedEnvironment?: string;
 	now?: () => Date;
 	sql?: DbClient;
@@ -146,13 +193,16 @@ export function createAgentReleaseService(options: {
 	const expectedEnvironment = parseExpectedEnvironment(
 		options.expectedEnvironment,
 	);
+	const evidenceSigner = parseEvidenceSigner(
+		options.evidenceSigningPrivateKeysJson,
+	);
 
 	return {
 		async apply(input: {
 			organizationId: string;
 			agentId: string;
 			command: unknown;
-		}): Promise<AgentReleaseApplyResult> {
+		}): Promise<AgentReleaseApplyResult | AgentReleasePostApplyEvidence> {
 			const sql = options.sql ?? getDb();
 			if (keyring.error) throw keyring.error;
 			if (expectedEnvironment.error) throw expectedEnvironment.error;
@@ -161,6 +211,7 @@ export function createAgentReleaseService(options: {
 			validateApplyEnvelope(input.agentId, command, expectedEnvironment.value);
 			verifySignedManifest(command.signedManifest, keyring.keys);
 			verifySignedFeed(command.signedFeed, keyring.keys);
+			validateCurrentContract(command);
 			const publication = validatePublication(
 				command,
 				(options.now ?? (() => new Date()))(),
@@ -176,8 +227,11 @@ export function createAgentReleaseService(options: {
 					"Agent release command digest does not match its canonical payload",
 				);
 			}
+			if (isCurrentApplyCommand(command) && evidenceSigner.error) {
+				throw evidenceSigner.error;
+			}
 
-			return sql.begin(async (tx) =>
+			const result = await sql.begin(async (tx) =>
 				applyInTransaction(tx, {
 					organizationId: input.organizationId,
 					agentId: input.agentId,
@@ -186,6 +240,13 @@ export function createAgentReleaseService(options: {
 					feedDigest,
 				}),
 			);
+			if (!isCurrentApplyCommand(command)) return result;
+			return signPostApplyEvidence({
+				command,
+				result,
+				signer: evidenceSigner.value,
+				now: (options.now ?? (() => new Date()))(),
+			});
 		},
 
 		async getEvidence(input: {
@@ -319,6 +380,17 @@ async function applyInTransaction(
 
 	if (current?.applied_release_sequence === manifest.releaseSequence) {
 		if (
+			isCurrentApplyCommand(input.command) &&
+			input.command.expectedCurrentReleaseSequence !==
+				current.applied_release_sequence
+		) {
+			throw releaseError(
+				"agent_release_expected_current_mismatch",
+				409,
+				"Agent release compare-and-set precondition does not match",
+			);
+		}
+		if (
 			current.manifest_digest !== manifestDigest ||
 			current.applied_release_id !== manifest.releaseId
 		) {
@@ -341,6 +413,7 @@ async function applyInTransaction(
 		const repairedSettingsHash = repaired
 			? settingsHashFromAgent(repairedAgent)
 			: current.settings_hash;
+		assertExpectedSettingsHash(manifest, repairedSettingsHash);
 		if (repaired && repairedSettingsHash !== current.settings_hash) {
 			throw releaseError(
 				"agent_release_settings_drift_unrepairable",
@@ -449,6 +522,7 @@ async function applyInTransaction(
 		manifest.managedSettings,
 	);
 	const settingsHash = settingsHashFromAgent(updated);
+	assertExpectedSettingsHash(manifest, settingsHash);
 	const revisionRef = [
 		"lobu",
 		input.agentId,
@@ -664,6 +738,10 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 			"signedManifest",
 			"signedFeed",
 			"assignment",
+			"assignmentRevision",
+			"claimToken",
+			"stepOrdinal",
+			"stepLeaseToken",
 			"expectedCurrentReleaseSequence",
 			"commandDigest",
 		],
@@ -672,6 +750,42 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 	const signedManifest = parseManifest(value.signedManifest);
 	const signedFeed = parseFeed(value.signedFeed);
 	const assignment = parseAssignment(value.assignment);
+	const currentAttemptKeys = [
+		"assignmentRevision",
+		"claimToken",
+		"stepOrdinal",
+		"stepLeaseToken",
+	] as const;
+	const presentAttemptKeys = currentAttemptKeys.filter((key) =>
+		hasOwn(value, key),
+	);
+	if (
+		presentAttemptKeys.length !== 0 &&
+		presentAttemptKeys.length !== currentAttemptKeys.length
+	) {
+		throw invalidRequest(
+			"Agent release apply attempt subjects must be provided together",
+		);
+	}
+	if (presentAttemptKeys.length > 0) {
+		for (const key of [
+			"assignmentRevision",
+			"claimToken",
+			"stepLeaseToken",
+		] as const) {
+			if (typeof value[key] !== "string" || !isUuid(value[key])) {
+				throw invalidRequest(`Agent release ${key} must be a UUID`);
+			}
+		}
+		if (
+			!Number.isSafeInteger(value.stepOrdinal) ||
+			Number(value.stepOrdinal) < 0
+		) {
+			throw invalidRequest(
+				"Agent release stepOrdinal must be a nonnegative safe integer",
+			);
+		}
+	}
 	const expectedCurrentReleaseSequence = value.expectedCurrentReleaseSequence;
 	if (
 		expectedCurrentReleaseSequence !== null &&
@@ -693,6 +807,14 @@ function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
 		signedManifest,
 		signedFeed,
 		assignment,
+		...(presentAttemptKeys.length > 0
+			? {
+					assignmentRevision: value.assignmentRevision as string,
+					claimToken: value.claimToken as string,
+					stepOrdinal: value.stepOrdinal as number,
+					stepLeaseToken: value.stepLeaseToken as string,
+				}
+			: {}),
 		expectedCurrentReleaseSequence,
 		commandDigest: value.commandDigest,
 	};
@@ -710,6 +832,7 @@ function parseManifest(value: unknown): SignedManifest {
 			"releaseKind",
 			"createdAt",
 			"managedSettings",
+			"controlPlanePolicy",
 			"rollbackToSequence",
 			"rollbackTo",
 			"signing",
@@ -738,6 +861,9 @@ function parseManifest(value: unknown): SignedManifest {
 		throw invalidRequest("Agent release createdAt is invalid");
 	}
 	const managedSettings = parseManagedSettings(value.managedSettings);
+	const controlPlanePolicy = hasOwn(value, "controlPlanePolicy")
+		? parseControlPlanePolicy(value.controlPlanePolicy)
+		: undefined;
 	const hasRollbackTo = hasOwn(value, "rollbackTo");
 	const hasRollbackToSequence = hasOwn(value, "rollbackToSequence");
 	if (hasRollbackTo !== hasRollbackToSequence) {
@@ -770,6 +896,7 @@ function parseManifest(value: unknown): SignedManifest {
 		releaseKind: value.releaseKind,
 		createdAt: value.createdAt,
 		managedSettings,
+		...(controlPlanePolicy ? { controlPlanePolicy } : {}),
 		...(hasRollbackToSequence
 			? { rollbackToSequence: value.rollbackToSequence as number }
 			: {}),
@@ -790,6 +917,8 @@ function parseFeed(value: unknown): SignedFeed {
 			"channel",
 			"generatedAt",
 			"publications",
+			"activationMode",
+			"rollout",
 			"feedSigning",
 		],
 		"feed",
@@ -815,6 +944,25 @@ function parseFeed(value: unknown): SignedFeed {
 		throw invalidRequest("Agent release feed must include a publication");
 	}
 	const publications = value.publications.map(parsePublication);
+	const hasActivationMode = hasOwn(value, "activationMode");
+	const hasRollout = hasOwn(value, "rollout");
+	if (hasActivationMode !== hasRollout) {
+		throw invalidRequest(
+			"Agent release feed activationMode and rollout must be provided together",
+		);
+	}
+	let activationMode: SignedFeed["activationMode"];
+	let rollout: SignedFeed["rollout"];
+	if (hasActivationMode) {
+		if (
+			value.activationMode !== "per_agent" &&
+			value.activationMode !== "shared_carrier"
+		) {
+			throw invalidRequest("Agent release feed activation mode is invalid");
+		}
+		activationMode = value.activationMode;
+		rollout = parseSignedRollout(value.rollout);
+	}
 	const feedSigning = parseSigningMetadata(value.feedSigning, "feed");
 	return {
 		feedVersion: 1,
@@ -823,6 +971,12 @@ function parseFeed(value: unknown): SignedFeed {
 		channel: value.channel,
 		generatedAt: value.generatedAt,
 		publications,
+		...(activationMode
+			? {
+					activationMode,
+					rollout: rollout as NonNullable<SignedFeed["rollout"]>,
+				}
+			: {}),
 		feedSigning,
 	};
 }
@@ -865,7 +1019,8 @@ function parsePublication(value: unknown): FeedPublication {
 	if (
 		value.publicationKind !== undefined &&
 		value.publicationKind !== "release" &&
-		value.publicationKind !== "rollback"
+		value.publicationKind !== "rollback" &&
+		value.publicationKind !== "pause"
 	) {
 		throw invalidRequest("Agent release publication kind is invalid");
 	}
@@ -882,6 +1037,11 @@ function parsePublication(value: unknown): FeedPublication {
 		if (rollbackFields.some((key) => hasOwn(value, key))) {
 			throw invalidRollback(
 				"Ordinary agent release publication cannot include rollback-only fields",
+			);
+		}
+		if (value.publicationKind === "pause") {
+			throw invalidRequest(
+				"Paused agent release publications cannot be applied",
 			);
 		}
 	} else {
@@ -1063,6 +1223,341 @@ function parseToolsConfig(value: unknown): ManagedToolsConfig {
 	return result;
 }
 
+function parseControlPlanePolicy(value: unknown): ControlPlanePolicy {
+	const policy = requireRecord(value, "controlPlanePolicy");
+	assertRequiredExactKeys(
+		policy,
+		[
+			"eligibility",
+			"rolloutPolicy",
+			"requiredCarriers",
+			"baseline",
+			"capabilities",
+			"migrations",
+			"rollbackStrategy",
+		],
+		["runtimeCarrier"],
+		"controlPlanePolicy",
+	);
+	const eligibility = requireRecord(policy.eligibility, "eligibility");
+	assertRequiredExactKeys(
+		eligibility,
+		[
+			"minimumSourceSequence",
+			"maximumSourceSequence",
+			"freshInstallAllowed",
+			"requiredAppliedCapabilities",
+			"requiredIntermediateSequences",
+			"cohortAlgorithmVersion",
+		],
+		[],
+		"eligibility",
+	);
+	for (const key of [
+		"minimumSourceSequence",
+		"maximumSourceSequence",
+	] as const) {
+		if (eligibility[key] !== null && !isPositiveSafeInteger(eligibility[key])) {
+			throw invalidRequest(`Agent release eligibility ${key} is invalid`);
+		}
+	}
+	if (
+		typeof eligibility.freshInstallAllowed !== "boolean" ||
+		eligibility.cohortAlgorithmVersion !== "hmac-sha256-toolbox-user-v1"
+	) {
+		throw invalidRequest("Agent release eligibility is invalid");
+	}
+	if (
+		eligibility.minimumSourceSequence !== null &&
+		eligibility.maximumSourceSequence !== null &&
+		Number(eligibility.minimumSourceSequence) >
+			Number(eligibility.maximumSourceSequence)
+	) {
+		throw invalidRequest("Agent release eligibility source range is invalid");
+	}
+	parseStringArray(
+		eligibility.requiredAppliedCapabilities,
+		"requiredAppliedCapabilities",
+	);
+	parsePositiveIntegerArray(
+		eligibility.requiredIntermediateSequences,
+		"requiredIntermediateSequences",
+	);
+
+	const rolloutPolicy = requireRecord(policy.rolloutPolicy, "rolloutPolicy");
+	assertRequiredExactKeys(
+		rolloutPolicy,
+		["kind", "stages", "gates"],
+		[],
+		"rolloutPolicy",
+	);
+	if (rolloutPolicy.kind !== "standard" && rolloutPolicy.kind !== "critical") {
+		throw invalidRequest("Agent release rollout policy kind is invalid");
+	}
+	parsePercentageArray(rolloutPolicy.stages, "rollout stages");
+	const gates = requireRecord(rolloutPolicy.gates, "rollout gates");
+	assertRequiredExactKeys(
+		gates,
+		[
+			"minimumCanaries",
+			"minimumCanaryObservationMinutes",
+			"requiredSmokeNames",
+		],
+		[],
+		"rollout gates",
+	);
+	if (
+		!Number.isSafeInteger(gates.minimumCanaries) ||
+		Number(gates.minimumCanaries) < 2 ||
+		!Number.isSafeInteger(gates.minimumCanaryObservationMinutes) ||
+		Number(gates.minimumCanaryObservationMinutes) < 30 ||
+		Number(gates.minimumCanaryObservationMinutes) > 1440
+	) {
+		throw invalidRequest("Agent release rollout gates are invalid");
+	}
+	parseStringArray(gates.requiredSmokeNames, "requiredSmokeNames", 1);
+
+	if (
+		!Array.isArray(policy.requiredCarriers) ||
+		policy.requiredCarriers.length < 1 ||
+		policy.requiredCarriers.length > 16
+	)
+		throw invalidRequest("Agent release required carriers are invalid");
+	const carrierKeys = new Set<string>();
+	const providedCapabilities = new Set<string>();
+	for (const carrierValue of policy.requiredCarriers) {
+		const carrier = requireRecord(carrierValue, "required carrier");
+		assertRequiredExactKeys(
+			carrier,
+			["component", "revision", "origin", "provides", "requires"],
+			["artifactDigest", "imageDigest"],
+			"required carrier",
+		);
+		if (
+			!["toolbox-api", "toolbox-mcp", "lobu-runtime"].includes(
+				String(carrier.component),
+			) ||
+			typeof carrier.revision !== "string" ||
+			carrier.revision.trim() === "" ||
+			!isCanonicalHttpsOrigin(carrier.origin)
+		)
+			throw invalidRequest("Agent release required carrier is invalid");
+		parseStringArray(carrier.provides, "carrier provides", 1);
+		parseStringArray(carrier.requires, "carrier requires");
+		const carrierKey = `${String(carrier.component)}:${String(carrier.revision)}`;
+		if (carrierKeys.has(carrierKey)) {
+			throw invalidRequest("Agent release required carrier is duplicated");
+		}
+		carrierKeys.add(carrierKey);
+		for (const provided of carrier.provides as string[]) {
+			providedCapabilities.add(provided);
+			providedCapabilities.add(`${String(carrier.component)}:${provided}`);
+		}
+		const digests = [carrier.artifactDigest, carrier.imageDigest].filter(
+			(item) => item !== undefined,
+		);
+		if (digests.length !== 1 || !SHA256_PATTERN.test(String(digests[0]))) {
+			throw invalidRequest(
+				"Agent release carrier must contain exactly one artifact digest",
+			);
+		}
+	}
+
+	if (policy.baseline !== null) {
+		const baseline = requireRecord(policy.baseline, "baseline");
+		assertRequiredExactKeys(
+			baseline,
+			["settingsHash", "fullBundleDigest", "patches"],
+			[],
+			"baseline",
+		);
+		if (
+			!SHA256_PATTERN.test(String(baseline.settingsHash)) ||
+			!SHA256_PATTERN.test(String(baseline.fullBundleDigest)) ||
+			!Array.isArray(baseline.patches) ||
+			baseline.patches.length > 32
+		) {
+			throw invalidRequest("Agent release baseline is invalid");
+		}
+		for (const patchValue of baseline.patches) {
+			const item = requireRecord(patchValue, "baseline patch");
+			assertRequiredExactKeys(
+				item,
+				["fromSettingsHash", "patchDigest"],
+				[],
+				"baseline patch",
+			);
+			if (
+				!SHA256_PATTERN.test(String(item.fromSettingsHash)) ||
+				!SHA256_PATTERN.test(String(item.patchDigest))
+			) {
+				throw invalidRequest("Agent release baseline patch is invalid");
+			}
+		}
+	}
+
+	if (
+		!Array.isArray(policy.capabilities) ||
+		policy.capabilities.length < 1 ||
+		policy.capabilities.length > 64
+	) {
+		throw invalidRequest("Agent release capabilities are invalid");
+	}
+	const capabilityNames = new Set<string>();
+	const requiredCapabilities: string[] = [];
+	for (const capabilityValue of policy.capabilities) {
+		const capability = requireRecord(capabilityValue, "capability");
+		assertRequiredExactKeys(
+			capability,
+			["name", "requires", "smokes"],
+			[],
+			"capability",
+		);
+		if (
+			typeof capability.name !== "string" ||
+			!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(capability.name)
+		) {
+			throw invalidRequest("Agent release capability name is invalid");
+		}
+		if (capabilityNames.has(capability.name)) {
+			throw invalidRequest("Agent release capability is duplicated");
+		}
+		capabilityNames.add(capability.name);
+		requiredCapabilities.push(
+			...parseStringArray(capability.requires, "capability requires", 1),
+		);
+		parseStringArray(capability.smokes, "capability smokes", 1);
+	}
+	for (const carrierValue of policy.requiredCarriers) {
+		const carrier = carrierValue as Record<string, unknown>;
+		requiredCapabilities.push(...(carrier.requires as string[]));
+	}
+	if (
+		requiredCapabilities.some((required) => !providedCapabilities.has(required))
+	) {
+		throw invalidRequest(
+			"Agent release capability dependency closure is incomplete",
+		);
+	}
+
+	const migrations = requireRecord(policy.migrations, "migrations");
+	assertRequiredExactKeys(
+		migrations,
+		["required", "backwardCompatible"],
+		[],
+		"migrations",
+	);
+	parseStringArray(migrations.required, "migrations required");
+	if (typeof migrations.backwardCompatible !== "boolean")
+		throw invalidRequest("Agent release migrations are invalid");
+	const rollback = requireRecord(policy.rollbackStrategy, "rollbackStrategy");
+	assertRequiredExactKeys(
+		rollback,
+		["kind", "backwardCompatible", "boundedDriftMinutes"],
+		[],
+		"rollbackStrategy",
+	);
+	if (
+		rollback.kind !== "forward_compatible_managed_settings" ||
+		rollback.backwardCompatible !== true ||
+		!Number.isSafeInteger(rollback.boundedDriftMinutes) ||
+		Number(rollback.boundedDriftMinutes) < 1 ||
+		Number(rollback.boundedDriftMinutes) > 1440
+	)
+		throw invalidRequest("Agent release rollback strategy is invalid");
+	if (hasOwn(policy, "runtimeCarrier"))
+		parseRuntimeCarrierPolicy(policy.runtimeCarrier);
+	return policy as unknown as ControlPlanePolicy;
+}
+
+function parseRuntimeCarrierPolicy(value: unknown): void {
+	const runtime = requireRecord(value, "runtimeCarrier");
+	assertRequiredExactKeys(
+		runtime,
+		[
+			"backwardCompatible",
+			"backwardCompatibilitySmokes",
+			"boundedDriftMinutes",
+			"requiredOperationalEvidence",
+			"previousStable",
+			"queueConsumer",
+			"databaseConsumer",
+		],
+		[],
+		"runtimeCarrier",
+	);
+	if (
+		runtime.backwardCompatible !== true ||
+		!Number.isSafeInteger(runtime.boundedDriftMinutes) ||
+		Number(runtime.boundedDriftMinutes) < 1 ||
+		Number(runtime.boundedDriftMinutes) > 1440
+	) {
+		throw invalidRequest("Agent release runtime carrier policy is invalid");
+	}
+	parseStringArray(
+		runtime.backwardCompatibilitySmokes,
+		"backwardCompatibilitySmokes",
+		1,
+	);
+	parseStringArray(
+		runtime.requiredOperationalEvidence,
+		"requiredOperationalEvidence",
+		3,
+	);
+	const previous = requireRecord(runtime.previousStable, "previousStable");
+	assertRequiredExactKeys(
+		previous,
+		["releaseId", "releaseSequence"],
+		[],
+		"previousStable",
+	);
+	if (
+		typeof previous.releaseId !== "string" ||
+		previous.releaseId.trim() === "" ||
+		!isPositiveSafeInteger(previous.releaseSequence)
+	)
+		throw invalidRequest("Agent release previous stable is invalid");
+	for (const key of ["queueConsumer", "databaseConsumer"] as const) {
+		const consumer = requireRecord(runtime[key], key);
+		assertRequiredExactKeys(
+			consumer,
+			["identity", "origin", "evidenceName"],
+			[],
+			key,
+		);
+		if (
+			typeof consumer.identity !== "string" ||
+			consumer.identity.trim() === "" ||
+			!isCanonicalHttpsOrigin(consumer.origin) ||
+			typeof consumer.evidenceName !== "string" ||
+			consumer.evidenceName.trim() === ""
+		)
+			throw invalidRequest(`Agent release ${key} is invalid`);
+	}
+}
+
+function parseSignedRollout(
+	value: unknown,
+): NonNullable<SignedFeed["rollout"]> {
+	const rollout = requireRecord(value, "signed rollout");
+	assertRequiredExactKeys(
+		rollout,
+		["percentage", "paused", "cohortAlgorithmVersion"],
+		[],
+		"signed rollout",
+	);
+	if (
+		!Number.isSafeInteger(rollout.percentage) ||
+		Number(rollout.percentage) < 0 ||
+		Number(rollout.percentage) > 100 ||
+		typeof rollout.paused !== "boolean" ||
+		rollout.cohortAlgorithmVersion !== "hmac-sha256-toolbox-user-v1"
+	) {
+		throw invalidRequest("Agent release signed rollout is invalid");
+	}
+	return rollout as unknown as NonNullable<SignedFeed["rollout"]>;
+}
+
 function parseSigningMetadata(
 	value: unknown,
 	label: "manifest" | "feed",
@@ -1118,6 +1613,82 @@ function validateApplyEnvelope(
 			"agent_release_environment_mismatch",
 			400,
 			"Agent release manifest, feed, and assignment must match the runtime environment",
+		);
+	}
+}
+
+function isCurrentApplyCommand(
+	command: AgentReleaseApplyCommand,
+): command is AgentReleaseApplyCommand & {
+	assignmentRevision: string;
+	claimToken: string;
+	stepOrdinal: number;
+	stepLeaseToken: string;
+} {
+	return command.assignmentRevision !== undefined;
+}
+
+function validateCurrentContract(command: AgentReleaseApplyCommand): void {
+	const current = isCurrentApplyCommand(command);
+	const hasManifestPolicy =
+		command.signedManifest.controlPlanePolicy !== undefined;
+	const hasFeedPolicy =
+		command.signedFeed.activationMode !== undefined &&
+		command.signedFeed.rollout !== undefined;
+	if (!current && !hasManifestPolicy && !hasFeedPolicy) return;
+	if (!current || !hasManifestPolicy || !hasFeedPolicy) {
+		throw invalidRequest(
+			"Current agent release command requires policy, feed activation, and apply attempt subjects",
+		);
+	}
+	if (!isUuid(command.assignment.targetId)) {
+		throw invalidRequest("Current agent release targetId must be a UUID");
+	}
+	if (command.signedFeed.rollout.paused) {
+		throw invalidRequest("Paused agent release feeds cannot be applied");
+	}
+	if (command.signedFeed.publications.length !== 1) {
+		throw invalidRequest(
+			"Current agent release feed must contain exactly one publication",
+		);
+	}
+	const expectedMode =
+		command.signedManifest.releaseKind === "runtime_carrier"
+			? "shared_carrier"
+			: "per_agent";
+	if (command.signedFeed.activationMode !== expectedMode) {
+		throw invalidRequest(
+			"Agent release activation mode does not match release kind",
+		);
+	}
+	if (
+		command.signedManifest.releaseKind === "capability_activation" &&
+		command.signedManifest.controlPlanePolicy.baseline === null
+	) {
+		throw invalidRequest(
+			"Capability activation requires a managed settings baseline",
+		);
+	}
+	if (
+		command.signedManifest.releaseKind === "runtime_carrier" &&
+		!hasOwn(command.signedManifest.controlPlanePolicy, "runtimeCarrier")
+	) {
+		throw invalidRequest(
+			"Runtime carrier release requires compatibility policy",
+		);
+	}
+}
+
+function assertExpectedSettingsHash(
+	manifest: SignedManifest,
+	settingsHash: string,
+): void {
+	const expected = manifest.controlPlanePolicy?.baseline?.settingsHash;
+	if (expected !== undefined && !safeDigestEqual(expected, settingsHash)) {
+		throw releaseError(
+			"agent_release_settings_hash_mismatch",
+			409,
+			"Applied managed settings do not match the signed baseline hash",
 		);
 	}
 }
@@ -1290,6 +1861,136 @@ function parseTrustedKeyring(value: string | undefined): {
 	}
 }
 
+interface EvidenceSigner {
+	keyId: string;
+	privateKey: KeyObject;
+}
+
+function parseEvidenceSigner(value: string | undefined): {
+	value: EvidenceSigner;
+	error: AgentReleaseError | null;
+} {
+	if (!value?.trim() || value.length > MAX_KEYRING_BYTES) {
+		return {
+			value: {} as EvidenceSigner,
+			error: releaseError(
+				"agent_release_evidence_signer_unavailable",
+				503,
+				"Agent release runtime evidence signer is unavailable",
+			),
+		};
+	}
+	try {
+		const parsed = parseStrictJsonBytes(new TextEncoder().encode(value), {
+			maxBytes: MAX_KEYRING_BYTES,
+			maxDepth: 3,
+			maxValues: MAX_KEYRING_KEYS + 4,
+		});
+		if (!isRecord(parsed)) throw new Error("invalid signer");
+		assertExactKeys(parsed, ["activeKeyId", "keys"], "evidence signer");
+		if (
+			typeof parsed.activeKeyId !== "string" ||
+			parsed.activeKeyId.trim() === "" ||
+			!isRecord(parsed.keys) ||
+			!hasOwn(parsed.keys, parsed.activeKeyId)
+		)
+			throw new Error("invalid active signer");
+		const entries = Object.entries(parsed.keys);
+		if (entries.length < 1 || entries.length > MAX_KEYRING_KEYS)
+			throw new Error("invalid signer keys");
+		let active: KeyObject | null = null;
+		for (const [keyId, encoded] of entries) {
+			if (
+				!keyId.trim() ||
+				typeof encoded !== "string" ||
+				!isCanonicalBase64(encoded)
+			) {
+				throw new Error("invalid signer key");
+			}
+			const privateKey = createPrivateKey({
+				key: Buffer.from(encoded, "base64"),
+				format: "der",
+				type: "pkcs8",
+			});
+			if (privateKey.asymmetricKeyType !== "ed25519")
+				throw new Error("invalid signer algorithm");
+			if (keyId === parsed.activeKeyId) active = privateKey;
+		}
+		if (!active) throw new Error("missing active signer");
+		return {
+			value: { keyId: parsed.activeKeyId, privateKey: active },
+			error: null,
+		};
+	} catch {
+		return {
+			value: {} as EvidenceSigner,
+			error: releaseError(
+				"agent_release_evidence_signer_unavailable",
+				503,
+				"Agent release runtime evidence signer is unavailable",
+			),
+		};
+	}
+}
+
+function signPostApplyEvidence(input: {
+	command: AgentReleaseApplyCommand & {
+		assignmentRevision: string;
+		claimToken: string;
+		stepOrdinal: number;
+		stepLeaseToken: string;
+	};
+	result: AgentReleaseApplyResult;
+	signer: EvidenceSigner;
+	now: Date;
+}): AgentReleasePostApplyEvidence {
+	const observedAt = input.now.toISOString();
+	const expiresAt = new Date(input.now.getTime() + 5 * 60_000).toISOString();
+	const smokeDigest = digestValue({
+		contract: "lobu-managed-settings-readback-v1",
+		passed: true,
+		settingsHash: input.result.settingsHash,
+		revisionRef: input.result.revisionRef,
+	});
+	const unsigned = {
+		evidenceKind: "post_apply" as const,
+		environment: input.command.signedManifest.environment,
+		targetId: input.command.assignment.targetId,
+		agentId: input.command.assignment.agentId,
+		assignmentRevision: input.command.assignmentRevision,
+		claimToken: input.command.claimToken,
+		stepOrdinal: input.command.stepOrdinal,
+		stepLeaseToken: input.command.stepLeaseToken,
+		releaseId: input.result.releaseId,
+		releaseSequence: input.result.releaseSequence,
+		feedSequence: input.result.feedSequence,
+		feedDigest: input.result.feedDigest,
+		manifestDigest: input.result.manifestDigest,
+		revisionRef: input.result.revisionRef,
+		settingsHash: input.result.settingsHash,
+		drifted: false,
+		postApplySmoke: { passed: true, digest: smokeDigest },
+		observedAt,
+		expiresAt,
+		evidenceRef: `lobu:managed-settings:${input.result.revisionRef}`,
+		evidenceSigning: {
+			algorithm: "Ed25519" as const,
+			keyId: input.signer.keyId,
+		},
+	};
+	return {
+		...unsigned,
+		evidenceSigning: {
+			...unsigned.evidenceSigning,
+			signature: signBytes(
+				null,
+				canonicalBytes(unsigned),
+				input.signer.privateKey,
+			).toString("base64"),
+		},
+	};
+}
+
 function isStrictRfc3339(value: string): boolean {
 	const match = RFC3339_PATTERN.exec(value);
 	if (!match) return false;
@@ -1452,6 +2153,96 @@ function assertExactKeys(
 		if (!allowedSet.has(key))
 			throw invalidRequest(`Unknown agent release ${label} key: ${key}`);
 	}
+}
+
+function assertRequiredExactKeys(
+	value: Record<string, unknown>,
+	required: readonly string[],
+	optional: readonly string[],
+	label: string,
+): void {
+	assertExactKeys(value, [...required, ...optional], label);
+	for (const key of required) {
+		if (!hasOwn(value, key))
+			throw invalidRequest(`Missing agent release ${label} key: ${key}`);
+	}
+}
+
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+	if (!isRecord(value))
+		throw invalidRequest(`Agent release ${label} must be an object`);
+	return value;
+}
+
+function parseStringArray(
+	value: unknown,
+	label: string,
+	minimum = 0,
+): string[] {
+	if (
+		!Array.isArray(value) ||
+		value.length < minimum ||
+		value.length > 64 ||
+		!value.every(
+			(item) =>
+				typeof item === "string" && item.length > 0 && item.length <= 256,
+		) ||
+		new Set(value).size !== value.length
+	)
+		throw invalidRequest(`Agent release ${label} is invalid`);
+	return value as string[];
+}
+
+function parsePositiveIntegerArray(value: unknown, label: string): number[] {
+	if (
+		!Array.isArray(value) ||
+		value.length > 64 ||
+		!value.every(
+			(item, index) =>
+				isPositiveSafeInteger(item) &&
+				(index === 0 || Number(item) > Number(value[index - 1])),
+		)
+	) {
+		throw invalidRequest(`Agent release ${label} is invalid`);
+	}
+	return value as number[];
+}
+
+function parsePercentageArray(value: unknown, label: string): number[] {
+	if (
+		!Array.isArray(value) ||
+		value.length < 1 ||
+		value.length > 8 ||
+		!value.every(
+			(item, index) =>
+				Number.isSafeInteger(item) &&
+				Number(item) > 0 &&
+				Number(item) <= 100 &&
+				(index === 0 || Number(item) > Number(value[index - 1])),
+		) ||
+		value.at(-1) !== 100
+	) {
+		throw invalidRequest(`Agent release ${label} is invalid`);
+	}
+	return value as number[];
+}
+
+function isCanonicalHttpsOrigin(value: unknown): boolean {
+	if (typeof value !== "string") return false;
+	try {
+		const url = new URL(value);
+		return (
+			url.protocol === "https:" && url.origin === value && url.pathname === "/"
+		);
+	} catch {
+		return false;
+	}
+}
+
+function isUuid(value: string): boolean {
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+		value,
+	);
 }
 
 function assertManagedNestedKeys(

@@ -66,6 +66,7 @@ interface ProvisioningRoutesOptions {
 	secretStore?: WritableSecretStore;
 	publicGatewayUrl?: string;
 	agentReleaseTrustedPublicKeysJson?: string;
+	agentReleaseEvidenceSigningPrivateKeysJson?: string;
 	agentReleaseEnvironment?: string;
 }
 
@@ -293,6 +294,9 @@ export function createProvisioningRoutes(
 		trustedPublicKeysJson:
 			options.agentReleaseTrustedPublicKeysJson ??
 			process.env.AGENT_RELEASE_TRUSTED_PUBLIC_KEYS_JSON,
+		evidenceSigningPrivateKeysJson:
+			options.agentReleaseEvidenceSigningPrivateKeysJson ??
+			process.env.AGENT_RELEASE_EVIDENCE_SIGNING_PRIVATE_KEYS_JSON,
 		expectedEnvironment:
 			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
 	});

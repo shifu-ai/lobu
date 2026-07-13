@@ -4,6 +4,7 @@ import {
 	createPrivateKey,
 	createPublicKey,
 	sign as signBytes,
+	verify as verifySignature,
 } from "node:crypto";
 import { Hono } from "hono";
 import {
@@ -16,6 +17,7 @@ const ORG_ID = "org-agent-release";
 const OTHER_ORG_ID = "org-agent-release-other";
 const AGENT_ID = "shifu-u-irene";
 const KEY_ID = "agent-release-test-2026";
+const EVIDENCE_KEY_ID = "lobu-runtime-evidence-2026";
 const MAX_RELEASE_BODY_BYTES = 1024 * 1024;
 const PRIVATE_KEY = `-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIIPVIttIdPiKTq8G2u58MHvf7DqR4wTOzHGSogMA6bou
@@ -77,6 +79,217 @@ beforeEach(async () => {
 });
 
 describe("signed managed agent release apply", () => {
+	test("accepts the current Toolbox policy envelope and returns attempt-bound signed post-apply evidence", async () => {
+		const app = await buildApp();
+		const request = latestSignedApplyRequest();
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(200);
+		const evidence = await response.json();
+		expect(evidence).toEqual({
+			evidenceKind: "post_apply",
+			environment: "production",
+			targetId: request.assignment.targetId,
+			agentId: AGENT_ID,
+			assignmentRevision: request.assignmentRevision,
+			claimToken: request.claimToken,
+			stepOrdinal: request.stepOrdinal,
+			stepLeaseToken: request.stepLeaseToken,
+			releaseId: request.signedManifest.releaseId,
+			releaseSequence: request.signedManifest.releaseSequence,
+			feedSequence: request.signedFeed.feedSequence,
+			feedDigest: digestValue(request.signedFeed),
+			manifestDigest: digestValue(request.signedManifest),
+			revisionRef: expect.stringMatching(
+				/^lobu:shifu-u-irene:agent-release:1:/,
+			),
+			settingsHash:
+				request.signedManifest.controlPlanePolicy.baseline.settingsHash,
+			drifted: false,
+			postApplySmoke: {
+				passed: true,
+				digest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+			},
+			observedAt: expect.any(String),
+			expiresAt: expect.any(String),
+			evidenceRef: expect.stringMatching(/^lobu:managed-settings:/),
+			evidenceSigning: {
+				algorithm: "Ed25519",
+				keyId: EVIDENCE_KEY_ID,
+				signature: expect.any(String),
+			},
+		});
+		const { signature, ...evidenceSigning } = evidence.evidenceSigning;
+		expect(
+			verifySignature(
+				null,
+				Buffer.from(
+					canonicalizeForTest({
+						...withoutKey(evidence, "evidenceSigning"),
+						evidenceSigning,
+					}),
+				),
+				createPublicKey(PUBLIC_KEY),
+				Buffer.from(signature, "base64"),
+			),
+		).toBe(true);
+	});
+
+	test("binds the Toolbox apply attempt fields into the command digest", async () => {
+		const app = await buildApp();
+		const request = latestSignedApplyRequest();
+		request.stepOrdinal += 1;
+
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_command_digest_mismatch",
+		});
+	});
+
+	test.each([
+		["missing", ""],
+		[
+			"active key mismatch",
+			JSON.stringify({
+				activeKeyId: "missing",
+				keys: {
+					[EVIDENCE_KEY_ID]: evidencePrivateKeyDer(),
+				},
+			}),
+		],
+		[
+			"invalid PKCS8",
+			JSON.stringify({
+				activeKeyId: EVIDENCE_KEY_ID,
+				keys: {
+					[EVIDENCE_KEY_ID]: Buffer.from("not-pkcs8").toString("base64"),
+				},
+			}),
+		],
+	])("fails closed before mutation when the evidence signer is %s", async (_label, signerJson) => {
+		const app = await buildApp({ evidenceSigningPrivateKeysJson: signerJson });
+		const response = await putApply(app, latestSignedApplyRequest());
+		expect(response.status).toBe(503);
+		await expect(response.json()).resolves.toEqual({
+			error: "agent_release_evidence_signer_unavailable",
+			error_description: "Agent release runtime evidence signer is unavailable",
+		});
+		expect(await currentIdentity()).toBe("existing identity");
+	});
+
+	test("uses only the configured active evidence key during rotation", async () => {
+		const rotatedKeyId = "lobu-runtime-evidence-2026-b";
+		const app = await buildApp({
+			evidenceSigningPrivateKeysJson: JSON.stringify({
+				activeKeyId: rotatedKeyId,
+				keys: {
+					[EVIDENCE_KEY_ID]: evidencePrivateKeyDer(),
+					[rotatedKeyId]: evidencePrivateKeyDer(),
+				},
+			}),
+		});
+		const response = await putApply(app, latestSignedApplyRequest());
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			evidenceSigning: { keyId: rotatedKeyId },
+		});
+	});
+
+	test("repairs same-sequence drift under a fresh Toolbox attempt and signs the repaired read-back", async () => {
+		const app = await buildApp();
+		const first = latestSignedApplyRequest();
+		expect((await putApply(app, first)).status).toBe(200);
+		const sql = await db();
+		await sql`
+			UPDATE agents
+			SET tools_config = ${sql.json({ allowedTools: ["drifted_tool"] })}
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+
+		const repair = latestSignedApplyRequest();
+		repair.expectedCurrentReleaseSequence = 1;
+		repair.claimToken = "55555555-5555-4555-8555-555555555555";
+		repair.stepLeaseToken = "66666666-6666-4666-8666-666666666666";
+		repair.commandDigest = commandDigest(repair);
+		const response = await putApply(app, repair);
+		expect(response.status).toBe(200);
+		await expect(response.json()).resolves.toMatchObject({
+			claimToken: repair.claimToken,
+			stepLeaseToken: repair.stepLeaseToken,
+			settingsHash:
+				repair.signedManifest.controlPlanePolicy.baseline.settingsHash,
+			drifted: false,
+			postApplySmoke: { passed: true },
+		});
+	});
+
+	test("returns fresh exact attempt evidence for an idempotent same-sequence no-drift retry", async () => {
+		const app = await buildApp();
+		const first = latestSignedApplyRequest();
+		expect((await putApply(app, first)).status).toBe(200);
+		const retry = latestSignedApplyRequest();
+		retry.expectedCurrentReleaseSequence = 1;
+		retry.claimToken = "77777777-7777-4777-8777-777777777777";
+		retry.stepLeaseToken = "88888888-8888-4888-8888-888888888888";
+		retry.commandDigest = commandDigest(retry);
+		const response = await putApply(app, retry);
+		expect(response.status).toBe(200);
+		const evidence = await response.json();
+		expect(evidence.claimToken).toBe(retry.claimToken);
+		expect(evidence.stepLeaseToken).toBe(retry.stepLeaseToken);
+		expect(Object.keys(evidence).sort()).toEqual(
+			[
+				"agentId",
+				"assignmentRevision",
+				"claimToken",
+				"drifted",
+				"environment",
+				"evidenceKind",
+				"evidenceRef",
+				"evidenceSigning",
+				"expiresAt",
+				"feedDigest",
+				"feedSequence",
+				"manifestDigest",
+				"observedAt",
+				"postApplySmoke",
+				"releaseId",
+				"releaseSequence",
+				"revisionRef",
+				"settingsHash",
+				"stepLeaseToken",
+				"stepOrdinal",
+				"targetId",
+			].sort(),
+		);
+	});
+
+	test("enforces expected-current CAS on current-contract same-sequence retries", async () => {
+		const app = await buildApp();
+		const first = latestSignedApplyRequest();
+		expect((await putApply(app, first)).status).toBe(200);
+		const stale = latestSignedApplyRequest();
+		const response = await putApply(app, stale);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_expected_current_mismatch",
+		});
+
+		const wrong = latestSignedApplyRequest();
+		wrong.expectedCurrentReleaseSequence = 2;
+		wrong.commandDigest = commandDigest(wrong);
+		expect((await putApply(app, wrong)).status).toBe(409);
+
+		const tampered = latestSignedApplyRequest();
+		tampered.expectedCurrentReleaseSequence = 1;
+		const tamperedResponse = await putApply(app, tampered);
+		expect(tamperedResponse.status).toBe(400);
+		await expect(tamperedResponse.json()).resolves.toMatchObject({
+			error: "agent_release_command_digest_mismatch",
+		});
+	});
+
 	test("atomically applies only managed columns and exposes bounded evidence", async () => {
 		const app = await buildApp();
 		const request = signedApplyRequest({
@@ -1114,6 +1327,7 @@ async function buildApp(
 		organizationId?: string;
 		trustedPublicKeysJson?: string;
 		agentReleaseEnvironment?: string;
+		evidenceSigningPrivateKeysJson?: string;
 	} = {},
 ) {
 	const organizationId = options.organizationId ?? ORG_ID;
@@ -1135,6 +1349,9 @@ async function buildApp(
 		createProvisioningRoutes({
 			agentReleaseTrustedPublicKeysJson:
 				options.trustedPublicKeysJson ?? trustedPublicKeysJson(),
+			agentReleaseEvidenceSigningPrivateKeysJson:
+				options.evidenceSigningPrivateKeysJson ??
+				evidenceSigningPrivateKeysJson(),
 			agentReleaseEnvironment:
 				options.agentReleaseEnvironment === undefined
 					? "production"
@@ -1303,6 +1520,121 @@ function signedApplyRequest(options: ReleaseFixtureOptions) {
 	return request;
 }
 
+function latestSignedApplyRequest() {
+	const managedSettings = {
+		identityMd: "release identity",
+		soulMd: "release soul",
+		userMd: "release user",
+		modelSelection: { mode: "auto" as const },
+		toolsConfig: {
+			allowedTools: ["manage_schedules"],
+			strictMode: true,
+			mcpExposure: "tools" as const,
+		},
+	};
+	const request = signedApplyRequest({ managedSettings });
+	const controlPlanePolicy = {
+		eligibility: {
+			minimumSourceSequence: null,
+			maximumSourceSequence: null,
+			freshInstallAllowed: true,
+			requiredAppliedCapabilities: [],
+			requiredIntermediateSequences: [],
+			cohortAlgorithmVersion: "hmac-sha256-toolbox-user-v1",
+		},
+		rolloutPolicy: {
+			kind: "standard",
+			stages: [100],
+			gates: {
+				minimumCanaries: 2,
+				minimumCanaryObservationMinutes: 30,
+				requiredSmokeNames: ["managed-settings-contract"],
+			},
+		},
+		requiredCarriers: [
+			{
+				component: "lobu-runtime",
+				revision: "test-runtime",
+				origin: "https://shifulobu.zeabur.app",
+				provides: ["managed_settings.apply.v1"],
+				requires: [],
+				imageDigest: `sha256:${"1".repeat(64)}`,
+			},
+		],
+		baseline: {
+			settingsHash: digestValue(managedSettings),
+			fullBundleDigest: `sha256:${"2".repeat(64)}`,
+			patches: [],
+		},
+		capabilities: [
+			{
+				name: "wake-agent",
+				requires: ["lobu-runtime:managed_settings.apply.v1"],
+				smokes: ["managed-settings-contract"],
+			},
+		],
+		migrations: { required: [], backwardCompatible: true },
+		rollbackStrategy: {
+			kind: "forward_compatible_managed_settings",
+			backwardCompatible: true,
+			boundedDriftMinutes: 60,
+		},
+	};
+	const unsignedManifest = {
+		...withoutKey(request.signedManifest, "signing"),
+		controlPlanePolicy,
+	};
+	request.signedManifest = {
+		...unsignedManifest,
+		signing: {
+			algorithm: "Ed25519",
+			keyId: KEY_ID,
+			signature: signValue({
+				...unsignedManifest,
+				signing: { algorithm: "Ed25519", keyId: KEY_ID },
+			}),
+		},
+	};
+	request.signedFeed.publications[0].manifest = structuredClone(
+		request.signedManifest,
+	);
+	request.signedFeed.publications[0].manifestDigest = digestValue(
+		request.signedManifest,
+	);
+	const unsignedFeed = {
+		...withoutKey(request.signedFeed, "feedSigning"),
+		activationMode: "per_agent" as const,
+		rollout: {
+			percentage: 100,
+			paused: false,
+			cohortAlgorithmVersion: "hmac-sha256-toolbox-user-v1" as const,
+		},
+	};
+	request.signedFeed = {
+		...unsignedFeed,
+		feedSigning: {
+			algorithm: "Ed25519",
+			keyId: KEY_ID,
+			signature: signValue({
+				...unsignedFeed,
+				feedSigning: { algorithm: "Ed25519", keyId: KEY_ID },
+			}),
+		},
+	};
+	const latest = Object.assign(request, {
+		assignment: {
+			...request.assignment,
+			targetId: "44444444-4444-4444-8444-444444444444",
+		},
+		assignmentRevision: "11111111-1111-4111-8111-111111111111",
+		claimToken: "22222222-2222-4222-8222-222222222222",
+		stepOrdinal: 0,
+		stepLeaseToken: "33333333-3333-4333-8333-333333333333",
+	});
+	latest.commandDigest = commandDigest(latest);
+	return latest;
+}
+
 function resignFeed(feed: ReturnType<typeof signedApplyRequest>["signedFeed"]) {
 	const { signature: _signature, ...feedSigning } = feed.feedSigning;
 	void _signature;
@@ -1363,4 +1695,20 @@ function trustedPublicKeysJson(): string {
 		format: "der",
 	});
 	return JSON.stringify({ [KEY_ID]: der.toString("base64") });
+}
+
+function evidenceSigningPrivateKeysJson(): string {
+	return JSON.stringify({
+		activeKeyId: EVIDENCE_KEY_ID,
+		keys: { [EVIDENCE_KEY_ID]: evidencePrivateKeyDer() },
+	});
+}
+
+function evidencePrivateKeyDer(): string {
+	return createPrivateKey(PRIVATE_KEY)
+		.export({
+			type: "pkcs8",
+			format: "der",
+		})
+		.toString("base64");
 }
