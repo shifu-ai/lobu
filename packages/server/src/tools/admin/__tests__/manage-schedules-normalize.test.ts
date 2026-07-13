@@ -47,6 +47,7 @@ describe("normalizeCreateArgs", () => {
         agent_id: "shifu-u-abc",
         prompt: "hello",
         custom_metadata: { tolerated: true },
+        trustedCoursePreference: "course-a",
         trustedCourseWake: { source: "calendar_scheduled_wake" },
         trustedCourseScope: { courseKey: "course-a" },
         __trustedCourseWakeProvenance: "internal",
@@ -58,6 +59,7 @@ describe("normalizeCreateArgs", () => {
       agent_id: "shifu-u-abc",
       prompt: "hello",
       custom_metadata: { tolerated: true },
+      trustedCoursePreference: "course-a",
     });
   });
 

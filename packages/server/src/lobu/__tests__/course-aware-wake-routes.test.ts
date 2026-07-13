@@ -13,7 +13,10 @@ const ORGANIZATION_ID = "org-1";
 const OWNER_USER_ID = "pm-1";
 const AGENT_ID = "shifu-u-pm-1";
 
-function buildApp(scopes: string[] = ["mcp:admin"]) {
+function buildApp(
+	scopes: string[] = ["mcp:admin"],
+	routes = createCourseAwareWakeRoutes(),
+) {
 	const app = new Hono();
 	app.use("*", async (c, next) => {
 		c.set("session", { id: "pat:course-aware-wake-test" });
@@ -22,7 +25,7 @@ function buildApp(scopes: string[] = ["mcp:admin"]) {
 		c.set("mcpAuthInfo", { scopes });
 		return orgContext.run({ organizationId: ORGANIZATION_ID }, next);
 	});
-	app.route("/api/internal/course-aware-wakes", createCourseAwareWakeRoutes());
+	app.route("/api/internal/course-aware-wakes", routes);
 	return app;
 }
 
@@ -111,6 +114,105 @@ describe("course-aware wake routes", () => {
 		});
 	});
 
+	test("isolates the same provider event external key for two owners in one organization", async () => {
+		const secondOwner = "pm-2";
+		const secondAgent = "shifu-u-pm-2";
+		await seedAgentRow(secondAgent, {
+			organizationId: ORGANIZATION_ID,
+			ownerPlatform: "toolbox",
+			ownerUserId: secondOwner,
+		});
+		const app = buildApp();
+		const firstBody = requestBody();
+		const secondBody = requestBody();
+		secondBody.ownerUserId = secondOwner;
+		secondBody.agentId = secondAgent;
+		secondBody.payload.trustedCourseScope.ownerUserId = secondOwner;
+		secondBody.payload.trustedCourseScope.agentId = secondAgent;
+
+		for (const body of [firstBody, secondBody]) {
+			const response = await app.request("/api/internal/course-aware-wakes", {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			expect(response.status).toBe(200);
+		}
+
+		const rows = await getDb()<{
+			created_by_user: string;
+			external_key: string;
+		}>`
+			SELECT created_by_user, external_key FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND external_key = ${firstBody.externalKey}
+			ORDER BY created_by_user
+		`;
+		expect(rows).toEqual([
+			{ created_by_user: OWNER_USER_ID, external_key: firstBody.externalKey },
+			{ created_by_user: secondOwner, external_key: firstBody.externalKey },
+		]);
+	});
+
+	test("does not re-arm an identical fired wake but re-arms a changed future provider revision", async () => {
+		const app = buildApp();
+		const original = requestBody();
+		await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(original),
+		});
+		await getDb()`
+			UPDATE scheduled_jobs
+			SET paused = true, last_fired_at = now()
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND external_key = ${original.externalKey}
+		`;
+
+		const replay = await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(original),
+		});
+		expect(replay.status).toBe(200);
+		let [row] = await getDb()<{
+			paused: boolean;
+			last_fired_at: Date | null;
+			schedule_revision: number;
+		}>`
+			SELECT paused, last_fired_at, schedule_revision FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND external_key = ${original.externalKey}
+		`;
+		expect(row).toMatchObject({ paused: true, schedule_revision: 1 });
+		expect(row?.last_fired_at).not.toBeNull();
+
+		const changed = requestBody("2026-07-14T08:00:00.000Z");
+		changed.payload.calendarEventRef.eventVersion = "v2";
+		const changedResponse = await app.request(
+			"/api/internal/course-aware-wakes",
+			{
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(changed),
+			},
+		);
+		expect(changedResponse.status).toBe(200);
+		[row] = await getDb()`
+			SELECT paused, last_fired_at, schedule_revision FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND external_key = ${original.externalKey}
+		`;
+		expect(row).toEqual({
+			paused: false,
+			last_fired_at: null,
+			schedule_revision: 2,
+		});
+	});
+
 	test("requires an admin PAT and rejects invalid trust claims", async () => {
 		const denied = await buildApp(["mcp:write"]).request(
 			"/api/internal/course-aware-wakes",
@@ -175,5 +277,45 @@ describe("course-aware wake routes", () => {
 			);
 			expect(response.status).toBe(400);
 		}
+	});
+
+	test("rejects impossible timestamps and runAt/scheduledFor mismatch", async () => {
+		const impossible = requestBody();
+		impossible.runAt = "2026-02-30T06:00:00.000Z";
+		impossible.payload.scheduledFor = impossible.runAt;
+		const mismatch = requestBody();
+		mismatch.payload.scheduledFor = "2026-07-14T06:01:00.000Z";
+
+		for (const body of [impossible, mismatch]) {
+			const response = await buildApp().request(
+				"/api/internal/course-aware-wakes",
+				{
+					method: "PUT",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+				},
+			);
+			expect(response.status).toBe(400);
+		}
+	});
+
+	test("returns a sanitized 500 for operational failures", async () => {
+		const routes = createCourseAwareWakeRoutes({
+			upsertScheduledJobByExternalKey: async () => {
+				throw new Error("database password leaked in driver error");
+			},
+		});
+		const response = await buildApp(["mcp:admin"], routes).request(
+			"/api/internal/course-aware-wakes",
+			{
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(requestBody()),
+			},
+		);
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({
+			error: "course_wake_upsert_failed",
+		});
 	});
 });
