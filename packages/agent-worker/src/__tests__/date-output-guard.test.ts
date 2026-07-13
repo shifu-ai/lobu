@@ -155,6 +155,26 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("supports only explicit connectors for relative day claims", () => {
+    for (const [finalText, expected] of [
+      ["今天 7/9（三）", "今天 7/13（一）"],
+      ["今天的日期為 7/9（三）", "今天的日期為 7/13（一）"],
+    ] as const) {
+      expect(
+        guardDateOutput({ userMessage: finalText, finalText, now: NOW }).text
+      ).toBe(expected);
+    }
+
+    for (const finalText of [
+      "今天氣溫資料來自 7/12（日）",
+      "昨天的報表涵蓋到 7/9（四）",
+    ]) {
+      expect(
+        guardDateOutput({ userMessage: finalText, finalText, now: NOW })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
   test("corrects a short date weekday within the relative calendar window", () => {
     const finalText = "7/16（三）";
     const result = guardDateOutput({

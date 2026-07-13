@@ -93,7 +93,7 @@ function sameShortDate(parts: CalendarDate, month: number, day: number) {
   return parts.month === month && parts.day === day;
 }
 
-function isBareRelativeWeekdayClaim(continuation: string): boolean {
+function isSupportedRelativeDateConnector(continuation: string): boolean {
   const normalized = continuation.trim();
   if (normalized === "" || normalized === "是") return true;
   if (/^(?:的日期|，日期|預定日期)[為是]$/.test(normalized)) return true;
@@ -136,7 +136,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       const weekdayText = explicitWeekdayText ?? bareWeekdayText;
       if (
         !explicitWeekdayMarker &&
-        !isBareRelativeWeekdayClaim(between)
+        !isSupportedRelativeDateConnector(between)
       ) {
         return match;
       }
@@ -181,6 +181,8 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     ) => {
       const reference = RELATIVE_DAY_REFERENCE[dayTextReference];
       if (!reference) return match;
+      if (!isSupportedRelativeDateConnector(between)) return match;
+
       const expected = resolveRelativeDay(reference, input.now);
       const expectedWeekday = weekdayWithStyle(weekday, weekdayFor(expected));
       const expectedDate = shortDate(expected, monthText, dayText);
