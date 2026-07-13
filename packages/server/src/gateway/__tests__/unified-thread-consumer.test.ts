@@ -20,6 +20,7 @@ const basePayload = {
 function createConsumer(overrides?: {
   chatResponseBridge?: unknown;
   renderer?: unknown;
+  courseWakeDelivery?: unknown;
 }) {
   const queue = {
     start: mock(async () => undefined),
@@ -36,17 +37,97 @@ function createConsumer(overrides?: {
   };
   const sseManager = {
     broadcast: mock(() => undefined),
+    hasActiveConnection: mock(() => false),
   };
   const consumer = new UnifiedThreadResponseConsumer(
     queue as any,
     platformRegistry as any,
-    sseManager as any
+    sseManager as any,
+    overrides?.courseWakeDelivery as any,
   ) as any;
   if (overrides?.chatResponseBridge) {
     consumer.setChatResponseBridge(overrides.chatResponseBridge as any);
   }
   return { consumer, platformRegistry, renderer };
 }
+
+describe("UnifiedThreadResponseConsumer scheduled course delivery", () => {
+  const scheduledPayload = {
+    messageId: "turn-1", channelId: "scheduled", conversationId: "conversation-1",
+    userId: "owner-1", teamId: "api", platform: "api", timestamp: 1,
+    processedMessageIds: ["turn-1"], finalText: "stored final output",
+    platformMetadata: { scheduledCourseWake: {
+      schemaVersion: 1, source: "calendar_scheduled_wake", automationId: "auto-1",
+      jobId: "job-1", runId: 42, toolboxUserId: "owner-1", lobuAgentId: "agent-1",
+    } },
+  };
+
+  test("mechanically delivers terminal finalText without routing through SSE or a renderer", async () => {
+    const courseWakeDelivery = mock(async () => undefined);
+    const { consumer, renderer, platformRegistry } = createConsumer({ courseWakeDelivery });
+    await consumer.handleThreadResponse({ id: "terminal-pg-run-1", data: scheduledPayload });
+    expect(courseWakeDelivery).toHaveBeenCalledWith({
+      metadata: scheduledPayload.platformMetadata.scheduledCourseWake,
+      completion: { kind: "succeeded", finalOutput: "stored final output" },
+      turnId: "turn-1",
+    });
+    expect(platformRegistry.get).not.toHaveBeenCalled();
+    expect(renderer.handleCompletion).not.toHaveBeenCalled();
+  });
+
+  test("throws a transient delivery failure so the same terminal PG run retries", async () => {
+    const courseWakeDelivery = mock(async () => { throw new Error("course_wake_delivery_retrying"); });
+    const { consumer, renderer } = createConsumer({ courseWakeDelivery });
+    await expect(consumer.handleThreadResponse({ id: "terminal-pg-run-1", data: scheduledPayload }))
+      .rejects.toThrow("course_wake_delivery_retrying");
+    expect(courseWakeDelivery).toHaveBeenCalledTimes(1);
+    expect(renderer.handleCompletion).not.toHaveBeenCalled();
+  });
+
+  test("does not treat a synthetic wake delta as another user turn or delivery", async () => {
+    const courseWakeDelivery = mock(async () => undefined);
+    const renderer = { handleDelta: mock(async () => undefined), handleCompletion: mock(async () => undefined) };
+    const { consumer } = createConsumer({ courseWakeDelivery, renderer });
+    await consumer.handleThreadResponse({
+      id: "delta-pg-run", data: { ...scheduledPayload, processedMessageIds: undefined, finalText: undefined, delta: "partial" },
+    });
+    expect(courseWakeDelivery).not.toHaveBeenCalled();
+    expect(renderer.handleDelta).toHaveBeenCalledTimes(1);
+  });
+
+  test("projects a generation error as one safe terminal failure without SSE routing", async () => {
+    const courseWakeDelivery = mock(async () => undefined);
+    const { consumer, renderer, platformRegistry } = createConsumer({ courseWakeDelivery });
+    await consumer.handleThreadResponse({
+      id: "terminal-error", data: { ...scheduledPayload, processedMessageIds: undefined, finalText: undefined,
+        error: "provider secret failure detail" },
+    });
+    expect(courseWakeDelivery).toHaveBeenCalledWith({
+      metadata: scheduledPayload.platformMetadata.scheduledCourseWake,
+      completion: { kind: "failed", failureCode: "generation_failed" },
+      turnId: "turn-1",
+    });
+    expect(platformRegistry.get).not.toHaveBeenCalled();
+    expect(renderer.handleError).not.toHaveBeenCalled();
+  });
+
+  test.each(["", "   ", "x".repeat(50_001)])(
+    "projects invalid final output as a safe terminal failure",
+    async (finalText) => {
+      const courseWakeDelivery = mock(async () => undefined);
+      const { consumer, renderer } = createConsumer({ courseWakeDelivery });
+      await consumer.handleThreadResponse({
+        id: "terminal-invalid", data: { ...scheduledPayload, finalText },
+      });
+      expect(courseWakeDelivery).toHaveBeenCalledWith({
+        metadata: scheduledPayload.platformMetadata.scheduledCourseWake,
+        completion: { kind: "failed", failureCode: "invalid_final_output" },
+        turnId: "turn-1",
+      });
+      expect(renderer.handleCompletion).not.toHaveBeenCalled();
+    },
+  );
+});
 
 describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {
   test("broadcasts tool_use customEvent to conversation + cli session", async () => {

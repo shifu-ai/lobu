@@ -1,19 +1,335 @@
-import type {CourseReadinessField} from '@lobu/core';import type {Env} from '@lobu/connector-sdk';import {createHash} from 'node:crypto';
-export const COURSE_MEMORY_RETRIEVAL_TIMEOUT_MS=800;
-const MAX_HITS=8,MAX_SEARCH_ROWS=64,MAX_TASK_CHARS=560,MAX_SKILL_TERMS=2,MAX_TITLE_CHARS=200,MAX_SNIPPET_CHARS=300,MAX_SOURCE_URL_CHARS=256,MAX_RETRIEVAL_JSON_CHARS=8000;
-interface SearchRow{id:number;payload_text:string;title:string|null;source_url:string|null;organization_id:string;metadata:Record<string,unknown>}
-export interface CourseMemoryRetrieval{status:'loaded'|'empty'|'degraded'|'invariant_violation';crossCourseGuard:'passed'|'failed';candidateCount:number;safeCount:number;droppedCount:number;durationMs:number;eventIds:number[];evidenceRefs:string[];snippets:Array<{eventId:number;title:string|null;text:string;sourceUrl:string|null;sourceRef:string;provenanceKind:'fresh_course_retrieval';courseEntityId:string;readinessFields:Partial<Record<CourseReadinessField,string>>}>}
-export interface CourseMemoryRetrievalInput{organizationId:string;ownerUserId:string;agentId:string;courseEntityId:string;task:string;skillTerms?:string[];limit?:number;env?:Env}
-export type CourseMemorySearch=(input:{organizationId:string;ownerUserId:string;agentId:string;entityIds:string[];query:string;limit:number;env?:Env;signal?:AbortSignal})=>Promise<unknown>;
-export function buildCourseMemoryQuery(task:string,skillTerms:string[]=[]):string{const terms=[...new Set(skillTerms.map((term)=>term.trim()).filter(Boolean))].slice(0,MAX_SKILL_TERMS);return [task.trim().slice(0,MAX_TASK_CHARS),...terms].filter(Boolean).join(' ').slice(0,700)}
-export function buildCourseMemoryQueries(task:string,skillTerms:string[]=[]):string[]{const bounded=task.trim().replace(/[，。！？!?]+$/u,'').slice(0,MAX_TASK_CHARS);const terms=[...new Set(skillTerms.map((term)=>term.trim()).filter(Boolean))].slice(0,MAX_SKILL_TERMS);return [...new Set([bounded,...terms])].filter((value)=>value.length>=2).slice(0,3)}
-function parseRows(value:unknown):{rows:SearchRow[];receivedCount:number}|{rows:null;receivedCount:number}{const receivedCount=Array.isArray(value)?value.length:0;if(!Array.isArray(value)||value.length>MAX_SEARCH_ROWS)return{rows:null,receivedCount};const rows:SearchRow[]=[];for(const item of value){if(!item||typeof item!=='object')return{rows:null,receivedCount};const row=item as Record<string,unknown>;if(!Number.isSafeInteger(row.id)||Number(row.id)<=0||typeof row.payload_text!=='string'||row.payload_text.length>200_000||typeof row.organization_id!=='string'||!row.metadata||typeof row.metadata!=='object'||Array.isArray(row.metadata))return{rows:null,receivedCount};if(row.title!==null&&typeof row.title!=='string')return{rows:null,receivedCount};if(row.source_url!==null&&typeof row.source_url!=='string')return{rows:null,receivedCount};rows.push(row as unknown as SearchRow)}return{rows,receivedCount}}
-class MalformedCourseMemoryResponse extends Error{constructor(readonly candidateCount:number){super('invalid course memory response')}}
-function exactCourseIds(metadata:Record<string,unknown>):string[]{const value=metadata.course_entity_ids;return Array.isArray(value)&&value.length===1&&typeof value[0]==='string'?value:[]}
-const READINESS_FIELDS:CourseReadinessField[]=['audience','key_learning','course_promise','existing_sales_talk'];
-function readinessFields(metadata:Record<string,unknown>):Partial<Record<CourseReadinessField,string>>{const value=metadata.course_readiness;if(!value||typeof value!=='object'||Array.isArray(value))return{};const result:Partial<Record<CourseReadinessField,string>>={};for(const field of READINESS_FIELDS){const item=(value as Record<string,unknown>)[field];if(typeof item==='string'&&item.trim())result[field]=clean(item,500);}return result}
-function sourceRef(row:SearchRow):string{const value=row.metadata.source_ref;if(typeof value!=='string'||!value.trim())return`lobu:event:${row.id}`;return`lobu:source:${createHash('sha256').update(value).digest('hex').slice(0,24)}`}
-const clean=(value:string,max:number)=>value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu,' ').slice(0,max);
-function safeSourceUrl(value:string|null):string|null{if(!value)return null;try{const url=new URL(value);if(url.protocol!=='https:'&&url.protocol!=='http:')return null;url.username='';url.password='';url.search='';url.hash='';return clean(url.toString(),MAX_SOURCE_URL_CHARS)}catch{return null}}
-function boundResult(result:CourseMemoryRetrieval):CourseMemoryRetrieval{for(let index=result.snippets.length-1;JSON.stringify(result).length>MAX_RETRIEVAL_JSON_CHARS&&index>=0;index--){const item=result.snippets[index];if(!item)continue;item.text=item.text.slice(0,100);item.title=item.title?.slice(0,80)??null;item.sourceUrl=null}while(JSON.stringify(result).length>MAX_RETRIEVAL_JSON_CHARS&&result.snippets.length>0){result.snippets.pop();result.eventIds.pop();result.evidenceRefs.pop()}result.safeCount=result.snippets.length;result.droppedCount=result.candidateCount-result.safeCount;return result}
-export async function retrieveCourseMemory(input:CourseMemoryRetrievalInput,deps:{search:CourseMemorySearch;timeoutMs?:number}):Promise<CourseMemoryRetrieval>{const started=Date.now();const empty=(status:'empty'|'degraded'|'invariant_violation',guard:'passed'|'failed'='passed',candidateCount=0,safeCount=0):CourseMemoryRetrieval=>({status,crossCourseGuard:guard,candidateCount,safeCount,droppedCount:candidateCount-safeCount,durationMs:Date.now()-started,eventIds:[],evidenceRefs:[],snippets:[]});const limit=typeof input.limit==='number'&&Number.isSafeInteger(input.limit)?Math.min(MAX_HITS,Math.max(1,input.limit)):MAX_HITS;let timeoutId:ReturnType<typeof setTimeout>|undefined;const controller=new AbortController();try{const run=async()=>{const merged:SearchRow[]=[];const seen=new Set<number>();for(const query of buildCourseMemoryQueries(input.task,input.skillTerms)){if(controller.signal.aborted)throw new Error('course memory aborted');const parsed=parseRows(await deps.search({organizationId:input.organizationId,ownerUserId:input.ownerUserId,agentId:input.agentId,entityIds:[input.courseEntityId],query,limit,env:input.env,signal:controller.signal}));if(controller.signal.aborted)throw new Error('course memory aborted');if(!parsed.rows)throw new MalformedCourseMemoryResponse(merged.length+parsed.receivedCount);for(const row of parsed.rows)if(!seen.has(row.id)){seen.add(row.id);merged.push(row)}if(merged.length>=limit)break}return merged};const timeout=new Promise<never>((_,reject)=>{timeoutId=setTimeout(()=>{controller.abort();reject(new Error('course memory timeout'))},deps.timeoutMs??COURSE_MEMORY_RETRIEVAL_TIMEOUT_MS)});const rows=await Promise.race([run(),timeout]);const safeCandidates=rows.filter((row)=>row.organization_id===input.organizationId&&row.metadata.owner_user_id===input.ownerUserId&&row.metadata.agent_id===input.agentId&&exactCourseIds(row.metadata)[0]===input.courseEntityId);if(safeCandidates.length!==rows.length)return empty('invariant_violation','failed',rows.length,safeCandidates.length);const refs=new Set<string>();const safe=safeCandidates.filter((row)=>{const ref=sourceRef(row);if(refs.has(ref))return false;refs.add(ref);return true}).slice(0,limit);if(safe.length===0)return empty('empty');return boundResult({status:'loaded',crossCourseGuard:'passed',candidateCount:rows.length,safeCount:safe.length,droppedCount:rows.length-safe.length,durationMs:Date.now()-started,eventIds:safe.map((row)=>row.id),evidenceRefs:safe.map(sourceRef),snippets:safe.map((row)=>({eventId:row.id,title:row.title===null?null:clean(row.title,MAX_TITLE_CHARS),text:clean(row.payload_text,MAX_SNIPPET_CHARS),sourceUrl:safeSourceUrl(row.source_url),sourceRef:sourceRef(row),provenanceKind:'fresh_course_retrieval',courseEntityId:input.courseEntityId,readinessFields:readinessFields(row.metadata)}))})}catch(error){return empty('degraded','passed',error instanceof MalformedCourseMemoryResponse?error.candidateCount:0)}finally{if(timeoutId)clearTimeout(timeoutId);controller.abort()}}
+import type { CourseReadinessField } from "@lobu/core";
+import type { Env } from "@lobu/connector-sdk";
+import { createHash } from "node:crypto";
+import { verifiedEvidenceKind } from "../../utils/trusted-evidence-provenance.js";
+export const COURSE_MEMORY_RETRIEVAL_TIMEOUT_MS = 800;
+const MAX_HITS = 8,
+	MAX_SEARCH_ROWS = 64,
+	MAX_TASK_CHARS = 560,
+	MAX_SKILL_TERMS = 2,
+	MAX_TITLE_CHARS = 200,
+	MAX_SNIPPET_CHARS = 300,
+	MAX_SOURCE_URL_CHARS = 256,
+	MAX_RETRIEVAL_JSON_CHARS = 8000;
+interface SearchRow {
+	id: number;
+	payload_text: string;
+	title: string | null;
+	source_url: string | null;
+	organization_id: string;
+	metadata: Record<string, unknown>;
+	connection_id?: number | null;
+	connector_key?: string | null;
+	origin_id?: string | null;
+	origin_type?: string | null;
+	semantic_type?: string | null;
+}
+export interface CourseMemoryRetrieval {
+	status: "loaded" | "empty" | "degraded" | "invariant_violation";
+	crossCourseGuard: "passed" | "failed";
+	candidateCount: number;
+	safeCount: number;
+	droppedCount: number;
+	durationMs: number;
+	eventIds: number[];
+	evidenceRefs: string[];
+	snippets: Array<{
+		eventId: number;
+		title: string | null;
+		text: string;
+		sourceUrl: string | null;
+		sourceRef: string;
+		provenanceKind: "fresh_course_retrieval";
+		courseEntityId: string;
+		readinessFields: Partial<Record<CourseReadinessField, string>>;
+		trustedEvidenceKind?: "meeting" | "transcript";
+	}>;
+}
+export interface CourseMemoryRetrievalInput {
+	organizationId: string;
+	ownerUserId: string;
+	agentId: string;
+	courseEntityId: string;
+	task: string;
+	skillTerms?: string[];
+	limit?: number;
+	env?: Env;
+}
+export type CourseMemorySearch = (input: {
+	organizationId: string;
+	ownerUserId: string;
+	agentId: string;
+	entityIds: string[];
+	query: string;
+	limit: number;
+	env?: Env;
+	signal?: AbortSignal;
+}) => Promise<unknown>;
+export function buildCourseMemoryQuery(
+	task: string,
+	skillTerms: string[] = [],
+): string {
+	const terms = [
+		...new Set(skillTerms.map((term) => term.trim()).filter(Boolean)),
+	].slice(0, MAX_SKILL_TERMS);
+	return [task.trim().slice(0, MAX_TASK_CHARS), ...terms]
+		.filter(Boolean)
+		.join(" ")
+		.slice(0, 700);
+}
+export function buildCourseMemoryQueries(
+	task: string,
+	skillTerms: string[] = [],
+): string[] {
+	const bounded = task
+		.trim()
+		.replace(/[，。！？!?]+$/u, "")
+		.slice(0, MAX_TASK_CHARS);
+	const terms = [
+		...new Set(skillTerms.map((term) => term.trim()).filter(Boolean)),
+	].slice(0, MAX_SKILL_TERMS);
+	return [...new Set([bounded, ...terms])]
+		.filter((value) => value.length >= 2)
+		.slice(0, 3);
+}
+function parseRows(
+	value: unknown,
+):
+	| { rows: SearchRow[]; receivedCount: number }
+	| { rows: null; receivedCount: number } {
+	const receivedCount = Array.isArray(value) ? value.length : 0;
+	if (!Array.isArray(value) || value.length > MAX_SEARCH_ROWS)
+		return { rows: null, receivedCount };
+	const rows: SearchRow[] = [];
+	for (const item of value) {
+		if (!item || typeof item !== "object") return { rows: null, receivedCount };
+		const row = item as Record<string, unknown>;
+		if (
+			!Number.isSafeInteger(row.id) ||
+			Number(row.id) <= 0 ||
+			typeof row.payload_text !== "string" ||
+			row.payload_text.length > 200_000 ||
+			typeof row.organization_id !== "string" ||
+			!row.metadata ||
+			typeof row.metadata !== "object" ||
+			Array.isArray(row.metadata)
+		)
+			return { rows: null, receivedCount };
+		if (row.title !== null && typeof row.title !== "string")
+			return { rows: null, receivedCount };
+		if (row.source_url !== null && typeof row.source_url !== "string")
+			return { rows: null, receivedCount };
+		if (
+			(row.connection_id !== undefined && row.connection_id !== null && !Number.isSafeInteger(row.connection_id)) ||
+			(row.connector_key !== undefined && row.connector_key !== null && typeof row.connector_key !== "string") ||
+			(row.origin_id !== undefined && row.origin_id !== null && typeof row.origin_id !== "string") ||
+			(row.origin_type !== undefined && row.origin_type !== null && typeof row.origin_type !== "string") ||
+			(row.semantic_type !== undefined && row.semantic_type !== null && typeof row.semantic_type !== "string")
+		)
+			return { rows: null, receivedCount };
+		rows.push(row as unknown as SearchRow);
+	}
+	return { rows, receivedCount };
+}
+class MalformedCourseMemoryResponse extends Error {
+	constructor(readonly candidateCount: number) {
+		super("invalid course memory response");
+	}
+}
+function exactCourseIds(metadata: Record<string, unknown>): string[] {
+	const value = metadata.course_entity_ids;
+	return Array.isArray(value) &&
+		value.length === 1 &&
+		typeof value[0] === "string"
+		? value
+		: [];
+}
+const READINESS_FIELDS: CourseReadinessField[] = [
+	"audience",
+	"key_learning",
+	"course_promise",
+	"existing_sales_talk",
+];
+function readinessFields(
+	metadata: Record<string, unknown>,
+): Partial<Record<CourseReadinessField, string>> {
+	const value = metadata.course_readiness;
+	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+	const result: Partial<Record<CourseReadinessField, string>> = {};
+	for (const field of READINESS_FIELDS) {
+		const item = (value as Record<string, unknown>)[field];
+		if (typeof item === "string" && item.trim())
+			result[field] = clean(item, 500);
+	}
+	return result;
+}
+function sourceRef(row: SearchRow): string {
+	const value = row.metadata.source_ref;
+	if (typeof value !== "string" || !value.trim()) return `lobu:event:${row.id}`;
+	return `lobu:source:${createHash("sha256").update(value).digest("hex").slice(0, 24)}`;
+}
+const clean = (value: string, max: number) =>
+	value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ").slice(0, max);
+function safeSourceUrl(value: string | null): string | null {
+	if (!value) return null;
+	try {
+		const url = new URL(value);
+		if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+		url.username = "";
+		url.password = "";
+		url.search = "";
+		url.hash = "";
+		return clean(url.toString(), MAX_SOURCE_URL_CHARS);
+	} catch {
+		return null;
+	}
+}
+function boundResult(result: CourseMemoryRetrieval): CourseMemoryRetrieval {
+	for (
+		let index = result.snippets.length - 1;
+		JSON.stringify(result).length > MAX_RETRIEVAL_JSON_CHARS && index >= 0;
+		index--
+	) {
+		const item = result.snippets[index];
+		if (!item) continue;
+		item.text = item.text.slice(0, 100);
+		item.title = item.title?.slice(0, 80) ?? null;
+		item.sourceUrl = null;
+	}
+	while (
+		JSON.stringify(result).length > MAX_RETRIEVAL_JSON_CHARS &&
+		result.snippets.length > 0
+	) {
+		result.snippets.pop();
+		result.eventIds.pop();
+		result.evidenceRefs.pop();
+	}
+	result.safeCount = result.snippets.length;
+	result.droppedCount = result.candidateCount - result.safeCount;
+	return result;
+}
+export async function retrieveCourseMemory(
+	input: CourseMemoryRetrievalInput,
+	deps: { search: CourseMemorySearch; timeoutMs?: number },
+): Promise<CourseMemoryRetrieval> {
+	const started = Date.now();
+	const empty = (
+		status: "empty" | "degraded" | "invariant_violation",
+		guard: "passed" | "failed" = "passed",
+		candidateCount = 0,
+		safeCount = 0,
+	): CourseMemoryRetrieval => ({
+		status,
+		crossCourseGuard: guard,
+		candidateCount,
+		safeCount,
+		droppedCount: candidateCount - safeCount,
+		durationMs: Date.now() - started,
+		eventIds: [],
+		evidenceRefs: [],
+		snippets: [],
+	});
+	const limit =
+		typeof input.limit === "number" && Number.isSafeInteger(input.limit)
+			? Math.min(MAX_HITS, Math.max(1, input.limit))
+			: MAX_HITS;
+	let timeoutId: ReturnType<typeof setTimeout> | undefined;
+	const controller = new AbortController();
+	try {
+		const run = async () => {
+			const merged: SearchRow[] = [];
+			const seen = new Set<number>();
+			for (const query of buildCourseMemoryQueries(
+				input.task,
+				input.skillTerms,
+			)) {
+				if (controller.signal.aborted) throw new Error("course memory aborted");
+				const parsed = parseRows(
+					await deps.search({
+						organizationId: input.organizationId,
+						ownerUserId: input.ownerUserId,
+						agentId: input.agentId,
+						entityIds: [input.courseEntityId],
+						query,
+						limit,
+						env: input.env,
+						signal: controller.signal,
+					}),
+				);
+				if (controller.signal.aborted) throw new Error("course memory aborted");
+				if (!parsed.rows)
+					throw new MalformedCourseMemoryResponse(
+						merged.length + parsed.receivedCount,
+					);
+				for (const row of parsed.rows)
+					if (!seen.has(row.id)) {
+						seen.add(row.id);
+						merged.push(row);
+					}
+				if (merged.length >= limit) break;
+			}
+			return merged;
+		};
+		const timeout = new Promise<never>((_, reject) => {
+			timeoutId = setTimeout(() => {
+				controller.abort();
+				reject(new Error("course memory timeout"));
+			}, deps.timeoutMs ?? COURSE_MEMORY_RETRIEVAL_TIMEOUT_MS);
+		});
+		const rows = await Promise.race([run(), timeout]);
+		const safeCandidates = rows.filter(
+			(row) =>
+				row.organization_id === input.organizationId &&
+				row.metadata.owner_user_id === input.ownerUserId &&
+				row.metadata.agent_id === input.agentId &&
+				exactCourseIds(row.metadata)[0] === input.courseEntityId,
+		);
+		if (safeCandidates.length !== rows.length)
+			return empty(
+				"invariant_violation",
+				"failed",
+				rows.length,
+				safeCandidates.length,
+			);
+		const refs = new Set<string>();
+		const safe = safeCandidates
+			.filter((row) => {
+				const ref = sourceRef(row);
+				if (refs.has(ref)) return false;
+				refs.add(ref);
+				return true;
+			})
+			.slice(0, limit);
+		if (safe.length === 0) return empty("empty");
+		return boundResult({
+			status: "loaded",
+			crossCourseGuard: "passed",
+			candidateCount: rows.length,
+			safeCount: safe.length,
+			droppedCount: rows.length - safe.length,
+			durationMs: Date.now() - started,
+			eventIds: safe.map((row) => row.id),
+			evidenceRefs: safe.map(sourceRef),
+			snippets: safe.map((row) => ({
+				eventId: row.id,
+				title: row.title === null ? null : clean(row.title, MAX_TITLE_CHARS),
+				text: clean(row.payload_text, MAX_SNIPPET_CHARS),
+				sourceUrl: safeSourceUrl(row.source_url),
+				sourceRef: sourceRef(row),
+				provenanceKind: "fresh_course_retrieval",
+				courseEntityId: input.courseEntityId,
+				readinessFields: readinessFields(row.metadata),
+				trustedEvidenceKind: verifiedEvidenceKind(row),
+			})),
+		});
+	} catch (error) {
+		return empty(
+			"degraded",
+			"passed",
+			error instanceof MalformedCourseMemoryResponse ? error.candidateCount : 0,
+		);
+	} finally {
+		if (timeoutId) clearTimeout(timeoutId);
+		controller.abort();
+	}
+}

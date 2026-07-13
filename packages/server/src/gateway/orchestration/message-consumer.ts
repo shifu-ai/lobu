@@ -33,6 +33,7 @@ import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
 import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {resolveCourseSkillContextMetadata,selectActiveCourseSkill} from './course-skill-context-metadata.js';
+import { getDb } from "../../db/client.js";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import {
   type BaseDeploymentManager,
@@ -81,20 +82,21 @@ export function mintRunJobToken(
     runId: data.runId,
     messageId: data.messageId,
     processedMessageIds: [data.messageId],
-    tokenKind: "run",
-    executionMode: data.trustedExecutionScope?.mode === "onboarding"
-      ? "onboarding"
-      : includeTrustedCourseScope && data.resolvedCourseContext
-        ? "course"
-        : "personal",
-    courseToolScope: includeTrustedCourseScope && data.resolvedCourseContext?.trust ? {
+		tokenKind: "run",
+		executionMode:
+			data.trustedExecutionScope?.mode === "onboarding"
+				? "onboarding"
+				: includeTrustedCourseScope && data.resolvedCourseContext
+					? "course"
+					: "personal",
+		courseToolScope: includeTrustedCourseScope && data.resolvedCourseContext?.trust ? {
       ownerUserId: data.resolvedCourseContext.trust.ownerUserId,
       agentId: data.resolvedCourseContext.trust.agentId,
-      courseEntityId: data.resolvedCourseContext.trust.courseEntityId,
-      contextPackId: data.resolvedCourseContext.trust.contextPackId,
-      contextVersion: data.resolvedCourseContext.trust.contextVersion,
-      activeSpecializedSkill:
-        data.resolvedCourseContext.activeSpecializedSkill ?? null,
+			courseEntityId: data.resolvedCourseContext.trust.courseEntityId,
+			contextPackId: data.resolvedCourseContext.trust.contextPackId,
+			contextVersion: data.resolvedCourseContext.trust.contextVersion,
+			activeSpecializedSkill:
+				data.resolvedCourseContext.activeSpecializedSkill ?? null,
     } : undefined,
   });
 }
@@ -132,17 +134,19 @@ export class MessageConsumer {
   private guardrailRegistry?: GuardrailRegistry;
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
-  private readonly journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void>;
-  private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();let timeout:ReturnType<typeof setTimeout>|undefined;try{const operation=this.journeyEmitter(event,controller.signal);const guarded=operation.catch(()=>{});await Promise.race([guarded,new Promise<void>(resolve=>{timeout=setTimeout(()=>{controller.abort();resolve();},20);})]);}catch{}finally{if(timeout)clearTimeout(timeout);}}
-  private async emitExecutionSelection(data:MessagePayload):Promise<void>{const mode=data.trustedExecutionScope?.mode==='course'?'course':data.trustedExecutionScope?.mode==='onboarding'?'onboarding':'personal';const skill=data.trustedExecutionScope?.mode==='course'&&data.trustedExecutionScope.activeSpecializedSkill==='opp-coach'?'opp-coach':'none';const traceSource=extractTraceId(data)??data.messageId??data.conversationId;const base={trace_id:`tr_${createHash('sha256').update(traceSource).digest('hex').slice(0,32)}`,journey_id:'course_context_gate',service:'lobu' as const,module:'message-consumer',status:'ok'};await Promise.all([this.emitJourneyFailOpen({...base,event:'context.scope.selected',mode}),this.emitJourneyFailOpen({...base,event:'context.skill.selected',skill})]);}
+	private readonly journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void>;
+	private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();let timeout:ReturnType<typeof setTimeout>|undefined;try{const operation=this.journeyEmitter(event,controller.signal);const guarded=operation.catch(()=>{});await Promise.race([guarded,new Promise<void>(resolve=>{timeout=setTimeout(()=>{controller.abort();resolve();},20);})]);}catch{}finally{if(timeout)clearTimeout(timeout);}}
+	private async emitExecutionSelection(data:MessagePayload):Promise<void>{const mode=data.trustedExecutionScope?.mode==='course'?'course':data.trustedExecutionScope?.mode==='onboarding'?'onboarding':'personal';const skill=data.trustedExecutionScope?.mode==='course'&&data.trustedExecutionScope.activeSpecializedSkill==='opp-coach'?'opp-coach':'none';const traceSource=extractTraceId(data)??data.messageId??data.conversationId;const base={trace_id:`tr_${createHash('sha256').update(traceSource).digest('hex').slice(0,32)}`,journey_id:'course_context_gate',service:'lobu' as const,module:'message-consumer',status:'ok'};await Promise.all([this.emitJourneyFailOpen({...base,event:'context.scope.selected',mode}),this.emitJourneyFailOpen({...base,event:'context.skill.selected',skill})]);}
   private sessionManager?: ISessionManager;
   private courseMemorySearch?:CourseMemorySearch;
+  private readonly scheduledExecutionTraceRecorder: (data: MessagePayload, trace: Parameters<NonNullable<Parameters<typeof attachCourseContextForReviewedScope>[1]>["recordScheduledExecutionTrace"]>[0]) => Promise<void>;
   constructor(
     config: OrchestratorConfig,
     deploymentManager: BaseDeploymentManager,
     queue?: IMessageQueue,
     courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
     journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void> = emitJourneyObsEvent,
+    scheduledExecutionTraceRecorder: MessageConsumer["scheduledExecutionTraceRecorder"] = recordScheduledExecutionTrace,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
@@ -150,25 +154,22 @@ export class MessageConsumer {
     this.courseContextResolver = courseContextResolver;
     this.courseContextRollout = parseCourseContextRolloutConfig();
     this.journeyEmitter = journeyEmitter;
+    this.scheduledExecutionTraceRecorder = scheduledExecutionTraceRecorder;
   }
 
-  private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
-    // The execution scope is an internal orchestration fact. Never trust a
-    // caller/model supplied value, including on rollout bypass paths.
-    delete data.trustedExecutionScope;
-    // Resolved course context is equally privileged: every accepted value
-    // must be freshly minted by this turn's resolver, never carried in from
-    // an inbound API/platform payload.
-    delete data.resolvedCourseContext;
-    if (this.courseContextRollout.mode === "off") {
-      await this.emitExecutionSelection(data);
+	private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
+		delete data.trustedExecutionScope;
+		const gateMode:CourseContextGateMode=data.scheduledCourseContext?'enforce':this.courseContextRollout.mode;
+		if(!data.scheduledCourseContext||gateMode==='off'||gateMode==='shadow')delete data.resolvedCourseContext;
+		if (gateMode === "off") {
+			await this.emitExecutionSelection(data);
       data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);
       return true;
     }
     let result: CourseContextGateResult | void;
-    const isNonBindingEvaluation = this.courseContextRollout.mode === "shadow" || this.courseContextRollout.mode === "single_course";
+    const isNonBindingEvaluation = gateMode === "shadow" || gateMode === "single_course";
     const shadowPayload = isNonBindingEvaluation ? { ...data, platformMetadata: { ...data.platformMetadata }, resolvedCourseContext: undefined } : data;
     try { if (this.courseContextResolver === attachCourseContextForReviewedScope) {
       const personalBypass = isExplicitPersonalBypass(shadowPayload);
@@ -176,22 +177,25 @@ export class MessageConsumer {
         throw new Error("Course context persistence is not initialized");
       }
       let settings = null; if (!personalBypass) try { settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null; } catch { logger.warn({ category: "course_skill_settings", agentId: data.agentId }, "Course skill settings unavailable; using deterministic message scope"); }
-      const courseSkillContext=resolveCourseSkillContextMetadata(settings?.skillsConfig?.skills??[]);
-      const activeCourseSkill=selectActiveCourseSkill({available:courseSkillContext,message:typeof shadowPayload.messageText==='string'?shadowPayload.messageText:''});
-      result = await attachCourseContextForReviewedScope(shadowPayload, {
+		const courseSkillContext=resolveCourseSkillContextMetadata(settings?.skillsConfig?.skills??[]);
+		const activeCourseSkill=selectActiveCourseSkill({available:courseSkillContext,message:typeof shadowPayload.messageText==='string'?shadowPayload.messageText:'',trustedScheduledTaskKind:data.scheduledCourseContext?.taskKind});
+		result = await attachCourseContextForReviewedScope(shadowPayload, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),activeSpecializedSkill:activeCourseSkill.activeSpecializedSkill,courseSkillContextFields:activeCourseSkill.contextFields,courseSkillRetrievalTerms:activeCourseSkill.retrievalTerms,courseSkillRetrievalLimit:activeCourseSkill.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+		sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),activeSpecializedSkill:activeCourseSkill.activeSpecializedSkill,courseSkillContextFields:activeCourseSkill.contextFields,courseSkillRetrievalTerms:activeCourseSkill.retrievalTerms,courseSkillRetrievalLimit:activeCourseSkill.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+        recordScheduledExecutionTrace: data.scheduledCourseContext
+          ? (trace) => this.scheduledExecutionTraceRecorder(data, trace)
+          : undefined,
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);
-    }} catch(error) { if(this.courseContextRollout.mode!=="shadow")throw error; result={status:"not_required"}; await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
-    if(this.courseContextRollout.mode==="shadow"){
+    }} catch(error) { if(gateMode!=="shadow")throw error; result={status:"not_required"}; await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
+    if(gateMode==="shadow"){
       const resolved=result?.status==="ready"?result.context.course:result?.status==="context_unavailable"?result.resolvedCourse:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
     }
-    if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
-    if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match")await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison:"match"});}
+    if (gateMode === "shadow") result = { status: "not_required" };
+    if(gateMode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match")await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison:"match"});}
     if(result?.status==='ready'&&!hasTrustedCourseContext(data,result.context)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
-    if (this.courseContextRollout.mode === "single_course") {
+    if (gateMode === "single_course") {
       const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
       if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
       // Only the gate's deterministic non-course/personal classification may
@@ -200,34 +204,30 @@ export class MessageConsumer {
       // worker without canonical context.
       else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
     }
-    if(data.resolvedCourseContext&&!hasTrustedCourseContext(data,data.resolvedCourseContext)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
-    if(result?.status==='ready'&&this.courseContextRollout.mode==='enforce'){
-      const context=result.context;
-      data.trustedExecutionScope={mode:'course',ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseEntityId:context.course.courseEntityId,contextPackId:context.context.contextPackId,contextVersion:context.context.contextVersion,activeSpecializedSkill:context.activeSpecializedSkill};
-    }
-    if (result?.status === "onboarding_ready") {
-      // Onboarding and resolved-course execution are mutually exclusive,
-      // including when an injected/custom resolver accidentally mutates data.
-      delete data.resolvedCourseContext;
-      if (this.courseContextRollout.mode !== "enforce") {
-        result = { status: "context_unavailable", reasonCode: "onboarding_scope_not_enforced" };
-      } else if (
-        result.scope.ownerUserId !== data.userId ||
-        result.scope.agentId !== data.agentId ||
-        result.scope.conversationId !== data.conversationId
-      ) {
-        result = { status: "context_unavailable", reasonCode: "onboarding_scope_mismatch" };
-      } else {
-        data.trustedExecutionScope = result.scope;
-      }
-    }
-    if (result?.status === "already_dispatched") return false;
-    if (result?.status === "clarification_required" || result?.status === "context_unavailable") {
+	if(data.resolvedCourseContext&&!hasTrustedCourseContext(data,data.resolvedCourseContext)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
+	if(result?.status==='ready'&&gateMode==='enforce'){
+		const context=result.context;
+		data.trustedExecutionScope={mode:'course',ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseEntityId:context.course.courseEntityId,contextPackId:context.context.contextPackId,contextVersion:context.context.contextVersion,activeSpecializedSkill:context.activeSpecializedSkill};
+	}
+	if (result?.status === "onboarding_ready") {
+		delete data.resolvedCourseContext;
+		if (gateMode !== "enforce") {
+			result = { status: "context_unavailable", reasonCode: "onboarding_scope_not_enforced" };
+		} else if (
+			result.scope.ownerUserId !== data.userId ||
+			result.scope.agentId !== data.agentId ||
+			result.scope.conversationId !== data.conversationId
+		) {
+			result = { status: "context_unavailable", reasonCode: "onboarding_scope_mismatch" };
+		} else data.trustedExecutionScope = result.scope;
+	}
+	if (result?.status === "already_dispatched") return false;
+	if (result?.status === "clarification_required" || result?.status === "context_unavailable") {
       await this.deliverCourseContextTerminal(data, result);
       return false;
-    }
-    await this.emitExecutionSelection(data);
-    data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, this.courseContextRollout.mode === "enforce" && result?.status === "ready");
+	}
+	await this.emitExecutionSelection(data);
+	data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, gateMode === "enforce" && result?.status === "ready");
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,
@@ -248,7 +248,7 @@ export class MessageConsumer {
     const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ").slice(0, 200);
     const finalText = result.status === "clarification_required"
       ? `請選擇這次要處理的課程：\n${result.candidates.map((candidate, index) => `${index + 1}. ${clean(candidate.displayName)}`).join("\n")}`
-      : result.status==='context_unavailable'&&result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
+		: result.status==='context_unavailable'&&result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
     await this.queue.createQueue("thread_response");
     await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,agentId:data.agentId,organizationId:data.organizationId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, {
       ...TERMINAL_DELIVERY_SEND_OPTS,
@@ -897,4 +897,26 @@ export class MessageConsumer {
       };
     }
   }
+}
+
+async function recordScheduledExecutionTrace(
+  data: MessagePayload,
+  trace: Parameters<NonNullable<Parameters<typeof attachCourseContextForReviewedScope>[1]>["recordScheduledExecutionTrace"]>[0],
+): Promise<void> {
+  if (!data.organizationId || !data.scheduledCourseContext)
+    throw new Error("scheduled_course_trace_scope_missing");
+  const sql = getDb();
+  const rows = await sql<{ id: string }>`
+    UPDATE scheduled_jobs
+    SET action_args = jsonb_set(action_args, '{courseWakeExecutionTrace}', ${sql.json(trace)}::jsonb, true),
+        updated_at = now()
+    WHERE id = ${data.scheduledCourseContext.jobId}
+      AND organization_id = ${data.organizationId}
+      AND created_by_user = ${data.userId}
+      AND created_by_agent = ${data.agentId}
+      AND action_args->>'reason' = 'trusted-course-calendar-wake'
+      AND action_args->'trustedCourseWake'->>'source' = 'calendar_scheduled_wake'
+    RETURNING id
+  `;
+  if (rows.length !== 1) throw new Error("scheduled_course_trace_job_missing");
 }

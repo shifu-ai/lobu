@@ -127,6 +127,38 @@ const CourseEvidenceProvenanceSchema = z.object({
   sourceHash: z.string().min(1).max(64).optional(),
 });
 
+const TrustedExecutionScopeSchema = z.discriminatedUnion("mode", [
+  z
+    .object({
+      mode: z.literal("onboarding"),
+      source: z.literal("toolbox_course_resolution"),
+      reason: z.literal("no_courses"),
+      ownerUserId: z.string().min(1).max(200),
+      agentId: z.string().min(1).max(200),
+      conversationId: z.string().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("course"),
+      ownerUserId: z.string().min(1).max(200),
+      agentId: z.string().min(1).max(200),
+      conversationId: z.string().min(1).max(200),
+      courseEntityId: z.string().min(1).max(200),
+      contextPackId: z.string().min(1).max(200),
+      contextVersion: z.number().int().positive(),
+      activeSpecializedSkill: z.literal("opp-coach").nullable(),
+    })
+    .strict(),
+]);
+
+function looksLikeNativeWorkerToken(value: string): boolean {
+  const parts = value.split(":");
+  return (
+    parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part))
+  );
+}
+
 const ResolvedCourseContextSchema = z
   .object({
     activeSpecializedSkill: z.literal("opp-coach").nullable().default(null),
@@ -187,6 +219,7 @@ const ResolvedCourseContextSchema = z
                 existing_sales_talk: z.string().min(1).max(500).optional(),
               })
               .strict(),
+            trustedEvidenceKind: z.enum(["meeting", "transcript"]).optional(),
           })
         )
         .max(8),
@@ -207,6 +240,7 @@ const ResolvedCourseContextSchema = z
         code: "custom",
         message: "Resolved course context trust does not match context",
       });
+
     for (const [index, snippet] of value.retrieval.snippets.entries())
       if (snippet.courseEntityId !== value.course.courseEntityId)
         ctx.addIssue({
@@ -226,38 +260,6 @@ const ResolvedCourseContextSchema = z
         message: "Resolved course context exceeds wire size limit",
       });
   });
-
-const TrustedExecutionScopeSchema = z.discriminatedUnion("mode", [
-  z
-    .object({
-      mode: z.literal("onboarding"),
-      source: z.literal("toolbox_course_resolution"),
-      reason: z.literal("no_courses"),
-      ownerUserId: z.string().min(1).max(200),
-      agentId: z.string().min(1).max(200),
-      conversationId: z.string().min(1).max(200),
-    })
-    .strict(),
-  z
-    .object({
-      mode: z.literal("course"),
-      ownerUserId: z.string().min(1).max(200),
-      agentId: z.string().min(1).max(200),
-      conversationId: z.string().min(1).max(200),
-      courseEntityId: z.string().min(1).max(200),
-      contextPackId: z.string().min(1).max(200),
-      contextVersion: z.number().int().positive(),
-      activeSpecializedSkill: z.literal("opp-coach").nullable(),
-    })
-    .strict(),
-]);
-
-function looksLikeNativeWorkerToken(value: string): boolean {
-  const parts = value.split(":");
-  return (
-    parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part))
-  );
-}
 
 function normalizeLegacyCourseRetrieval(value: unknown): void {
   if (!value || typeof value !== "object") return;
@@ -343,6 +345,34 @@ const JobEventSchema = z
         runJobToken: z.string().optional(),
         resolvedCourseContext: ResolvedCourseContextSchema.optional(),
         trustedExecutionScope: TrustedExecutionScopeSchema.optional(),
+        scheduledCourseContext: z
+          .object({
+            schemaVersion: z.literal(1),
+            source: z.literal("calendar_scheduled_wake"),
+            automationId: z.string().min(1).max(256),
+            jobId: z.string().min(1).max(256),
+            runId: z.number().int().positive(),
+            taskKind: z.enum([
+              "opp_coach_rehearsal_prompt",
+              "opp_coach_practice_prompt",
+              "opp_coach_event_prompt",
+            ]),
+            course: z
+              .object({
+                ownerUserId: z.string().min(1).max(256),
+                agentId: z.string().min(1).max(256),
+                courseKey: z.string().min(1).max(200),
+                courseEntityId: z.string().min(1).max(200),
+                displayName: z.string().min(1).max(500),
+              })
+              .strict(),
+            evidenceReadiness: z.enum([
+              "canonical_only",
+              "same_course_evidence",
+            ]),
+          })
+          .strict()
+          .optional(),
       })
       .passthrough(),
     processedIds: z.array(z.string()).optional(),
@@ -393,6 +423,19 @@ const JobEventSchema = z
         code: "custom",
         message: "Personal run token cannot carry course execution context",
         path: ["payload", "runJobToken"],
+      });
+    const scheduled = value.payload.scheduledCourseContext;
+    if (
+      scheduled &&
+      (scheduled.course.ownerUserId !== value.payload.userId ||
+        scheduled.course.agentId !== value.payload.agentId ||
+        scheduled.course.courseKey !== context?.course.courseKey ||
+        scheduled.course.courseEntityId !== context?.course.courseEntityId)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Scheduled course context does not match execution",
+        path: ["payload", "scheduledCourseContext"],
       });
     if (
       trust &&
@@ -831,16 +874,12 @@ export class GatewayClient {
             : null;
           if (
             boundedRunToken?.tokenKind === "run" &&
-            boundedRunToken.executionMode !== undefined
-          ) {
-            // deploymentName is instance state and therefore cannot be
-            // checked inside the static Zod schema. Bind it before receipt or
-            // execution so a valid token from another worker cannot replay.
-            if (boundedRunToken.deploymentName !== this.deploymentName)
-              throw new Error(
-                "Bounded run token does not match worker deployment"
-              );
-          }
+            boundedRunToken.executionMode !== undefined &&
+            boundedRunToken.deploymentName !== this.deploymentName
+          )
+            throw new Error(
+              "Bounded run token does not match worker deployment"
+            );
 
           // Send delivery receipt immediately so the gateway knows
           // the job was actually received (not lost to a stale SSE connection).
@@ -1185,6 +1224,7 @@ export class GatewayClient {
       platform: message.payload.platform,
       resolvedCourseContext: message.payload.resolvedCourseContext,
       trustedExecutionScope: message.payload.trustedExecutionScope,
+      scheduledCourseContext: message.payload.scheduledCourseContext,
     });
     return (
       stableCanonicalJson(identity(first)) ===
@@ -1423,6 +1463,7 @@ export class GatewayClient {
           : undefined,
       resolvedCourseContext: payload.resolvedCourseContext,
       trustedExecutionScope: payload.trustedExecutionScope,
+      scheduledCourseContext: payload.scheduledCourseContext,
     };
   }
 

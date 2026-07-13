@@ -76,7 +76,7 @@ describe('save_memory personal-agent scope', () => {
       {
         content: 'ordinary write',
         semantic_type: 'content',
-        metadata: { memory_visibility: 'public', custom: 'kept' },
+        metadata: { memory_visibility: 'public', custom: 'kept', evidence_kind: 'meeting', source_kind: 'meeting_notes', source_type: 'transcript' },
       },
       {} as never,
       ctx,

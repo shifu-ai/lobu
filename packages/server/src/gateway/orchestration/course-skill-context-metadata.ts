@@ -122,9 +122,15 @@ export function resolveCourseSkillContextMetadata(
 export function selectActiveCourseSkill(input: {
 	available: ResolvedCourseSkillContextMetadata;
 	message: string;
+	trustedScheduledTaskKind?:
+		| "opp_coach_rehearsal_prompt"
+		| "opp_coach_practice_prompt"
+		| "opp_coach_event_prompt";
 }): ActiveCourseSkillSelection {
-	const active = input.available.oppCoachAvailable &&
-		isDeterministicSalesTalkIntent(input.message);
+	const active =
+		input.available.oppCoachAvailable &&
+		(Boolean(input.trustedScheduledTaskKind) ||
+			isDeterministicSalesTalkIntent(input.message));
 	return active ? {
 		activeSpecializedSkill: "opp-coach",
 		contextFields: input.available.contextFields,

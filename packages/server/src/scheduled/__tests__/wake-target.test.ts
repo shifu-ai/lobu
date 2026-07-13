@@ -12,6 +12,7 @@ function sqlReturning(rows: unknown[]) {
 describe("resolveWakeThreadId", () => {
   const AGENT = "shifu-u-abc123";
   const USER = "toolbox-user-1";
+  const ORGANIZATION = "org-1";
 
   test("returns the most recent live conversation for the agent+user", async () => {
     const sql = sqlReturning([
@@ -20,11 +21,11 @@ describe("resolveWakeThreadId", () => {
     ]);
     const sessionManager = {
       getSession: mock(async (key: string) =>
-        key === `${AGENT}_${USER}_thread-new` ? { conversationId: key } : null
+        key === `${AGENT}_${USER}_thread-new` ? { conversationId: key, organizationId: ORGANIZATION } : null
       ),
     };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
       userId: USER,
     });
     expect(threadId).toBe(`${AGENT}_${USER}_thread-new`);
@@ -37,11 +38,11 @@ describe("resolveWakeThreadId", () => {
     ]);
     const sessionManager = {
       getSession: mock(async (key: string) =>
-        key === "live-thread" ? { conversationId: key } : null
+        key === "live-thread" ? { conversationId: key, organizationId: ORGANIZATION } : null
       ),
     };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
       userId: USER,
     });
     expect(threadId).toBe("live-thread");
@@ -51,7 +52,7 @@ describe("resolveWakeThreadId", () => {
     const sql = sqlReturning([{ conversation_id: "dead-1" }]);
     const sessionManager = { getSession: mock(async () => null) };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
       userId: USER,
     });
     expect(threadId).toBeNull();
@@ -61,7 +62,7 @@ describe("resolveWakeThreadId", () => {
     const sql = sqlReturning([]);
     const sessionManager = { getSession: mock(async () => null) };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
       userId: USER,
     });
     expect(threadId).toBeNull();
@@ -73,7 +74,7 @@ describe("resolveWakeThreadId", () => {
     }) as unknown as Parameters<typeof resolveWakeThreadId>[0]["sql"];
     const sessionManager = { getSession: mock(async () => null) };
     const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
       userId: USER,
     });
     expect(threadId).toBeNull();
@@ -86,26 +87,53 @@ describe("resolveWakeThreadId", () => {
     const sessionManager = { getSession: mock(async () => null) };
 
     const withoutUserId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
     });
     expect(withoutUserId).toBeNull();
 
     const withNullUserId = await resolveWakeThreadId({ sql, sessionManager }, {
-      agentId: AGENT,
+      organizationId: ORGANIZATION, agentId: AGENT,
       userId: null,
     });
     expect(withNullUserId).toBeNull();
 
     expect(sql).not.toHaveBeenCalled();
   });
+
+  test("filters runs by organization and skips a live session owned by another organization", async () => {
+    let queryText = "";
+    const sql = (async (strings: TemplateStringsArray) => {
+      queryText = strings.raw.join("?");
+      return [{ conversation_id: "cross-org-thread" }, { conversation_id: "same-org-thread" }];
+    }) as unknown as Parameters<typeof resolveWakeThreadId>[0]["sql"];
+    const sessionManager = {
+      getSession: mock(async (key: string) => ({
+        conversationId: key,
+        organizationId: key === "cross-org-thread" ? "org-other" : ORGANIZATION,
+      })),
+    };
+
+    const threadId = await resolveWakeThreadId({ sql, sessionManager }, {
+      organizationId: ORGANIZATION, agentId: AGENT, userId: USER,
+    });
+
+    expect(queryText).toContain("organization_id =");
+    expect(threadId).toBe("same-org-thread");
+  });
 });
 
 describe("buildScheduledWakeMessage", () => {
-  test("prefixes the machine marker and appends the LINE delivery instruction", () => {
+  test("keeps the legacy send_daily_digest instruction for ordinary wakes", () => {
     const msg = buildScheduledWakeMessage("提醒使用者該喝水了");
     expect(msg.startsWith("[排程任務自動觸發] 提醒使用者該喝水了")).toBe(true);
     expect(msg).toContain("send_daily_digest");
     expect(msg).toContain("LINE");
+  });
+
+  test("omits agent-driven delivery only for mechanically delivered course wakes", () => {
+    const msg = buildScheduledWakeMessage("準備課程提醒", { mechanicalDelivery: true });
+    expect(msg).not.toContain("send_daily_digest");
+    expect(msg).not.toContain("推送到他的 LINE");
   });
 
   test("does not double-prefix an already-marked prompt", () => {

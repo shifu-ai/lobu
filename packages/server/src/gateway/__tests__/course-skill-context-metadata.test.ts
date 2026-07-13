@@ -128,4 +128,24 @@ describe("course skill context metadata", () => {
 		expect(selectActiveCourseSkill({available,message}).activeSpecializedSkill).toBe(expected);
 	});
 
+	test("selects opp-coach from a trusted scheduled task kind even when the prompt is generic", () => {
+		const available = resolveCourseSkillContextMetadata([
+			{
+				name: "opp-coach",
+				enabled: true,
+				content: TOOLBOX_OPP_SKILL_FRONTMATTER,
+			},
+		]);
+		expect(
+			selectActiveCourseSkill({
+				available,
+				message: "請主動問候 PM 並提供今天的準備提示",
+				trustedScheduledTaskKind: "opp_coach_rehearsal_prompt",
+			}),
+		).toMatchObject({
+			activeSpecializedSkill: "opp-coach",
+			retrievalTerms: ["Key Learning", "Offer"],
+		});
+	});
+
 });

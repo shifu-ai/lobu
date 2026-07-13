@@ -10,6 +10,7 @@ function context(
   overrides: Partial<ResolvedCourseExecutionContext> = {}
 ): ResolvedCourseExecutionContext {
   return {
+    activeSpecializedSkill: null,
     course: {
       courseKey: "course-a",
       courseEntityId: "course:pm:course-a",
@@ -61,6 +62,47 @@ describe("resolved course context instructions", () => {
     expect(rendered).not.toContain("submit_course_pm_profile");
     expect(buildTrustedExecutionScopeInstructions(undefined)).toBe("");
   });
+  test("labels canonical-only scheduled coaching as a draft without meeting-evidence claims", () => {
+    const rendered = buildResolvedCourseContextInstructions(context(), {
+      schemaVersion: 1,
+      source: "calendar_scheduled_wake",
+      automationId: "auto-1",
+      jobId: "job-1",
+      runId: 42,
+      taskKind: "opp_coach_rehearsal_prompt",
+      course: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseKey: "course-a",
+        courseEntityId: "course:pm:course-a",
+        displayName: "Course A",
+      },
+      evidenceReadiness: "canonical_only",
+    });
+    expect(rendered).toContain("排程任務草稿");
+    expect(rendered).toContain("沒有可用的同課程會議或逐字稿證據");
+    expect(rendered).not.toContain("已根據會議紀錄");
+  });
+  test("does not label a scheduled task as canonical-only when exact same-course evidence is ready", () => {
+    const rendered = buildResolvedCourseContextInstructions(context(), {
+      schemaVersion: 1,
+      source: "calendar_scheduled_wake",
+      automationId: "auto-1",
+      jobId: "job-1",
+      runId: 42,
+      taskKind: "opp_coach_rehearsal_prompt",
+      course: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseKey: "course-a",
+        courseEntityId: "course:pm:course-a",
+        displayName: "Course A",
+      },
+      evidenceReadiness: "same_course_evidence",
+    });
+    expect(rendered).not.toContain("排程任務草稿");
+    expect(rendered).toContain("Retrieved background");
+  });
   test("renders one bounded section with trusted identity and quoted background", () => {
     const rendered = buildResolvedCourseContextInstructions(context());
 
@@ -84,7 +126,6 @@ describe("resolved course context instructions", () => {
     const rendered = buildResolvedCourseContextInstructions(
       context({ activeSpecializedSkill: "opp-coach" })
     );
-
     expect(rendered).toContain(".skills/opp-coach/SKILL.md");
     expect(rendered).toContain("read the full file before answering");
     expect(rendered).toMatch(/apply its instructions to this turn/i);
@@ -102,7 +143,6 @@ describe("resolved course context instructions", () => {
     const rendered = buildResolvedCourseContextInstructions(
       context({ activeSpecializedSkill: null })
     );
-
     expect(rendered).toContain(
       "Do not load or apply `.skills/opp-coach/SKILL.md`"
     );

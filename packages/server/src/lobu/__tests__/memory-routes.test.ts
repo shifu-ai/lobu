@@ -376,6 +376,13 @@ describe('writeContextPackMemory', () => {
         authSource: 'pat',
         scopes: ['mcp:admin'],
         body: contextPackBody({
+		  metadata: {
+			source: 'toolbox_onboarding',
+			custom: 'kept',
+			evidence_kind: 'meeting',
+			source_kind: 'meeting_notes',
+			source_type: 'transcript',
+		  },
           entityIds: [
             ' course:user-001:super-ai ',
             'course:user-001:super-ai',
@@ -403,6 +410,7 @@ describe('writeContextPackMemory', () => {
       title: '超級AI個體 onboarding context pack',
       metadata: {
         source: 'toolbox_onboarding',
+		custom: 'kept',
         summary: 'Project summary',
         owner_user_id: OWNER_USER_ID,
         agent_id: AGENT_ID,
@@ -412,6 +420,9 @@ describe('writeContextPackMemory', () => {
       },
       supersedes_event_id: 456,
     });
+	expect((args as {metadata:Record<string,unknown>}).metadata).not.toHaveProperty('evidence_kind');
+	expect((args as {metadata:Record<string,unknown>}).metadata).not.toHaveProperty('source_kind');
+	expect((args as {metadata:Record<string,unknown>}).metadata).not.toHaveProperty('source_type');
     expect(args).not.toHaveProperty('entity_ids');
     expect(ctx).toMatchObject({
       organizationId: ORG_ID,

@@ -130,7 +130,8 @@ function quoteUntrusted(value: string, maxChars: number): string[] {
 }
 
 export function buildResolvedCourseContextInstructions(
-  resolved: ResolvedCourseExecutionContext | undefined
+  resolved: ResolvedCourseExecutionContext | undefined,
+  scheduled?: import("@lobu/core").ScheduledCourseContext
 ): string {
   if (!resolved) return "";
   const specializedSkillInstructions =
@@ -164,6 +165,13 @@ export function buildResolvedCourseContextInstructions(
     `Retrieval status: ${resolved.retrieval.status}`,
     `Cross-course guard: ${resolved.retrieval.crossCourseGuard}`,
   ];
+  if (scheduled) {
+    lines.push("", `排程任務：${normalizeIdentity(scheduled.taskKind)}`);
+    if (scheduled.evidenceReadiness === "canonical_only")
+      lines.push(
+        "排程任務草稿：目前只有已驗證的課程脈絡，沒有可用的同課程會議或逐字稿證據。請明確標示為草稿，禁止冒充會議證據。"
+      );
+  }
   if (resolved.readiness) {
     lines.push(
       "",

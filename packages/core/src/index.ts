@@ -172,4 +172,5 @@ export type {
   QueuedMessage,
   ResolvedCourseExecutionContext,
   TrustedExecutionScope,
+  ScheduledCourseContext,
 } from "./worker/wire";

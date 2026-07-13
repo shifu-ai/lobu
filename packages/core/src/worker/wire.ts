@@ -105,6 +105,7 @@ export interface ResolvedCourseExecutionContext {
       provenanceKind: "fresh_course_retrieval";
       courseEntityId: string;
       readinessFields: Partial<Record<CourseReadinessField, string>>;
+      trustedEvidenceKind?: "meeting" | "transcript";
     }>;
   };
   /** Advisory completeness metadata. Older gateway payloads omit it. */
@@ -132,6 +133,26 @@ export type TrustedExecutionScope =
       contextVersion: number;
       activeSpecializedSkill: "opp-coach" | null;
     };
+
+export interface ScheduledCourseContext {
+  schemaVersion: 1;
+  source: "calendar_scheduled_wake";
+  automationId: string;
+  jobId: string;
+  runId: number;
+  taskKind:
+    | "opp_coach_rehearsal_prompt"
+    | "opp_coach_practice_prompt"
+    | "opp_coach_event_prompt";
+  course: {
+    ownerUserId: string;
+    agentId: string;
+    courseKey: string;
+    courseEntityId: string;
+    displayName: string;
+  };
+  evidenceReadiness: "canonical_only" | "same_course_evidence";
+}
 
 /**
  * Universal message payload for every gateway → worker hop.
@@ -171,6 +192,8 @@ export interface MessagePayload {
   resolvedCourseContext?: ResolvedCourseExecutionContext;
   /** Gateway-minted per-turn execution scope. Caller values are discarded. */
   trustedExecutionScope?: TrustedExecutionScope;
+  scheduledCourseContext?: ScheduledCourseContext;
+
   // ── Platform-specific data (used by worker for context) ────────────
   platformMetadata: Record<string, unknown>;
 

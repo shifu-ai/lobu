@@ -33,7 +33,7 @@ const DELIVERY_INSTRUCTION =
  */
 export async function resolveWakeThreadId(
   deps: { sql: SqlLike; sessionManager: Pick<ISessionManager, "getSession"> },
-  args: { agentId: string; userId?: string | null }
+  args: { organizationId: string; agentId: string; userId?: string | null }
 ): Promise<string | null> {
   if (!args.userId) return null;
   try {
@@ -45,6 +45,7 @@ export async function resolveWakeThreadId(
         FROM runs
         WHERE run_type = 'chat_message'
           AND status = 'completed'
+          AND organization_id = ${args.organizationId}
           AND action_input->>'agentId' = ${args.agentId}
           AND action_input->>'userId' = ${args.userId}
           AND coalesce(action_input->'platformMetadata'->>'source', '') <> 'scheduled-job'
@@ -61,17 +62,21 @@ export async function resolveWakeThreadId(
 
     for (const row of candidates) {
       const session = await deps.sessionManager.getSession(row.conversation_id);
-      if (session) return row.conversation_id;
+      if (session?.organizationId === args.organizationId) return row.conversation_id;
     }
     return null;
   } catch (error) {
-    logger.warn({ error, agentId: args.agentId }, "resolveWakeThreadId failed; falling back");
+    logger.warn({ error, organizationId: args.organizationId, agentId: args.agentId }, "resolveWakeThreadId failed; falling back");
     return null;
   }
 }
 
-/** Prefix the machine marker and append the LINE delivery instruction. Idempotent on the prefix. */
-export function buildScheduledWakeMessage(prompt: string): string {
+/** Prefix the machine marker; only trusted course wakes have mechanical delivery. */
+export function buildScheduledWakeMessage(
+  prompt: string,
+  options: { mechanicalDelivery?: boolean } = {},
+): string {
   const body = prompt.startsWith(WAKE_PREFIX) ? prompt : `${WAKE_PREFIX}${prompt}`;
+  if (options.mechanicalDelivery) return body;
   return body.includes(DELIVERY_INSTRUCTION) ? body : `${body}${DELIVERY_INSTRUCTION}`;
 }
