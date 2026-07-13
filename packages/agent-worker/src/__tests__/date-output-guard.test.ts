@@ -540,6 +540,13 @@ describe("guardDateOutput", () => {
       "下一場未安排在 7/22（三）。",
       "下一場沒有安排在 7/22（三）。",
       "下一場没有安排在 7/22（三）。",
+      "下一場不會安排在 7/22（三）。",
+      "下一場不會辦在 7/22（三）。",
+      "下一場未能訂在 7/22（三）。",
+      "下一場無法辦在 7/22（三）。",
+      "下一場不能安排在 7/22（三）。",
+      "下一場尚未安排在 7/22（三）。",
+      "下一場沒有訂在 7/22（三）。",
     ]) {
       expect(
         guardDateOutput({
@@ -775,6 +782,32 @@ describe("guardDateOutput", () => {
       });
       expect(result.status).toBe("corrected");
       expect(result.text).toBe("下一場是 7/19（日）。");
+    }
+  });
+
+  test("fails closed for recurrence weekday exclusions", () => {
+    for (const userMessage of [
+      "The session runs every day except Sunday at 19:00; when is the next session?",
+      "The session runs every Wednesday except Sunday at 19:00; when is the next session?",
+      "The session runs every Wednesday excluding Sunday at 19:00; when is the next session?",
+      "The session runs every Wednesday but not Sunday at 19:00; when is the next session?",
+      "The session runs every Wednesday, not including Sunday, at 19:00; when is the next session?",
+      "銷講每週三但不含週日 19:00 舉行，下一場是哪天？",
+      "銷講每週三排除週日 19:00 舉行，下一場是哪天？",
+      "銷講每週三但不週日 19:00 舉行，下一場是哪天？",
+      "銷講每週三，除了週日以外，19:00 舉行，下一場是哪天？",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/19（日）。",
+          now: new Date("2026-07-16T04:00:00.000Z"),
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
     }
   });
 
@@ -1203,6 +1236,116 @@ describe("extractTrustedTemporalCandidates", () => {
         reason: "next_occurrence_without_temporal_evidence",
       });
     }
+  });
+
+  test("prioritizes a non-generic final claim descriptor over the user target", () => {
+    const salesEvidence = [
+      {
+        candidate: "2026-07-16T19:00:00+08:00",
+        label: "銷講",
+      },
+    ];
+
+    expect(
+      guardDateOutput({
+        userMessage: "銷講每週四 19:00 舉行，幫我查下一場銷講",
+        finalText: "下一場內部會議是 7/14（二）。",
+        now: NOW,
+        trustedTemporalCandidates: salesEvidence.map(
+          (item) => item.candidate
+        ),
+        trustedTemporalEvidence: salesEvidence,
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
+  });
+
+  test("uses a unique matching final claim descriptor", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "銷講每週四 19:00 舉行，幫我查下一場銷講",
+        finalText: "下一場內部會議是 7/20（一）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-14T19:00:00+08:00",
+            label: "內部會議",
+          },
+          {
+            candidate: "2026-07-16T19:00:00+08:00",
+            label: "銷講",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "corrected",
+      text: "下一場內部會議是 7/14（二）。",
+      corrections: [
+        {
+          reason: "relative_date_mismatch",
+          original: "7/20（一）",
+          replacement: "7/14（二）",
+        },
+      ],
+    });
+  });
+
+  test("falls back to the user target for a generic final claim descriptor", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "幫我查下一場銷講",
+        finalText: "下一場是 7/20（一）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-14T19:00:00+08:00",
+            label: "內部會議",
+          },
+          {
+            candidate: "2026-07-16T19:00:00+08:00",
+            label: "銷講",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "corrected",
+      text: "下一場是 7/16（四）。",
+      corrections: [
+        {
+          reason: "relative_date_mismatch",
+          original: "7/20（一）",
+          replacement: "7/16（四）",
+        },
+      ],
+    });
+  });
+
+  test("fails closed for conflicting non-generic final claim descriptors", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "活動每週四 19:00 舉行，幫我查下一場活動",
+        finalText:
+          "下一場內部會議是 7/20（一）；下一場銷講是 7/21（二）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-14T19:00:00+08:00",
+            label: "內部會議",
+          },
+          {
+            candidate: "2026-07-16T19:00:00+08:00",
+            label: "銷講",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
   });
 
   test("does not use an unsafe one-character evidence label as a match", () => {

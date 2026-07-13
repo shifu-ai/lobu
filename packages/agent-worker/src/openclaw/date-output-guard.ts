@@ -343,6 +343,8 @@ const NEXT_OCCURRENCE_BLOCK_TEXT =
   "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。";
 const NEXT_OCCURRENCE_ASSOCIATION_LIMIT = 120;
 const SENTENCE_OR_LINE_BOUNDARY_RE = /[。\n\r！？；;.!?]/;
+const NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE =
+  /(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|預計(?:\s*(?:在|於))?|定於|將\s*(?:在|於)|會\s*(?:在|於)|(?:辦|办|訂|订|安排)\s*(?:在|於|于)|(?:是|為)\s*(?:在|於)?|[:：—-]|\b(?:date\s*(?:is|will\s+be|[:：])|is|will\s+be(?:\s+held\s+on)?|will\s+take\s+place\s+on|scheduled\s+(?:for|on)|occurs?\s+on|on|at))\s*$/i;
 
 type LocatedDateClaim = {
   kind: "short" | "iso";
@@ -380,7 +382,7 @@ function isExplicitNextOccurrenceForwardBridge(
   }
 
   const hasNegativeSchedulingPredicate =
-    /(?:不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|不(?:辦|办|訂|订|安排)(?:在|於|于)?|未能(?:在|於)?|未在|未於|未(?:辦|办|訂|订|安排)(?:在|於|于)?|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|(?:沒有|没有|沒|没)安排(?:在|於|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/.test(
+    /(?:(?:不會|未能|無法|无法|不能|尚未|沒有|没有|沒|没)\s*(?:辦|办|訂|订|安排)\s*(?:在|於|于)?|不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|不(?:辦|办|訂|订|安排)(?:在|於|于)?|未能(?:在|於)?|未在|未於|未(?:辦|办|訂|订|安排)(?:在|於|于)?|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|(?:沒有|没有|沒|没)安排(?:在|於|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/.test(
       normalized
     ) ||
     /(?:\b(?:is|are|was|were|will|would|can|could|should|do|does|did)\s+(?:not|never)(?:\s+(?:be|held|on|at|scheduled|for))*|\bcannot(?:\s+(?:be|held|on|at|scheduled|for))*|\bunable(?:\s+to)?(?:\s+(?:be|hold|schedule|occur|on|at|for))*|\b[a-z]+n['’]t(?:\s+(?:be|held|on|at|scheduled|for))*)$/i.test(
@@ -388,10 +390,9 @@ function isExplicitNextOccurrenceForwardBridge(
     );
   if (hasNegativeSchedulingPredicate) return false;
 
-  const terminalConnector =
-    /(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|預計(?:\s*(?:在|於))?|定於|將\s*(?:在|於)|會\s*(?:在|於)|(?:辦|办|訂|订|安排)\s*(?:在|於|于)|(?:是|為)\s*(?:在|於)?|[:：—-]|\b(?:date\s*(?:is|will\s+be|[:：])|is|will\s+be(?:\s+held\s+on)?|will\s+take\s+place\s+on|scheduled\s+(?:for|on)|occurs?\s+on|on|at))\s*$/i.exec(
-      normalized
-    );
+  const terminalConnector = NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(
+    normalized
+  );
   if (terminalConnector) {
     const descriptor = normalized.slice(0, terminalConnector.index).trim();
     return descriptor.length <= 32;
@@ -508,6 +509,20 @@ function normalizeTemporalEvidenceLabel(value: string): string {
     .trim();
 }
 
+function normalizedNextOccurrenceDescriptor(
+  claim: LocatedDateClaim
+): string | null {
+  if (claim.associationText === undefined) return null;
+  const association = normalizeTemporalEvidenceLabel(claim.associationText);
+  const terminalConnector = NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(
+    association
+  );
+  const descriptor = terminalConnector
+    ? association.slice(0, terminalConnector.index).trim()
+    : association;
+  return descriptor || null;
+}
+
 const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
   sunday: 0,
   monday: 1,
@@ -599,7 +614,23 @@ function recurrenceInClause(
   return null;
 }
 
-function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
+function explicitRecurrence(
+  userMessage: string
+): ExplicitRecurrence | "ambiguous" | null {
+  for (const recurrenceScope of userMessage.split(/[；;。！？\n\r]+/)) {
+    const hasRecurrenceMarker =
+      /(?:每週|每周|每星期)/.test(recurrenceScope) ||
+      /\b(?:every|weekly)\b/i.test(recurrenceScope);
+    const hasExclusion =
+      /(?:不含|排除|但不|除了[^；;。！？\n\r]{0,80}(?:以外|之外))/.test(
+        recurrenceScope
+      ) ||
+      /\b(?:except|excluding)\b|\bbut\s+not\b|\bnot\s+including\b/i.test(
+        recurrenceScope
+      );
+    if (hasRecurrenceMarker && hasExclusion) return "ambiguous";
+  }
+
   const distinct = new Map<string, ExplicitRecurrence>();
   const protectedEnglishWeekdayLists = userMessage.replace(
     /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b\s*,\s*(?=(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b)/gi,
@@ -610,12 +641,12 @@ function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
   )) {
     const recurrence = recurrenceInClause(clause);
     if (!recurrence) continue;
-    if (recurrence === "ambiguous") return null;
+    if (recurrence === "ambiguous") return "ambiguous";
     distinct.set(
       `${recurrence.weekdays.join(",")}:${recurrence.timeMinutes ?? "ambiguous"}`,
       recurrence
     );
-    if (distinct.size > 1) return null;
+    if (distinct.size > 1) return "ambiguous";
   }
   return distinct.values().next().value ?? null;
 }
@@ -736,16 +767,34 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     : [];
   if (nextOccurrenceDateClaims.length > 0) {
     const recurrence = explicitRecurrence(input.userMessage);
+    if (recurrence === "ambiguous") {
+      return {
+        status: "blocked",
+        text: NEXT_OCCURRENCE_BLOCK_TEXT,
+        reason: "next_occurrence_without_temporal_evidence",
+      };
+    }
     const recurrenceDate =
       recurrence === null ? null : resolveNextRecurrence(recurrence, input.now);
     const normalizedUserMessage = normalizeTemporalEvidenceLabel(
       input.userMessage
     );
-    const normalizedAssociationText = nextOccurrenceDateClaims
-      .map((claim) => claim.associationText ?? "")
-      .map(normalizeTemporalEvidenceLabel)
-      .join(" ");
-    const labelHaystack = `${normalizedUserMessage} ${normalizedAssociationText}`;
+    const claimDescriptors = new Set(
+      nextOccurrenceDateClaims
+        .map(normalizedNextOccurrenceDescriptor)
+        .filter((descriptor): descriptor is string => descriptor !== null)
+    );
+    if (claimDescriptors.size > 1) {
+      return {
+        status: "blocked",
+        text: NEXT_OCCURRENCE_BLOCK_TEXT,
+        reason: "next_occurrence_without_temporal_evidence",
+      };
+    }
+    const labelHaystack =
+      claimDescriptors.size === 1
+        ? (claimDescriptors.values().next().value ?? "")
+        : normalizedUserMessage;
     const labeledEvidence = input.trustedTemporalEvidence ?? [];
     const safeEvidence = labeledEvidence.flatMap((item) => {
       const label = normalizeTemporalEvidenceLabel(item.label);
@@ -777,7 +826,17 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
           candidate !== null && candidate.epoch >= input.now.getTime()
       )
       .sort((left, right) => left.epoch - right.epoch)[0];
-    const authoritativeDate = recurrenceDate ?? trustedCandidate?.date;
+    if (labeledEvidence.length > 0 && !trustedCandidate) {
+      return {
+        status: "blocked",
+        text: NEXT_OCCURRENCE_BLOCK_TEXT,
+        reason: "next_occurrence_without_temporal_evidence",
+      };
+    }
+    const authoritativeDate =
+      claimDescriptors.size === 1 && labeledEvidence.length > 0
+        ? trustedCandidate?.date
+        : (recurrenceDate ?? trustedCandidate?.date);
 
     if (!authoritativeDate) {
       return {
