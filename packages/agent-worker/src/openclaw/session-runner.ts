@@ -2423,11 +2423,15 @@ Use it when the user references past discussions or you need context.`);
         ),
       });
     } catch (error) {
-      logger.error(
-        `Date output guard failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+      const errorType =
+        error instanceof RangeError
+          ? "RangeError"
+          : error instanceof TypeError
+            ? "TypeError"
+            : error instanceof Error
+              ? "Error"
+              : typeof error;
+      logger.error(`Date output guard failed: errorType=${errorType}`);
       dateGuardDecision = isDateSensitiveTurn(userPrompt)
         ? {
             status: "blocked",

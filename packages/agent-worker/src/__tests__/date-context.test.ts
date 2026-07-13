@@ -93,6 +93,17 @@ describe("date context", () => {
     expect(calendar.current.map(formatCalendarDate)).toContain("2028-02-29");
   });
 
+  test("keeps years before 0100 instead of applying Date.UTC's 1900 offset", () => {
+    const now = new Date(0);
+    now.setUTCHours(12, 0, 0, 0);
+    now.setUTCFullYear(99, 0, 1);
+
+    const calendar = buildRelativeWeekCalendar(now);
+
+    expect(calendar.current.map(formatCalendarDate)).toContain("0099-01-01");
+    expect(calendar.current.map(formatCalendarDate).at(0)).toBe("0098-12-29");
+  });
+
   test("renders a fail-closed prompt when the clock value is invalid", () => {
     expect(buildCurrentDateContext(new Date(Number.NaN))).toContain(
       "Current date computation is unavailable. Do not guess any date or weekday."

@@ -187,9 +187,9 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
 }
 
 const CHINESE_DATE_SENSITIVE_RE =
-  /(?:今天|昨天|明天|上[週周]|本[週周]|這[週周]|这[周週]|下[週周]|(?:星期|週|周)[幾几日天一二三四五六]|(?:上一場|下一場|最近一場))/;
+  /(?:今天|昨天|明天|這兩天|这两天|日期|哪一天|哪天|幾號|几号|何時|何时|什麼時候|什么时候|上[週周]|本[週周]|這[週周]|这[周週]|下[週周]|(?:星期|週|周)[幾几日天一二三四五六]|(?:上一場|下一場|最近一場))/;
 const ENGLISH_DATE_SENSITIVE_RE =
-  /\b(?:date|today|tomorrow|yesterday|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:this|last|next)\s+(?:week|mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday))\b/i;
+  /\b(?:date|when|today|tomorrow|yesterday|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+(?:event|session|occurrence)|(?:this|last|next)\s+(?:week|mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday))\b/i;
 const ISO_DATE_RE =
   /(?:^|[^\d])\d{4}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])(?:$|[^\d])/;
 const SHORT_DATE_RE =
@@ -206,7 +206,8 @@ export function isDateSensitiveTurn(promptText: string): boolean {
 
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<!\d)(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
-const EXPLICIT_ISO_DATE_RE = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+const EXPLICIT_ISO_DATE_CLAIM_RE =
+  /(?<![A-Za-z0-9_/-])(\d{4})-(\d{2})-(\d{2})(?:(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))(?![A-Za-z0-9_/-])|(?=$|[^A-Za-z0-9_/-]))/g;
 const INVALID_CALENDAR_DATE_BLOCK_TEXT =
   "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。";
 
@@ -612,7 +613,11 @@ function correctNextOccurrenceClaim(
 }
 
 export function guardDateOutput(input: DateGuardInput): DateGuardResult {
-  for (const match of input.finalText.matchAll(EXPLICIT_ISO_DATE_RE)) {
+  if (!isDateSensitiveTurn(input.userMessage)) {
+    return { status: "unchanged", text: input.finalText };
+  }
+
+  for (const match of input.finalText.matchAll(EXPLICIT_ISO_DATE_CLAIM_RE)) {
     if (!validUtcDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
       return {
         status: "blocked",

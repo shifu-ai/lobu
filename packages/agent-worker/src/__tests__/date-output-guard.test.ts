@@ -25,6 +25,9 @@ describe("isDateSensitiveTurn", () => {
       "請查下一場銷講",
       "2026-07-16 是星期幾？",
       "2026-7-6 有活動嗎？",
+      "核對這兩天",
+      "活動日期是哪天？",
+      "開課是幾號？",
     ]) {
       expect(isDateSensitiveTurn(prompt)).toBe(true);
     }
@@ -118,7 +121,73 @@ describe("guardDateOutput", () => {
 
     expect(
       guardDateOutput({
-        userMessage: "請檢查這段程式",
+        userMessage: "請核對這個日期格式 token",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({ status: "unchanged", text: finalText });
+  });
+
+  test("blocks an impossible date inside an ISO datetime claim", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "這個排程日期有效嗎？",
+        finalText: "排程是 2026-02-30T10:00:00+08:00。",
+        now: NOW,
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。",
+      reason: "invalid_calendar_date",
+    });
+  });
+
+  test("does not treat slug or path tokens as date claims", () => {
+    for (const finalText of [
+      "release-2026-02-30",
+      "/2026-02-30/report",
+      "version_2026-02-30",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "請核對這些日期格式 token",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("does not mutate an already-streamed answer for a non-date turn", () => {
+    const finalText = "資料列內容為 2026-02-30 (星期一)";
+
+    expect(
+      guardDateOutput({
+        userMessage: "請整理這份資料",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({ status: "unchanged", text: finalText });
+
+    expect(
+      guardDateOutput({
+        userMessage: "請核對資料中的日期",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。",
+      reason: "invalid_calendar_date",
+    });
+  });
+
+  test("does not correct a weekday in an already-streamed non-date turn", () => {
+    const finalText = "資料列內容為 2026-07-16 (星期三)";
+
+    expect(
+      guardDateOutput({
+        userMessage: "請整理這份資料",
         finalText,
         now: NOW,
       })

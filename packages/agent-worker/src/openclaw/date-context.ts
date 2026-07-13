@@ -48,15 +48,21 @@ function getTaipeiDateParts(now: Date): DateParts {
 }
 
 export function formatCalendarDate(value: CalendarDate): string {
-  return `${value.year}-${String(value.month).padStart(2, "0")}-${String(
-    value.day
-  ).padStart(2, "0")}`;
+  return `${String(value.year).padStart(4, "0")}-${String(value.month).padStart(
+    2,
+    "0"
+  )}-${String(value.day).padStart(2, "0")}`;
+}
+
+function calendarDateAsUtc(parts: DateParts, days = 0): Date {
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(parts.year, parts.month - 1, parts.day + days);
+  return date;
 }
 
 function addCalendarDays(parts: DateParts, days: number): DateParts {
-  const date = new Date(
-    Date.UTC(parts.year, parts.month - 1, parts.day + days)
-  );
+  const date = calendarDateAsUtc(parts, days);
   return {
     year: date.getUTCFullYear(),
     month: date.getUTCMonth() + 1,
@@ -65,9 +71,7 @@ function addCalendarDays(parts: DateParts, days: number): DateParts {
 }
 
 function weekdayLabel(parts: DateParts): string {
-  const weekdayIndex = new Date(
-    Date.UTC(parts.year, parts.month - 1, parts.day)
-  ).getUTCDay();
+  const weekdayIndex = calendarDateAsUtc(parts).getUTCDay();
   return WEEKDAY_LABELS_ZH_TW[weekdayIndex] ?? "星期未知";
 }
 
@@ -98,9 +102,7 @@ function buildSevenDaysFrom(start: CalendarDate): CalendarDate[] {
 
 export function buildRelativeWeekCalendar(now: Date): RelativeWeekCalendar {
   const today = getTaipeiDateParts(now);
-  const weekdayIndex = new Date(
-    Date.UTC(today.year, today.month - 1, today.day)
-  ).getUTCDay();
+  const weekdayIndex = calendarDateAsUtc(today).getUTCDay();
   const daysSinceMonday = (weekdayIndex + 6) % 7;
   const currentMonday = addCalendarDays(today, -daysSinceMonday);
 
