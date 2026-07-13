@@ -290,6 +290,56 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test.each([
+		[
+			"runtime carrier with shared activation",
+			"runtime_carrier",
+			"shared_carrier",
+		],
+		[
+			"runtime carrier with per-agent activation",
+			"runtime_carrier",
+			"per_agent",
+		],
+		[
+			"capability release with shared activation",
+			"capability_activation",
+			"shared_carrier",
+		],
+	] as const)("rejects %s at the managed-settings boundary", async (_label, releaseKind, activationMode) => {
+		const app = await buildApp();
+		const request = latestSignedApplyRequest();
+		request.signedManifest.releaseKind = releaseKind;
+		request.signedFeed.activationMode = activationMode;
+		if (releaseKind === "runtime_carrier") {
+			(
+				request.signedManifest.controlPlanePolicy as Record<string, unknown>
+			).runtimeCarrier = testRuntimeCarrierPolicy();
+		}
+		resignLatestRequest(request);
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_request",
+			error_description:
+				"Managed settings only accept per-agent capability activation releases",
+		});
+		expect(await currentIdentity()).toBe("existing identity");
+	});
+
+	test("rejects a tampered activation mode before managed-settings compatibility checks", async () => {
+		const app = await buildApp();
+		const request = latestSignedApplyRequest();
+		request.signedFeed.activationMode = "shared_carrier";
+		request.commandDigest = commandDigest(request);
+		const response = await putApply(app, request);
+		expect(response.status).toBe(403);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_feed_signature_invalid",
+		});
+		expect(await currentIdentity()).toBe("existing identity");
+	});
+
 	test("atomically applies only managed columns and exposes bounded evidence", async () => {
 		const app = await buildApp();
 		const request = signedApplyRequest({
@@ -1633,6 +1683,58 @@ function latestSignedApplyRequest() {
 	});
 	latest.commandDigest = commandDigest(latest);
 	return latest;
+}
+
+function resignLatestRequest(
+	request: ReturnType<typeof latestSignedApplyRequest>,
+) {
+	const unsignedManifest = withoutKey(request.signedManifest, "signing");
+	request.signedManifest.signing.signature = signValue({
+		...unsignedManifest,
+		signing: {
+			algorithm: "Ed25519",
+			keyId: request.signedManifest.signing.keyId,
+		},
+	});
+	request.signedFeed.publications[0].manifest = structuredClone(
+		request.signedManifest,
+	);
+	request.signedFeed.publications[0].manifestDigest = digestValue(
+		request.signedManifest,
+	);
+	const unsignedFeed = withoutKey(request.signedFeed, "feedSigning");
+	request.signedFeed.feedSigning.signature = signValue({
+		...unsignedFeed,
+		feedSigning: {
+			algorithm: "Ed25519",
+			keyId: request.signedFeed.feedSigning.keyId,
+		},
+	});
+	request.commandDigest = commandDigest(request);
+}
+
+function testRuntimeCarrierPolicy() {
+	return {
+		backwardCompatible: true as const,
+		backwardCompatibilitySmokes: ["runtime-backward-compatibility"],
+		boundedDriftMinutes: 60,
+		requiredOperationalEvidence: [
+			"runtime-queue",
+			"runtime-database",
+			"runtime-health",
+		],
+		previousStable: { releaseId: "runtime-previous", releaseSequence: 1 },
+		queueConsumer: {
+			identity: "lobu-queue-consumer",
+			origin: "https://shifulobu.zeabur.app",
+			evidenceName: "runtime-queue",
+		},
+		databaseConsumer: {
+			identity: "lobu-database-consumer",
+			origin: "https://shifulobu.zeabur.app",
+			evidenceName: "runtime-database",
+		},
+	};
 }
 
 function resignFeed(feed: ReturnType<typeof signedApplyRequest>["signedFeed"]) {

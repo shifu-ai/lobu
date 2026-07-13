@@ -1630,13 +1630,23 @@ function isCurrentApplyCommand(
 
 function validateCurrentContract(command: AgentReleaseApplyCommand): void {
 	const current = isCurrentApplyCommand(command);
-	const hasManifestPolicy =
-		command.signedManifest.controlPlanePolicy !== undefined;
-	const hasFeedPolicy =
-		command.signedFeed.activationMode !== undefined &&
-		command.signedFeed.rollout !== undefined;
-	if (!current && !hasManifestPolicy && !hasFeedPolicy) return;
-	if (!current || !hasManifestPolicy || !hasFeedPolicy) {
+	const manifestPolicy = command.signedManifest.controlPlanePolicy;
+	const activationMode = command.signedFeed.activationMode;
+	const rollout = command.signedFeed.rollout;
+	if (
+		!current &&
+		manifestPolicy === undefined &&
+		activationMode === undefined &&
+		rollout === undefined
+	) {
+		return;
+	}
+	if (
+		!current ||
+		manifestPolicy === undefined ||
+		activationMode === undefined ||
+		rollout === undefined
+	) {
 		throw invalidRequest(
 			"Current agent release command requires policy, feed activation, and apply attempt subjects",
 		);
@@ -1644,7 +1654,7 @@ function validateCurrentContract(command: AgentReleaseApplyCommand): void {
 	if (!isUuid(command.assignment.targetId)) {
 		throw invalidRequest("Current agent release targetId must be a UUID");
 	}
-	if (command.signedFeed.rollout.paused) {
+	if (rollout.paused) {
 		throw invalidRequest("Paused agent release feeds cannot be applied");
 	}
 	if (command.signedFeed.publications.length !== 1) {
@@ -1652,29 +1662,17 @@ function validateCurrentContract(command: AgentReleaseApplyCommand): void {
 			"Current agent release feed must contain exactly one publication",
 		);
 	}
-	const expectedMode =
-		command.signedManifest.releaseKind === "runtime_carrier"
-			? "shared_carrier"
-			: "per_agent";
-	if (command.signedFeed.activationMode !== expectedMode) {
+	if (
+		command.signedManifest.releaseKind !== "capability_activation" ||
+		activationMode !== "per_agent"
+	) {
 		throw invalidRequest(
-			"Agent release activation mode does not match release kind",
+			"Managed settings only accept per-agent capability activation releases",
 		);
 	}
-	if (
-		command.signedManifest.releaseKind === "capability_activation" &&
-		command.signedManifest.controlPlanePolicy.baseline === null
-	) {
+	if (manifestPolicy.baseline === null) {
 		throw invalidRequest(
 			"Capability activation requires a managed settings baseline",
-		);
-	}
-	if (
-		command.signedManifest.releaseKind === "runtime_carrier" &&
-		!hasOwn(command.signedManifest.controlPlanePolicy, "runtimeCarrier")
-	) {
-		throw invalidRequest(
-			"Runtime carrier release requires compatibility policy",
 		);
 	}
 }
