@@ -19,6 +19,7 @@ describe("isDateSensitiveTurn", () => {
       "上週、本週、這週和下週的日期",
       "本週三是哪天？",
       "星期五有空嗎？",
+      "銷講是星期幾？",
       "上一場和最近一場是何時？",
       "請查下一場銷講",
       "2026-07-16 是星期幾？",
@@ -32,7 +33,17 @@ describe("isDateSensitiveTurn", () => {
     for (const prompt of [
       "Is next Wednesday available?",
       "What date is the session?",
+      "Can we meet this Mon?",
+      "Can we meet next Tue?",
       "Can we meet next Wed?",
+      "Can we meet this Wed?",
+      "Was it last Tues?",
+      "Was it last Thu?",
+      "Was it last Thur?",
+      "Try next Thurs",
+      "Try this Fri",
+      "Try last Sat",
+      "Try next Sun",
       "Compare today, tomorrow, and yesterday",
       "Show this week, last week, and next week",
       "Is Monday a weekday?",
@@ -42,7 +53,14 @@ describe("isDateSensitiveTurn", () => {
   });
 
   test("does not classify ordinary non-date prompts", () => {
-    for (const prompt of ["請整理會議摘要", "課程報名人數有多少？", "hello"]) {
+    for (const prompt of [
+      "請整理會議摘要",
+      "課程報名人數有多少？",
+      "hello",
+      "this wedding summary",
+      "the next sunset photo",
+      "the latest update",
+    ]) {
       expect(isDateSensitiveTurn(prompt)).toBe(false);
     }
   });

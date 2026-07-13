@@ -46,9 +46,9 @@ export type DateGuardInput = {
 };
 
 const CHINESE_DATE_SENSITIVE_RE =
-  /(?:今天|昨天|明天|上[週周]|本[週周]|這[週周]|这[周週]|下[週周]|(?:星期|週|周)[日天一二三四五六]|(?:上一場|下一場|最近一場))/;
+  /(?:今天|昨天|明天|上[週周]|本[週周]|這[週周]|这[周週]|下[週周]|(?:星期|週|周)[幾几日天一二三四五六]|(?:上一場|下一場|最近一場))/;
 const ENGLISH_DATE_SENSITIVE_RE =
-  /\b(?:date|today|tomorrow|yesterday|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:this|last|next)\s+week|next\s+(?:mon|tue|wed|thu|fri|sat|sun)(?:day)?)\b/i;
+  /\b(?:date|today|tomorrow|yesterday|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:this|last|next)\s+(?:week|mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday))\b/i;
 const ISO_DATE_RE =
   /(?:^|[^\d])\d{4}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])(?:$|[^\d])/;
 const SHORT_DATE_RE =
