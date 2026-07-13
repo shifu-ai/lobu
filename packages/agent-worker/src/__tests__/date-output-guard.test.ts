@@ -259,6 +259,42 @@ describe("guardDateOutput", () => {
     expect(result.text).toBe("下一場是 7/16（四）。");
   });
 
+  test("requires a positive unambiguous request for generic unlabeled candidates", () => {
+    for (const userMessage of [
+      "下一場是哪天？",
+      "請查下一場銷講",
+      "不要查下一場內部會議，幫我查下一場銷講",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/22（三）。",
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-22", "2026-07-16"],
+        }).text
+      ).toBe("下一場是 7/16（四）。");
+    }
+
+    for (const userMessage of [
+      "幫我查下一場內部會議，也查下一場銷講",
+      "幫我查下一場銷講和內部會議",
+      "不要查下一場銷講",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/22（三）。",
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+    }
+  });
+
   test("preserves padded short-date style when correcting a next occurrence", () => {
     const result = guardDateOutput({
       userMessage: "請查下一場銷講",
@@ -1438,8 +1474,9 @@ describe("extractTrustedTemporalCandidates", () => {
         trustedTemporalEvidence: extractTrustedTemporalEvidence(envelope),
       })
     ).toEqual({
-      status: "unchanged",
-      text: "下一場銷講是 7/16（四）。",
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
     });
   });
 

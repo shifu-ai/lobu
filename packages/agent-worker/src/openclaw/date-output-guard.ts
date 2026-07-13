@@ -541,6 +541,7 @@ function normalizeRequestedOccurrenceTarget(value: string): string | null {
     length < 2 ||
     length > 64 ||
     !/[\p{L}\p{N}]/u.test(normalized) ||
+    /(?:和|與|与|及|、)|\b(?:and|or)\b/i.test(normalized) ||
     /^(?:是|為|为|在|於|于|哪|何|when\b|what\b)/i.test(normalized)
   ) {
     return null;
@@ -548,15 +549,27 @@ function normalizeRequestedOccurrenceTarget(value: string): string | null {
   return normalized;
 }
 
-function normalizedRequestedOccurrenceTarget(
+type RequestedOccurrenceTargetState =
+  | { kind: "unique"; target: string }
+  | { kind: "bare" }
+  | { kind: "invalid" };
+
+function requestedOccurrenceTargetState(
   userMessage: string
-): string | null {
+): RequestedOccurrenceTargetState {
   const targets = new Set<string>();
+  let hasPositiveOccurrence = false;
+  let hasBarePositiveOccurrence = false;
+  let hasInvalidPositiveTarget = false;
   const addTarget = (raw: string | undefined) => {
     const target = raw
       ? normalizeRequestedOccurrenceTarget(raw)
       : null;
-    if (target) targets.add(target);
+    if (target) {
+      targets.add(target);
+      return true;
+    }
+    return false;
   };
 
   for (const occurrence of userMessage.matchAll(/(?:下一場|下次)/g)) {
@@ -565,17 +578,23 @@ function normalizedRequestedOccurrenceTarget(
     if (/(?:不要|別|别|不必|無需|无需|忽略)\s*(?:管|查|看)?\s*$/.test(prefix)) {
       continue;
     }
+    hasPositiveOccurrence = true;
     const tail = userMessage.slice(index + occurrence[0].length, index + 80);
+    if (/^\s*(?:是|為|为)?\s*(?:哪天|哪一天|何時|何时|什麼時候|什么时候)/u.test(tail)) {
+      hasBarePositiveOccurrence = true;
+      continue;
+    }
     const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?:(?:的)?(?:目前|当前)?(?:報名狀況|报名状况|報名人數|报名人数|報名數|报名数)(?:\s*(?:嗎|吗|呢|如何|怎樣|怎样|怎麼樣|怎么样))?|的(?:日期|時間|时间))?(?=\s*(?:是|為|为|在|於|于|哪|何|[？?，,。！!；;]|$))/u.exec(
       tail
     );
-    addTarget(forward?.[1]);
+    if (!forward?.[1] && /的\s*$/u.test(prefix)) continue;
+    if (!addTarget(forward?.[1])) hasInvalidPositiveTarget = true;
   }
 
   for (const backward of userMessage.matchAll(
     /(?:^|[\s，,。！？；;])([\p{L}\p{N}]{2,64})的(?:下一場|下次)/gu
   )) {
-    addTarget(backward[1]);
+    if (!addTarget(backward[1])) hasInvalidPositiveTarget = true;
   }
 
   for (const occurrence of userMessage.matchAll(
@@ -586,19 +605,37 @@ function normalizedRequestedOccurrenceTarget(
     if (/\b(?:do\s+not|don't|ignore)\s*$/i.test(prefix)) {
       continue;
     }
+    hasPositiveOccurrence = true;
+    if (/\bwhen\s+is\s+the\s*$/i.test(prefix)) {
+      hasBarePositiveOccurrence = true;
+      continue;
+    }
     const tail = userMessage.slice(
       index + occurrence[0].length,
       index + occurrence[0].length + 96
     );
+    if (/^\s+(?:is\s+)?when\b/i.test(tail)) {
+      hasBarePositiveOccurrence = true;
+      continue;
+    }
     const forward = /^\s+(?:for\s+|of\s+)?([a-z0-9][a-z0-9 _-]{1,63}?)(?=\s*(?:is|will|on|at|when|what|[?.,;!]|$))/i.exec(
       tail
     );
-    addTarget(forward?.[1]);
+    if (!addTarget(forward?.[1])) hasInvalidPositiveTarget = true;
   }
 
-  return targets.size === 1
-    ? (targets.values().next().value ?? null)
-    : null;
+  if (
+    !hasPositiveOccurrence ||
+    hasInvalidPositiveTarget ||
+    targets.size > 1 ||
+    (hasBarePositiveOccurrence && targets.size > 0)
+  ) {
+    return { kind: "invalid" };
+  }
+  if (targets.size === 1) {
+    return { kind: "unique", target: targets.values().next().value ?? "" };
+  }
+  return hasBarePositiveOccurrence ? { kind: "bare" } : { kind: "invalid" };
 }
 
 function normalizedNextOccurrenceDescriptor(
@@ -902,9 +939,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
-  const requestedTarget = normalizedRequestedOccurrenceTarget(
-    input.userMessage
-  );
+  const requestedTargetState = requestedOccurrenceTargetState(input.userMessage);
+  const requestedTarget =
+    requestedTargetState.kind === "unique"
+      ? requestedTargetState.target
+      : null;
   const nextOccurrenceDateClaims = isNextOccurrence
     ? findNextOccurrenceDateClaims(text, requestedTarget)
     : [];
@@ -985,13 +1024,16 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
           .map(({ item }) => item)
       : [];
     const hasSafeUnlabeledCandidateBinding =
-      claimDescriptors.size === 0 ||
-      (claimDescriptors.size === 1 &&
-        requestedTarget !== null &&
-        claimDescriptor === requestedTarget);
+      (requestedTargetState.kind === "bare" && claimDescriptors.size === 0) ||
+      (requestedTargetState.kind === "unique" &&
+        (claimDescriptors.size === 0 ||
+          (claimDescriptors.size === 1 &&
+            claimDescriptor === requestedTarget)));
     const candidateStrings =
       labeledEvidence.length > 0
-        ? Array.from(new Set(matchingEvidence.map((item) => item.candidate)))
+        ? requestedTargetState.kind === "unique"
+          ? Array.from(new Set(matchingEvidence.map((item) => item.candidate)))
+          : []
         : hasSafeUnlabeledCandidateBinding
           ? (input.trustedTemporalCandidates ?? [])
           : [];
