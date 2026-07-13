@@ -23,6 +23,9 @@ export type RelativeWeekCalendar = {
   next: CalendarDate[];
 };
 
+export type RelativeWeekReference = keyof RelativeWeekCalendar;
+export type RelativeDayReference = "yesterday" | "today" | "tomorrow";
+
 function getTaipeiDateParts(now: Date): DateParts {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: TAIPEI_TIME_ZONE,
@@ -106,6 +109,31 @@ export function buildRelativeWeekCalendar(now: Date): RelativeWeekCalendar {
     current: buildSevenDaysFrom(currentMonday),
     next: buildSevenDaysFrom(addCalendarDays(currentMonday, 7)),
   };
+}
+
+export function resolveRelativeWeekday(
+  reference: RelativeWeekReference,
+  weekday: number,
+  now: Date
+): CalendarDate {
+  if (!Number.isInteger(weekday) || weekday < 0 || weekday > 6) {
+    throw new RangeError(
+      `Weekday must be an integer from 0 through 6: ${weekday}`
+    );
+  }
+
+  const mondayBasedIndex = (weekday + 6) % 7;
+  const resolved = buildRelativeWeekCalendar(now)[reference][mondayBasedIndex];
+  if (!resolved) throw new Error("Relative week calendar is incomplete");
+  return resolved;
+}
+
+export function resolveRelativeDay(
+  reference: RelativeDayReference,
+  now: Date
+): CalendarDate {
+  const offset = { yesterday: -1, today: 0, tomorrow: 1 }[reference];
+  return addCalendarDays(getTaipeiDateParts(now), offset);
 }
 
 function formatWeek(dates: CalendarDate[]): string {
