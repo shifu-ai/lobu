@@ -252,6 +252,11 @@ const TrustedExecutionScopeSchema = z.discriminatedUnion("mode", [
     .strict(),
 ]);
 
+function looksLikeNativeWorkerToken(value: string): boolean {
+  const parts = value.split(":");
+  return parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part));
+}
+
 function normalizeLegacyCourseRetrieval(value: unknown): void {
   if (!value || typeof value !== "object") return;
   const context = (value as any).payload?.resolvedCourseContext;
@@ -343,6 +348,8 @@ const JobEventSchema = z
   .superRefine((value, ctx) => {
     const context = value.payload.resolvedCourseContext;
     const trust = context?.trust;
+    const tokenText = value.payload.runJobToken;
+    const token = tokenText ? verifyWorkerToken(tokenText) : null;
     if (
       trust &&
       (trust.ownerUserId !== value.payload.userId ||
@@ -375,6 +382,14 @@ const JobEventSchema = z
       if (
         scope.mode === "course" &&
         (!context ||
+          !trust ||
+          scope.ownerUserId !== trust.ownerUserId ||
+          scope.agentId !== trust.agentId ||
+          scope.conversationId !== trust.conversationId ||
+          scope.courseEntityId !== trust.courseEntityId ||
+          scope.contextPackId !== trust.contextPackId ||
+          scope.contextVersion !== trust.contextVersion ||
+          context.course.courseKey !== trust.courseKey ||
           scope.courseEntityId !== context.course.courseEntityId ||
           scope.contextPackId !== context.context.contextPackId ||
           scope.contextVersion !== context.context.contextVersion ||
@@ -386,9 +401,6 @@ const JobEventSchema = z
             "Course execution scope does not match resolved course context",
           path: ["payload", "trustedExecutionScope"],
         });
-      const token = value.payload.runJobToken
-        ? verifyWorkerToken(value.payload.runJobToken)
-        : null;
       if (
         !token ||
         token.executionMode !== scope.mode ||
@@ -397,19 +409,29 @@ const JobEventSchema = z
         token.conversationId !== value.payload.conversationId ||
         token.runId !== value.payload.runId ||
         token.messageId !== value.payload.messageId ||
-        token.channelId !== value.payload.channelId
+        token.channelId !== value.payload.channelId ||
+        (scope.mode === "course" &&
+          (!token.courseToolScope ||
+            token.courseToolScope.ownerUserId !== scope.ownerUserId ||
+            token.courseToolScope.agentId !== scope.agentId ||
+            token.courseToolScope.courseEntityId !== scope.courseEntityId))
       )
         ctx.addIssue({
           code: "custom",
           message: "Trusted execution scope does not match run token",
           path: ["payload", "runJobToken"],
         });
-    } else if (value.payload.runJobToken) {
-      const token = verifyWorkerToken(value.payload.runJobToken);
-      if (token?.executionMode === "onboarding")
+    } else if (tokenText) {
+      if (looksLikeNativeWorkerToken(tokenText) && !token)
         ctx.addIssue({
           code: "custom",
-          message: "Onboarding run token requires trusted execution scope",
+          message: "Native run token failed integrity validation",
+          path: ["payload", "runJobToken"],
+        });
+      if (token?.executionMode === "onboarding" || token?.executionMode === "course")
+        ctx.addIssue({
+          code: "custom",
+          message: "Scoped run token requires trusted execution scope",
           path: ["payload", "trustedExecutionScope"],
         });
     }
