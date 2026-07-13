@@ -1340,6 +1340,89 @@ describe("extractTrustedTemporalCandidates", () => {
     });
   });
 
+  test("matches generic claims to the adjacent requested event target", () => {
+    const evidence = [
+      {
+        candidate: "2026-07-14T19:00:00+08:00",
+        label: "內部會議",
+      },
+      {
+        candidate: "2026-07-16T19:00:00+08:00",
+        label: "銷講",
+      },
+    ];
+    for (const userMessage of [
+      "不要管內部會議，幫我查下一場銷講",
+      "內部會議已取消，幫我查下一場銷講",
+      "幫我查銷講的下一場",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/20（一）。",
+          now: NOW,
+          trustedTemporalEvidence: evidence,
+        })
+      ).toEqual({
+        status: "corrected",
+        text: "下一場是 7/16（四）。",
+        corrections: [
+          {
+            reason: "relative_date_mismatch",
+            original: "7/20（一）",
+            replacement: "7/16（四）",
+          },
+        ],
+      });
+    }
+  });
+
+  test("does not substring-match a requested target to an evidence label", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "幫我查下一場進階銷講",
+        finalText: "下一場是 7/20（一）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-16T19:00:00+08:00",
+            label: "銷講",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
+  });
+
+  test("fails closed for absent, ambiguous, or negated requested targets", () => {
+    for (const userMessage of [
+      "幫我查下一場",
+      "幫我查下一場銷講和內部會議",
+      "不要查下一場銷講",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/20（一）。",
+          now: NOW,
+          trustedTemporalEvidence: [
+            {
+              candidate: "2026-07-16T19:00:00+08:00",
+              label: "銷講",
+            },
+          ],
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+    }
+  });
+
   test("uses an explicit recurrence for a generic claim despite unrelated labeled evidence", () => {
     expect(
       guardDateOutput({

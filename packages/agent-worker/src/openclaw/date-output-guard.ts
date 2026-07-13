@@ -509,6 +509,81 @@ function normalizeTemporalEvidenceLabel(value: string): string {
     .trim();
 }
 
+const REQUEST_PREFIX_RE =
+  /^(?:(?:請幫我查|请帮我查|幫我查|帮我查|請問|请问|我想知道|麻煩查|麻烦查)\s*)+/u;
+
+function normalizeRequestedOccurrenceTarget(value: string): string | null {
+  const normalized = normalizeTemporalEvidenceLabel(value)
+    .replace(REQUEST_PREFIX_RE, "")
+    .trim();
+  const length = Array.from(normalized).length;
+  if (
+    length < 2 ||
+    length > 64 ||
+    !/[\p{L}\p{N}]/u.test(normalized) ||
+    /^(?:是|為|为|在|於|于|哪|何|when\b|what\b)/i.test(normalized)
+  ) {
+    return null;
+  }
+  return normalized;
+}
+
+function normalizedRequestedOccurrenceTarget(
+  userMessage: string
+): string | null {
+  const targets = new Set<string>();
+  let invalid = false;
+  const addTarget = (raw: string | undefined) => {
+    const target = raw
+      ? normalizeRequestedOccurrenceTarget(raw)
+      : null;
+    if (target) targets.add(target);
+  };
+
+  for (const occurrence of userMessage.matchAll(/(?:下一場|下次)/g)) {
+    const index = occurrence.index ?? 0;
+    const prefix = userMessage.slice(Math.max(0, index - 24), index);
+    if (/(?:不要|別|别|不必|無需|无需|忽略)\s*(?:管|查|看)?\s*$/.test(prefix)) {
+      invalid = true;
+      continue;
+    }
+    const tail = userMessage.slice(index + occurrence[0].length, index + 80);
+    const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?=\s*(?:是|為|为|在|於|于|哪|何|日期|時間|时间|[？?，,。！!；;]|$))/u.exec(
+      tail
+    );
+    addTarget(forward?.[1]);
+  }
+
+  for (const backward of userMessage.matchAll(
+    /(?:^|[\s，,。！？；;])([\p{L}\p{N}]{2,64})的(?:下一場|下次)/gu
+  )) {
+    addTarget(backward[1]);
+  }
+
+  for (const occurrence of userMessage.matchAll(
+    /\bnext\s+(?:session|event|occurrence)\b/gi
+  )) {
+    const index = occurrence.index ?? 0;
+    const prefix = userMessage.slice(Math.max(0, index - 32), index);
+    if (/\b(?:do\s+not|don't|ignore)\s*$/i.test(prefix)) {
+      invalid = true;
+      continue;
+    }
+    const tail = userMessage.slice(
+      index + occurrence[0].length,
+      index + occurrence[0].length + 96
+    );
+    const forward = /^\s+(?:for\s+|of\s+)?([a-z0-9][a-z0-9 _-]{1,63}?)(?=\s*(?:is|will|on|at|when|what|[?.,;!]|$))/i.exec(
+      tail
+    );
+    addTarget(forward?.[1]);
+  }
+
+  return !invalid && targets.size === 1
+    ? (targets.values().next().value ?? null)
+    : null;
+}
+
 function normalizedNextOccurrenceDescriptor(
   claim: LocatedDateClaim
 ): string | null {
@@ -558,10 +633,7 @@ function recurrenceSubjectMatchesDescriptor(
     return false;
   }
   const eventTail = subject
-    .replace(
-      /^(?:(?:請幫我查|请帮我查|幫我查|帮我查|請問|请问|我想知道|麻煩查|麻烦查)\s*)+/u,
-      ""
-    )
+    .replace(REQUEST_PREFIX_RE, "")
     .replace(
       /^(?:(?:請記得|请记得|目前|現在|现在|請注意|请注意)\s*)+/u,
       ""
@@ -825,9 +897,6 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     }
     const recurrenceDate =
       recurrence === null ? null : resolveNextRecurrence(recurrence, input.now);
-    const normalizedUserMessage = normalizeTemporalEvidenceLabel(
-      input.userMessage
-    );
     const claimDescriptors = new Set(
       nextOccurrenceDateClaims
         .map(normalizedNextOccurrenceDescriptor)
@@ -860,10 +929,13 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
         reason: "next_occurrence_without_temporal_evidence",
       };
     }
-    const labelHaystack =
+    const requestedTarget = normalizedRequestedOccurrenceTarget(
+      input.userMessage
+    );
+    const evidenceTarget =
       claimDescriptors.size === 1
-        ? (claimDescriptors.values().next().value ?? "")
-        : normalizedUserMessage;
+        ? (claimDescriptors.values().next().value ?? null)
+        : requestedTarget;
     const labeledEvidence = input.trustedTemporalEvidence ?? [];
     const safeEvidence = labeledEvidence.flatMap((item) => {
       const label = normalizeTemporalEvidenceLabel(item.label);
@@ -874,7 +946,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     });
     const matchingLabels = new Set(
       safeEvidence
-        .filter(({ label }) => labelHaystack.includes(label))
+        .filter(({ label }) => label === evidenceTarget)
         .map(({ label }) => label)
     );
     const matchedLabel =
