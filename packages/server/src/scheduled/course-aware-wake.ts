@@ -48,6 +48,10 @@ function nonEmpty(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0;
 }
 
+function boundedNonEmpty(value: unknown, maxLength: number): value is string {
+	return nonEmpty(value) && value.length <= maxLength;
+}
+
 export class TrustedCourseWakeValidationError extends Error {}
 
 export function parseStrictRfc3339(value: unknown, field: string): Date {
@@ -94,9 +98,19 @@ export function parseStrictRfc3339(value: unknown, field: string): Date {
 	);
 }
 
-function isDeterministicResolutionMatches(value: unknown): value is CourseResolutionMatch[] {
-	return Array.isArray(value) && value.length > 0 && value.every(
-		(item) => typeof item === "string" && COURSE_RESOLUTION_MATCHES.some((candidate) => candidate === item),
+function isDeterministicResolutionMatches(
+	value: unknown,
+): value is CourseResolutionMatch[] {
+	return (
+		Array.isArray(value) &&
+		value.length > 0 &&
+		value.length <= COURSE_RESOLUTION_MATCHES.length &&
+		new Set(value).size === value.length &&
+		value.every(
+			(item) =>
+				typeof item === "string" &&
+				COURSE_RESOLUTION_MATCHES.some((candidate) => candidate === item),
+		)
 	);
 }
 
@@ -119,7 +133,7 @@ export function parseTrustedCourseWakeV1(
 	if (value.schemaVersion !== 1 || value.source !== "calendar_scheduled_wake") {
 		throw new Error("unsupported trusted course wake schema");
 	}
-	if (!nonEmpty(value.automationId))
+	if (!boundedNonEmpty(value.automationId, 256))
 		throw new Error("automationId is required");
 	if (!isCourseWakeTaskKind(value.taskKind)) {
 		throw new Error("unsupported taskKind");
@@ -130,16 +144,17 @@ export function parseTrustedCourseWakeV1(
 	}
 	if (!isRecord(eventRef)) throw new Error("calendarEventRef is required");
 	if (
-		!nonEmpty(eventRef.accountRef) ||
-		!nonEmpty(eventRef.eventId) ||
-		!nonEmpty(eventRef.eventVersion) ||
-		!nonEmpty(eventRef.eventTitle) ||
-		!nonEmpty(eventRef.eventStartAt)
+		!boundedNonEmpty(eventRef.accountRef, 256) ||
+		!boundedNonEmpty(eventRef.eventId, 256) ||
+		!boundedNonEmpty(eventRef.eventVersion, 256) ||
+		!boundedNonEmpty(eventRef.eventTitle, 500) ||
+		!boundedNonEmpty(eventRef.eventStartAt, 64)
 	) {
 		throw new Error("invalid calendarEventRef");
 	}
 	parseStrictRfc3339(eventRef.eventStartAt, "calendarEventRef.eventStartAt");
-	if (!nonEmpty(value.scheduledFor)) throw new Error("invalid scheduledFor");
+	if (!boundedNonEmpty(value.scheduledFor, 64))
+		throw new Error("invalid scheduledFor");
 	const scheduledFor = value.scheduledFor;
 	parseStrictRfc3339(scheduledFor, "scheduledFor");
 	if (
@@ -149,9 +164,11 @@ export function parseTrustedCourseWakeV1(
 		throw new Error("trusted course scope owner or agent mismatch");
 	}
 	if (
-		!nonEmpty(scope.courseEntityId) ||
-		!nonEmpty(scope.courseKey) ||
-		!nonEmpty(scope.courseDisplayName) ||
+		!boundedNonEmpty(scope.ownerUserId, 256) ||
+		!boundedNonEmpty(scope.agentId, 256) ||
+		!boundedNonEmpty(scope.courseEntityId, 200) ||
+		!boundedNonEmpty(scope.courseKey, 200) ||
+		!boundedNonEmpty(scope.courseDisplayName, 500) ||
 		scope.resolutionSource !== "toolbox_calendar_course_resolver" ||
 		!isDeterministicResolutionMatches(scope.resolutionMatchedBy) ||
 		scope.scopeVersion !== 1
@@ -194,8 +211,10 @@ export function trustedCourseWakeMatchesFireProvenance(
 	const expectedExternalKey = `google_calendar:${wake.calendarEventRef.accountRef}:${wake.calendarEventRef.eventId}:${wake.taskKind}`;
 	if (externalKey !== expectedExternalKey) return false;
 	try {
-		return parseStrictRfc3339(scheduledTick, "scheduled job tick").getTime() ===
-			parseStrictRfc3339(wake.scheduledFor, "scheduledFor").getTime();
+		return (
+			parseStrictRfc3339(scheduledTick, "scheduled job tick").getTime() ===
+			parseStrictRfc3339(wake.scheduledFor, "scheduledFor").getTime()
+		);
 	} catch {
 		return false;
 	}
@@ -215,22 +234,91 @@ export interface TrustedCourseFireInput {
 }
 
 export interface TrustedCourseFireDeps {
-	verifyOwner(input: { organizationId: string; ownerUserId: string; agentId: string }): Promise<boolean>;
-	resolveContext(input: { trustedWake: TrustedCourseWakeV1; scheduledCourseContext: ScheduledCourseContext }): Promise<ResolvedCourseExecutionContext | null>;
+	verifyOwner(input: {
+		organizationId: string;
+		ownerUserId: string;
+		agentId: string;
+	}): Promise<boolean>;
+	resolveContext(input: {
+		trustedWake: TrustedCourseWakeV1;
+		scheduledCourseContext: ScheduledCourseContext;
+	}): Promise<ResolvedCourseExecutionContext | null>;
 }
 
 export async function buildTrustedCourseFireContext(
 	input: TrustedCourseFireInput,
 	deps: TrustedCourseFireDeps,
-): Promise<{ trustedWake: TrustedCourseWakeV1; scheduledCourseContext: ScheduledCourseContext; resolvedCourseContext: ResolvedCourseExecutionContext } | null> {
-	if (input.reason !== "trusted-course-calendar-wake" || !input.createdByUser || !input.createdByAgent || !input.scheduledJobId || !Number.isSafeInteger(input.scheduledTaskRunId) || input.scheduledTaskRunId! <= 0) return null;
+): Promise<{
+	trustedWake: TrustedCourseWakeV1;
+	scheduledCourseContext: ScheduledCourseContext;
+	resolvedCourseContext: ResolvedCourseExecutionContext;
+} | null> {
+	if (
+		input.reason !== "trusted-course-calendar-wake" ||
+		!input.createdByUser ||
+		!input.createdByAgent ||
+		!input.scheduledJobId ||
+		!Number.isSafeInteger(input.scheduledTaskRunId) ||
+		input.scheduledTaskRunId! <= 0
+	)
+		return null;
 	let trustedWake: TrustedCourseWakeV1;
-	try { trustedWake = parseTrustedCourseWakeV1(input.rawWake, { ownerUserId: input.createdByUser, agentId: input.resolvedAgentId }); } catch { return null; }
-	if (input.createdByAgent !== input.resolvedAgentId || !trustedCourseWakeMatchesFireProvenance(trustedWake, input.externalKey, input.scheduledTick)) return null;
-	if (!await deps.verifyOwner({ organizationId: input.organizationId, ownerUserId: input.createdByUser, agentId: input.resolvedAgentId })) return null;
-	const scheduledCourseContext: ScheduledCourseContext = { schemaVersion: 1, source: "calendar_scheduled_wake", automationId: trustedWake.automationId, jobId: input.scheduledJobId, runId: input.scheduledTaskRunId!, taskKind: trustedWake.taskKind, course: { ownerUserId: trustedWake.trustedCourseScope.ownerUserId, agentId: trustedWake.trustedCourseScope.agentId, courseKey: trustedWake.trustedCourseScope.courseKey, courseEntityId: trustedWake.trustedCourseScope.courseEntityId, displayName: trustedWake.trustedCourseScope.courseDisplayName }, evidenceReadiness: "canonical_only" };
-	const resolvedCourseContext = await deps.resolveContext({ trustedWake, scheduledCourseContext });
-	if (!resolvedCourseContext || resolvedCourseContext.course.courseKey !== scheduledCourseContext.course.courseKey || resolvedCourseContext.course.courseEntityId !== scheduledCourseContext.course.courseEntityId) return null;
+	try {
+		trustedWake = parseTrustedCourseWakeV1(input.rawWake, {
+			ownerUserId: input.createdByUser,
+			agentId: input.resolvedAgentId,
+		});
+	} catch {
+		return null;
+	}
+	if (
+		input.createdByAgent !== input.resolvedAgentId ||
+		!trustedCourseWakeMatchesFireProvenance(
+			trustedWake,
+			input.externalKey,
+			input.scheduledTick,
+		)
+	)
+		return null;
+	if (
+		!(await deps.verifyOwner({
+			organizationId: input.organizationId,
+			ownerUserId: input.createdByUser,
+			agentId: input.resolvedAgentId,
+		}))
+	)
+		return null;
+	const scheduledCourseContext: ScheduledCourseContext = {
+		schemaVersion: 1,
+		source: "calendar_scheduled_wake",
+		automationId: trustedWake.automationId,
+		jobId: input.scheduledJobId,
+		runId: input.scheduledTaskRunId!,
+		taskKind: trustedWake.taskKind,
+		course: {
+			ownerUserId: trustedWake.trustedCourseScope.ownerUserId,
+			agentId: trustedWake.trustedCourseScope.agentId,
+			courseKey: trustedWake.trustedCourseScope.courseKey,
+			courseEntityId: trustedWake.trustedCourseScope.courseEntityId,
+			displayName: trustedWake.trustedCourseScope.courseDisplayName,
+		},
+		evidenceReadiness: "canonical_only",
+	};
+	const resolvedCourseContext = await deps.resolveContext({
+		trustedWake,
+		scheduledCourseContext,
+	});
+	if (
+		!resolvedCourseContext ||
+		resolvedCourseContext.course.courseKey !==
+			scheduledCourseContext.course.courseKey ||
+		resolvedCourseContext.course.courseEntityId !==
+			scheduledCourseContext.course.courseEntityId
+	)
+		return null;
 	return { trustedWake, scheduledCourseContext, resolvedCourseContext };
 }
-import type { ResolvedCourseExecutionContext, ScheduledCourseContext } from "@lobu/core";
+import type {
+	ResolvedCourseExecutionContext,
+	ScheduledCourseContext,
+} from "@lobu/core";

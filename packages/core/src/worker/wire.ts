@@ -103,6 +103,7 @@ export interface ResolvedCourseExecutionContext {
       provenanceKind: "fresh_course_retrieval";
       courseEntityId: string;
       readinessFields: Partial<Record<CourseReadinessField, string>>;
+      trustedEvidenceKind?: "meeting" | "transcript";
     }>;
   };
   /** Advisory completeness metadata. Older gateway payloads omit it. */
