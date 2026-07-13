@@ -11,6 +11,10 @@ import type {
   QueueJob,
   ThreadResponsePayload,
 } from "../infrastructure/queue/index.js";
+import {
+  deliverCourseWakeCompletion,
+  readCourseWakeDeliveryMetadata,
+} from "../../scheduled/course-wake-delivery.js";
 import type { PlatformRegistry } from "../platform.js";
 import type { SseManager } from "../services/sse-manager.js";
 import type { ResponseRenderer } from "./response-renderer.js";
@@ -23,12 +27,16 @@ const logger = createLogger("unified-thread-consumer");
  */
 export class UnifiedThreadResponseConsumer {
   private chatResponseBridge?: ChatResponseBridge;
+  private courseWakeDelivery: typeof deliverCourseWakeCompletion;
 
   constructor(
     private queue: IMessageQueue,
     private platformRegistry: PlatformRegistry,
-    private sseManager: SseManager
-  ) {}
+    private sseManager: SseManager,
+    courseWakeDelivery?: typeof deliverCourseWakeCompletion,
+  ) {
+    this.courseWakeDelivery = courseWakeDelivery ?? deliverCourseWakeCompletion;
+  }
 
   setChatResponseBridge(bridge: ChatResponseBridge): void {
     this.chatResponseBridge = bridge;
@@ -86,6 +94,17 @@ export class UnifiedThreadResponseConsumer {
     });
 
     try {
+      const scheduledDelivery = readCourseWakeDeliveryMetadata(
+        data.platformMetadata
+      );
+      if (scheduledDelivery && !data.error && data.processedMessageIds?.length) {
+        await this.courseWakeDelivery({
+          metadata: scheduledDelivery,
+          finalOutput: data.finalText ?? "",
+          turnId: data.messageId,
+        });
+        return;
+      }
       // Check if this response belongs to a Chat SDK connection — handle before legacy routing.
       // If a Chat SDK connectionId is present but this gateway instance does not manage it,
       // fail the job so another instance can retry instead of silently completing an undelivered reply.

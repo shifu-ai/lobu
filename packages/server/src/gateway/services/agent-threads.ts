@@ -14,7 +14,11 @@
  * remain the single auth-gated entry point for external clients.
  */
 import { randomUUID } from "node:crypto";
-import { createLogger, generateWorkerToken } from "@lobu/core";
+import {
+  createLogger,
+  generateWorkerToken,
+  type MessagePayload,
+} from "@lobu/core";
 import type { QueueProducer } from "../infrastructure/queue/queue-producer.js";
 import type { ISessionManager, ThreadSession } from "../session.js";
 
@@ -171,6 +175,19 @@ export async function enqueueAgentMessage(
       agentId: realAgentId,
       source: args.source || "internal",
       dryRun: session.dryRun || false,
+      ...(args.scheduledCourseContext?.source === "calendar_scheduled_wake"
+        ? {
+            scheduledCourseWake: {
+              schemaVersion: 1,
+              source: "calendar_scheduled_wake",
+              automationId: args.scheduledCourseContext.automationId,
+              jobId: args.scheduledCourseContext.jobId,
+              runId: args.scheduledCourseContext.runId,
+              toolboxUserId: args.scheduledCourseContext.course.ownerUserId,
+              lobuAgentId: args.scheduledCourseContext.course.agentId,
+            },
+          }
+        : {}),
     },
     agentOptions: {
       provider: session.provider || "claude",

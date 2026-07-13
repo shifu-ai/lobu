@@ -20,11 +20,6 @@ export type SqlLike = (
 
 const WAKE_PREFIX = "[排程任務自動觸發] ";
 
-const DELIVERY_INSTRUCTION =
-  "\n\n(系統指示:這是排程觸發的背景任務,使用者現在不在對話中。" +
-  "完成任務後,請呼叫 shifu-toolbox 的 send_daily_digest 工具,把要告訴使用者的內容推送到他的 LINE。" +
-  "如果推送失敗,把完整內容留在本對話即可,不要重試超過一次。)";
-
 /**
  * Find the most recent conversation for (agentId, userId) that still has a
  * live session. Candidates come from completed chat_message runs, excluding
@@ -70,8 +65,7 @@ export async function resolveWakeThreadId(
   }
 }
 
-/** Prefix the machine marker and append the LINE delivery instruction. Idempotent on the prefix. */
+/** Prefix the machine marker. Mechanical completion delivery happens after the worker finishes. */
 export function buildScheduledWakeMessage(prompt: string): string {
-  const body = prompt.startsWith(WAKE_PREFIX) ? prompt : `${WAKE_PREFIX}${prompt}`;
-  return body.includes(DELIVERY_INSTRUCTION) ? body : `${body}${DELIVERY_INSTRUCTION}`;
+  return prompt.startsWith(WAKE_PREFIX) ? prompt : `${WAKE_PREFIX}${prompt}`;
 }
