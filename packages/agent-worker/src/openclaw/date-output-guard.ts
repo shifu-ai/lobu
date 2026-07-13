@@ -49,7 +49,7 @@ const EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<!\d)(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
 
 const RELATIVE_WEEK_DATE_RE =
-  /(?<![上下本這大小前後])((上週|本週|這週|下週)\s*(?:星期)?([日天一二三四五六]))(?!\s*[期程場堂次])((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
+  /(?<![上下本這大小前後])((上週|本週|這週|下週)\s*(?:(星期)([日天一二三四五六])|([日天一二三四五六])))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
 const RELATIVE_DAY_DATE_RE =
   /((今天|昨天|明天))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
 const SHORT_DATE_WITH_WEEKDAY_RE =
@@ -93,6 +93,29 @@ function sameShortDate(parts: CalendarDate, month: number, day: number) {
   return parts.month === month && parts.day === day;
 }
 
+function isBareRelativeWeekdayClaim(
+  weekdayText: string,
+  continuation: string
+): boolean {
+  const nextCharacter = continuation.trimStart().charAt(0);
+
+  if (
+    (weekdayText === "日" || weekdayText === "天") &&
+    /[期程曆]/.test(nextCharacter)
+  ) {
+    return false;
+  }
+
+  if (
+    /[一二三四五六]/.test(weekdayText) &&
+    /[天個場堂次]/.test(nextCharacter)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
 function validUtcDate(year: number, month: number, day: number): Date | null {
   const date = new Date(Date.UTC(year, month - 1, day));
   if (
@@ -113,7 +136,9 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       match,
       claim,
       weekText,
-      weekdayText,
+      explicitWeekdayMarker,
+      explicitWeekdayText,
+      bareWeekdayText,
       between,
       monthText,
       dayText,
@@ -121,6 +146,14 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       weekday,
       closing
     ) => {
+      const weekdayText = explicitWeekdayText ?? bareWeekdayText;
+      if (
+        !explicitWeekdayMarker &&
+        !isBareRelativeWeekdayClaim(weekdayText, between)
+      ) {
+        return match;
+      }
+
       const reference = RELATIVE_WEEK_REFERENCE[weekText];
       const weekdayIndex = WEEKDAY_INDEX_ZH[`星期${weekdayText}`];
       if (!reference || weekdayIndex === undefined) return match;

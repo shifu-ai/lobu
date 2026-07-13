@@ -92,10 +92,29 @@ describe("guardDateOutput", () => {
       "本週日程：7/16（四）",
       "這週三場課，日期是 7/16（四）",
       "大上週三 7/1（三）",
+      "這週三天有課，日期是 7/16（四）",
+      "本週四個活動，日期是 7/17（五）",
+      "本週日曆標示 7/16（四）",
     ]) {
       expect(
         guardDateOutput({ userMessage: finalText, finalText, now: NOW })
       ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("recognizes explicit and bare weekday claims before event nouns", () => {
+    for (const finalText of [
+      "這週星期三期末考是 7/9（三）",
+      "這週三期末考是 7/9（三）",
+    ]) {
+      const result = guardDateOutput({
+        userMessage: finalText,
+        finalText,
+        now: NOW,
+      });
+
+      expect(result.status).toBe("corrected");
+      expect(result.text).toBe(finalText.replace("7/9", "7/15"));
     }
   });
 
