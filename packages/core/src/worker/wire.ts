@@ -111,6 +111,26 @@ export interface ResolvedCourseExecutionContext {
   evidence?: CourseEvidenceProvenance[];
 }
 
+export type TrustedExecutionScope =
+  | {
+      mode: "onboarding";
+      source: "toolbox_course_resolution";
+      reason: "no_courses";
+      ownerUserId: string;
+      agentId: string;
+      conversationId: string;
+    }
+  | {
+      mode: "course";
+      ownerUserId: string;
+      agentId: string;
+      conversationId: string;
+      courseEntityId: string;
+      contextPackId: string;
+      contextVersion: number;
+      activeSpecializedSkill: "opp-coach" | null;
+    };
+
 /**
  * Universal message payload for every gateway → worker hop.
  * Used by: platform inbound → runs queue → MessageConsumer → worker.
@@ -147,6 +167,8 @@ export interface MessagePayload {
   // ── Message content (used by worker) ───────────────────────────────
   messageText: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  /** Gateway-minted per-turn execution scope. Caller values are discarded. */
+  trustedExecutionScope?: TrustedExecutionScope;
 
   // ── Platform-specific data (used by worker for context) ────────────
   platformMetadata: Record<string, unknown>;

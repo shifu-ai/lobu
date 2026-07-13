@@ -1,4 +1,4 @@
-import { createLogger, extractTraceId, type MessagePayload } from '@lobu/core';
+import { createLogger, extractTraceId, type MessagePayload, type TrustedExecutionScope } from '@lobu/core';
 import { createHash } from 'node:crypto';
 import type {Env} from '@lobu/connector-sdk';
 import type { ActiveCourseBindingWriteResult, ISessionManager } from '../session.js';
@@ -9,7 +9,7 @@ import { gradeCourseEvidenceReadiness } from './course-evidence-readiness.js';
 import type {CourseReadinessField} from '@lobu/core';
 
 export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
-export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
+export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | {status:'onboarding_ready';scope:Extract<TrustedExecutionScope,{mode:'onboarding'}>} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
 const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
 const logger = createLogger('course-context-gate');
@@ -76,7 +76,20 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   if (choice && pending) data.messageText = pending.originalMessage;
   let resolution:Awaited<ReturnType<ToolboxCourseContextClient['resolve']>>; try { resolution = await client.resolve({ ownerUserId: data.userId, agentId: data.agentId, conversationId: data.conversationId, message: typeof data.messageText==='string'?data.messageText:'', boundCourseKey: session?.shifuCourseContext?.courseKey, explicitCourseKey: choice?.courseKey }); await traceCourse(data,options,`context.course.${resolution.status}`,'ok',{duration_ms:Date.now()-gateStarted,...(resolution.status==='resolved'?{course_key:resolution.course.courseKey,course_entity_id:resolution.course.courseEntityId}:{}),reason_code:'reason'in resolution?resolution.reason:undefined}); } catch { logger.warn({ category: 'resolver' }, 'Course context resolver unavailable'); await traceCourse(data,options,'context.course.missing','failed',{reason_code:'resolver_unavailable'}); return { status: 'context_unavailable', reasonCode: 'resolver_unavailable' }; }
   if (resolution.status === 'ambiguous') { const candidates = resolution.candidates.map(({courseKey,displayName}) => ({courseKey,displayName})); if (options?.sessionManager && options.sessionKey && (await options.sessionManager.createPendingCourseSelection(options.sessionKey, { ownerUserId:data.userId,agentId:data.agentId,candidates, originalMessage: (typeof data.messageText==='string'?data.messageText:'').slice(0, 8000), createdAt: Date.now() })).status!=='persisted') return { status: 'context_unavailable', reasonCode: 'pending_write_failed' }; return { status: 'clarification_required', candidates }; }
-  if (resolution.status === 'missing') return { status: 'onboarding_required' };
+  if (resolution.status === 'missing') {
+    if (resolution.reason === 'no_courses') return {
+      status: 'onboarding_ready',
+      scope: {
+        mode: 'onboarding',
+        source: 'toolbox_course_resolution',
+        reason: 'no_courses',
+        ownerUserId: data.userId,
+        agentId: data.agentId,
+        conversationId: data.conversationId,
+      },
+    };
+    return { status: 'context_unavailable', reasonCode: 'archived_only' };
+  }
   const course = resolution.course;
   let bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>; try { bundle = await client.bundle(course.courseKey, { ownerUserId: data.userId, agentId: data.agentId }); await traceCourse(data,options,'context.bundle.loaded','ok',{course_key:course.courseKey,course_entity_id:course.courseEntityId,context_version:bundle.context.version}); } catch { logger.warn({ category: 'bundle' }, 'Course context bundle unavailable'); await traceCourse(data,options,'context.bundle.failed','failed',{course_key:course.courseKey,reason_code:'bundle_unavailable'}); return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_unavailable',resolvedCourse:{courseKey:course.courseKey,courseEntityId:course.courseEntityId,displayName:course.displayName} }; }
   if (bundle.course.courseKey !== course.courseKey || bundle.course.courseEntityId !== course.courseEntityId) return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_identity_mismatch' };

@@ -17,6 +17,7 @@ import {
   type McpToolDef,
   type PluginsConfig,
   type ResolvedCourseExecutionContext,
+  type TrustedExecutionScope,
   type ToolsConfig,
 } from "@lobu/core";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
@@ -78,6 +79,7 @@ import { buildAgentSession } from "./session-builder";
 import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import {
   buildResolvedCourseContextInstructions,
+  buildTrustedExecutionScopeInstructions,
   getOpenClawSessionContext,
   removeLegacyToolboxActiveContext,
 } from "./session-context";
@@ -700,6 +702,7 @@ export interface RunAISessionParams {
    */
   runJobToken?: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  trustedExecutionScope?: TrustedExecutionScope;
 
   // Resolved workspace directory (from WorkspaceManager)
   workspaceDir: string;
@@ -1071,6 +1074,7 @@ export async function runAISession(
     agentId,
     runJobToken,
     resolvedCourseContext,
+    trustedExecutionScope,
     workspaceDir,
     progressProcessor,
     onSessionFilePathResolved,
@@ -1573,12 +1577,15 @@ export async function runAISession(
   const resolvedCourseInstructions = buildResolvedCourseContextInstructions(
     resolvedCourseContext
   );
+  const trustedExecutionScopeInstructions =
+    buildTrustedExecutionScopeInstructions(trustedExecutionScope);
   const gatewayInstructions = resolvedCourseContext
     ? removeLegacyToolboxActiveContext(context.gatewayInstructions)
     : context.gatewayInstructions;
   const instructionParts = [
     gatewayInstructions,
     resolvedCourseInstructions,
+    trustedExecutionScopeInstructions,
     customInstructions,
   ];
 

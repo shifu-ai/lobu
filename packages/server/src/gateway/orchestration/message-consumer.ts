@@ -82,6 +82,11 @@ export function mintRunJobToken(
     messageId: data.messageId,
     processedMessageIds: [data.messageId],
     tokenKind: "run",
+    executionMode: data.trustedExecutionScope?.mode === "onboarding"
+      ? "onboarding"
+      : includeTrustedCourseScope && data.resolvedCourseContext
+        ? "course"
+        : "personal",
     courseToolScope: includeTrustedCourseScope && data.resolvedCourseContext?.trust ? {
       ownerUserId: data.resolvedCourseContext.trust.ownerUserId,
       agentId: data.resolvedCourseContext.trust.agentId,
@@ -143,7 +148,13 @@ export class MessageConsumer {
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
-    if(this.courseContextRollout.mode==='off'||this.courseContextRollout.mode==='shadow')delete data.resolvedCourseContext;
+    // The execution scope is an internal orchestration fact. Never trust a
+    // caller/model supplied value, including on rollout bypass paths.
+    delete data.trustedExecutionScope;
+    // Resolved course context is equally privileged: every accepted value
+    // must be freshly minted by this turn's resolver, never carried in from
+    // an inbound API/platform payload.
+    delete data.resolvedCourseContext;
     if (this.courseContextRollout.mode === "off") {
       data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
@@ -183,8 +194,24 @@ export class MessageConsumer {
       else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
     }
     if(data.resolvedCourseContext&&!hasTrustedCourseContext(data,data.resolvedCourseContext)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
+    if (result?.status === "onboarding_ready") {
+      // Onboarding and resolved-course execution are mutually exclusive,
+      // including when an injected/custom resolver accidentally mutates data.
+      delete data.resolvedCourseContext;
+      if (this.courseContextRollout.mode !== "enforce") {
+        result = { status: "context_unavailable", reasonCode: "onboarding_scope_not_enforced" };
+      } else if (
+        result.scope.ownerUserId !== data.userId ||
+        result.scope.agentId !== data.agentId ||
+        result.scope.conversationId !== data.conversationId
+      ) {
+        result = { status: "context_unavailable", reasonCode: "onboarding_scope_mismatch" };
+      } else {
+        data.trustedExecutionScope = result.scope;
+      }
+    }
     if (result?.status === "already_dispatched") return false;
-    if (result?.status === "clarification_required" || result?.status === "onboarding_required" || result?.status === "context_unavailable") {
+    if (result?.status === "clarification_required" || result?.status === "context_unavailable") {
       await this.deliverCourseContextTerminal(data, result);
       return false;
     }
@@ -209,7 +236,6 @@ export class MessageConsumer {
     const clean = (value: string) => value.replace(/[\u0000-\u001f\u007f\u2028\u2029]/gu, " ").slice(0, 200);
     const finalText = result.status === "clarification_required"
       ? `請選擇這次要處理的課程：\n${result.candidates.map((candidate, index) => `${index + 1}. ${clean(candidate.displayName)}`).join("\n")}`
-      : result.status === "onboarding_required" ? "目前還沒有可用的課程資料，請先完成課程設定後再試。"
       : result.status==='context_unavailable'&&result.displayName ? `目前無法取得「${clean(result.displayName)}」的課程資料，請稍後再試。` : "目前無法取得課程資料，請稍後再試。";
     await this.queue.createQueue("thread_response");
     await this.queue.send("thread_response", { messageId:data.messageId,userId:data.userId,agentId:data.agentId,organizationId:data.organizationId,channelId:data.channelId,conversationId:data.conversationId,platform:data.platform,platformMetadata:data.platformMetadata,finalText,processedMessageIds:[data.messageId],timestamp:Date.now(),teamId:data.teamId ?? getStringField(data.platformMetadata,"teamId") ?? "" }, {

@@ -12,6 +12,7 @@ import {
   type QueuedMessage,
   SpanStatusCode,
   stripEnv,
+  verifyWorkerToken,
 } from "@lobu/core";
 import { z } from "zod";
 import type { WorkerConfig, WorkerExecutor } from "../core/types";
@@ -225,6 +226,31 @@ const ResolvedCourseContextSchema = z
       });
   });
 
+const TrustedExecutionScopeSchema = z.discriminatedUnion("mode", [
+  z
+    .object({
+      mode: z.literal("onboarding"),
+      source: z.literal("toolbox_course_resolution"),
+      reason: z.literal("no_courses"),
+      ownerUserId: z.string().min(1).max(200),
+      agentId: z.string().min(1).max(200),
+      conversationId: z.string().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("course"),
+      ownerUserId: z.string().min(1).max(200),
+      agentId: z.string().min(1).max(200),
+      conversationId: z.string().min(1).max(200),
+      courseEntityId: z.string().min(1).max(200),
+      contextPackId: z.string().min(1).max(200),
+      contextVersion: z.number().int().positive(),
+      activeSpecializedSkill: z.literal("opp-coach").nullable(),
+    })
+    .strict(),
+]);
+
 function normalizeLegacyCourseRetrieval(value: unknown): void {
   if (!value || typeof value !== "object") return;
   const context = (value as any).payload?.resolvedCourseContext;
@@ -308,6 +334,7 @@ const JobEventSchema = z
         runId: z.number().optional(),
         runJobToken: z.string().optional(),
         resolvedCourseContext: ResolvedCourseContextSchema.optional(),
+        trustedExecutionScope: TrustedExecutionScopeSchema.optional(),
       })
       .passthrough(),
     processedIds: z.array(z.string()).optional(),
@@ -326,6 +353,51 @@ const JobEventSchema = z
         message: "Resolved course context trust does not match execution",
         path: ["payload", "resolvedCourseContext", "trust"],
       });
+    const scope = value.payload.trustedExecutionScope;
+    if (scope) {
+      if (scope.mode === "onboarding" && context)
+        ctx.addIssue({
+          code: "custom",
+          message: "Onboarding scope cannot include resolved course context",
+          path: ["payload", "resolvedCourseContext"],
+        });
+      if (
+        scope.ownerUserId !== value.payload.userId ||
+        scope.agentId !== value.payload.agentId ||
+        scope.conversationId !== value.payload.conversationId
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Trusted execution scope does not match execution",
+          path: ["payload", "trustedExecutionScope"],
+        });
+      const token = value.payload.runJobToken
+        ? verifyWorkerToken(value.payload.runJobToken)
+        : null;
+      if (
+        !token ||
+        token.executionMode !== scope.mode ||
+        token.userId !== value.payload.userId ||
+        token.agentId !== value.payload.agentId ||
+        token.conversationId !== value.payload.conversationId ||
+        token.runId !== value.payload.runId ||
+        token.messageId !== value.payload.messageId ||
+        token.channelId !== value.payload.channelId
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Trusted execution scope does not match run token",
+          path: ["payload", "runJobToken"],
+        });
+    } else if (value.payload.runJobToken) {
+      const token = verifyWorkerToken(value.payload.runJobToken);
+      if (token?.executionMode === "onboarding")
+        ctx.addIssue({
+          code: "custom",
+          message: "Onboarding run token requires trusted execution scope",
+          path: ["payload", "trustedExecutionScope"],
+        });
+    }
   });
 
 /**
@@ -665,6 +737,20 @@ export class GatewayClient {
             );
           }
 
+          const payload = validationResult.data.payload;
+          if (payload.trustedExecutionScope) {
+            const token = payload.runJobToken
+              ? verifyWorkerToken(payload.runJobToken)
+              : null;
+            // deploymentName is instance state and therefore cannot be
+            // checked inside the static Zod schema. Bind it before receipt or
+            // execution so a valid token from another worker cannot replay.
+            if (!token || token.deploymentName !== this.deploymentName)
+              throw new Error(
+                "Trusted execution scope does not match worker deployment"
+              );
+          }
+
           // Send delivery receipt immediately so the gateway knows
           // the job was actually received (not lost to a stale SSE connection).
           // jobId is at the top level of the SSE event (set by job-router),
@@ -674,7 +760,6 @@ export class GatewayClient {
             this.sendDeliveryReceipt(jobId);
           }
 
-          const payload = validationResult.data.payload;
           if (
             payload.resolvedCourseContext &&
             !payload.resolvedCourseContext.trust
@@ -1008,6 +1093,7 @@ export class GatewayClient {
       botId: message.payload.botId,
       platform: message.payload.platform,
       resolvedCourseContext: message.payload.resolvedCourseContext,
+      trustedExecutionScope: message.payload.trustedExecutionScope,
     });
     return (
       stableCanonicalJson(identity(first)) ===
@@ -1245,6 +1331,7 @@ export class GatewayClient {
           ? payload.runJobToken
           : undefined,
       resolvedCourseContext: payload.resolvedCourseContext,
+      trustedExecutionScope: payload.trustedExecutionScope,
     };
   }
 

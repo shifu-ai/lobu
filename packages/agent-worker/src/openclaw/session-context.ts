@@ -10,6 +10,7 @@ import {
   type McpStatus,
   type McpToolDef,
   type ResolvedCourseExecutionContext,
+  type TrustedExecutionScope,
 } from "@lobu/core";
 import type { WorkerShifuTraceContext } from "../shared/journey-trace";
 import { shifuTraceHeaders } from "../shared/journey-trace";
@@ -202,6 +203,17 @@ export function buildResolvedCourseContextInstructions(
   return codePointLength(rendered) <= MAX_RESOLVED_COURSE_CONTEXT_CHARS
     ? rendered
     : `${codePointSlice(rendered, MAX_RESOLVED_COURSE_CONTEXT_CHARS - 3).trimEnd()}...`;
+}
+
+export function buildTrustedExecutionScopeInstructions(
+  scope: TrustedExecutionScope | undefined
+): string {
+  if (scope?.mode !== "onboarding") return "";
+  return [
+    "Runtime Execution Scope: onboarding",
+    "Toolbox 尚無 canonical course。依既有 authorization-first onboarding instructions 執行；",
+    "不得聲稱已載入課程 context，不得把本輪當成已知課程的生成任務。",
+  ].join("\n");
 }
 
 export function removeLegacyToolboxActiveContext(instructions: string): string {

@@ -99,6 +99,64 @@ describe("worker auth token", () => {
     expect(d.traceId).toBe("trace-zzz");
   });
 
+  test("round-trips a trusted onboarding execution mode on a run token", () => {
+    const token = generateWorkerToken("user-2", "conv-2", "deploy-B", {
+      channelId: "C2",
+      agentId: "agent-x",
+      runId: 42,
+      tokenKind: "run",
+      executionMode: "onboarding",
+    });
+    expect(verifyWorkerToken(token)).toMatchObject({
+      userId: "user-2",
+      conversationId: "conv-2",
+      agentId: "agent-x",
+      runId: 42,
+      tokenKind: "run",
+      executionMode: "onboarding",
+    });
+  });
+
+  test.each([
+    { executionMode: "onboarding", tokenKind: "session", runId: 1 },
+    { executionMode: "onboarding", tokenKind: "run", runId: undefined },
+    {
+      executionMode: "personal",
+      tokenKind: "run",
+      runId: 1,
+      courseToolScope: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseEntityId: "course:x",
+      },
+    },
+    {
+      executionMode: "onboarding",
+      tokenKind: "run",
+      runId: 1,
+      courseToolScope: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseEntityId: "course:x",
+      },
+    },
+    { executionMode: "course", tokenKind: "run", runId: 1 },
+    { executionMode: "unknown", tokenKind: "run", runId: 1 },
+  ])("rejects an inconsistent bounded execution mode %#", (override) => {
+    const token = encrypt(
+      JSON.stringify({
+        userId: "u",
+        conversationId: "c",
+        channelId: "ch",
+        deploymentName: "d",
+        timestamp: Date.now(),
+        agentId: "a",
+        ...override,
+      })
+    );
+    expect(verifyWorkerToken(token)).toBeNull();
+  });
+
   test("two tokens generated for the same input differ (random IV)", () => {
     const t1 = generateWorkerToken("u", "c", "d", { channelId: "ch" });
     const t2 = generateWorkerToken("u", "c", "d", { channelId: "ch" });

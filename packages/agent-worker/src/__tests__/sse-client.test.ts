@@ -1,4 +1,8 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import {
+  __resetEncryptionKeyCacheForTests,
+  generateWorkerToken,
+} from "@lobu/core";
 import { GatewayClient } from "../gateway/sse-client";
 
 const basePayload = () => ({
@@ -57,9 +61,203 @@ const validResolvedCourseContext = () => ({
 
 describe("GatewayClient heartbeat ACKs", () => {
   const originalFetch = globalThis.fetch;
+  const originalEncryptionKey = process.env.ENCRYPTION_KEY;
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    if (originalEncryptionKey === undefined) delete process.env.ENCRYPTION_KEY;
+    else process.env.ENCRYPTION_KEY = originalEncryptionKey;
+    __resetEncryptionKeyCacheForTests();
+  });
+
+  test("validates and preserves an identity-bound onboarding execution scope", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const runJobToken = generateWorkerToken(
+      "user-1",
+      "conversation-1",
+      "worker-1",
+      {
+        channelId: "channel-1",
+        agentId: "agent-1",
+        runId: 9,
+        messageId: "message-1",
+        tokenKind: "run",
+        executionMode: "onboarding",
+      }
+    );
+    const trustedExecutionScope = {
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    } as const;
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: {
+          ...basePayload(),
+          runId: 9,
+          runJobToken,
+          trustedExecutionScope,
+        },
+      })
+    );
+    expect(handleThreadMessage).toHaveBeenCalledTimes(1);
+    const forwarded = handleThreadMessage.mock.calls[0]?.[0];
+    expect(forwarded.trustedExecutionScope).toEqual(trustedExecutionScope);
+    expect(
+      (client as any).payloadToWorkerConfig(forwarded).trustedExecutionScope
+    ).toEqual(trustedExecutionScope);
+  });
+
+  test("rejects onboarding scope identity mismatch and missing scope for an onboarding token", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const runJobToken = generateWorkerToken(
+      "user-1",
+      "conversation-1",
+      "worker-1",
+      {
+        channelId: "channel-1",
+        agentId: "agent-1",
+        runId: 10,
+        messageId: "message-1",
+        tokenKind: "run",
+        executionMode: "onboarding",
+      }
+    );
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    const scope = {
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "other",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    };
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: {
+          ...basePayload(),
+          runId: 10,
+          runJobToken,
+          trustedExecutionScope: scope,
+        },
+      })
+    );
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({ payload: { ...basePayload(), runId: 10, runJobToken } })
+    );
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: {
+          ...basePayload(),
+          runId: 10,
+          runJobToken,
+          trustedExecutionScope: { ...scope, ownerUserId: "user-1" },
+          resolvedCourseContext: validResolvedCourseContext(),
+        },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
+  test("rejects onboarding token replay across run, message, channel, or deployment", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const trustedExecutionScope = {
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    } as const;
+    const cases = [
+      {
+        tokenRunId: 19,
+        tokenMessageId: "message-1",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "worker-1",
+      },
+      {
+        tokenRunId: 20,
+        tokenMessageId: "other-message",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "worker-1",
+      },
+      {
+        tokenRunId: 20,
+        tokenMessageId: "message-1",
+        tokenChannelId: "other-channel",
+        tokenDeployment: "worker-1",
+      },
+      {
+        tokenRunId: 20,
+        tokenMessageId: "message-1",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "other-worker",
+      },
+    ];
+    for (const item of cases) {
+      const runJobToken = generateWorkerToken(
+        "user-1",
+        "conversation-1",
+        item.tokenDeployment,
+        {
+          channelId: item.tokenChannelId,
+          agentId: "agent-1",
+          runId: item.tokenRunId,
+          messageId: item.tokenMessageId,
+          tokenKind: "run",
+          executionMode: "onboarding",
+        }
+      );
+      const client = new GatewayClient(
+        "https://gateway.example.com",
+        "worker-token",
+        "user-1",
+        "worker-1"
+      );
+      const handleThreadMessage = mock(async () => undefined);
+      (client as any).handleThreadMessage = handleThreadMessage;
+      await (client as any).handleEvent(
+        "job",
+        JSON.stringify({
+          payload: {
+            ...basePayload(),
+            runId: 20,
+            runJobToken,
+            trustedExecutionScope,
+          },
+        })
+      );
+      expect(handleThreadMessage).not.toHaveBeenCalled();
+    }
   });
 
   test("accepts nested platform metadata on job events", async () => {

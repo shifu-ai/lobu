@@ -23,9 +23,14 @@ describe('course context gate', () => {
     const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify(body),{status:200}));
     await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'context_unavailable',reasonCode:'resolver_unavailable'});
   });
-  test.each(['no_courses','archived_only'] as const)('maps missing/%s to onboarding',async(reason)=>{
+  test('maps missing/no_courses to a trusted onboarding execution scope',async()=>{
+    const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'missing',reason:'no_courses'}),{status:200}));
+    await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'onboarding_ready',scope:{mode:'onboarding',source:'toolbox_course_resolution',reason:'no_courses',ownerUserId:'u',agentId:'a',conversationId:'c'}});
+  });
+  test('keeps missing/archived_only fail closed',async()=>{
+    const reason='archived_only';
     const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'missing',reason}),{status:200}));
-    await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'onboarding_required'});
+    await expect(attachCourseContextForReviewedScope(payload('課程'),{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'context_unavailable',reasonCode:'archived_only'});
   });
   test.each(['multiple_active_courses','explicit_course_key_not_found'] as const)('allows empty candidate reasons for %s',async(reason)=>{
     const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify({status:'ambiguous',reason,candidates:[{...candidate,reasons:[]}]}),{status:200}));

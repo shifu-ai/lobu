@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ResolvedCourseExecutionContext } from "@lobu/core";
 import {
   buildResolvedCourseContextInstructions,
+  buildTrustedExecutionScopeInstructions,
   removeLegacyToolboxActiveContext,
 } from "../openclaw/session-context";
 
@@ -40,6 +41,26 @@ function context(
 }
 
 describe("resolved course context instructions", () => {
+  test("renders only the bounded onboarding scope instruction", () => {
+    const rendered = buildTrustedExecutionScopeInstructions({
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    });
+    expect(rendered).toBe(
+      [
+        "Runtime Execution Scope: onboarding",
+        "Toolbox 尚無 canonical course。依既有 authorization-first onboarding instructions 執行；",
+        "不得聲稱已載入課程 context，不得把本輪當成已知課程的生成任務。",
+      ].join("\n")
+    );
+    expect(rendered).not.toContain("受眾");
+    expect(rendered).not.toContain("submit_course_pm_profile");
+    expect(buildTrustedExecutionScopeInstructions(undefined)).toBe("");
+  });
   test("renders one bounded section with trusted identity and quoted background", () => {
     const rendered = buildResolvedCourseContextInstructions(context());
 
