@@ -33,6 +33,7 @@ import {
 import { orgContext } from './stores/org-context';
 import { toolboxMcpRoutes } from './agent-routes';
 import { createProvisioningRoutes } from '../gateway/routes/provisioning';
+import { courseAwareWakeRoutes } from './course-aware-wake-routes';
 import { PostgresSecretStore } from './stores/postgres-secret-store';
 import {
   createPostgresAgentAccessStore,
@@ -469,6 +470,7 @@ export async function initLobuGateway(): Promise<Hono | null> {
         publicGatewayUrl: coreServices.getPublicGatewayUrl(),
       })
     );
+    lobuApp.route('/api/internal/course-aware-wakes', courseAwareWakeRoutes);
     lobuApp.route('/api/v1', toolboxMcpRoutes);
     lobuApp.route('/', rawLobuApp);
 
