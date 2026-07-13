@@ -39,6 +39,17 @@ import { applyTrustedCourseToolPolicy, isPlainToolArguments, type TrustedCourseT
 
 const logger = createLogger("mcp-proxy");
 
+export interface McpDiscoveryProvenance {
+  upstreamOrigin: string;
+  configSource: "global" | "agent" | "derived";
+}
+
+export interface McpDiscoveryResult {
+  tools: McpTool[];
+  instructions?: string;
+  provenance?: McpDiscoveryProvenance;
+}
+
 const MAX_BODY_SIZE = 1024 * 1024; // 1MB
 const OBS_RESPONSE_INSPECT_MAX_BYTES = 64 * 1024;
 const OBS_RESPONSE_INSPECT_TIMEOUT_MS = 1000;
@@ -573,6 +584,7 @@ interface HttpMcpServerConfig {
   authScope?: "user" | "channel";
   /** True when the upstream is the same embedded Lobu process (lobu-memory). */
   internal?: boolean;
+  configSource: "global" | "agent" | "derived";
 }
 
 interface McpConfigSource {
@@ -1124,7 +1136,7 @@ export class McpProxy {
     tokenData: any,
     workerToken?: string,
     options?: { surfaceErrors?: boolean; trace?: ShifuTraceContext }
-  ): Promise<{ tools: McpTool[]; instructions?: string }> {
+  ): Promise<McpDiscoveryResult> {
     const trace = options?.trace ?? generatedMcpTrace();
     const listStartedAt = Date.now();
     const userId = tokenData?.userId;
@@ -1213,6 +1225,13 @@ export class McpProxy {
       );
       return { tools: [] };
     }
+    const discoveryProvenance: McpDiscoveryProvenance = {
+      upstreamOrigin: new URL(httpServer.upstreamUrl).origin,
+      configSource: httpServer.configSource,
+    };
+    const bindDiscoveryProvenance = (
+      result: Omit<McpDiscoveryResult, "provenance">
+    ): McpDiscoveryResult => ({ ...result, provenance: discoveryProvenance });
     emitMcpObsEvent({
       trace,
       eventName: "mcp.server.discovered",
@@ -1263,7 +1282,7 @@ export class McpProxy {
           pause.lastError || "MCP server paused"
         );
       }
-      return cached ?? { tools: [] };
+      return bindDiscoveryProvenance(cached ?? { tools: [] });
     }
 
     if (cached) {
@@ -1286,7 +1305,7 @@ export class McpProxy {
         has_instructions: Boolean(cached.instructions),
         has_agent_id: Boolean(agentId),
       });
-      return cached;
+      return bindDiscoveryProvenance(cached);
     }
 
     const channelId = tokenData?.channelId || "";
@@ -1344,7 +1363,7 @@ export class McpProxy {
             "upstream_unauthorized",
             safeHost(httpServer.upstreamUrl)
           );
-          return { tools: [] };
+          return bindDiscoveryProvenance({ tools: [] });
         }
 
         if (initResponse.status === 403) {
@@ -1358,7 +1377,7 @@ export class McpProxy {
             "upstream_forbidden",
             safeHost(httpServer.upstreamUrl)
           );
-          return { tools: [] };
+          return bindDiscoveryProvenance({ tools: [] });
         }
 
         const initData = (await parseJsonRpcResponse(initResponse)) as {
@@ -1431,7 +1450,7 @@ export class McpProxy {
           "upstream_unauthorized",
           safeHost(httpServer.upstreamUrl)
         );
-        return { tools: [] };
+        return bindDiscoveryProvenance({ tools: [] });
       }
 
       if (!response.ok) {
@@ -1446,7 +1465,7 @@ export class McpProxy {
             "upstream_forbidden",
             safeHost(httpServer.upstreamUrl)
           );
-          return { tools: [] };
+          return bindDiscoveryProvenance({ tools: [] });
         }
         throw new McpHttpStatusError(response.status);
       }
@@ -1466,7 +1485,7 @@ export class McpProxy {
             this.authDiagnosticCodeFromMessage(errorMsg),
             safeHost(httpServer.upstreamUrl)
           );
-          return { tools: [] };
+          return bindDiscoveryProvenance({ tools: [] });
         }
         throw new McpJsonRpcError(data.error.code, errorMsg);
       }
@@ -1501,7 +1520,7 @@ export class McpProxy {
         upstream_host: safeHost(httpServer.upstreamUrl),
       });
 
-      return serverInfo;
+      return bindDiscoveryProvenance(serverInfo);
     } catch (error) {
       logger.warn("Failed to fetch tools for MCP, retrying once", {
         mcpId,
@@ -1547,7 +1566,7 @@ export class McpProxy {
             "upstream_unauthorized",
             safeHost(httpServer.upstreamUrl)
           );
-          return { tools: [] };
+          return bindDiscoveryProvenance({ tools: [] });
         }
         if (retryResponse.status === 403) {
           await retryResponse.body?.cancel().catch(() => {
@@ -1560,7 +1579,7 @@ export class McpProxy {
             "upstream_forbidden",
             safeHost(httpServer.upstreamUrl)
           );
-          return { tools: [] };
+          return bindDiscoveryProvenance({ tools: [] });
         }
         if (!retryResponse.ok) {
           throw new McpHttpStatusError(retryResponse.status);
@@ -1583,7 +1602,7 @@ export class McpProxy {
               this.authDiagnosticCodeFromMessage(errorMsg),
               safeHost(httpServer.upstreamUrl)
             );
-            return { tools: [] };
+            return bindDiscoveryProvenance({ tools: [] });
           }
           throw new McpJsonRpcError(retryData.error.code, errorMsg);
         }
@@ -1622,7 +1641,7 @@ export class McpProxy {
           retry_succeeded: true,
           upstream_host: safeHost(httpServer.upstreamUrl),
         });
-        return serverInfo;
+        return bindDiscoveryProvenance(serverInfo);
       } catch (retryError) {
         logger.error("Retry also failed for MCP tool fetch", {
           mcpId,
@@ -1696,7 +1715,7 @@ export class McpProxy {
         },
         error
       );
-      return { tools: [] };
+      return bindDiscoveryProvenance({ tools: [] });
     }
   }
 

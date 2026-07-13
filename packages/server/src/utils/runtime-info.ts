@@ -2,7 +2,8 @@ import packageJson from '../../package.json';
 
 /** Stable capabilities attested by the deployed Lobu runtime carrier. */
 export const RUNTIME_CARRIER_CAPABILITIES = [
-  'dynamic_tool_catalog.automation.v1',
+  'lobu-runtime:member-schedule-direct-auth.v1',
+  'lobu-runtime:automation-tool-catalog.v1',
 ] as const;
 
 interface RuntimeEnvLike {

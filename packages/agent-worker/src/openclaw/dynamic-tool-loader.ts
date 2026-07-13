@@ -1,8 +1,9 @@
 import type { McpToolDef } from "@lobu/core";
 import {
   catalogEntryForTool,
-  isTrustedShifuToolMetadataMcpId,
+  isTrustedShifuToolMetadataSource,
   TOOL_PRIORITY_WEIGHT,
+  type McpCatalogProvenanceById,
   type ToolCatalogEntry,
 } from "./tool-catalog";
 
@@ -31,6 +32,8 @@ export interface SelectMcpToolsForTurnParams {
   budget: number;
   mcpId?: string;
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
+  mcpProvenanceById?: McpCatalogProvenanceById;
+  trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
 
 export interface SelectMcpToolsForTurnResult {
@@ -43,6 +46,8 @@ export interface SelectGroupedMcpToolsForTurnParams {
   userMessage: string;
   maxProviderVisibleTools: number;
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
+  mcpProvenanceById?: McpCatalogProvenanceById;
+  trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
 
 export interface SelectGroupedMcpToolsForTurnResult {
@@ -55,6 +60,8 @@ export interface SelectMcpToolsByMcpForTurnParams {
   message: string;
   budget: number;
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
+  mcpProvenanceById?: McpCatalogProvenanceById;
+  trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
 
 export interface SelectMcpToolsByMcpForTurnResult {
@@ -119,11 +126,22 @@ const PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES = new Set([
   "create_automation",
 ]);
 
-function isPinnedDirectTool(entry: ToolCatalogEntry): boolean {
+function isPinnedDirectTool(
+  entry: ToolCatalogEntry,
+  primaryIntent: ToolIntent,
+  provenanceById: McpCatalogProvenanceById | undefined,
+  trustedOrigins: ReadonlySet<string> | undefined
+): boolean {
   return (
     PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
     entry.name.startsWith("sales_battle_report_") ||
-    (isTrustedShifuToolMetadataMcpId(entry.mcpId) &&
+    (primaryIntent === "automation" &&
+      entry.domain === "automation" &&
+      isTrustedShifuToolMetadataSource({
+        mcpId: entry.mcpId,
+        provenance: provenanceById?.[entry.mcpId],
+        trustedOrigins,
+      }) &&
       PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES.has(entry.name))
   );
 }
@@ -131,16 +149,28 @@ function isPinnedDirectTool(entry: ToolCatalogEntry): boolean {
 function selectRankedEntries(
   entries: ToolCatalogEntry[],
   primaryIntent: ToolIntent,
-  budget: number
+  budget: number,
+  provenanceById?: McpCatalogProvenanceById,
+  trustedOrigins?: ReadonlySet<string>
 ): {
   selectedEntries: ToolCatalogEntry[];
   pinnedBudgetOverflow: ToolCatalogEntry[];
 } {
   const pinnedEntries = entries
-    .filter(isPinnedDirectTool)
+    .filter((entry) =>
+      isPinnedDirectTool(entry, primaryIntent, provenanceById, trustedOrigins)
+    )
     .sort((left, right) => compareEntries(primaryIntent, left, right));
   const nonPinnedEntries = entries
-    .filter((entry) => !isPinnedDirectTool(entry))
+    .filter(
+      (entry) =>
+        !isPinnedDirectTool(
+          entry,
+          primaryIntent,
+          provenanceById,
+          trustedOrigins
+        )
+    )
     .sort((left, right) => compareEntries(primaryIntent, left, right));
   const rankedEntries = [...pinnedEntries, ...nonPinnedEntries];
 
@@ -165,6 +195,8 @@ export function selectMcpToolsForTurn(
       message: params.userMessage,
       budget: params.maxProviderVisibleTools,
       isToolAllowed: params.isToolAllowed,
+      mcpProvenanceById: params.mcpProvenanceById,
+      trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
     });
     return {
       selected: result.selectedTools,
@@ -175,15 +207,25 @@ export function selectMcpToolsForTurn(
   const primaryIntent = classifyToolIntent(params.message);
   const budget = Math.max(0, Math.floor(params.budget));
   const entries = params.tools
-    .map((tool, index) => catalogEntryForTool(tool, index, params.mcpId))
+    .map((tool, index) =>
+      catalogEntryForTool(tool, index, params.mcpId, {
+        provenance: params.mcpProvenanceById?.[params.mcpId || ""],
+        trustedOrigins: params.trustedShifuToolboxOrigins,
+      })
+    )
     .filter(
       (entry) =>
         !params.isToolAllowed || params.isToolAllowed(entry.name, entry.mcpId)
+    )
+    .filter(
+      (entry) => primaryIntent === "automation" || entry.domain !== "automation"
     );
   const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
     entries,
     primaryIntent,
-    budget
+    budget,
+    params.mcpProvenanceById,
+    params.trustedShifuToolboxOrigins
   );
   const selectedToolNames = new Set(
     selectedEntries.map((entry) => entry.name).filter(Boolean)
@@ -226,12 +268,18 @@ export function selectMcpToolsByMcpForTurn(
 
   for (const [mcpId, tools] of Object.entries(params.toolsByMcp)) {
     for (const tool of tools) {
-      const entry = catalogEntryForTool(tool, originalIndex, mcpId);
+      const entry = catalogEntryForTool(tool, originalIndex, mcpId, {
+        provenance: params.mcpProvenanceById?.[mcpId],
+        trustedOrigins: params.trustedShifuToolboxOrigins,
+      });
       originalIndex++;
       if (
         params.isToolAllowed &&
         !params.isToolAllowed(entry.name, entry.mcpId)
       ) {
+        continue;
+      }
+      if (primaryIntent !== "automation" && entry.domain === "automation") {
         continue;
       }
       entries.push(entry);
@@ -241,7 +289,9 @@ export function selectMcpToolsByMcpForTurn(
   const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
     entries,
     primaryIntent,
-    budget
+    budget,
+    params.mcpProvenanceById,
+    params.trustedShifuToolboxOrigins
   );
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))

@@ -661,6 +661,8 @@ export class WorkerGateway {
 			name: string;
 			requiresAuth: boolean;
 			requiresInput: boolean;
+			upstreamOrigin: string;
+			configSource: "global" | "agent" | "derived";
 		}>,
 		agentId: string,
 		userId: string,
@@ -672,6 +674,8 @@ export class WorkerGateway {
 			requiresInput: boolean;
 			authenticated: boolean;
 			configured: boolean;
+			upstreamOrigin: string;
+			configSource: "global" | "agent" | "derived";
 		}>
 	> {
 		const secretStore = this.secretStore;
@@ -1399,6 +1403,7 @@ export class WorkerGateway {
 					agentId || userId,
 					userId,
 				);
+				let runtimeMcpStatus = enrichedMcpStatus;
 				const toolboxPersonalAgentTools =
 					await this.collectToolboxPersonalAgentTools({
 						organizationId: auth.tokenData.organizationId,
@@ -1410,6 +1415,13 @@ export class WorkerGateway {
 				// will attempt discovery without credentials)
 				const mcpTools: Record<string, McpTool[]> = {};
 				const mcpInstructions: Record<string, string> = {};
+				const discoveryProvenance = new Map<
+					string,
+					{
+						upstreamOrigin: string;
+						configSource: "global" | "agent" | "derived";
+					}
+				>();
 				if (this.mcpProxy && enrichedMcpStatus.length > 0) {
 					const toolResults = await Promise.allSettled(
 						enrichedMcpStatus.map(async (mcp) => {
@@ -1426,6 +1438,12 @@ export class WorkerGateway {
 
 					for (const result of toolResults) {
 						if (result.status === "fulfilled") {
+							if (result.value.provenance) {
+								discoveryProvenance.set(
+									result.value.mcpId,
+									result.value.provenance,
+								);
+							}
 							if (result.value.tools && result.value.tools.length > 0) {
 								mcpTools[result.value.mcpId] = result.value.tools;
 							}
@@ -1441,6 +1459,21 @@ export class WorkerGateway {
 							});
 						}
 					}
+
+					// Tool metadata is only trusted when its provenance comes from the
+					// same resolved MCP config used by tools/list. Status fetched earlier
+					// can be stale if an agent config changes during session bootstrap.
+					runtimeMcpStatus = enrichedMcpStatus.map((mcp) => {
+						const provenance = discoveryProvenance.get(mcp.id);
+						const { upstreamOrigin, configSource, ...status } = mcp;
+						return provenance
+							? { ...status, ...provenance }
+							: {
+									...status,
+									upstreamOrigin: "",
+									configSource: "derived" as const,
+								};
+					});
 				}
 
 				// Resolve dynamic provider configuration
@@ -1519,7 +1552,7 @@ export class WorkerGateway {
 					platformInstructions: contextData.platformInstructions,
 					networkInstructions: contextData.networkInstructions,
 					skillsInstructions: mergedSkillsInstructions,
-					mcpStatus: enrichedMcpStatus,
+					mcpStatus: runtimeMcpStatus,
 					mcpTools,
 					mcpInstructions,
 					mcpContext,

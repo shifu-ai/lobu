@@ -378,6 +378,34 @@ describe("McpConfigService", () => {
     const plainStatus = statuses.find((s) => s.id === "plain-mcp");
     expect(plainStatus?.requiresAuth).toBe(false);
     expect(plainStatus?.requiresInput).toBe(false);
+    expect(plainStatus).toMatchObject({
+      upstreamOrigin: "https://plain.example.com",
+      configSource: "global",
+    });
+  });
+
+  test("getMcpStatus attests per-agent Toolbox origin and config provenance", async () => {
+    const service = new McpConfigService({
+      agentSettingsStore: {
+        getSettings: async () => ({
+          mcpServers: {
+            "shifu-toolbox": {
+              url: "https://mcp.shifu-ai.org/mcp",
+              type: "streamable-http",
+            },
+          },
+        }),
+      } as any,
+    });
+
+    expect(await service.getMcpStatus("agent1")).toContainEqual({
+      id: "shifu-toolbox",
+      name: "shifu-toolbox",
+      requiresAuth: false,
+      requiresInput: false,
+      upstreamOrigin: "https://mcp.shifu-ai.org",
+      configSource: "agent",
+    });
   });
 
   test("getAllHttpServers - merges global + per-agent, excludes disabled and non-HTTP", async () => {

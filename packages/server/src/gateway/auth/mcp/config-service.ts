@@ -42,6 +42,7 @@ interface HttpMcpServerConfig {
    * direct-auth header so Lobu promotes it to admin scope.
    */
   internal?: boolean;
+  configSource: "global" | "agent" | "derived";
 }
 
 interface WorkerMcpConfig {
@@ -53,11 +54,24 @@ interface McpStatus {
   name: string;
   requiresAuth: boolean;
   requiresInput: boolean;
+  upstreamOrigin: string;
+  configSource: "global" | "agent" | "derived";
 }
 
 interface LoadedConfig {
   rawServers: Record<string, any>;
   httpServers: Map<string, HttpMcpServerConfig>;
+}
+
+function resolveCanonicalUpstreamOrigin(upstreamUrl: string): string {
+  try {
+    const parsed = new URL(upstreamUrl);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? parsed.origin
+      : "";
+  } catch {
+    return "";
+  }
 }
 
 interface LobuMemoryConfigOptions {
@@ -260,6 +274,8 @@ export class McpConfigService {
         name: id,
         requiresAuth,
         requiresInput,
+        upstreamOrigin: resolveCanonicalUpstreamOrigin(httpServer.upstreamUrl),
+        configSource: httpServer.configSource,
       });
     }
 
@@ -571,6 +587,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
         // the per-agent derived lobu-memory entry, which does not flow through
         // normalizeConfig. Never trust a stored `internal` flag here.
         internal: false,
+        configSource: "global",
       });
     }
   }
@@ -612,6 +629,7 @@ function toHttpServerConfig(
     toolFilter: parseMcpToolFilter(cloned),
     authScope: parseAuthScope(cloned),
     internal: cloned.internal === true,
+    configSource: cloned.internal === true ? "derived" : "agent",
   };
 }
 

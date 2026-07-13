@@ -6,6 +6,7 @@ import {
   selectMcpToolsByMcpForTurn,
   selectMcpToolsForTurn,
 } from "../openclaw/dynamic-tool-loader";
+import { resolveTrustedShifuToolboxOrigins } from "../openclaw/tool-catalog";
 
 function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
   return {
@@ -16,7 +17,46 @@ function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
   };
 }
 
+function trustedToolboxProvenance() {
+  return {
+    "shifu-toolbox": {
+      upstreamOrigin: "https://mcp.shifu-ai.org",
+      configSource: "agent" as const,
+    },
+  };
+}
+
+function trustedToolboxOrigins() {
+  return new Set(["https://mcp.shifu-ai.org"]);
+}
+
 describe("selectMcpToolsForTurn", () => {
+  test("resolves a bounded fail-closed Toolbox origin allowlist", () => {
+    expect([...resolveTrustedShifuToolboxOrigins(undefined)]).toEqual([
+      "https://mcp.shifu-ai.org",
+    ]);
+    expect([
+      ...resolveTrustedShifuToolboxOrigins(
+        [
+          "http://insecure.example",
+          "https://user@credential.example",
+          "https://path.example/mcp",
+          "not-a-url",
+          ...Array.from(
+            { length: 10 },
+            (_, index) => `https://trusted-${index}.example`
+          ),
+        ].join(",")
+      ),
+    ]).toEqual([
+      "https://trusted-0.example",
+      "https://trusted-1.example",
+      "https://trusted-2.example",
+      "https://trusted-3.example",
+    ]);
+    expect([...resolveTrustedShifuToolboxOrigins(" ,not-a-url")]).toEqual([]);
+  });
+
   test("preserves Toolbox automation metadata in the runtime catalog", () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: {
@@ -37,6 +77,8 @@ describe("selectMcpToolsForTurn", () => {
         ],
       },
       selectedTools: { "shifu-toolbox": [] },
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(catalog[0]).toMatchObject({
@@ -53,6 +95,8 @@ describe("selectMcpToolsForTurn", () => {
     "每週一自動排程寄出報告",
     "持續追蹤報名狀況十分鐘",
     "monitor this and follow up automatically",
+    "list my automations",
+    "取消明天的提醒",
   ])("classifies automation intent for %s", (message) => {
     const result = selectMcpToolsForTurn({
       tools: [
@@ -66,6 +110,8 @@ describe("selectMcpToolsForTurn", () => {
       message,
       budget: 1,
       mcpId: "shifu-toolbox",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(result.trace.primaryIntent).toBe("automation");
@@ -99,6 +145,8 @@ describe("selectMcpToolsForTurn", () => {
       },
       message: "每分鐘追蹤一次報名狀況，持續十分鐘",
       budget: 2,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(result.trace.selectedToolNames).toEqual([
@@ -156,6 +204,79 @@ describe("selectMcpToolsForTurn", () => {
     expect(result.selectedTools).toEqual({});
     expect(result.trace.totalTools).toBe(0);
     expect(result.trace.selectedToolNames).toEqual([]);
+  });
+
+  test.each([
+    ["look up tracking number 123", "shipment_search"],
+    ["search Notion for the course schedule", "notion_search"],
+    ["監控螢幕亮度", "system_display_settings"],
+    ["draft follow-up content for Irene", "docs_create"],
+    ["查看課程 schedule", "course_context_search"],
+  ])("does not spend automation budget for non-automation request: %s", (message, expectedTool) => {
+    const automationMetadata = {
+      _meta: {
+        shifuTool: { domain: "automation", priority: "P1" },
+      },
+    };
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        core: [tool(expectedTool)],
+        "shifu-toolbox": [
+          tool("plan_automation", automationMetadata),
+          tool("create_automation", automationMetadata),
+        ],
+      },
+      message,
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("unknown");
+    expect(result.trace.selectedToolNames).toEqual([`core/${expectedTool}`]);
+    expect(result.trace.pinnedBudgetOverflow).toEqual([]);
+  });
+
+  test.each([
+    ["toolbox", "https://mcp.shifu-ai.org", "agent"],
+    ["shifu-toolbox", "https://evil.example", "agent"],
+    ["shifu-toolbox", "https://mcp.shifu-ai.org/forged-path", "agent"],
+    ["shifu-toolbox", "https://mcp.shifu-ai.org", "global"],
+    ["evil-mcp", "https://mcp.shifu-ai.org", "agent"],
+  ] as const)("rejects forged Toolbox metadata provenance: %s %s %s", (mcpId, upstreamOrigin, configSource) => {
+    const forged = tool("plan_automation", {
+      _meta: {
+        shifuTool: {
+          domain: "automation",
+          priority: "P0",
+          aliases: ["reminder", "自動工作"],
+        },
+      },
+    });
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { [mcpId]: [forged] },
+      selectedTools: { [mcpId]: [] },
+      mcpProvenanceById: {
+        [mcpId]: { upstreamOrigin, configSource },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: { [mcpId]: [forged] },
+      message: "明天提醒我回覆 Irene",
+      budget: 0,
+      mcpProvenanceById: {
+        [mcpId]: { upstreamOrigin, configSource },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(catalog[0]).toMatchObject({
+      domain: "unknown",
+      priority: "P2",
+      aliases: [],
+    });
+    expect(selection.trace.pinnedBudgetOverflow).toEqual([]);
   });
 
   test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
@@ -315,6 +436,8 @@ describe("selectMcpToolsForTurn", () => {
       message: "幫我核准社群待審學員",
       budget: 10,
       mcpId: "shifu-toolbox",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     const selectedNames = result.selected.map((toolDef) => toolDef.name);
@@ -373,7 +496,7 @@ describe("selectMcpToolsForTurn", () => {
 
   test("builds a runtime catalog with metadata and availability for this turn", () => {
     const allTools = {
-      toolbox: [
+      "shifu-toolbox": [
         tool("line_community_member_lookup", {
           _meta: {
             shifuTool: {
@@ -392,11 +515,16 @@ describe("selectMcpToolsForTurn", () => {
       workspace: [tool("workspace_drive_search")],
     };
     const selectedTools = {
-      toolbox: [allTools.toolbox[0]],
+      "shifu-toolbox": [allTools["shifu-toolbox"][0]],
       workspace: [allTools.workspace[0]],
     };
 
-    const catalog = buildRuntimeToolCatalog({ allTools, selectedTools });
+    const catalog = buildRuntimeToolCatalog({
+      allTools,
+      selectedTools,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
 
     expect(
       catalog.map((entry) => ({
@@ -414,7 +542,7 @@ describe("selectMcpToolsForTurn", () => {
     ).toEqual([
       {
         name: "line_community_member_lookup",
-        mcpId: "toolbox",
+        mcpId: "shifu-toolbox",
         domain: "community_verification",
         priority: "P0",
         aliases: ["審核學員"],
@@ -426,7 +554,7 @@ describe("selectMcpToolsForTurn", () => {
       },
       {
         name: "card_studio_template_list",
-        mcpId: "toolbox",
+        mcpId: "shifu-toolbox",
         domain: "card_studio",
         priority: "P3",
         aliases: [],
@@ -454,7 +582,7 @@ describe("selectMcpToolsForTurn", () => {
   test("preserves Toolbox PM metadata domains in the runtime catalog", () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: {
-        toolbox: [
+        "shifu-toolbox": [
           tool("meeting_search", {
             _meta: {
               shifuTool: {
@@ -490,7 +618,9 @@ describe("selectMcpToolsForTurn", () => {
           }),
         ],
       },
-      selectedTools: { toolbox: [] },
+      selectedTools: { "shifu-toolbox": [] },
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(
@@ -553,7 +683,7 @@ describe("selectMcpToolsForTurn", () => {
 
     const catalog = buildRuntimeToolCatalog({
       allTools: {
-        toolbox: [
+        "shifu-toolbox": [
           tool("line_community_member_approve", {
             _meta: {
               shifuTool: {
@@ -568,7 +698,9 @@ describe("selectMcpToolsForTurn", () => {
           }),
         ],
       },
-      selectedTools: { toolbox: [] },
+      selectedTools: { "shifu-toolbox": [] },
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(catalog[0]).toMatchObject({
@@ -584,7 +716,7 @@ describe("selectMcpToolsForTurn", () => {
   test("keeps annotations shifuTool compatibility during metadata migration", () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: {
-        toolbox: [
+        "shifu-toolbox": [
           tool("line_community_setup", {
             annotations: {
               shifuTool: {
@@ -600,7 +732,9 @@ describe("selectMcpToolsForTurn", () => {
           }),
         ],
       },
-      selectedTools: { toolbox: [] },
+      selectedTools: { "shifu-toolbox": [] },
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(catalog[0]).toMatchObject({

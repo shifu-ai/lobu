@@ -63,6 +63,7 @@ interface HttpMcpServerConfig {
   inputs?: unknown[];
   headers?: Record<string, string>;
   toolFilter?: import("@lobu/core").McpToolFilter;
+  configSource?: "global" | "agent" | "derived";
 }
 
 interface McpConfigSource {
@@ -135,6 +136,7 @@ function jsonRpcErrorResponse(message: string, code = -32603): Response {
 const TEST_SERVER: HttpMcpServerConfig = {
   id: "test-mcp",
   upstreamUrl: "http://upstream:9000/mcp",
+  configSource: "agent",
 };
 
 let originalEnv: string | undefined;
@@ -531,7 +533,13 @@ describe("McpProxy", () => {
           )
         );
 
-        expect(result).toEqual({ tools: [] });
+        expect(result).toEqual({
+          tools: [],
+          provenance: {
+            upstreamOrigin: "http://upstream:9000",
+            configSource: "agent",
+          },
+        });
       }
     });
 
@@ -664,7 +672,13 @@ describe("McpProxy", () => {
         )
       );
 
-      expect(result).toEqual({ tools: [] });
+      expect(result).toEqual({
+        tools: [],
+        provenance: {
+          upstreamOrigin: "http://upstream:9000",
+          configSource: "agent",
+        },
+      });
     });
 
     test("surfaceErrors throws for invalid tools/list JSON bodies", async () => {

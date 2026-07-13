@@ -31,6 +31,86 @@ export interface ToolCatalogEntry {
   originalIndex: number;
 }
 
+export interface McpCatalogProvenance {
+  upstreamOrigin?: string;
+  configSource?: "global" | "agent" | "derived";
+}
+
+export type McpCatalogProvenanceById = Record<
+  string,
+  McpCatalogProvenance | undefined
+>;
+
+const SHIFU_TOOLBOX_MCP_ID = "shifu-toolbox";
+const DEFAULT_TRUSTED_SHIFU_TOOLBOX_ORIGIN = "https://mcp.shifu-ai.org";
+const MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS = 8;
+
+function canonicalHttpsOrigin(value: string): string | null {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveTrustedShifuToolboxOrigins(
+  configuredValue: string | undefined
+): ReadonlySet<string> {
+  const rawOrigins = configuredValue?.trim()
+    ? configuredValue.split(",")
+    : [DEFAULT_TRUSTED_SHIFU_TOOLBOX_ORIGIN];
+  const origins = new Set<string>();
+  for (const rawOrigin of rawOrigins.slice(
+    0,
+    MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS
+  )) {
+    const configuredOrigin = rawOrigin.trim();
+    const canonical = canonicalHttpsOrigin(configuredOrigin);
+    if (!canonical) continue;
+    let parsed: URL;
+    try {
+      parsed = new URL(configuredOrigin);
+    } catch {
+      continue;
+    }
+    if (
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      (configuredOrigin !== canonical && configuredOrigin !== `${canonical}/`)
+    ) {
+      continue;
+    }
+    origins.add(canonical);
+  }
+  return origins;
+}
+
+export function isTrustedShifuToolMetadataSource(params: {
+  mcpId: string;
+  provenance?: McpCatalogProvenance;
+  trustedOrigins?: ReadonlySet<string>;
+}): boolean {
+  if (
+    params.mcpId !== SHIFU_TOOLBOX_MCP_ID ||
+    params.provenance?.configSource !== "agent"
+  ) {
+    return false;
+  }
+  const assertedOrigin = params.provenance.upstreamOrigin?.trim();
+  const upstreamOrigin = assertedOrigin
+    ? canonicalHttpsOrigin(assertedOrigin)
+    : null;
+  return Boolean(
+    upstreamOrigin === assertedOrigin &&
+      params.trustedOrigins?.has(upstreamOrigin)
+  );
+}
+
 export const TOOL_PRIORITY_WEIGHT: Record<ToolPriority, number> = {
   P0: 0,
   P1: 1,
@@ -67,17 +147,6 @@ const KNOWN_TOOL_FRESHNESS = new Set<ToolFreshness>([
   "batch",
 ]);
 
-const TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS = new Set([
-  "shifu-toolbox",
-  "shifu_toolbox",
-  "shifu_toolbox_mcp",
-  "toolbox",
-]);
-
-export function isTrustedShifuToolMetadataMcpId(mcpId: string): boolean {
-  return TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS.has(mcpId);
-}
-
 interface ShifuToolMetadata {
   domain: ToolDomain;
   priority: ToolPriority;
@@ -106,9 +175,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseShifuToolMetadata(
   tool: McpToolDef,
-  mcpId: string
+  trustedMetadata: boolean
 ): ShifuToolMetadata | null {
-  if (!isTrustedShifuToolMetadataMcpId(mcpId)) return null;
+  if (!trustedMetadata) return null;
 
   const looseTool = tool as unknown as {
     _meta?: { shifuTool?: unknown };
@@ -160,10 +229,19 @@ function parseShifuToolMetadata(
 export function catalogEntryForTool(
   tool: McpToolDef,
   originalIndex = 0,
-  mcpId = ""
+  mcpId = "",
+  options: {
+    provenance?: McpCatalogProvenance;
+    trustedOrigins?: ReadonlySet<string>;
+  } = {}
 ): ToolCatalogEntry {
   const name = tool.name || "";
-  const shifuMetadata = parseShifuToolMetadata(tool, mcpId);
+  const trustedMetadata = isTrustedShifuToolMetadataSource({
+    mcpId,
+    provenance: options.provenance,
+    trustedOrigins: options.trustedOrigins,
+  });
+  const shifuMetadata = parseShifuToolMetadata(tool, trustedMetadata);
 
   if (shifuMetadata) {
     return {
@@ -178,6 +256,23 @@ export function catalogEntryForTool(
       mutatesState: shifuMetadata.mutatesState,
       requiresConfirmation: shifuMetadata.requiresConfirmation,
       freshness: shifuMetadata.freshness,
+      originalIndex,
+    };
+  }
+
+  const looseTool = tool as unknown as {
+    _meta?: { shifuTool?: unknown };
+    annotations?: { shifuTool?: unknown };
+  };
+  if (looseTool._meta?.shifuTool || looseTool.annotations?.shifuTool) {
+    return {
+      tool,
+      name,
+      mcpId,
+      domain: "unknown",
+      intent: "unknown",
+      priority: "P2",
+      ...defaultCatalogMetadata(),
       originalIndex,
     };
   }

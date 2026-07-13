@@ -14,6 +14,42 @@ function includesAny(text: string, keywords: string[]): boolean {
   return keywords.some((keyword) => text.includes(keyword));
 }
 
+function hasAutomationIntent(text: string): boolean {
+  if (
+    /\b(?:plan_automation|create_automation|wake[ -]agent|automations?|automate|automatically)\b/.test(
+      text
+    ) ||
+    /(?:自動化|自動工作)/.test(text) ||
+    /(?:建立|新增|取消|列出|查看|停止|刪除|删除|設定|设定).{0,12}(?:提醒|自動工作|自动工作|排程)/.test(
+      text
+    ) ||
+    /(?:提醒我|提醒他|提醒她|提醒大家|提醒團隊|提醒团队)/.test(text) ||
+    /\bremind(?:\s+(?:me|us|him|her|them))?\b/.test(text)
+  ) {
+    return true;
+  }
+
+  const englishAction =
+    /\b(?:schedule|track(?:ing)?|monitor|follow[ -]?up|check|notify)\b/.test(
+      text
+    );
+  const englishTemporal =
+    /\b(?:tomorrow|later|every|daily|weekly|monthly|recurring|continuously|until|next\s+(?:hour|day|week|month)|in\s+\d+\s+(?:minutes?|hours?|days?)|for\s+\d+\s+(?:minutes?|hours?|days?))\b/.test(
+      text
+    );
+  if (englishAction && englishTemporal) return true;
+
+  const chineseAction =
+    /(?:建立|新增|安排|設定|设定|排程|追蹤|追踪|監控|监控|檢查|检查|通知|觀察|观察)/.test(
+      text
+    );
+  const chineseTemporal =
+    /(?:明天|後天|后天|下週|下周|未來|未来|每隔|每天|每日|每週|每周|每月|定期|持續|持续|直到|分鐘後|分钟后|小時後|小时后|\d+[點点時时])/.test(
+      text
+    );
+  return chineseAction && chineseTemporal;
+}
+
 export function classifyToolIntent(text: string): ToolIntent {
   const normalized = text.toLowerCase();
 
@@ -87,37 +123,7 @@ export function classifyToolIntent(text: string): ToolIntent {
     return "media_editing";
   }
 
-  if (
-    includesAny(normalized, [
-      "automation",
-      "automate",
-      "automatically",
-      "reminder",
-      "remind",
-      "schedule",
-      "recurring",
-      "monitor",
-      "tracking",
-      "follow up",
-      "wake agent",
-      "自動化",
-      "自動工作",
-      "提醒",
-      "排程",
-      "定期",
-      "每隔",
-      "每天",
-      "每日",
-      "每週",
-      "每周",
-      "追蹤",
-      "追踪",
-      "監控",
-      "监控",
-      "持續觀察",
-      "持续观察",
-    ])
-  ) {
+  if (hasAutomationIntent(normalized)) {
     return "automation";
   }
 

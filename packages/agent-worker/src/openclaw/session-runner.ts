@@ -94,6 +94,7 @@ import {
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
+import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
 import {
   checkCompletionClaim,
   getRequiredBattleReportMutationTools,
@@ -1628,6 +1629,18 @@ Use it when the user references past discussions or you need context.`);
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
+  const mcpProvenanceById = Object.fromEntries(
+    context.mcpStatus.map((status) => [
+      status.id,
+      {
+        upstreamOrigin: status.upstreamOrigin,
+        configSource: status.configSource,
+      },
+    ])
+  );
+  const trustedShifuToolboxOrigins = resolveTrustedShifuToolboxOrigins(
+    process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS
+  );
   let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;
 
   if (mcpExposure !== "cli") {
@@ -1636,6 +1649,8 @@ Use it when the user references past discussions or you need context.`);
       message: userPrompt,
       budget: dynamicToolBudget,
       isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
     });
     selectedMcpToolsForTurn = selection.selectedTools;
     logger.info(
@@ -1685,6 +1700,8 @@ Use it when the user references past discussions or you need context.`);
       selectedTools: selectedMcpToolsForTurn,
       providerVisibleTools: {},
       allowedToolNames: catalogAllowedToolNames,
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1725,6 +1742,8 @@ Use it when the user references past discussions or you need context.`);
       selectedTools: selectedMcpToolsForTurn,
       providerVisibleTools: projectedMcp.tools,
       allowedToolNames: catalogAllowedToolNames,
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
     });
     customTools.push(
       ...createOpenClawCustomTools({

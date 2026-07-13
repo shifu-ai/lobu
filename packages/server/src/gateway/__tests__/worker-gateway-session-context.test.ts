@@ -174,6 +174,8 @@ describe("WorkerGateway session context", () => {
 							name: "ShiFu Toolbox",
 							requiresAuth: true,
 							requiresInput: false,
+							upstreamOrigin: "https://mcp.shifu-ai.org",
+							configSource: "agent",
 						},
 					],
 				}),
@@ -201,7 +203,12 @@ describe("WorkerGateway session context", () => {
 		expect(response.status).toBe(200);
 
 		const body = (await response.json()) as {
-			mcpStatus: Array<{ id: string; authenticated: boolean }>;
+			mcpStatus: Array<{
+				id: string;
+				authenticated: boolean;
+				upstreamOrigin: string;
+				configSource: string;
+			}>;
 		};
 
 		expect(body.mcpStatus).toContainEqual({
@@ -211,6 +218,87 @@ describe("WorkerGateway session context", () => {
 			requiresInput: false,
 			authenticated: true,
 			configured: true,
+			upstreamOrigin: "https://mcp.shifu-ai.org",
+			configSource: "agent",
+		});
+	});
+
+	test("binds MCP status provenance to the config used for tool discovery", async () => {
+		const gateway = new WorkerGateway(
+			{ send: async () => undefined } as any,
+			"https://gateway.example.com",
+			{
+				getWorkerConfig: async () => ({ mcpServers: {} }),
+			} as any,
+			{
+				getSessionContext: async () => ({
+					agentInstructions: "",
+					platformInstructions: "",
+					networkInstructions: "",
+					skillsInstructions: "",
+					mcpStatus: [
+						{
+							id: "shifu-toolbox",
+							name: "ShiFu Toolbox",
+							requiresAuth: false,
+							requiresInput: false,
+							upstreamOrigin: "https://stale-or-evil.example",
+							configSource: "global",
+						},
+						{
+							id: "unbound-catalog",
+							name: "Unbound Catalog",
+							requiresAuth: false,
+							requiresInput: false,
+							upstreamOrigin: "https://mcp.shifu-ai.org",
+							configSource: "agent",
+						},
+					],
+				}),
+			} as any,
+			{
+				fetchToolsForMcp: async (mcpId: string) =>
+					mcpId === "shifu-toolbox"
+						? {
+								tools: [{ name: "plan_automation" }],
+								provenance: {
+									upstreamOrigin: "https://mcp.shifu-ai.org",
+									configSource: "agent",
+								},
+							}
+						: { tools: [{ name: "create_automation" }] },
+			} as any,
+		);
+
+		const token = generateWorkerToken("user-1", "conv-1", "worker-a", {
+			channelId: "channel-1",
+			agentId: "agent-1",
+		});
+
+		const response = await gateway.getApp().request("/session-context", {
+			headers: {
+				authorization: `Bearer ${token}`,
+				host: "gateway.example.com",
+			},
+		});
+		const body = (await response.json()) as {
+			mcpStatus: Array<{
+				id: string;
+				upstreamOrigin?: string;
+				configSource?: string;
+			}>;
+		};
+
+		expect(response.status).toBe(200);
+		expect(body.mcpStatus[0]).toMatchObject({
+			id: "shifu-toolbox",
+			upstreamOrigin: "https://mcp.shifu-ai.org",
+			configSource: "agent",
+		});
+		expect(body.mcpStatus[1]).toMatchObject({
+			id: "unbound-catalog",
+			upstreamOrigin: "",
+			configSource: "derived",
 		});
 	});
 

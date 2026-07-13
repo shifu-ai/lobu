@@ -2,7 +2,11 @@ import type { McpToolDef } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ToolContentResult } from "../shared/tool-implementations";
-import { catalogEntryForTool, type ToolCatalogEntry } from "./tool-catalog";
+import {
+  catalogEntryForTool,
+  type McpCatalogProvenanceById,
+  type ToolCatalogEntry,
+} from "./tool-catalog";
 
 export type RuntimeToolCallBlockedReason =
   | "not_discovered"
@@ -35,6 +39,8 @@ export interface BuildRuntimeToolCatalogParams {
   selectedTools: Record<string, McpToolDef[]>;
   providerVisibleTools?: Record<string, McpToolDef[]>;
   allowedToolNames?: Iterable<string>;
+  mcpProvenanceById?: McpCatalogProvenanceById;
+  trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
 
 export interface SearchRuntimeToolCatalogParams {
@@ -154,7 +160,10 @@ export function buildRuntimeToolCatalog(
   let originalIndex = 0;
   for (const [mcpId, tools] of Object.entries(params.allTools)) {
     for (const tool of tools) {
-      const entry = catalogEntryForTool(tool, originalIndex, mcpId);
+      const entry = catalogEntryForTool(tool, originalIndex, mcpId, {
+        provenance: params.mcpProvenanceById?.[mcpId],
+        trustedOrigins: params.trustedShifuToolboxOrigins,
+      });
       originalIndex++;
       if (!entry.name) continue;
       const directVisibleThisTurn = selectedToolKeys.has(
