@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   __resetEncryptionKeyCacheForTests,
   generateWorkerToken,
+  verifyWorkerToken,
 } from "@lobu/core";
 import { GatewayClient } from "../gateway/sse-client";
 
@@ -121,6 +122,10 @@ describe("GatewayClient heartbeat ACKs", () => {
     expect(
       (client as any).payloadToWorkerConfig(forwarded).trustedExecutionScope
     ).toEqual(trustedExecutionScope);
+    expect(forwarded.resolvedCourseContext).toBeUndefined();
+    expect(forwarded.trustedExecutionScope).not.toHaveProperty("courseEntityId");
+    expect(forwarded.trustedExecutionScope).not.toHaveProperty("retrieval");
+    expect(verifyWorkerToken(runJobToken)?.courseToolScope).toBeUndefined();
   });
 
   test.each([
@@ -293,19 +298,23 @@ describe("GatewayClient heartbeat ACKs", () => {
         tokenChannelId: "channel-1",
         tokenDeployment: "other-worker",
       },
+      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenUserId:"other-user"},
+      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenConversationId:"other-conversation"},
+      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenAgentId:"other-agent"},
+      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenExecutionMode:"personal" as const},
     ];
     for (const item of cases) {
       const runJobToken = generateWorkerToken(
-        "user-1",
-        "conversation-1",
+        item.tokenUserId ?? "user-1",
+        item.tokenConversationId ?? "conversation-1",
         item.tokenDeployment,
         {
           channelId: item.tokenChannelId,
-          agentId: "agent-1",
+          agentId: item.tokenAgentId ?? "agent-1",
           runId: item.tokenRunId,
           messageId: item.tokenMessageId,
           tokenKind: "run",
-          executionMode: "onboarding",
+          executionMode: item.tokenExecutionMode ?? "onboarding",
         }
       );
       const client = new GatewayClient(
@@ -1110,6 +1119,18 @@ describe("GatewayClient heartbeat ACKs", () => {
         processSingleMessage.mock.calls[1]?.[0].payload.resolvedCourseContext
       ).toEqual(secondContext);
     }
+  });
+
+  test("does not batch messages with distinct trusted execution scopes", async () => {
+    const client = new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");
+    const processSingleMessage = mock(async () => undefined);
+    (client as any).processSingleMessage = processSingleMessage;
+    const onboardingScope = {mode:"onboarding",source:"toolbox_course_resolution",reason:"no_courses",ownerUserId:"user-1",agentId:"agent-1",conversationId:"conversation-1"} as const;
+    await (client as any).processBatchedMessages([
+      {timestamp:1,payload:{...basePayload(),messageId:"m1",platformMetadata:{responseId:"shared"},trustedExecutionScope:onboardingScope}},
+      {timestamp:2,payload:{...basePayload(),messageId:"m2",platformMetadata:{responseId:"shared"}}},
+    ]);
+    expect(processSingleMessage).toHaveBeenCalledTimes(2);
   });
 
   test.each([

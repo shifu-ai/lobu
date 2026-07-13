@@ -10,7 +10,7 @@ import type {CourseReadinessField} from '@lobu/core';
 
 export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; activeSpecializedSkill?:'opp-coach'|null; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
 export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | {status:'onboarding_ready';scope:Extract<TrustedExecutionScope,{mode:'onboarding'}>} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
-const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師|錄課|會議待辦|戰報|招生|offer)/iu;
+const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|大課|老師|錄課|會議待辦|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
 const logger = createLogger('course-context-gate');
 const STRUCTURED_CONTEXT_FIELDS=new Set(['audience','dream_result','course_promise','key_learning','delivery_mechanism','evidence','offer']);
