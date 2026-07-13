@@ -68,7 +68,7 @@ describe("UnifiedThreadResponseConsumer scheduled course delivery", () => {
     await consumer.handleThreadResponse({ id: "terminal-pg-run-1", data: scheduledPayload });
     expect(courseWakeDelivery).toHaveBeenCalledWith({
       metadata: scheduledPayload.platformMetadata.scheduledCourseWake,
-      finalOutput: "stored final output",
+      completion: { kind: "succeeded", finalOutput: "stored final output" },
       turnId: "turn-1",
     });
     expect(platformRegistry.get).not.toHaveBeenCalled();
@@ -94,6 +94,39 @@ describe("UnifiedThreadResponseConsumer scheduled course delivery", () => {
     expect(courseWakeDelivery).not.toHaveBeenCalled();
     expect(renderer.handleDelta).toHaveBeenCalledTimes(1);
   });
+
+  test("projects a generation error as one safe terminal failure without SSE routing", async () => {
+    const courseWakeDelivery = mock(async () => undefined);
+    const { consumer, renderer, platformRegistry } = createConsumer({ courseWakeDelivery });
+    await consumer.handleThreadResponse({
+      id: "terminal-error", data: { ...scheduledPayload, processedMessageIds: undefined, finalText: undefined,
+        error: "provider secret failure detail" },
+    });
+    expect(courseWakeDelivery).toHaveBeenCalledWith({
+      metadata: scheduledPayload.platformMetadata.scheduledCourseWake,
+      completion: { kind: "failed", failureCode: "generation_failed" },
+      turnId: "turn-1",
+    });
+    expect(platformRegistry.get).not.toHaveBeenCalled();
+    expect(renderer.handleError).not.toHaveBeenCalled();
+  });
+
+  test.each(["", "   ", "x".repeat(50_001)])(
+    "projects invalid final output as a safe terminal failure",
+    async (finalText) => {
+      const courseWakeDelivery = mock(async () => undefined);
+      const { consumer, renderer } = createConsumer({ courseWakeDelivery });
+      await consumer.handleThreadResponse({
+        id: "terminal-invalid", data: { ...scheduledPayload, finalText },
+      });
+      expect(courseWakeDelivery).toHaveBeenCalledWith({
+        metadata: scheduledPayload.platformMetadata.scheduledCourseWake,
+        completion: { kind: "failed", failureCode: "invalid_final_output" },
+        turnId: "turn-1",
+      });
+      expect(renderer.handleCompletion).not.toHaveBeenCalled();
+    },
+  );
 });
 
 describe("UnifiedThreadResponseConsumer customEvent broadcast", () => {

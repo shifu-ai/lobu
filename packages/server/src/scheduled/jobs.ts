@@ -354,7 +354,9 @@ export async function handleWakeAgentTask(
     {
       threadId,
       messageText: reuseConversation
-        ? buildScheduledWakeMessage(renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick))
+        ? buildScheduledWakeMessage(renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick), {
+            mechanicalDelivery: hasTrustedWake,
+          })
         : renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
       source: 'scheduled-job',
       scheduledCourseContext,

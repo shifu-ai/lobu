@@ -101,11 +101,17 @@ describe("resolveWakeThreadId", () => {
 });
 
 describe("buildScheduledWakeMessage", () => {
-  test("prefixes the machine marker without delegating delivery to an agent tool", () => {
+  test("keeps the legacy send_daily_digest instruction for ordinary wakes", () => {
     const msg = buildScheduledWakeMessage("提醒使用者該喝水了");
     expect(msg.startsWith("[排程任務自動觸發] 提醒使用者該喝水了")).toBe(true);
+    expect(msg).toContain("send_daily_digest");
+    expect(msg).toContain("LINE");
+  });
+
+  test("omits agent-driven delivery only for mechanically delivered course wakes", () => {
+    const msg = buildScheduledWakeMessage("準備課程提醒", { mechanicalDelivery: true });
     expect(msg).not.toContain("send_daily_digest");
-    expect(msg).not.toContain("推送");
+    expect(msg).not.toContain("推送到他的 LINE");
   });
 
   test("does not double-prefix an already-marked prompt", () => {
