@@ -3,6 +3,7 @@
 // Shared exports for @lobu/core consumers (gateway, worker, external tools)
 
 export * from "./agent-policy";
+export * from "./automation-confirmation-context";
 // Shared credential-store primitives (CLI + embedded server share one impl)
 export * from "./credentials";
 // Agent store interface (unified storage abstraction)

@@ -1,4 +1,8 @@
-import { getCustomToolDescription, type McpToolDef } from "@lobu/core";
+import {
+  type AutomationConfirmationContext,
+  getCustomToolDescription,
+  type McpToolDef,
+} from "@lobu/core";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 import type { Static } from "@sinclair/typebox";
@@ -41,6 +45,27 @@ import {
 } from "./tool-catalog-dispatcher";
 
 type ToolResult = AgentToolResult<Record<string, unknown>>;
+
+function exactSchemaFor<TShared>() {
+  return <TSchemaType extends TSchema>(
+    schema: TSchemaType &
+      ([Static<TSchemaType>] extends [TShared] ? unknown : never) &
+      ([TShared] extends [Static<TSchemaType>] ? unknown : never)
+  ): TSchemaType => schema;
+}
+
+const automationConfirmationContextSchema =
+  exactSchemaFor<AutomationConfirmationContext>()(
+    Type.Object(
+      {
+        kind: Type.Literal("automation_create"),
+        planId: Type.String({ pattern: "\\S" }),
+        planVersion: Type.Integer({ minimum: 1 }),
+        contentHash: Type.String({ pattern: "\\S" }),
+      },
+      { additionalProperties: false }
+    )
+  );
 
 function safeObjectKeys(value: unknown): string[] {
   return value && typeof value === "object" && !Array.isArray(value)
@@ -524,6 +549,7 @@ export function createOpenClawCustomTools(params: {
               "Exactly three recovery options. Exactly one must be recommended.",
           }
         ),
+        confirmationContext: Type.Optional(automationConfirmationContextSchema),
       }),
       run: (args) =>
         requestHumanDecision(gw, args, {
