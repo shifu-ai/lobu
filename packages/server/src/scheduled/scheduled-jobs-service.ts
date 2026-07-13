@@ -105,7 +105,10 @@ export async function upsertScheduledJobByExternalKey(
 		const newWake = trustedWakeIdentity(params.actionArgs);
 		const changed =
 			oldWake.eventVersion !== newWake.eventVersion ||
-			oldWake.scheduledFor !== newWake.scheduledFor;
+			oldWake.scheduledFor !== newWake.scheduledFor ||
+			oldWake.payloadIdentity !== newWake.payloadIdentity ||
+			existing.created_by_user !== params.createdByUser ||
+			existing.created_by_agent !== (params.createdByAgent ?? null);
 		if (!changed || params.runAt.getTime() <= Date.now()) return existing;
 
 		const rows = (await tx`
@@ -166,6 +169,7 @@ export async function cancelTrustedCourseWake(
 function trustedWakeIdentity(actionArgs: Record<string, unknown>): {
 	eventVersion: string | null;
 	scheduledFor: string | null;
+	payloadIdentity: string;
 } {
 	const wake = asRecord(actionArgs.trustedCourseWake);
 	const eventRef = asRecord(wake?.calendarEventRef);
@@ -174,7 +178,20 @@ function trustedWakeIdentity(actionArgs: Record<string, unknown>): {
 			typeof eventRef?.eventVersion === "string" ? eventRef.eventVersion : null,
 		scheduledFor:
 			typeof wake?.scheduledFor === "string" ? wake.scheduledFor : null,
+		payloadIdentity: canonicalJson(wake),
 	};
+}
+
+function canonicalJson(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+	if (value && typeof value === "object") {
+		const record = value as Record<string, unknown>;
+		return `{${Object.keys(record)
+			.sort()
+			.map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+			.join(",")}}`;
+	}
+	return JSON.stringify(value) ?? "null";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

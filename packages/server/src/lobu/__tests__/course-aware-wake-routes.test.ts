@@ -435,4 +435,102 @@ describe("course-aware wake routes", () => {
 		}>`SELECT paused FROM scheduled_jobs WHERE id = ${ordinaryId}`;
 		expect(row?.paused).toBe(false);
 	});
+
+	test("rearms the same row for a same-version personal-agent rotation", async () => {
+		const nextAgentId = "shifu-u-pm-1-next";
+		await seedAgentRow(nextAgentId, {
+			organizationId: ORGANIZATION_ID,
+			ownerPlatform: "toolbox",
+			ownerUserId: OWNER_USER_ID,
+		});
+		const app = buildApp();
+		const original = requestBody();
+		const created = await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(original),
+		});
+		const { engineRef } = (await created.json()) as { engineRef: string };
+		await app.request(`/api/internal/course-aware-wakes/${engineRef}`, {
+			method: "DELETE",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				organizationId: ORGANIZATION_ID,
+				externalKey: original.externalKey,
+				ownerUserId: OWNER_USER_ID,
+				agentId: AGENT_ID,
+			}),
+		});
+
+		const rotated = requestBody();
+		rotated.agentId = nextAgentId;
+		rotated.payload.trustedCourseScope.agentId = nextAgentId;
+		const response = await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(rotated),
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ engineRef });
+		const [row] = await getDb()<{
+			paused: boolean;
+			created_by_agent: string;
+			schedule_revision: number;
+			action_args: {
+				trustedCourseWake: { trustedCourseScope: { agentId: string } };
+			};
+		}>`SELECT paused, created_by_agent, schedule_revision, action_args FROM scheduled_jobs WHERE id = ${engineRef}`;
+		expect(row).toMatchObject({
+			paused: false,
+			created_by_agent: nextAgentId,
+			schedule_revision: 2,
+		});
+		expect(row?.action_args.trustedCourseWake.trustedCourseScope.agentId).toBe(
+			nextAgentId,
+		);
+	});
+
+	test("rearms the same row for a same-version trusted course change", async () => {
+		const app = buildApp();
+		const original = requestBody();
+		const created = await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(original),
+		});
+		const { engineRef } = (await created.json()) as { engineRef: string };
+		await app.request(`/api/internal/course-aware-wakes/${engineRef}`, {
+			method: "DELETE",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				organizationId: ORGANIZATION_ID,
+				externalKey: original.externalKey,
+				ownerUserId: OWNER_USER_ID,
+				agentId: AGENT_ID,
+			}),
+		});
+
+		const changed = requestBody();
+		changed.payload.trustedCourseScope.courseEntityId = "course:pm-1:course-b";
+		changed.payload.trustedCourseScope.courseKey = "course-b";
+		changed.payload.trustedCourseScope.courseDisplayName = "課程 B";
+		const response = await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(changed),
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ engineRef });
+		const [row] = await getDb()<{
+			paused: boolean;
+			schedule_revision: number;
+			action_args: {
+				trustedCourseWake: { trustedCourseScope: { courseEntityId: string } };
+			};
+		}>`SELECT paused, schedule_revision, action_args FROM scheduled_jobs WHERE id = ${engineRef}`;
+		expect(row).toMatchObject({ paused: false, schedule_revision: 2 });
+		expect(
+			row?.action_args.trustedCourseWake.trustedCourseScope.courseEntityId,
+		).toBe("course:pm-1:course-b");
+	});
 });
