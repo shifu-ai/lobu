@@ -43,7 +43,60 @@ export type DateGuardInput = {
   userMessage: string;
   finalText: string;
   now: Date;
+  trustedTemporalCandidates?: string[];
 };
+
+const TEMPORAL_KEY_RE =
+  /^(?:date|time|start(?:date|time|at)?|scheduled(?:date|time|at)?|occurs(?:at)?|timestamp)$/i;
+const STRICT_ISO_DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/;
+const STRICT_ISO_DATETIME_RE =
+  /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+const MAX_TEMPORAL_TRAVERSAL_DEPTH = 5;
+const MAX_TEMPORAL_VISITED_VALUES = 200;
+
+function isStrictIsoTemporalString(value: string): boolean {
+  const match =
+    STRICT_ISO_DATE_RE.exec(value) ?? STRICT_ISO_DATETIME_RE.exec(value);
+  if (!match) return false;
+  if (!validUtcDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
+    return false;
+  }
+  return STRICT_ISO_DATE_RE.test(value) || Number.isFinite(Date.parse(value));
+}
+
+export function extractTrustedTemporalCandidates(value: unknown): string[] {
+  const candidates = new Set<string>();
+  const seen = new WeakSet<object>();
+  let visited = 0;
+
+  const visit = (current: unknown, depth: number, temporalValue: boolean) => {
+    if (visited >= MAX_TEMPORAL_VISITED_VALUES) return;
+    visited += 1;
+    if (depth > MAX_TEMPORAL_TRAVERSAL_DEPTH) return;
+
+    if (typeof current === "string") {
+      if (temporalValue && isStrictIsoTemporalString(current)) {
+        candidates.add(current);
+      }
+      return;
+    }
+    if (current === null || typeof current !== "object") return;
+    if (seen.has(current)) return;
+    seen.add(current);
+
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, depth + 1, temporalValue);
+      return;
+    }
+
+    for (const [key, child] of Object.entries(current)) {
+      visit(child, depth + 1, TEMPORAL_KEY_RE.test(key));
+    }
+  };
+
+  visit(value, 0, false);
+  return Array.from(candidates);
+}
 
 const CHINESE_DATE_SENSITIVE_RE =
   /(?:今天|昨天|明天|上[週周]|本[週周]|這[週周]|这[周週]|下[週周]|(?:星期|週|周)[幾几日天一二三四五六]|(?:上一場|下一場|最近一場))/;
@@ -134,9 +187,197 @@ function validUtcDate(year: number, month: number, day: number): Date | null {
   return date;
 }
 
+const NEXT_OCCURRENCE_RE =
+  /(?:下一場|下次|\bnext\s+(?:event|session|occurrence)\b)/i;
+const FINAL_SHORT_DATE_CLAIM_RE =
+  /(?<![\d/])(\d{1,2})\/(\d{1,2})(?:([\s]*[(（])((?:星期)?[日天一二三四五六])([)）]))?/;
+const FINAL_ISO_DATE_CLAIM_RE =
+  /(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:([\s]*[(（])(星期[日天一二三四五六])([)）]))?/;
+const NEXT_OCCURRENCE_BLOCK_TEXT =
+  "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。";
+
+function taipeiStartOfDay(parts: CalendarDate): number {
+  return Date.UTC(parts.year, parts.month - 1, parts.day) - 8 * 60 * 60 * 1000;
+}
+
+function taipeiCalendarDate(date: Date): CalendarDate {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Taipei",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const read = (type: string) =>
+    Number(parts.find((part) => part.type === type)?.value);
+  return { year: read("year"), month: read("month"), day: read("day") };
+}
+
+function parseTrustedTemporalCandidate(
+  candidate: string
+): { epoch: number; date: CalendarDate } | null {
+  if (!isStrictIsoTemporalString(candidate)) return null;
+  const dateOnly = STRICT_ISO_DATE_RE.exec(candidate);
+  if (dateOnly) {
+    const date = {
+      year: Number(dateOnly[1]),
+      month: Number(dateOnly[2]),
+      day: Number(dateOnly[3]),
+    };
+    return { epoch: taipeiStartOfDay(date), date };
+  }
+
+  const epoch = Date.parse(candidate);
+  if (!Number.isFinite(epoch)) return null;
+  return { epoch, date: taipeiCalendarDate(new Date(epoch)) };
+}
+
+const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+function explicitRecurrenceWeekday(userMessage: string): number | null {
+  const chinese =
+    /(?:每週|每星期)\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/.exec(
+      userMessage
+    );
+  if (chinese) return WEEKDAY_INDEX_ZH[`星期${chinese[1]}`] ?? null;
+
+  const english =
+    /\bweekly\b[^.\n\r]{0,24}\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b|\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b[^.\n\r]{0,24}\bweekly\b/i.exec(
+      userMessage
+    );
+  const weekday = english?.[1] ?? english?.[2];
+  return weekday
+    ? (ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()] ?? null)
+    : null;
+}
+
+function resolveNextRecurrence(
+  weekday: number,
+  now: Date
+): CalendarDate | null {
+  for (const reference of ["current", "next"] as const) {
+    const candidate = resolveRelativeWeekday(reference, weekday, now);
+    if (taipeiStartOfDay(candidate) >= now.getTime()) return candidate;
+  }
+  return null;
+}
+
+function correctNextOccurrenceClaim(
+  text: string,
+  expected: CalendarDate,
+  corrections: DateCorrection[]
+): string {
+  const occurrence = NEXT_OCCURRENCE_RE.exec(text);
+  let searchStart = occurrence ? occurrence.index + occurrence[0].length : 0;
+  let searchText = text.slice(searchStart);
+  let shortMatch = FINAL_SHORT_DATE_CLAIM_RE.exec(searchText);
+  let isoMatch = FINAL_ISO_DATE_CLAIM_RE.exec(searchText);
+  if (occurrence && !shortMatch && !isoMatch) {
+    searchStart = 0;
+    searchText = text;
+    shortMatch = FINAL_SHORT_DATE_CLAIM_RE.exec(searchText);
+    isoMatch = FINAL_ISO_DATE_CLAIM_RE.exec(searchText);
+  }
+  const useShortMatch =
+    shortMatch !== null &&
+    (isoMatch === null || shortMatch.index <= isoMatch.index);
+
+  if (useShortMatch && shortMatch) {
+    const original = shortMatch[0];
+    const weekday = shortMatch[4];
+    const replacementWeekday = weekday
+      ? weekdayWithStyle(weekday, weekdayFor(expected))
+      : undefined;
+    const replacement = `${shortDate(
+      expected,
+      shortMatch[1]!,
+      shortMatch[2]!
+    )}${
+      weekday
+        ? `${shortMatch[3] ?? ""}${replacementWeekday}${shortMatch[5] ?? ""}`
+        : ""
+    }`;
+    if (original !== replacement) {
+      corrections.push({
+        reason: "relative_date_mismatch",
+        original,
+        replacement,
+      });
+      const index = searchStart + shortMatch.index;
+      return `${text.slice(0, index)}${replacement}${text.slice(
+        index + original.length
+      )}`;
+    }
+    return text;
+  }
+
+  if (!isoMatch) return text;
+  const original = isoMatch[0];
+  const weekday = isoMatch[5];
+  const replacementWeekday = weekday
+    ? weekdayWithStyle(weekday, weekdayFor(expected))
+    : undefined;
+  const replacement = `${expected.year}-${String(expected.month).padStart(
+    2,
+    "0"
+  )}-${String(expected.day).padStart(2, "0")}${
+    weekday
+      ? `${isoMatch[4] ?? ""}${replacementWeekday}${isoMatch[6] ?? ""}`
+      : ""
+  }`;
+  if (original !== replacement) {
+    corrections.push({
+      reason: "relative_date_mismatch",
+      original,
+      replacement,
+    });
+    const index = searchStart + isoMatch.index;
+    return `${text.slice(0, index)}${replacement}${text.slice(
+      index + original.length
+    )}`;
+  }
+  return text;
+}
+
 export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const corrections: DateCorrection[] = [];
-  let text = input.finalText.replace(
+  let text = input.finalText;
+  const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
+  const hasFinalDateClaim =
+    FINAL_SHORT_DATE_CLAIM_RE.test(text) || FINAL_ISO_DATE_CLAIM_RE.test(text);
+  if (isNextOccurrence && hasFinalDateClaim) {
+    const recurrenceWeekday = explicitRecurrenceWeekday(input.userMessage);
+    const recurrenceDate =
+      recurrenceWeekday === null
+        ? null
+        : resolveNextRecurrence(recurrenceWeekday, input.now);
+    const trustedCandidate = (input.trustedTemporalCandidates ?? [])
+      .map(parseTrustedTemporalCandidate)
+      .filter(
+        (candidate): candidate is { epoch: number; date: CalendarDate } =>
+          candidate !== null && candidate.epoch >= input.now.getTime()
+      )
+      .sort((left, right) => left.epoch - right.epoch)[0];
+    const authoritativeDate = recurrenceDate ?? trustedCandidate?.date;
+
+    if (!authoritativeDate) {
+      return {
+        status: "blocked",
+        text: NEXT_OCCURRENCE_BLOCK_TEXT,
+        reason: "next_occurrence_without_temporal_evidence",
+      };
+    }
+    text = correctNextOccurrenceClaim(text, authoritativeDate, corrections);
+  }
+
+  text = text.replace(
     RELATIVE_WEEK_DATE_RE,
     (
       match,

@@ -5,6 +5,7 @@ import {
   resolveRelativeWeekday,
 } from "../openclaw/date-context";
 import {
+  extractTrustedTemporalCandidates,
   guardDateOutput,
   isDateSensitiveTurn,
 } from "../openclaw/date-output-guard";
@@ -98,6 +99,105 @@ describe("relative date resolution", () => {
 });
 
 describe("guardDateOutput", () => {
+  test("blocks an unsupported next-occurrence date claim", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "下一場銷講是什麼時候？",
+        finalText: "下一場是 7/16（四）。",
+        now: NOW,
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
+  });
+
+  test("uses the earliest future trusted candidate for a next occurrence", () => {
+    const result = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText: "下一場是 7/22（三）。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-22", "2026-07-16", "2026-07-12"],
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("下一場是 7/16（四）。");
+  });
+
+  test("preserves padded short-date style when correcting a next occurrence", () => {
+    const result = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText: "下一場是 07/22（星期三）。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+
+    expect(result.text).toBe("下一場是 07/16（星期四）。");
+  });
+
+  test("corrects the date attached to the next occurrence, not an earlier date", () => {
+    const result = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText: "今天是 7/13（一）；下一場是 7/22（三）。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("今天是 7/13（一）；下一場是 7/16（四）。");
+  });
+
+  test("corrects a next-occurrence date written before its label", () => {
+    const result = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText: "7/22（三）是下一場。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("7/16（四）是下一場。");
+  });
+
+  test("compares timestamp candidates by instant and renders the Taipei date", () => {
+    const result = guardDateOutput({
+      userMessage: "When is the next session?",
+      finalText: "The next session is 7/22 (星期三).",
+      now: NOW,
+      trustedTemporalCandidates: [
+        "2026-07-16T01:00:00Z",
+        "2026-07-15T16:30:00Z",
+        "2026-07-13",
+      ],
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("The next session is 7/16 (星期四).");
+  });
+
+  test("does not block a next-occurrence response that makes no date claim", () => {
+    const finalText = "我先查詢實際排程再回覆你。";
+    expect(
+      guardDateOutput({
+        userMessage: "下一場銷講是什麼時候？",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({ status: "unchanged", text: finalText });
+  });
+
+  test("resolves an explicit current-turn weekly recurrence", () => {
+    const result = guardDateOutput({
+      userMessage: "銷講每週三舉行，下一場是哪一天？",
+      finalText: "下一場是 7/22（三）。",
+      now: NOW,
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("下一場是 7/15（三）。");
+  });
+
   test("corrects stale dates attached to relative week claims", () => {
     const cases = [
       ["這週三是 7/9（三）", "這週三是 7/15（三）"],
@@ -358,5 +458,50 @@ describe("guardDateOutput", () => {
     if (result.status === "corrected") {
       expect(result.corrections).toHaveLength(2);
     }
+  });
+});
+
+describe("extractTrustedTemporalCandidates", () => {
+  test("extracts only strict ISO strings under temporal keys and deduplicates", () => {
+    const result = extractTrustedTemporalCandidates({
+      events: [
+        { startDate: "2026-07-16", title: "2026-07-15" },
+        { scheduledAt: "2026-07-22T09:00:00+08:00" },
+        { timestamp: "2026-07-22T01:00:00Z" },
+        { date: "2026-02-30" },
+        { occursAt: "2026-07-16" },
+        { start_date: "2026-07-17" },
+      ],
+    });
+
+    expect(result).toEqual([
+      "2026-07-16",
+      "2026-07-22T09:00:00+08:00",
+      "2026-07-22T01:00:00Z",
+    ]);
+  });
+
+  test("bounds traversal by depth and number of visited values", () => {
+    const tooDeep = {
+      one: { two: { three: { four: { five: { date: "2026-07-16" } } } } },
+    };
+    const many = Array.from({ length: 250 }, (_, index) => ({
+      date: `2026-08-${String((index % 28) + 1).padStart(2, "0")}`,
+    }));
+
+    expect(extractTrustedTemporalCandidates(tooDeep)).toEqual([]);
+    expect(extractTrustedTemporalCandidates(many).length).toBeLessThanOrEqual(
+      100
+    );
+  });
+
+  test("handles cyclic and invalid values without retaining them", () => {
+    const cyclic: Record<string, unknown> = {
+      date: "not-an-iso-date",
+      time: "2026-07-16T09:00:00",
+    };
+    cyclic.self = cyclic;
+
+    expect(extractTrustedTemporalCandidates(cyclic)).toEqual([]);
   });
 });

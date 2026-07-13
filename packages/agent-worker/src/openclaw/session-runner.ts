@@ -101,7 +101,11 @@ import {
   getRequiredBattleReportMutationTools,
   getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
-import { guardDateOutput, isDateSensitiveTurn } from "./date-output-guard";
+import {
+  extractTrustedTemporalCandidates,
+  guardDateOutput,
+  isDateSensitiveTurn,
+} from "./date-output-guard";
 import { buildCurrentDateContext } from "./date-context";
 export { buildCurrentDateContext } from "./date-context";
 const logger = createLogger("worker");
@@ -1889,6 +1893,7 @@ Use it when the user references past discussions or you need context.`);
     let turnNonce = 0;
     let suppressProgressOutput = false;
     const currentTurnExecutedTools = new Set<string>();
+    const currentTurnTrustedTemporalCandidates = new Set<string>();
     let bufferCurrentTurnOutputForFinalGuards = false;
 
     // Wire events through progress processor with delta batching
@@ -1937,6 +1942,7 @@ Use it when the user references past discussions or you need context.`);
       // to this turn only.
       turnController.startTurn();
       currentTurnExecutedTools.clear();
+      currentTurnTrustedTemporalCandidates.clear();
       bufferCurrentTurnOutputForFinalGuards =
         options?.silent === true
           ? false
@@ -2073,6 +2079,13 @@ Use it when the user references past discussions or you need context.`);
           isError: event.isError,
         })) {
           currentTurnExecutedTools.add(toolName);
+        }
+        if (!event.isError) {
+          for (const candidate of extractTrustedTemporalCandidates(
+            event.result
+          )) {
+            currentTurnTrustedTemporalCandidates.add(candidate);
+          }
         }
         const executionEventPromise = executionReporter.record({
           type: event.isError ? "tool.failed" : "tool.completed",
@@ -2402,6 +2415,9 @@ Use it when the user references past discussions or you need context.`);
       userMessage: userPrompt,
       finalText,
       now: turnNow,
+      trustedTemporalCandidates: Array.from(
+        currentTurnTrustedTemporalCandidates
+      ),
     });
     if (dateGuardDecision.status === "corrected") {
       logger.warn(
