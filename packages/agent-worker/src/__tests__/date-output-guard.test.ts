@@ -299,12 +299,14 @@ describe("guardDateOutput", () => {
     for (const userMessage of [
       "我不想查下一場銷講",
       "我不想查一下下一場銷講",
+      "我不想參加下一場銷講",
       "不用查下一場銷講",
       "不要下一場銷講",
       "我不要下一場銷講",
       "不用下一場銷講",
       "我不想要下一場銷講",
       "暫時不需要下一場銷講",
+      "暫時不需要知道下一場銷講",
       "先不要查銷講的下一場",
       "先不要看一下銷講的下一場",
       "暫時忽略銷講的下一場",
@@ -332,6 +334,11 @@ describe("guardDateOutput", () => {
       ],
       [
         "我不想查一下下一場銷講，幫我查下一場內部會議",
+        "下一場內部會議是 7/22（三）。",
+        "下一場內部會議是 7/16（四）。",
+      ],
+      [
+        "我不想參加下一場銷講，幫我查下一場內部會議",
         "下一場內部會議是 7/22（三）。",
         "下一場內部會議是 7/16（四）。",
       ],
@@ -389,6 +396,9 @@ describe("guardDateOutput", () => {
       "I don't want to find the next occurrence for Sales.",
       "I don't need to query the next event for Sales.",
       "I don’t want to get the next session for Sales.",
+      "I don't want to attend the next session for Sales.",
+      "I do not need to join the next event for Sales.",
+      "I don't want to know the next occurrence for Sales.",
       "Ignore the next event for Sales.",
       "Skip the next session for Sales.",
     ]) {
@@ -405,7 +415,7 @@ describe("guardDateOutput", () => {
     expect(
       guardDateOutput({
         userMessage:
-          "I don't want to check the next session for Sales; check the next session for Internal Meeting.",
+          "I don't want to attend the next session for Sales; check the next session for Internal Meeting.",
         finalText:
           "The next session Internal Meeting is 7/22 (星期三).",
         now: NOW,
