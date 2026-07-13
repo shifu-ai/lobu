@@ -318,4 +318,121 @@ describe("course-aware wake routes", () => {
 			error: "course_wake_upsert_failed",
 		});
 	});
+
+	test("cancels a trusted wake through the narrow engine-ref route and is idempotent", async () => {
+		const app = buildApp();
+		const created = await app.request("/api/internal/course-aware-wakes", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(requestBody()),
+		});
+		const { engineRef } = (await created.json()) as { engineRef: string };
+		const cancellation = {
+			organizationId: ORGANIZATION_ID,
+			externalKey: requestBody().externalKey,
+			ownerUserId: OWNER_USER_ID,
+			agentId: AGENT_ID,
+		};
+
+		for (const expectedAlreadyCancelled of [false, true]) {
+			const response = await app.request(
+				`/api/internal/course-aware-wakes/${encodeURIComponent(engineRef)}`,
+				{
+					method: "DELETE",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(cancellation),
+				},
+			);
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				cancelled: true,
+				alreadyCancelled: expectedAlreadyCancelled,
+			});
+		}
+
+		const [row] = await getDb()<{ paused: boolean }>`
+			SELECT paused FROM scheduled_jobs WHERE id = ${engineRef}
+		`;
+		expect(row?.paused).toBe(true);
+	});
+
+	test("requires mcp:admin and cannot cancel a trusted wake across owners", async () => {
+		const created = await buildApp().request(
+			"/api/internal/course-aware-wakes",
+			{
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(requestBody()),
+			},
+		);
+		const { engineRef } = (await created.json()) as { engineRef: string };
+		const body = {
+			organizationId: ORGANIZATION_ID,
+			externalKey: requestBody().externalKey,
+			ownerUserId: OWNER_USER_ID,
+			agentId: AGENT_ID,
+		};
+		const denied = await buildApp(["mcp:write"]).request(
+			`/api/internal/course-aware-wakes/${engineRef}`,
+			{
+				method: "DELETE",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			},
+		);
+		expect(denied.status).toBe(403);
+
+		const crossOwner = await buildApp().request(
+			`/api/internal/course-aware-wakes/${engineRef}`,
+			{
+				method: "DELETE",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					...body,
+					ownerUserId: "pm-2",
+					agentId: "shifu-u-pm-2",
+				}),
+			},
+		);
+		expect(crossOwner.status).toBe(404);
+		const [row] = await getDb()<{
+			paused: boolean;
+		}>`SELECT paused FROM scheduled_jobs WHERE id = ${engineRef}`;
+		expect(row?.paused).toBe(false);
+	});
+
+	test("does not cancel an ordinary schedule even when ids and provenance strings are supplied", async () => {
+		const ordinaryId = "00000000-0000-4000-8000-000000000123";
+		const externalKey =
+			"google_calendar:acct-1:ordinary:opp_coach_event_prompt";
+		const sql = getDb();
+		await sql`
+			INSERT INTO scheduled_jobs (
+				id, external_key, organization_id, action_type, action_args, next_run_at,
+				description, created_by_user, created_by_agent
+			) VALUES (
+				${ordinaryId}, ${externalKey}, ${ORGANIZATION_ID}, 'wake_agent',
+				${sql.json({ agent_id: AGENT_ID, prompt: "ordinary reminder" })},
+				now() + interval '1 day', 'ordinary', ${OWNER_USER_ID}, ${AGENT_ID}
+			)
+		`;
+		const response = await buildApp().request(
+			`/api/internal/course-aware-wakes/${ordinaryId}`,
+			{
+				method: "DELETE",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					organizationId: ORGANIZATION_ID,
+					externalKey,
+					ownerUserId: OWNER_USER_ID,
+					agentId: AGENT_ID,
+				}),
+			},
+		);
+		expect(response.status).toBe(404);
+		const [row] = await getDb()<{
+			paused: boolean;
+		}>`SELECT paused FROM scheduled_jobs WHERE id = ${ordinaryId}`;
+		expect(row?.paused).toBe(false);
+	});
 });

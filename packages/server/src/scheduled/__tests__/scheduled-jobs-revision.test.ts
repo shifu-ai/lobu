@@ -6,6 +6,7 @@ import {
 	seedAgentRow,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import {
+	cancelTrustedCourseWake,
 	dispatchScheduledJobCandidate,
 	upsertScheduledJobByExternalKey,
 } from "../scheduled-jobs-service.js";
@@ -121,5 +122,57 @@ describe("scheduled job revision guard", () => {
 		}>`SELECT paused, last_fired_at FROM scheduled_jobs WHERE id = ${candidate.id}`;
 		expect(completed?.paused).toBe(true);
 		expect(completed?.last_fired_at).not.toBeNull();
+	});
+
+	test("narrow cancellation pauses only the exact trusted owner wake and is idempotent", async () => {
+		const externalKey = "google_calendar:acct:cancel:opp_coach_event_prompt";
+		const scheduledFor = "2026-07-14T09:00:00.000Z";
+		const job = await upsertScheduledJobByExternalKey({
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: {
+				agent_id: AGENT_ID,
+				reason: "trusted-course-calendar-wake",
+				trustedCourseWake: {
+					source: "calendar_scheduled_wake",
+					trustedCourseScope: { ownerUserId: OWNER_USER_ID, agentId: AGENT_ID },
+					calendarEventRef: { eventVersion: "v1" },
+					scheduledFor,
+				},
+			},
+			description: "trusted",
+			runAt: new Date(scheduledFor),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+		});
+
+		expect(
+			await cancelTrustedCourseWake({
+				engineRef: job.id,
+				externalKey,
+				organizationId: ORGANIZATION_ID,
+				ownerUserId: "someone-else",
+				agentId: AGENT_ID,
+			}),
+		).toEqual({ found: false, alreadyCancelled: false });
+		expect(
+			await cancelTrustedCourseWake({
+				engineRef: job.id,
+				externalKey,
+				organizationId: ORGANIZATION_ID,
+				ownerUserId: OWNER_USER_ID,
+				agentId: AGENT_ID,
+			}),
+		).toEqual({ found: true, alreadyCancelled: false });
+		expect(
+			await cancelTrustedCourseWake({
+				engineRef: job.id,
+				externalKey,
+				organizationId: ORGANIZATION_ID,
+				ownerUserId: OWNER_USER_ID,
+				agentId: AGENT_ID,
+			}),
+		).toEqual({ found: true, alreadyCancelled: true });
 	});
 });
