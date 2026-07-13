@@ -195,6 +195,93 @@ const FINAL_ISO_DATE_CLAIM_RE =
   /(?<!\d)(\d{4})-(\d{2})-(\d{2})(?:([\s]*[(（])(星期[日天一二三四五六])([)）]))?/;
 const NEXT_OCCURRENCE_BLOCK_TEXT =
   "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。";
+const NEXT_OCCURRENCE_ASSOCIATION_LIMIT = 120;
+const SENTENCE_OR_LINE_BOUNDARY_RE = /[。\n\r！？；;.!?]/;
+
+type LocatedDateClaim = {
+  kind: "short" | "iso";
+  match: RegExpExecArray;
+  index: number;
+};
+
+function firstDateClaimIn(
+  text: string,
+  offset: number
+): LocatedDateClaim | null {
+  const shortMatch = FINAL_SHORT_DATE_CLAIM_RE.exec(text);
+  const isoMatch = FINAL_ISO_DATE_CLAIM_RE.exec(text);
+  if (!shortMatch && !isoMatch) return null;
+  if (shortMatch && (!isoMatch || shortMatch.index <= isoMatch.index)) {
+    return {
+      kind: "short",
+      match: shortMatch,
+      index: offset + shortMatch.index,
+    };
+  }
+  return isoMatch
+    ? { kind: "iso", match: isoMatch, index: offset + isoMatch.index }
+    : null;
+}
+
+function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
+  const collect = (regex: RegExp, kind: LocatedDateClaim["kind"]) =>
+    Array.from(text.matchAll(new RegExp(regex.source, "g")), (match) => ({
+      kind,
+      match,
+      index: offset + (match.index ?? 0),
+    }));
+  return [
+    ...collect(FINAL_SHORT_DATE_CLAIM_RE, "short"),
+    ...collect(FINAL_ISO_DATE_CLAIM_RE, "iso"),
+  ].sort((left, right) => left.index - right.index);
+}
+
+function findNextOccurrenceDateClaim(text: string): LocatedDateClaim | null {
+  const occurrenceRegex = new RegExp(NEXT_OCCURRENCE_RE.source, "gi");
+  for (const occurrence of text.matchAll(occurrenceRegex)) {
+    const occurrenceIndex = occurrence.index ?? 0;
+    const occurrenceEnd = occurrenceIndex + occurrence[0].length;
+    const forwardRemainder = text.slice(
+      occurrenceEnd,
+      occurrenceEnd + NEXT_OCCURRENCE_ASSOCIATION_LIMIT
+    );
+    const forwardBoundary = forwardRemainder.search(
+      SENTENCE_OR_LINE_BOUNDARY_RE
+    );
+    const forwardScope =
+      forwardBoundary === -1
+        ? forwardRemainder
+        : forwardRemainder.slice(0, forwardBoundary);
+    const forwardClaim = firstDateClaimIn(forwardScope, occurrenceEnd);
+    if (forwardClaim) return forwardClaim;
+
+    let backwardStart = Math.max(
+      0,
+      occurrenceIndex - NEXT_OCCURRENCE_ASSOCIATION_LIMIT
+    );
+    const backwardWindow = text.slice(backwardStart, occurrenceIndex);
+    for (let index = backwardWindow.length - 1; index >= 0; index -= 1) {
+      if (SENTENCE_OR_LINE_BOUNDARY_RE.test(backwardWindow[index] ?? "")) {
+        backwardStart += index + 1;
+        break;
+      }
+    }
+    const backwardScope = text.slice(backwardStart, occurrenceIndex);
+    const backwardClaims = allDateClaimsIn(backwardScope, backwardStart);
+    for (let index = backwardClaims.length - 1; index >= 0; index -= 1) {
+      const claim = backwardClaims[index];
+      if (!claim) continue;
+      const bridge = text.slice(
+        claim.index + claim.match[0].length,
+        occurrenceIndex
+      );
+      if (/^\s*(?:(?:是|為|就是)|is\s+(?:the\s+)?)?\s*$/i.test(bridge)) {
+        return claim;
+      }
+    }
+  }
+  return null;
+}
 
 function taipeiStartOfDay(parts: CalendarDate): number {
   return Date.UTC(parts.year, parts.month - 1, parts.day) - 8 * 60 * 60 * 1000;
@@ -272,24 +359,11 @@ function resolveNextRecurrence(
 function correctNextOccurrenceClaim(
   text: string,
   expected: CalendarDate,
-  corrections: DateCorrection[]
+  corrections: DateCorrection[],
+  claim: LocatedDateClaim
 ): string {
-  const occurrence = NEXT_OCCURRENCE_RE.exec(text);
-  let searchStart = occurrence ? occurrence.index + occurrence[0].length : 0;
-  let searchText = text.slice(searchStart);
-  let shortMatch = FINAL_SHORT_DATE_CLAIM_RE.exec(searchText);
-  let isoMatch = FINAL_ISO_DATE_CLAIM_RE.exec(searchText);
-  if (occurrence && !shortMatch && !isoMatch) {
-    searchStart = 0;
-    searchText = text;
-    shortMatch = FINAL_SHORT_DATE_CLAIM_RE.exec(searchText);
-    isoMatch = FINAL_ISO_DATE_CLAIM_RE.exec(searchText);
-  }
-  const useShortMatch =
-    shortMatch !== null &&
-    (isoMatch === null || shortMatch.index <= isoMatch.index);
-
-  if (useShortMatch && shortMatch) {
+  if (claim.kind === "short") {
+    const shortMatch = claim.match;
     const original = shortMatch[0];
     const weekday = shortMatch[4];
     const replacementWeekday = weekday
@@ -310,15 +384,14 @@ function correctNextOccurrenceClaim(
         original,
         replacement,
       });
-      const index = searchStart + shortMatch.index;
-      return `${text.slice(0, index)}${replacement}${text.slice(
-        index + original.length
+      return `${text.slice(0, claim.index)}${replacement}${text.slice(
+        claim.index + original.length
       )}`;
     }
     return text;
   }
 
-  if (!isoMatch) return text;
+  const isoMatch = claim.match;
   const original = isoMatch[0];
   const weekday = isoMatch[5];
   const replacementWeekday = weekday
@@ -338,9 +411,8 @@ function correctNextOccurrenceClaim(
       original,
       replacement,
     });
-    const index = searchStart + isoMatch.index;
-    return `${text.slice(0, index)}${replacement}${text.slice(
-      index + original.length
+    return `${text.slice(0, claim.index)}${replacement}${text.slice(
+      claim.index + original.length
     )}`;
   }
   return text;
@@ -350,9 +422,10 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
-  const hasFinalDateClaim =
-    FINAL_SHORT_DATE_CLAIM_RE.test(text) || FINAL_ISO_DATE_CLAIM_RE.test(text);
-  if (isNextOccurrence && hasFinalDateClaim) {
+  const nextOccurrenceDateClaim = isNextOccurrence
+    ? findNextOccurrenceDateClaim(text)
+    : null;
+  if (nextOccurrenceDateClaim) {
     const recurrenceWeekday = explicitRecurrenceWeekday(input.userMessage);
     const recurrenceDate =
       recurrenceWeekday === null
@@ -374,7 +447,12 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
         reason: "next_occurrence_without_temporal_evidence",
       };
     }
-    text = correctNextOccurrenceClaim(text, authoritativeDate, corrections);
+    text = correctNextOccurrenceClaim(
+      text,
+      authoritativeDate,
+      corrections,
+      nextOccurrenceDateClaim
+    );
   }
 
   text = text.replace(

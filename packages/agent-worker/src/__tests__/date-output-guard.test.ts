@@ -187,6 +187,32 @@ describe("guardDateOutput", () => {
     ).toEqual({ status: "unchanged", text: finalText });
   });
 
+  test("ignores an unrelated date before an unresolved next occurrence", () => {
+    const finalText = "今天是 7/13（一）；下一場尚未查到。";
+
+    for (const trustedTemporalCandidates of [undefined, ["2026-07-16"]]) {
+      expect(
+        guardDateOutput({
+          userMessage: "下一場銷講是什麼時候？",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates,
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("does not associate a next occurrence with a date across a line boundary", () => {
+    const finalText = "下一場尚未查到。\n參考日期是 7/22（三）。";
+    expect(
+      guardDateOutput({
+        userMessage: "下一場銷講是什麼時候？",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({ status: "unchanged", text: finalText });
+  });
+
   test("resolves an explicit current-turn weekly recurrence", () => {
     const result = guardDateOutput({
       userMessage: "銷講每週三舉行，下一場是哪一天？",
