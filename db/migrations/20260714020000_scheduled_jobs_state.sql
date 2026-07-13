@@ -18,6 +18,19 @@ CREATE INDEX idx_scheduled_jobs_due
 
 -- migrate:down
 
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM public.scheduled_jobs
+    WHERE state = 'staged'
+  ) THEN
+    RAISE EXCEPTION 'Cannot roll back scheduled job state while staged schedules exist.'
+      USING ERRCODE = '55000';
+  END IF;
+END
+$$;
+
 DROP INDEX IF EXISTS public.idx_scheduled_jobs_due;
 
 CREATE INDEX idx_scheduled_jobs_due

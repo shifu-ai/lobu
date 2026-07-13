@@ -6,6 +6,7 @@ import {
 	buildSalesBattleReportScheduledJobs,
 	createProvisioningRoutes,
 } from "../routes/provisioning/index.js";
+import { stageScheduledJobByExternalKey } from "../../scheduled/scheduled-jobs-service.js";
 import {
 	ensureDbForGatewayTests,
 	resetTestDatabase,
@@ -170,5 +171,37 @@ describe("sales battle report schedule provisioning", () => {
 			WHERE organization_id = ${ORG_ID}
 		`;
 		expect(count).toBe("2");
+	});
+
+	test("staged matching job returns an explicit conflict instead of existing success", async () => {
+		const body = { ...requestBody(), salesTalkWeekdays: [0] };
+		const [job] = buildSalesBattleReportScheduledJobs(body);
+		const staged = await stageScheduledJobByExternalKey({
+			...job,
+			externalKey: "toolbox:sales-battle-report:staged",
+		});
+		expect(staged.status).toBe("ok");
+
+		const res = await buildApp().request(
+			"/api/provisioning/sales-battle-report-schedules",
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			},
+		);
+
+		expect(res.status).toBe(409);
+		expect(await res.json()).toEqual({
+			error: "schedule_conflict",
+			error_description:
+				"A matching sales battle report schedule is staged and must be resolved before provisioning.",
+		});
+		const rows = await getDb()<Array<{ state: string }>>`
+			SELECT state FROM scheduled_jobs
+			WHERE organization_id = ${ORG_ID}
+			  AND action_args->>'toolboxScheduleId' = ${body.toolboxScheduleId}
+		`;
+		expect(rows.map((row) => row.state)).toEqual(["staged"]);
 	});
 });

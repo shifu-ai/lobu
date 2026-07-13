@@ -9,6 +9,8 @@ import type { Env } from "../../../index.js";
 
 const SALES_BATTLE_REPORT_REASON = "sales-battle-report-schedule";
 
+class StagedSalesBattleReportScheduleConflict extends Error {}
+
 export interface SalesBattleReportScheduleProvisioningBody {
 	organizationId: string;
 	createdByUser: string;
@@ -193,6 +195,11 @@ export async function ensureSalesBattleReportScheduledJobs(
 				job.actionArgs.salesTalkWeekday,
 			);
 			if (existing) {
+				if (existing.state === "staged") {
+					throw new StagedSalesBattleReportScheduleConflict(
+						"A matching sales battle report schedule is staged and must be resolved before provisioning.",
+					);
+				}
 				refs.push(existing.id);
 				continue;
 			}
@@ -247,7 +254,22 @@ export function createSalesBattleReportScheduleProvisioningRoutes(): Hono<{
 			return c.json({ error: "organizationId does not match authenticated org" }, 403);
 		}
 
-		const { refs, createdCount } = await ensureSalesBattleReportScheduledJobs(body);
+		let refs: string[];
+		let createdCount: number;
+		try {
+			({ refs, createdCount } = await ensureSalesBattleReportScheduledJobs(body));
+		} catch (error) {
+			if (error instanceof StagedSalesBattleReportScheduleConflict) {
+				return c.json(
+					{
+						error: "schedule_conflict",
+						error_description: error.message,
+					},
+					409,
+				);
+			}
+			throw error;
+		}
 		return c.json(
 			{ ok: true, scheduleRefs: refs },
 			createdCount > 0 ? 201 : 200,
