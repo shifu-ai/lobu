@@ -86,6 +86,19 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("does not treat ordinary words or quantities as relative weekday claims", () => {
+    for (const finalText of [
+      "上週日期是 7/9（四）",
+      "本週日程：7/16（四）",
+      "這週三場課，日期是 7/16（四）",
+      "大上週三 7/1（三）",
+    ]) {
+      expect(
+        guardDateOutput({ userMessage: finalText, finalText, now: NOW })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
   test("corrects stale dates attached to relative day claims", () => {
     const finalText = "今天是 7/9（三）";
     const result = guardDateOutput({
