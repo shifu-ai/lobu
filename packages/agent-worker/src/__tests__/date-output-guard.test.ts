@@ -563,6 +563,32 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("does not rewrite non-occurrence temporal roles with event evidence", () => {
+    for (const finalText of [
+      "下一場銷講報名截止在 7/22（三）。",
+      "下一場銷講早鳥截止在 7/22（三）。",
+      "下一場銷講繳費期限在 7/22（三）。",
+      "下一場銷講付款截止在 7/22（三）。",
+      "下一場銷講售票開始在 7/22（三）。",
+      "下一場銷講開賣日期是 7/22（三）。",
+      "The next event registration deadline is 7/22 (星期三).",
+      "The next event early bird deadline is 7/22 (星期三).",
+      "The next event payment due is 7/22 (星期三).",
+      "The next event ticket sales open is 7/22 (星期三).",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalEvidence: [
+            { candidate: "2026-07-16", label: "銷講" },
+          ],
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
   test("rejects negated affirmative scheduling predicates", () => {
     for (const finalText of [
       "下一場不辦在 7/22（三）。",

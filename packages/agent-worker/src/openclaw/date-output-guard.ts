@@ -366,10 +366,7 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
   ].sort((left, right) => left.index - right.index);
 }
 
-function isExplicitNextOccurrenceForwardBridge(
-  bridge: string,
-  suffix: string
-): boolean {
+function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
   const normalized = bridge.trim();
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
@@ -380,6 +377,15 @@ function isExplicitNextOccurrenceForwardBridge(
   if (hasReferenceSourceRangeOrUnresolvedMarker) {
     return false;
   }
+
+  const hasNonOccurrenceTemporalRole =
+    /(?:(?:報名|报名)\s*(?:截止|期限)|(?:早鳥|早鸟)\s*截止|(?:繳費|缴费|付款)\s*(?:期限|截止)|售票\s*(?:開始|开始)|(?:開賣|开卖)\s*日期)/u.test(
+      normalized
+    ) ||
+    /\b(?:registration\s+deadline|early\s+bird\s+deadline|payment\s+due|ticket\s+sales\s+open)\b/i.test(
+      normalized
+    );
+  if (hasNonOccurrenceTemporalRole) return false;
 
   const hasNegativeSchedulingPredicate =
     /(?:(?:不會|不会|未能|無法|无法|不能|尚未|沒有|没有|沒|没|未|不)\s*(?:(?:再|被|重新|另行|再次|被重新)\s*){0,2}[\p{L}\p{N}]{1,4}(?:在|於|于)|不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|不(?:辦|办|訂|订|安排)(?:在|於|于)?|未能(?:在|於)?|未在|未於|未(?:辦|办|訂|订|安排)(?:在|於|于)?|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|(?:沒有|没有|沒|没)安排(?:在|於|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/u.test(
@@ -401,13 +407,6 @@ function isExplicitNextOccurrenceForwardBridge(
     return descriptor.length <= 32;
   }
 
-  const hasSchedulingSuffix =
-    /^\s*(?:舉行|進行|開始|開課|登場|will\s+be\s+held|takes?\s+place)/i.test(
-      suffix
-    );
-  if (hasSchedulingSuffix) {
-    return /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
-  }
   return /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
 }
 
@@ -431,11 +430,7 @@ function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
     const forwardClaims = allDateClaimsIn(forwardScope, occurrenceEnd);
     for (const claim of forwardClaims) {
       const bridge = text.slice(occurrenceEnd, claim.index);
-      const suffix = text.slice(
-        claim.index + claim.match[0].length,
-        occurrenceEnd + forwardScope.length
-      );
-      if (isExplicitNextOccurrenceForwardBridge(bridge, suffix)) {
+      if (isExplicitNextOccurrenceForwardBridge(bridge)) {
         linkedClaims.set(claim.index, { ...claim, associationText: bridge });
         break;
       }
