@@ -341,6 +341,13 @@ async function applyInTransaction(
 		const repairedSettingsHash = repaired
 			? settingsHashFromAgent(repairedAgent)
 			: current.settings_hash;
+		if (repaired && repairedSettingsHash !== current.settings_hash) {
+			throw releaseError(
+				"agent_release_settings_drift_unrepairable",
+				409,
+				"Signed managed settings cannot restore the complete expected projection",
+			);
+		}
 		await writeFeedCursor(tx, input, cursor);
 		if (
 			repaired ||
@@ -354,7 +361,7 @@ async function applyInTransaction(
 					applied_feed_sequence = ${feed.feedSequence},
 					applied_channel = ${feed.channel},
 					applied_feed_digest = ${input.feedDigest},
-					settings_hash = ${repairedSettingsHash},
+					settings_hash = ${current.settings_hash},
 					updated_at = NOW()
 				WHERE organization_id = ${input.organizationId}
 				  AND agent_id = ${input.agentId}

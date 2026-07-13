@@ -216,6 +216,84 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test("rolls back a partial repair when drift remains in an omitted managed field", async () => {
+		const app = await buildApp();
+		const request = signedApplyRequest({
+			managedSettings: { identityMd: "signed identity" },
+		});
+		const appliedResponse = await putApply(app, request);
+		const applied = await appliedResponse.json();
+		expect(appliedResponse.status).toBe(200);
+
+		const sql = await db();
+		await sql`
+			UPDATE agents SET
+				identity_md = 'external identity drift',
+				tools_config = ${sql.json({ allowedTools: ["omitted_drift"] })}
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+		const retryResponse = await putApply(app, request);
+		expect(retryResponse.status).toBe(409);
+		await expect(retryResponse.json()).resolves.toMatchObject({
+			error: "agent_release_settings_drift_unrepairable",
+		});
+
+		const rows = await sql<{
+			identity_md: string;
+			settings_hash: string;
+		}>`
+			SELECT a.identity_md, r.settings_hash
+			FROM agents a
+			JOIN agent_release_applies r
+			  ON r.organization_id = a.organization_id AND r.agent_id = a.id
+			WHERE a.organization_id = ${ORG_ID} AND a.id = ${AGENT_ID}
+		`;
+		expect(rows[0]).toEqual({
+			identity_md: "external identity drift",
+			settings_hash: applied.settingsHash,
+		});
+		const evidenceResponse = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(evidenceResponse.status).toBe(200);
+		await expect(evidenceResponse.json()).resolves.toMatchObject({
+			status: "drifted",
+			settingsHash: applied.settingsHash,
+			liveSettingsHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+		});
+	});
+
+	test("repairs a partial manifest when all drift is in its present identity field", async () => {
+		const app = await buildApp();
+		const request = signedApplyRequest({
+			managedSettings: { identityMd: "signed identity" },
+		});
+		const appliedResponse = await putApply(app, request);
+		const applied = await appliedResponse.json();
+		expect(appliedResponse.status).toBe(200);
+		await (await db())`
+			UPDATE agents SET identity_md = 'identity drift'
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+
+		const retryResponse = await putApply(app, request);
+		expect(retryResponse.status).toBe(200);
+		await expect(retryResponse.json()).resolves.toMatchObject({
+			status: "applied",
+			idempotent: false,
+			repaired: true,
+			settingsHash: applied.settingsHash,
+		});
+		await expect(currentIdentity()).resolves.toBe("signed identity");
+		const evidenceResponse = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		await expect(evidenceResponse.json()).resolves.toMatchObject({
+			status: "applied",
+			settingsHash: applied.settingsHash,
+		});
+	});
+
 	test("rejects declared and chunked release bodies above one MiB before parsing", async () => {
 		const app = await buildApp();
 		const path = `/api/provisioning/agents/${AGENT_ID}/managed-settings`;
