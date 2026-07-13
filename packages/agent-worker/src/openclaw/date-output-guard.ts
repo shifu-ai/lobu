@@ -8,6 +8,17 @@ const WEEKDAYS_ZH = [
 	"星期六",
 ] as const;
 
+const WEEKDAY_INDEX_ZH: Record<string, number> = {
+	星期日: 0,
+	星期天: 0,
+	星期一: 1,
+	星期二: 2,
+	星期三: 3,
+	星期四: 4,
+	星期五: 5,
+	星期六: 6,
+};
+
 export type DateCorrection = {
 	reason: "weekday_mismatch" | "relative_date_mismatch";
 	original: string;
@@ -26,7 +37,7 @@ export type DateGuardInput = {
 };
 
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
-	/(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
+	/(?<!\d)(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
 
 function validUtcDate(year: number, month: number, day: number): Date | null {
 	const date = new Date(Date.UTC(year, month - 1, day));
@@ -52,8 +63,9 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
 			);
 			if (!date) return match;
 
-			const expectedWeekday = WEEKDAYS_ZH[date.getUTCDay()] ?? weekday;
-			if (weekday === expectedWeekday) return match;
+			const expectedWeekdayIndex = date.getUTCDay();
+			if (WEEKDAY_INDEX_ZH[weekday] === expectedWeekdayIndex) return match;
+			const expectedWeekday = WEEKDAYS_ZH[expectedWeekdayIndex] ?? weekday;
 
 			corrections.push({
 				reason: "weekday_mismatch",
