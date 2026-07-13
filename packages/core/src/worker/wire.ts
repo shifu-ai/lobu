@@ -134,18 +134,6 @@ export type TrustedExecutionScope =
     };
 
 /**
- * Internal scheduler provenance stamped by gateway-owned producers. Public
- * message endpoints never copy caller fields into this top-level envelope.
- */
-export interface TrustedScheduledExecution {
-  source: "internal_scheduler";
-  taskKind: "sales_rehearsal";
-  ownerUserId: string;
-  agentId: string;
-  conversationId: string;
-}
-
-/**
  * Universal message payload for every gateway → worker hop.
  * Used by: platform inbound → runs queue → MessageConsumer → worker.
  */
@@ -183,9 +171,6 @@ export interface MessagePayload {
   resolvedCourseContext?: ResolvedCourseExecutionContext;
   /** Gateway-minted per-turn execution scope. Caller values are discarded. */
   trustedExecutionScope?: TrustedExecutionScope;
-  /** Gateway-internal input only; consumed and removed before worker dispatch. */
-  trustedScheduledExecution?: TrustedScheduledExecution;
-
   // ── Platform-specific data (used by worker for context) ────────────
   platformMetadata: Record<string, unknown>;
 

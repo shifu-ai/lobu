@@ -80,6 +80,27 @@ describe("resolved course context instructions", () => {
     expect(rendered.length).toBeLessThanOrEqual(6000);
   });
 
+  test("requires the selected opp-coach skill file before answering", () => {
+    const rendered = buildResolvedCourseContextInstructions(
+      context({ activeSpecializedSkill: "opp-coach" })
+    );
+
+    expect(rendered).toContain(".skills/opp-coach/SKILL.md");
+    expect(rendered).toContain("read the full file before answering");
+    expect(rendered).toMatch(/apply its instructions to this turn/i);
+  });
+
+  test("null selection suppresses only opp-coach for this turn", () => {
+    const rendered = buildResolvedCourseContextInstructions(
+      context({ activeSpecializedSkill: null })
+    );
+
+    expect(rendered).toContain(
+      "Do not load or apply `.skills/opp-coach/SKILL.md`"
+    );
+    expect(rendered).toContain("does not disable unrelated skills");
+  });
+
   test("quotes hostile multiline content and normalizes identity controls", () => {
     const rendered = buildResolvedCourseContextInstructions(
       context({

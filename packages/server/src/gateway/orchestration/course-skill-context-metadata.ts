@@ -38,7 +38,7 @@ export interface ActiveCourseSkillSelection {
 	retrievalLimit: number;
 }
 
-const SALES_TALK_INTENT = /(?:銷講|彩排|Perfect\s*Webinar|Key\s*(?:Learning|Secret)|三個秘密|新舊答案|英雄之旅|試吃|Offer|價值堆疊|破價|成交|CTA|逐字稿.{0,20}(?:feedback|回饋|修改))/iu;
+const SALES_TALK_INTENT = /(?:銷講|彩排|Perfect\s*Webinar|Key\s*(?:Learning|Secret)|三個(?:秘密|相信)|錯誤信念|打破.{0,12}信念|價值公式|關鍵秘密|新舊答案|英雄之旅|試吃|Offer|價值堆疊|破價|成交|CTA|逐字稿.{0,20}(?:feedback|回饋|修改))/iu;
 
 export function isDeterministicSalesTalkIntent(message: string): boolean {
 	return SALES_TALK_INTENT.test(message.trim());
@@ -119,10 +119,9 @@ export function resolveCourseSkillContextMetadata(
 export function selectActiveCourseSkill(input: {
 	available: ResolvedCourseSkillContextMetadata;
 	message: string;
-	trustedScheduledTaskKind?: "sales_rehearsal";
 }): ActiveCourseSkillSelection {
 	const active = input.available.oppCoachAvailable &&
-		(isDeterministicSalesTalkIntent(input.message) || input.trustedScheduledTaskKind === "sales_rehearsal");
+		isDeterministicSalesTalkIntent(input.message);
 	return active ? {
 		activeSpecializedSkill: "opp-coach",
 		contextFields: input.available.contextFields,

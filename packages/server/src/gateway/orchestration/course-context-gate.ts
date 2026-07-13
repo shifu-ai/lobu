@@ -7,9 +7,8 @@ import { retrieveCourseMemory, type CourseMemorySearch } from './course-memory-r
 import { emitJourneyEvent, type JourneyEventPayload } from '../services/journey-observability.js';
 import { gradeCourseEvidenceReadiness } from './course-evidence-readiness.js';
 import type {CourseReadinessField} from '@lobu/core';
-import { isDeterministicSalesTalkIntent } from './course-skill-context-metadata.js';
 
-export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; oppCoachAvailable?:boolean; activeSpecializedSkill?:'opp-coach'|null; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; trustedScheduledTaskKind?:'sales_rehearsal'; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
+export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; activeSpecializedSkill?:'opp-coach'|null; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
 export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | {status:'onboarding_ready';scope:Extract<TrustedExecutionScope,{mode:'onboarding'}>} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
 const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師|錄課|會議待辦|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
@@ -37,17 +36,15 @@ function projectRequiredCourseContext(bundle:Awaited<ReturnType<ToolboxCourseCon
   }
   return lines.join('\n').slice(0,8000);
 }
-export interface CourseTurnDecision { courseContextRequired:boolean; activeSpecializedSkill:'opp-coach'|null; }
-export function decideCourseTurn(data:MessagePayload,options:{oppCoachAvailable?:boolean;hasActiveCourse?:boolean;trustedScheduledTaskKind?:'sales_rehearsal'}={}):CourseTurnDecision {
+export interface CourseTurnDecision { courseContextRequired:boolean; }
+export function decideCourseTurn(data:MessagePayload,options:{hasActiveCourse?:boolean}={}):CourseTurnDecision {
   const message = data.messageText?.trim() ?? '';
-  if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message)) return {courseContextRequired:false,activeSpecializedSkill:null};
-  const scheduledCourseTask=options.trustedScheduledTaskKind==='sales_rehearsal';
-  const activeSpecializedSkill=options.oppCoachAvailable&&(isDeterministicSalesTalkIntent(message)||scheduledCourseTask)?'opp-coach':null;
-  const courseContextRequired=scheduledCourseTask||data.platformMetadata?.courseScope==='reviewed'||COURSE_INTENT.test(message)||Boolean(options.hasActiveCourse&&/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message));
-  return {courseContextRequired,activeSpecializedSkill};
+  if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message)) return {courseContextRequired:false};
+  const courseContextRequired=data.platformMetadata?.courseScope==='reviewed'||COURSE_INTENT.test(message)||Boolean(options.hasActiveCourse&&/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message));
+  return {courseContextRequired};
 }
-export function requiresCourseContext(data: MessagePayload, options: {hasActiveCourse?:boolean;trustedScheduledTaskKind?:'sales_rehearsal'} = {}): boolean {
-  return decideCourseTurn(data,{hasActiveCourse:options.hasActiveCourse,trustedScheduledTaskKind:options.trustedScheduledTaskKind}).courseContextRequired;
+export function requiresCourseContext(data: MessagePayload, options: {hasActiveCourse?:boolean} = {}): boolean {
+  return decideCourseTurn(data,{hasActiveCourse:options.hasActiveCourse}).courseContextRequired;
 }
 export function isExplicitPersonalBypass(data: MessagePayload): boolean { const message=data.messageText?.trim()??''; return PERSONAL_REMINDER.test(message)&&!COURSE_INTENT.test(message); }
 
@@ -70,7 +67,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   if(pending?.status==='claimed'&&pending.claimedMessageId!==data.messageId&&pending.claimedAt&&Date.now()-pending.claimedAt>CLAIMED_RECOVERY_GRACE_MS){if(!options?.sessionManager||!options.sessionKey||(await options.sessionManager.clearPendingCourseSelection(options.sessionKey,pending.pendingId,data.userId,data.agentId,pending.claimedMessageId)).status!=='cleared')return{status:'context_unavailable',reasonCode:'claimed_recovery_failed'};pending=undefined;}
   const text = typeof data.messageText === 'string' ? data.messageText.trim() : '';
   const choice = pending?.status === 'claimed' && pending.claimedMessageId === data.messageId ? pending.candidates.find((candidate)=>candidate.courseKey===pending.claimedCourseKey) : pending ? pending.candidates.find((candidate, index) => text === String(index + 1) || text === candidate.courseKey || text === candidate.displayName) : undefined;
-  if (!choice && !pending && options?.activeSpecializedSkill!=='opp-coach' && !decideCourseTurn(data, { oppCoachAvailable:options?.oppCoachAvailable,hasActiveCourse: Boolean(session?.shifuCourseContext),trustedScheduledTaskKind:options?.trustedScheduledTaskKind }).courseContextRequired) return { status: 'not_required' };
+  if (!choice && !pending && options?.activeSpecializedSkill!=='opp-coach' && !decideCourseTurn(data, { hasActiveCourse: Boolean(session?.shifuCourseContext) }).courseContextRequired) return { status: 'not_required' };
   const baseUrl = options?.baseUrl ?? process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim();
   const secret = options?.secret ?? process.env.TOOLBOX_INTERNAL_SECRET?.trim();
   if (!baseUrl || !secret) return { status: 'context_unavailable', reasonCode: 'not_configured' };
@@ -100,7 +97,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   let bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>; try { bundle = await client.bundle(course.courseKey, { ownerUserId: data.userId, agentId: data.agentId }); await traceCourse(data,options,'context.bundle.loaded','ok',{course_key:course.courseKey,course_entity_id:course.courseEntityId,context_version:bundle.context.version}); } catch { logger.warn({ category: 'bundle' }, 'Course context bundle unavailable'); await traceCourse(data,options,'context.bundle.failed','failed',{course_key:course.courseKey,reason_code:'bundle_unavailable'}); return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_unavailable',resolvedCourse:{courseKey:course.courseKey,courseEntityId:course.courseEntityId,displayName:course.displayName} }; }
   if (bundle.course.courseKey !== course.courseKey || bundle.course.courseEntityId !== course.courseEntityId) return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_identity_mismatch' };
   const context = bundle.context;
-  const specializedActive=options?.activeSpecializedSkill==='opp-coach'||Boolean(options?.oppCoachAvailable&&(isDeterministicSalesTalkIntent(typeof data.messageText==='string'?data.messageText:'')||options?.trustedScheduledTaskKind==='sales_rehearsal'));
+  const specializedActive=options?.activeSpecializedSkill==='opp-coach';
   const skillTerms=specializedActive?(options.courseSkillRetrievalTerms??[]):[];
   const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:specializedActive?options?.courseSkillRetrievalLimit:undefined,env:options.env},{search:options.memorySearch}):{status:'degraded' as const,crossCourseGuard:'passed' as const,candidateCount:0,safeCount:0,droppedCount:0,durationMs:0,eventIds:[],evidenceRefs:[],snippets:[]};
   const canonicalReadiness={audience:bundle.profile.audience,course_promise:bundle.profile.coursePromise};

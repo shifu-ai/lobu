@@ -102,6 +102,11 @@ describe("course skill context metadata", () => {
 
 	test.each([
 		["這堂課的三個秘密幫我想一下", "opp-coach"],
+		["這堂課的三個相信怎麼鋪陳", "opp-coach"],
+		["這段錯誤信念不夠有力", "opp-coach"],
+		["幫我打破學員的信念", "opp-coach"],
+		["價值公式這段怎麼講", "opp-coach"],
+		["第二個關鍵秘密要怎麼改", "opp-coach"],
 		["幫我看這段銷講彩排哪裡要改", "opp-coach"],
 		["幫我寫信跟老師確認下週錄課時間", null],
 		["整理今天的課程會議待辦", null],
@@ -112,9 +117,4 @@ describe("course skill context metadata", () => {
 		expect(selectActiveCourseSkill({available,message}).activeSpecializedSkill).toBe(expected);
 	});
 
-	test("accepts only the trusted scheduled sales rehearsal selector input",()=>{
-		const available=resolveCourseSkillContextMetadata([{enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
-		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"sales_rehearsal"}).activeSpecializedSkill).toBe("opp-coach");
-		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"other" as never}).activeSpecializedSkill).toBeNull();
-	});
 });

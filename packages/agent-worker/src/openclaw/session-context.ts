@@ -133,8 +133,25 @@ export function buildResolvedCourseContextInstructions(
   resolved: ResolvedCourseExecutionContext | undefined
 ): string {
   if (!resolved) return "";
+  const specializedSkillInstructions =
+    resolved.activeSpecializedSkill === "opp-coach"
+      ? [
+          "",
+          "Turn-specialized skill authority: opp-coach",
+          "- Use the normal Lobu skill-loading path and read the full file before answering: `cat .skills/opp-coach/SKILL.md` (or an equivalent file read).",
+          "- Apply its instructions to this turn. Do not substitute the skill summary or recreate its content from memory.",
+        ]
+      : resolved.activeSpecializedSkill === null
+        ? [
+            "",
+            "Turn-specialized skill authority: none",
+            "- Do not load or apply `.skills/opp-coach/SKILL.md` for this turn.",
+            "- This does not disable unrelated skills; follow their normal task-matching rules.",
+          ]
+        : [];
   const lines = [
     "## Resolved Course Context",
+    ...specializedSkillInstructions,
     "",
     `Course: ${normalizeIdentity(resolved.course.displayName)}`,
     `Course key: ${normalizeIdentity(resolved.course.courseKey)}`,
