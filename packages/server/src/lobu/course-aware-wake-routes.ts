@@ -78,6 +78,9 @@ interface ParsedCourseWakeRequest {
 export interface CourseAwareWakeRoutesDeps {
 	upsertScheduledJobByExternalKey: typeof upsertScheduledJobByExternalKey;
 	cancelTrustedCourseWake: typeof cancelTrustedCourseWake;
+	inspectConversationBinding: (input: {
+		organizationId: string; ownerUserId: string; agentId: string;
+	}) => Promise<{ conversationId: string; courseEntityId: string | null } | null>;
 }
 
 interface ParsedCourseWakeCancellation {
@@ -144,7 +147,29 @@ export function createCourseAwareWakeRoutes(
 	const upsert =
 		options.upsertScheduledJobByExternalKey ?? upsertScheduledJobByExternalKey;
 	const cancel = options.cancelTrustedCourseWake ?? cancelTrustedCourseWake;
+	const inspectBinding = options.inspectConversationBinding;
 	const routes = new Hono<{ Bindings: Env }>();
+	routes.get("/conversation-binding", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+		const ownerUserId = c.req.query("ownerUserId")?.trim();
+		const agentId = c.req.query("agentId")?.trim();
+		if (!ownerUserId || !agentId || !inspectBinding) return c.json({ error: "invalid_request" }, 400);
+		const ownerRows = await getDb()`
+			SELECT id FROM agents WHERE organization_id = ${organizationId} AND id = ${agentId}
+			AND owner_platform = 'toolbox' AND owner_user_id = ${ownerUserId} LIMIT 1
+		`;
+		if (!ownerRows.length) return c.json({ error: "agent_owner_mismatch" }, 403);
+		try {
+			const binding = await inspectBinding({ organizationId, ownerUserId, agentId });
+			if (!binding) return c.json({ error: "conversation_binding_not_found" }, 404);
+			return c.json(binding, 200);
+		} catch {
+			return c.json({ error: "conversation_binding_inspect_failed" }, 500);
+		}
+	});
 	routes.put("/", async (c) => {
 		const denied = requireAdminPat(c);
 		if (denied) return denied;
