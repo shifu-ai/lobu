@@ -156,4 +156,47 @@ describe("API terminal completion contract", () => {
 			"complete",
 		]);
 	});
+
+	test("preserves CLI completion for a successful non-API renderer", async () => {
+		const sseManager = new SseManager();
+		sseManager.addConnection("cli-session-success", {});
+
+		const renderer: ResponseRenderer = {
+			handleError: async () => undefined,
+			handleCompletion: async () => undefined,
+		};
+		const platformRegistry = new PlatformRegistry();
+		platformRegistry.register({
+			name: "telegram",
+			initialize: async () => undefined,
+			start: async () => undefined,
+			stop: async () => undefined,
+			isHealthy: () => true,
+			getResponseRenderer: () => renderer,
+		});
+		const consumer = new UnifiedThreadResponseConsumer(
+			{} as IMessageQueue,
+			platformRegistry,
+			sseManager,
+		);
+		const handleThreadResponse = Reflect.get(
+			consumer,
+			"handleThreadResponse",
+		) as (job: QueueJob<ThreadResponsePayload>) => Promise<void>;
+		await handleThreadResponse.call(consumer, {
+			id: "job-1",
+			data: terminalPayload({
+				platform: "telegram",
+				teamId: "telegram",
+				platformMetadata: { sessionId: "cli-session-success" },
+				processedMessageIds: ["message-1"],
+				finalText: "successful reply",
+			}),
+		});
+
+		const completions = sseManager
+			.getRecentEvents("cli-session-success")
+			.filter((event) => event.event === "complete");
+		expect(completions).toHaveLength(1);
+	});
 });
