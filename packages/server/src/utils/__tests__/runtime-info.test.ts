@@ -25,6 +25,7 @@ describe('getRuntimeInfo', () => {
       environment: 'production',
       revision: 'abc123',
       build_time: '2026-04-12T23:00:00Z',
+      carrier_capabilities: ['dynamic_tool_catalog.automation.v1'],
     });
   });
 });

@@ -1,14 +1,17 @@
 import type { McpToolDef } from "@lobu/core";
 import {
   catalogEntryForTool,
+  isTrustedShifuToolMetadataMcpId,
   TOOL_PRIORITY_WEIGHT,
   type ToolCatalogEntry,
 } from "./tool-catalog";
+
 export {
-  buildRuntimeToolCatalog,
   type BuildRuntimeToolCatalogParams,
+  buildRuntimeToolCatalog,
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
+
 import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 
 export interface DynamicToolSelectionTrace {
@@ -108,10 +111,17 @@ const PINNED_DIRECT_TOOL_NAMES = new Set([
   "sales_battle_report_run_now",
 ]);
 
+const PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES = new Set([
+  "plan_automation",
+  "create_automation",
+]);
+
 function isPinnedDirectTool(entry: ToolCatalogEntry): boolean {
   return (
     PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
-    entry.name.startsWith("sales_battle_report_")
+    entry.name.startsWith("sales_battle_report_") ||
+    (isTrustedShifuToolMetadataMcpId(entry.mcpId) &&
+      PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES.has(entry.name))
   );
 }
 

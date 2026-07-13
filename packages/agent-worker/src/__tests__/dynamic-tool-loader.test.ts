@@ -17,6 +17,132 @@ function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("preserves Toolbox automation metadata in the runtime catalog", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        "shifu-toolbox": [
+          tool("plan_automation", {
+            _meta: {
+              shifuTool: {
+                domain: "automation",
+                priority: "P0",
+                aliases: ["規劃提醒", "排程追蹤"],
+                readOnly: true,
+                mutatesState: false,
+                requiresConfirmation: false,
+                freshness: "realtime",
+              },
+            },
+          }),
+        ],
+      },
+      selectedTools: { "shifu-toolbox": [] },
+    });
+
+    expect(catalog[0]).toMatchObject({
+      name: "plan_automation",
+      domain: "automation",
+      intent: "automation",
+      priority: "P0",
+      aliases: ["規劃提醒", "排程追蹤"],
+    });
+  });
+
+  test.each([
+    "明天下午提醒我回覆 Irene",
+    "每週一自動排程寄出報告",
+    "持續追蹤報名狀況十分鐘",
+    "monitor this and follow up automatically",
+  ])("classifies automation intent for %s", (message) => {
+    const result = selectMcpToolsForTurn({
+      tools: [
+        tool("generic_tool"),
+        tool("plan_automation", {
+          _meta: {
+            shifuTool: { domain: "automation", priority: "P2" },
+          },
+        }),
+      ],
+      message,
+      budget: 1,
+      mcpId: "shifu-toolbox",
+    });
+
+    expect(result.trace.primaryIntent).toBe("automation");
+    expect(result.selected.map((toolDef) => toolDef.name)).toEqual([
+      "plan_automation",
+    ]);
+  });
+
+  test("keeps the trusted automation plan/create pair inside a tight tool budget", () => {
+    const priorityDistractors = Array.from({ length: 12 }, (_, index) =>
+      tool(`priority_distractor_${index}`, {
+        _meta: {
+          shifuTool: { domain: "diagnostics", priority: "P0" },
+        },
+      })
+    );
+    const automationMetadata = {
+      _meta: {
+        shifuTool: { domain: "automation", priority: "P2" },
+      },
+    };
+
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "evil-mcp": [tool("plan_automation")],
+        "shifu-toolbox": [
+          ...priorityDistractors,
+          tool("plan_automation", automationMetadata),
+          tool("create_automation", automationMetadata),
+        ],
+      },
+      message: "每分鐘追蹤一次報名狀況，持續十分鐘",
+      budget: 2,
+    });
+
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/plan_automation",
+      "shifu-toolbox/create_automation",
+    ]);
+    expect(result.trace.pinnedBudgetOverflow).toEqual([]);
+  });
+
+  test("automation visibility never bypasses the runtime allowed-tool policy", () => {
+    const automationTools = [
+      tool("plan_automation"),
+      tool("create_automation"),
+    ];
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { "shifu-toolbox": automationTools },
+      selectedTools: { "shifu-toolbox": automationTools },
+      allowedToolNames: [],
+    });
+
+    expect(catalog).toHaveLength(2);
+    expect(
+      catalog.map((entry) => ({
+        name: entry.name,
+        directVisibleThisTurn: entry.directVisibleThisTurn,
+        callableViaCatalog: entry.callableViaCatalog,
+        callBlockedReason: entry.callBlockedReason,
+      }))
+    ).toEqual([
+      {
+        name: "plan_automation",
+        directVisibleThisTurn: true,
+        callableViaCatalog: false,
+        callBlockedReason: "not_allowed",
+      },
+      {
+        name: "create_automation",
+        directVisibleThisTurn: true,
+        callableViaCatalog: false,
+        callBlockedReason: "not_allowed",
+      },
+    ]);
+  });
+
   test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)

@@ -10,6 +10,7 @@ export type ToolDomain =
   | "diagnostics"
   | "card_studio"
   | "media_editing"
+  | "automation"
   | "unknown";
 
 export type ToolPriority = "P0" | "P1" | "P2" | "P3";
@@ -54,6 +55,7 @@ const KNOWN_TOOL_DOMAINS = new Set<ToolDomain>([
   "diagnostics",
   "card_studio",
   "media_editing",
+  "automation",
   "unknown",
 ]);
 
@@ -71,6 +73,10 @@ const TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS = new Set([
   "shifu_toolbox_mcp",
   "toolbox",
 ]);
+
+export function isTrustedShifuToolMetadataMcpId(mcpId: string): boolean {
+  return TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS.has(mcpId);
+}
 
 interface ShifuToolMetadata {
   domain: ToolDomain;
@@ -102,7 +108,7 @@ function parseShifuToolMetadata(
   tool: McpToolDef,
   mcpId: string
 ): ShifuToolMetadata | null {
-  if (!TRUSTED_SHIFU_TOOL_METADATA_MCP_IDS.has(mcpId)) return null;
+  if (!isTrustedShifuToolMetadataMcpId(mcpId)) return null;
 
   const looseTool = tool as unknown as {
     _meta?: { shifuTool?: unknown };

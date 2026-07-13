@@ -1,5 +1,10 @@
 import packageJson from '../../package.json';
 
+/** Stable capabilities attested by the deployed Lobu runtime carrier. */
+export const RUNTIME_CARRIER_CAPABILITIES = [
+  'dynamic_tool_catalog.automation.v1',
+] as const;
+
 interface RuntimeEnvLike {
   ENVIRONMENT?: string;
   NODE_ENV?: string;
@@ -33,5 +38,6 @@ export function getRuntimeInfo(env?: RuntimeEnvLike | null) {
       cleanString(process.env.APP_BUILD_TIME) ||
       null,
     environment: resolveRuntimeEnvironment(env),
+    carrier_capabilities: [...RUNTIME_CARRIER_CAPABILITIES],
   };
 }

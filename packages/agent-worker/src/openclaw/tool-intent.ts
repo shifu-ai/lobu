@@ -7,6 +7,7 @@ export type ToolIntent =
   | "diagnostics"
   | "card_studio"
   | "media_editing"
+  | "automation"
   | "unknown";
 
 function includesAny(text: string, keywords: string[]): boolean {
@@ -84,6 +85,40 @@ export function classifyToolIntent(text: string): ToolIntent {
     ])
   ) {
     return "media_editing";
+  }
+
+  if (
+    includesAny(normalized, [
+      "automation",
+      "automate",
+      "automatically",
+      "reminder",
+      "remind",
+      "schedule",
+      "recurring",
+      "monitor",
+      "tracking",
+      "follow up",
+      "wake agent",
+      "自動化",
+      "自動工作",
+      "提醒",
+      "排程",
+      "定期",
+      "每隔",
+      "每天",
+      "每日",
+      "每週",
+      "每周",
+      "追蹤",
+      "追踪",
+      "監控",
+      "监控",
+      "持續觀察",
+      "持续观察",
+    ])
+  ) {
+    return "automation";
   }
 
   return "unknown";
