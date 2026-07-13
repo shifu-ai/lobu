@@ -547,6 +547,10 @@ describe("guardDateOutput", () => {
       "下一場不能安排在 7/22（三）。",
       "下一場尚未安排在 7/22（三）。",
       "下一場沒有訂在 7/22（三）。",
+      "下一場不會再安排在 7/22（三）。",
+      "下一場不會被安排在 7/22（三）。",
+      "下一場不會被重新安排在 7/22（三）。",
+      "下一場未能另行訂在 7/22（三）。",
     ]) {
       expect(
         guardDateOutput({
@@ -560,16 +564,29 @@ describe("guardDateOutput", () => {
   });
 
   test("corrects a later positive scheduling predicate after a negated one", () => {
-    const result = guardDateOutput({
-      userMessage: "幫我查下一場活動",
-      finalText: "下一場不安排在 7/22（三）；下次安排在 7/23（四）。",
-      now: NOW,
-      trustedTemporalCandidates: ["2026-07-16"],
-    });
-    expect(result.status).toBe("corrected");
-    expect(result.text).toBe(
-      "下一場不安排在 7/22（三）；下次安排在 7/16（四）。"
-    );
+    for (const [finalText, expected] of [
+      [
+        "下一場不安排在 7/22（三）；下次安排在 7/23（四）。",
+        "下一場不安排在 7/22（三）；下次安排在 7/16（四）。",
+      ],
+      [
+        "下一場不會再安排在 7/22（三）；下次安排在 7/23（四）。",
+        "下一場不會再安排在 7/22（三）；下次安排在 7/16（四）。",
+      ],
+      [
+        "下一場不會被安排在 7/22（三）；下次安排在 7/23（四）。",
+        "下一場不會被安排在 7/22（三）；下次安排在 7/16（四）。",
+      ],
+    ] as const) {
+      const result = guardDateOutput({
+        userMessage: "幫我查下一場活動",
+        finalText,
+        now: NOW,
+        trustedTemporalCandidates: ["2026-07-16"],
+      });
+      expect(result.status).toBe("corrected");
+      expect(result.text).toBe(expected);
+    }
   });
 
   test("does not rewrite negated next-occurrence date clauses", () => {
@@ -1356,6 +1373,11 @@ describe("extractTrustedTemporalCandidates", () => {
       "目前銷講每週三舉行，下一場銷講是哪一天？",
       "現在銷講每週三舉行，下一場銷講是哪一天？",
       "請注意銷講每週三舉行，下一場銷講是哪一天？",
+      "幫我查銷講每週三舉行，下一場銷講是哪一天？",
+      "请帮我查 銷講每週三舉行，下一場銷講是哪一天？",
+      "請問銷講每週三舉行，下一場銷講是哪一天？",
+      "我想知道銷講每週三舉行，下一場銷講是哪一天？",
+      "麻煩查 銷講每週三舉行，下一場銷講是哪一天？",
     ]) {
       expect(
         guardDateOutput({
