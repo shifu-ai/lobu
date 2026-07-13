@@ -1323,6 +1323,32 @@ describe("extractTrustedTemporalCandidates", () => {
     });
   });
 
+  test("uses an explicit recurrence for a generic claim despite unrelated labeled evidence", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "銷講每週三舉行，下一場是哪一天？",
+        finalText: "下一場是 7/22（三）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-14T19:00:00+08:00",
+            label: "內部會議",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "corrected",
+      text: "下一場是 7/15（三）。",
+      corrections: [
+        {
+          reason: "relative_date_mismatch",
+          original: "7/22（三）",
+          replacement: "7/15（三）",
+        },
+      ],
+    });
+  });
+
   test("fails closed for conflicting non-generic final claim descriptors", () => {
     expect(
       guardDateOutput({

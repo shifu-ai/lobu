@@ -826,7 +826,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
           candidate !== null && candidate.epoch >= input.now.getTime()
       )
       .sort((left, right) => left.epoch - right.epoch)[0];
-    if (labeledEvidence.length > 0 && !trustedCandidate) {
+    if (
+      labeledEvidence.length > 0 &&
+      !trustedCandidate &&
+      (claimDescriptors.size === 1 || recurrenceDate === null)
+    ) {
       return {
         status: "blocked",
         text: NEXT_OCCURRENCE_BLOCK_TEXT,
