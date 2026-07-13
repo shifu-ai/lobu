@@ -114,13 +114,20 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
 		const existing = existingRows[0];
 		const changeDetection = params.changeDetection ?? "trusted-course-wake";
 		const now = Date.now();
-		const expiredPausedOneShot =
+		const existingUntilAt = dateValue(existing?.until_at ?? null);
+		const requestedUntilAt = dateValue(params.untilAt ?? null);
+		const expiredPausedSchedule =
 			changeDetection === "full" &&
 			existing?.paused === true &&
-			existing.cron === null &&
-			new Date(existing.next_run_at).getTime() <= now &&
-			params.runAt.getTime() <= now;
-		if (expiredPausedOneShot) return { status: "ok", job: existing };
+			((existing.cron === null &&
+				new Date(existing.next_run_at).getTime() <= now &&
+				params.runAt.getTime() <= now) ||
+				(existing.cron !== null &&
+					existingUntilAt !== null &&
+					existingUntilAt <= now &&
+					requestedUntilAt !== null &&
+					requestedUntilAt <= now));
+		if (expiredPausedSchedule) return { status: "ok", job: existing };
 
 		const changed = existing
 			? changeDetection === "full"
@@ -219,6 +226,13 @@ function fullScheduledJobChanged(
 
 function dateValue(value: string | Date | null): number | null {
 	return value == null ? null : new Date(value).getTime();
+}
+
+export function scheduleHasExpired(
+	untilAt: string | Date | null,
+	now: string | Date,
+): boolean {
+	return untilAt !== null && new Date(now).getTime() > new Date(untilAt).getTime();
 }
 
 export interface CancelTrustedCourseWakeParams {
@@ -456,17 +470,17 @@ export async function dispatchScheduledJobCandidate(
 	const sql = getDb();
 	await sql.begin(async (tx) => {
 		const rows = (await tx`
-      SELECT *, until_at IS NOT NULL AND until_at <= now() AS expired
+      SELECT *, now() AS evaluated_at
       FROM scheduled_jobs
       WHERE id = ${candidate.id}
         AND schedule_revision = ${candidate.schedule_revision}
         AND next_run_at <= now()
         AND NOT paused
       FOR UPDATE SKIP LOCKED
-    `) as unknown as Array<ScheduledJobRow & { expired: boolean }>;
+    `) as unknown as Array<ScheduledJobRow & { evaluated_at: string }>;
 		const row = rows[0];
 		if (!row) return;
-		if (row.expired) {
+		if (scheduleHasExpired(row.until_at, row.evaluated_at)) {
 			await tx`
         UPDATE scheduled_jobs
         SET paused = true, updated_at = now()

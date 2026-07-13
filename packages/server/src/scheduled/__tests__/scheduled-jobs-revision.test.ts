@@ -8,6 +8,7 @@ import {
 import {
 	cancelTrustedCourseWake,
 	dispatchScheduledJobCandidate,
+	scheduleHasExpired,
 	upsertScheduledJobByExternalKey,
 	upsertScheduledJobByExternalKeyWithQuota,
 } from "../scheduled-jobs-service.js";
@@ -156,6 +157,13 @@ describe("scheduled job revision guard", () => {
 			SELECT paused FROM scheduled_jobs WHERE id = ${job.id}
 		`;
 		expect(expired?.paused).toBe(true);
+	});
+
+	test("the final due run is inclusive when database now equals until_at", () => {
+		const finalRunAt = "2030-06-30T09:00:00.000Z";
+
+		expect(scheduleHasExpired(finalRunAt, finalRunAt)).toBe(false);
+		expect(scheduleHasExpired(finalRunAt, "2030-06-30T09:00:00.001Z")).toBe(true);
 	});
 
 	test("narrow cancellation pauses only the exact trusted owner wake and is idempotent", async () => {
@@ -359,6 +367,45 @@ describe("scheduled job revision guard", () => {
 			schedule_revision: completed!.schedule_revision,
 			last_fired_run_id: 42,
 		});
+	});
+
+	test("full change detection never rearms an expired paused recurring schedule on identical retry", async () => {
+		const externalKey = "toolbox:schedule:expired-recurring";
+		const untilAt = new Date("2020-01-01T09:05:00.000Z");
+		const params = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "already completed" },
+			description: "expired recurring",
+			cron: "* * * * *",
+			runAt: new Date("2020-01-01T09:00:00.000Z"),
+			untilAt,
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+		const first = await upsertScheduledJobByExternalKey(params);
+		await getDb()`
+			UPDATE scheduled_jobs
+			SET paused = true, next_run_at = ${untilAt}, last_fired_at = ${untilAt}, last_fired_run_id = 43
+			WHERE id = ${first.id}
+		`;
+		const [completed] = await getDb()<ScheduledJobRow[]>`
+			SELECT * FROM scheduled_jobs WHERE id = ${first.id}
+		`;
+
+		const retried = await upsertScheduledJobByExternalKey(params);
+
+		expect(retried).toMatchObject({
+			id: completed!.id,
+			paused: true,
+			schedule_revision: completed!.schedule_revision,
+			last_fired_run_id: 43,
+		});
+		expect(new Date(retried.next_run_at).toISOString()).toBe(
+			new Date(completed!.next_run_at).toISOString(),
+		);
 	});
 
 	test("full change detection never rearms an expired completed one-shot with changed payload", async () => {
