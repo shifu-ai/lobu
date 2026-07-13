@@ -541,6 +541,7 @@ export class OpenClawWorker implements WorkerExecutor {
       agentId: this.config.agentId,
       runJobToken: this.config.runJobToken,
       resolvedCourseContext: this.config.resolvedCourseContext,
+      trustedExecutionScope: this.config.trustedExecutionScope,
       scheduledCourseContext: this.config.scheduledCourseContext,
       workspaceDir: this.workspaceManager.getCurrentWorkingDirectory(),
       progressProcessor: this.progressProcessor,

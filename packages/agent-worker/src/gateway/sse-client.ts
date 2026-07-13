@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   createChildSpan,
   createLogger,
@@ -12,6 +13,7 @@ import {
   type QueuedMessage,
   SpanStatusCode,
   stripEnv,
+  verifyWorkerToken,
 } from "@lobu/core";
 import { z } from "zod";
 import type { WorkerConfig, WorkerExecutor } from "../core/types";
@@ -126,8 +128,74 @@ const CourseEvidenceProvenanceSchema = z.object({
   sourceHash: z.string().min(1).max(64).optional(),
 });
 
+const TrustedExecutionScopeSchema = z.discriminatedUnion("mode", [
+  z
+    .object({
+      mode: z.literal("onboarding"),
+      source: z.literal("toolbox_course_resolution"),
+      reason: z.literal("no_courses"),
+      ownerUserId: z.string().min(1).max(200),
+      agentId: z.string().min(1).max(200),
+      conversationId: z.string().min(1).max(200),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("course"),
+      ownerUserId: z.string().min(1).max(200),
+      agentId: z.string().min(1).max(200),
+      conversationId: z.string().min(1).max(200),
+      courseEntityId: z.string().min(1).max(200),
+      contextPackId: z.string().min(1).max(200),
+      contextVersion: z.number().int().positive(),
+      activeSpecializedSkill: z.literal("opp-coach").nullable(),
+    })
+    .strict(),
+]);
+
+function looksLikeNativeWorkerToken(value: string): boolean {
+  const parts = value.split(":");
+  return (
+    parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part))
+  );
+}
+
+const WorkerTokenClaimsSchema = z
+  .object({
+    userId: z.string().min(1).max(256),
+    conversationId: z.string().min(1).max(256),
+    channelId: z.string().min(1).max(256),
+    agentId: z.string().min(1).max(256).optional(),
+    deploymentName: z.string().min(1).max(256),
+    timestamp: z.number().int().positive(),
+    runId: z.number().int().positive().optional(),
+    messageId: z.string().min(1).max(256).optional(),
+    tokenKind: z.enum(["deployment", "session", "run"]).optional(),
+    executionMode: z.enum(["personal", "onboarding", "course"]).optional(),
+    courseToolScope: z
+      .object({
+        ownerUserId: z.string().min(1).max(256),
+        agentId: z.string().min(1).max(256),
+        courseEntityId: z.string().min(1).max(256),
+        contextPackId: z.string().min(1).max(256).optional(),
+        contextVersion: z.number().int().positive().optional(),
+        activeSpecializedSkill: z.literal("opp-coach").nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const GatewayVerifiedRunTokenSchema = z
+  .object({
+    tokenSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    claims: WorkerTokenClaimsSchema,
+  })
+  .strict();
+
 const ResolvedCourseContextSchema = z
   .object({
+    activeSpecializedSkill: z.literal("opp-coach").nullable().default(null),
     trust: z
       .object({
         ownerUserId: z.string().min(1).max(200),
@@ -206,6 +274,7 @@ const ResolvedCourseContextSchema = z
         code: "custom",
         message: "Resolved course context trust does not match context",
       });
+
     for (const [index, snippet] of value.retrieval.snippets.entries())
       if (snippet.courseEntityId !== value.course.courseEntityId)
         ctx.addIssue({
@@ -283,6 +352,7 @@ function normalizeLegacyCourseRetrieval(value: unknown): void {
 
 const JobEventSchema = z
   .object({
+    gatewayVerifiedRunToken: GatewayVerifiedRunTokenSchema.optional(),
     payload: z
       .object({
         botId: z.string(),
@@ -309,6 +379,7 @@ const JobEventSchema = z
         runId: z.number().optional(),
         runJobToken: z.string().optional(),
         resolvedCourseContext: ResolvedCourseContextSchema.optional(),
+        trustedExecutionScope: TrustedExecutionScopeSchema.optional(),
         scheduledCourseContext: z
           .object({
             schemaVersion: z.literal(1),
@@ -344,6 +415,68 @@ const JobEventSchema = z
   .superRefine((value, ctx) => {
     const context = value.payload.resolvedCourseContext;
     const trust = context?.trust;
+    const tokenText = value.payload.runJobToken;
+    const nativeToken = tokenText
+      ? looksLikeNativeWorkerToken(tokenText)
+      : false;
+    const gatewayVerification = value.gatewayVerifiedRunToken;
+    const gatewayVerificationMatches = Boolean(
+      tokenText &&
+        nativeToken &&
+        gatewayVerification &&
+        gatewayVerification.tokenSha256 ===
+          createHash("sha256").update(tokenText).digest("hex")
+    );
+    if (gatewayVerification && !gatewayVerificationMatches)
+      ctx.addIssue({
+        code: "custom",
+        message: "Gateway run-token verification does not match job token",
+        path: ["gatewayVerifiedRunToken"],
+      });
+    const token = gatewayVerificationMatches
+      ? gatewayVerification?.claims
+      : tokenText && nativeToken && !gatewayVerification
+        ? verifyWorkerToken(tokenText)
+        : null;
+    if (
+      nativeToken &&
+      token &&
+      (token.tokenKind !== "run" || token.executionMode === undefined)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Native job token must be a bounded run token",
+        path: ["payload", "runJobToken"],
+      });
+    const boundedRunToken =
+      token?.tokenKind === "run" && token.executionMode !== undefined
+        ? token
+        : null;
+    if (
+      boundedRunToken &&
+      (boundedRunToken.userId !== value.payload.userId ||
+        boundedRunToken.agentId !== value.payload.agentId ||
+        boundedRunToken.conversationId !== value.payload.conversationId ||
+        boundedRunToken.runId !== value.payload.runId ||
+        boundedRunToken.messageId !== value.payload.messageId ||
+        boundedRunToken.channelId !== value.payload.channelId)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Bounded run token does not match job payload",
+        path: ["payload", "runJobToken"],
+      });
+    if (
+      boundedRunToken?.executionMode === "personal" &&
+      (value.payload.trustedExecutionScope ||
+        value.payload.resolvedCourseContext ||
+        boundedRunToken.courseToolScope)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Personal run token cannot carry course execution context",
+        path: ["payload", "runJobToken"],
+      });
     const scheduled = value.payload.scheduledCourseContext;
     if (
       scheduled &&
@@ -368,6 +501,87 @@ const JobEventSchema = z
         message: "Resolved course context trust does not match execution",
         path: ["payload", "resolvedCourseContext", "trust"],
       });
+    const scope = value.payload.trustedExecutionScope;
+    if (scope) {
+      if (scope.mode === "onboarding" && context)
+        ctx.addIssue({
+          code: "custom",
+          message: "Onboarding scope cannot include resolved course context",
+          path: ["payload", "resolvedCourseContext"],
+        });
+      if (
+        scope.ownerUserId !== value.payload.userId ||
+        scope.agentId !== value.payload.agentId ||
+        scope.conversationId !== value.payload.conversationId
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Trusted execution scope does not match execution",
+          path: ["payload", "trustedExecutionScope"],
+        });
+      if (
+        scope.mode === "course" &&
+        (!context ||
+          !trust ||
+          scope.ownerUserId !== trust.ownerUserId ||
+          scope.agentId !== trust.agentId ||
+          scope.conversationId !== trust.conversationId ||
+          scope.courseEntityId !== trust.courseEntityId ||
+          scope.contextPackId !== trust.contextPackId ||
+          scope.contextVersion !== trust.contextVersion ||
+          context.course.courseKey !== trust.courseKey ||
+          scope.courseEntityId !== context.course.courseEntityId ||
+          scope.contextPackId !== context.context.contextPackId ||
+          scope.contextVersion !== context.context.contextVersion ||
+          scope.activeSpecializedSkill !== context.activeSpecializedSkill)
+      )
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "Course execution scope does not match resolved course context",
+          path: ["payload", "trustedExecutionScope"],
+        });
+      if (
+        !token ||
+        token.executionMode !== scope.mode ||
+        token.userId !== value.payload.userId ||
+        token.agentId !== value.payload.agentId ||
+        token.conversationId !== value.payload.conversationId ||
+        token.runId !== value.payload.runId ||
+        token.messageId !== value.payload.messageId ||
+        token.channelId !== value.payload.channelId ||
+        (scope.mode === "course" &&
+          (!token.courseToolScope ||
+            token.courseToolScope.ownerUserId !== scope.ownerUserId ||
+            token.courseToolScope.agentId !== scope.agentId ||
+            token.courseToolScope.courseEntityId !== scope.courseEntityId ||
+            token.courseToolScope.contextPackId !== scope.contextPackId ||
+            token.courseToolScope.contextVersion !== scope.contextVersion ||
+            token.courseToolScope.activeSpecializedSkill !==
+              scope.activeSpecializedSkill))
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Trusted execution scope does not match run token",
+          path: ["payload", "runJobToken"],
+        });
+    } else if (tokenText) {
+      if (nativeToken && !token)
+        ctx.addIssue({
+          code: "custom",
+          message: "Native run token failed integrity validation",
+          path: ["payload", "runJobToken"],
+        });
+      if (
+        token?.executionMode === "onboarding" ||
+        token?.executionMode === "course"
+      )
+        ctx.addIssue({
+          code: "custom",
+          message: "Scoped run token requires trusted execution scope",
+          path: ["payload", "trustedExecutionScope"],
+        });
+    }
   });
 
 /**
@@ -701,11 +915,26 @@ export class GatewayClient {
               "Invalid job event data:",
               validationResult.error.format()
             );
-            logger.debug(`Raw job data: ${data}`);
             throw new Error(
               `Job event validation failed: ${validationResult.error.message}`
             );
           }
+
+          const payload = validationResult.data.payload;
+          const boundedRunToken =
+            validationResult.data.gatewayVerifiedRunToken?.claims ??
+            (payload.runJobToken &&
+            looksLikeNativeWorkerToken(payload.runJobToken)
+              ? verifyWorkerToken(payload.runJobToken)
+              : null);
+          if (
+            boundedRunToken?.tokenKind === "run" &&
+            boundedRunToken.executionMode !== undefined &&
+            boundedRunToken.deploymentName !== this.deploymentName
+          )
+            throw new Error(
+              "Bounded run token does not match worker deployment"
+            );
 
           // Send delivery receipt immediately so the gateway knows
           // the job was actually received (not lost to a stale SSE connection).
@@ -716,7 +945,6 @@ export class GatewayClient {
             this.sendDeliveryReceipt(jobId);
           }
 
-          const payload = validationResult.data.payload;
           if (
             payload.resolvedCourseContext &&
             !payload.resolvedCourseContext.trust
@@ -749,7 +977,6 @@ export class GatewayClient {
             `Failed to parse or validate job event data:`,
             parseError
           );
-          logger.debug(`Raw job data: ${data}`);
         }
         return;
       }
@@ -1050,6 +1277,7 @@ export class GatewayClient {
       botId: message.payload.botId,
       platform: message.payload.platform,
       resolvedCourseContext: message.payload.resolvedCourseContext,
+      trustedExecutionScope: message.payload.trustedExecutionScope,
       scheduledCourseContext: message.payload.scheduledCourseContext,
     });
     return (
@@ -1288,6 +1516,7 @@ export class GatewayClient {
           ? payload.runJobToken
           : undefined,
       resolvedCourseContext: payload.resolvedCourseContext,
+      trustedExecutionScope: payload.trustedExecutionScope,
       scheduledCourseContext: payload.scheduledCourseContext,
     };
   }

@@ -10,6 +10,7 @@ import {
   type McpStatus,
   type McpToolDef,
   type ResolvedCourseExecutionContext,
+  type TrustedExecutionScope,
 } from "@lobu/core";
 import type { WorkerShifuTraceContext } from "../shared/journey-trace";
 import { shifuTraceHeaders } from "../shared/journey-trace";
@@ -133,8 +134,26 @@ export function buildResolvedCourseContextInstructions(
   scheduled?: import("@lobu/core").ScheduledCourseContext
 ): string {
   if (!resolved) return "";
+  const specializedSkillInstructions =
+    resolved.activeSpecializedSkill === "opp-coach"
+      ? [
+          "",
+          "Turn-specialized skill authority: opp-coach",
+          "- Use the normal Lobu skill-loading path and read the full file before answering: `cat .skills/opp-coach/SKILL.md` (or an equivalent file read).",
+          "- Apply its instructions to this turn. Do not substitute the skill summary or recreate its content from memory.",
+          "- If the file is missing or unreadable, do not reconstruct the skill or claim that it was applied. Continue with the general canonical course context and explicitly state that the specialized skill is unavailable.",
+        ]
+      : resolved.activeSpecializedSkill === null
+        ? [
+            "",
+            "Turn-specialized skill authority: none",
+            "- Do not load or apply `.skills/opp-coach/SKILL.md` for this turn.",
+            "- This does not disable unrelated skills; follow their normal task-matching rules.",
+          ]
+        : [];
   const lines = [
     "## Resolved Course Context",
+    ...specializedSkillInstructions,
     "",
     `Course: ${normalizeIdentity(resolved.course.displayName)}`,
     `Course key: ${normalizeIdentity(resolved.course.courseKey)}`,
@@ -210,6 +229,17 @@ export function buildResolvedCourseContextInstructions(
   return codePointLength(rendered) <= MAX_RESOLVED_COURSE_CONTEXT_CHARS
     ? rendered
     : `${codePointSlice(rendered, MAX_RESOLVED_COURSE_CONTEXT_CHARS - 3).trimEnd()}...`;
+}
+
+export function buildTrustedExecutionScopeInstructions(
+  scope: TrustedExecutionScope | undefined
+): string {
+  if (scope?.mode !== "onboarding") return "";
+  return [
+    "Runtime Execution Scope: onboarding",
+    "Toolbox 尚無 canonical course。依既有 authorization-first onboarding instructions 執行；",
+    "不得聲稱已載入課程 context，不得把本輪當成已知課程的生成任務。",
+  ].join("\n");
 }
 
 export function removeLegacyToolboxActiveContext(instructions: string): string {

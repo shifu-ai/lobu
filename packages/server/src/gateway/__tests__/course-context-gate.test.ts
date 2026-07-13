@@ -2,6 +2,7 @@ import type { MessagePayload } from "@lobu/core";
 import { describe, expect, test, vi } from "vitest";
 import {
 	attachCourseContextForReviewedScope,
+	decideCourseTurn,
 	requiresCourseContext,
 } from "../orchestration/course-context-gate.js";
 const payload = (
@@ -256,7 +257,7 @@ describe("course context gate", () => {
 		expect(fetcher).not.toHaveBeenCalled();
 	});
 	test.each([
-		[{ status: "missing", reason: "archived_only" }, "onboarding_required"],
+		[{ status: "missing", reason: "archived_only" }, "context_unavailable"],
 		[
 			{
 				status: "resolved",
@@ -318,15 +319,29 @@ describe("course context gate", () => {
 		expect(
 			requiresCourseContext(
 				payload("提醒我明天繳電話費", { courseScope: "reviewed" }),
-				{ courseSkillEnabled: true, hasActiveCourse: true },
+				{ hasActiveCourse: true },
 			),
 		).toBe(false);
 		expect(
 			requiresCourseContext(payload("提醒我明天整理課程文件"), {
-				courseSkillEnabled: true,
 				hasActiveCourse: true,
 			}),
 		).toBe(true);
+	});
+	test.each([
+		["幫我寫信跟老師確認下週錄課時間", true],
+		["整理今天的課程會議待辦", true],
+		["這堂課的三個秘密幫我想一下", true],
+		["幫我看這段銷講彩排哪裡要改", true],
+		["提醒我繳電話費", false],
+		["你好", false],
+	] as const)("classifies general course context without selecting a skill for %s", (message, courseContextRequired) => {
+		expect(decideCourseTurn(payload(message))).toEqual({ courseContextRequired });
+	});
+	test("reviewed scope requires general course context without activating opp-coach", () => {
+		expect(decideCourseTurn(payload("你好", { courseScope: "reviewed" }))).toEqual({
+			courseContextRequired: true,
+		});
 	});
 	test("accepts the complete canonical ambiguous contract and preserves order", async () => {
 		const fetcher = vi
@@ -402,14 +417,11 @@ describe("course context gate", () => {
 			reasonCode: "resolver_unavailable",
 		});
 	});
-	test.each([
-		"no_courses",
-		"archived_only",
-	] as const)("maps missing/%s to onboarding", async (reason) => {
+	test("maps missing/no_courses to a trusted onboarding execution scope", async () => {
 		const fetcher = vi
 			.fn()
 			.mockResolvedValue(
-				new Response(JSON.stringify({ status: "missing", reason }), {
+				new Response(JSON.stringify({ status: "missing", reason: "no_courses" }), {
 					status: 200,
 				}),
 			);
@@ -419,7 +431,31 @@ describe("course context gate", () => {
 				secret: "s",
 				fetcher,
 			}),
-		).resolves.toEqual({ status: "onboarding_required" });
+		).resolves.toEqual({
+			status: "onboarding_ready",
+			scope: {
+				mode: "onboarding",
+				source: "toolbox_course_resolution",
+				reason: "no_courses",
+				ownerUserId: "u",
+				agentId: "a",
+				conversationId: "c",
+			},
+		});
+	});
+	test("keeps missing/archived_only fail closed", async () => {
+		const fetcher = vi.fn().mockResolvedValue(
+			new Response(JSON.stringify({ status: "missing", reason: "archived_only" }), {
+				status: 200,
+			}),
+		);
+		await expect(
+			attachCourseContextForReviewedScope(payload("課程"), {
+				baseUrl: "https://t",
+				secret: "s",
+				fetcher,
+			}),
+		).resolves.toEqual({ status: "context_unavailable", reasonCode: "archived_only" });
 	});
 	test.each([
 		"multiple_active_courses",
@@ -683,7 +719,7 @@ describe("course context gate", () => {
 				secret: "s",
 				fetcher,
 				memorySearch,
-				courseSkillEnabled: true,
+				activeSpecializedSkill: "opp-coach",
 			}),
 		).resolves.toMatchObject({
 			status: "ready",
@@ -797,7 +833,7 @@ describe("course context gate", () => {
 			secret: "s",
 			fetcher,
 			memorySearch,
-			courseSkillEnabled: true,
+			activeSpecializedSkill: "opp-coach",
 			traceEmitter: async (event) => {
 				events.push(event);
 			},
@@ -889,7 +925,7 @@ describe("course context gate", () => {
 			secret: "s",
 			fetcher,
 			memorySearch,
-			courseSkillEnabled: true,
+			activeSpecializedSkill: "opp-coach",
 			courseSkillRetrievalTerms: ["Key Learning", "Offer"],
 			courseSkillRetrievalLimit: 3,
 			courseSkillContextFields: ["audience"],
@@ -941,7 +977,7 @@ describe("course context gate", () => {
 				baseUrl: "https://t",
 				secret: "s",
 				fetcher,
-				courseSkillEnabled: true,
+				activeSpecializedSkill: "opp-coach",
 				courseSkillContextFields: [
 					"audience",
 					"course_promise",
@@ -1007,7 +1043,7 @@ describe("course context gate", () => {
 			secret: "s",
 			fetcher,
 			memorySearch,
-			courseSkillEnabled: true,
+			activeSpecializedSkill: "opp-coach",
 		});
 		expect(result).toMatchObject({
 			status: "ready",
@@ -1034,7 +1070,7 @@ describe("course context gate", () => {
 			},
 		});
 	});
-	test("empty retrieval remains advisory minimal and preserves canonical context", async () => {
+	test("empty retrieval preserves general canonical context without opp-coach readiness", async () => {
 		const resolved = {
 			status: "resolved",
 			confidence: "high",
@@ -1062,9 +1098,12 @@ describe("course context gate", () => {
 			context: {
 				context: { confirmedSummary: "s" },
 				retrieval: { status: "empty" },
-				readiness: { level: "minimal", answerPolicy: "answer_conservatively" },
 			},
 		});
+		if (result.status === "ready") {
+			expect(result.context.activeSpecializedSkill).toBeNull();
+			expect(result.context.readiness).toBeUndefined();
+		}
 	});
 	test("non-text input is safe", () =>
 		expect(

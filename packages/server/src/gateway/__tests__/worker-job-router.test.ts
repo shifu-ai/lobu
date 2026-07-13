@@ -4,6 +4,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import {
+  __resetEncryptionKeyCacheForTests,
+  generateWorkerToken,
+  verifyWorkerToken,
+} from "@lobu/core";
 import { WorkerConnectionManager } from "../gateway/connection-manager.js";
 import { WorkerJobRouter } from "../gateway/job-router.js";
 import {
@@ -71,6 +76,101 @@ describe("WorkerJobRouter", () => {
   });
 
   describe("Job Routing", () => {
+    test("gateway verifies a native run token and overwrites caller verification metadata", async () => {
+      const previousKey = process.env.ENCRYPTION_KEY;
+      process.env.ENCRYPTION_KEY =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+      __resetEncryptionKeyCacheForTests();
+      try {
+        const token = generateWorkerToken(
+          "U123",
+          "conversation-1",
+          "worker-1",
+          {
+            channelId: "channel-1",
+            agentId: "agent-1",
+            runId: 21,
+            messageId: "message-1",
+            organizationId: "org-secret",
+            connectionId: "connection-secret",
+            sessionKey: "session-secret",
+            traceId: "trace-secret",
+            processedMessageIds: ["message-1", "message-secret"],
+            tokenKind: "run",
+            executionMode: "personal",
+          }
+        );
+        expect(verifyWorkerToken(token)).not.toBeNull();
+        const res = new MockResponse() as any;
+        connectionManager.addConnection(
+          "worker-1",
+          "U123",
+          "thread-1",
+          "agent-1",
+          res
+        );
+        await router.registerWorker("worker-1");
+        res.clearWrites();
+
+        const routePromise = queue.addJob("thread_message_worker-1", {
+          id: "native-run-job",
+          data: {
+            ...TestHelpers.createMockJob().data,
+            userId: "U123",
+            conversationId: "conversation-1",
+            channelId: "channel-1",
+            agentId: "agent-1",
+            runId: 21,
+            messageId: "message-1",
+            runJobToken: token,
+            gatewayVerifiedRunToken: {
+              tokenSha256: "forged",
+              claims: { userId: "attacker" },
+            },
+          },
+        });
+
+        const events = TestHelpers.parseSSE(res.getAllWrites());
+        const jobEvent = events.find((event) => event.event === "job");
+        if (jobEvent?.data?.jobId) router.acknowledgeJob(jobEvent.data.jobId);
+        await routePromise;
+
+        expect(jobEvent?.data?.gatewayVerifiedRunToken?.claims).toEqual({
+          userId: "U123",
+          conversationId: "conversation-1",
+          channelId: "channel-1",
+          agentId: "agent-1",
+          deploymentName: "worker-1",
+          timestamp: expect.any(Number),
+          runId: 21,
+          messageId: "message-1",
+          tokenKind: "run",
+          executionMode: "personal",
+        });
+        for (const forbidden of [
+          "organizationId",
+          "connectionId",
+          "sessionKey",
+          "traceId",
+          "jti",
+          "processedMessageIds",
+        ])
+          expect(
+            jobEvent?.data?.gatewayVerifiedRunToken?.claims
+          ).not.toHaveProperty(forbidden);
+        expect(jobEvent?.data?.gatewayVerifiedRunToken?.tokenSha256).toMatch(
+          /^[0-9a-f]{64}$/
+        );
+        expect(
+          jobEvent?.data?.payload?.gatewayVerifiedRunToken
+        ).toBeUndefined();
+      } finally {
+        if (previousKey === undefined) delete process.env.ENCRYPTION_KEY;
+        else process.env.ENCRYPTION_KEY = previousKey;
+        __resetEncryptionKeyCacheForTests();
+      }
+    });
+
     test("routes job to connected worker via SSE", async () => {
       const res = new MockResponse() as any;
       connectionManager.addConnection(

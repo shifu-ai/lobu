@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
-import { createLogger } from "@lobu/core";
+import { createHash } from "node:crypto";
+import { createLogger, verifyWorkerToken } from "@lobu/core";
 import type { IMessageQueue } from "../infrastructure/queue/index.js";
 import type { WorkerConnectionManager } from "./connection-manager.js";
 
@@ -11,6 +12,41 @@ interface PendingJob {
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
   jobId: string;
+}
+
+function looksLikeNativeWorkerToken(value: string): boolean {
+  const parts = value.split(":");
+  return (
+    parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part))
+  );
+}
+
+function projectVerifiedRunTokenClaims(
+  claims: NonNullable<ReturnType<typeof verifyWorkerToken>>
+) {
+  return {
+    userId: claims.userId,
+    conversationId: claims.conversationId,
+    channelId: claims.channelId,
+    agentId: claims.agentId,
+    deploymentName: claims.deploymentName,
+    timestamp: claims.timestamp,
+    runId: claims.runId,
+    messageId: claims.messageId,
+    tokenKind: claims.tokenKind,
+    executionMode: claims.executionMode,
+    courseToolScope: claims.courseToolScope
+      ? {
+          ownerUserId: claims.courseToolScope.ownerUserId,
+          agentId: claims.courseToolScope.agentId,
+          courseEntityId: claims.courseToolScope.courseEntityId,
+          contextPackId: claims.courseToolScope.contextPackId,
+          contextVersion: claims.courseToolScope.contextVersion,
+          activeSpecializedSkill:
+            claims.courseToolScope.activeSpecializedSkill,
+        }
+      : undefined,
+  };
 }
 
 /**
@@ -95,16 +131,52 @@ export class WorkerJobRouter {
     }
 
     // Extract job data and ID
-    const jobData = (job as { data?: unknown }).data;
+    const rawJobData = (job as { data?: unknown }).data;
+    const jobData =
+      typeof rawJobData === "object" && rawJobData !== null
+        ? { ...(rawJobData as Record<string, unknown>) }
+        : rawJobData;
+    // This field is gateway-owned. Never forward a value supplied through the
+    // queue payload, even though the worker receives the SSE stream from us.
+    if (typeof jobData === "object" && jobData !== null)
+      delete (jobData as Record<string, unknown>).gatewayVerifiedRunToken;
     const jobId =
       (job as { id?: string }).id ||
       `job-${Date.now()}-${Math.random().toString(36).substring(7)}`;
 
     // Send job to worker via SSE with jobId wrapped in payload
+    const jobDataRecord =
+      typeof jobData === "object" && jobData !== null
+        ? (jobData as Record<string, unknown>)
+        : undefined;
+    const runJobToken =
+      typeof jobDataRecord?.runJobToken === "string"
+        ? jobDataRecord.runJobToken
+        : undefined;
+    let gatewayVerifiedRunToken:
+      | {
+          tokenSha256: string;
+          claims: ReturnType<typeof projectVerifiedRunTokenClaims>;
+        }
+      | undefined;
+    if (runJobToken && looksLikeNativeWorkerToken(runJobToken)) {
+      const claims = verifyWorkerToken(runJobToken);
+      if (!claims)
+        throw new Error("Native run token failed gateway integrity validation");
+      gatewayVerifiedRunToken = {
+        tokenSha256: createHash("sha256").update(runJobToken).digest("hex"),
+        claims: projectVerifiedRunTokenClaims(claims),
+      };
+    }
+
     const jobPayload =
       typeof jobData === "object" && jobData !== null
-        ? { payload: jobData, jobId: jobId }
-        : { payload: { data: jobData }, jobId: jobId };
+        ? { payload: jobData, jobId: jobId, gatewayVerifiedRunToken }
+        : {
+            payload: { data: jobData },
+            jobId: jobId,
+            gatewayVerifiedRunToken,
+          };
 
     const sent = this.connectionManager.sendSSE(
       connection.writer,

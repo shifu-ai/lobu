@@ -1,4 +1,9 @@
-import { createLogger, extractTraceId, type MessagePayload } from "@lobu/core";
+import {
+	createLogger,
+	extractTraceId,
+	type MessagePayload,
+	type TrustedExecutionScope,
+} from "@lobu/core";
 import { createHash } from "node:crypto";
 import type { Env } from "@lobu/connector-sdk";
 import type {
@@ -24,7 +29,7 @@ export interface CourseContextGateOptions
 	extends ToolboxCourseContextClientOptions {
 	sessionManager?: ISessionManager;
 	sessionKey?: string;
-	courseSkillEnabled?: boolean;
+	activeSpecializedSkill?: "opp-coach" | null;
 	courseSkillContextFields?: string[];
 	courseSkillRetrievalTerms?: string[];
 	courseSkillRetrievalLimit?: number;
@@ -44,6 +49,10 @@ export type CourseContextGateResult =
 	| { status: "not_required" }
 	| { status: "already_dispatched" }
 	| {
+			status: "onboarding_ready";
+			scope: Extract<TrustedExecutionScope, { mode: "onboarding" }>;
+	  }
+	| {
 			status: "ready";
 			context: NonNullable<MessagePayload["resolvedCourseContext"]>;
 			bindingStatus?: ActiveCourseBindingWriteResult;
@@ -53,7 +62,6 @@ export type CourseContextGateResult =
 			status: "clarification_required";
 			candidates: Array<{ courseKey: string; displayName: string }>;
 	  }
-	| { status: "onboarding_required" }
 	| {
 			status: "context_unavailable";
 			displayName?: string;
@@ -65,7 +73,7 @@ export type CourseContextGateResult =
 			};
 	  };
 const COURSE_INTENT =
-	/(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
+	/(?:銷講|三個秘密|課綱|課程|大課|老師|錄課|會議待辦|戰報|招生|offer)/iu;
 const PERSONAL_REMINDER =
 	/提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
 const logger = createLogger("course-context-gate");
@@ -190,23 +198,31 @@ function projectRequiredCourseContext(
 	}
 	return lines.join("\n").slice(0, 8000);
 }
-export function requiresCourseContext(
+export interface CourseTurnDecision {
+	courseContextRequired: boolean;
+}
+export function decideCourseTurn(
 	data: MessagePayload,
-	options: { courseSkillEnabled?: boolean; hasActiveCourse?: boolean } = {},
-): boolean {
+	options: { hasActiveCourse?: boolean } = {},
+): CourseTurnDecision {
 	const message = data.messageText?.trim() ?? "";
 	if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message))
-		return false;
-	if (
-		options.courseSkillEnabled ||
-		data.platformMetadata?.courseScope === "reviewed"
-	)
-		return true;
-	if (COURSE_INTENT.test(message)) return true;
-	return Boolean(
-		options.hasActiveCourse &&
-			/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message),
-	);
+		return { courseContextRequired: false };
+	return {
+		courseContextRequired:
+			data.platformMetadata?.courseScope === "reviewed" ||
+			COURSE_INTENT.test(message) ||
+			Boolean(
+				options.hasActiveCourse &&
+					/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message),
+			),
+	};
+}
+export function requiresCourseContext(
+	data: MessagePayload,
+	options: { hasActiveCourse?: boolean } = {},
+): boolean {
+	return decideCourseTurn(data, options).courseContextRequired;
 }
 export function isExplicitPersonalBypass(data: MessagePayload): boolean {
 	const message = data.messageText?.trim() ?? "";
@@ -376,10 +392,10 @@ export async function attachCourseContextForReviewedScope(
 		!scheduled &&
 		!choice &&
 		!pending &&
-		!requiresCourseContext(data, {
-			courseSkillEnabled: options?.courseSkillEnabled,
+		options?.activeSpecializedSkill !== "opp-coach" &&
+		!decideCourseTurn(data, {
 			hasActiveCourse: Boolean(session?.shifuCourseContext),
-		})
+		}).courseContextRequired
 	)
 		return { status: "not_required" };
 	if (scheduled && data.resolvedCourseContext) {
@@ -397,6 +413,9 @@ export async function attachCourseContextForReviewedScope(
 				status: "context_unavailable",
 				reasonCode: "invalid_prevalidated_scheduled_context",
 			};
+		const specializedActive =
+			scheduled !== undefined || options?.activeSpecializedSkill === "opp-coach";
+		existing.activeSpecializedSkill = specializedActive ? "opp-coach" : null;
 		const retrieval =
 			data.organizationId && options?.memorySearch
 				? await retrieveCourseMemory(
@@ -406,10 +425,12 @@ export async function attachCourseContextForReviewedScope(
 							agentId: data.agentId,
 							courseEntityId: scheduled.course.courseEntityId,
 							task: data.messageText,
-							skillTerms: options?.courseSkillEnabled
-								? (options.courseSkillRetrievalTerms ?? [])
-								: [],
-							limit: options?.courseSkillRetrievalLimit,
+						skillTerms: specializedActive
+							? (options.courseSkillRetrievalTerms ?? [])
+							: [],
+						limit: specializedActive
+							? options?.courseSkillRetrievalLimit
+							: undefined,
 							env: options.env,
 						},
 						{ search: options.memorySearch },
@@ -550,7 +571,27 @@ export async function attachCourseContextForReviewedScope(
 			};
 		return { status: "clarification_required", candidates };
 	}
-	if (resolution.status === "missing") return { status: "onboarding_required" };
+	if (resolution.status === "missing") {
+		if (scheduled)
+			return {
+				status: "context_unavailable",
+				displayName: scheduled.course.displayName,
+				reasonCode: "scheduled_course_mapping_changed",
+			};
+		if (resolution.reason === "no_courses")
+			return {
+				status: "onboarding_ready",
+				scope: {
+					mode: "onboarding",
+					source: "toolbox_course_resolution",
+					reason: "no_courses",
+					ownerUserId: data.userId,
+					agentId: data.agentId,
+					conversationId: data.conversationId,
+				},
+			};
+		return { status: "context_unavailable", reasonCode: "archived_only" };
+	}
 	const course = resolution.course;
 	if (
 		scheduled &&
@@ -601,8 +642,10 @@ export async function attachCourseContextForReviewedScope(
 			reasonCode: "bundle_identity_mismatch",
 		};
 	const context = bundle.context;
-	const skillTerms = options?.courseSkillEnabled
-		? (options.courseSkillRetrievalTerms ?? [])
+	const specializedActive =
+		scheduled !== undefined || options?.activeSpecializedSkill === "opp-coach";
+	const skillTerms = specializedActive
+		? (options?.courseSkillRetrievalTerms ?? [])
 		: [];
 	const retrieval =
 		data.organizationId && options?.memorySearch
@@ -614,7 +657,9 @@ export async function attachCourseContextForReviewedScope(
 						courseEntityId: course.courseEntityId,
 						task: data.messageText,
 						skillTerms,
-						limit: options?.courseSkillRetrievalLimit,
+						limit: specializedActive
+							? options?.courseSkillRetrievalLimit
+							: undefined,
 						env: options.env,
 					},
 					{ search: options.memorySearch },
@@ -646,7 +691,9 @@ export async function attachCourseContextForReviewedScope(
 		audience: bundle.profile.audience,
 		course_promise: bundle.profile.coursePromise,
 	};
-	const mergedReadiness = mergeReadiness(canonicalReadiness, retrieval);
+	const mergedReadiness = specializedActive
+		? mergeReadiness(canonicalReadiness, retrieval)
+		: undefined;
 	await traceCourse(
 		data,
 		options,
@@ -673,6 +720,7 @@ export async function attachCourseContextForReviewedScope(
 	const resolvedCourseContext: NonNullable<
 		MessagePayload["resolvedCourseContext"]
 	> = {
+		activeSpecializedSkill: specializedActive ? "opp-coach" : null,
 		trust: {
 			ownerUserId: data.userId,
 			agentId: data.agentId,
@@ -693,7 +741,7 @@ export async function attachCourseContextForReviewedScope(
 			contextVersion: context.version,
 			stale: context.stale,
 			confirmedSummary:
-				options?.courseSkillEnabled && options.courseSkillContextFields?.length
+				specializedActive && options?.courseSkillContextFields?.length
 					? projectRequiredCourseContext(
 							bundle,
 							options.courseSkillContextFields,
@@ -701,8 +749,10 @@ export async function attachCourseContextForReviewedScope(
 					: context.agentMd.slice(0, 8000),
 		},
 		retrieval,
-		readiness: mergedReadiness.assessment,
-		evidence: [
+		...(mergedReadiness
+			? {
+					readiness: mergedReadiness.assessment,
+					evidence: [
 			{
 				kind: "canonical_context",
 				fields: [
@@ -731,7 +781,9 @@ export async function attachCourseContextForReviewedScope(
 						},
 					]
 				: []),
-		],
+					],
+				}
+			: {}),
 	};
 	data.resolvedCourseContext = resolvedCourseContext;
 	if (scheduled) {
