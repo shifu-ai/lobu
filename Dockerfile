@@ -11,9 +11,11 @@ ARG BUN_VERSION=1.3.5
 
 # Bun for workspace install + tsc. git needed because some deps ship git URLs.
 # python3 + build-essential + node-gyp needed for native install fallbacks.
+# libvips-dev keeps Xenova's sharp@0.32 source fallback reproducible when its
+# prebuilt binary is unavailable instead of depending on a warm Docker cache.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl unzip \
-      python3 build-essential \
+      python3 build-essential libvips-dev \
     && rm -rf /var/lib/apt/lists/* \
     && curl --retry 5 --retry-all-errors --retry-delay 5 -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash -s "bun-v${BUN_VERSION}" \
     && chmod +x /usr/local/bin/bun \
@@ -130,9 +132,11 @@ WORKDIR /app
 
 ARG BUN_VERSION=1.3.5
 
-# curl for health checks, dbmate for migrations, bun for tsx-equivalent, Chromium deps for connectors
+# curl for health checks, dbmate for migrations, bun for tsx-equivalent, Chromium deps for connectors.
+# Source-built sharp links libvips dynamically, so retain the runtime library.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates unzip \
+      libvips42 \
       libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libdbus-1-3 \
       libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
       libgbm1 libpango-1.0-0 libcairo2 libasound2 libwayland-client0 \
