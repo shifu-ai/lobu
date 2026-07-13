@@ -6,7 +6,10 @@ import {
 	parseTrustedCourseWakeV1,
 	type TrustedCourseWakeV1,
 } from "../scheduled/course-aware-wake.js";
-import { upsertScheduledJobByExternalKey } from "../scheduled/scheduled-jobs-service.js";
+import {
+	cancelTrustedCourseWake,
+	upsertScheduledJobByExternalKey,
+} from "../scheduled/scheduled-jobs-service.js";
 
 const EXTERNAL_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/;
 
@@ -47,6 +50,35 @@ interface ParsedCourseWakeRequest {
 
 export interface CourseAwareWakeRoutesDeps {
 	upsertScheduledJobByExternalKey: typeof upsertScheduledJobByExternalKey;
+	cancelTrustedCourseWake: typeof cancelTrustedCourseWake;
+}
+
+interface ParsedCourseWakeCancellation {
+	externalKey: string;
+	ownerUserId: string;
+	agentId: string;
+}
+
+function parseCancellationRequest(
+	raw: unknown,
+	organizationId: string,
+): ParsedCourseWakeCancellation {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error("body must be an object");
+	}
+	const body = raw as Record<string, unknown>;
+	if (requiredString(body, "organizationId") !== organizationId) {
+		throw new Error("organizationId mismatch");
+	}
+	const externalKey = requiredString(body, "externalKey");
+	if (!EXTERNAL_KEY_PATTERN.test(externalKey)) {
+		throw new Error("invalid externalKey");
+	}
+	return {
+		externalKey,
+		ownerUserId: requiredString(body, "ownerUserId"),
+		agentId: requiredString(body, "agentId"),
+	};
 }
 
 function parseRequest(
@@ -84,6 +116,7 @@ export function createCourseAwareWakeRoutes(
 ): Hono<{ Bindings: Env }> {
 	const upsert =
 		options.upsertScheduledJobByExternalKey ?? upsertScheduledJobByExternalKey;
+	const cancel = options.cancelTrustedCourseWake ?? cancelTrustedCourseWake;
 	const routes = new Hono<{ Bindings: Env }>();
 	routes.put("/", async (c) => {
 		const denied = requireAdminPat(c);
@@ -135,6 +168,42 @@ export function createCourseAwareWakeRoutes(
 			return c.json({ ok: true, engineRef: job.id }, 200);
 		} catch {
 			return c.json({ error: "course_wake_upsert_failed" }, 500);
+		}
+	});
+	routes.delete("/:engineRef", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId)
+			return c.json({ error: "Authentication required" }, 401);
+		const engineRef = c.req.param("engineRef")?.trim();
+		if (!engineRef || engineRef.length > 256) {
+			return c.json(
+				{ error: "invalid_request", message: "engineRef is required" },
+				400,
+			);
+		}
+		let parsed: ParsedCourseWakeCancellation;
+		try {
+			parsed = parseCancellationRequest(await c.req.json(), organizationId);
+		} catch (error) {
+			return c.json(
+				{
+					error: "invalid_request",
+					message: error instanceof Error ? error.message : "invalid request",
+				},
+				400,
+			);
+		}
+		try {
+			const result = await cancel({ engineRef, organizationId, ...parsed });
+			if (!result.found) return c.json({ error: "course_wake_not_found" }, 404);
+			return c.json(
+				{ cancelled: true, alreadyCancelled: result.alreadyCancelled },
+				200,
+			);
+		} catch {
+			return c.json({ error: "course_wake_cancel_failed" }, 500);
 		}
 	});
 	return routes;
