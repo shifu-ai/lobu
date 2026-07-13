@@ -1,0 +1,58 @@
+import { describe, expect, test } from "bun:test";
+import {
+  buildCurrentDateContext,
+  buildRelativeWeekCalendar,
+  formatCalendarDate,
+} from "../openclaw/date-context";
+
+const NOW = new Date("2026-07-13T10:15:00.000Z");
+
+describe("date context", () => {
+  test("builds Monday-to-Sunday calendars for the previous, current, and next weeks", () => {
+    const calendar = buildRelativeWeekCalendar(NOW);
+
+    expect(calendar.previous.map(formatCalendarDate)).toEqual([
+      "2026-07-06",
+      "2026-07-07",
+      "2026-07-08",
+      "2026-07-09",
+      "2026-07-10",
+      "2026-07-11",
+      "2026-07-12",
+    ]);
+    expect(calendar.current.map(formatCalendarDate)).toEqual([
+      "2026-07-13",
+      "2026-07-14",
+      "2026-07-15",
+      "2026-07-16",
+      "2026-07-17",
+      "2026-07-18",
+      "2026-07-19",
+    ]);
+    expect(calendar.next.map(formatCalendarDate)).toEqual([
+      "2026-07-20",
+      "2026-07-21",
+      "2026-07-22",
+      "2026-07-23",
+      "2026-07-24",
+      "2026-07-25",
+      "2026-07-26",
+    ]);
+  });
+
+  test("renders deterministic week anchors and date precedence guidance", () => {
+    const context = buildCurrentDateContext(NOW);
+
+    expect(context).toContain("Current time / 現在時間: 2026-07-13 18:15:00");
+    expect(context).toContain("Previous week / 上週");
+    expect(context).toContain("Current week / 本週");
+    expect(context).toContain("Next week / 下週");
+    expect(context).toContain("2026-07-12 (星期日)");
+    expect(context).toContain("2026-07-15 (星期三)");
+    expect(context).toContain("2026-07-22 (星期三)");
+    expect(context).toContain(
+      "Current Date Context overrides relative dates in old conversation history"
+    );
+    expect(context).toContain("Never guess a weekday");
+  });
+});

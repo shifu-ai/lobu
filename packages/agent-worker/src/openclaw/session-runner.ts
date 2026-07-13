@@ -102,6 +102,8 @@ import {
   getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
 import { guardDateOutput } from "./date-output-guard";
+import { buildCurrentDateContext } from "./date-context";
+export { buildCurrentDateContext } from "./date-context";
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -506,107 +508,6 @@ export function replaceBasePromptIdentity(
   // Upstream wording drifted — prepend identity with a framing note rather
   // than silently letting the upstream opener win.
   return `${identity}\n\nThe section below describes the runtime tooling available to you. It does not change your role.\n\n${basePrompt}`;
-}
-
-const TAIPEI_TIME_ZONE = "Asia/Taipei";
-const WEEKDAY_LABELS_ZH_TW = [
-  "星期日",
-  "星期一",
-  "星期二",
-  "星期三",
-  "星期四",
-  "星期五",
-  "星期六",
-];
-
-type DateParts = {
-  year: number;
-  month: number;
-  day: number;
-};
-
-function getTaipeiDateParts(now: Date): DateParts {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-
-  const valueFor = (type: string) => {
-    const value = parts.find((part) => part.type === type)?.value;
-    if (!value) throw new Error(`Missing ${type} from Taipei date formatter`);
-    return Number(value);
-  };
-
-  return {
-    year: valueFor("year"),
-    month: valueFor("month"),
-    day: valueFor("day"),
-  };
-}
-
-function formatDateParts(parts: DateParts): string {
-  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(
-    parts.day
-  ).padStart(2, "0")}`;
-}
-
-function addCalendarDays(parts: DateParts, days: number): DateParts {
-  const date = new Date(
-    Date.UTC(parts.year, parts.month - 1, parts.day + days)
-  );
-  return {
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-  };
-}
-
-function weekdayLabel(parts: DateParts): string {
-  const day = new Date(
-    Date.UTC(parts.year, parts.month - 1, parts.day)
-  ).getUTCDay();
-  return WEEKDAY_LABELS_ZH_TW[day] ?? "星期未知";
-}
-
-function formatDatedWeekday(parts: DateParts): string {
-  return `${formatDateParts(parts)} (${weekdayLabel(parts)})`;
-}
-
-function formatTaipeiTime(now: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  })
-    .format(now)
-    .replace(", ", " ");
-}
-
-export function buildCurrentDateContext(now: Date = new Date()): string {
-  const today = getTaipeiDateParts(now);
-  const yesterday = addCalendarDays(today, -1);
-  const tomorrow = addCalendarDays(today, 1);
-  const currentTime = formatTaipeiTime(now);
-
-  return [
-    "## Current Date Context",
-    "",
-    "- Timezone: Asia/Taipei (UTC+08:00)",
-    `- Current time / 現在時間: ${currentTime}`,
-    `- Today / 今天: ${formatDatedWeekday(today)}`,
-    `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
-    `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,
-    "- When answering about dates, schedules, reports, or relative words such as " +
-      "today/yesterday/tomorrow/今天/昨天/明天, use this context instead of " +
-      "guessing weekdays.",
-  ].join("\n");
 }
 
 export function buildLobuSystemPrompt(
