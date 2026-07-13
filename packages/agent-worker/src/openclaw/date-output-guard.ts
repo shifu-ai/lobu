@@ -313,7 +313,7 @@ function isExplicitNextOccurrenceForwardBridge(
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
   const hasChineseNegativeOrNonAssertion =
-    /[不未無无没沒非否]|(?:查不到|查到|參考|來源|範圍|歷史|舊資料|但|然而|未知|取消)/.test(
+    /(?:不(?:會|是|在|於|能|可|應|可能)|未(?:能|在|於|查)|尚未|無法|无法|沒有|没有|沒辦法|没办法|並非|并非|是否|否定|查不到|參考|來源|範圍|歷史|舊資料|但|然而|未知|取消)/.test(
       normalized
     );
   const hasEnglishNegativeOrNonAssertion =

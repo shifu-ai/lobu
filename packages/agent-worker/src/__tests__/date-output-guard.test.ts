@@ -386,6 +386,16 @@ describe("guardDateOutput", () => {
       "下一場不於 7/22（三）。",
       "下一場不是 7/22（三）。",
       "下一場並非 7/22（三）。",
+      "下一場不能在 7/22（三）。",
+      "下一場不可在 7/22（三）。",
+      "下一場不應在 7/22（三）。",
+      "下一場不可能在 7/22（三）。",
+      "下一場未能在 7/22（三）。",
+      "下一場未在 7/22（三）。",
+      "下一場未於 7/22（三）。",
+      "下一場沒有在 7/22（三）。",
+      "下一場没有在 7/22（三）。",
+      "下一場并非 7/22（三）。",
     ]) {
       expect(
         guardDateOutput({
@@ -395,6 +405,34 @@ describe("guardDateOutput", () => {
           trustedTemporalCandidates: ["2026-07-16"],
         })
       ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("does not confuse Chinese event-name characters with negation", () => {
+    for (const [finalText, expected] of [
+      ["下一場不動產講座是 7/22（三）。", "下一場不動產講座是 7/16（四）。"],
+      ["下一場非營利課程是 7/22（三）。", "下一場非營利課程是 7/16（四）。"],
+      ["下一場未來論壇是 7/22（三）。", "下一場未來論壇是 7/16（四）。"],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: "請查下一場活動",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+      expect(
+        guardDateOutput({
+          userMessage: "請查下一場活動",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).text
+      ).toBe(expected);
     }
   });
 
