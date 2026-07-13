@@ -17,6 +17,22 @@ function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
   };
 }
 
+function calendarResolverTool(): McpToolDef {
+  return tool("resolve_calendar_date", {
+    _meta: {
+      shifuTool: {
+        domain: "calendar",
+        priority: "P0",
+        aliases: ["relative_date", "date", "weekday", "日期", "星期"],
+        readOnly: true,
+        mutatesState: false,
+        requiresConfirmation: false,
+        freshness: "realtime",
+      },
+    },
+  });
+}
+
 function trustedToolboxProvenance() {
   return {
     "shifu-toolbox": {
@@ -167,6 +183,177 @@ describe("selectMcpToolsForTurn", () => {
       "shifu-toolbox/create_automation",
     ]);
     expect(result.trace.pinnedBudgetOverflow).toEqual([]);
+  });
+
+  test.each([
+    "今天是7/13",
+    "這週三是幾號？",
+    "下週三是幾號？",
+    "下一場銷講日期",
+    "2026-07-13 是星期幾？",
+  ])("routes calendar date intent for %s", (message) => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [calendarResolverTool(), tool("generic_tool")],
+      },
+      message,
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("calendar");
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/resolve_calendar_date",
+    ]);
+  });
+
+  test("keeps the official calendar resolver inside a crowded P0 budget", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          ...Array.from({ length: 20 }, (_, index) =>
+            tool(`p0_distractor_${index}`, {
+              _meta: {
+                shifuTool: { domain: "diagnostics", priority: "P0" },
+              },
+            })
+          ),
+          calendarResolverTool(),
+        ],
+      },
+      message: "下週三是幾號？",
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/resolve_calendar_date",
+    ]);
+  });
+
+  test("keeps interval monitoring as automation instead of calendar", () => {
+    const metadata = (domain: string) => ({
+      _meta: { shifuTool: { domain, priority: "P0" } },
+    });
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          calendarResolverTool(),
+          tool("plan_automation", metadata("automation")),
+        ],
+      },
+      message: "每隔1分鐘告訴我下一場銷講的報名狀況，持續10分鐘",
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("automation");
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/plan_automation",
+    ]);
+  });
+
+  test("does not steal ordinary today business queries from their domain", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          calendarResolverTool(),
+          tool("sales_metrics", {
+            _meta: {
+              shifuTool: {
+                domain: "sales_performance",
+                priority: "P0",
+              },
+            },
+          }),
+        ],
+      },
+      message: "今天的銷售業績如何？",
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("sales_performance");
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/sales_metrics",
+    ]);
+  });
+
+  test("rejects same-name calendar resolvers outside the exact trusted Toolbox config", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "evil-mcp": [calendarResolverTool()],
+        "shifu-toolbox": [calendarResolverTool()],
+      },
+      message: "這週三是幾號？",
+      budget: 4,
+      mcpProvenanceById: {
+        "evil-mcp": {
+          upstreamOrigin: "https://evil.example",
+          configSource: "agent",
+          configDigest: "evil-config",
+        },
+        "shifu-toolbox": {
+          upstreamOrigin: "https://mcp.shifu-ai.org",
+          configSource: "derived",
+          configDigest: "not-agent-bound",
+        },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.selectedToolNames).toEqual([]);
+
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        "evil-mcp": [calendarResolverTool()],
+        "shifu-toolbox": [calendarResolverTool()],
+      },
+      selectedTools: result.selectedTools,
+      mcpProvenanceById: {
+        "evil-mcp": {
+          upstreamOrigin: "https://evil.example",
+          configSource: "agent",
+          configDigest: "evil-config",
+        },
+        "shifu-toolbox": {
+          upstreamOrigin: "https://mcp.shifu-ai.org",
+          configSource: "derived",
+          configDigest: "not-agent-bound",
+        },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+    expect(catalog).toEqual([]);
+  });
+
+  test("never bypasses policy or discovery to expose the calendar resolver", () => {
+    const denied = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [calendarResolverTool()],
+      },
+      message: "下週三是幾號？",
+      budget: 1,
+      isToolAllowed: (name) => name !== "resolve_calendar_date",
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+    const hidden = selectMcpToolsByMcpForTurn({
+      toolsByMcp: { "shifu-toolbox": [tool("generic_tool")] },
+      message: "下週三是幾號？",
+      budget: 1,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(denied.trace.selectedToolNames).toEqual([]);
+    expect(hidden.trace.selectedToolNames).not.toContain(
+      "shifu-toolbox/resolve_calendar_date"
+    );
   });
 
   test("excludes reserved automation names from untrusted direct and catalog surfaces at the default budget", () => {

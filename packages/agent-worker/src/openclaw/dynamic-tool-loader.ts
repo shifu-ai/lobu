@@ -1,6 +1,7 @@
 import type { McpToolDef } from "@lobu/core";
 import {
   catalogEntryForTool,
+  isTrustedShifuCalendarResolver,
   isReservedAutomationToolName,
   isTrustedShifuToolMetadataSource,
   TOOL_PRIORITY_WEIGHT,
@@ -136,6 +137,13 @@ function isPinnedDirectTool(
   return (
     PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
     entry.name.startsWith("sales_battle_report_") ||
+    (primaryIntent === "calendar" &&
+      isTrustedShifuCalendarResolver({
+        tool: entry.tool,
+        mcpId: entry.mcpId,
+        provenance: provenanceById?.[entry.mcpId],
+        trustedOrigins,
+      })) ||
     (primaryIntent === "automation" &&
       entry.domain === "automation" &&
       isTrustedShifuToolMetadataSource({
@@ -228,7 +236,19 @@ export function selectMcpToolsForTurn(
         })
     )
     .filter(
-      (entry) => primaryIntent === "automation" || entry.domain !== "automation"
+      (entry) =>
+        entry.name !== "resolve_calendar_date" ||
+        isTrustedShifuCalendarResolver({
+          tool: entry.tool,
+          mcpId: entry.mcpId,
+          provenance: params.mcpProvenanceById?.[entry.mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
+    )
+    .filter(
+      (entry) =>
+        (primaryIntent === "automation" || entry.domain !== "automation") &&
+        (primaryIntent === "calendar" || entry.domain !== "calendar")
     );
   const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
     entries,
@@ -299,7 +319,21 @@ export function selectMcpToolsByMcpForTurn(
       ) {
         continue;
       }
+      if (
+        entry.name === "resolve_calendar_date" &&
+        !isTrustedShifuCalendarResolver({
+          tool: entry.tool,
+          mcpId: entry.mcpId,
+          provenance: params.mcpProvenanceById?.[entry.mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
+      ) {
+        continue;
+      }
       if (primaryIntent !== "automation" && entry.domain === "automation") {
+        continue;
+      }
+      if (primaryIntent !== "calendar" && entry.domain === "calendar") {
         continue;
       }
       entries.push(entry);

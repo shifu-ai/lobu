@@ -95,6 +95,7 @@ import {
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
 import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
+import { buildCalendarResolverInstructions } from "./calendar-resolver-guidance";
 import {
   checkCompletionClaim,
   getRequiredBattleReportMutationTools,
@@ -1804,6 +1805,20 @@ Use it when the user references past discussions or you need context.`);
         `Registered ${mcpToolDefs.length} MCP tool(s): ${mcpToolDefs.map((t) => t.name).join(", ")}`
       );
     }
+  }
+
+  const calendarResolverInstructions = buildCalendarResolverInstructions({
+    exposedTools:
+      mcpExposure === "cli" ? context.mcpTools : registeredDirectMcpTools,
+    mcpExposure,
+    mcpProvenanceById,
+    trustedShifuToolboxOrigins,
+    isToolAllowed: (toolName, mcpId) =>
+      isToolAllowedByPolicy(toolName, toolsPolicy) &&
+      Boolean(context.mcpTools[mcpId]?.some((tool) => tool.name === toolName)),
+  });
+  if (calendarResolverInstructions) {
+    instructionParts.push(calendarResolverInstructions);
   }
 
   // Load OpenClaw plugins. Inject the worker's bound agentId into the Lobu

@@ -11,6 +11,7 @@ export type ToolDomain =
   | "card_studio"
   | "media_editing"
   | "automation"
+  | "calendar"
   | "unknown";
 
 export type ToolPriority = "P0" | "P1" | "P2" | "P3";
@@ -43,6 +44,7 @@ export type McpCatalogProvenanceById = Record<
 >;
 
 const SHIFU_TOOLBOX_MCP_ID = "shifu-toolbox";
+export const SHIFU_CALENDAR_RESOLVER_TOOL_NAME = "resolve_calendar_date";
 const DEFAULT_TRUSTED_SHIFU_TOOLBOX_ORIGIN = "https://mcp.shifu-ai.org";
 const MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS = 8;
 
@@ -140,8 +142,50 @@ const KNOWN_TOOL_DOMAINS = new Set<ToolDomain>([
   "card_studio",
   "media_editing",
   "automation",
+  "calendar",
   "unknown",
 ]);
+
+const SHIFU_CALENDAR_RESOLVER_ALIASES = [
+  "relative_date",
+  "date",
+  "weekday",
+  "日期",
+  "星期",
+];
+
+export function isTrustedShifuCalendarResolver(params: {
+  tool: McpToolDef;
+  mcpId: string;
+  provenance?: McpCatalogProvenance;
+  trustedOrigins?: ReadonlySet<string>;
+}): boolean {
+  if (
+    params.tool.name !== SHIFU_CALENDAR_RESOLVER_TOOL_NAME ||
+    !isTrustedShifuToolMetadataSource(params)
+  ) {
+    return false;
+  }
+  const metadata = (
+    params.tool as unknown as {
+      _meta?: { shifuTool?: Record<string, unknown> };
+    }
+  )._meta?.shifuTool;
+  const aliases = Array.isArray(metadata?.aliases) ? metadata.aliases : [];
+  return Boolean(
+    metadata &&
+      metadata.domain === "calendar" &&
+      metadata.priority === "P0" &&
+      SHIFU_CALENDAR_RESOLVER_ALIASES.every(
+        (alias, index) => aliases[index] === alias
+      ) &&
+      aliases.length === SHIFU_CALENDAR_RESOLVER_ALIASES.length &&
+      metadata.readOnly === true &&
+      metadata.mutatesState === false &&
+      metadata.requiresConfirmation === false &&
+      metadata.freshness === "realtime"
+  );
+}
 
 const KNOWN_TOOL_PRIORITIES = new Set<ToolPriority>(["P0", "P1", "P2", "P3"]);
 

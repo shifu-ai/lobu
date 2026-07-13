@@ -8,6 +8,7 @@ export type ToolIntent =
   | "card_studio"
   | "media_editing"
   | "automation"
+  | "calendar"
   | "unknown";
 
 function includesAny(text: string, keywords: string[]): boolean {
@@ -50,6 +51,42 @@ function hasAutomationIntent(text: string): boolean {
   return chineseAction && chineseTemporal;
 }
 
+function hasCalendarIntent(text: string): boolean {
+  if (
+    /\b\d{4}-\d{2}-\d{2}\b.{0,16}\b(?:weekday|day of (?:the )?week|date)\b/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:today|yesterday|tomorrow)\b.{0,16}\b(?:date|weekday|day of (?:the )?week|\d{1,2}[/-]\d{1,2})\b/.test(
+      text
+    ) ||
+    /\b(?:date|weekday|day of (?:the )?week)\b.{0,16}\b(?:today|yesterday|tomorrow)\b/.test(
+      text
+    ) ||
+    /\b(?:this|next|previous|last)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  if (
+    /(?:今天|今日|昨天|昨日|明天).{0,12}(?:\d{1,2}[/-]\d{1,2}|日期|幾號|几号|星期|週幾|周几)/.test(
+      text
+    ) ||
+    /(?:這|这|本|下|上)(?:週|周)[一二三四五六日天]/.test(text) ||
+    /\d{4}-\d{2}-\d{2}.{0,12}(?:星期|週|周|日期|幾號|几号)/.test(text) ||
+    /下一場.{0,20}(?:日期|幾號|几号|星期|週幾|周几)/.test(text)
+  ) {
+    return true;
+  }
+  return /(?:日期|幾號|几号|星期|週幾|周几).{0,12}(?:今天|昨天|明天|這週|这周|下週|下周)/.test(
+    text
+  );
+}
+
 export function classifyToolIntent(text: string): ToolIntent {
   const normalized = text.toLowerCase();
 
@@ -77,6 +114,16 @@ export function classifyToolIntent(text: string): ToolIntent {
     ])
   ) {
     return "community_verification";
+  }
+
+  // A recurring or delayed action remains automation even when its subject
+  // mentions a calendar date. This must run before the read-only domains.
+  if (hasAutomationIntent(normalized)) {
+    return "automation";
+  }
+
+  if (hasCalendarIntent(normalized)) {
+    return "calendar";
   }
 
   if (
@@ -121,10 +168,6 @@ export function classifyToolIntent(text: string): ToolIntent {
     ])
   ) {
     return "media_editing";
-  }
-
-  if (hasAutomationIntent(normalized)) {
-    return "automation";
   }
 
   return "unknown";

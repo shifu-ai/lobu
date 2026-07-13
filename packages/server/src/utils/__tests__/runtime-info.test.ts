@@ -22,6 +22,7 @@ describe('getRuntimeInfo', () => {
     expect(RUNTIME_CARRIER_CAPABILITIES).toEqual([
       'lobu-runtime:member-schedule-direct-auth.v1',
       'lobu-runtime:automation-tool-catalog.v1',
+      'lobu-runtime:turn.release_context.v1',
     ]);
   });
 
@@ -39,6 +40,7 @@ describe('getRuntimeInfo', () => {
       carrier_capabilities: [
         'lobu-runtime:member-schedule-direct-auth.v1',
         'lobu-runtime:automation-tool-catalog.v1',
+        'lobu-runtime:turn.release_context.v1',
       ],
     });
   });

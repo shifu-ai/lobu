@@ -5,6 +5,7 @@ import type { ToolContentResult } from "../shared/tool-implementations";
 import {
   catalogEntryForTool,
   isReservedAutomationToolName,
+  isTrustedShifuCalendarResolver,
   isTrustedShifuToolMetadataSource,
   type McpCatalogProvenanceById,
   type ToolCatalogEntry,
@@ -171,6 +172,17 @@ export function buildRuntimeToolCatalog(
       if (
         isReservedAutomationToolName(entry.name) &&
         !isTrustedShifuToolMetadataSource({
+          mcpId,
+          provenance: params.mcpProvenanceById?.[mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
+      ) {
+        continue;
+      }
+      if (
+        entry.name === "resolve_calendar_date" &&
+        !isTrustedShifuCalendarResolver({
+          tool,
           mcpId,
           provenance: params.mcpProvenanceById?.[mcpId],
           trustedOrigins: params.trustedShifuToolboxOrigins,

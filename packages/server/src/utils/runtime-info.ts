@@ -4,6 +4,7 @@ import packageJson from '../../package.json';
 export const RUNTIME_CARRIER_CAPABILITIES = [
   'lobu-runtime:member-schedule-direct-auth.v1',
   'lobu-runtime:automation-tool-catalog.v1',
+  'lobu-runtime:turn.release_context.v1',
 ] as const;
 
 interface RuntimeEnvLike {
