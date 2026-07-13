@@ -313,7 +313,7 @@ function isExplicitNextOccurrenceForwardBridge(
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
   if (
-    /(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知|不是|並非|取消|\b(?:reference|source|range|unknown|unconfirmed|cancelled)\b|\b(?:not|unable)\s+(?:found|confirmed|scheduled)\b)/i.test(
+    /(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知|不會|不在|不於|不是|並非|取消|\b(?:reference|source|range|unknown|unconfirmed|cancelled|not)\b|\b(?:isn|aren|wasn|weren|won|wouldn|can|couldn|shouldn|don|doesn|didn)['’]t\b|\bunable\s+(?:to\s+)?(?:find|confirm|schedule)|\bunable\s+(?:found|confirmed|scheduled)\b)/i.test(
       normalized
     )
   ) {

@@ -368,6 +368,45 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("does not rewrite negated next-occurrence date clauses", () => {
+    for (const finalText of [
+      "The next session is not 7/22 (星期三); it is 7/16 (星期四).",
+      "The next session will not be on 7/22 (星期三).",
+      "The next session isn't on 7/22 (星期三).",
+      "The next session isn’t on 7/22 (星期三).",
+      "The next session won't be on 7/22 (星期三).",
+      "The next session won’t be on 7/22 (星期三).",
+      "The next session can't be on 7/22 (星期三).",
+      "The next session can’t be on 7/22 (星期三).",
+      "下一場不會在 7/22（三）；而是在 7/16（四）。",
+      "下一場不在 7/22（三）。",
+      "下一場不於 7/22（三）。",
+      "下一場不是 7/22（三）。",
+      "下一場並非 7/22（三）。",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "請查下一場銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("can correct a later independently labeled positive clause", () => {
+    const result = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText: "下一場不會在 7/22（三）；下次是在 7/23（四）。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe("下一場不會在 7/22（三）；下次是在 7/16（四）。");
+  });
+
   test("uses an unpassed same-day recurrence time and rolls a passed time forward", () => {
     const wednesdayNow = new Date("2026-07-15T10:15:00.000Z");
     for (const [userMessage, expected] of [
