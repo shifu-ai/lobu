@@ -557,13 +557,15 @@ function recurrenceSubjectMatchesDescriptor(
   ) {
     return false;
   }
-  if (subject === descriptor) return true;
-  if (!subject.endsWith(descriptor)) return false;
-
-  const prefix = subject.slice(0, -descriptor.length);
-  const preceding = prefix.at(-1) ?? "";
-  const first = descriptor[0] ?? "";
-  return !(/[a-z0-9]/i.test(preceding) && /[a-z0-9]/i.test(first));
+  const eventTail = subject
+    .replace(
+      /^(?:(?:請記得|请记得|目前|現在|现在|請注意|请注意)\s*)+/u,
+      ""
+    )
+    .replace(/^(?:(?:please\s+remember|currently)\s+)+/i, "")
+    .replace(/^the\s+/i, "")
+    .trim();
+  return eventTail === descriptor;
 }
 
 const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
