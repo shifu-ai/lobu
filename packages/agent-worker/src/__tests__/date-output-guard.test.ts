@@ -295,6 +295,44 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("applies request negation to backward possessive targets", () => {
+    for (const userMessage of [
+      "不要查銷講的下一場",
+      "忽略銷講的下一場",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場銷講是 7/22（三）。",
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).status
+      ).toBe("blocked");
+    }
+
+    for (const [userMessage, finalText, expected] of [
+      [
+        "不要查銷講的下一場，幫我查內部會議的下一場",
+        "下一場內部會議是 7/22（三）。",
+        "下一場內部會議是 7/16（四）。",
+      ],
+      [
+        "幫我查銷講的下一場",
+        "下一場銷講是 7/22（三）。",
+        "下一場銷講是 7/16（四）。",
+      ],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).text
+      ).toBe(expected);
+    }
+  });
+
   test("preserves padded short-date style when correcting a next occurrence", () => {
     const result = guardDateOutput({
       userMessage: "請查下一場銷講",

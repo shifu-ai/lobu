@@ -594,7 +594,15 @@ function requestedOccurrenceTargetState(
   for (const backward of userMessage.matchAll(
     /(?:^|[\s，,。！？；;])([\p{L}\p{N}]{2,64})的(?:下一場|下次)/gu
   )) {
-    if (!addTarget(backward[1])) hasInvalidPositiveTarget = true;
+    const rawTarget = backward[1] ?? "";
+    if (
+      /^(?:(?:請|请)\s*)?(?:不要|別|别|不必|無需|无需|忽略)\s*(?:管|查|看)?/u.test(
+        rawTarget
+      )
+    ) {
+      continue;
+    }
+    if (!addTarget(rawTarget)) hasInvalidPositiveTarget = true;
   }
 
   for (const occurrence of userMessage.matchAll(
