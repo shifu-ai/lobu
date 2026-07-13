@@ -37,6 +37,14 @@ function requestBody(runAt = "2026-07-14T06:00:00.000Z") {
 			schemaVersion: 1,
 			source: "calendar_scheduled_wake",
 			automationId: "auto-1",
+			triggerSource: "google_calendar",
+			calendarEventRef: {
+				accountRef: "acct-1",
+				eventId: "event-1",
+				eventVersion: "v1",
+				eventTitle: "雷蒙銷講",
+				eventStartAt: "2026-07-15T14:00:00+08:00",
+			},
 			trustedCourseScope: {
 				ownerUserId: OWNER_USER_ID,
 				agentId: AGENT_ID,
@@ -49,6 +57,7 @@ function requestBody(runAt = "2026-07-14T06:00:00.000Z") {
 			},
 			taskKind: "opp_coach_event_prompt",
 			delivery: "line",
+			scheduledFor: runAt,
 		},
 	};
 }
@@ -98,7 +107,7 @@ describe("course-aware wake routes", () => {
 		expect(rows[0]?.paused).toBe(false);
 		expect(rows[0]?.action_args).toMatchObject({
 			agent_id: AGENT_ID,
-		trustedCourseWake: requestBody().payload,
+			trustedCourseWake: requestBody("2026-07-14T07:00:00.000Z").payload,
 		});
 	});
 
@@ -124,5 +133,47 @@ describe("course-aware wake routes", () => {
 			},
 		);
 		expect(invalid.status).toBe(400);
+	});
+
+	test("rejects unsupported trigger source and incomplete calendar provenance", async () => {
+		const cases = [
+			() => {
+				const body = requestBody();
+				(body.payload as Record<string, unknown>).triggerSource = "manual";
+				return body;
+			},
+			() => {
+				const body = requestBody();
+				delete (body.payload as Record<string, unknown>).calendarEventRef;
+				return body;
+			},
+			() => {
+				const body = requestBody();
+				body.payload.calendarEventRef.eventId = "";
+				return body;
+			},
+			() => {
+				const body = requestBody();
+				(body.payload as Record<string, unknown>).scheduledFor = "not-a-date";
+				return body;
+			},
+			() => {
+				const body = requestBody();
+				delete (body.payload as Record<string, unknown>).scheduledFor;
+				return body;
+			},
+		];
+
+		for (const invalidBody of cases) {
+			const response = await buildApp().request(
+				"/api/internal/course-aware-wakes",
+				{
+					method: "PUT",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(invalidBody()),
+				},
+			);
+			expect(response.status).toBe(400);
+		}
 	});
 });

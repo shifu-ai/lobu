@@ -126,6 +126,33 @@ function notifyCreateArgs(recipients: unknown, overrides: Record<string, unknown
 }
 
 describe("manage_schedules member self-scoping — create wake_agent", () => {
+  test("ordinary wake persistence strips trusted provenance but keeps benign extensions", async () => {
+    const deps = makeDeps();
+    await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        payload: {
+          type: "wake_agent",
+          agent_id: MEMBER_AGENT,
+          prompt: "check X",
+          custom_metadata: { tolerated: true },
+          trustedCourseWake: { source: "calendar_scheduled_wake" },
+          trustedCourseScope: { courseKey: "course-a" },
+          __trustedCourseWakeProvenance: "internal",
+        },
+      }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.actionArgs).toEqual({
+      agent_id: MEMBER_AGENT,
+      prompt: "check X",
+      custom_metadata: { tolerated: true },
+    });
+  });
+
   test("member targeting an agent they do NOT own → error, nothing persisted", async () => {
     const deps = makeDeps({ agentOwnedByUser: mock(async () => false) as any });
     const result = await manageSchedules(
