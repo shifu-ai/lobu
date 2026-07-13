@@ -3,6 +3,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   createChildSpan,
   createLogger,
@@ -158,6 +159,39 @@ function looksLikeNativeWorkerToken(value: string): boolean {
     parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part))
   );
 }
+
+const WorkerTokenClaimsSchema = z
+  .object({
+    userId: z.string().min(1).max(256),
+    conversationId: z.string().min(1).max(256),
+    channelId: z.string().min(1).max(256),
+    agentId: z.string().min(1).max(256).optional(),
+    deploymentName: z.string().min(1).max(256),
+    timestamp: z.number().int().positive(),
+    runId: z.number().int().positive().optional(),
+    messageId: z.string().min(1).max(256).optional(),
+    tokenKind: z.enum(["deployment", "session", "run"]).optional(),
+    executionMode: z.enum(["personal", "onboarding", "course"]).optional(),
+    courseToolScope: z
+      .object({
+        ownerUserId: z.string().min(1).max(256),
+        agentId: z.string().min(1).max(256),
+        courseEntityId: z.string().min(1).max(256),
+        contextPackId: z.string().min(1).max(256).optional(),
+        contextVersion: z.number().int().positive().optional(),
+        activeSpecializedSkill: z.literal("opp-coach").nullable().optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+
+const GatewayVerifiedRunTokenSchema = z
+  .object({
+    tokenSha256: z.string().regex(/^[0-9a-f]{64}$/u),
+    claims: WorkerTokenClaimsSchema,
+  })
+  .strict();
 
 const ResolvedCourseContextSchema = z
   .object({
@@ -318,6 +352,7 @@ function normalizeLegacyCourseRetrieval(value: unknown): void {
 
 const JobEventSchema = z
   .object({
+    gatewayVerifiedRunToken: GatewayVerifiedRunTokenSchema.optional(),
     payload: z
       .object({
         botId: z.string(),
@@ -381,10 +416,28 @@ const JobEventSchema = z
     const context = value.payload.resolvedCourseContext;
     const trust = context?.trust;
     const tokenText = value.payload.runJobToken;
-    const token = tokenText ? verifyWorkerToken(tokenText) : null;
     const nativeToken = tokenText
       ? looksLikeNativeWorkerToken(tokenText)
       : false;
+    const gatewayVerification = value.gatewayVerifiedRunToken;
+    const gatewayVerificationMatches = Boolean(
+      tokenText &&
+        nativeToken &&
+        gatewayVerification &&
+        gatewayVerification.tokenSha256 ===
+          createHash("sha256").update(tokenText).digest("hex")
+    );
+    if (gatewayVerification && !gatewayVerificationMatches)
+      ctx.addIssue({
+        code: "custom",
+        message: "Gateway run-token verification does not match job token",
+        path: ["gatewayVerifiedRunToken"],
+      });
+    const token = gatewayVerificationMatches
+      ? gatewayVerification?.claims
+      : tokenText && nativeToken && !gatewayVerification
+        ? verifyWorkerToken(tokenText)
+        : null;
     if (
       nativeToken &&
       token &&
@@ -862,16 +915,18 @@ export class GatewayClient {
               "Invalid job event data:",
               validationResult.error.format()
             );
-            logger.debug(`Raw job data: ${data}`);
             throw new Error(
               `Job event validation failed: ${validationResult.error.message}`
             );
           }
 
           const payload = validationResult.data.payload;
-          const boundedRunToken = payload.runJobToken
-            ? verifyWorkerToken(payload.runJobToken)
-            : null;
+          const boundedRunToken =
+            validationResult.data.gatewayVerifiedRunToken?.claims ??
+            (payload.runJobToken &&
+            looksLikeNativeWorkerToken(payload.runJobToken)
+              ? verifyWorkerToken(payload.runJobToken)
+              : null);
           if (
             boundedRunToken?.tokenKind === "run" &&
             boundedRunToken.executionMode !== undefined &&
@@ -922,7 +977,6 @@ export class GatewayClient {
             `Failed to parse or validate job event data:`,
             parseError
           );
-          logger.debug(`Raw job data: ${data}`);
         }
         return;
       }

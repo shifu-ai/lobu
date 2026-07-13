@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { createHash } from "node:crypto";
 import {
   __resetEncryptionKeyCacheForTests,
   generateWorkerToken,
@@ -17,6 +18,21 @@ const basePayload = () => ({
   messageText: "hello",
   platformMetadata: {},
   agentOptions: {},
+});
+const projectWorkerClaims = (
+  claims: NonNullable<ReturnType<typeof verifyWorkerToken>>
+) => ({
+  userId: claims.userId,
+  conversationId: claims.conversationId,
+  channelId: claims.channelId,
+  agentId: claims.agentId,
+  deploymentName: claims.deploymentName,
+  timestamp: claims.timestamp,
+  runId: claims.runId,
+  messageId: claims.messageId,
+  tokenKind: claims.tokenKind,
+  executionMode: claims.executionMode,
+  courseToolScope: claims.courseToolScope,
 });
 const validResolvedCourseContext = () => ({
   activeSpecializedSkill: null,
@@ -128,6 +144,169 @@ describe("GatewayClient heartbeat ACKs", () => {
     );
     expect(forwarded.trustedExecutionScope).not.toHaveProperty("retrieval");
     expect(verifyWorkerToken(runJobToken)?.courseToolScope).toBeUndefined();
+  });
+
+  test("accepts gateway-verified native claims without exposing ENCRYPTION_KEY to the worker", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const runJobToken = generateWorkerToken(
+      "user-1",
+      "conversation-1",
+      "worker-1",
+      {
+        channelId: "channel-1",
+        agentId: "agent-1",
+        runId: 22,
+        messageId: "message-1",
+        tokenKind: "run",
+        executionMode: "onboarding",
+      }
+    );
+    const claims = projectWorkerClaims(verifyWorkerToken(runJobToken)!);
+    delete process.env.ENCRYPTION_KEY;
+    __resetEncryptionKeyCacheForTests();
+
+    const trustedExecutionScope = {
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    } as const;
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    const sendDeliveryReceipt = mock(() => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "job-gateway-verified",
+        gatewayVerifiedRunToken: {
+          tokenSha256: createHash("sha256").update(runJobToken).digest("hex"),
+          claims,
+        },
+        payload: {
+          ...basePayload(),
+          runId: 22,
+          runJobToken,
+          trustedExecutionScope,
+        },
+      })
+    );
+
+    expect(sendDeliveryReceipt).toHaveBeenCalledWith("job-gateway-verified");
+    expect(handleThreadMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test("rejects mismatched gateway-verified claims before receipt or execution", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const runJobToken = generateWorkerToken(
+      "other-user",
+      "conversation-1",
+      "worker-1",
+      {
+        channelId: "channel-1",
+        agentId: "agent-1",
+        runId: 23,
+        messageId: "message-1",
+        tokenKind: "run",
+        executionMode: "personal",
+      }
+    );
+    const claims = projectWorkerClaims(verifyWorkerToken(runJobToken)!);
+    delete process.env.ENCRYPTION_KEY;
+    __resetEncryptionKeyCacheForTests();
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    const sendDeliveryReceipt = mock(() => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "job-mismatched-claims",
+        gatewayVerifiedRunToken: {
+          tokenSha256: createHash("sha256").update(runJobToken).digest("hex"),
+          claims,
+        },
+        payload: {
+          ...basePayload(),
+          runId: 23,
+          runJobToken,
+        },
+      })
+    );
+
+    expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+  });
+
+  test("rejects non-allowlisted gateway claim fields before receipt or execution", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const runJobToken = generateWorkerToken(
+      "user-1",
+      "conversation-1",
+      "worker-1",
+      {
+        channelId: "channel-1",
+        agentId: "agent-1",
+        runId: 24,
+        messageId: "message-1",
+        tokenKind: "run",
+        executionMode: "personal",
+      }
+    );
+    const claims = projectWorkerClaims(verifyWorkerToken(runJobToken)!);
+    delete process.env.ENCRYPTION_KEY;
+    __resetEncryptionKeyCacheForTests();
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    const sendDeliveryReceipt = mock(() => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "job-extra-claims",
+        gatewayVerifiedRunToken: {
+          tokenSha256: createHash("sha256").update(runJobToken).digest("hex"),
+          claims: { ...claims, sessionKey: "must-not-cross-boundary" },
+        },
+        payload: {
+          ...basePayload(),
+          runId: 24,
+          runJobToken,
+        },
+      })
+    );
+
+    expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+    expect(handleThreadMessage).not.toHaveBeenCalled();
   });
 
   test.each([
