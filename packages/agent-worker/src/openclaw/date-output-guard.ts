@@ -379,10 +379,10 @@ function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
   }
 
   const hasNonOccurrenceTemporalRole =
-    /(?:(?:報名|报名)\s*(?:截止|期限)|(?:早鳥|早鸟)\s*截止|(?:繳費|缴费|付款)\s*(?:期限|截止)|售票\s*(?:開始|开始)|(?:開賣|开卖)\s*日期)/u.test(
+    /(?:報名|报名|售票|早鳥|早鸟|繳費|缴费|付款|開賣|开卖|退費|退费|退款)/u.test(
       normalized
     ) ||
-    /\b(?:registration\s+deadline|early\s+bird\s+deadline|payment\s+due|ticket\s+sales\s+open)\b/i.test(
+    /\b(?:registration|early\s+bird|ticket\s+sales?|payment|refund|deadline|due)\b/i.test(
       normalized
     );
   if (hasNonOccurrenceTemporalRole) return false;

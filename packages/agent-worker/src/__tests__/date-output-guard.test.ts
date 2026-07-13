@@ -571,10 +571,16 @@ describe("guardDateOutput", () => {
       "下一場銷講付款截止在 7/22（三）。",
       "下一場銷講售票開始在 7/22（三）。",
       "下一場銷講開賣日期是 7/22（三）。",
+      "下一場銷講報名開始在 7/22（三）。",
+      "下一場銷講售票截止在 7/22（三）。",
+      "下一場銷講報名開放日在 7/22（三）。",
+      "下一場銷講退款處理日在 7/22（三）。",
       "The next event registration deadline is 7/22 (星期三).",
       "The next event early bird deadline is 7/22 (星期三).",
       "The next event payment due is 7/22 (星期三).",
       "The next event ticket sales open is 7/22 (星期三).",
+      "The next event registration opens on 7/22 (星期三).",
+      "The next event refund processing is 7/22 (星期三).",
     ]) {
       expect(
         guardDateOutput({
