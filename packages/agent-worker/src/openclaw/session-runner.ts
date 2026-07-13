@@ -101,6 +101,7 @@ import {
   getRequiredBattleReportMutationTools,
   getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
+import { guardDateOutput } from "./date-output-guard";
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -1905,6 +1906,7 @@ Use it when the user references past discussions or you need context.`);
     .filter(Boolean)
     .join("\n\n");
 
+  const turnNow = new Date();
   const resourceLoader = new DefaultResourceLoader({
     cwd: workspaceDir,
     settingsManager,
@@ -1912,7 +1914,8 @@ Use it when the user references past discussions or you need context.`);
       buildLobuSystemPrompt(
         base,
         context.agentInstructions,
-        finalInstructionsUpdated
+        finalInstructionsUpdated,
+        turnNow
       ),
   });
   await resourceLoader.reload();
@@ -2493,13 +2496,27 @@ Use it when the user references past discussions or you need context.`);
     // against user-facing text. Without this, getFinalResult() is always
     // null in production and the sandbox-leak redaction never fires.
     const finalText = progressProcessor.getOutputSnapshot();
-    const completionClaimDecision = checkCompletionClaim({
+    const dateGuardDecision = guardDateOutput({
       userMessage: userPrompt,
       finalText,
+      now: turnNow,
+    });
+    if (dateGuardDecision.status === "corrected") {
+      logger.warn(
+        `Date output guard corrected final answer: corrections=${dateGuardDecision.corrections.length}`
+      );
+    } else if (dateGuardDecision.status === "blocked") {
+      logger.warn(
+        `Date output guard blocked final answer: reason=${dateGuardDecision.reason}`
+      );
+    }
+    const completionClaimDecision = checkCompletionClaim({
+      userMessage: userPrompt,
+      finalText: dateGuardDecision.text,
       executedTools: Array.from(currentTurnExecutedTools),
     });
     const guardedFinalText = completionClaimDecision.allowed
-      ? finalText
+      ? dateGuardDecision.text
       : completionClaimDecision.safeText;
     if (!completionClaimDecision.allowed) {
       logger.warn(
