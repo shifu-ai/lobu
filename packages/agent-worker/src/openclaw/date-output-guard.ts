@@ -532,7 +532,9 @@ function normalizeTemporalEvidenceLabel(value: string): string {
 const REQUEST_PREFIX_RE =
   /^(?:(?:請幫我查|请帮我查|幫我查|帮我查|請問|请问|我想知道|麻煩查|麻烦查)\s*)+/u;
 const NEGATED_OCCURRENCE_REQUEST_RE =
-  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:不要|別|别|不必|不用|無需|无需|忽略|不想)\s*(?:管|查|看)?/gu;
+  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:不想要|不需要|不要|別|别|不必|不用|無需|无需|忽略|不想)\s*(?:管|查|看)?/gu;
+const NEGATED_ENGLISH_OCCURRENCE_REQUEST_RE =
+  /(?:(?:\bi\s+)?(?:do\s+not|don['’]t)\s+(?:want|need|check)|\b(?:ignore|skip))(?:\s+the)?\s*$/i;
 
 function hasBoundedOccurrenceRequestNegation(
   value: string,
@@ -631,7 +633,7 @@ function requestedOccurrenceTargetState(
   )) {
     const index = occurrence.index ?? 0;
     const prefix = userMessage.slice(Math.max(0, index - 32), index);
-    if (/\b(?:do\s+not|don't|ignore)\s*$/i.test(prefix)) {
+    if (NEGATED_ENGLISH_OCCURRENCE_REQUEST_RE.test(prefix)) {
       continue;
     }
     hasPositiveOccurrence = true;

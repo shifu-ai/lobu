@@ -302,6 +302,8 @@ describe("guardDateOutput", () => {
       "不要下一場銷講",
       "我不要下一場銷講",
       "不用下一場銷講",
+      "我不想要下一場銷講",
+      "暫時不需要下一場銷講",
       "先不要查銷講的下一場",
       "暫時忽略銷講的下一場",
     ]) {
@@ -318,6 +320,11 @@ describe("guardDateOutput", () => {
     for (const [userMessage, finalText, expected] of [
       [
         "我不想查下一場銷講，幫我查下一場內部會議",
+        "下一場內部會議是 7/22（三）。",
+        "下一場內部會議是 7/16（四）。",
+      ],
+      [
+        "我不需要下一場銷講，幫我查下一場內部會議",
         "下一場內部會議是 7/22（三）。",
         "下一場內部會議是 7/16（四）。",
       ],
@@ -363,6 +370,36 @@ describe("guardDateOutput", () => {
         }).text
       ).toBe(expected);
     }
+  });
+
+  test("applies bounded English request negation before next occurrences", () => {
+    for (const userMessage of [
+      "I do not want the next session for Sales.",
+      "I don't need the next event for Sales.",
+      "I don’t check the next occurrence for Sales.",
+      "Ignore the next event for Sales.",
+      "Skip the next session for Sales.",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "The next session Sales is 7/22 (星期三).",
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).status
+      ).toBe("blocked");
+    }
+
+    expect(
+      guardDateOutput({
+        userMessage:
+          "Ignore the next session for Sales; check the next session for Internal Meeting.",
+        finalText:
+          "The next session Internal Meeting is 7/22 (星期三).",
+        now: NOW,
+        trustedTemporalCandidates: ["2026-07-16"],
+      }).text
+    ).toBe("The next session Internal Meeting is 7/16 (星期四).");
   });
 
   test("preserves padded short-date style when correcting a next occurrence", () => {
