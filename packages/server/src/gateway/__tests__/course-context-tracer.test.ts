@@ -83,7 +83,7 @@ describe('course context tracer', () => {
     await (consumer as unknown as { dispatchCourseContextBoundary(p: MessagePayload, d: string): Promise<void> }).dispatchCourseContextBoundary(payload, 'test-deployment');
     expect(order).toEqual(['resolve', 'arm', 'create-send', 'send']);
     expect(forwarded?.resolvedCourseContext?.course.courseKey).toBe('super-ai');
-    expect(verifyWorkerToken(forwarded?.runJobToken??'')).toMatchObject({tokenKind:'run',runId:9,userId:'pm-1',agentId:'shifu-u-pm-1',courseToolScope:{ownerUserId:'pm-1',agentId:'shifu-u-pm-1',courseEntityId:'course:pm-1:super-ai'}});
+    expect(verifyWorkerToken(forwarded?.runJobToken??'')).toMatchObject({tokenKind:'run',runId:9,userId:'pm-1',agentId:'shifu-u-pm-1',courseToolScope:{ownerUserId:'pm-1',agentId:'shifu-u-pm-1',courseEntityId:'course:pm-1:super-ai',contextPackId:'pack-super-ai',contextVersion:1,activeSpecializedSkill:null}});
     if(previousMode===undefined)delete process.env.COURSE_CONTEXT_GATE_MODE;else process.env.COURSE_CONTEXT_GATE_MODE=previousMode;
   });
 

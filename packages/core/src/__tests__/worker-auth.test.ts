@@ -117,6 +117,34 @@ describe("worker auth token", () => {
     });
   });
 
+  test("round-trips a complete integrity-bound course execution scope", () => {
+    const token = generateWorkerToken("user-2", "conv-2", "deploy-B", {
+      channelId: "C2",
+      agentId: "agent-x",
+      runId: 43,
+      messageId: "message-43",
+      tokenKind: "run",
+      executionMode: "course",
+      courseToolScope: {
+        ownerUserId: "user-2",
+        agentId: "agent-x",
+        courseEntityId: "course:user-2:a",
+        contextPackId: "pack-a",
+        contextVersion: 3,
+        activeSpecializedSkill: "opp-coach",
+      },
+    });
+    expect(verifyWorkerToken(token)).toMatchObject({
+      executionMode: "course",
+      courseToolScope: {
+        courseEntityId: "course:user-2:a",
+        contextPackId: "pack-a",
+        contextVersion: 3,
+        activeSpecializedSkill: "opp-coach",
+      },
+    });
+  });
+
   test.each([
     { executionMode: "onboarding", tokenKind: "session", runId: 1 },
     { executionMode: "onboarding", tokenKind: "run", runId: undefined },

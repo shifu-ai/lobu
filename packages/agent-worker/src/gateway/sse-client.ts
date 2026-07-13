@@ -350,6 +350,48 @@ const JobEventSchema = z
     const trust = context?.trust;
     const tokenText = value.payload.runJobToken;
     const token = tokenText ? verifyWorkerToken(tokenText) : null;
+    const nativeToken = tokenText
+      ? looksLikeNativeWorkerToken(tokenText)
+      : false;
+    if (
+      nativeToken &&
+      token &&
+      (token.tokenKind !== "run" || token.executionMode === undefined)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Native job token must be a bounded run token",
+        path: ["payload", "runJobToken"],
+      });
+    const boundedRunToken =
+      token?.tokenKind === "run" && token.executionMode !== undefined
+        ? token
+        : null;
+    if (
+      boundedRunToken &&
+      (boundedRunToken.userId !== value.payload.userId ||
+        boundedRunToken.agentId !== value.payload.agentId ||
+        boundedRunToken.conversationId !== value.payload.conversationId ||
+        boundedRunToken.runId !== value.payload.runId ||
+        boundedRunToken.messageId !== value.payload.messageId ||
+        boundedRunToken.channelId !== value.payload.channelId)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Bounded run token does not match job payload",
+        path: ["payload", "runJobToken"],
+      });
+    if (
+      boundedRunToken?.executionMode === "personal" &&
+      (value.payload.trustedExecutionScope ||
+        value.payload.resolvedCourseContext ||
+        boundedRunToken.courseToolScope)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Personal run token cannot carry course execution context",
+        path: ["payload", "runJobToken"],
+      });
     if (
       trust &&
       (trust.ownerUserId !== value.payload.userId ||
@@ -414,7 +456,11 @@ const JobEventSchema = z
           (!token.courseToolScope ||
             token.courseToolScope.ownerUserId !== scope.ownerUserId ||
             token.courseToolScope.agentId !== scope.agentId ||
-            token.courseToolScope.courseEntityId !== scope.courseEntityId))
+            token.courseToolScope.courseEntityId !== scope.courseEntityId ||
+            token.courseToolScope.contextPackId !== scope.contextPackId ||
+            token.courseToolScope.contextVersion !== scope.contextVersion ||
+            token.courseToolScope.activeSpecializedSkill !==
+              scope.activeSpecializedSkill))
       )
         ctx.addIssue({
           code: "custom",
@@ -422,7 +468,7 @@ const JobEventSchema = z
           path: ["payload", "runJobToken"],
         });
     } else if (tokenText) {
-      if (looksLikeNativeWorkerToken(tokenText) && !token)
+      if (nativeToken && !token)
         ctx.addIssue({
           code: "custom",
           message: "Native run token failed integrity validation",
@@ -775,16 +821,19 @@ export class GatewayClient {
           }
 
           const payload = validationResult.data.payload;
-          if (payload.trustedExecutionScope) {
-            const token = payload.runJobToken
-              ? verifyWorkerToken(payload.runJobToken)
-              : null;
+          const boundedRunToken = payload.runJobToken
+            ? verifyWorkerToken(payload.runJobToken)
+            : null;
+          if (
+            boundedRunToken?.tokenKind === "run" &&
+            boundedRunToken.executionMode !== undefined
+          ) {
             // deploymentName is instance state and therefore cannot be
             // checked inside the static Zod schema. Bind it before receipt or
             // execution so a valid token from another worker cannot replay.
-            if (!token || token.deploymentName !== this.deploymentName)
+            if (boundedRunToken.deploymentName !== this.deploymentName)
               throw new Error(
-                "Trusted execution scope does not match worker deployment"
+                "Bounded run token does not match worker deployment"
               );
           }
 

@@ -91,6 +91,10 @@ export function mintRunJobToken(
       ownerUserId: data.resolvedCourseContext.trust.ownerUserId,
       agentId: data.resolvedCourseContext.trust.agentId,
       courseEntityId: data.resolvedCourseContext.trust.courseEntityId,
+      contextPackId: data.resolvedCourseContext.trust.contextPackId,
+      contextVersion: data.resolvedCourseContext.trust.contextVersion,
+      activeSpecializedSkill:
+        data.resolvedCourseContext.activeSpecializedSkill ?? null,
     } : undefined,
   });
 }
