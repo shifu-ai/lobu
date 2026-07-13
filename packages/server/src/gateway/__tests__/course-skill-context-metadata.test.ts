@@ -115,6 +115,6 @@ describe("course skill context metadata", () => {
 	test("accepts only the trusted scheduled sales rehearsal selector input",()=>{
 		const available=resolveCourseSkillContextMetadata([{enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
 		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"sales_rehearsal"}).activeSpecializedSkill).toBe("opp-coach");
-		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"other"}).activeSpecializedSkill).toBeNull();
+		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"other" as never}).activeSpecializedSkill).toBeNull();
 	});
 });

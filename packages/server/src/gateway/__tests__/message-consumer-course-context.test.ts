@@ -1,9 +1,11 @@
 import type { MessagePayload } from '@lobu/core';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { MessageConsumer, terminalCourseContextSingletonKey, workerMessageSingletonKey } from '../orchestration/message-consumer.js';
+import { enqueueAgentMessage } from '../services/agent-threads.js';
 import { __resetEncryptionKeyCacheForTests, verifyWorkerToken } from '@lobu/core';
 const originalFetch=globalThis.fetch;
 afterEach(()=>{delete process.env.TOOLBOX_COURSE_CONTEXT_URL;delete process.env.TOOLBOX_INTERNAL_SECRET;globalThis.fetch=originalFetch;});
+const oppSkill={name:'opp-coach',repo:'local',enabled:true,content:`---\nname: opp-coach\nmetadata:\n  course-context-contract: 1\n  scope: course\n  context-fields: [audience, offer]\n  retrieval-terms: [Key Learning, Offer]\n  retrieval-limit: 3\n---`};
 function setup(body:unknown, text='課程', metadata:Record<string,unknown>={}, rejectTerminal=false, withSession=true, rejectWorkerOnce=false, cleanupFails=false) {
   let handler:((job:{id:string;data:MessagePayload})=>Promise<void>)|undefined; const sends:Array<[string,unknown,unknown]>=[]; const order:string[]=[];
   let workerRejected=false;const queue={start:vi.fn(),stop:vi.fn(),createQueue:vi.fn(async(n)=>{order.push(`create:${n}`);}),work:vi.fn(async(_n,cb)=>{handler=cb;}),send:vi.fn(async(n,d,o)=>{order.push(`send:${n}`);sends.push([n,d,o]);if(rejectTerminal&&n==='thread_response')throw new Error('terminal failed');if(rejectWorkerOnce&&!workerRejected&&n.startsWith('thread_message_')){workerRejected=true;throw new Error('worker send failed');}return 'job';}),getQueueStats:vi.fn(),isHealthy:vi.fn(),pauseWorker:vi.fn(),resumeWorker:vi.fn()};
@@ -14,6 +16,15 @@ function setup(body:unknown, text='課程', metadata:Record<string,unknown>={}, 
   return {sends,order,fetcher,consumer,data,run:async(nextText?:string,nextId?:string)=>{if(nextText)data.messageText=nextText;if(nextId)data.messageId=nextId;await consumer.start();return handler?.({id:'legacy',data});}};
 }
 describe('message consumer course boundary',()=>{
+  test('internal scheduled enqueue stamps an identity-bound trusted execution envelope',async()=>{
+    const enqueueMessage=vi.fn().mockResolvedValue('job-1');
+    const getSession=vi.fn().mockResolvedValue({userId:'u',agentId:'a',conversationId:'c',channelId:'ch'});
+    await enqueueAgentMessage({sessionManager:{getSession,touchSession:vi.fn()} as never,queueProducer:{enqueueMessage} as never},{threadId:'thread',messageText:'開始彩排',messageId:'m',trustedScheduledTaskKind:'sales_rehearsal'});
+    expect(enqueueMessage).toHaveBeenCalledWith(expect.objectContaining({
+      userId:'u',agentId:'a',conversationId:'c',
+      trustedScheduledExecution:{source:'internal_scheduler',taskKind:'sales_rehearsal',ownerUserId:'u',agentId:'a',conversationId:'c'},
+    }));
+  });
   test('worker idempotency key is stable per turn and distinct across canonical threads',()=>{const base={userId:'u',agentId:'a',conversationId:'c1',channelId:'ch',messageId:'same',platform:'line',messageText:'x',platformMetadata:{},agentOptions:{}} as MessagePayload;expect(workerMessageSingletonKey(base)).toBe(workerMessageSingletonKey({...base}));expect(workerMessageSingletonKey(base)).not.toBe(workerMessageSingletonKey({...base,conversationId:'c2'}));expect(workerMessageSingletonKey(base)).not.toBe(workerMessageSingletonKey({...base,platform:'slack'}));expect(workerMessageSingletonKey({...base,organizationId:'org-1'})).not.toBe(workerMessageSingletonKey({...base,organizationId:'org-2'}));});
   test('terminal key scopes the source turn, agent, and clarification candidates',()=>{const base={userId:'u',agentId:'a',organizationId:'org',conversationId:'c',channelId:'ch',messageId:'same',platform:'line'} as MessagePayload;const first={status:'clarification_required',candidates:[{courseKey:'a',displayName:'A'}]} as const;expect(terminalCourseContextSingletonKey(base,first)).toBe(terminalCourseContextSingletonKey({...base},first));expect(terminalCourseContextSingletonKey(base,first)).not.toBe(terminalCourseContextSingletonKey(base,{status:'clarification_required',candidates:[{courseKey:'b',displayName:'B'}]}));expect(terminalCourseContextSingletonKey(base,first)).not.toBe(terminalCourseContextSingletonKey({...base,agentId:'other'},first));expect(terminalCourseContextSingletonKey(base,first)).not.toBe(terminalCourseContextSingletonKey({...base,messageId:'next'},first));});
   test('reviewed personal bypass needs no session and touches neither settings nor Toolbox',async()=>{const h=setup({},'提醒我明天繳電話費',{courseScope:'reviewed'},false,false);const settings={getSettings:vi.fn()};h.consumer.setGuardrails(undefined,settings as never);await h.run();expect(settings.getSettings).not.toHaveBeenCalled();expect(h.fetcher).not.toHaveBeenCalled();expect(h.sends.some(([n])=>n.startsWith('thread_message_'))).toBe(true);});
@@ -45,6 +56,43 @@ describe('message consumer course boundary',()=>{
     const worker=h.sends.find(([name])=>name.startsWith('thread_message_'))?.[1] as MessagePayload;
     expect(worker.resolvedCourseContext).toBeUndefined();
     expect(worker.trustedExecutionScope).toBeUndefined();
+  });
+  test('trusted internal scheduled sales rehearsal activates opp-coach through the real consumer path',async()=>{
+    const h=setup([{status:'resolved',confidence:'high',matchedBy:['single_course_default'],course:{courseKey:'x',courseEntityId:'course:x',displayName:'X'}},{course:{courseKey:'x',courseEntityId:'course:x',displayName:'X'},context:{contextPackId:'p',version:1,stale:false,confirmedSummary:'canonical summary'}}],'執行已驗證的排程');
+    h.data.trustedScheduledExecution={source:'internal_scheduler',taskKind:'sales_rehearsal',ownerUserId:'u',agentId:'a',conversationId:'c'};
+    h.consumer.setGuardrails(undefined,{getSettings:vi.fn().mockResolvedValue({skillsConfig:{skills:[oppSkill]}})} as never);
+    await h.run();
+    const worker=h.sends.find(([name])=>name.startsWith('thread_message_'))?.[1] as MessagePayload;
+    expect(worker.resolvedCourseContext?.activeSpecializedSkill).toBe('opp-coach');
+    expect(worker.trustedExecutionScope).toMatchObject({mode:'course',activeSpecializedSkill:'opp-coach'});
+    expect(worker.trustedScheduledExecution).toBeUndefined();
+  });
+  test('caller metadata taskKind and mismatched trusted scheduled identity cannot activate opp-coach',async()=>{
+    for(const data of [
+      {platformMetadata:{taskKind:'sales_rehearsal'}},
+      {platformMetadata:{},trustedScheduledExecution:{source:'internal_scheduler',taskKind:'sales_rehearsal',ownerUserId:'other',agentId:'a',conversationId:'c'}},
+    ]){
+      const h=setup({},'你好',data.platformMetadata);
+      h.data.trustedScheduledExecution=data.trustedScheduledExecution as never;
+      h.consumer.setGuardrails(undefined,{getSettings:vi.fn().mockResolvedValue({skillsConfig:{skills:[oppSkill]}})} as never);
+      await h.run();
+      expect(h.fetcher).not.toHaveBeenCalled();
+      const worker=h.sends.find(([name])=>name.startsWith('thread_message_'))?.[1] as MessagePayload;
+      expect(worker.resolvedCourseContext).toBeUndefined();
+      expect(worker.trustedExecutionScope).toBeUndefined();
+    }
+  });
+  test('generic PM work does not inherit inactive opp-coach retrieval limit',async()=>{
+    const h=setup([{status:'resolved',confidence:'high',matchedBy:['single_course_default'],course:{courseKey:'x',courseEntityId:'course:x',displayName:'X'}},{course:{courseKey:'x',courseEntityId:'course:x',displayName:'X'},context:{contextPackId:'p',version:1,stale:false,confirmedSummary:'canonical summary'}}],'整理今天的課程會議待辦');
+    h.data.organizationId='org';
+    const memorySearch=vi.fn().mockResolvedValue([]);
+    h.consumer.setCourseMemorySearch(memorySearch);
+    h.consumer.setGuardrails(undefined,{getSettings:vi.fn().mockResolvedValue({skillsConfig:{skills:[oppSkill]}})} as never);
+    await h.run();
+    expect(memorySearch).toHaveBeenCalledWith(expect.objectContaining({limit:8,query:'整理今天的課程會議待辦'}));
+    expect(memorySearch).toHaveBeenCalledTimes(1);
+    const worker=h.sends.find(([name])=>name.startsWith('thread_message_'))?.[1] as MessagePayload;
+    expect(worker.resolvedCourseContext?.activeSpecializedSkill).toBeNull();
   });
   test('legacy unscoped course-memory candidates violate hydration and never dispatch',async()=>{const h=setup([{status:'resolved',confidence:'high',matchedBy:['single_course_default'],course:{courseKey:'x',courseEntityId:'course:x',displayName:'X'}},{course:{courseKey:'x',courseEntityId:'course:x',displayName:'X'},context:{contextPackId:'p',version:1,stale:false,confirmedSummary:'canonical summary'}}]);h.data.organizationId='org';h.consumer.setCourseMemorySearch(vi.fn().mockResolvedValue([{id:7,payload_text:'legacy-unscoped-text',title:'legacy',source_url:null,organization_id:'org',metadata:{agent_id:'a'}}]));await h.run();expect(h.sends.filter(([name])=>name.startsWith('thread_message_'))).toHaveLength(0);expect(JSON.stringify(h.sends)).not.toContain('legacy-unscoped-text');});
   test('bound course conversation match persists into the dispatched context',async()=>{const h=setup([{status:'resolved',confidence:'high',matchedBy:['conversation_binding'],course:{courseKey:'old',courseEntityId:'course:old',displayName:'Old'}},{course:{courseKey:'old',courseEntityId:'course:old',displayName:'Old'},context:{contextPackId:'p',version:1,stale:false,confirmedSummary:'s'}}],'繼續');await h.run();expect(JSON.parse((h.fetcher.mock.calls[0]?.[1] as RequestInit).body as string)).toMatchObject({boundCourseKey:'old'});const worker=h.sends.find(([n])=>n.startsWith('thread_message_'))?.[1] as MessagePayload;expect(worker.resolvedCourseContext?.resolution.matchedBy).toEqual(['conversation_binding']);const bind=h.order.indexOf('bind');const arm=h.order.findIndex((v,index)=>index>bind&&v.startsWith('create:'));expect(bind).toBeLessThan(arm);expect(arm).toBeLessThan(h.order.findIndex((v)=>v.startsWith('send:thread_message_')));});

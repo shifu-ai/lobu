@@ -118,6 +118,8 @@ export interface EnqueueAgentMessageArgs {
   messageId?: string;
   /** Free-form source tag for log lines / platformMetadata. */
   source?: string;
+  /** Internal callers only. Identity is stamped from the persisted session. */
+  trustedScheduledTaskKind?: "sales_rehearsal";
 }
 
 export interface EnqueueAgentMessageResult {
@@ -163,6 +165,17 @@ export async function enqueueAgentMessage(
     botId: "lobu-api",
     platform: "api",
     messageText,
+    ...(args.trustedScheduledTaskKind
+      ? {
+          trustedScheduledExecution: {
+            source: "internal_scheduler" as const,
+            taskKind: args.trustedScheduledTaskKind,
+            ownerUserId: session.userId,
+            agentId: realAgentId,
+            conversationId: session.conversationId || threadId,
+          },
+        }
+      : {}),
     platformMetadata: {
       agentId: realAgentId,
       source: args.source || "internal",
