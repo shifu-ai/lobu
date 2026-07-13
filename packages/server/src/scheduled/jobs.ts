@@ -314,7 +314,7 @@ export async function handleWakeAgentTask(
   if (!threadId && reuseConversation) {
     threadId = await resolveWakeThreadId(
       { sql, sessionManager },
-      { agentId: p.agent_id, userId: p.__created_by_user ?? null }
+      { organizationId: orgId, agentId: p.agent_id, userId: p.__created_by_user ?? null }
     );
     if (threadId) {
       logger.info(
