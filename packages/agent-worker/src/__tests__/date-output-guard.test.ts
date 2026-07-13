@@ -6,6 +6,7 @@ import {
 } from "../openclaw/date-context";
 import {
   extractTrustedTemporalCandidates,
+  extractTrustedTemporalEvidence,
   guardDateOutput,
   isDateSensitiveTurn,
 } from "../openclaw/date-output-guard";
@@ -501,6 +502,34 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("supports affirmative Chinese scheduling predicates", () => {
+    for (const [finalText, expected] of [
+      ["下一場銷講辦在 7/22（三）。", "下一場銷講辦在 7/16（四）。"],
+      ["下一場銷講訂在 7/22（三）。", "下一場銷講訂在 7/16（四）。"],
+      ["下一場銷講安排在 7/22（三）。", "下一場銷講安排在 7/16（四）。"],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場銷講",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).text
+      ).toBe(expected);
+    }
+  });
+
   test("does not rewrite negated next-occurrence date clauses", () => {
     for (const finalText of [
       "The next session is not 7/22 (星期三); it is 7/16 (星期四).",
@@ -680,6 +709,21 @@ describe("guardDateOutput", () => {
       text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
       reason: "next_occurrence_without_temporal_evidence",
     });
+  });
+
+  test("chooses the earliest occurrence across enumerated recurrence weekdays", () => {
+    for (const userMessage of [
+      "銷講每週三、週日 19:00 舉行，下一場是哪天？",
+      "銷講每周三、周日 19:00 舉行，下一場是哪天？",
+    ]) {
+      const result = guardDateOutput({
+        userMessage,
+        finalText: "下一場是 7/22（三）。",
+        now: new Date("2026-07-16T04:00:00.000Z"),
+      });
+      expect(result.status).toBe("corrected");
+      expect(result.text).toBe("下一場是 7/19（日）。");
+    }
   });
 
   test("corrects every explicitly linked next-occurrence claim", () => {
@@ -1014,6 +1058,43 @@ describe("guardDateOutput", () => {
 });
 
 describe("extractTrustedTemporalCandidates", () => {
+  test("associates production MCP candidates with sanitized same-record labels", () => {
+    const envelope = {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            events: [
+              { title: "內部會議", startTime: "2026-07-14T19:00:00+08:00" },
+              { title: "銷講", startTime: "2026-07-16T19:00:00+08:00" },
+            ],
+          }),
+        },
+      ],
+      details: {},
+    };
+
+    expect(extractTrustedTemporalEvidence(envelope)).toEqual([
+      {
+        candidate: "2026-07-14T19:00:00+08:00",
+        label: "內部會議",
+      },
+      { candidate: "2026-07-16T19:00:00+08:00", label: "銷講" },
+    ]);
+
+    const result = guardDateOutput({
+      userMessage: "幫我查下一場銷講",
+      finalText: "下一場銷講是 7/16（四）。",
+      now: NOW,
+      trustedTemporalCandidates: extractTrustedTemporalCandidates(envelope),
+      trustedTemporalEvidence: extractTrustedTemporalEvidence(envelope),
+    });
+    expect(result).toEqual({
+      status: "unchanged",
+      text: "下一場銷講是 7/16（四）。",
+    });
+  });
+
   test("extracts dates from the production structured MCP text envelope", () => {
     const result = extractTrustedTemporalCandidates({
       content: [

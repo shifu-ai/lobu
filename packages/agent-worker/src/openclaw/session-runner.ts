@@ -103,7 +103,9 @@ import {
 } from "./completion-claim-guard";
 import {
   type DateGuardResult,
+  type TrustedTemporalEvidence,
   extractTrustedTemporalCandidates,
+  extractTrustedTemporalEvidence,
   guardDateOutput,
   isDateSensitiveTurn,
 } from "./date-output-guard";
@@ -1895,6 +1897,10 @@ Use it when the user references past discussions or you need context.`);
     let suppressProgressOutput = false;
     const currentTurnExecutedTools = new Set<string>();
     const currentTurnTrustedTemporalCandidates = new Set<string>();
+    const currentTurnTrustedTemporalEvidence = new Map<
+      string,
+      TrustedTemporalEvidence
+    >();
     let bufferCurrentTurnOutputForFinalGuards = false;
 
     // Wire events through progress processor with delta batching
@@ -1944,6 +1950,7 @@ Use it when the user references past discussions or you need context.`);
       turnController.startTurn();
       currentTurnExecutedTools.clear();
       currentTurnTrustedTemporalCandidates.clear();
+      currentTurnTrustedTemporalEvidence.clear();
       bufferCurrentTurnOutputForFinalGuards =
         options?.silent === true
           ? false
@@ -2086,6 +2093,12 @@ Use it when the user references past discussions or you need context.`);
             event.result
           )) {
             currentTurnTrustedTemporalCandidates.add(candidate);
+          }
+          for (const evidence of extractTrustedTemporalEvidence(event.result)) {
+            currentTurnTrustedTemporalEvidence.set(
+              `${evidence.candidate}\u0000${evidence.label}`,
+              evidence
+            );
           }
         }
         const executionEventPromise = executionReporter.record({
@@ -2420,6 +2433,9 @@ Use it when the user references past discussions or you need context.`);
         now: turnNow,
         trustedTemporalCandidates: Array.from(
           currentTurnTrustedTemporalCandidates
+        ),
+        trustedTemporalEvidence: Array.from(
+          currentTurnTrustedTemporalEvidence.values()
         ),
       });
     } catch (error) {

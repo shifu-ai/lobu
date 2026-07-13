@@ -44,6 +44,12 @@ export type DateGuardInput = {
   finalText: string;
   now: Date;
   trustedTemporalCandidates?: string[];
+  trustedTemporalEvidence?: TrustedTemporalEvidence[];
+};
+
+export type TrustedTemporalEvidence = {
+  candidate: string;
+  label: string;
 };
 
 const TEMPORAL_KEY_RE =
@@ -69,8 +75,12 @@ function isStrictIsoTemporalString(value: string): boolean {
   return STRICT_ISO_DATE_RE.test(value) || Number.isFinite(Date.parse(value));
 }
 
-export function extractTrustedTemporalCandidates(value: unknown): string[] {
+function extractTrustedTemporalData(value: unknown): {
+  candidates: string[];
+  evidence: TrustedTemporalEvidence[];
+} {
   const candidates = new Set<string>();
+  const evidence = new Map<string, TrustedTemporalEvidence>();
   const seen = new WeakSet<object>();
   let visited = 0;
   let inspectedKeys = 0;
@@ -145,6 +155,35 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
     } catch {
       return;
     }
+    const labelValue = entries.find(
+      ([key, child]) =>
+        /^(?:title|summary|name|subject)$/i.test(key) &&
+        typeof child === "string"
+    )?.[1];
+    const label =
+      typeof labelValue === "string" && labelValue.length <= 160
+        ? Array.from(labelValue, (character) => {
+            const code = character.charCodeAt(0);
+            return code <= 31 || code === 127 ? " " : character;
+          })
+            .join("")
+            .trim()
+            .replace(/\s+/g, " ")
+        : "";
+    if (label) {
+      for (const [key, child] of entries) {
+        if (
+          TEMPORAL_KEY_RE.test(key) &&
+          typeof child === "string" &&
+          isStrictIsoTemporalString(child)
+        ) {
+          evidence.set(`${child}\u0000${label}`, {
+            candidate: child,
+            label,
+          });
+        }
+      }
+    }
     if (structuredMcpTextBlock) {
       const block = new Map(entries);
       const type = block.get("type");
@@ -183,7 +222,20 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
   } catch {
     // Tool results are untrusted values. Extraction must never fail a turn.
   }
-  return Array.from(candidates);
+  return {
+    candidates: Array.from(candidates),
+    evidence: Array.from(evidence.values()),
+  };
+}
+
+export function extractTrustedTemporalCandidates(value: unknown): string[] {
+  return extractTrustedTemporalData(value).candidates;
+}
+
+export function extractTrustedTemporalEvidence(
+  value: unknown
+): TrustedTemporalEvidence[] {
+  return extractTrustedTemporalData(value).evidence;
 }
 
 const CHINESE_DATE_SENSITIVE_RE =
@@ -336,7 +388,7 @@ function isExplicitNextOccurrenceForwardBridge(
   if (hasNegativeSchedulingPredicate) return false;
 
   const terminalConnector =
-    /(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|預計(?:\s*(?:在|於))?|定於|將\s*(?:在|於)|會\s*(?:在|於)|(?:是|為)\s*(?:在|於)?|[:：—-]|\b(?:date\s*(?:is|will\s+be|[:：])|is|will\s+be(?:\s+held\s+on)?|will\s+take\s+place\s+on|scheduled\s+(?:for|on)|occurs?\s+on|on|at))\s*$/i.exec(
+    /(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|預計(?:\s*(?:在|於))?|定於|將\s*(?:在|於)|會\s*(?:在|於)|(?:辦|办|訂|订|安排)\s*(?:在|於|于)|(?:是|為)\s*(?:在|於)?|[:：—-]|\b(?:date\s*(?:is|will\s+be|[:：])|is|will\s+be(?:\s+held\s+on)?|will\s+take\s+place\s+on|scheduled\s+(?:for|on)|occurs?\s+on|on|at))\s*$/i.exec(
       normalized
     );
   if (terminalConnector) {
@@ -447,6 +499,14 @@ function parseTrustedTemporalCandidate(
   return { epoch, date: taipeiCalendarDate(new Date(epoch)) };
 }
 
+function normalizeTemporalEvidenceLabel(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
   sunday: 0,
   monday: 1,
@@ -458,7 +518,7 @@ const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
 };
 
 type ExplicitRecurrence = {
-  weekday: number;
+  weekdays: number[];
   timeMinutes: number | null;
 };
 
@@ -491,17 +551,22 @@ function recurrenceInClause(
   clause: string
 ): ExplicitRecurrence | "ambiguous" | null {
   const withClauseTime = (
-    weekday: number
+    weekdays: number[]
   ): ExplicitRecurrence | "ambiguous" => {
     const times = explicitRecurrenceTimes(clause);
     if (times.length > 1) return "ambiguous";
-    return { weekday, timeMinutes: times[0] ?? null };
+    return { weekdays, timeMinutes: times[0] ?? null };
   };
-  const chinese =
-    /(?:每週|每星期)\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/.exec(clause);
-  if (chinese) {
-    const weekday = WEEKDAY_INDEX_ZH[`星期${chinese[1]}`];
-    return weekday === undefined ? null : withClauseTime(weekday);
+  if (/(?:每週|每周|每星期)/.test(clause)) {
+    const weekdays = Array.from(
+      new Set(
+        Array.from(
+          clause.matchAll(/(?:星期|週|周)\s*([日天一二三四五六])/g),
+          (match) => WEEKDAY_INDEX_ZH[`星期${match[1]}`]
+        ).filter((weekday): weekday is number => weekday !== undefined)
+      )
+    ).sort((left, right) => left - right);
+    if (weekdays.length > 0) return withClauseTime(weekdays);
   }
 
   const english =
@@ -510,7 +575,7 @@ function recurrenceInClause(
     );
   const weekday = english?.[1] ?? english?.[2];
   return weekday
-    ? withClauseTime(ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!)
+    ? withClauseTime([ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!])
     : null;
 }
 
@@ -521,7 +586,7 @@ function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
     if (!recurrence) continue;
     if (recurrence === "ambiguous") return null;
     distinct.set(
-      `${recurrence.weekday}:${recurrence.timeMinutes ?? "ambiguous"}`,
+      `${recurrence.weekdays.join(",")}:${recurrence.timeMinutes ?? "ambiguous"}`,
       recurrence
     );
     if (distinct.size > 1) return null;
@@ -533,21 +598,31 @@ function resolveNextRecurrence(
   recurrence: ExplicitRecurrence,
   now: Date
 ): CalendarDate | null {
-  const current = resolveRelativeWeekday("current", recurrence.weekday, now);
-  const currentStart = taipeiStartOfDay(current);
-  const today = taipeiCalendarDate(now);
-  const isToday =
-    current.year === today.year &&
-    current.month === today.month &&
-    current.day === today.day;
+  const resolveWeekday = (weekday: number): CalendarDate | null => {
+    const current = resolveRelativeWeekday("current", weekday, now);
+    const currentStart = taipeiStartOfDay(current);
+    const today = taipeiCalendarDate(now);
+    const isToday =
+      current.year === today.year &&
+      current.month === today.month &&
+      current.day === today.day;
 
-  if (currentStart > now.getTime()) return current;
-  if (isToday) {
-    if (recurrence.timeMinutes === null) return null;
-    const occurrenceEpoch = currentStart + recurrence.timeMinutes * 60 * 1000;
-    if (occurrenceEpoch >= now.getTime()) return current;
-  }
-  return resolveRelativeWeekday("next", recurrence.weekday, now);
+    if (currentStart > now.getTime()) return current;
+    if (isToday) {
+      if (recurrence.timeMinutes === null) return null;
+      const occurrenceEpoch = currentStart + recurrence.timeMinutes * 60 * 1000;
+      if (occurrenceEpoch >= now.getTime()) return current;
+    }
+    return resolveRelativeWeekday("next", weekday, now);
+  };
+
+  const candidates = recurrence.weekdays.map(resolveWeekday);
+  if (candidates.some((candidate) => candidate === null)) return null;
+  return (
+    (candidates as CalendarDate[]).sort(
+      (left, right) => taipeiStartOfDay(left) - taipeiStartOfDay(right)
+    )[0] ?? null
+  );
 }
 
 function correctNextOccurrenceClaim(
@@ -637,7 +712,20 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     const recurrence = explicitRecurrence(input.userMessage);
     const recurrenceDate =
       recurrence === null ? null : resolveNextRecurrence(recurrence, input.now);
-    const trustedCandidate = (input.trustedTemporalCandidates ?? [])
+    const normalizedUserMessage = normalizeTemporalEvidenceLabel(
+      input.userMessage
+    );
+    const matchingEvidence = (input.trustedTemporalEvidence ?? []).filter(
+      (item) => {
+        const label = normalizeTemporalEvidenceLabel(item.label);
+        return label.length > 0 && normalizedUserMessage.includes(label);
+      }
+    );
+    const candidateStrings =
+      matchingEvidence.length > 0
+        ? Array.from(new Set(matchingEvidence.map((item) => item.candidate)))
+        : (input.trustedTemporalCandidates ?? []);
+    const trustedCandidate = candidateStrings
       .map(parseTrustedTemporalCandidate)
       .filter(
         (candidate): candidate is { epoch: number; date: CalendarDate } =>
