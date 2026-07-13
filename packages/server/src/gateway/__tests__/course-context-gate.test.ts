@@ -17,6 +17,18 @@ describe('course context gate', () => {
     expect(manager.bindActiveCourse).not.toHaveBeenCalled();
   });
   test.each([
+    ['same_course_evidence',{owner_user_id:'u',agent_id:'a',course_entity_ids:['course:a']}],
+    ['canonical_only',{agent_id:'a',course_entity_ids:['course:a']}],
+  ] as const)('scheduled readiness becomes %s only from exact scoped evidence',async(expected,metadata)=>{
+    const data=payload('準備排程課程任務');data.organizationId='org';
+    data.scheduledCourseContext={schemaVersion:1,source:'calendar_scheduled_wake',automationId:'auto-1',jobId:'job-1',runId:42,taskKind:'opp_coach_rehearsal_prompt',course:{ownerUserId:'u',agentId:'a',courseKey:'a',courseEntityId:'course:a',displayName:'A 課'},evidenceReadiness:'canonical_only'};
+    const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({status:'resolved',confidence:'high',matchedBy:['explicit_course_key'],course:{courseKey:'a',courseEntityId:'course:a',displayName:'A 課'}}),{status:200})).mockResolvedValueOnce(new Response(JSON.stringify(canonicalBundle('a')),{status:200}));
+    const memorySearch=vi.fn().mockResolvedValue([{id:9,payload_text:'meeting evidence',title:'meeting',source_url:null,organization_id:'org',metadata}]);
+    await attachCourseContextForReviewedScope(data,{baseUrl:'https://t',secret:'s',fetcher,memorySearch});
+    expect(data.scheduledCourseContext.evidenceReadiness).toBe(expected);
+    expect(memorySearch).toHaveBeenCalledWith(expect.objectContaining({organizationId:'org',ownerUserId:'u',agentId:'a',entityIds:['course:a']}));
+  });
+  test.each([
     ['schema',{schemaVersion:2}],
     ['owner',{course:{ownerUserId:'other'}}],
     ['agent',{course:{agentId:'other'}}],

@@ -25,7 +25,7 @@ import {
   enqueueAgentMessage,
 } from '../gateway/services/agent-threads';
 import { buildScheduledWakeMessage, resolveWakeThreadId } from './wake-target.js';
-import { parseTrustedCourseWakeV1, type TrustedCourseWakeV1 } from './course-aware-wake.js';
+import { buildTrustedCourseFireContext, type TrustedCourseWakeV1 } from './course-aware-wake.js';
 import { attachCourseContextForReviewedScope } from '../gateway/orchestration/course-context-gate.js';
 import type { MessagePayload, ResolvedCourseExecutionContext, ScheduledCourseContext } from '@lobu/core';
 
@@ -308,19 +308,7 @@ export async function handleWakeAgentTask(
     return;
   }
   p.agent_id = resolvedAgentId;
-  let trustedWake:TrustedCourseWakeV1|undefined;
-  if(p.trustedCourseWake!==undefined){
-    if(p.reason!=='trusted-course-calendar-wake'||!p.__created_by_user||!p.__created_by_agent||!p.__scheduled_job_id||!Number.isSafeInteger(p.__scheduled_task_run_id)||p.__scheduled_task_run_id!<=0)return;
-    try{trustedWake=parseTrustedCourseWakeV1(p.trustedCourseWake,{ownerUserId:p.__created_by_user,agentId:p.agent_id});}catch{return;}
-    if(p.__created_by_agent!==p.agent_id)return;
-    const expectedExternalKey=`google_calendar:${trustedWake.calendarEventRef.accountRef}:${trustedWake.calendarEventRef.eventId}:${trustedWake.taskKind}`;
-    if(p.__scheduled_job_external_key!==expectedExternalKey||p.__scheduled_job_tick!==trustedWake.scheduledFor)return;
-    const ownerRows=await sql`
-      SELECT id FROM agents WHERE organization_id=${orgId} AND id=${p.agent_id}
-        AND owner_platform='toolbox' AND owner_user_id=${p.__created_by_user} LIMIT 1
-    `;
-    if(ownerRows.length===0)return;
-  }
+  const hasTrustedWake=p.trustedCourseWake!==undefined;
   const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== '0';
   let threadId = p.thread_id ?? null;
   if (!threadId && reuseConversation) {
@@ -355,11 +343,11 @@ export async function handleWakeAgentTask(
   }
   let scheduledCourseContext:ScheduledCourseContext|undefined;
   let resolvedCourseContext:ResolvedCourseExecutionContext|undefined;
-  if(trustedWake){
-    scheduledCourseContext={schemaVersion:1,source:'calendar_scheduled_wake',automationId:trustedWake.automationId,jobId:p.__scheduled_job_id!,runId:p.__scheduled_task_run_id!,taskKind:trustedWake.taskKind,course:{ownerUserId:trustedWake.trustedCourseScope.ownerUserId,agentId:trustedWake.trustedCourseScope.agentId,courseKey:trustedWake.trustedCourseScope.courseKey,courseEntityId:trustedWake.trustedCourseScope.courseEntityId,displayName:trustedWake.trustedCourseScope.courseDisplayName},evidenceReadiness:'canonical_only'};
-    const firePayload={userId:p.__created_by_user!,agentId:p.agent_id,organizationId:orgId,conversationId:threadId,channelId:'scheduled',messageId:`scheduled:${p.__scheduled_job_id}:${p.__scheduled_task_run_id}`,botId:'lobu-api',platform:'api',messageText:p.prompt,platformMetadata:{source:'scheduled-job'},agentOptions:{},scheduledCourseContext} as MessagePayload;
-    resolvedCourseContext=await (deps.resolveScheduledCourseContext??resolveScheduledCourseContextAtFire)({payload:firePayload,trustedWake})??undefined;
-    if(!resolvedCourseContext)return;
+  if(hasTrustedWake){
+    const fire=await buildTrustedCourseFireContext({rawWake:p.trustedCourseWake,reason:p.reason,organizationId:orgId,createdByUser:p.__created_by_user,createdByAgent:p.__created_by_agent,resolvedAgentId:p.agent_id,scheduledJobId:p.__scheduled_job_id,scheduledTaskRunId:p.__scheduled_task_run_id,externalKey:p.__scheduled_job_external_key,scheduledTick:p.__scheduled_job_tick},{verifyOwner:async({organizationId,ownerUserId,agentId})=>{const rows=await sql`SELECT id FROM agents WHERE organization_id=${organizationId} AND id=${agentId} AND owner_platform='toolbox' AND owner_user_id=${ownerUserId} LIMIT 1`;return rows.length>0;},resolveContext:async({trustedWake,scheduledCourseContext})=>{const firePayload={userId:p.__created_by_user!,agentId:p.agent_id!,organizationId:orgId,conversationId:threadId!,channelId:'scheduled',messageId:`scheduled:${p.__scheduled_job_id}:${p.__scheduled_task_run_id}`,botId:'lobu-api',platform:'api',messageText:p.prompt!,platformMetadata:{source:'scheduled-job'},agentOptions:{},scheduledCourseContext} as MessagePayload;return (deps.resolveScheduledCourseContext??resolveScheduledCourseContextAtFire)({payload:firePayload,trustedWake});}});
+    if(!fire)return;
+    scheduledCourseContext=fire.scheduledCourseContext;
+    resolvedCourseContext=fire.resolvedCourseContext;
   }
   await enqueueAgentMessage(
     { sessionManager, queueProducer },

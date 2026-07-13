@@ -94,6 +94,7 @@ export async function attachCourseContextForReviewedScope(data: MessagePayload, 
   const context = bundle.context;
   const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
   const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'degraded' as const,crossCourseGuard:'passed' as const,candidateCount:0,safeCount:0,droppedCount:0,durationMs:0,eventIds:[],evidenceRefs:[],snippets:[]};
+  if(scheduled)data.scheduledCourseContext={...scheduled,evidenceReadiness:retrieval.status==='loaded'&&retrieval.crossCourseGuard==='passed'&&retrieval.snippets.length>0?'same_course_evidence':'canonical_only'};
   const canonicalReadiness={audience:bundle.profile.audience,course_promise:bundle.profile.coursePromise};
   const mergedReadiness=mergeReadiness(canonicalReadiness,retrieval);
   await traceCourse(data,options,`context.memory.${retrieval.status}` ,retrieval.status==='degraded'?'degraded':retrieval.status==='invariant_violation'?'failed':'ok',{candidate_count:retrieval.candidateCount,safe_count:retrieval.safeCount,dropped_count:retrieval.droppedCount,duration_ms:retrieval.durationMs});

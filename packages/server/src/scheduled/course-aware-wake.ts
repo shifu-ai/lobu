@@ -5,6 +5,13 @@ export const COURSE_WAKE_TASK_KINDS = [
 ] as const;
 
 export type CourseWakeTaskKind = (typeof COURSE_WAKE_TASK_KINDS)[number];
+export const COURSE_RESOLUTION_MATCHES = [
+	"course_name",
+	"course_alias",
+	"instructor_name",
+	"instructor_alias",
+] as const;
+export type CourseResolutionMatch = (typeof COURSE_RESOLUTION_MATCHES)[number];
 
 export interface TrustedCourseWakeV1 {
 	schemaVersion: 1;
@@ -17,7 +24,7 @@ export interface TrustedCourseWakeV1 {
 		courseKey: string;
 		courseDisplayName: string;
 		resolutionSource: "toolbox_calendar_course_resolver";
-		resolutionMatchedBy: string[];
+		resolutionMatchedBy: CourseResolutionMatch[];
 		scopeVersion: 1;
 	};
 	taskKind: CourseWakeTaskKind;
@@ -87,8 +94,10 @@ export function parseStrictRfc3339(value: unknown, field: string): Date {
 	);
 }
 
-function isNonEmptyStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every(nonEmpty);
+function isDeterministicResolutionMatches(value: unknown): value is CourseResolutionMatch[] {
+	return Array.isArray(value) && value.length > 0 && value.every(
+		(item) => typeof item === "string" && COURSE_RESOLUTION_MATCHES.some((candidate) => candidate === item),
+	);
 }
 
 function isCourseWakeTaskKind(value: unknown): value is CourseWakeTaskKind {
@@ -144,7 +153,7 @@ export function parseTrustedCourseWakeV1(
 		!nonEmpty(scope.courseKey) ||
 		!nonEmpty(scope.courseDisplayName) ||
 		scope.resolutionSource !== "toolbox_calendar_course_resolver" ||
-		!isNonEmptyStringArray(scope.resolutionMatchedBy) ||
+		!isDeterministicResolutionMatches(scope.resolutionMatchedBy) ||
 		scope.scopeVersion !== 1
 	) {
 		throw new Error("invalid trusted course scope");
@@ -176,3 +185,52 @@ export function parseTrustedCourseWakeV1(
 		delivery: "line",
 	};
 }
+
+export function trustedCourseWakeMatchesFireProvenance(
+	wake: TrustedCourseWakeV1,
+	externalKey: string | null | undefined,
+	scheduledTick: string | null | undefined,
+): boolean {
+	const expectedExternalKey = `google_calendar:${wake.calendarEventRef.accountRef}:${wake.calendarEventRef.eventId}:${wake.taskKind}`;
+	if (externalKey !== expectedExternalKey) return false;
+	try {
+		return parseStrictRfc3339(scheduledTick, "scheduled job tick").getTime() ===
+			parseStrictRfc3339(wake.scheduledFor, "scheduledFor").getTime();
+	} catch {
+		return false;
+	}
+}
+
+export interface TrustedCourseFireInput {
+	rawWake: unknown;
+	reason: string | null | undefined;
+	organizationId: string;
+	createdByUser: string | null | undefined;
+	createdByAgent: string | null | undefined;
+	resolvedAgentId: string;
+	scheduledJobId: string | undefined;
+	scheduledTaskRunId: number | undefined;
+	externalKey: string | null | undefined;
+	scheduledTick: string | undefined;
+}
+
+export interface TrustedCourseFireDeps {
+	verifyOwner(input: { organizationId: string; ownerUserId: string; agentId: string }): Promise<boolean>;
+	resolveContext(input: { trustedWake: TrustedCourseWakeV1; scheduledCourseContext: ScheduledCourseContext }): Promise<ResolvedCourseExecutionContext | null>;
+}
+
+export async function buildTrustedCourseFireContext(
+	input: TrustedCourseFireInput,
+	deps: TrustedCourseFireDeps,
+): Promise<{ trustedWake: TrustedCourseWakeV1; scheduledCourseContext: ScheduledCourseContext; resolvedCourseContext: ResolvedCourseExecutionContext } | null> {
+	if (input.reason !== "trusted-course-calendar-wake" || !input.createdByUser || !input.createdByAgent || !input.scheduledJobId || !Number.isSafeInteger(input.scheduledTaskRunId) || input.scheduledTaskRunId! <= 0) return null;
+	let trustedWake: TrustedCourseWakeV1;
+	try { trustedWake = parseTrustedCourseWakeV1(input.rawWake, { ownerUserId: input.createdByUser, agentId: input.resolvedAgentId }); } catch { return null; }
+	if (input.createdByAgent !== input.resolvedAgentId || !trustedCourseWakeMatchesFireProvenance(trustedWake, input.externalKey, input.scheduledTick)) return null;
+	if (!await deps.verifyOwner({ organizationId: input.organizationId, ownerUserId: input.createdByUser, agentId: input.resolvedAgentId })) return null;
+	const scheduledCourseContext: ScheduledCourseContext = { schemaVersion: 1, source: "calendar_scheduled_wake", automationId: trustedWake.automationId, jobId: input.scheduledJobId, runId: input.scheduledTaskRunId!, taskKind: trustedWake.taskKind, course: { ownerUserId: trustedWake.trustedCourseScope.ownerUserId, agentId: trustedWake.trustedCourseScope.agentId, courseKey: trustedWake.trustedCourseScope.courseKey, courseEntityId: trustedWake.trustedCourseScope.courseEntityId, displayName: trustedWake.trustedCourseScope.courseDisplayName }, evidenceReadiness: "canonical_only" };
+	const resolvedCourseContext = await deps.resolveContext({ trustedWake, scheduledCourseContext });
+	if (!resolvedCourseContext || resolvedCourseContext.course.courseKey !== scheduledCourseContext.course.courseKey || resolvedCourseContext.course.courseEntityId !== scheduledCourseContext.course.courseEntityId) return null;
+	return { trustedWake, scheduledCourseContext, resolvedCourseContext };
+}
+import type { ResolvedCourseExecutionContext, ScheduledCourseContext } from "@lobu/core";
