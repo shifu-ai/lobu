@@ -101,11 +101,11 @@ describe("resolveWakeThreadId", () => {
 });
 
 describe("buildScheduledWakeMessage", () => {
-  test("prefixes the machine marker and appends the LINE delivery instruction", () => {
+  test("prefixes the machine marker without delegating delivery to an agent tool", () => {
     const msg = buildScheduledWakeMessage("提醒使用者該喝水了");
     expect(msg.startsWith("[排程任務自動觸發] 提醒使用者該喝水了")).toBe(true);
-    expect(msg).toContain("send_daily_digest");
-    expect(msg).toContain("LINE");
+    expect(msg).not.toContain("send_daily_digest");
+    expect(msg).not.toContain("推送");
   });
 
   test("does not double-prefix an already-marked prompt", () => {
