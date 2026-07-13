@@ -6,6 +6,26 @@ import {
 } from "../openclaw/turn-controller";
 
 describe("TurnController", () => {
+  test("only ask-user termination awaits a human decision", () => {
+    const controller = new TurnController();
+    controller.startTurn();
+
+    expect(controller.awaitingHumanDecision).toBe(false);
+
+    controller.terminate("ask-user", "decision posted");
+
+    expect(controller.awaitingHumanDecision).toBe(true);
+  });
+
+  test("runaway termination does not await a human decision", () => {
+    const controller = new TurnController({ maxToolCallsPerTurn: 0 });
+    controller.startTurn();
+
+    controller.recordToolCall("search", { query: "status" });
+
+    expect(controller.awaitingHumanDecision).toBe(false);
+  });
+
   test("terminate() aborts the turn and is idempotent within a turn", () => {
     let aborts = 0;
     const reasons: string[] = [];

@@ -61,12 +61,15 @@ export class HttpWorkerTransport implements WorkerTransport {
     this.jobId = jobId;
   }
 
-  async signalDone(finalDelta?: string): Promise<void> {
+  async signalDone(
+    finalDelta?: string,
+    awaitingHumanDecision?: boolean
+  ): Promise<void> {
     // Send final delta if there is one
     if (finalDelta) {
       await this.sendStreamDelta(finalDelta, false, true);
     }
-    await this.signalCompletion();
+    await this.signalCompletion(awaitingHumanDecision);
   }
 
   async sendStreamDelta(
@@ -153,7 +156,7 @@ export class HttpWorkerTransport implements WorkerTransport {
     );
   }
 
-  async signalCompletion(): Promise<void> {
+  async signalCompletion(awaitingHumanDecision?: boolean): Promise<void> {
     // Carry the full assistant text on the terminal row. The reply text is
     // otherwise only in the gateway's per-pod streaming buffer (built from the
     // delta rows on whichever replica drained them); a post-once renderer
@@ -170,6 +173,9 @@ export class HttpWorkerTransport implements WorkerTransport {
       this.buildBaseResponse({
         processedMessageIds: this.processedMessageIds,
         finalText: this.finalText ?? this.accumulatedStreamContent.join(""),
+        ...(typeof awaitingHumanDecision === "boolean" && {
+          awaitingHumanDecision,
+        }),
       })
     );
   }

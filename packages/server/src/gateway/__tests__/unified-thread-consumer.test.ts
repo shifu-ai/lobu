@@ -48,8 +48,32 @@ function createConsumer(overrides?: {
   if (overrides?.chatResponseBridge) {
     consumer.setChatResponseBridge(overrides.chatResponseBridge as any);
   }
-  return { consumer, platformRegistry, renderer };
+  return { consumer, platformRegistry, renderer, sseManager };
 }
+
+describe("UnifiedThreadResponseConsumer completion contract", () => {
+  test("preserves awaitingHumanDecision in complete SSE data", async () => {
+    const { consumer, sseManager } = createConsumer();
+    sseManager.hasActiveConnection.mockReturnValue(true);
+
+    await consumer.handleThreadResponse({
+      id: "terminal-decision",
+      data: {
+        ...basePayload,
+        platform: "api",
+        teamId: "api",
+        awaitingHumanDecision: true,
+        platformMetadata: { sessionId: "cli-session-1" },
+      },
+    });
+
+    expect(sseManager.broadcast).toHaveBeenCalledWith(
+      "cli-session-1",
+      "complete",
+      expect.objectContaining({ awaitingHumanDecision: true })
+    );
+  });
+});
 
 describe("UnifiedThreadResponseConsumer scheduled course delivery", () => {
   const scheduledPayload = {

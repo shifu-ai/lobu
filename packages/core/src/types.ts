@@ -507,6 +507,8 @@ export interface ThreadResponsePayload {
    * drained by a different replica than the one that buffered the deltas.
    */
   finalText?: string;
+  /** Whether this successful turn ended after posting a human decision request. */
+  awaitingHumanDecision?: boolean;
   error?: string;
   errorCode?: string;
   timestamp: number;

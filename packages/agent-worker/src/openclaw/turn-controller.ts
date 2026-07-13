@@ -105,6 +105,10 @@ export class TurnController {
     return this.terminationReason;
   }
 
+  get awaitingHumanDecision(): boolean {
+    return this.terminationReason === "ask-user";
+  }
+
   /**
    * Force-terminate the turn. Idempotent within a turn. Safe to call before the
    * abort is attached (the flag is still set so the worker can surface it).

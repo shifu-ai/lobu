@@ -84,6 +84,10 @@ export class ApiResponseRenderer implements ResponseRenderer {
       type: "complete",
       messageId: payload.messageId,
       processedMessageIds: payload.processedMessageIds,
+      ...(!payload.error &&
+        typeof payload.awaitingHumanDecision === "boolean" && {
+          awaitingHumanDecision: payload.awaitingHumanDecision,
+        }),
       timestamp: payload.timestamp || Date.now(),
     });
 

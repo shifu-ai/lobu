@@ -98,6 +98,7 @@ export interface SessionExecutionResult {
   success: boolean;
   exitCode: number;
   output: string;
+  awaitingHumanDecision: boolean;
   error?: string;
   sessionKey: string;
 }

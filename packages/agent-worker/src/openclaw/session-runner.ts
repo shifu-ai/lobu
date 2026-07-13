@@ -2337,6 +2337,7 @@ Use it when the user references past discussions or you need context.`);
         success: true,
         exitCode: 0,
         output: "",
+        awaitingHumanDecision: false,
         sessionKey,
       };
     }
@@ -2466,6 +2467,7 @@ Use it when the user references past discussions or you need context.`);
         success: false,
         exitCode: 1,
         output: "",
+        awaitingHumanDecision: false,
         error: errorWithHint,
         sessionKey,
       };
@@ -2523,6 +2525,7 @@ Use it when the user references past discussions or you need context.`);
       success: true,
       exitCode: 0,
       output: "",
+      awaitingHumanDecision: turnController.awaitingHumanDecision,
       sessionKey,
     };
   } catch (error) {
@@ -2559,6 +2562,7 @@ Use it when the user references past discussions or you need context.`);
       success: false,
       exitCode: 1,
       output: "",
+      awaitingHumanDecision: false,
       error: errorWithHint,
       sessionKey,
     };
