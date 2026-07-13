@@ -366,11 +366,18 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
   ].sort((left, right) => left.index - right.index);
 }
 
+function normalizedNextOccurrenceBridge(bridge: string): string {
+  const normalized = bridge.trim();
+  return normalized.startsWith("的")
+    ? normalized.slice(1).trimStart()
+    : normalized;
+}
+
 function isExplicitNextOccurrenceForwardBridge(
   bridge: string,
   requestedTarget: string | null
 ): boolean {
-  const normalized = bridge.trim();
+  const normalized = normalizedNextOccurrenceBridge(bridge);
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
   const hasReferenceSourceRangeOrUnresolvedMarker =
@@ -596,7 +603,9 @@ function normalizedNextOccurrenceDescriptor(
   claim: LocatedDateClaim
 ): string | null {
   if (claim.associationText === undefined) return null;
-  const association = normalizeTemporalEvidenceLabel(claim.associationText);
+  const association = normalizeTemporalEvidenceLabel(
+    normalizedNextOccurrenceBridge(claim.associationText)
+  );
   const terminalConnector = NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(
     association
   );

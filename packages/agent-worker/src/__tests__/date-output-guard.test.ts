@@ -621,6 +621,60 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("supports one possessive marker before exact event titles", () => {
+    for (const [target, finalText, expected] of [
+      [
+        "銷講",
+        "下一場的銷講排在 7/22（三）。",
+        "下一場的銷講排在 7/16（四）。",
+      ],
+      [
+        "報名系統說明會",
+        "下一場的報名系統說明會排在 7/22（三）。",
+        "下一場的報名系統說明會排在 7/16（四）。",
+      ],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: `幫我查下一場的${target}`,
+          finalText,
+          now: NOW,
+          trustedTemporalEvidence: [
+            { candidate: "2026-07-16", label: target },
+          ],
+        }).text
+      ).toBe(expected);
+    }
+
+    const roleClaim = "下一場的報名系統說明會報名截止在 7/22（三）。";
+    expect(
+      guardDateOutput({
+        userMessage: "幫我查下一場的報名系統說明會",
+        finalText: roleClaim,
+        now: NOW,
+        trustedTemporalEvidence: [
+          { candidate: "2026-07-16", label: "報名系統說明會" },
+        ],
+      })
+    ).toEqual({ status: "unchanged", text: roleClaim });
+
+    for (const finalText of [
+      "下一場的的銷講排在 7/22（三）。",
+      "下一場別的銷講排在 7/22（三）。",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場的銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalEvidence: [
+            { candidate: "2026-07-16", label: "銷講" },
+          ],
+        }).status
+      ).toBe("blocked");
+    }
+  });
+
   test("rejects negated affirmative scheduling predicates", () => {
     for (const finalText of [
       "下一場不辦在 7/22（三）。",
