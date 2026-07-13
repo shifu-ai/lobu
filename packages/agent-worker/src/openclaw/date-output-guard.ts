@@ -204,25 +204,6 @@ type LocatedDateClaim = {
   index: number;
 };
 
-function firstDateClaimIn(
-  text: string,
-  offset: number
-): LocatedDateClaim | null {
-  const shortMatch = FINAL_SHORT_DATE_CLAIM_RE.exec(text);
-  const isoMatch = FINAL_ISO_DATE_CLAIM_RE.exec(text);
-  if (!shortMatch && !isoMatch) return null;
-  if (shortMatch && (!isoMatch || shortMatch.index <= isoMatch.index)) {
-    return {
-      kind: "short",
-      match: shortMatch,
-      index: offset + shortMatch.index,
-    };
-  }
-  return isoMatch
-    ? { kind: "iso", match: isoMatch, index: offset + isoMatch.index }
-    : null;
-}
-
 function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
   const collect = (regex: RegExp, kind: LocatedDateClaim["kind"]) =>
     Array.from(text.matchAll(new RegExp(regex.source, "g")), (match) => ({
@@ -234,6 +215,12 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
     ...collect(FINAL_SHORT_DATE_CLAIM_RE, "short"),
     ...collect(FINAL_ISO_DATE_CLAIM_RE, "iso"),
   ].sort((left, right) => left.index - right.index);
+}
+
+function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
+  return /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i.test(
+    bridge
+  );
 }
 
 function findNextOccurrenceDateClaim(text: string): LocatedDateClaim | null {
@@ -252,8 +239,11 @@ function findNextOccurrenceDateClaim(text: string): LocatedDateClaim | null {
       forwardBoundary === -1
         ? forwardRemainder
         : forwardRemainder.slice(0, forwardBoundary);
-    const forwardClaim = firstDateClaimIn(forwardScope, occurrenceEnd);
-    if (forwardClaim) return forwardClaim;
+    const forwardClaims = allDateClaimsIn(forwardScope, occurrenceEnd);
+    for (const claim of forwardClaims) {
+      const bridge = text.slice(occurrenceEnd, claim.index);
+      if (isExplicitNextOccurrenceForwardBridge(bridge)) return claim;
+    }
 
     let backwardStart = Math.max(
       0,
