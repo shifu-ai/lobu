@@ -12,6 +12,26 @@ import {
 } from "../scheduled/scheduled-jobs-service.js";
 
 const EXTERNAL_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/;
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+const FIXED_WAKE_PROMPT =
+	"Prepare the trusted scheduled course task using the attached structured course context.";
+
+async function readBoundedJson(
+	c: Context<{ Bindings: Env }>,
+): Promise<unknown> {
+	const declaredLength = Number(c.req.header("content-length"));
+	if (
+		Number.isFinite(declaredLength) &&
+		declaredLength > MAX_REQUEST_BODY_BYTES
+	) {
+		throw new Error("request body is too large");
+	}
+	const body = await c.req.text();
+	if (new TextEncoder().encode(body).byteLength > MAX_REQUEST_BODY_BYTES) {
+		throw new Error("request body is too large");
+	}
+	return JSON.parse(body);
+}
 
 function requireAdminPat(c: Context<{ Bindings: Env }>): Response | null {
 	const session = c.get("session") as { id?: string } | null;
@@ -33,11 +53,17 @@ function requireAdminPat(c: Context<{ Bindings: Env }>): Response | null {
 	);
 }
 
-function requiredString(record: Record<string, unknown>, key: string): string {
+function requiredString(
+	record: Record<string, unknown>,
+	key: string,
+	maxLength = 256,
+): string {
 	const value = record[key];
 	if (typeof value !== "string" || !value.trim())
 		throw new Error(`${key} is required`);
-	return value.trim();
+	const trimmed = value.trim();
+	if (trimmed.length > maxLength) throw new Error(`${key} is too long`);
+	return trimmed;
 }
 
 interface ParsedCourseWakeRequest {
@@ -127,7 +153,7 @@ export function createCourseAwareWakeRoutes(
 
 		let parsed: ParsedCourseWakeRequest;
 		try {
-			parsed = parseRequest(await c.req.json(), organizationId);
+			parsed = parseRequest(await readBoundedJson(c), organizationId);
 		} catch (error) {
 			return c.json(
 				{
@@ -156,7 +182,7 @@ export function createCourseAwareWakeRoutes(
 				actionType: "wake_agent",
 				actionArgs: {
 					agent_id: parsed.agentId,
-					prompt: `Prepare the scheduled course task for ${parsed.payload.trustedCourseScope.courseDisplayName}.`,
+					prompt: FIXED_WAKE_PROMPT,
 					reason: "trusted-course-calendar-wake",
 					trustedCourseWake: parsed.payload,
 				},
@@ -185,7 +211,10 @@ export function createCourseAwareWakeRoutes(
 		}
 		let parsed: ParsedCourseWakeCancellation;
 		try {
-			parsed = parseCancellationRequest(await c.req.json(), organizationId);
+			parsed = parseCancellationRequest(
+				await readBoundedJson(c),
+				organizationId,
+			);
 		} catch (error) {
 			return c.json(
 				{
