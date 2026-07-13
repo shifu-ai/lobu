@@ -72,8 +72,10 @@ test("transient completion retry reuses stored final output without a second wor
     platformMetadata: Record<string, unknown>;
   }).platformMetadata;
   const delivered: string[] = [];
-  const mechanicalDelivery = mock(async ({ finalOutput }: { finalOutput: string }) => {
-    delivered.push(finalOutput);
+  const mechanicalDelivery = mock(async ({ completion }: {
+    completion: { kind: "succeeded"; finalOutput: string };
+  }) => {
+    delivered.push(completion.finalOutput);
     if (delivered.length === 1) throw new Error("course_wake_delivery_retrying");
   });
   const consumer = new UnifiedThreadResponseConsumer(
