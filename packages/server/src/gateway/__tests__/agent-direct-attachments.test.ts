@@ -74,6 +74,10 @@ afterEach(async () => {
 
 function makeApp(overrides: Record<string, unknown> = {}) {
 	const enqueued: EnqueuedMessage[] = [];
+	const enqueueMessage = mock(async (payload: EnqueuedMessage) => {
+		enqueued.push(payload);
+		return `job-${randomUUID()}`;
+	});
 	const durableReceipts = new Map<string, string>();
 	const enqueueDurableMessage = mock(async (payload: EnqueuedMessage) => {
 		const deliveryId = String(payload.messageId);
@@ -100,10 +104,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 
 	const app = createAgentApi({
 		queueProducer: {
-			enqueueMessage: mock(async (payload: EnqueuedMessage) => {
-				enqueued.push(payload);
-				return `job-${randomUUID()}`;
-			}),
+			enqueueMessage,
 			enqueueDurableMessage,
 		} as never,
 		sessionManager: {
@@ -127,7 +128,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 		...overrides,
 	});
 
-	return { app, enqueued, enqueueDurableMessage };
+	return { app, enqueued, enqueueMessage, enqueueDurableMessage };
 }
 
 function makeGatewayApp(overrides: Record<string, unknown> = {}) {
@@ -366,6 +367,71 @@ describe("direct API multipart attachments", () => {
 		expect(enqueueDurableMessage).toHaveBeenCalledTimes(2);
 		expect(enqueued).toHaveLength(1);
 		expect(enqueued[0]?.messageText).toBe("改成每小時");
+	});
+
+	test("durably enqueues an ordinary message only for a privileged server session", async () => {
+		const { app, enqueued, enqueueMessage, enqueueDurableMessage } = makeApp();
+		const token = generateWorkerToken(
+			"user-test",
+			CONVERSATION_ID,
+			"api-shifu-u",
+			{
+				channelId: "api_user-test",
+				agentId: AGENT_ID,
+				organizationId: "org-test",
+				platform: "api",
+				tokenKind: "session",
+				trustedPlatformContext: true,
+			},
+		);
+		const request = () => app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					content: "真實 LINE 文字",
+					messageId: "line-turn-a1b2c3",
+					durableMessage: true,
+				}),
+			},
+		);
+
+		const first = await request();
+		const duplicate = await request();
+
+		expect(await first.json()).toMatchObject({ deduplicated: false });
+		expect(await duplicate.json()).toMatchObject({ deduplicated: true });
+		expect(enqueueDurableMessage).toHaveBeenCalledTimes(2);
+		expect(enqueueMessage).not.toHaveBeenCalled();
+		expect(enqueued).toHaveLength(1);
+	});
+
+	test("does not let an ordinary session caller enable durable enqueue", async () => {
+		const { app, enqueueMessage, enqueueDurableMessage } = makeApp();
+		const res = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${AUTH_TOKEN}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					content: "ordinary caller",
+					messageId: "ordinary-message-1",
+					durableMessage: true,
+				}),
+			},
+		);
+
+		expect(res.status).toBe(200);
+		expect(await res.json()).not.toHaveProperty("deduplicated");
+		expect(enqueueMessage).toHaveBeenCalledTimes(1);
+		expect(enqueueDurableMessage).not.toHaveBeenCalled();
 	});
 
 	test("forwards direct API platformMetadata for session reset messages", async () => {

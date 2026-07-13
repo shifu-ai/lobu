@@ -133,6 +133,7 @@ const SendMessageRequestSchema = z
       .optional()
       .describe("Message content (alias for content)"),
     messageId: z.string().optional(),
+    durableMessage: z.boolean().optional(),
     platform: z
       .string()
       .optional()
@@ -150,6 +151,7 @@ const SendMessageResponseSchema = z.object({
   jobId: z.string().optional(),
   eventsUrl: z.string().optional(),
   queued: z.boolean(),
+  deduplicated: z.boolean().optional(),
   traceparent: z.string().optional(),
 });
 
@@ -1345,12 +1347,24 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     const messageWorkerData = messageWorkerToken
       ? verifyWorkerToken(messageWorkerToken)
       : null;
-    const mayProvideTrustedAutomationContext =
+    const mayProvideTrustedPlatformContext =
       messageWorkerData?.tokenKind === "session" &&
       messageWorkerData.trustedPlatformContext === true &&
       messageWorkerData.conversationId === agentId;
+    const trustedDurableMessage =
+      mayProvideTrustedPlatformContext && body.durableMessage === true;
     if (
-      mayProvideTrustedAutomationContext &&
+      trustedDurableMessage &&
+      (typeof body.messageId !== "string" ||
+        !/^[A-Za-z0-9._-]{1,200}$/.test(body.messageId))
+    ) {
+      return c.json(
+        { success: false, error: "Invalid durable message delivery" },
+        400,
+      );
+    }
+    if (
+      mayProvideTrustedPlatformContext &&
       requestedAutomationModificationContext !== undefined &&
       (!requestedAutomationModificationContext ||
         typeof requestedAutomationModificationContext !== "object" ||
@@ -1367,7 +1381,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       );
     }
     const trustedAutomationModificationContext =
-      mayProvideTrustedAutomationContext &&
+      mayProvideTrustedPlatformContext &&
       requestedAutomationModificationContext &&
       typeof requestedAutomationModificationContext === "object" &&
       !Array.isArray(requestedAutomationModificationContext)
@@ -1479,7 +1493,10 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
           ? { mcpServers: settingsMcpServers }
           : session.mcpConfig,
       };
-      const disposition = trustedAutomationModificationContext
+      const durableDispatch = Boolean(
+        trustedAutomationModificationContext || trustedDurableMessage,
+      );
+      const disposition = durableDispatch
         ? await queueProducer.enqueueDurableMessage(directPayload)
         : {
             jobId: await queueProducer.enqueueMessage(directPayload),
@@ -1493,7 +1510,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         messageId,
         jobId: disposition.jobId,
         queued: true,
-        ...(trustedAutomationModificationContext
+        ...(durableDispatch
           ? { deduplicated: disposition.deduplicated }
           : {}),
         traceparent: traceparent || undefined,
