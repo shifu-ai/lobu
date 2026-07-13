@@ -55,7 +55,7 @@ interface SignedManifest {
 	createdAt: string;
 	managedSettings: ManagedSettings;
 	rollbackToSequence?: number;
-	rollbackToReleaseId?: string;
+	rollbackTo?: string;
 	signing: SigningMetadata;
 }
 
@@ -67,6 +67,7 @@ interface FeedPublication {
 	publicationKind?: PublicationKind;
 	fromReleaseSequence?: number;
 	toReleaseSequence?: number;
+	toReleaseId?: string;
 	allowDowngrade?: true;
 	reason?: string;
 	actor?: string;
@@ -190,6 +191,7 @@ export function createAgentReleaseService(options: {
 				SELECT r.applied_release_id, r.applied_release_sequence,
 				       r.applied_feed_sequence, r.applied_channel,
 				       r.applied_feed_digest, r.environment,
+				       r.rollback_to_release_id, r.rollback_to_sequence,
 				       r.manifest_digest, r.status,
 				       r.revision_ref, r.settings_hash, r.applied_at
 				FROM agent_release_applies r
@@ -250,6 +252,7 @@ async function applyInTransaction(
 		SELECT desired_release_id, desired_release_sequence, desired_feed_sequence,
 		       applied_release_id, applied_release_sequence, applied_feed_sequence,
 		       applied_channel, applied_feed_digest, environment,
+		       rollback_to_release_id, rollback_to_sequence,
 		       manifest_digest, status, revision_ref, settings_hash, applied_at
 		FROM agent_release_applies
 		WHERE organization_id = ${input.organizationId}
@@ -326,6 +329,7 @@ async function applyInTransaction(
 				RETURNING desired_release_id, desired_release_sequence, desired_feed_sequence,
 				          applied_release_id, applied_release_sequence, applied_feed_sequence,
 				          applied_channel, applied_feed_digest, environment,
+				          rollback_to_release_id, rollback_to_sequence,
 				          manifest_digest, status, revision_ref, settings_hash, applied_at
 			`;
 			return {
@@ -357,15 +361,32 @@ async function applyInTransaction(
 		if (
 			input.publication.fromReleaseSequence !==
 				current.applied_release_sequence ||
-			input.publication.fromReleaseSequence !==
-				current.desired_release_sequence ||
-			input.publication.toReleaseSequence !== manifest.releaseSequence ||
-			manifest.rollbackToSequence !== manifest.releaseSequence
+			input.publication.fromReleaseSequence !== current.desired_release_sequence
 		) {
 			throw releaseError(
 				"agent_release_rollback_target_mismatch",
 				409,
-				"Signed rollback source and target do not match the current receipt",
+				"Signed rollback source does not match the current receipt",
+			);
+		}
+		if (
+			current.rollback_to_release_id === null ||
+			current.rollback_to_sequence === null
+		) {
+			throw releaseError(
+				"agent_release_rollback_not_authorized",
+				409,
+				"The applied manifest did not pre-authorize a rollback target",
+			);
+		}
+		if (
+			input.publication.toReleaseId !== current.rollback_to_release_id ||
+			input.publication.toReleaseSequence !== current.rollback_to_sequence
+		) {
+			throw releaseError(
+				"agent_release_rollback_target_mismatch",
+				409,
+				"Signed rollback target does not match the applied manifest authorization",
 			);
 		}
 	} else if (publicationKind === "rollback") {
@@ -437,6 +458,7 @@ async function applyInTransaction(
 			desired_release_id, desired_release_sequence, desired_feed_sequence,
 			applied_release_id, applied_release_sequence, applied_feed_sequence,
 			applied_channel, applied_feed_digest,
+			rollback_to_release_id, rollback_to_sequence,
 			manifest_digest, status, revision_ref, settings_hash, error_code,
 			created_at, updated_at, applied_at
 		) VALUES (
@@ -444,6 +466,7 @@ async function applyInTransaction(
 			${manifest.releaseId}, ${manifest.releaseSequence}, ${feed.feedSequence},
 			${manifest.releaseId}, ${manifest.releaseSequence}, ${feed.feedSequence},
 			${feed.channel}, ${input.feedDigest},
+			${manifest.rollbackTo ?? null}, ${manifest.rollbackToSequence ?? null},
 			${manifestDigest}, 'applied', ${revisionRef}, ${settingsHash}, NULL,
 			NOW(), NOW(), NOW()
 		)
@@ -457,6 +480,8 @@ async function applyInTransaction(
 			applied_feed_sequence = EXCLUDED.applied_feed_sequence,
 			applied_channel = EXCLUDED.applied_channel,
 			applied_feed_digest = EXCLUDED.applied_feed_digest,
+			rollback_to_release_id = EXCLUDED.rollback_to_release_id,
+			rollback_to_sequence = EXCLUDED.rollback_to_sequence,
 			manifest_digest = EXCLUDED.manifest_digest,
 			status = EXCLUDED.status,
 			revision_ref = EXCLUDED.revision_ref,
@@ -467,6 +492,7 @@ async function applyInTransaction(
 		RETURNING desired_release_id, desired_release_sequence, desired_feed_sequence,
 		          applied_release_id, applied_release_sequence, applied_feed_sequence,
 		          applied_channel, applied_feed_digest, environment,
+		          rollback_to_release_id, rollback_to_sequence,
 		          manifest_digest, status, revision_ref, settings_hash, applied_at
 	`;
 	return {
@@ -526,6 +552,8 @@ interface ReceiptRow {
 	applied_feed_sequence: number;
 	applied_channel: "candidate" | "stable";
 	applied_feed_digest: string;
+	rollback_to_release_id: string | null;
+	rollback_to_sequence: number | null;
 	environment: AgentReleaseEnvironment;
 	manifest_digest: string;
 	status: string;
@@ -618,7 +646,7 @@ function parseManifest(value: unknown): SignedManifest {
 			"createdAt",
 			"managedSettings",
 			"rollbackToSequence",
-			"rollbackToReleaseId",
+			"rollbackTo",
 			"signing",
 		],
 		"manifest",
@@ -645,18 +673,25 @@ function parseManifest(value: unknown): SignedManifest {
 		throw invalidRequest("Agent release createdAt is invalid");
 	}
 	const managedSettings = parseManagedSettings(value.managedSettings);
-	if (
-		value.rollbackToSequence !== undefined &&
-		!isPositiveSafeInteger(value.rollbackToSequence)
-	) {
+	const hasRollbackTo = hasOwn(value, "rollbackTo");
+	const hasRollbackToSequence = hasOwn(value, "rollbackToSequence");
+	if (hasRollbackTo !== hasRollbackToSequence) {
 		throw invalidRollback(
-			"Agent release manifest rollback target sequence is invalid",
+			"Agent release manifest rollback target id and sequence must be provided together",
 		);
 	}
 	if (
-		value.rollbackToReleaseId !== undefined &&
-		(typeof value.rollbackToReleaseId !== "string" ||
-			value.rollbackToReleaseId.trim() === "")
+		hasRollbackToSequence &&
+		(!isPositiveSafeInteger(value.rollbackToSequence) ||
+			value.rollbackToSequence >= value.releaseSequence)
+	) {
+		throw invalidRollback(
+			"Agent release manifest rollback target sequence must be older than its source",
+		);
+	}
+	if (
+		hasRollbackTo &&
+		(typeof value.rollbackTo !== "string" || value.rollbackTo.trim() === "")
 	) {
 		throw invalidRollback(
 			"Agent release manifest rollback target id is invalid",
@@ -670,12 +705,10 @@ function parseManifest(value: unknown): SignedManifest {
 		releaseKind: value.releaseKind,
 		createdAt: value.createdAt,
 		managedSettings,
-		...(value.rollbackToSequence !== undefined
-			? { rollbackToSequence: value.rollbackToSequence }
+		...(hasRollbackToSequence
+			? { rollbackToSequence: value.rollbackToSequence as number }
 			: {}),
-		...(value.rollbackToReleaseId !== undefined
-			? { rollbackToReleaseId: value.rollbackToReleaseId }
-			: {}),
+		...(hasRollbackTo ? { rollbackTo: value.rollbackTo as string } : {}),
 		signing,
 	};
 }
@@ -742,6 +775,7 @@ function parsePublication(value: unknown): FeedPublication {
 			"publicationKind",
 			"fromReleaseSequence",
 			"toReleaseSequence",
+			"toReleaseId",
 			"allowDowngrade",
 			"reason",
 			"actor",
@@ -773,6 +807,7 @@ function parsePublication(value: unknown): FeedPublication {
 	const rollbackFields = [
 		"fromReleaseSequence",
 		"toReleaseSequence",
+		"toReleaseId",
 		"allowDowngrade",
 		"reason",
 		"actor",
@@ -790,6 +825,12 @@ function parsePublication(value: unknown): FeedPublication {
 		}
 		if (!isPositiveSafeInteger(value.toReleaseSequence)) {
 			throw invalidRollback("Signed rollback requires toReleaseSequence");
+		}
+		if (
+			typeof value.toReleaseId !== "string" ||
+			value.toReleaseId.trim() === ""
+		) {
+			throw invalidRollback("Signed rollback requires nonempty toReleaseId");
 		}
 		if (value.allowDowngrade !== true) {
 			throw invalidRollback("Signed rollback requires allowDowngrade=true");
@@ -818,6 +859,7 @@ function parsePublication(value: unknown): FeedPublication {
 			? {
 					fromReleaseSequence: value.fromReleaseSequence as number,
 					toReleaseSequence: value.toReleaseSequence as number,
+					toReleaseId: value.toReleaseId as string,
 					allowDowngrade: true as const,
 					reason: value.reason as string,
 					actor: value.actor as string,
@@ -1061,9 +1103,7 @@ function validatePublication(
 	if (publication.publicationKind === "rollback") {
 		if (
 			publication.toReleaseSequence !== manifest.releaseSequence ||
-			manifest.rollbackToSequence !== publication.toReleaseSequence ||
-			(manifest.rollbackToReleaseId !== undefined &&
-				manifest.rollbackToReleaseId !== manifest.releaseId)
+			publication.toReleaseId !== manifest.releaseId
 		) {
 			throw releaseError(
 				"agent_release_rollback_target_mismatch",
@@ -1078,13 +1118,6 @@ function validatePublication(
 				"Signed rollback publication has expired",
 			);
 		}
-	} else if (
-		manifest.rollbackToSequence !== undefined ||
-		manifest.rollbackToReleaseId !== undefined
-	) {
-		throw invalidRollback(
-			"Ordinary release manifest cannot contain rollback target fields",
-		);
 	}
 	return publication;
 }

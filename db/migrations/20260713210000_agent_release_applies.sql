@@ -10,6 +10,8 @@ CREATE TABLE agent_release_applies (
     applied_feed_sequence bigint NOT NULL,
     applied_channel text NOT NULL,
     applied_feed_digest text NOT NULL,
+    rollback_to_release_id text,
+    rollback_to_sequence bigint,
     manifest_digest text NOT NULL,
     status text NOT NULL,
     revision_ref text NOT NULL,
@@ -42,7 +44,18 @@ CREATE TABLE agent_release_applies (
     CONSTRAINT agent_release_applies_settings_hash_check
         CHECK (settings_hash ~ '^sha256:[0-9a-f]{64}$'),
     CONSTRAINT agent_release_applies_feed_digest_check
-        CHECK (applied_feed_digest ~ '^sha256:[0-9a-f]{64}$')
+        CHECK (applied_feed_digest ~ '^sha256:[0-9a-f]{64}$'),
+    CONSTRAINT agent_release_applies_rollback_target_pair_check
+        CHECK (
+            (rollback_to_release_id IS NULL AND rollback_to_sequence IS NULL)
+            OR (
+                rollback_to_release_id IS NOT NULL
+                AND btrim(rollback_to_release_id) <> ''
+                AND rollback_to_sequence IS NOT NULL
+                AND rollback_to_sequence > 0
+                AND rollback_to_sequence < applied_release_sequence
+            )
+        )
 );
 
 CREATE INDEX agent_release_applies_status_updated_idx

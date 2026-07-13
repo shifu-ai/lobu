@@ -47,13 +47,15 @@ interface ReleaseFixtureOptions {
 	publicationKind?: PublicationKind;
 	fromReleaseSequence?: number;
 	toReleaseSequence?: number;
+	toReleaseId?: string;
 	allowDowngrade?: boolean;
 	rollbackReason?: string;
 	rollbackActor?: string;
 	rollbackExpiresAt?: string;
 	manifestRollbackToSequence?: number;
-	manifestRollbackToReleaseId?: string;
-	omitManifestRollbackTarget?: boolean;
+	manifestRollbackTo?: string;
+	omitManifestRollbackTo?: boolean;
+	omitManifestRollbackToSequence?: boolean;
 	expectedCurrentReleaseSequence?: number | null;
 	agentId?: string;
 	keyId?: string;
@@ -529,6 +531,8 @@ describe("signed managed agent release apply", () => {
 						feedSequence: 2,
 						releaseId: "agent-2026.07.13.2",
 						managedSettings: { identityMd: "sequence two" },
+						manifestRollbackTo: "agent-2026.07.13.1",
+						manifestRollbackToSequence: 1,
 					}),
 				)
 			).status,
@@ -565,6 +569,8 @@ describe("signed managed agent release apply", () => {
 						releaseSequence: 2,
 						feedSequence: 1,
 						releaseId: "agent-rollback-source",
+						manifestRollbackTo: "agent-2026.07.13.1",
+						manifestRollbackToSequence: 1,
 					}),
 				)
 			).status,
@@ -573,6 +579,7 @@ describe("signed managed agent release apply", () => {
 		for (const field of [
 			"fromReleaseSequence",
 			"toReleaseSequence",
+			"toReleaseId",
 			"allowDowngrade",
 			"reason",
 			"actor",
@@ -620,6 +627,8 @@ describe("signed managed agent release apply", () => {
 						releaseSequence: 2,
 						feedSequence: 1,
 						releaseId: "agent-rollback-current",
+						manifestRollbackTo: "agent-2026.07.13.1",
+						manifestRollbackToSequence: 1,
 					}),
 				)
 			).status,
@@ -646,15 +655,7 @@ describe("signed managed agent release apply", () => {
 				feedSequence: 2,
 				publicationKind: "rollback",
 				fromReleaseSequence: 2,
-				manifestRollbackToSequence: 9,
-				expectedCurrentReleaseSequence: 2,
-			}),
-			signedApplyRequest({
-				releaseSequence: 1,
-				feedSequence: 2,
-				publicationKind: "rollback",
-				fromReleaseSequence: 2,
-				omitManifestRollbackTarget: true,
+				toReleaseId: "agent-wrong-target",
 				expectedCurrentReleaseSequence: 2,
 			}),
 		]) {
@@ -677,6 +678,156 @@ describe("signed managed agent release apply", () => {
 		await expect(nonDowngradeResponse.json()).resolves.toMatchObject({
 			error: "agent_release_invalid_rollback",
 		});
+	});
+
+	test("authorizes rollback only from the applied manifest's predeclared target", async () => {
+		const app = await buildApp();
+		const source = signedApplyRequest({
+			releaseSequence: 42,
+			feedSequence: 1,
+			releaseId: "agent-release-42",
+			manifestRollbackTo: "agent-release-35",
+			manifestRollbackToSequence: 35,
+		});
+		expect((await putApply(app, source)).status).toBe(200);
+
+		const rollback = signedApplyRequest({
+			releaseSequence: 35,
+			feedSequence: 2,
+			releaseId: "agent-release-35",
+			publicationKind: "rollback",
+			fromReleaseSequence: 42,
+			toReleaseId: "agent-release-35",
+			toReleaseSequence: 35,
+			expectedCurrentReleaseSequence: 42,
+		});
+		expect((await putApply(app, rollback)).status).toBe(200);
+		await expect(currentIdentity()).resolves.toBe("release identity");
+	});
+
+	test("does not let a rollback target manifest authorize itself", async () => {
+		const app = await buildApp();
+		expect(
+			(
+				await putApply(
+					app,
+					signedApplyRequest({
+						releaseSequence: 42,
+						feedSequence: 1,
+						releaseId: "agent-release-42",
+					}),
+				)
+			).status,
+		).toBe(200);
+
+		const selfAuthorizedTarget = signedApplyRequest({
+			releaseSequence: 35,
+			feedSequence: 2,
+			releaseId: "agent-release-35",
+			publicationKind: "rollback",
+			fromReleaseSequence: 42,
+			toReleaseId: "agent-release-35",
+			toReleaseSequence: 35,
+			manifestRollbackTo: "agent-release-34",
+			manifestRollbackToSequence: 34,
+			expectedCurrentReleaseSequence: 42,
+		});
+		const response = await putApply(app, selfAuthorizedTarget);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_rollback_not_authorized",
+		});
+
+		const selfReferentialTarget = signedApplyRequest({
+			releaseSequence: 35,
+			feedSequence: 2,
+			releaseId: "agent-release-35",
+			publicationKind: "rollback",
+			fromReleaseSequence: 42,
+			toReleaseId: "agent-release-35",
+			toReleaseSequence: 35,
+			manifestRollbackTo: "agent-release-35",
+			manifestRollbackToSequence: 35,
+			expectedCurrentReleaseSequence: 42,
+		});
+		const malformedResponse = await putApply(app, selfReferentialTarget);
+		expect(malformedResponse.status).toBe(400);
+		await expect(malformedResponse.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_rollback",
+		});
+	});
+
+	test("persists the rollback target manifest's next chained rollback", async () => {
+		const app = await buildApp();
+		expect(
+			(
+				await putApply(
+					app,
+					signedApplyRequest({
+						releaseSequence: 42,
+						feedSequence: 1,
+						releaseId: "agent-release-42",
+						manifestRollbackTo: "agent-release-35",
+						manifestRollbackToSequence: 35,
+					}),
+				)
+			).status,
+		).toBe(200);
+		expect(
+			(
+				await putApply(
+					app,
+					signedApplyRequest({
+						releaseSequence: 35,
+						feedSequence: 2,
+						releaseId: "agent-release-35",
+						publicationKind: "rollback",
+						fromReleaseSequence: 42,
+						toReleaseId: "agent-release-35",
+						toReleaseSequence: 35,
+						manifestRollbackTo: "agent-release-34",
+						manifestRollbackToSequence: 34,
+						expectedCurrentReleaseSequence: 42,
+					}),
+				)
+			).status,
+		).toBe(200);
+		const rows = await (await db())<{
+			rollback_to_release_id: string | null;
+			rollback_to_sequence: number | null;
+		}>`
+			SELECT rollback_to_release_id, rollback_to_sequence
+			FROM agent_release_applies
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+		expect(rows[0]).toMatchObject({
+			rollback_to_release_id: "agent-release-34",
+			rollback_to_sequence: 34,
+		});
+	});
+
+	test("requires a manifest rollback target id and sequence as an older pair", async () => {
+		const app = await buildApp();
+		for (const request of [
+			signedApplyRequest({
+				releaseSequence: 42,
+				manifestRollbackTo: "agent-release-35",
+				manifestRollbackToSequence: 35,
+				omitManifestRollbackTo: true,
+			}),
+			signedApplyRequest({
+				releaseSequence: 42,
+				manifestRollbackTo: "agent-release-35",
+				manifestRollbackToSequence: 35,
+				omitManifestRollbackToSequence: true,
+			}),
+		]) {
+			const response = await putApply(app, request);
+			expect(response.status).toBe(400);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_release_invalid_rollback",
+			});
+		}
 	});
 
 	test("ordinary publications reject rollback-only fields", async () => {
@@ -856,14 +1007,18 @@ function signedApplyRequest(options: ReleaseFixtureOptions) {
 		managedSettings: options.managedSettings ?? {
 			identityMd: "release identity",
 		},
-		...(options.publicationKind === "rollback" &&
-		!options.omitManifestRollbackTarget
+		...(options.manifestRollbackTo !== undefined ||
+		options.manifestRollbackToSequence !== undefined
 			? {
-					rollbackToSequence:
-						options.manifestRollbackToSequence ?? releaseSequence,
-					...(options.manifestRollbackToReleaseId
-						? { rollbackToReleaseId: options.manifestRollbackToReleaseId }
-						: {}),
+					...(options.omitManifestRollbackToSequence
+						? {}
+						: {
+								rollbackToSequence:
+									options.manifestRollbackToSequence ?? releaseSequence,
+							}),
+					...(options.omitManifestRollbackTo
+						? {}
+						: { rollbackTo: options.manifestRollbackTo ?? releaseId }),
 				}
 			: {}),
 	};
@@ -890,6 +1045,7 @@ function signedApplyRequest(options: ReleaseFixtureOptions) {
 			options.fromReleaseSequence ?? releaseSequence + 1;
 		publication.toReleaseSequence =
 			options.toReleaseSequence ?? releaseSequence;
+		publication.toReleaseId = options.toReleaseId ?? releaseId;
 		publication.allowDowngrade = options.allowDowngrade ?? true;
 		publication.reason = options.rollbackReason ?? "rollback test fixture";
 		publication.actor = options.rollbackActor ?? "release-operator@test";
