@@ -17,6 +17,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { handleWakeAgentTask, type WakeAgentTaskDeps } from "../jobs";
 import type { SqlLike } from "../scheduled-jobs-service";
+import type { ResolvedCourseExecutionContext } from "@lobu/core";
 
 const ORG = "org-1";
 const BARE_AGENT_ID = "shifu-u-302b8bcc3af1";
@@ -162,5 +163,29 @@ describe("handleWakeAgentTask — agent_id normalization (defense in depth)", ()
 
     expect(enqueueMessage).not.toHaveBeenCalled();
     expect(pauseCalls).toHaveLength(0);
+  });
+});
+
+describe("handleWakeAgentTask — trusted course fire gate",()=>{
+  const trustedWake={schemaVersion:1 as const,source:'calendar_scheduled_wake' as const,automationId:'auto-1',trustedCourseScope:{ownerUserId:'user-1',agentId:BARE_AGENT_ID,courseEntityId:'course:a',courseKey:'a',courseDisplayName:'A 課',resolutionSource:'toolbox_calendar_course_resolver' as const,resolutionMatchedBy:['event-id'],scopeVersion:1 as const},taskKind:'opp_coach_rehearsal_prompt' as const,delivery:'line' as const,triggerSource:'google_calendar' as const,calendarEventRef:{accountRef:'acct',eventId:'event',eventVersion:'v1',eventTitle:'課程 A',eventStartAt:'2026-08-01T00:00:00Z'},scheduledFor:'2026-07-31T00:00:00Z'};
+  const resolved={trust:{ownerUserId:'user-1',agentId:BARE_AGENT_ID,conversationId:'existing',courseKey:'a',courseEntityId:'course:a',contextPackId:'pack',contextVersion:1},course:{courseKey:'a',courseEntityId:'course:a',displayName:'A 課'},resolution:{confidence:'high' as const,matchedBy:['explicit_course_key'] as ['explicit_course_key']},context:{contextPackId:'pack',contextVersion:1,stale:false,confirmedSummary:'canonical'},retrieval:{status:'empty' as const,crossCourseGuard:'passed' as const,eventIds:[],evidenceRefs:[],snippets:[]}} satisfies ResolvedCourseExecutionContext;
+  test('revalidates owner and canonical course before enqueueing structured scheduled scope',async()=>{
+    const enqueueMessage=mock(async()=> 'job');
+    const sql=mock(async(strings:TemplateStringsArray,...values:unknown[])=>{const text=strings.raw.join('');if(text.includes('owner_platform'))return [{id:BARE_AGENT_ID}];if(text.includes('SELECT id FROM agents'))return [{id:BARE_AGENT_ID}];return [];});
+    const resolveScheduledCourseContext=mock(async()=>resolved);
+    await handleWakeAgentTask({sql:sql as never,sessionManager:{getSession:mock(async()=>({conversationId:'existing',channelId:'api_user-1',userId:'user-1',agentId:BARE_AGENT_ID,organizationId:ORG})),touchSession:mock(async()=>{})} as never,queueProducer:{enqueueMessage} as never,resolveScheduledCourseContext},{__organization_id:ORG,__created_by_user:'user-1',__created_by_agent:BARE_AGENT_ID,__scheduled_job_id:'job-1',__scheduled_job_external_key:'google_calendar:acct:event:opp_coach_rehearsal_prompt',__scheduled_job_tick:'2026-07-31T00:00:00Z',__scheduled_task_run_id:42,agent_id:BARE_AGENT_ID,prompt:'coach',thread_id:'existing',reason:'trusted-course-calendar-wake',trustedCourseWake:trustedWake});
+    expect(resolveScheduledCourseContext).toHaveBeenCalledTimes(1);
+    expect(enqueueMessage).toHaveBeenCalledWith(expect.objectContaining({scheduledCourseContext:expect.objectContaining({source:'calendar_scheduled_wake',automationId:'auto-1',jobId:'job-1',runId:42,course:expect.objectContaining({courseEntityId:'course:a'})}),resolvedCourseContext:resolved}));
+  });
+  test.each([
+    ['bad provenance',{reason:'scheduled-wake'}],
+    ['bad schema',{trustedCourseWake:{...trustedWake,schemaVersion:2}}],
+    ['owner changed',{__created_by_user:'user-2'}],
+    ['agent changed',{__created_by_agent:'other'}],
+    ['missing job id',{__scheduled_job_id:undefined}],
+  ])('%s fails before canonical lookup or enqueue',async(_name,override)=>{
+    const enqueueMessage=mock(async()=> 'job');const resolver=mock(async()=>resolved);
+    await handleWakeAgentTask({sql:(async(strings:TemplateStringsArray)=>strings.raw.join('').includes('SELECT id FROM agents')?[{id:BARE_AGENT_ID}]:[]) as never,sessionManager:{} as never,queueProducer:{enqueueMessage} as never,resolveScheduledCourseContext:resolver},{__organization_id:ORG,__created_by_user:'user-1',__created_by_agent:BARE_AGENT_ID,__scheduled_job_id:'job-1',__scheduled_job_external_key:'google_calendar:acct:event:opp_coach_rehearsal_prompt',__scheduled_job_tick:'2026-07-31T00:00:00Z',__scheduled_task_run_id:42,agent_id:BARE_AGENT_ID,prompt:'coach',thread_id:'existing',reason:'trusted-course-calendar-wake',trustedCourseWake:trustedWake,...override} as any);
+    expect(resolver).not.toHaveBeenCalled();expect(enqueueMessage).not.toHaveBeenCalled();
   });
 });
