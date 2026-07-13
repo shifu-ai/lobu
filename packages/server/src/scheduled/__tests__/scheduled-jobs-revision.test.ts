@@ -9,7 +9,9 @@ import {
 	cancelTrustedCourseWake,
 	dispatchScheduledJobCandidate,
 	upsertScheduledJobByExternalKey,
+	upsertScheduledJobByExternalKeyWithQuota,
 } from "../scheduled-jobs-service.js";
+import type { ScheduledJobRow } from "../scheduled-jobs-service.js";
 
 const ORGANIZATION_ID = "org-revision";
 const OWNER_USER_ID = "pm-revision";
@@ -174,5 +176,334 @@ describe("scheduled job revision guard", () => {
 				agentId: AGENT_ID,
 			}),
 		).toEqual({ found: true, alreadyCancelled: true });
+	});
+
+	test("full change detection returns the same row and revision for an identical user/key payload", async () => {
+		const externalKey = "toolbox:schedule:same";
+		const runAt = new Date("2030-01-01T09:00:00.000Z");
+		const params = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "ordinary wake" },
+			description: "ordinary",
+			runAt,
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+
+		const first = await upsertScheduledJobByExternalKey(params);
+		const second = await upsertScheduledJobByExternalKey(params);
+		const [{ count }] = await getDb()<[{ count: number }]>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND external_key = ${externalKey}
+		`;
+
+		expect(second.id).toBe(first.id);
+		expect(second.schedule_revision).toBe(first.schedule_revision);
+		expect(count).toBe(1);
+	});
+
+	test("full change detection updates one row and increments revision for changed payload and schedule", async () => {
+		const externalKey = "toolbox:schedule:changed";
+		const first = await upsertScheduledJobByExternalKey({
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "first" },
+			description: "first description",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full",
+		});
+		const second = await upsertScheduledJobByExternalKey({
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "second" },
+			description: "second description",
+			cron: "0 9 * * *",
+			runAt: new Date("2030-01-02T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full",
+		});
+		const [{ count }] = await getDb()<[{ count: number }]>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND external_key = ${externalKey}
+		`;
+
+		expect(second.id).toBe(first.id);
+		expect(second.schedule_revision).toBe(first.schedule_revision + 1);
+		expect(second.action_args).toEqual({ agent_id: AGENT_ID, prompt: "second" });
+		expect(second.cron).toBe("0 9 * * *");
+		expect(second.description).toBe("second description");
+		expect(count).toBe(1);
+	});
+
+	test("the same external key remains unique per user rather than per organization", async () => {
+		const externalKey = "toolbox:schedule:shared-key";
+		const otherUserId = "pm-revision-other";
+		const common = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "ordinary wake" },
+			description: "ordinary",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+
+		const first = await upsertScheduledJobByExternalKey({ ...common, createdByUser: OWNER_USER_ID });
+		const second = await upsertScheduledJobByExternalKey({ ...common, createdByUser: otherUserId });
+		const [{ count }] = await getDb()<[{ count: number }]>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID} AND external_key = ${externalKey}
+		`;
+
+		expect(second.id).not.toBe(first.id);
+		expect(count).toBe(2);
+	});
+
+	test("full change detection rearms a paused key and increments its revision", async () => {
+		const externalKey = "toolbox:schedule:rearm-paused";
+		const params = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "ordinary wake" },
+			description: "ordinary",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+		const first = await upsertScheduledJobByExternalKey(params);
+		await getDb()`UPDATE scheduled_jobs SET paused = true WHERE id = ${first.id}`;
+
+		const rearmed = await upsertScheduledJobByExternalKey(params);
+
+		expect(rearmed.id).toBe(first.id);
+		expect(rearmed.paused).toBe(false);
+		expect(rearmed.schedule_revision).toBe(first.schedule_revision + 1);
+	});
+
+	test("full change detection never rearms an expired completed one-shot on identical retry", async () => {
+		const externalKey = "toolbox:schedule:expired-identical";
+		const pastRunAt = new Date("2020-01-01T09:00:00.000Z");
+		const params = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "already fired" },
+			description: "expired",
+			runAt: pastRunAt,
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+		const first = await upsertScheduledJobByExternalKey(params);
+		await getDb()`
+			UPDATE scheduled_jobs
+			SET paused = true, last_fired_at = now(), last_fired_run_id = 42
+			WHERE id = ${first.id}
+		`;
+		const [completed] = await getDb()<ScheduledJobRow[]>`
+			SELECT * FROM scheduled_jobs WHERE id = ${first.id}
+		`;
+
+		const retried = await upsertScheduledJobByExternalKey(params);
+
+		expect(retried).toMatchObject({
+			id: completed!.id,
+			paused: true,
+			schedule_revision: completed!.schedule_revision,
+			last_fired_run_id: 42,
+		});
+	});
+
+	test("full change detection never rearms an expired completed one-shot with changed payload", async () => {
+		const externalKey = "toolbox:schedule:expired-changed";
+		const common = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			description: "expired",
+			runAt: new Date("2020-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+		const first = await upsertScheduledJobByExternalKey({
+			...common,
+			actionArgs: { agent_id: AGENT_ID, prompt: "already fired" },
+		});
+		await getDb()`
+			UPDATE scheduled_jobs
+			SET paused = true, last_fired_at = now(), last_fired_run_id = 43
+			WHERE id = ${first.id}
+		`;
+		const [completed] = await getDb()<ScheduledJobRow[]>`
+			SELECT * FROM scheduled_jobs WHERE id = ${first.id}
+		`;
+
+		const retried = await upsertScheduledJobByExternalKey({
+			...common,
+			cron: "*/5 * * * *",
+			actionArgs: { agent_id: AGENT_ID, prompt: "changed after firing" },
+		});
+
+		expect(retried).toMatchObject({
+			id: completed!.id,
+			paused: true,
+			schedule_revision: completed!.schedule_revision,
+			last_fired_run_id: 43,
+			cron: null,
+			action_args: { agent_id: AGENT_ID, prompt: "already fired" },
+		});
+	});
+
+	test("full change detection treats separately constructed nested JSON key order as identical", async () => {
+		const externalKey = "toolbox:schedule:nested-order";
+		const common = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			description: "nested",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+		const first = await upsertScheduledJobByExternalKey({
+			...common,
+			actionArgs: {
+				agent_id: AGENT_ID,
+				metadata: { outer: { alpha: 1, beta: 2 }, values: [{ left: true, right: false }] },
+			},
+		});
+		const second = await upsertScheduledJobByExternalKey({
+			...common,
+			actionArgs: {
+				metadata: { values: [{ right: false, left: true }], outer: { beta: 2, alpha: 1 } },
+				agent_id: AGENT_ID,
+			},
+		});
+
+		expect(second.id).toBe(first.id);
+		expect(second.schedule_revision).toBe(first.schedule_revision);
+	});
+
+	test("concurrent same-key creates serialize to one row and one id", async () => {
+		const externalKey = "toolbox:schedule:concurrent";
+		const params = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "concurrent" },
+			description: "concurrent",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+
+		const [first, second] = await Promise.all([
+			upsertScheduledJobByExternalKey(params),
+			upsertScheduledJobByExternalKey(params),
+		]);
+		const [{ count }] = await getDb()<[{ count: number }]>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND external_key = ${externalKey}
+		`;
+
+		expect(second.id).toBe(first.id);
+		expect(count).toBe(1);
+	});
+
+	test("atomic keyed quota allows active retry but rejects new and paused-to-active capacity", async () => {
+		const activeKey = "toolbox:schedule:quota-active";
+		const pausedKey = "toolbox:schedule:quota-paused";
+		const common = {
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "quota" },
+			description: "quota",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+		const active = await upsertScheduledJobByExternalKey({ ...common, externalKey: activeKey });
+		const paused = await upsertScheduledJobByExternalKey({ ...common, externalKey: pausedKey });
+		await getDb()`UPDATE scheduled_jobs SET paused = true WHERE id = ${paused.id}`;
+
+		expect(
+			await upsertScheduledJobByExternalKeyWithQuota({
+				...common,
+				externalKey: activeKey,
+				activeQuota: 1,
+			}),
+		).toMatchObject({ status: "ok", job: { id: active.id } });
+		expect(
+			await upsertScheduledJobByExternalKeyWithQuota({
+				...common,
+				externalKey: "toolbox:schedule:quota-new",
+				activeQuota: 1,
+			}),
+		).toEqual({ status: "quota_exceeded", activeCount: 1 });
+		expect(
+			await upsertScheduledJobByExternalKeyWithQuota({
+				...common,
+				externalKey: pausedKey,
+				activeQuota: 1,
+			}),
+		).toEqual({ status: "quota_exceeded", activeCount: 1 });
+	});
+
+	test("concurrent distinct keys cannot both claim the final active quota slot", async () => {
+		const common = {
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "quota race" },
+			description: "quota race",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+			activeQuota: 1,
+		};
+
+		const outcomes = await Promise.all([
+			upsertScheduledJobByExternalKeyWithQuota({
+				...common,
+				externalKey: "toolbox:schedule:quota-race-a",
+			}),
+			upsertScheduledJobByExternalKeyWithQuota({
+				...common,
+				externalKey: "toolbox:schedule:quota-race-b",
+			}),
+		]);
+		const [{ count }] = await getDb()<[{ count: number }]>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID}
+			  AND created_by_user = ${OWNER_USER_ID}
+			  AND NOT paused
+		`;
+
+		expect(outcomes.map((outcome) => outcome.status).sort()).toEqual([
+			"ok",
+			"quota_exceeded",
+		]);
+		expect(count).toBe(1);
 	});
 });

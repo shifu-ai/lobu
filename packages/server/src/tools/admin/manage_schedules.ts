@@ -32,6 +32,7 @@ import {
   pauseScheduledJob,
   resolveWakeAgentId,
   type ScheduledJobRow,
+  upsertScheduledJobByExternalKeyWithQuota,
 } from '../../scheduled/scheduled-jobs-service';
 import type { ToolContext } from '../registry';
 import logger from '../../utils/logger';
@@ -70,10 +71,12 @@ const WakeAgentArgs = Type.Object({
 });
 
 const ActionUnion = Type.Union([SendNotificationArgs, WakeAgentArgs]);
+const CreationKey = Type.String({ minLength: 1, maxLength: 200, pattern: '\\S' });
 
 const CreateAction = Type.Object({
   action: Type.Literal('create'),
   description: Type.String({ minLength: 1, maxLength: 200 }),
+  creation_key: Type.Optional(CreationKey),
   /**
    * RFC3339 timestamp for the first (or only) firing. Required.
    * For one-shot schedules this is the only firing.
@@ -129,6 +132,7 @@ export const ManageSchedulesSchema = Type.Object({
   }),
   // create
   description: Type.Optional(Type.String({ maxLength: 200 })),
+  creation_key: Type.Optional(CreationKey),
   run_at: Type.Optional(
     Type.String({
       description:
@@ -200,6 +204,7 @@ function isPrivilegedRole(ctx: ToolContext): boolean {
  */
 export interface ManageSchedulesDeps {
   createScheduledJob: typeof createScheduledJob;
+  upsertScheduledJobByExternalKeyWithQuota: typeof upsertScheduledJobByExternalKeyWithQuota;
   listScheduledJobs: typeof listScheduledJobs;
   getScheduledJob: typeof getScheduledJob;
   pauseScheduledJob: typeof pauseScheduledJob;
@@ -247,6 +252,7 @@ async function dbResolveWakeAgentId(
 
 export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   createScheduledJob,
+  upsertScheduledJobByExternalKeyWithQuota,
   listScheduledJobs,
   getScheduledJob,
   pauseScheduledJob,
@@ -313,6 +319,9 @@ const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as c
  */
 export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string, unknown> {
   const args = { ...raw };
+  if (typeof args.creation_key === 'string') {
+    args.creation_key = args.creation_key.trim();
+  }
   const coerced = coerceSchedulePayload(args.payload);
   const payload: Record<string, unknown> = isPlainRecord(coerced) ? { ...coerced } : {};
 
@@ -382,6 +391,9 @@ async function handleCreate(
     return {
       error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}. ${CREATE_SHAPE_HINT}`,
     };
+  }
+  if (args.creation_key && !ctx.userId) {
+    return { error: 'creation_key requires an authenticated user.' };
   }
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
@@ -453,11 +465,13 @@ async function handleCreate(
       // requested — impossible to target another user via this path.
       args.payload.recipients = ctx.userId ? [ctx.userId] : recipients;
     }
-    const activeCount = await deps.countActiveScheduledJobs(ctx.organizationId, ctx.userId);
-    if (activeCount >= MEMBER_SCHEDULE_QUOTA) {
-      return {
-        error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${activeCount}.`,
-      };
+    if (!args.creation_key) {
+      const activeCount = await deps.countActiveScheduledJobs(ctx.organizationId, ctx.userId);
+      if (activeCount >= MEMBER_SCHEDULE_QUOTA) {
+        return {
+          error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${activeCount}.`,
+        };
+      }
     }
   }
 
@@ -468,7 +482,7 @@ async function handleCreate(
     type: string;
   };
 
-  const job = await deps.createScheduledJob({
+  const createParams = {
     organizationId: ctx.organizationId,
     actionType,
     actionArgs,
@@ -484,7 +498,22 @@ async function handleCreate(
     sourceRunId: args.source_run_id ?? null,
     sourceEventId: args.source_event_id ?? null,
     sourceThreadId: args.source_thread_id ?? null,
-  });
+  };
+  if (args.creation_key) {
+    const outcome = await deps.upsertScheduledJobByExternalKeyWithQuota({
+      ...createParams,
+      externalKey: args.creation_key,
+      changeDetection: 'full',
+      activeQuota: isPrivilegedRole(ctx) ? undefined : MEMBER_SCHEDULE_QUOTA,
+    });
+    if (outcome.status === 'quota_exceeded') {
+      return {
+        error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
+      };
+    }
+    return { schedule: serializeSchedule(outcome.job) };
+  }
+  const job = await deps.createScheduledJob(createParams);
   return { schedule: serializeSchedule(job) };
 }
 
@@ -558,6 +587,7 @@ async function handleCancel(
 function serializeSchedule(row: ScheduledJobRow) {
   return {
     id: row.id,
+    creation_key: row.external_key,
     organization_id: row.organization_id,
     action_type: row.action_type,
     action_args: row.action_args,

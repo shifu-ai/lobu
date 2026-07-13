@@ -48,4 +48,14 @@ describe("manage_schedules payload coercion", () => {
     const payload = { type: "send_notification", title: "hi" };
     expect(coerceSchedulePayload(JSON.stringify(payload))).toEqual(payload);
   });
+
+  test("MCP schema accepts a nonblank creation_key up to 200 characters", () => {
+    expect(validator.Check({ ...createArgs(wakeAgentPayload), creation_key: "schedule-1" })).toBe(true);
+    expect(validator.Check({ ...createArgs(wakeAgentPayload), creation_key: "x".repeat(200) })).toBe(true);
+  });
+
+  test("MCP schema rejects blank or overlong creation_key values", () => {
+    expect(validator.Check({ ...createArgs(wakeAgentPayload), creation_key: "   " })).toBe(false);
+    expect(validator.Check({ ...createArgs(wakeAgentPayload), creation_key: "x".repeat(201) })).toBe(false);
+  });
 });

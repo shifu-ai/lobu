@@ -60,20 +60,46 @@ export interface CreateScheduledJobParams {
 
 export type UpsertScheduledJobByExternalKeyParams = CreateScheduledJobParams & {
 	externalKey: string;
+	changeDetection?: "trusted-course-wake" | "full";
 };
+
+export type UpsertScheduledJobByExternalKeyWithQuotaParams =
+	UpsertScheduledJobByExternalKeyParams & {
+		activeQuota?: number;
+	};
+
+export type UpsertScheduledJobByExternalKeyOutcome =
+	| { status: "ok"; job: ScheduledJobRow }
+	| { status: "quota_exceeded"; activeCount: number };
 
 export async function upsertScheduledJobByExternalKey(
 	params: UpsertScheduledJobByExternalKeyParams,
 ): Promise<ScheduledJobRow> {
+	const outcome = await upsertScheduledJobByExternalKeyWithQuota(params);
+	if (outcome.status === "quota_exceeded") {
+		throw new Error("unexpected quota outcome without activeQuota");
+	}
+	return outcome.job;
+}
+
+export async function upsertScheduledJobByExternalKeyWithQuota(
+	params: UpsertScheduledJobByExternalKeyWithQuotaParams,
+): Promise<UpsertScheduledJobByExternalKeyOutcome> {
 	if (!params.externalKey.trim()) throw new Error("externalKey is required");
 	if (!params.createdByUser)
 		throw new Error("external-key schedules require created_by_user");
+	if (
+		params.activeQuota !== undefined &&
+		(!Number.isInteger(params.activeQuota) || params.activeQuota < 0)
+	) {
+		throw new Error("activeQuota must be a non-negative integer");
+	}
 	const sql = getDb();
 	return sql.begin(async (tx) => {
 		await tx`
       SELECT pg_advisory_xact_lock(
-        hashtext(${params.organizationId}),
-        hashtext(${`${params.createdByUser}:${params.externalKey}`})
+        hashtext(${`scheduled-jobs:${params.organizationId}`}),
+        hashtext(${params.createdByUser})
       )
     `;
 		const existingRows = (await tx`
@@ -84,6 +110,43 @@ export async function upsertScheduledJobByExternalKey(
       FOR UPDATE
     `) as unknown as ScheduledJobRow[];
 		const existing = existingRows[0];
+		const changeDetection = params.changeDetection ?? "trusted-course-wake";
+		const now = Date.now();
+		const expiredPausedOneShot =
+			changeDetection === "full" &&
+			existing?.paused === true &&
+			existing.cron === null &&
+			new Date(existing.next_run_at).getTime() <= now &&
+			params.runAt.getTime() <= now;
+		if (expiredPausedOneShot) return { status: "ok", job: existing };
+
+		const changed = existing
+			? changeDetection === "full"
+				? fullScheduledJobChanged(existing, params)
+				: trustedCourseWakeChanged(existing, params)
+			: true;
+		if (
+			existing &&
+			(!changed ||
+				(changeDetection === "trusted-course-wake" &&
+					params.runAt.getTime() <= now))
+		) {
+			return { status: "ok", job: existing };
+		}
+
+		const needsActiveCapacity = !existing || existing.paused;
+		if (params.activeQuota !== undefined && needsActiveCapacity) {
+			const [{ count: activeCount }] = (await tx`
+        SELECT count(*)::int AS count FROM scheduled_jobs
+        WHERE organization_id = ${params.organizationId}
+          AND created_by_user = ${params.createdByUser}
+          AND NOT paused
+      `) as unknown as Array<{ count: number }>;
+			if (activeCount >= params.activeQuota) {
+				return { status: "quota_exceeded", activeCount };
+			}
+		}
+
 		if (!existing) {
 			const rows = (await tx`
         INSERT INTO scheduled_jobs (
@@ -98,18 +161,8 @@ export async function upsertScheduledJobByExternalKey(
         )
         RETURNING *
       `) as unknown as ScheduledJobRow[];
-			return rows[0];
+			return { status: "ok", job: rows[0] };
 		}
-
-		const oldWake = trustedWakeIdentity(existing.action_args);
-		const newWake = trustedWakeIdentity(params.actionArgs);
-		const changed =
-			oldWake.eventVersion !== newWake.eventVersion ||
-			oldWake.scheduledFor !== newWake.scheduledFor ||
-			oldWake.payloadIdentity !== newWake.payloadIdentity ||
-			existing.created_by_user !== params.createdByUser ||
-			existing.created_by_agent !== (params.createdByAgent ?? null);
-		if (!changed || params.runAt.getTime() <= Date.now()) return existing;
 
 		const rows = (await tx`
       UPDATE scheduled_jobs SET
@@ -123,8 +176,42 @@ export async function upsertScheduledJobByExternalKey(
       WHERE id = ${existing.id}
       RETURNING *
     `) as unknown as ScheduledJobRow[];
-		return rows[0];
+		return { status: "ok", job: rows[0] };
 	});
+}
+
+function trustedCourseWakeChanged(
+	existing: ScheduledJobRow,
+	params: UpsertScheduledJobByExternalKeyParams,
+): boolean {
+	const oldWake = trustedWakeIdentity(existing.action_args);
+	const newWake = trustedWakeIdentity(params.actionArgs);
+	return (
+		oldWake.eventVersion !== newWake.eventVersion ||
+		oldWake.scheduledFor !== newWake.scheduledFor ||
+		oldWake.payloadIdentity !== newWake.payloadIdentity ||
+		existing.created_by_user !== params.createdByUser ||
+		existing.created_by_agent !== (params.createdByAgent ?? null)
+	);
+}
+
+function fullScheduledJobChanged(
+	existing: ScheduledJobRow,
+	params: UpsertScheduledJobByExternalKeyParams,
+): boolean {
+	return (
+		existing.paused ||
+		existing.action_type !== params.actionType ||
+		canonicalJson(existing.action_args) !== canonicalJson(params.actionArgs) ||
+		existing.cron !== (params.cron ?? null) ||
+		new Date(existing.next_run_at).getTime() !== params.runAt.getTime() ||
+		existing.description !== params.description ||
+		existing.created_by_user !== params.createdByUser ||
+		existing.created_by_agent !== (params.createdByAgent ?? null) ||
+		existing.source_run_id !== (params.sourceRunId ?? null) ||
+		existing.source_event_id !== (params.sourceEventId ?? null) ||
+		existing.source_thread_id !== (params.sourceThreadId ?? null)
+	);
 }
 
 export interface CancelTrustedCourseWakeParams {

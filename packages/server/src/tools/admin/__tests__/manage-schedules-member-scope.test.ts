@@ -93,6 +93,16 @@ function makeDeps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedules
         created_by_agent: params.createdByAgent,
       })
     ) as any,
+    upsertScheduledJobByExternalKeyWithQuota: mock(async (params: any) => ({
+      status: "ok",
+      job: fakeJobRow({
+        external_key: params.externalKey,
+        action_type: params.actionType,
+        action_args: params.actionArgs,
+        created_by_user: params.createdByUser,
+        created_by_agent: params.createdByAgent,
+      }),
+    })) as any,
     listScheduledJobs: mock(async () => []) as any,
     getScheduledJob: mock(async () => null) as any,
     pauseScheduledJob: mock(async () => true) as any,
@@ -520,5 +530,154 @@ describe("manage_schedules attribution regression — all roles stamp createdByA
     );
     const call = (deps.createScheduledJob as any).mock.calls[0][0];
     expect(call.createdByAgent).toBeNull();
+  });
+});
+
+describe("manage_schedules creation_key routing", () => {
+  test("create without creation_key keeps using createScheduledJob", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(deps.createScheduledJob).toHaveBeenCalledTimes(1);
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test("create trims creation_key and uses full-payload external-key upsert", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "  toolbox:schedule:42  " }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(1);
+    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]).toMatchObject({
+      externalKey: "toolbox:schedule:42",
+      changeDetection: "full",
+      createdByUser: MEMBER_USER,
+      activeQuota: 20,
+    });
+    expect(result.schedule?.creation_key).toBe("toolbox:schedule:42");
+  });
+
+  test("external-key create without a user returns an error and never falls back", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:42" }) as any,
+      {} as any,
+      adminCtx({ userId: null }),
+      deps
+    );
+
+    expect(result.error).toMatch(/creation_key.*user/i);
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test("blank creation_key is rejected by internal create validation", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "   " }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toMatch(/creation_key/i);
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).not.toHaveBeenCalled();
+  });
+
+  test("member at quota can retry an existing active creation_key", async () => {
+    const deps = makeDeps({
+      countActiveScheduledJobs: mock(async () => {
+        throw new Error("keyed quota decisions belong to the atomic service operation");
+      }) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:existing" }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(deps.countActiveScheduledJobs).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(1);
+    expect(result.schedule?.id).toBe("job-1");
+  });
+
+  test("member at quota cannot create a genuinely new creation_key", async () => {
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
+        status: "quota_exceeded",
+        activeCount: 20,
+      })) as any,
+      countActiveScheduledJobs: mock(async () => {
+        throw new Error("keyed quota decisions belong to the atomic service operation");
+      }) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:new" }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toMatch(/quota/i);
+    expect(deps.countActiveScheduledJobs).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(1);
+  });
+
+  test("member at quota cannot reactivate an existing paused creation_key", async () => {
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
+        status: "quota_exceeded",
+        activeCount: 20,
+      })) as any,
+      countActiveScheduledJobs: mock(async () => {
+        throw new Error("keyed quota decisions belong to the atomic service operation");
+      }) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:paused" }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toMatch(/quota/i);
+    expect(deps.countActiveScheduledJobs).not.toHaveBeenCalled();
+    expect(deps.upsertScheduledJobByExternalKeyWithQuota).toHaveBeenCalledTimes(1);
+  });
+
+  test("admin keyed create is unrestricted by active quota", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, { creation_key: "toolbox:schedule:admin" }) as any,
+      {} as any,
+      adminCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota).toBeUndefined();
   });
 });
