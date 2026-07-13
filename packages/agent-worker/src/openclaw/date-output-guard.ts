@@ -345,6 +345,8 @@ const NEXT_OCCURRENCE_ASSOCIATION_LIMIT = 120;
 const SENTENCE_OR_LINE_BOUNDARY_RE = /[。\n\r！？；;.!?]/;
 const NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE =
   /(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|預計(?:\s*(?:在|於))?|定於|將\s*(?:在|於)|會\s*(?:在|於)|(?:辦|办|訂|订|安排)\s*(?:在|於|于)|(?:是|為)\s*(?:在|於)?|[:：—-]|\b(?:date\s*(?:is|will\s+be|[:：])|is|will\s+be(?:\s+held\s+on)?|will\s+take\s+place\s+on|scheduled\s+(?:for|on)|occurs?\s+on|on|at))\s*$/i;
+const NEXT_OCCURRENCE_SCHEDULING_TAIL_RE =
+  /^(?:(?:預|预)?排|定|設|设|辦|办|訂|订|安排)\s*(?:在|於|于)$/u;
 
 type LocatedDateClaim = {
   kind: "short" | "iso";
@@ -926,10 +928,7 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
             return descriptor;
           }
           const schedulingTail = descriptor.slice(requestedTarget.length);
-          const tailLength = Array.from(schedulingTail).length;
-          return tailLength >= 2 &&
-            tailLength <= 5 &&
-            /^[\p{L}\p{N}]+(?:在|於|于)$/u.test(schedulingTail)
+          return NEXT_OCCURRENCE_SCHEDULING_TAIL_RE.test(schedulingTail)
             ? requestedTarget
             : descriptor;
         })

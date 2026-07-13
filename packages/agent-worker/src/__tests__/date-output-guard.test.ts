@@ -507,7 +507,9 @@ describe("guardDateOutput", () => {
   test("supports affirmative Chinese scheduling predicates", () => {
     for (const [finalText, expected] of [
       ["下一場銷講辦在 7/22（三）。", "下一場銷講辦在 7/16（四）。"],
+      ["下一場銷講办于 7/22（三）。", "下一場銷講办于 7/16（四）。"],
       ["下一場銷講訂在 7/22（三）。", "下一場銷講訂在 7/16（四）。"],
+      ["下一場銷講订于 7/22（三）。", "下一場銷講订于 7/16（四）。"],
       ["下一場銷講安排在 7/22（三）。", "下一場銷講安排在 7/16（四）。"],
     ] as const) {
       expect(
@@ -539,7 +541,9 @@ describe("guardDateOutput", () => {
       ["下一場銷講排在 7/22（三）。", "下一場銷講排在 7/16（四）。"],
       ["下一場銷講定在 7/22（三）。", "下一場銷講定在 7/16（四）。"],
       ["下一場銷講設在 7/22（三）。", "下一場銷講設在 7/16（四）。"],
+      ["下一場銷講设于 7/22（三）。", "下一場銷講设于 7/16（四）。"],
       ["下一場銷講预排在 7/22（三）。", "下一場銷講预排在 7/16（四）。"],
+      ["下一場銷講預排於 7/22（三）。", "下一場銷講預排於 7/16（四）。"],
     ] as const) {
       expect(
         guardDateOutput({
@@ -560,6 +564,32 @@ describe("guardDateOutput", () => {
           trustedTemporalCandidates: ["2026-07-16"],
         }).text
       ).toBe(expected);
+    }
+  });
+
+  test("does not collapse unknown descriptor tails into the requested event", () => {
+    for (const finalText of [
+      "下一場銷講問卷截止在 7/22（三）。",
+      "下一場銷講入場時間在 7/22（三）。",
+      "下一場銷講作業截止在 7/22（三）。",
+    ]) {
+      for (const trustedTemporalEvidence of [
+        undefined,
+        [{ candidate: "2026-07-16", label: "銷講" }],
+      ]) {
+        expect(
+          guardDateOutput({
+            userMessage: "幫我查下一場銷講",
+            finalText,
+            now: NOW,
+            trustedTemporalEvidence,
+          })
+        ).toEqual({
+          status: "blocked",
+          text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+          reason: "next_occurrence_without_temporal_evidence",
+        });
+      }
     }
   });
 
