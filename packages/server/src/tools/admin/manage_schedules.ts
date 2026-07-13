@@ -525,6 +525,9 @@ async function handleCreate(
         error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
       };
     }
+    if (!isPrivilegedRole(ctx) && outcome.job.created_by_user !== ctx.userId) {
+      return { error: 'Schedule could not be created.' };
+    }
     return { schedule: serializeSchedule(outcome.job) };
   }
   const job = await deps.createScheduledJob(createParams);

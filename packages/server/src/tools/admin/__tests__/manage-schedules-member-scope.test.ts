@@ -643,6 +643,87 @@ describe("manage_schedules creation_key routing", () => {
     expect(result.schedule?.id).toBe("job-1");
   });
 
+  test("member cannot inspect a schedule owned by another user through creation_key", async () => {
+    const existing = fakeJobRow({
+      id: "job-private",
+      external_key: "toolbox:schedule:private",
+      action_args: { agent_id: "shifu-u-other", prompt: "private course details" },
+      description: "private schedule",
+      created_by_user: "user-other",
+      created_by_agent: "shifu-u-other",
+    });
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
+        status: "ok",
+        job: existing,
+      })) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        creation_key: "toolbox:schedule:private",
+      }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result).toEqual({ error: "Schedule could not be created." });
+    expect(result).not.toHaveProperty("schedule");
+    expect(JSON.stringify(result)).not.toContain("job-private");
+    expect(JSON.stringify(result)).not.toContain("private course details");
+    expect(JSON.stringify(result)).not.toContain("user-other");
+    expect(deps.pauseScheduledJob).not.toHaveBeenCalled();
+    expect(deps.deleteScheduledJob).not.toHaveBeenCalled();
+    expect(existing).toEqual(
+      fakeJobRow({
+        id: "job-private",
+        external_key: "toolbox:schedule:private",
+        action_args: { agent_id: "shifu-u-other", prompt: "private course details" },
+        description: "private schedule",
+        created_by_user: "user-other",
+        created_by_agent: "shifu-u-other",
+      })
+    );
+  });
+
+  test.each([
+    ["admin", adminCtx()],
+    ["owner", adminCtx({ memberRole: "owner", userId: "user-owner" })],
+  ])("%s can reuse another user's organization-scoped creation_key", async (_role, ctx) => {
+    const existing = fakeJobRow({
+      id: "job-shared",
+      external_key: "toolbox:schedule:shared",
+      created_by_user: "user-original",
+      created_by_agent: "shifu-u-original",
+    });
+    const deps = makeDeps({
+      upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
+        status: "ok",
+        job: existing,
+      })) as any,
+    });
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        creation_key: "toolbox:schedule:shared",
+      }) as any,
+      {} as any,
+      ctx,
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.schedule).toMatchObject({
+      id: "job-shared",
+      creation_key: "toolbox:schedule:shared",
+      created_by_user: "user-original",
+    });
+    expect(
+      (deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0].activeQuota
+    ).toBeUndefined();
+  });
+
   test("member at quota cannot create a genuinely new creation_key", async () => {
     const deps = makeDeps({
       upsertScheduledJobByExternalKeyWithQuota: mock(async () => ({
