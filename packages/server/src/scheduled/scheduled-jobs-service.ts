@@ -18,12 +18,13 @@
 
 import { getDb } from '../db/client';
 import { nextRunAt as nextCronTickAt } from '../utils/cron';
+import { errorMessage } from '../utils/errors';
 import logger from '../utils/logger';
 import type { TaskScheduler } from './task-scheduler';
-import { errorMessage } from '../utils/errors';
 
 export interface ScheduledJobRow {
   id: string;
+  external_key: string | null;
   organization_id: string;
   action_type: string;
   action_args: Record<string, unknown>;
@@ -54,6 +55,46 @@ export interface CreateScheduledJobParams {
   sourceRunId?: number | null;
   sourceEventId?: number | null;
   sourceThreadId?: string | null;
+}
+
+export type UpsertScheduledJobByExternalKeyParams = CreateScheduledJobParams & {
+  externalKey: string;
+};
+
+export async function upsertScheduledJobByExternalKey(
+  params: UpsertScheduledJobByExternalKeyParams
+): Promise<ScheduledJobRow> {
+  if (!params.externalKey.trim()) throw new Error('externalKey is required');
+  if (!params.createdByUser && !params.createdByAgent) {
+    throw new Error('scheduled_jobs requires created_by_user or created_by_agent');
+  }
+  const sql = getDb();
+  const rows = (await sql`
+    INSERT INTO scheduled_jobs (
+      external_key, organization_id, action_type, action_args, cron, next_run_at,
+      description, created_by_user, created_by_agent,
+      source_run_id, source_event_id, source_thread_id
+    ) VALUES (
+      ${params.externalKey}, ${params.organizationId}, ${params.actionType},
+      ${sql.json(params.actionArgs)}, ${params.cron ?? null}, ${params.runAt},
+      ${params.description}, ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
+      ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null}, ${params.sourceThreadId ?? null}
+    )
+    ON CONFLICT (organization_id, external_key) WHERE external_key IS NOT NULL DO UPDATE SET
+      action_type = EXCLUDED.action_type,
+      action_args = EXCLUDED.action_args,
+      cron = EXCLUDED.cron,
+      next_run_at = EXCLUDED.next_run_at,
+      description = EXCLUDED.description,
+      created_by_user = EXCLUDED.created_by_user,
+      created_by_agent = EXCLUDED.created_by_agent,
+      paused = false,
+      last_fired_at = NULL,
+      last_fired_run_id = NULL,
+      updated_at = now()
+    RETURNING *
+  `) as unknown as ScheduledJobRow[];
+  return rows[0];
 }
 
 export async function createScheduledJob(
