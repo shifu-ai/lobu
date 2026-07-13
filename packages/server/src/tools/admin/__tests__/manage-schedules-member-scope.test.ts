@@ -61,6 +61,7 @@ function adminCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 function trustedAdminPatCtx(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
     organizationId: ORG,
+    tokenOrganizationId: ORG,
     userId: "toolbox-adapter",
     memberRole: "member",
     agentId: null,

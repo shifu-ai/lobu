@@ -15,6 +15,7 @@ const SCHEDULE_ID = "00000000-0000-4000-8000-000000000042";
 function trustedCtx(): ToolContext {
 	return {
 		organizationId: ORG,
+		tokenOrganizationId: ORG,
 		userId: "toolbox-adapter",
 		memberRole: "member",
 		agentId: null,

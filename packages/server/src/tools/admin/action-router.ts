@@ -2,6 +2,7 @@ import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
   isDirectAuthMemberScheduleWrite,
+  isVerifiedOrganizationAdminPat,
 } from '../../auth/tool-access';
 import logger from '../../utils/logger';
 import type { ToolContext } from '../registry';
@@ -22,12 +23,7 @@ function isSystemContext(ctx: ToolContext): boolean {
 
 export function isPrivilegedToolContext(ctx: ToolContext): boolean {
   if (ctx.memberRole === 'owner' || ctx.memberRole === 'admin') return true;
-  return (
-    ctx.isAuthenticated === true &&
-    ctx.tokenType === 'pat' &&
-    ctx.allowCrossOrg === false &&
-    ctx.scopes?.includes('mcp:admin') === true
-  );
+  return isVerifiedOrganizationAdminPat(ctx);
 }
 
 function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): void {
