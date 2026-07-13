@@ -126,6 +126,38 @@ describe("scheduled job revision guard", () => {
 		expect(completed?.last_fired_at).not.toBeNull();
 	});
 
+	test("a recurring schedule persists its stop time and cannot fire after expiry", async () => {
+		const externalKey = "toolbox:schedule:bounded";
+		const untilAt = new Date(Date.now() - 60_000);
+		const job = await upsertScheduledJobByExternalKey({
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "bounded wake" },
+			description: "bounded recurring wake",
+			cron: "* * * * *",
+			runAt: new Date(Date.now() - 120_000),
+			untilAt,
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full",
+		});
+		const [persisted] = await getDb()<Array<{ until_at: Date | null }>>`
+			SELECT until_at FROM scheduled_jobs WHERE id = ${job.id}
+		`;
+		const spawn = mock(async () => "run-expired");
+
+		expect(persisted?.until_at?.toISOString()).toBe(untilAt.toISOString());
+		await dispatchScheduledJobCandidate(job, { spawn } as never);
+		await dispatchScheduledJobCandidate(job, { spawn } as never);
+
+		expect(spawn).not.toHaveBeenCalled();
+		const [expired] = await getDb()<Array<{ paused: boolean }>>`
+			SELECT paused FROM scheduled_jobs WHERE id = ${job.id}
+		`;
+		expect(expired?.paused).toBe(true);
+	});
+
 	test("narrow cancellation pauses only the exact trusted owner wake and is idempotent", async () => {
 		const externalKey = "google_calendar:acct:cancel:opp_coach_event_prompt";
 		const scheduledFor = "2026-07-14T09:00:00.000Z";

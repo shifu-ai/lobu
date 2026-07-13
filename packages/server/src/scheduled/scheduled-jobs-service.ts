@@ -30,6 +30,7 @@ export interface ScheduledJobRow {
 	action_type: string;
 	action_args: Record<string, unknown>;
 	cron: string | null;
+	until_at: string | null;
 	next_run_at: string;
 	last_fired_at: string | null;
 	last_fired_run_id: number | null;
@@ -50,6 +51,7 @@ export interface CreateScheduledJobParams {
 	actionArgs: Record<string, unknown>;
 	description: string;
 	cron?: string | null;
+	untilAt?: Date | null;
 	runAt: Date;
 	createdByUser?: string | null;
 	createdByAgent?: string | null;
@@ -150,12 +152,12 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
 		if (!existing) {
 			const rows = (await tx`
         INSERT INTO scheduled_jobs (
-          external_key, organization_id, action_type, action_args, cron, next_run_at,
+          external_key, organization_id, action_type, action_args, cron, until_at, next_run_at,
           description, created_by_user, created_by_agent,
           source_run_id, source_event_id, source_thread_id
         ) VALUES (
           ${params.externalKey}, ${params.organizationId}, ${params.actionType},
-          ${tx.json(params.actionArgs)}, ${params.cron ?? null}, ${params.runAt},
+          ${tx.json(params.actionArgs)}, ${params.cron ?? null}, ${params.untilAt ?? null}, ${params.runAt},
           ${params.description}, ${params.createdByUser}, ${params.createdByAgent ?? null},
           ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null}, ${params.sourceThreadId ?? null}
         )
@@ -167,7 +169,7 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
 		const rows = (await tx`
       UPDATE scheduled_jobs SET
         action_type = ${params.actionType}, action_args = ${tx.json(params.actionArgs)},
-        cron = ${params.cron ?? null}, next_run_at = ${params.runAt},
+        cron = ${params.cron ?? null}, until_at = ${params.untilAt ?? null}, next_run_at = ${params.runAt},
         description = ${params.description}, created_by_agent = ${params.createdByAgent ?? null},
         source_run_id = ${params.sourceRunId ?? null}, source_event_id = ${params.sourceEventId ?? null},
         source_thread_id = ${params.sourceThreadId ?? null}, paused = false,
@@ -204,6 +206,7 @@ function fullScheduledJobChanged(
 		existing.action_type !== params.actionType ||
 		canonicalJson(existing.action_args) !== canonicalJson(params.actionArgs) ||
 		existing.cron !== (params.cron ?? null) ||
+		dateValue(existing.until_at) !== dateValue(params.untilAt ?? null) ||
 		new Date(existing.next_run_at).getTime() !== params.runAt.getTime() ||
 		existing.description !== params.description ||
 		existing.created_by_user !== params.createdByUser ||
@@ -212,6 +215,10 @@ function fullScheduledJobChanged(
 		existing.source_event_id !== (params.sourceEventId ?? null) ||
 		existing.source_thread_id !== (params.sourceThreadId ?? null)
 	);
+}
+
+function dateValue(value: string | Date | null): number | null {
+	return value == null ? null : new Date(value).getTime();
 }
 
 export interface CancelTrustedCourseWakeParams {
@@ -298,13 +305,13 @@ export async function createScheduledJob(
 	const sql = getDb();
 	const rows = (await sql`
     INSERT INTO scheduled_jobs (
-      organization_id, action_type, action_args, cron, next_run_at,
+      organization_id, action_type, action_args, cron, until_at, next_run_at,
       description,
       created_by_user, created_by_agent,
       source_run_id, source_event_id, source_thread_id
     ) VALUES (
       ${params.organizationId}, ${params.actionType},
-      ${sql.json(params.actionArgs)}, ${params.cron ?? null}, ${params.runAt},
+      ${sql.json(params.actionArgs)}, ${params.cron ?? null}, ${params.untilAt ?? null}, ${params.runAt},
       ${params.description},
       ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
       ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null},
@@ -449,15 +456,24 @@ export async function dispatchScheduledJobCandidate(
 	const sql = getDb();
 	await sql.begin(async (tx) => {
 		const rows = (await tx`
-      SELECT * FROM scheduled_jobs
+      SELECT *, until_at IS NOT NULL AND until_at <= now() AS expired
+      FROM scheduled_jobs
       WHERE id = ${candidate.id}
         AND schedule_revision = ${candidate.schedule_revision}
         AND next_run_at <= now()
         AND NOT paused
       FOR UPDATE SKIP LOCKED
-    `) as unknown as ScheduledJobRow[];
+    `) as unknown as Array<ScheduledJobRow & { expired: boolean }>;
 		const row = rows[0];
 		if (!row) return;
+		if (row.expired) {
+			await tx`
+        UPDATE scheduled_jobs
+        SET paused = true, updated_at = now()
+        WHERE id = ${row.id} AND schedule_revision = ${row.schedule_revision}
+      `;
+			return;
+		}
 
 		const tickIso = row.next_run_at;
 		const idempotencyKey = `scheduled_job:${row.id}:r${row.schedule_revision}:${tickIso}`;
@@ -485,7 +501,11 @@ export async function dispatchScheduledJobCandidate(
 		}
 
 		const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
-		if (nextAt) {
+		const nextRunIsAllowed =
+			nextAt !== null &&
+			(row.until_at === null ||
+				new Date(nextAt).getTime() <= new Date(row.until_at).getTime());
+		if (nextAt && nextRunIsAllowed) {
 			await tx`
         UPDATE scheduled_jobs
         SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()

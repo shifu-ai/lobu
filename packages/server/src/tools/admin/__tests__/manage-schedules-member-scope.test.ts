@@ -67,6 +67,7 @@ function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
     action_type: "wake_agent",
     action_args: {},
     cron: null,
+    until_at: null,
     next_run_at: "2026-08-01T00:00:00Z",
     last_fired_at: null,
     last_fired_run_id: null,
@@ -534,6 +535,27 @@ describe("manage_schedules attribution regression — all roles stamp createdByA
 });
 
 describe("manage_schedules creation_key routing", () => {
+  test("keyed create passes until_at to the persisted schedule", async () => {
+    const deps = makeDeps();
+
+    const result = await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        creation_key: "toolbox:schedule:bounded",
+        cron: "0 9 * * *",
+        until_at: "2030-06-30T09:00:00.000Z",
+      }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    expect(result.error).toBeUndefined();
+    expect((deps.upsertScheduledJobByExternalKeyWithQuota as any).mock.calls[0][0]).toMatchObject({
+      externalKey: "toolbox:schedule:bounded",
+      untilAt: new Date("2030-06-30T09:00:00.000Z"),
+    });
+  });
+
   test("create without creation_key keeps using createScheduledJob", async () => {
     const deps = makeDeps();
 

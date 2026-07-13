@@ -89,6 +89,9 @@ const CreateAction = Type.Object({
    * each firing. When omitted, the job is one-shot.
    */
   cron: Type.Optional(Type.String()),
+  until_at: Type.Optional(
+    Type.String({ description: 'ISO timestamp after which a recurring job must not fire.' })
+  ),
   /** Handler-specific payload. The `type` field selects the handler. */
   payload: ActionUnion,
   /**
@@ -141,6 +144,9 @@ export const ManageSchedulesSchema = Type.Object({
   ),
   cron: Type.Optional(
     Type.String({ description: 'Cron expression for recurring jobs. Omit for one-shot.' })
+  ),
+  until_at: Type.Optional(
+    Type.String({ description: 'ISO timestamp after which a recurring job must not fire.' })
   ),
   payload: Type.Optional(
     Type.Object(
@@ -376,7 +382,7 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
 }
 
 const CREATE_SHAPE_HINT =
-  "Expected create shape: {action:'create', description, run_at:'<future ISO>', cron?, payload:{type:'wake_agent', agent_id, prompt} | {type:'send_notification', title, body?, recipients?}}. Flattened fields (action_type/agent_id/prompt/title/body) are also accepted in place of payload.";
+  "Expected create shape: {action:'create', description, run_at:'<future ISO>', cron?, until_at?, payload:{type:'wake_agent', agent_id, prompt} | {type:'send_notification', title, body?, recipients?}}. Flattened fields (action_type/agent_id/prompt/title/body) are also accepted in place of payload.";
 
 async function handleCreate(
   rawArgs: Extract<ManageSchedulesArgs, { action: 'create' }>,
@@ -398,6 +404,13 @@ async function handleCreate(
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
     return { error: `run_at is not a valid ISO timestamp: ${args.run_at}` };
+  }
+  const untilAtDate = args.until_at ? new Date(args.until_at) : null;
+  if (untilAtDate && Number.isNaN(untilAtDate.getTime())) {
+    return { error: `until_at is not a valid ISO timestamp: ${args.until_at}` };
+  }
+  if (untilAtDate && untilAtDate.getTime() < runAtDate.getTime()) {
+    return { error: 'until_at must be at or after run_at.' };
   }
   // A stale timestamp usually means the model guessed the current time.
   // Return the server clock so it can self-correct on retry.
@@ -488,6 +501,7 @@ async function handleCreate(
     actionArgs,
     description: args.description,
     cron: args.cron ?? null,
+    untilAt: untilAtDate,
     runAt: runAtDate,
     createdByUser: ctx.userId ?? null,
     // Attribution: any session with an agentId (member-owned direct-auth
@@ -592,6 +606,7 @@ function serializeSchedule(row: ScheduledJobRow) {
     action_type: row.action_type,
     action_args: row.action_args,
     cron: row.cron,
+    until_at: row.until_at,
     next_run_at: row.next_run_at,
     last_fired_at: row.last_fired_at,
     last_fired_run_id: row.last_fired_run_id,
