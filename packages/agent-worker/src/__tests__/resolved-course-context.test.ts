@@ -48,15 +48,36 @@ describe("resolved course context instructions", () => {
       jobId: "job-1",
       runId: 42,
       taskKind: "opp_coach_rehearsal_prompt",
-      course: { ownerUserId: "u", agentId: "a", courseKey: "course-a", courseEntityId: "course:pm:course-a", displayName: "Course A" },
+      course: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseKey: "course-a",
+        courseEntityId: "course:pm:course-a",
+        displayName: "Course A",
+      },
       evidenceReadiness: "canonical_only",
     });
     expect(rendered).toContain("排程任務草稿");
     expect(rendered).toContain("沒有可用的同課程會議或逐字稿證據");
     expect(rendered).not.toContain("已根據會議紀錄");
   });
-  test("does not label a scheduled task as canonical-only when exact same-course evidence is ready",()=>{
-    const rendered=buildResolvedCourseContextInstructions(context(),{schemaVersion:1,source:"calendar_scheduled_wake",automationId:"auto-1",jobId:"job-1",runId:42,taskKind:"opp_coach_rehearsal_prompt",course:{ownerUserId:"u",agentId:"a",courseKey:"course-a",courseEntityId:"course:pm:course-a",displayName:"Course A"},evidenceReadiness:"same_course_evidence"});
+  test("does not label a scheduled task as canonical-only when exact same-course evidence is ready", () => {
+    const rendered = buildResolvedCourseContextInstructions(context(), {
+      schemaVersion: 1,
+      source: "calendar_scheduled_wake",
+      automationId: "auto-1",
+      jobId: "job-1",
+      runId: 42,
+      taskKind: "opp_coach_rehearsal_prompt",
+      course: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseKey: "course-a",
+        courseEntityId: "course:pm:course-a",
+        displayName: "Course A",
+      },
+      evidenceReadiness: "same_course_evidence",
+    });
     expect(rendered).not.toContain("排程任務草稿");
     expect(rendered).toContain("Retrieved background");
   });
