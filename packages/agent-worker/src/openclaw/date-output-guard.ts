@@ -53,6 +53,10 @@ const STRICT_ISO_DATETIME_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const MAX_TEMPORAL_TRAVERSAL_DEPTH = 5;
 const MAX_TEMPORAL_VISITED_VALUES = 200;
+// `for...in` may ask a Proxy for one descriptor before the loop body can stop.
+// Keeping the explicit inspection budget below 100 caps total descriptor work
+// at 200 even in that adversarial case.
+const MAX_TEMPORAL_INSPECTED_KEYS = 99;
 const MAX_STRUCTURED_MCP_TEXT_LENGTH = 64_000;
 
 function isStrictIsoTemporalString(value: string): boolean {
@@ -69,19 +73,7 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
   const candidates = new Set<string>();
   const seen = new WeakSet<object>();
   let visited = 0;
-
-  const ownDataEntries = (current: object): [string, unknown][] => {
-    try {
-      return Object.entries(Object.getOwnPropertyDescriptors(current)).flatMap(
-        ([key, descriptor]) =>
-          descriptor.enumerable && "value" in descriptor
-            ? [[key, descriptor.value] as [string, unknown]]
-            : []
-      );
-    } catch {
-      return [];
-    }
-  };
+  let inspectedKeys = 0;
 
   const visit = (
     current: unknown,
@@ -104,15 +96,55 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
     seen.add(current);
 
     if (Array.isArray(current)) {
-      for (const [key, item] of ownDataEntries(current)) {
-        if (/^\d+$/.test(key)) {
-          visit(item, depth + 1, temporalValue, structuredMcpTextBlock);
+      if (inspectedKeys >= MAX_TEMPORAL_INSPECTED_KEYS) return;
+      inspectedKeys += 1;
+      let length = 0;
+      try {
+        const descriptor = Object.getOwnPropertyDescriptor(current, "length");
+        if (descriptor && "value" in descriptor) {
+          length = Math.min(
+            Number(descriptor.value) || 0,
+            Number.MAX_SAFE_INTEGER
+          );
         }
+      } catch {
+        return;
+      }
+      for (
+        let index = 0;
+        index < length && inspectedKeys < MAX_TEMPORAL_INSPECTED_KEYS;
+        index += 1
+      ) {
+        inspectedKeys += 1;
+        let descriptor: PropertyDescriptor | undefined;
+        try {
+          descriptor = Object.getOwnPropertyDescriptor(current, String(index));
+        } catch {
+          return;
+        }
+        if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+        visit(
+          descriptor.value,
+          depth + 1,
+          temporalValue,
+          structuredMcpTextBlock
+        );
       }
       return;
     }
 
-    const entries = ownDataEntries(current);
+    const entries: [string, unknown][] = [];
+    try {
+      for (const key in current) {
+        if (inspectedKeys >= MAX_TEMPORAL_INSPECTED_KEYS) break;
+        inspectedKeys += 1;
+        const descriptor = Object.getOwnPropertyDescriptor(current, key);
+        if (!descriptor?.enumerable || !("value" in descriptor)) continue;
+        entries.push([key, descriptor.value]);
+      }
+    } catch {
+      return;
+    }
     if (structuredMcpTextBlock) {
       const block = new Map(entries);
       const type = block.get("type");
@@ -275,7 +307,7 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
 
 function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
   const directBridge =
-    /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|將\s*(?:在|於)|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|date\s*[:：]|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i;
+    /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|將\s*(?:在|於)|預計|定於|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|date\s*[:：]|will\s+take\s+place\s+on|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i;
   if (directBridge.test(bridge)) return true;
 
   const descriptorBridge =
@@ -417,29 +449,41 @@ function explicitRecurrenceTimeMinutes(userMessage: string): number | null {
   return hour * 60 + minute;
 }
 
-function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
+function recurrenceInClause(clause: string): ExplicitRecurrence | null {
   const chinese =
-    /(?:每週|每星期)\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/.exec(
-      userMessage
-    );
+    /(?:每週|每星期)\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/.exec(clause);
   if (chinese) {
     const weekday = WEEKDAY_INDEX_ZH[`星期${chinese[1]}`];
     return weekday === undefined
       ? null
-      : { weekday, timeMinutes: explicitRecurrenceTimeMinutes(userMessage) };
+      : { weekday, timeMinutes: explicitRecurrenceTimeMinutes(clause) };
   }
 
   const english =
     /\bweekly\b[^.\n\r]{0,24}\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b|\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b[^.\n\r]{0,24}\bweekly\b/i.exec(
-      userMessage
+      clause
     );
   const weekday = english?.[1] ?? english?.[2];
   return weekday
     ? {
         weekday: ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!,
-        timeMinutes: explicitRecurrenceTimeMinutes(userMessage),
+        timeMinutes: explicitRecurrenceTimeMinutes(clause),
       }
     : null;
+}
+
+function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
+  const distinct = new Map<string, ExplicitRecurrence>();
+  for (const clause of userMessage.split(/[，,；;。！？\n\r]+/)) {
+    const recurrence = recurrenceInClause(clause);
+    if (!recurrence) continue;
+    distinct.set(
+      `${recurrence.weekday}:${recurrence.timeMinutes ?? "ambiguous"}`,
+      recurrence
+    );
+    if (distinct.size > 1) return null;
+  }
+  return distinct.values().next().value ?? null;
 }
 
 function resolveNextRecurrence(

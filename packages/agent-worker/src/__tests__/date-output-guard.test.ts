@@ -302,6 +302,38 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("supports direct scheduling bridges with and without evidence", () => {
+    for (const [finalText, expected] of [
+      [
+        "The next session will take place on 7/22 (星期三).",
+        "The next session will take place on 7/16 (星期四).",
+      ],
+      ["下一場預計 7/22（三）舉行。", "下一場預計 7/16（四）舉行。"],
+      ["下一場定於 7/22（三）舉行。", "下一場定於 7/16（四）舉行。"],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: "請查下一場銷講",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+
+      expect(
+        guardDateOutput({
+          userMessage: "請查下一場銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).text
+      ).toBe(expected);
+    }
+  });
+
   test("uses an unpassed same-day recurrence time and rolls a passed time forward", () => {
     const wednesdayNow = new Date("2026-07-15T10:15:00.000Z");
     for (const [userMessage, expected] of [
@@ -336,6 +368,20 @@ describe("guardDateOutput", () => {
         reason: "next_occurrence_without_temporal_evidence",
       });
     }
+  });
+
+  test("fails closed for multiple distinct recurrence clauses", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "原本每週三 17:00，已改成每週三 20:00，下一場是哪天？",
+        finalText: "下一場是 7/15（三）。",
+        now: new Date("2026-07-15T10:15:00.000Z"),
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
   });
 
   test("corrects every explicitly linked next-occurrence claim", () => {
@@ -725,5 +771,37 @@ describe("extractTrustedTemporalCandidates", () => {
 
     expect(extractTrustedTemporalCandidates(withGetter)).toEqual([]);
     expect(extractTrustedTemporalCandidates(hostileProxy)).toEqual([]);
+  });
+
+  test("caps descriptor inspection for huge direct arrays and objects", () => {
+    let objectDescriptorVisits = 0;
+    const hugeObjectTarget = Object.fromEntries(
+      Array.from({ length: 1_000 }, (_, index) => [
+        `field${index}`,
+        { date: "2026-07-16" },
+      ])
+    );
+    const hugeObject = new Proxy(hugeObjectTarget, {
+      getOwnPropertyDescriptor(target, key) {
+        objectDescriptorVisits += 1;
+        return Reflect.getOwnPropertyDescriptor(target, key);
+      },
+    });
+
+    let arrayDescriptorVisits = 0;
+    const hugeArray = new Proxy(
+      Array.from({ length: 1_000 }, () => ({ date: "2026-07-16" })),
+      {
+        getOwnPropertyDescriptor(target, key) {
+          arrayDescriptorVisits += 1;
+          return Reflect.getOwnPropertyDescriptor(target, key);
+        },
+      }
+    );
+
+    extractTrustedTemporalCandidates(hugeObject);
+    extractTrustedTemporalCandidates(hugeArray);
+    expect(objectDescriptorVisits).toBeLessThanOrEqual(200);
+    expect(arrayDescriptorVisits).toBeLessThanOrEqual(201);
   });
 });
