@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { createLogger, type McpOAuthConfig } from "@lobu/core";
 import { Hono } from "hono";
 import { GenericDeviceCodeClient } from "../../auth/external/device-code-client.js";
@@ -14,7 +15,9 @@ const logger = createLogger("device-auth");
 const DEFAULT_MCP_SCOPE = "mcp:read mcp:write profile:read";
 const DEVICE_CODE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code";
 
-interface StoredCredential {
+export interface StoredCredential {
+  /** Stable across token refresh; changes only when the account is rebound. */
+  bindingId?: string;
   accessToken: string;
   refreshToken?: string;
   expiresAt: number;
@@ -35,6 +38,29 @@ interface StoredCredential {
     | "none"
     | "client_secret_basic"
     | "client_secret_post";
+}
+
+/**
+ * Return the stable account binding used by MCP config identity checks.
+ * Legacy credentials predate bindingId, so derive a compatibility fingerprint
+ * once from their refresh/client metadata. Refresh persists that same value
+ * before rotating any tokens.
+ */
+export function getStableCredentialBindingId(
+  credential: StoredCredential,
+): string {
+  if (credential.bindingId) return credential.bindingId;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        refreshToken: credential.refreshToken ?? null,
+        clientId: credential.clientId,
+        tokenUrl: credential.tokenUrl,
+        resource: credential.resource ?? null,
+        tokenEndpointAuthMethod: credential.tokenEndpointAuthMethod ?? null,
+      }),
+    )
+    .digest("hex");
 }
 
 interface StoredDeviceAuth {
@@ -81,7 +107,7 @@ interface ResolvedOAuthEndpoints {
 async function getSecretJson<T>(
   secretStore: WritableSecretStore,
   name: string,
-  context: Record<string, unknown>
+  context: Record<string, unknown>,
 ): Promise<T | null> {
   // The secret store's `get` accepts a SecretRef; we always store under the
   // default `secret://` scheme so the ref form is mechanical.
@@ -104,7 +130,7 @@ async function putSecretJson<T>(
   secretStore: WritableSecretStore,
   name: string,
   value: T,
-  ttlSeconds?: number
+  ttlSeconds?: number,
 ): Promise<void> {
   await secretStore.put(name, JSON.stringify(value), { ttlSeconds });
 }
@@ -112,7 +138,7 @@ async function putSecretJson<T>(
 async function deleteSecretJson(
   secretStore: WritableSecretStore,
   name: string,
-  _context: Record<string, unknown>
+  _context: Record<string, unknown>,
 ): Promise<boolean> {
   // delete() is idempotent for the underlying store; we don't know if a row
   // existed before, but for cleanup that doesn't matter.
@@ -127,7 +153,7 @@ async function deleteSecretJson(
 function credentialName(
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): string {
   return `mcp-auth/${agentId}/${userId}/${mcpId}/credential`;
 }
@@ -135,7 +161,7 @@ function credentialName(
 function deviceAuthName(
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): string {
   return `mcp-auth/${agentId}/${userId}/${mcpId}/device-auth`;
 }
@@ -155,7 +181,7 @@ const REFRESH_LOCK_TTL_MS = 30_000;
 function tryAcquireRefreshLock(
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): boolean {
   const key = `${agentId}:${userId}:${mcpId}`;
   const expiresAt = refreshLocks.get(key);
@@ -167,7 +193,7 @@ function tryAcquireRefreshLock(
 function releaseRefreshLock(
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): void {
   refreshLocks.delete(`${agentId}:${userId}:${mcpId}`);
 }
@@ -186,7 +212,7 @@ function deriveOAuthBaseUrl(upstreamUrl: string): string {
  */
 function resolveOAuthEndpoints(
   upstreamUrl: string,
-  oauth?: McpOAuthConfig
+  oauth?: McpOAuthConfig,
 ): ResolvedOAuthEndpoints {
   const issuer = deriveOAuthBaseUrl(upstreamUrl);
   return {
@@ -206,12 +232,12 @@ export async function getStoredCredential(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): Promise<StoredCredential | null> {
   return getSecretJson<StoredCredential>(
     secretStore,
     credentialName(agentId, userId, mcpId),
-    { agentId, userId, mcpId }
+    { agentId, userId, mcpId },
   );
 }
 
@@ -220,13 +246,17 @@ async function storeCredential(
   agentId: string,
   userId: string,
   mcpId: string,
-  credential: StoredCredential
+  credential: StoredCredential,
 ): Promise<void> {
+  const normalized = {
+    ...credential,
+    bindingId: credential.bindingId ?? randomUUID(),
+  };
   await putSecretJson(
     secretStore,
     credentialName(agentId, userId, mcpId),
-    credential,
-    90 * 24 * 60 * 60
+    normalized,
+    90 * 24 * 60 * 60,
   );
 }
 
@@ -241,7 +271,7 @@ export async function storeCredentialForScope(
   agentId: string,
   scopeKey: string,
   mcpId: string,
-  credential: StoredCredential
+  credential: StoredCredential,
 ): Promise<void> {
   await storeCredential(secretStore, agentId, scopeKey, mcpId, credential);
 }
@@ -256,18 +286,19 @@ export async function deleteCredential(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): Promise<boolean> {
   const deleted = await deleteSecretJson(
     secretStore,
     credentialName(agentId, userId, mcpId),
-    { agentId, userId, mcpId }
+    { agentId, userId, mcpId },
   );
-  await deleteSecretJson(
-    secretStore,
-    deviceAuthName(agentId, userId, mcpId),
-    { agentId, userId, mcpId, scope: "device-auth" }
-  );
+  await deleteSecretJson(secretStore, deviceAuthName(agentId, userId, mcpId), {
+    agentId,
+    userId,
+    mcpId,
+    scope: "device-auth",
+  });
   logger.info("Deleted MCP credential", { agentId, userId, mcpId });
   return deleted;
 }
@@ -277,7 +308,7 @@ export async function refreshCredential(
   agentId: string,
   userId: string,
   mcpId: string,
-  credential: StoredCredential
+  credential: StoredCredential,
 ): Promise<StoredCredential | null> {
   if (!credential.refreshToken) return null;
 
@@ -319,7 +350,7 @@ export async function refreshCredential(
         credential.clientSecret
       ) {
         const basic = Buffer.from(
-          `${encodeURIComponent(credential.clientId)}:${encodeURIComponent(credential.clientSecret)}`
+          `${encodeURIComponent(credential.clientId)}:${encodeURIComponent(credential.clientSecret)}`,
         ).toString("base64");
         headers.Authorization = `Basic ${basic}`;
       }
@@ -346,6 +377,7 @@ export async function refreshCredential(
     if (typeof data.access_token !== "string") return null;
 
     const refreshed: StoredCredential = {
+      bindingId: getStableCredentialBindingId(credential),
       accessToken: data.access_token,
       refreshToken:
         typeof data.refresh_token === "string"
@@ -383,12 +415,12 @@ export async function tryCompletePendingDeviceAuth(
   secretStore: WritableSecretStore,
   agentId: string,
   userId: string,
-  mcpId: string
+  mcpId: string,
 ): Promise<string | null> {
   const deviceState = await getSecretJson<StoredDeviceAuth>(
     secretStore,
     deviceAuthName(agentId, userId, mcpId),
-    { agentId, userId, mcpId, scope: "device-auth" }
+    { agentId, userId, mcpId, scope: "device-auth" },
   );
   if (!deviceState) return null;
 
@@ -396,7 +428,7 @@ export async function tryCompletePendingDeviceAuth(
     await deleteSecretJson(
       secretStore,
       deviceAuthName(agentId, userId, mcpId),
-      { agentId, userId, mcpId, scope: "device-auth" }
+      { agentId, userId, mcpId, scope: "device-auth" },
     );
     return null;
   }
@@ -418,7 +450,7 @@ export async function tryCompletePendingDeviceAuth(
 
     const pollResult = await deviceCodeClient.pollForToken(
       deviceState.deviceCode,
-      deviceState.interval
+      deviceState.interval,
     );
 
     if (pollResult.status === "pending") {
@@ -429,7 +461,7 @@ export async function tryCompletePendingDeviceAuth(
       await deleteSecretJson(
         secretStore,
         deviceAuthName(agentId, userId, mcpId),
-        { agentId, userId, mcpId, scope: "device-auth" }
+        { agentId, userId, mcpId, scope: "device-auth" },
       );
       return null;
     }
@@ -450,7 +482,7 @@ export async function tryCompletePendingDeviceAuth(
     await deleteSecretJson(
       secretStore,
       deviceAuthName(agentId, userId, mcpId),
-      { agentId, userId, mcpId, scope: "device-auth" }
+      { agentId, userId, mcpId, scope: "device-auth" },
     );
 
     logger.info("Device auth auto-completed by proxy", {
@@ -480,12 +512,12 @@ export async function startDeviceAuth(
   mcpConfigService: {
     getHttpServer: (
       id: string,
-      agentId?: string
+      agentId?: string,
     ) => Promise<{ upstreamUrl: string; oauth?: McpOAuthConfig } | undefined>;
   },
   mcpId: string,
   agentId: string,
-  userId: string
+  userId: string,
 ): Promise<{
   userCode: string;
   verificationUri: string;
@@ -496,7 +528,7 @@ export async function startDeviceAuth(
   const existing = await getSecretJson<StoredDeviceAuth>(
     secretStore,
     deviceAuthName(agentId, userId, mcpId),
-    { agentId, userId, mcpId, scope: "device-auth" }
+    { agentId, userId, mcpId, scope: "device-auth" },
   );
   if (existing?.expiresAt && existing.expiresAt > Date.now()) {
     const httpServer = await mcpConfigService.getHttpServer(mcpId, agentId);
@@ -531,7 +563,7 @@ export async function startDeviceAuth(
 
   const endpoints = resolveOAuthEndpoints(
     httpServer.upstreamUrl,
-    httpServer.oauth
+    httpServer.oauth,
   );
 
   // Resolve client: use explicit config clientId, or cached registration, or register new
@@ -552,7 +584,7 @@ export async function startDeviceAuth(
     client = await getSecretJson<StoredClient>(
       secretStore,
       clientCacheName(mcpId),
-      { mcpId, scope: "device-client" }
+      { mcpId, scope: "device-client" },
     );
 
     // Register a new client if needed
@@ -623,7 +655,7 @@ export async function startDeviceAuth(
     secretStore,
     deviceAuthName(agentId, userId, mcpId),
     deviceState,
-    started.expiresIn
+    started.expiresIn,
   );
 
   logger.info("Device auth started (auto)", { mcpId, agentId, userId });
@@ -637,7 +669,7 @@ export async function startDeviceAuth(
 }
 
 export function createDeviceAuthRoutes(
-  config: DeviceAuthConfig
+  config: DeviceAuthConfig,
 ): Hono<WorkerContext> {
   const { mcpConfigService } = config;
   const router = new Hono<WorkerContext>();
@@ -660,7 +692,7 @@ export function createDeviceAuthRoutes(
         mcpConfigService,
         mcpId,
         agentId,
-        userId
+        userId,
       );
 
       if (!result) {
@@ -675,7 +707,7 @@ export function createDeviceAuthRoutes(
         if (connectUrl) {
           logger.info(
             "Device flow unavailable — returning auth-code connect link",
-            { mcpId, agentId, userId }
+            { mcpId, agentId, userId },
           );
           return c.json({
             flow: "auth_code",
@@ -688,7 +720,7 @@ export function createDeviceAuthRoutes(
         return errorResponse(
           c,
           `authorization link could not be generated for '${mcpId}' — device flow unsupported and connect-link fallback unavailable (check publicGatewayUrl / ENCRYPTION_KEY)`,
-          404
+          404,
         );
       }
 
@@ -718,7 +750,7 @@ export function createDeviceAuthRoutes(
     const deviceState = await getSecretJson<StoredDeviceAuth>(
       config.secretStore,
       deviceAuthName(agentId, userId, mcpId),
-      { agentId, userId, mcpId, scope: "device-auth" }
+      { agentId, userId, mcpId, scope: "device-auth" },
     );
     if (!deviceState) {
       return c.json(
@@ -726,7 +758,7 @@ export function createDeviceAuthRoutes(
           status: "error",
           message: "No device auth in progress. Call start first.",
         },
-        400
+        400,
       );
     }
 
@@ -734,11 +766,11 @@ export function createDeviceAuthRoutes(
       await deleteSecretJson(
         config.secretStore,
         deviceAuthName(agentId, userId, mcpId),
-        { agentId, userId, mcpId, scope: "device-auth" }
+        { agentId, userId, mcpId, scope: "device-auth" },
       );
       return c.json(
         { status: "error", message: "Device code expired. Start again." },
-        400
+        400,
       );
     }
 
@@ -759,7 +791,7 @@ export function createDeviceAuthRoutes(
 
       const pollResult = await deviceCodeClient.pollForToken(
         deviceState.deviceCode,
-        deviceState.interval
+        deviceState.interval,
       );
 
       if (pollResult.status === "pending") {
@@ -771,13 +803,13 @@ export function createDeviceAuthRoutes(
           deviceState.interval = pollResult.interval;
           const ttl = Math.max(
             Math.floor((deviceState.expiresAt - Date.now()) / 1000),
-            10
+            10,
           );
           await putSecretJson(
             config.secretStore,
             deviceAuthName(agentId, userId, mcpId),
             deviceState,
-            ttl
+            ttl,
           );
         }
         return c.json({ status: "pending" });
@@ -787,7 +819,7 @@ export function createDeviceAuthRoutes(
         await deleteSecretJson(
           config.secretStore,
           deviceAuthName(agentId, userId, mcpId),
-          { agentId, userId, mcpId, scope: "device-auth" }
+          { agentId, userId, mcpId, scope: "device-auth" },
         );
         return c.json({ status: "error", message: pollResult.error });
       }
@@ -809,12 +841,12 @@ export function createDeviceAuthRoutes(
         agentId,
         userId,
         mcpId,
-        storedCred
+        storedCred,
       );
       await deleteSecretJson(
         config.secretStore,
         deviceAuthName(agentId, userId, mcpId),
-        { agentId, userId, mcpId, scope: "device-auth" }
+        { agentId, userId, mcpId, scope: "device-auth" },
       );
 
       logger.info("Device auth completed", { mcpId, agentId, userId });
@@ -823,7 +855,7 @@ export function createDeviceAuthRoutes(
       logger.error("Failed to poll device auth", { mcpId, error });
       return c.json(
         { status: "error", message: "Failed to poll device auth" },
-        500
+        500,
       );
     }
   });
@@ -843,7 +875,7 @@ export function createDeviceAuthRoutes(
       config.secretStore,
       agentId,
       userId,
-      mcpId
+      mcpId,
     );
     return c.json({ authenticated: !!credential });
   });
@@ -867,10 +899,10 @@ export function createDeviceAuthRoutes(
         config.secretStore,
         agentId,
         userId,
-        mcpId
+        mcpId,
       );
       return c.json({ deleted });
-    }
+    },
   );
 
   logger.debug("Device auth routes registered");

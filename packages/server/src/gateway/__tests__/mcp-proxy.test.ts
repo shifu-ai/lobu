@@ -16,13 +16,13 @@ import { orgContext } from "../../lobu/stores/org-context.js";
 import { McpProxy } from "../auth/mcp/proxy.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
 import { GrantStore } from "../permissions/grant-store.js";
-import {
-  type SecretListEntry,
-  type WritableSecretStore,
-} from "../secrets/index.js";
+import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
 
 class InMemoryWritableStore implements WritableSecretStore {
-  private readonly entries = new Map<string, { value: string; updatedAt: number }>();
+  private readonly entries = new Map<
+    string,
+    { value: string; updatedAt: number }
+  >();
   async get(ref: SecretRef): Promise<string | null> {
     if (!ref.startsWith("secret://")) return null;
     const name = decodeURIComponent(ref.slice("secret://".length));
@@ -53,7 +53,9 @@ class InMemoryWritableStore implements WritableSecretStore {
   }
 }
 
-function createTestSecretStore(_queue: MockMessageQueue): InMemoryWritableStore {
+function createTestSecretStore(
+  _queue: MockMessageQueue,
+): InMemoryWritableStore {
   return new InMemoryWritableStore();
 }
 
@@ -73,15 +75,15 @@ interface HttpMcpServerConfig {
 interface McpConfigSource {
   getHttpServer(
     id: string,
-    agentId?: string
+    agentId?: string,
   ): Promise<HttpMcpServerConfig | undefined>;
   getAllHttpServers(
-    agentId?: string
+    agentId?: string,
   ): Promise<Map<string, HttpMcpServerConfig>>;
 }
 
 function createMockConfigSource(
-  servers: Record<string, HttpMcpServerConfig>
+  servers: Record<string, HttpMcpServerConfig>,
 ): McpConfigSource {
   return {
     getHttpServer: async (id) => servers[id],
@@ -114,7 +116,7 @@ function inTestOrg<T>(fn: () => T): T {
 }
 
 function jsonRpcToolsResponse(
-  tools: Array<{ name: string; description?: string }> = []
+  tools: Array<{ name: string; description?: string }> = [],
 ): Response {
   return new Response(
     JSON.stringify({
@@ -122,7 +124,7 @@ function jsonRpcToolsResponse(
       id: 1,
       result: { tools },
     }),
-    { status: 200, headers: { "Content-Type": "application/json" } }
+    { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }
 
@@ -133,7 +135,7 @@ function jsonRpcErrorResponse(message: string, code = -32603): Response {
       id: 1,
       error: { code, message },
     }),
-    { status: 200, headers: { "Content-Type": "application/json" } }
+    { status: 200, headers: { "Content-Type": "application/json" } },
   );
 }
 
@@ -253,7 +255,7 @@ describe("McpProxy", () => {
 
       const res = await app.request(
         `/test-mcp/tools?workerToken=${validToken}`,
-        { method: "GET" }
+        { method: "GET" },
       );
       expect(res.status).toBe(401);
     });
@@ -350,7 +352,7 @@ describe("McpProxy", () => {
             id: 1,
             result: { tools: [{ name: "cached_tool" }] },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       };
 
@@ -402,15 +404,15 @@ describe("McpProxy", () => {
       };
 
       const trustedFirst = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
       current = evil;
       const evilResult = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
       current = trusted;
       const trustedAgain = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
 
       expect(trustedFirst.tools.map((tool) => tool.name)).toEqual([
@@ -423,7 +425,7 @@ describe("McpProxy", () => {
       expect(listCounts).toEqual({ trusted: 1, evil: 1 });
       expect(trustedAgain.provenance).toEqual(trustedFirst.provenance);
       expect(evilResult.provenance?.configDigest).not.toBe(
-        trustedFirst.provenance?.configDigest
+        trustedFirst.provenance?.configDigest,
       );
     });
 
@@ -447,7 +449,7 @@ describe("McpProxy", () => {
         return jsonRpcToolsResponse();
       };
       const first = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
       const cacheId = `test-mcp:config:${first.provenance!.configDigest}`;
       inTestOrg(() =>
@@ -461,19 +463,17 @@ describe("McpProxy", () => {
               configDigest: first.provenance!.configDigest,
             },
           },
-          "agent1"
-        )
+          "agent1",
+        ),
       );
 
       const second = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
 
       expect(second.tools.map((tool) => tool.name)).toEqual(["trusted_tool"]);
       expect(trustedListCalls).toBe(2);
-      expect(second.provenance?.upstreamOrigin).toBe(
-        "https://trusted.example"
-      );
+      expect(second.provenance?.upstreamOrigin).toBe("https://trusted.example");
     });
 
     test("rejects a tool call when config changes after discovery without contacting the new origin", async () => {
@@ -504,34 +504,116 @@ describe("McpProxy", () => {
         return jsonRpcToolsResponse();
       };
       const discovery = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
       current = evil;
       contactedOrigins.length = 0;
 
-      const response = await proxy.getApp().request(
-        "/test-mcp/tools/ordinary_tool",
-        {
+      const response = await proxy
+        .getApp()
+        .request("/test-mcp/tools/ordinary_tool", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${validToken}`,
             "Content-Type": "application/json",
-            "x-lobu-mcp-expected-origin":
-              discovery.provenance!.upstreamOrigin,
+            "x-lobu-mcp-expected-origin": discovery.provenance!.upstreamOrigin,
             "x-lobu-mcp-expected-config-source":
               discovery.provenance!.configSource,
             "x-lobu-mcp-expected-config-digest":
               discovery.provenance!.configDigest,
           },
           body: "{}",
-        }
-      );
+        });
 
       expect(response.status).toBe(409);
       expect(await response.json()).toMatchObject({
         diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
       });
       expect(contactedOrigins).toEqual([]);
+    });
+
+    test("fails closed across REST, approval replay, and JSON-RPC when static credential changes after discovery", async () => {
+      const tenantA = {
+        ...TEST_SERVER,
+        upstreamUrl: "https://trusted.example/mcp",
+        headers: { Authorization: "Bearer tenant-a" },
+      };
+      const tenantB = {
+        ...tenantA,
+        headers: { Authorization: "Bearer tenant-b" },
+      };
+      let current = tenantA;
+      const configSource = {
+        getHttpServer: async () => current,
+        getAllHttpServers: async () => new Map([["test-mcp", current]]),
+      };
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache: new McpToolCache(),
+      });
+      let upstreamCalls = 0;
+      globalThis.fetch = async (_input, init) => {
+        upstreamCalls++;
+        if (String(init?.body ?? "").includes("tools/list")) {
+          return jsonRpcToolsResponse([
+            { name: "ordinary_tool", annotations: { readOnlyHint: true } },
+          ]);
+        }
+        return jsonRpcToolsResponse();
+      };
+      const discovery = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
+      );
+      const identityHeaders = {
+        "x-lobu-mcp-expected-origin": discovery.provenance!.upstreamOrigin,
+        "x-lobu-mcp-expected-config-source": discovery.provenance!.configSource,
+        "x-lobu-mcp-expected-config-digest": discovery.provenance!.configDigest,
+      };
+      current = tenantB;
+      upstreamCalls = 0;
+
+      const rest = await proxy
+        .getApp()
+        .request("/test-mcp/tools/ordinary_tool", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            "Content-Type": "application/json",
+            ...identityHeaders,
+          },
+          body: "{}",
+        });
+      const approvalReplay = await inTestOrg(() =>
+        proxy.executeToolDirect(
+          "agent1",
+          "user1",
+          "test-mcp",
+          "ordinary_tool",
+          {},
+          { expectedMcpIdentity: discovery.provenance! },
+        ),
+      );
+      const jsonRpc = await proxy.getApp().request("/test-mcp", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${validToken}`,
+          "Content-Type": "application/json",
+          ...identityHeaders,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 91,
+          method: "tools/call",
+          params: { name: "ordinary_tool", arguments: {} },
+        }),
+      });
+
+      expect(rest.status).toBe(409);
+      expect(approvalReplay.diagnosticCode).toBe(
+        "MCP_CONFIG_IDENTITY_MISMATCH",
+      );
+      expect(jsonRpc.status).toBe(409);
+      expect(upstreamCalls).toBe(0);
     });
 
     test("uses the matched config snapshot when a concurrent update lands after call resolution", async () => {
@@ -570,39 +652,37 @@ describe("McpProxy", () => {
               id: 1,
               result: { content: [{ type: "text", text: "ok" }] },
             }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
+            { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
         return jsonRpcToolsResponse();
       };
       const discovery = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" }),
       );
       contactedOrigins.length = 0;
       flipAfterResolve = true;
 
-      const response = await proxy.getApp().request(
-        "/test-mcp/tools/ordinary_tool",
-        {
+      const response = await proxy
+        .getApp()
+        .request("/test-mcp/tools/ordinary_tool", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${validToken}`,
             "Content-Type": "application/json",
-            "x-lobu-mcp-expected-origin":
-              discovery.provenance!.upstreamOrigin,
+            "x-lobu-mcp-expected-origin": discovery.provenance!.upstreamOrigin,
             "x-lobu-mcp-expected-config-source":
               discovery.provenance!.configSource,
             "x-lobu-mcp-expected-config-digest":
               discovery.provenance!.configDigest,
           },
           body: "{}",
-        }
-      );
+        });
 
       expect(response.status).toBe(200);
       expect(contactedOrigins.length).toBeGreaterThan(0);
       expect(new Set(contactedOrigins)).toEqual(
-        new Set(["https://trusted.example"])
+        new Set(["https://trusted.example"]),
       );
       expect(current).toBe(evil);
     });
@@ -633,7 +713,7 @@ describe("McpProxy", () => {
               tools: [{ name: "read_page" }, { name: "write_page" }],
             },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       };
 
@@ -653,48 +733,44 @@ describe("McpProxy", () => {
         headers: { Authorization: `Bearer ${validToken}` },
       });
       expect(second.status).toBe(200);
-      expect(
-        (await second.json()).tools.map((tool: any) => tool.name)
-      ).toEqual(["write_page"]);
+      expect((await second.json()).tools.map((tool: any) => tool.name)).toEqual(
+        ["write_page"],
+      );
       expect(fetchCount).toBeGreaterThan(3);
     });
 
-    test(
-      "skips upstream discovery while server health is paused",
-      async () => {
-        const configSource = createMockConfigSource({
-          "test-mcp": TEST_SERVER,
-        });
-        const proxy = new McpProxy(configSource, {
-          secretStore: createTestSecretStore(queue),
-        });
-        const app = proxy.getApp();
+    test("skips upstream discovery while server health is paused", async () => {
+      const configSource = createMockConfigSource({
+        "test-mcp": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      const app = proxy.getApp();
 
-        let fetchCount = 0;
-        globalThis.fetch = async () => {
-          fetchCount++;
-          throw new Error(`boom ${fetchCount}`);
-        };
+      let fetchCount = 0;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        throw new Error(`boom ${fetchCount}`);
+      };
 
-        for (let i = 0; i < 3; i++) {
-          const res = await app.request("/test-mcp/tools", {
-            method: "GET",
-            headers: { Authorization: `Bearer ${validToken}` },
-          });
-          expect(res.status).toBe(502);
-        }
-        const fetchesBeforePause = fetchCount;
-
-        const paused = await app.request("/test-mcp/tools", {
+      for (let i = 0; i < 3; i++) {
+        const res = await app.request("/test-mcp/tools", {
           method: "GET",
           headers: { Authorization: `Bearer ${validToken}` },
         });
-        expect(paused.status).toBe(200);
-        expect(await paused.json()).toEqual({ tools: [] });
-        expect(fetchCount).toBe(fetchesBeforePause);
-      },
-      10_000
-    );
+        expect(res.status).toBe(502);
+      }
+      const fetchesBeforePause = fetchCount;
+
+      const paused = await app.request("/test-mcp/tools", {
+        method: "GET",
+        headers: { Authorization: `Bearer ${validToken}` },
+      });
+      expect(paused.status).toBe(200);
+      expect(await paused.json()).toEqual({ tools: [] });
+      expect(fetchCount).toBe(fetchesBeforePause);
+    }, 10_000);
 
     test("does not pause when surfaced tools/list retry returns 401 or 403", async () => {
       for (const retryStatus of [401, 403]) {
@@ -766,8 +842,8 @@ describe("McpProxy", () => {
             "test-mcp",
             "agent1",
             { userId: "user1", channelId: "ch1" },
-            undefined
-          )
+            undefined,
+          ),
         );
 
         expect(result).toEqual({
@@ -806,10 +882,10 @@ describe("McpProxy", () => {
               "agent1",
               { userId: "user1", channelId: "ch1" },
               undefined,
-              { surfaceErrors: true }
-            )
-          )
-        ).rejects.toMatchObject({ diagnosticCode: "upstream_unauthorized" })
+              { surfaceErrors: true },
+            ),
+          ),
+        ).rejects.toMatchObject({ diagnosticCode: "upstream_unauthorized" }),
       );
     });
 
@@ -838,13 +914,13 @@ describe("McpProxy", () => {
                 "agent1",
                 { userId: "user1", channelId: "ch1" },
                 undefined,
-                { surfaceErrors: true }
-              )
-            )
+                { surfaceErrors: true },
+              ),
+            ),
           ).rejects.toMatchObject({
             diagnosticCode:
               status === 401 ? "upstream_unauthorized" : "upstream_forbidden",
-          })
+          }),
         );
       }
     });
@@ -877,10 +953,10 @@ describe("McpProxy", () => {
                 "agent1",
                 { userId: "user1", channelId: "ch1" },
                 undefined,
-                { surfaceErrors: true }
-              )
-            )
-          ).rejects.toMatchObject({ diagnosticCode })
+                { surfaceErrors: true },
+              ),
+            ),
+          ).rejects.toMatchObject({ diagnosticCode }),
         );
       }
     });
@@ -906,8 +982,8 @@ describe("McpProxy", () => {
           "test-mcp",
           "agent1",
           { userId: "user1", channelId: "ch1" },
-          undefined
-        )
+          undefined,
+        ),
       );
 
       expect(result).toEqual({
@@ -947,10 +1023,10 @@ describe("McpProxy", () => {
               "agent1",
               { userId: "user1", channelId: "ch1" },
               undefined,
-              { surfaceErrors: true }
-            )
-          )
-        ).rejects.toBeInstanceOf(SyntaxError)
+              { surfaceErrors: true },
+            ),
+          ),
+        ).rejects.toBeInstanceOf(SyntaxError),
       );
     });
 
@@ -977,9 +1053,9 @@ describe("McpProxy", () => {
                 "agent1",
                 { userId: "user1", channelId: "ch1" },
                 undefined,
-                { surfaceErrors: true }
-              )
-            )
+                { surfaceErrors: true },
+              ),
+            ),
           ).rejects.toMatchObject({ diagnosticCode: "upstream_forbidden" });
         }
       });
@@ -996,8 +1072,8 @@ describe("McpProxy", () => {
           "agent1",
           { userId: "user1", channelId: "ch1" },
           undefined,
-          { surfaceErrors: true }
-        )
+          { surfaceErrors: true },
+        ),
       );
       expect(result.tools.map((tool) => tool.name)).toEqual([
         "after_auth_failures",
@@ -1044,7 +1120,7 @@ describe("McpProxy", () => {
         app.request("/test-mcp/tools", {
           method: "GET",
           headers: { Authorization: `Bearer ${validToken}` },
-        })
+        }),
       );
       expect(zero.status).toBe(200);
       expect(await zero.json()).toEqual({ tools: [] });
@@ -1171,7 +1247,11 @@ describe("McpProxy", () => {
       });
       const toolCache = new McpToolCache();
       orgContext.run({ organizationId: "test-org" }, () => {
-        toolCache.set("test-mcp", [{ name: "old_tool" }], "agent1");
+        toolCache.set(
+          "test-mcp:config:current-digest",
+          [{ name: "old_tool" }],
+          "agent1",
+        );
       });
       const proxy = new McpProxy(configSource, {
         secretStore: createTestSecretStore(queue),
@@ -1189,7 +1269,7 @@ describe("McpProxy", () => {
           {
             status: 200,
             headers: { "Content-Type": "text/event-stream" },
-          }
+          },
         );
 
       const res = await app.request("/test-mcp", {
@@ -1200,7 +1280,9 @@ describe("McpProxy", () => {
       await res.text();
 
       orgContext.run({ organizationId: "test-org" }, () => {
-        expect(toolCache.get("test-mcp", "agent1")).toBeNull();
+        expect(
+          toolCache.get("test-mcp:config:current-digest", "agent1"),
+        ).toBeNull();
       });
     });
   });
@@ -1208,7 +1290,40 @@ describe("McpProxy", () => {
   // ---------- POST /:mcpId/tools/:toolName ----------
 
   describe("POST /:mcpId/tools/:toolName", () => {
-    test.each(RESERVED_AUTOMATION_TOOL_NAMES)("rejects reserved automation call without discovery identity: %s", async (toolName) => {
+    test.each(
+      RESERVED_AUTOMATION_TOOL_NAMES,
+    )("rejects generic JSON-RPC reserved automation call without discovery identity: %s", async (toolName) => {
+      const proxy = new McpProxy(
+        createMockConfigSource({ "shifu-toolbox": TEST_SERVER }),
+        { secretStore: createTestSecretStore(queue) },
+      );
+      let upstreamCalls = 0;
+      globalThis.fetch = async () => {
+        upstreamCalls++;
+        return jsonRpcToolsResponse();
+      };
+
+      const response = await proxy.getApp().request("/shifu-toolbox", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${validToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 90,
+          method: "tools/call",
+          params: { name: toolName, arguments: {} },
+        }),
+      });
+
+      expect(response.status).toBe(409);
+      expect(upstreamCalls).toBe(0);
+    });
+
+    test.each(
+      RESERVED_AUTOMATION_TOOL_NAMES,
+    )("rejects reserved automation call without discovery identity: %s", async (toolName) => {
       const configSource = createMockConfigSource({
         "shifu-toolbox": TEST_SERVER,
       });
@@ -1225,17 +1340,16 @@ describe("McpProxy", () => {
         approvalCalls++;
       };
 
-      const response = await proxy.getApp().request(
-        `/shifu-toolbox/tools/${toolName}`,
-        {
+      const response = await proxy
+        .getApp()
+        .request(`/shifu-toolbox/tools/${toolName}`, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${validToken}`,
             "Content-Type": "application/json",
           },
           body: "{}",
-        }
-      );
+        });
 
       expect(response.status).toBe(409);
       expect(await response.json()).toMatchObject({
@@ -1245,7 +1359,9 @@ describe("McpProxy", () => {
       expect(approvalCalls).toBe(0);
     });
 
-    test.each(RESERVED_AUTOMATION_TOOL_NAMES)("rejects reserved automation approval replay without discovery identity: %s", async (toolName) => {
+    test.each(
+      RESERVED_AUTOMATION_TOOL_NAMES,
+    )("rejects reserved automation approval replay without discovery identity: %s", async (toolName) => {
       const configSource = createMockConfigSource({
         "shifu-toolbox": TEST_SERVER,
       });
@@ -1264,8 +1380,8 @@ describe("McpProxy", () => {
           "user1",
           "shifu-toolbox",
           toolName,
-          {}
-        )
+          {},
+        ),
       );
 
       expect(result.isError).toBe(true);
@@ -1463,7 +1579,7 @@ describe("McpProxy", () => {
               isError: false,
             },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       };
 
@@ -1513,7 +1629,7 @@ describe("McpProxy", () => {
               id: 1,
               error: { code: -32000, message: "Server not initialized" },
             }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
+            { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
         // Re-init calls (initialize + notifications/initialized) and retry
@@ -1525,7 +1641,7 @@ describe("McpProxy", () => {
               content: [{ type: "text", text: "Success after re-init" }],
             },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       };
 
@@ -1549,7 +1665,7 @@ describe("McpProxy", () => {
 
   describe("tool approval", () => {
     function createProxyWithGrants(
-      servers: Record<string, HttpMcpServerConfig>
+      servers: Record<string, HttpMcpServerConfig>,
     ) {
       const configSource = createMockConfigSource(servers);
       const toolCache = new McpToolCache();
@@ -1606,7 +1722,7 @@ describe("McpProxy", () => {
         "/mcp/test-mcp/tools/dangerous_tool",
         null,
         undefined,
-        "test-org"
+        "test-org",
       );
 
       mockUpstreamFetch({
@@ -1642,7 +1758,7 @@ describe("McpProxy", () => {
         toolCache.set(
           "test-mcp",
           [{ name: "read_tool", annotations: { readOnlyHint: true } }],
-          "agent1"
+          "agent1",
         );
       });
 
@@ -1679,7 +1795,7 @@ describe("McpProxy", () => {
         toolCache.set(
           "test-mcp",
           [{ name: "safe_tool", annotations: { destructiveHint: false } }],
-          "agent1"
+          "agent1",
         );
       });
 
@@ -1733,7 +1849,7 @@ describe("McpProxy", () => {
             id: 1,
             result: { tools },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       };
 
@@ -1779,7 +1895,7 @@ describe("McpProxy", () => {
             id: 1,
             result: { tools: [{ name: "working_tool" }] },
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       };
 

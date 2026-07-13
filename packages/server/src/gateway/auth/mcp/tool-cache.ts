@@ -33,6 +33,7 @@ export interface CachedMcpServer {
  * probes upstream itself on miss.
  */
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_CACHE_ENTRIES = 512;
 const CACHE_KEY_PREFIX = "mcp:tools:v2:";
 
 interface CacheEntry {
@@ -65,10 +66,7 @@ export class McpToolCache {
     }
   }
 
-  getServerInfo(
-    mcpId: string,
-    agentId?: string
-  ): CachedMcpServer | null {
+  getServerInfo(mcpId: string, agentId?: string): CachedMcpServer | null {
     const key = this.buildKey(mcpId, agentId);
     const entry = this.entries.get(key);
     if (!entry) return null;
@@ -76,29 +74,33 @@ export class McpToolCache {
       this.entries.delete(key);
       return null;
     }
+    // Map iteration order is used as the LRU order. Move cache hits to the end.
+    this.entries.delete(key);
+    this.entries.set(key, entry);
     return entry.info;
   }
 
-  setServerInfo(
-    mcpId: string,
-    info: CachedMcpServer,
-    agentId?: string
-  ): void {
+  setServerInfo(mcpId: string, info: CachedMcpServer, agentId?: string): void {
     const key = this.buildKey(mcpId, agentId);
     try {
+      const now = Date.now();
+      this.sweepExpired(now);
+      this.entries.delete(key);
       this.entries.set(key, {
         info,
-        expiresAt: Date.now() + CACHE_TTL_MS,
+        expiresAt: now + CACHE_TTL_MS,
       });
+      while (this.entries.size > MAX_CACHE_ENTRIES) {
+        const oldestKey = this.entries.keys().next().value;
+        if (oldestKey === undefined) break;
+        this.entries.delete(oldestKey);
+      }
     } catch (error) {
       logger.error("Failed to write tool cache", { key, error });
     }
   }
 
-  getInstructions(
-    mcpId: string,
-    agentId?: string
-  ): string | undefined {
+  getInstructions(mcpId: string, agentId?: string): string | undefined {
     const info = this.getServerInfo(mcpId, agentId);
     return info?.instructions;
   }
@@ -122,7 +124,7 @@ export class McpToolCache {
   }
 
   private parseKey(
-    key: string
+    key: string,
   ): { orgId: string; agentId?: string; mcpId: string } | null {
     if (!key.startsWith(CACHE_KEY_PREFIX)) return null;
     const rest = key.slice(CACHE_KEY_PREFIX.length);
@@ -144,8 +146,18 @@ export class McpToolCache {
 
   private matchesMcpIdOrFilterVariant(
     candidate: string,
-    mcpId: string
+    mcpId: string,
   ): boolean {
-    return candidate === mcpId || candidate.startsWith(`${mcpId}:toolFilter:`);
+    return (
+      candidate === mcpId ||
+      candidate.startsWith(`${mcpId}:config:`) ||
+      candidate.startsWith(`${mcpId}:toolFilter:`)
+    );
+  }
+
+  private sweepExpired(now: number): void {
+    for (const [key, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.entries.delete(key);
+    }
   }
 }

@@ -40,7 +40,7 @@ function hasAutomationIntent(text: string): boolean {
   if (englishAction && englishTemporal) return true;
 
   const chineseAction =
-    /(?:建立|新增|安排|設定|设定|排程|追蹤|追踪|監控|监控|檢查|检查|通知|觀察|观察)/.test(
+    /(?:建立|新增|安排|設定|设定|排程|追蹤|追踪|監控|监控|檢查|检查|告訴|告诉|回報|回报|通知|觀察|观察)/.test(
       text
     );
   const chineseTemporal =

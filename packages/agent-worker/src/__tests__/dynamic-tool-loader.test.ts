@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { RESERVED_AUTOMATION_TOOL_NAMES, type McpToolDef } from "@lobu/core";
+import { type McpToolDef, RESERVED_AUTOMATION_TOOL_NAMES } from "@lobu/core";
 import {
   buildRuntimeToolCatalog,
   resolveDynamicToolBudget,
@@ -103,6 +103,10 @@ describe("selectMcpToolsForTurn", () => {
     "明天下午提醒我回覆 Irene",
     "每週一自動排程寄出報告",
     "持續追蹤報名狀況十分鐘",
+    "每隔1分鐘就告訴我 Irene 的最新進度，持續10分鐘",
+    "每隔 1 分鐘就告訴我 Irene 的最新進度，持續 10 分鐘",
+    "每隔1分鐘回報 Irene 的最新進度，持續10分鐘",
+    "每隔1分鐘通知我 Irene 的最新進度，持續10分鐘",
     "monitor this and follow up automatically",
     "list my automations",
     "取消明天的提醒",
@@ -294,6 +298,7 @@ describe("selectMcpToolsForTurn", () => {
 
   test.each([
     ["look up tracking number 123", "shipment_search"],
+    ["追蹤 Irene 的課程進度", "course_progress_search"],
     ["search Notion for the course schedule", "notion_search"],
     ["監控螢幕亮度", "system_display_settings"],
     ["draft follow-up content for Irene", "docs_create"],

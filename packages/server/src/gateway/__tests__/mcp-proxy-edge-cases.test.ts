@@ -24,16 +24,13 @@ import {
 } from "bun:test";
 import { generateWorkerToken, type SecretRef } from "@lobu/core";
 import { MockMessageQueue } from "@lobu/core/testing";
-import { orgContext } from "../../lobu/stores/org-context.js";
+import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import { McpProxy } from "../auth/mcp/proxy.js";
 import { McpToolCache } from "../auth/mcp/tool-cache.js";
-import { tryGetOrgId } from "../../lobu/stores/org-context.js";
-import { GrantStore } from "../permissions/grant-store.js";
 import { applyTrustedCourseToolPolicy } from "../orchestration/course-tool-policy.js";
-import type {
-  SecretListEntry,
-  WritableSecretStore,
-} from "../secrets/index.js";
+import { GrantStore } from "../permissions/grant-store.js";
+import { getStableCredentialBindingId } from "../routes/internal/device-auth.js";
+import type { SecretListEntry, WritableSecretStore } from "../secrets/index.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -100,15 +97,15 @@ interface HttpMcpServerConfig {
 interface McpConfigSource {
   getHttpServer(
     id: string,
-    agentId?: string
+    agentId?: string,
   ): Promise<HttpMcpServerConfig | undefined>;
   getAllHttpServers(
-    agentId?: string
+    agentId?: string,
   ): Promise<Map<string, HttpMcpServerConfig>>;
 }
 
 function createConfigSource(
-  servers: Record<string, HttpMcpServerConfig>
+  servers: Record<string, HttpMcpServerConfig>,
 ): McpConfigSource {
   return {
     getHttpServer: async (id) => servers[id],
@@ -118,10 +115,18 @@ function createConfigSource(
 
 function mockFetch(handler: (url: string) => Response) {
   globalThis.fetch = async (input: RequestInfo | URL) =>
-    handler(typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url);
+    handler(
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.href
+          : (input as Request).url,
+    );
 }
 
-function successFetch(body: object = { jsonrpc: "2.0", id: 1, result: { tools: [] } }) {
+function successFetch(
+  body: object = { jsonrpc: "2.0", id: 1, result: { tools: [] } },
+) {
   globalThis.fetch = async () =>
     new Response(JSON.stringify(body), {
       status: 200,
@@ -197,12 +202,23 @@ beforeEach(() => {
 });
 
 describe("trusted course memory tool policy", () => {
-  const scope = { ownerUserId: "owner-1", agentId: "agent1", courseEntityId: "course:owner-1:a" };
+  const scope = {
+    ownerUserId: "owner-1",
+    agentId: "agent1",
+    courseEntityId: "course:owner-1:a",
+  };
 
   test("injects the trusted owner, agent, and single course into an unscoped search", () => {
-    expect(applyTrustedCourseToolPolicy("search_memory", { query: "launch" }, scope)).toEqual({
+    expect(
+      applyTrustedCourseToolPolicy("search_memory", { query: "launch" }, scope),
+    ).toEqual({
       ok: true,
-      arguments: { query: "launch", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] },
+      arguments: {
+        query: "launch",
+        owner_user_id: "owner-1",
+        agent_id: "agent1",
+        entity_ids: ["course:owner-1:a"],
+      },
     });
   });
 
@@ -214,90 +230,366 @@ describe("trusted course memory tool policy", () => {
     { owner_user_id: null },
     { entity_ids: [] },
   ])("rejects an attempt to alter or clear trusted course scope", (override) => {
-    expect(applyTrustedCourseToolPolicy("search_memory", { query: "launch", ...override }, scope)).toEqual({
+    expect(
+      applyTrustedCourseToolPolicy(
+        "search_memory",
+        { query: "launch", ...override },
+        scope,
+      ),
+    ).toEqual({
       ok: false,
       code: "COURSE_SCOPE_MISMATCH",
-      message: "Memory search scope does not match the trusted course execution context.",
+      message:
+        "Memory search scope does not match the trusted course execution context.",
     });
   });
 
   test("accepts redundant matching values and leaves non-course calls compatible", () => {
-    expect(applyTrustedCourseToolPolicy("search_memory", { query: "x", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] }, scope).ok).toBe(true);
-    expect(applyTrustedCourseToolPolicy("search_memory", { query: "x" }, undefined)).toEqual({ ok: true, arguments: { query: "x" } });
+    expect(
+      applyTrustedCourseToolPolicy(
+        "search_memory",
+        {
+          query: "x",
+          owner_user_id: "owner-1",
+          agent_id: "agent1",
+          entity_ids: ["course:owner-1:a"],
+        },
+        scope,
+      ).ok,
+    ).toBe(true);
+    expect(
+      applyTrustedCourseToolPolicy("search_memory", { query: "x" }, undefined),
+    ).toEqual({ ok: true, arguments: { query: "x" } });
   });
 
   test("blocks canonical course-scoped meeting_search without leaking scope identifiers", () => {
-    expect(applyTrustedCourseToolPolicy("meeting_search", { query: "weekly" }, scope)).toEqual({ ok: false, code: "COURSE_MEETING_SCOPE_UNAVAILABLE", message: "Course meeting ownership is not verified yet. Provide a specific meeting or link, or use canonical course evidence instead." });
+    expect(
+      applyTrustedCourseToolPolicy(
+        "meeting_search",
+        { query: "weekly" },
+        scope,
+      ),
+    ).toEqual({
+      ok: false,
+      code: "COURSE_MEETING_SCOPE_UNAVAILABLE",
+      message:
+        "Course meeting ownership is not verified yet. Provide a specific meeting or link, or use canonical course evidence instead.",
+    });
   });
 
   test("REST blocks course meeting search before upstream and forwards non-course meeting search", async () => {
-    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 11, courseToolScope: scope });
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      tokenKind: "run",
+      runId: 11,
+      courseToolScope: scope,
+    });
     const bodies: any[] = [];
-    globalThis.fetch = mock(async (_input, init) => { const body = JSON.parse(String(init?.body)); bodies.push(body); return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [] } }), { headers: { "content-type": "application/json" } }); }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ toolbox: { id: "toolbox", upstreamUrl: "https://toolbox.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
-    const blocked = await proxy.getApp().request("/toolbox/tools/meeting_search", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "weekly", bypassCourseScope: true }) });
-    expect(blocked.status).toBe(409); expect(await blocked.json()).toMatchObject({ diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" }); expect(bodies).toHaveLength(0);
-    const forwarded = await proxy.getApp().request("/toolbox/tools/meeting_search", { method: "POST", headers: { authorization: `Bearer ${agent1Token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "weekly" }) });
-    expect(forwarded.status).toBe(200); expect(bodies.some((body) => body.params?.name === "meeting_search")).toBe(true);
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [] },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        toolbox: {
+          id: "toolbox",
+          upstreamUrl: "https://toolbox.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const blocked = await proxy
+      .getApp()
+      .request("/toolbox/tools/meeting_search", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ query: "weekly", bypassCourseScope: true }),
+      });
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({
+      diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE",
+    });
+    expect(bodies).toHaveLength(0);
+    const forwarded = await proxy
+      .getApp()
+      .request("/toolbox/tools/meeting_search", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${agent1Token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ query: "weekly" }),
+      });
+    expect(forwarded.status).toBe(200);
+    expect(bodies.some((body) => body.params?.name === "meeting_search")).toBe(
+      true,
+    );
   });
 
   test("JSON-RPC blocks canonical meeting_search before upstream and leaves course search_memory available", async () => {
-    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 12, courseToolScope: scope });
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      tokenKind: "run",
+      runId: 12,
+      courseToolScope: scope,
+    });
     const bodies: any[] = [];
-    globalThis.fetch = mock(async (_input, init) => { const body = JSON.parse(String(init?.body)); bodies.push(body); return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [] } }), { headers: { "content-type": "application/json" } }); }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ toolbox: { id: "toolbox", upstreamUrl: "https://toolbox.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
-    const blocked = await proxy.getApp().request("/toolbox", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 51, method: "tools/call", params: { name: "meeting_search", arguments: { query: "weekly" } } }) });
-    expect(blocked.status).toBe(409); expect(await blocked.json()).toMatchObject({ result: { diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" } }); expect(bodies).toHaveLength(0);
-    const memory = await proxy.getApp().request("/toolbox", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 52, method: "tools/call", params: { name: "search_memory", arguments: { query: "weekly" } } }) });
-    expect(memory.status).toBe(200); expect(bodies.some((body) => body.params?.name === "search_memory")).toBe(true);
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [] },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        toolbox: {
+          id: "toolbox",
+          upstreamUrl: "https://toolbox.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const blocked = await proxy.getApp().request("/toolbox", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 51,
+        method: "tools/call",
+        params: { name: "meeting_search", arguments: { query: "weekly" } },
+      }),
+    });
+    expect(blocked.status).toBe(409);
+    expect(await blocked.json()).toMatchObject({
+      result: { diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" },
+    });
+    expect(bodies).toHaveLength(0);
+    const memory = await proxy.getApp().request("/toolbox", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 52,
+        method: "tools/call",
+        params: { name: "search_memory", arguments: { query: "weekly" } },
+      }),
+    });
+    expect(memory.status).toBe(200);
+    expect(bodies.some((body) => body.params?.name === "search_memory")).toBe(
+      true,
+    );
   });
 
   test("direct approval replay denies meeting_search from durable trusted course scope", async () => {
-    let calls = 0; globalThis.fetch = mock(async () => { calls++; return new Response("{}"); }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ toolbox: { id: "toolbox", upstreamUrl: "https://toolbox.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
-    const result = await inTestOrg(() => proxy.executeToolDirect("agent1", "owner-1", "toolbox", "meeting_search", { query: "weekly", bypassCourseScope: true }, { courseToolScope: scope }));
-    expect(result).toMatchObject({ isError: true, diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE" }); expect(calls).toBe(0);
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      return new Response("{}");
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        toolbox: {
+          id: "toolbox",
+          upstreamUrl: "https://toolbox.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const result = await inTestOrg(() =>
+      proxy.executeToolDirect(
+        "agent1",
+        "owner-1",
+        "toolbox",
+        "meeting_search",
+        { query: "weekly", bypassCourseScope: true },
+        { courseToolScope: scope },
+      ),
+    );
+    expect(result).toMatchObject({
+      isError: true,
+      diagnosticCode: "COURSE_MEETING_SCOPE_UNAVAILABLE",
+    });
+    expect(calls).toBe(0);
   });
 
   test("REST proxy rewrites from the encrypted run scope before upstream search", async () => {
     const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
-      channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 7, courseToolScope: scope,
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      tokenKind: "run",
+      runId: 7,
+      courseToolScope: scope,
     });
     const bodies: any[] = [];
     globalThis.fetch = mock(async (_input, init) => {
-      const body = JSON.parse(String(init?.body)); bodies.push(body);
-      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [] } }), { headers: { "content-type": "application/json" } });
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { content: [] },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
     }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
-    const response = await proxy.getApp().request("/memory/tools/search_memory", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "launch" }) });
+    const proxy = new McpProxy(
+      createConfigSource({
+        memory: {
+          id: "memory",
+          upstreamUrl: "https://memory.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const response = await proxy
+      .getApp()
+      .request("/memory/tools/search_memory", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ query: "launch" }),
+      });
     expect(response.status).toBe(200);
-    expect(bodies.find((body) => body.method === "tools/call")?.params.arguments).toEqual({ query: "launch", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] });
+    expect(
+      bodies.find((body) => body.method === "tools/call")?.params.arguments,
+    ).toEqual({
+      query: "launch",
+      owner_user_id: "owner-1",
+      agent_id: "agent1",
+      entity_ids: ["course:owner-1:a"],
+    });
   });
 
   test("REST proxy rejects a conflicting course before any upstream request", async () => {
-    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 8, courseToolScope: scope });
-    let calls = 0; globalThis.fetch = mock(async () => { calls++; return new Response("{}"); }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
-    const response = await proxy.getApp().request("/memory/tools/search_memory", { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify({ query: "x", entity_ids: [] }) });
-    expect(response.status).toBe(409); expect((await response.json()).diagnosticCode).toBe("COURSE_SCOPE_MISMATCH"); expect(calls).toBe(0);
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      tokenKind: "run",
+      runId: 8,
+      courseToolScope: scope,
+    });
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      return new Response("{}");
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        memory: {
+          id: "memory",
+          upstreamUrl: "https://memory.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const response = await proxy
+      .getApp()
+      .request("/memory/tools/search_memory", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ query: "x", entity_ids: [] }),
+      });
+    expect(response.status).toBe(409);
+    expect((await response.json()).diagnosticCode).toBe(
+      "COURSE_SCOPE_MISMATCH",
+    );
+    expect(calls).toBe(0);
   });
 
   test("JSON-RPC proxy injects encrypted run scope into upstream tools/call params", async () => {
     const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
-      channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 9, courseToolScope: scope,
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      tokenKind: "run",
+      runId: 9,
+      courseToolScope: scope,
     });
     const bodies: any[] = [];
     globalThis.fetch = mock(async (_input, init) => {
-      const body = JSON.parse(String(init?.body)); bodies.push(body);
-      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: body.method === "initialize" ? {} : { content: [] } }), { headers: { "content-type": "application/json" } });
+      const body = JSON.parse(String(init?.body));
+      bodies.push(body);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: body.method === "initialize" ? {} : { content: [] },
+        }),
+        { headers: { "content-type": "application/json" } },
+      );
     }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const proxy = new McpProxy(
+      createConfigSource({
+        memory: {
+          id: "memory",
+          upstreamUrl: "https://memory.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
     const response = await proxy.getApp().request("/memory", {
-      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 41, method: "tools/call", params: { name: "search_memory", arguments: { query: "launch" } } }),
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 41,
+        method: "tools/call",
+        params: { name: "search_memory", arguments: { query: "launch" } },
+      }),
     });
     expect(response.status).toBe(200);
-    expect(bodies.find((body) => body.method === "tools/call")?.params.arguments).toEqual({ query: "launch", owner_user_id: "owner-1", agent_id: "agent1", entity_ids: ["course:owner-1:a"] });
+    expect(
+      bodies.find((body) => body.method === "tools/call")?.params.arguments,
+    ).toEqual({
+      query: "launch",
+      owner_user_id: "owner-1",
+      agent_id: "agent1",
+      entity_ids: ["course:owner-1:a"],
+    });
   });
 
   test.each([
@@ -306,30 +598,135 @@ describe("trusted course memory tool policy", () => {
     { entity_ids: [] },
     { entity_ids: ["course:owner-1:a", "course:owner-1:b"] },
   ])("JSON-RPC proxy rejects conflicting or cleared encrypted run scope before upstream", async (override) => {
-    const token = generateWorkerToken("owner-1", "conv1", "deploy1", { channelId: "ch1", agentId: "agent1", organizationId: "test-org", tokenKind: "run", runId: 10, courseToolScope: scope });
-    let calls = 0; globalThis.fetch = mock(async () => { calls++; return new Response("{}"); }) as typeof fetch;
-    const proxy = new McpProxy(createConfigSource({ memory: { id: "memory", upstreamUrl: "https://memory.test/mcp", internal: true } }), { secretStore: new InMemoryWritableStore() });
+    const token = generateWorkerToken("owner-1", "conv1", "deploy1", {
+      channelId: "ch1",
+      agentId: "agent1",
+      organizationId: "test-org",
+      tokenKind: "run",
+      runId: 10,
+      courseToolScope: scope,
+    });
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      return new Response("{}");
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        memory: {
+          id: "memory",
+          upstreamUrl: "https://memory.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
     const response = await proxy.getApp().request("/memory", {
-      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 42, method: "tools/call", params: { name: "search_memory", arguments: { query: "x", ...override } } }),
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 42,
+        method: "tools/call",
+        params: {
+          name: "search_memory",
+          arguments: { query: "x", ...override },
+        },
+      }),
     });
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ jsonrpc: "2.0", id: 42, result: { isError: true, diagnosticCode: "COURSE_SCOPE_MISMATCH" } });
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: 42,
+      result: { isError: true, diagnosticCode: "COURSE_SCOPE_MISMATCH" },
+    });
     expect(calls).toBe(0);
   });
 
-  test.each([{value:null},{value:[]},{value:"query"}])('REST rejects non-object arguments before upstream', async ({value:args}) => {
-    let calls=0; globalThis.fetch=mock(async()=>{calls++;return new Response('{}')}) as typeof fetch;
-    const proxy=new McpProxy(createConfigSource({memory:{id:'memory',upstreamUrl:'https://memory.test/mcp',internal:true}}),{secretStore:new InMemoryWritableStore()});
-    const response=await proxy.getApp().request('/memory/tools/search_memory',{method:'POST',headers:{authorization:`Bearer ${agent1Token}`,'content-type':'application/json'},body:JSON.stringify(args)});
-    expect(response.status).toBe(400); expect(await response.json()).toMatchObject({diagnosticCode:'INVALID_TOOL_ARGUMENTS'}); expect(calls).toBe(0);
+  test.each([
+    { value: null },
+    { value: [] },
+    { value: "query" },
+  ])("REST rejects non-object arguments before upstream", async ({
+    value: args,
+  }) => {
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      return new Response("{}");
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        memory: {
+          id: "memory",
+          upstreamUrl: "https://memory.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const response = await proxy
+      .getApp()
+      .request("/memory/tools/search_memory", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${agent1Token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(args),
+      });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      diagnosticCode: "INVALID_TOOL_ARGUMENTS",
+    });
+    expect(calls).toBe(0);
   });
 
-  test.each([{value:null},{value:[]},{value:"query"}])('JSON-RPC rejects non-object arguments before upstream', async ({value:args}) => {
-    let calls=0; globalThis.fetch=mock(async()=>{calls++;return new Response('{}')}) as typeof fetch;
-    const proxy=new McpProxy(createConfigSource({memory:{id:'memory',upstreamUrl:'https://memory.test/mcp',internal:true}}),{secretStore:new InMemoryWritableStore()});
-    const response=await proxy.getApp().request('/memory',{method:'POST',headers:{authorization:`Bearer ${agent1Token}`,'content-type':'application/json'},body:JSON.stringify({jsonrpc:'2.0',id:77,method:'tools/call',params:{name:'search_memory',arguments:args}})});
-    expect(response.status).toBe(400); expect(await response.json()).toMatchObject({jsonrpc:'2.0',id:77,error:{code:-32602}}); expect(calls).toBe(0);
+  test.each([
+    { value: null },
+    { value: [] },
+    { value: "query" },
+  ])("JSON-RPC rejects non-object arguments before upstream", async ({
+    value: args,
+  }) => {
+    let calls = 0;
+    globalThis.fetch = mock(async () => {
+      calls++;
+      return new Response("{}");
+    }) as typeof fetch;
+    const proxy = new McpProxy(
+      createConfigSource({
+        memory: {
+          id: "memory",
+          upstreamUrl: "https://memory.test/mcp",
+          internal: true,
+        },
+      }),
+      { secretStore: new InMemoryWritableStore() },
+    );
+    const response = await proxy.getApp().request("/memory", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${agent1Token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 77,
+        method: "tools/call",
+        params: { name: "search_memory", arguments: args },
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      jsonrpc: "2.0",
+      id: 77,
+      error: { code: -32602 },
+    });
+    expect(calls).toBe(0);
   });
 });
 
@@ -351,53 +748,55 @@ describe("durable observability for tools/list", () => {
       secretStore: new InMemoryWritableStore(),
     });
 
-    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : (input as Request).url;
-      if (url === "https://obs.example.test/ingest") {
-        obsBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 202 });
-      }
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
 
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (body.method === "initialize") {
-        return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      if (body.method === "tools/list") {
-        return new Response(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: body.id,
-            result: { tools: [{ name: "search" }, { name: "read" }] },
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "tools/list") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { tools: [{ name: "search" }, { name: "read" }] },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      },
+    ) as unknown as typeof fetch;
 
     await inTestOrg(() =>
       proxy.fetchToolsForMcp("obs-mcp", "agent1", {
         userId: "user1",
         channelId: "ch1",
-      })
+      }),
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const discovered = obsBodies.find(
       (body) =>
         body.schemaVersion === "journey.trace.v1" &&
-        body.payload?.event === "mcp.server.discovered"
+        body.payload?.event === "mcp.server.discovered",
     );
     expect(discovered).toMatchObject({
       schemaVersion: "journey.trace.v1",
@@ -414,8 +813,7 @@ describe("durable observability for tools/list", () => {
 
     const completed = obsBodies.find(
       (body) =>
-        body.eventName === "mcp.tools_list.completed" &&
-        body.status === "ok"
+        body.eventName === "mcp.tools_list.completed" && body.status === "ok",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tools_list.completed",
@@ -431,7 +829,7 @@ describe("durable observability for tools/list", () => {
     const journeyCompleted = obsBodies.find(
       (body) =>
         body.schemaVersion === "journey.trace.v1" &&
-        body.payload?.event === "mcp.tools_list.completed"
+        body.payload?.event === "mcp.tools_list.completed",
     );
     expect(journeyCompleted).toMatchObject({
       schemaVersion: "journey.trace.v1",
@@ -460,25 +858,27 @@ describe("durable observability for tools/list", () => {
       secretStore: new InMemoryWritableStore(),
     });
 
-    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : (input as Request).url;
-      if (url === "https://obs.example.test/ingest") {
-        obsBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 202 });
-      }
-      throw new Error("fetch failed: network timeout 503");
-    }) as unknown as typeof fetch;
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+        throw new Error("fetch failed: network timeout 503");
+      },
+    ) as unknown as typeof fetch;
 
     const result = await inTestOrg(() =>
       proxy.fetchToolsForMcp("flaky-mcp", "agent1", {
         userId: "user1",
         channelId: "ch1",
-      })
+      }),
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -486,7 +886,7 @@ describe("durable observability for tools/list", () => {
     const completed = obsBodies.find(
       (body) =>
         body.eventName === "mcp.tools_list.completed" &&
-        body.status === "failed"
+        body.status === "failed",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tools_list.completed",
@@ -514,25 +914,27 @@ describe("durable observability for tools/list", () => {
       secretStore: new InMemoryWritableStore(),
     });
 
-    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : (input as Request).url;
-      if (url === "https://obs.example.test/ingest") {
-        obsBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 202 });
-      }
-      return new Response("auth required", { status: 401 });
-    }) as unknown as typeof fetch;
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
+        return new Response("auth required", { status: 401 });
+      },
+    ) as unknown as typeof fetch;
 
     const result = await inTestOrg(() =>
       proxy.fetchToolsForMcp("port-mcp", "agent1", {
         userId: "user1",
         channelId: "ch1",
-      })
+      }),
     );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -540,7 +942,7 @@ describe("durable observability for tools/list", () => {
     const completed = obsBodies.find(
       (body) =>
         body.eventName === "mcp.tools_list.completed" &&
-        body.status === "failed"
+        body.status === "failed",
     );
     expect(completed).toMatchObject({
       metadata: expect.objectContaining({
@@ -555,22 +957,25 @@ describe("durable observability for tools/list", () => {
     { status: 403, phase: "initialize", diagnostic: "upstream_forbidden" },
     { status: 401, phase: "tools/list", diagnostic: "upstream_unauthorized" },
     { status: 403, phase: "tools/list", diagnostic: "upstream_forbidden" },
-  ])(
-    "emits a failed completed event for $phase HTTP $status auth early return",
-    async ({ status, phase, diagnostic }) => {
-      enableObsEnv();
-      const obsBodies: any[] = [];
-      const configSource = createConfigSource({
-        "auth-mcp": {
-          id: "auth-mcp",
-          upstreamUrl: "https://auth-mcp.example.test/mcp",
-        },
-      });
-      const proxy = new McpProxy(configSource, {
-        secretStore: new InMemoryWritableStore(),
-      });
+  ])("emits a failed completed event for $phase HTTP $status auth early return", async ({
+    status,
+    phase,
+    diagnostic,
+  }) => {
+    enableObsEnv();
+    const obsBodies: any[] = [];
+    const configSource = createConfigSource({
+      "auth-mcp": {
+        id: "auth-mcp",
+        upstreamUrl: "https://auth-mcp.example.test/mcp",
+      },
+    });
+    const proxy = new McpProxy(configSource, {
+      secretStore: new InMemoryWritableStore(),
+    });
 
-      globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
         const url =
           typeof input === "string"
             ? input
@@ -587,12 +992,15 @@ describe("durable observability for tools/list", () => {
           if (phase === "initialize") {
             return new Response("auth required", {
               status,
-              headers: { "WWW-Authenticate": 'Bearer resource_metadata="https://auth.example.test/.well-known/oauth-protected-resource"' },
+              headers: {
+                "WWW-Authenticate":
+                  'Bearer resource_metadata="https://auth.example.test/.well-known/oauth-protected-resource"',
+              },
             });
           }
           return new Response(
             JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
-            { status: 200, headers: { "Content-Type": "application/json" } }
+            { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
         if (body.method === "tools/list") {
@@ -602,40 +1010,40 @@ describe("durable observability for tools/list", () => {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
-      }) as unknown as typeof fetch;
+      },
+    ) as unknown as typeof fetch;
 
-      const result = await inTestOrg(() =>
-        proxy.fetchToolsForMcp("auth-mcp", "agent1", {
-          userId: "user1",
-          channelId: "ch1",
-        })
-      );
-      await new Promise((resolve) => setTimeout(resolve, 0));
+    const result = await inTestOrg(() =>
+      proxy.fetchToolsForMcp("auth-mcp", "agent1", {
+        userId: "user1",
+        channelId: "ch1",
+      }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
-      expect(result.tools).toEqual([]);
-      const completed = obsBodies.find(
-        (body) =>
-          body.eventName === "mcp.tools_list.completed" &&
-          body.status === "failed"
-      );
-      expect(completed).toMatchObject({
-        eventName: "mcp.tools_list.completed",
-        status: "failed",
-        metadata: expect.objectContaining({
-          module: "mcp-proxy",
-          mcp_id: "auth-mcp",
-          error_class: "needs_reauth",
-          diagnostic_code: diagnostic,
-          next_debug_hint: expect.stringContaining("MCP"),
-        }),
-      });
-    }
-  );
+    expect(result.tools).toEqual([]);
+    const completed = obsBodies.find(
+      (body) =>
+        body.eventName === "mcp.tools_list.completed" &&
+        body.status === "failed",
+    );
+    expect(completed).toMatchObject({
+      eventName: "mcp.tools_list.completed",
+      status: "failed",
+      metadata: expect.objectContaining({
+        module: "mcp-proxy",
+        mcp_id: "auth-mcp",
+        error_class: "needs_reauth",
+        diagnostic_code: diagnostic,
+        next_debug_hint: expect.stringContaining("MCP"),
+      }),
+    });
+  });
 });
 
 describe("durable observability for forwarded JSON-RPC tools/call", () => {
   async function requestForwardedToolCall(
-    upstreamToolCallResult: object
+    upstreamToolCallResult: object,
   ): Promise<{ response: Response; obsBodies: any[] }> {
     enableObsEnv();
     const obsBodies: any[] = [];
@@ -650,36 +1058,38 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     });
     const app = proxy.getApp();
 
-    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : (input as Request).url;
-      if (url === "https://obs.example.test/ingest") {
-        obsBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 202 });
-      }
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
 
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (body.method === "initialize") {
-        return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      if (body.method === "tools/call") {
-        return new Response(JSON.stringify(upstreamToolCallResult), {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "tools/call") {
+          return new Response(JSON.stringify(upstreamToolCallResult), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
-      }
-      return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
+      },
+    ) as unknown as typeof fetch;
 
     const response = await app.request("/jsonrpc-mcp", {
       method: "POST",
@@ -713,7 +1123,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       error: { code: -32001, message: "upstream tool failed" },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tool_call.completed",
@@ -744,7 +1154,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       error: { code: -32602, message: "unknown server: shifu-toolbox" },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tool_call.completed",
@@ -774,7 +1184,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       error: "unknown",
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tool_call.completed",
@@ -810,7 +1220,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tool_call.completed",
@@ -831,7 +1241,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
   test("redacts and truncates tool call result preview text", async () => {
     const longText = `Authorization: Bearer ${"abc"}${"123"} ${"x".repeat(
-      400
+      400,
     )}`;
     const { response, obsBodies } = await requestForwardedToolCall({
       jsonrpc: "2.0",
@@ -844,7 +1254,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     expect(response.status).toBe(200);
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     const preview = completed?.metadata?.result_preview;
     expect(preview).toEqual(
@@ -852,7 +1262,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
         is_error: true,
         first_content_type: "text",
         first_text: expect.any(String),
-      })
+      }),
     );
     const firstText = (preview as { first_text: string }).first_text;
     expect(firstText).not.toContain("Bearer");
@@ -871,7 +1281,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       jsonRefreshToken: `"refreshToken":"json-raw-refresh-token"`,
     };
     const longText = `${Object.values(credentials).join(" ")} ${"x".repeat(
-      400
+      400,
     )}`;
     const { response, obsBodies } = await requestForwardedToolCall({
       jsonrpc: "2.0",
@@ -884,7 +1294,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
 
     expect(response.status).toBe(200);
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     const firstText = completed?.metadata?.result_preview?.first_text;
     expect(firstText).toEqual(expect.any(String));
@@ -922,7 +1332,7 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
       },
     });
     const completed = obsBodies.find(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completed).toMatchObject({
       eventName: "mcp.tool_call.completed",
@@ -956,41 +1366,43 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
     const app = proxy.getApp();
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
 
-    globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.href
-            : (input as Request).url;
-      if (url === "https://obs.example.test/ingest") {
-        obsBodies.push(JSON.parse(String(init?.body)));
-        return new Response("{}", { status: 202 });
-      }
+    globalThis.fetch = mock(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.href
+              : (input as Request).url;
+        if (url === "https://obs.example.test/ingest") {
+          obsBodies.push(JSON.parse(String(init?.body)));
+          return new Response("{}", { status: 202 });
+        }
 
-      const body = init?.body ? JSON.parse(String(init.body)) : {};
-      if (body.method === "initialize") {
-        return new Response(
-          JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
-      if (body.method === "tools/call") {
-        const stream = new ReadableStream<Uint8Array>({
-          start(streamController) {
-            controller = streamController;
-          },
-        });
-        return new Response(stream, {
+        const body = init?.body ? JSON.parse(String(init.body)) : {};
+        if (body.method === "initialize") {
+          return new Response(
+            JSON.stringify({ jsonrpc: "2.0", id: body.id, result: {} }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (body.method === "tools/call") {
+          const stream = new ReadableStream<Uint8Array>({
+            start(streamController) {
+              controller = streamController;
+            },
+          });
+          return new Response(stream, {
+            status: 200,
+            headers: { "Content-Type": "text/event-stream" },
+          });
+        }
+        return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
           status: 200,
-          headers: { "Content-Type": "text/event-stream" },
+          headers: { "Content-Type": "application/json" },
         });
-      }
-      return new Response(JSON.stringify({ jsonrpc: "2.0", result: {} }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      });
-    }) as unknown as typeof fetch;
+      },
+    ) as unknown as typeof fetch;
 
     const requestPromise = app.request("/sse-forwarded-mcp", {
       method: "POST",
@@ -1018,14 +1430,14 @@ describe("durable observability for forwarded JSON-RPC tools/call", () => {
             content: [{ type: "text", text: "eventual" }],
             isError: false,
           },
-        })}\n\n`
-      )
+        })}\n\n`,
+      ),
     );
     controller?.close();
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     const completedEvents = obsBodies.filter(
-      (body) => body.eventName === "mcp.tool_call.completed"
+      (body) => body.eventName === "mcp.tool_call.completed",
     );
     expect(completedEvents).toHaveLength(1);
     expect(completedEvents[0]).toMatchObject({
@@ -1150,7 +1562,10 @@ describe("SSRF guard", () => {
 
   test("allows public upstream URL", async () => {
     const configSource = createConfigSource({
-      "pub-mcp": { id: "pub-mcp", upstreamUrl: "http://public-mcp.example.com:9000/mcp" },
+      "pub-mcp": {
+        id: "pub-mcp",
+        upstreamUrl: "http://public-mcp.example.com:9000/mcp",
+      },
     });
     const proxy = new McpProxy(configSource, {
       secretStore: new InMemoryWritableStore(),
@@ -1164,7 +1579,7 @@ describe("SSRF guard", () => {
           id: 1,
           result: { content: [{ type: "text", text: "ok" }], isError: false },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
     const res = await app.request("/pub-mcp/tools/a_tool", {
@@ -1197,9 +1612,12 @@ describe("SSRF guard", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { content: [{ type: "text", text: "internal ok" }], isError: false },
+          result: {
+            content: [{ type: "text", text: "internal ok" }],
+            isError: false,
+          },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
     const res = await app.request("/lobu-memory/tools/search_memory", {
@@ -1260,7 +1678,10 @@ describe("cross-agent JWT isolation", () => {
       getHttpServer: async (id, agentId) => {
         // Only agent1 has access to "secure-mcp"
         if (id === "secure-mcp" && agentId === "agent1") {
-          return { id: "secure-mcp", upstreamUrl: "http://secure.example.com/mcp" };
+          return {
+            id: "secure-mcp",
+            upstreamUrl: "http://secure.example.com/mcp",
+          };
         }
         return undefined;
       },
@@ -1292,7 +1713,10 @@ describe("cross-agent JWT isolation", () => {
     const configSource: McpConfigSource = {
       getHttpServer: async (id, agentId) => {
         if (id === "secure-mcp" && agentId === "agent1") {
-          return { id: "secure-mcp", upstreamUrl: "http://secure.example.com/mcp" };
+          return {
+            id: "secure-mcp",
+            upstreamUrl: "http://secure.example.com/mcp",
+          };
         }
         return undefined;
       },
@@ -1311,7 +1735,7 @@ describe("cross-agent JWT isolation", () => {
           id: 1,
           result: { content: [{ type: "text", text: "ok" }], isError: false },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
     const res = await app.request("/secure-mcp/tools/some_tool", {
@@ -1331,7 +1755,10 @@ describe("cross-agent JWT isolation", () => {
     const grantStore = new GrantStore();
 
     const configSource = createConfigSource({
-      "shared-mcp": { id: "shared-mcp", upstreamUrl: "http://shared.example.com/mcp" },
+      "shared-mcp": {
+        id: "shared-mcp",
+        upstreamUrl: "http://shared.example.com/mcp",
+      },
     });
     const proxy = new McpProxy(configSource, {
       secretStore: new InMemoryWritableStore(),
@@ -1353,7 +1780,7 @@ describe("cross-agent JWT isolation", () => {
       "/mcp/shared-mcp/tools/delete_everything",
       null,
       undefined,
-      "test-org"
+      "test-org",
     );
 
     successFetch({
@@ -1467,9 +1894,12 @@ describe("tool registry collision — same tool name on two MCPs", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { content: [{ type: "text", text: `response from ${lastUrl}` }], isError: false },
+          result: {
+            content: [{ type: "text", text: `response from ${lastUrl}` }],
+            isError: false,
+          },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
@@ -1501,13 +1931,17 @@ describe("tool registry collision — same tool name on two MCPs", () => {
     const { toolsA, toolsB } = orgContext.run(
       { organizationId: "test-org" },
       () => {
-        toolCache.set("mcp-a", [{ name: "send_message", annotations: { readOnlyHint: true } }], "agent1");
+        toolCache.set(
+          "mcp-a",
+          [{ name: "send_message", annotations: { readOnlyHint: true } }],
+          "agent1",
+        );
         toolCache.set("mcp-b", [{ name: "send_message" }], "agent1");
         return {
           toolsA: toolCache.get("mcp-a", "agent1"),
           toolsB: toolCache.get("mcp-b", "agent1"),
         };
-      }
+      },
     );
 
     expect(toolsA).toHaveLength(1);
@@ -1527,7 +1961,11 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();
     inTestOrg(() => {
-      toolCache.set("google_workspace", [{ name: "gws_docs_create" }], "agent-1");
+      toolCache.set(
+        "google_workspace",
+        [{ name: "gws_docs_create" }],
+        "agent-1",
+      );
     });
 
     const configSource = createConfigSource({
@@ -1555,7 +1993,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       conversationId,
       teamId,
       connectionId,
-      platform
+      platform,
     ) => {
       captured.push({
         requestId,
@@ -1585,7 +2023,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
             isError: false,
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
@@ -1602,8 +2040,8 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           organizationId: "org-1",
           platform: "line",
           token: "worker-token",
-        }
-      )
+        },
+      ),
     );
 
     expect(result.status).toBe("blocked-notified");
@@ -1627,7 +2065,11 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     const toolCache = new McpToolCache();
     const grantStore = new GrantStore();
     inTestOrg(() => {
-      toolCache.set("google_workspace", [{ name: "gws_docs_create" }], "agent-1");
+      toolCache.set(
+        "google_workspace",
+        [{ name: "gws_docs_create" }],
+        "agent-1",
+      );
     });
 
     const configSource = createConfigSource({
@@ -1644,7 +2086,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     });
     proxy.onToolBlocked = async () => {
       throw new Error(
-        "Refusing to post tool approval: connectionId is required to prevent cross-platform event leakage"
+        "Refusing to post tool approval: connectionId is required to prevent cross-platform event leakage",
       );
     };
 
@@ -1660,7 +2102,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
             isError: false,
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
@@ -1677,8 +2119,8 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           organizationId: "org-1",
           platform: "api",
           token: "worker-token",
-        }
-      )
+        },
+      ),
     );
 
     expect(result.status).toBe("blocked-no-channel");
@@ -1692,7 +2134,10 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     const grantStore = new GrantStore();
 
     const configSource = createConfigSource({
-      "test-mcp": { id: "test-mcp", upstreamUrl: "http://test.example.com/mcp" },
+      "test-mcp": {
+        id: "test-mcp",
+        upstreamUrl: "http://test.example.com/mcp",
+      },
     });
 
     let blockedCount = 0;
@@ -1712,7 +2157,11 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       toolCache.set("test-mcp", [{ name: "nuke_db" }], "agent1");
     });
 
-    successFetch({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "done" }] } });
+    successFetch({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: "done" }] },
+    });
 
     const res = await app.request("/test-mcp/tools/nuke_db", {
       method: "POST",
@@ -1735,11 +2184,8 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     orgContext.run({ organizationId: "test-org" }, () => {
       toolCache.set(
         "gh-mcp",
-        [
-          { name: "create_issue" },
-          { name: "delete_repo" },
-        ],
-        "agent1"
+        [{ name: "create_issue" }, { name: "delete_repo" }],
+        "agent1",
       );
     });
 
@@ -1749,7 +2195,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       "/mcp/gh-mcp/tools/*",
       null,
       undefined,
-      "test-org"
+      "test-org",
     );
 
     const configSource = createConfigSource({
@@ -1769,7 +2215,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           id: 1,
           result: { content: [{ type: "text", text: "ok" }], isError: false },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
     const r1 = await app.request("/gh-mcp/tools/create_issue", {
@@ -1845,17 +2291,18 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
 
   test("refreshes stored OAuth credential when tool discovery gets invalid_token", async () => {
     const secretStore = new InMemoryWritableStore();
+    const legacyCredential = {
+      accessToken: "stale-access-token",
+      refreshToken: "refresh-token",
+      expiresAt: Date.now() + 60 * 60 * 1000,
+      clientId: "client-id",
+      tokenUrl: "https://auth.example.com/oauth/token",
+      resource: "https://toolbox.example.com/mcp",
+      tokenEndpointAuthMethod: "none" as const,
+    };
     await secretStore.put(
       "mcp-auth/agent1/user1/toolbox/credential",
-      JSON.stringify({
-        accessToken: "stale-access-token",
-        refreshToken: "refresh-token",
-        expiresAt: Date.now() + 60 * 60 * 1000,
-        clientId: "client-id",
-        tokenUrl: "https://auth.example.com/oauth/token",
-        resource: "https://toolbox.example.com/mcp",
-        tokenEndpointAuthMethod: "none",
-      })
+      JSON.stringify(legacyCredential),
     );
 
     const configSource = createConfigSource({
@@ -1888,12 +2335,12 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
             refresh_token: "rotated-refresh-token",
             expires_in: 3600,
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
+          { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
 
       upstreamAuthorizations.push(
-        String((init?.headers as Record<string, string>)?.Authorization || "")
+        String((init?.headers as Record<string, string>)?.Authorization || ""),
       );
       if (upstreamAuthorizations.length === 1) {
         return new Response(
@@ -1901,7 +2348,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
             error: "invalid_token",
             error_description: "Invalid access token",
           }),
-          { status: 401, headers: { "Content-Type": "application/json" } }
+          { status: 401, headers: { "Content-Type": "application/json" } },
         );
       }
 
@@ -1911,7 +2358,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
           id: 1,
           result: { tools: [{ name: "meeting_search" }] },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
@@ -1921,24 +2368,27 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
         "agent1",
         { userId: "user1", channelId: "ch1" },
         agent1Token,
-        { surfaceErrors: true }
-      )
+        { surfaceErrors: true },
+      ),
     );
 
     expect(refreshCount).toBe(1);
     expect(upstreamAuthorizations[0]).toBe("Bearer stale-access-token");
     expect(upstreamAuthorizations.slice(1)).toEqual(
-      upstreamAuthorizations.slice(1).map(() => "Bearer fresh-access-token")
+      upstreamAuthorizations.slice(1).map(() => "Bearer fresh-access-token"),
     );
     expect(result.tools.map((tool) => tool.name)).toEqual(["meeting_search"]);
 
     const stored = JSON.parse(
       (await secretStore.get(
-        "secret://mcp-auth%2Fagent1%2Fuser1%2Ftoolbox%2Fcredential" as SecretRef
-      )) || "{}"
+        "secret://mcp-auth%2Fagent1%2Fuser1%2Ftoolbox%2Fcredential" as SecretRef,
+      )) || "{}",
     );
     expect(stored.accessToken).toBe("fresh-access-token");
     expect(stored.refreshToken).toBe("rotated-refresh-token");
+    expect(stored.bindingId).toBe(
+      getStableCredentialBindingId(legacyCredential),
+    );
   });
 
   test("onToolBlocked receives correct agentId and tool metadata", async () => {
@@ -1949,7 +2399,10 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     });
 
     const configSource = createConfigSource({
-      "audit-mcp": { id: "audit-mcp", upstreamUrl: "http://audit.example.com/mcp" },
+      "audit-mcp": {
+        id: "audit-mcp",
+        upstreamUrl: "http://audit.example.com/mcp",
+      },
     });
 
     const captured: Record<string, unknown>[] = [];
@@ -1965,9 +2418,17 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       mcpId,
       toolName,
       args,
-      grantPattern
+      grantPattern,
     ) => {
-      captured.push({ requestId, agentId, userId, mcpId, toolName, args, grantPattern });
+      captured.push({
+        requestId,
+        agentId,
+        userId,
+        mcpId,
+        toolName,
+        args,
+        grantPattern,
+      });
     };
     const app = proxy.getApp();
 
@@ -2011,7 +2472,10 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
     });
 
     const configSource = createConfigSource({
-      "line-mcp": { id: "line-mcp", upstreamUrl: "http://line.example.com/mcp" },
+      "line-mcp": {
+        id: "line-mcp",
+        upstreamUrl: "http://line.example.com/mcp",
+      },
     });
 
     const captured: Record<string, unknown>[] = [];
@@ -2034,7 +2498,7 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
       connectionId,
       platform,
       originMessageId,
-      processedMessageIds
+      processedMessageIds,
     ) => {
       captured.push({
         requestId,
@@ -2088,7 +2552,10 @@ describe("tool approval — onToolBlocked and wildcard grants", () => {
 describe("request body size limit", () => {
   test("body > 1MB returns 413", async () => {
     const configSource = createConfigSource({
-      "test-mcp": { id: "test-mcp", upstreamUrl: "http://test.example.com/mcp" },
+      "test-mcp": {
+        id: "test-mcp",
+        upstreamUrl: "http://test.example.com/mcp",
+      },
     });
     const proxy = new McpProxy(configSource, {
       secretStore: new InMemoryWritableStore(),
@@ -2196,16 +2663,24 @@ describe("in-memory session TTL", () => {
       const cache = new McpToolCache();
       cache.set("mcp-delete", [{ name: "agent1_tool" }], "agent1");
       cache.set("mcp-delete", [{ name: "agent2_tool" }], "agent2");
-      cache.set("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", [
-        { name: "read_file" },
-      ], "agent1");
+      cache.set(
+        "mcp-delete:config:digest-a",
+        [{ name: "configured_tool" }],
+        "agent1",
+      );
+      cache.set(
+        'mcp-delete:toolFilter:{"include":["read_*"]}',
+        [{ name: "read_file" }],
+        "agent1",
+      );
 
       cache.delete("mcp-delete", "agent1");
 
       expect(cache.get("mcp-delete", "agent1")).toBeNull();
       expect(
-        cache.get("mcp-delete:toolFilter:{\"include\":[\"read_*\"]}", "agent1")
+        cache.get('mcp-delete:toolFilter:{"include":["read_*"]}', "agent1"),
       ).toBeNull();
+      expect(cache.get("mcp-delete:config:digest-a", "agent1")).toBeNull();
       expect(cache.get("mcp-delete", "agent2")?.[0]?.name).toBe("agent2_tool");
 
       cache.delete("mcp-delete");
@@ -2218,18 +2693,68 @@ describe("in-memory session TTL", () => {
       const cache = new McpToolCache();
       cache.set("foo:bar", [{ name: "foo_bar_tool" }], "agent1");
       cache.set("bar", [{ name: "bar_tool" }], "agent1");
-      cache.set("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", [
-        { name: "foo_bar_read_tool" },
-      ], "agent1");
+      cache.set(
+        'foo:bar:toolFilter:{"include":["read_*"]}',
+        [{ name: "foo_bar_read_tool" }],
+        "agent1",
+      );
 
       cache.delete("bar");
 
       expect(cache.get("bar", "agent1")).toBeNull();
       expect(cache.get("foo:bar", "agent1")?.[0]?.name).toBe("foo_bar_tool");
       expect(
-        cache.get("foo:bar:toolFilter:{\"include\":[\"read_*\"]}", "agent1")?.[0]
-          ?.name
+        cache.get('foo:bar:toolFilter:{"include":["read_*"]}', "agent1")?.[0]
+          ?.name,
       ).toBe("foo_bar_read_tool");
+    });
+  });
+
+  test("McpToolCache sweeps expired entries when a new catalog is cached", () => {
+    const cache = new McpToolCache();
+    const originalNow = Date.now;
+    let now = 1_000;
+    Date.now = () => now;
+
+    try {
+      orgContext.run({ organizationId: "test-org" }, () => {
+        cache.set("expired-a", [{ name: "old_a" }], "agent1");
+        cache.set("expired-b", [{ name: "old_b" }], "agent1");
+        now += 5 * 60 * 1000 + 1;
+        cache.set("current", [{ name: "current" }], "agent1");
+
+        const entries = (cache as unknown as { entries: Map<string, unknown> })
+          .entries;
+        expect(entries.size).toBe(1);
+        expect(cache.get("current", "agent1")?.[0]?.name).toBe("current");
+      });
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("McpToolCache bounds config churn and evicts the least recently used catalog", () => {
+    const cache = new McpToolCache();
+    orgContext.run({ organizationId: "test-org" }, () => {
+      for (let i = 0; i < 512; i++) {
+        cache.set(`mcp-churn:config:${i}`, [{ name: `tool_${i}` }], "agent1");
+      }
+
+      expect(cache.get("mcp-churn:config:0", "agent1")?.[0]?.name).toBe(
+        "tool_0",
+      );
+      cache.set("mcp-churn:config:512", [{ name: "tool_512" }], "agent1");
+
+      const entries = (cache as unknown as { entries: Map<string, unknown> })
+        .entries;
+      expect(entries.size).toBe(512);
+      expect(cache.get("mcp-churn:config:0", "agent1")?.[0]?.name).toBe(
+        "tool_0",
+      );
+      expect(cache.get("mcp-churn:config:1", "agent1")).toBeNull();
+      expect(cache.get("mcp-churn:config:512", "agent1")?.[0]?.name).toBe(
+        "tool_512",
+      );
     });
   });
 });
@@ -2241,7 +2766,10 @@ describe("in-memory session TTL", () => {
 describe("concurrent tool calls", () => {
   test("two concurrent calls to the same MCP tool both succeed", async () => {
     const configSource = createConfigSource({
-      "conc-mcp": { id: "conc-mcp", upstreamUrl: "http://conc.example.com/mcp" },
+      "conc-mcp": {
+        id: "conc-mcp",
+        upstreamUrl: "http://conc.example.com/mcp",
+      },
     });
     const proxy = new McpProxy(configSource, {
       secretStore: new InMemoryWritableStore(),
@@ -2255,9 +2783,12 @@ describe("concurrent tool calls", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { content: [{ type: "text", text: `call-${callCount}` }], isError: false },
+          result: {
+            content: [{ type: "text", text: `call-${callCount}` }],
+            isError: false,
+          },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
@@ -2308,17 +2839,21 @@ describe("executeToolDirect", () => {
         JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
-          result: { content: [{ type: "text", text: "direct-result" }], isError: false },
+          result: {
+            content: [{ type: "text", text: "direct-result" }],
+            isError: false,
+          },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
-    const result = await executeDirectInTestOrg(proxy,
+    const result = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "direct-mcp",
       "some_tool",
-      { arg1: "val1" }
+      { arg1: "val1" },
     );
 
     expect(result.isError).toBe(false);
@@ -2331,12 +2866,13 @@ describe("executeToolDirect", () => {
       secretStore: new InMemoryWritableStore(),
     });
 
-    const result = await executeDirectInTestOrg(proxy,
+    const result = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "nonexistent-mcp",
       "some_tool",
-      {}
+      {},
     );
 
     expect(result.isError).toBe(true);
@@ -2358,12 +2894,13 @@ describe("executeToolDirect", () => {
       throw new Error("Connection refused");
     };
 
-    const result = await executeDirectInTestOrg(proxy,
+    const result = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "flaky-mcp",
       "any_tool",
-      {}
+      {},
     );
 
     expect(result.isError).toBe(true);
@@ -2388,24 +2925,26 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 3; i++) {
-      const result = await executeDirectInTestOrg(proxy,
+      const result = await executeDirectInTestOrg(
+        proxy,
         "agent1",
         "user1",
         "flaky-direct-mcp",
         "any_tool",
-        {}
+        {},
       );
       expect(result.isError).toBe(true);
       expect(result.diagnosticCode).toBe("connector_unavailable");
     }
     const fetchesBeforePause = fetchCount;
 
-    const paused = await executeDirectInTestOrg(proxy,
+    const paused = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "flaky-direct-mcp",
       "any_tool",
-      {}
+      {},
     );
 
     expect(paused.isError).toBe(true);
@@ -2432,12 +2971,13 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 2; i++) {
-      const result = await executeDirectInTestOrg(proxy,
+      const result = await executeDirectInTestOrg(
+        proxy,
         "agent1",
         "user1",
         "recover-direct-mcp",
         "any_tool",
-        {}
+        {},
       );
       expect(result.isError).toBe(true);
     }
@@ -2452,15 +2992,16 @@ describe("executeToolDirect", () => {
             isError: false,
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
-    const recovered = await executeDirectInTestOrg(proxy,
+    const recovered = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "recover-direct-mcp",
       "any_tool",
-      {}
+      {},
     );
     expect(recovered.isError).toBe(false);
     expect(recovered.content[0].text).toBe("recovered");
@@ -2472,12 +3013,13 @@ describe("executeToolDirect", () => {
     };
 
     for (let i = 0; i < 2; i++) {
-      const result = await executeDirectInTestOrg(proxy,
+      const result = await executeDirectInTestOrg(
+        proxy,
         "agent1",
         "user1",
         "recover-direct-mcp",
         "any_tool",
-        {}
+        {},
       );
       expect(result.isError).toBe(true);
     }
@@ -2494,16 +3036,17 @@ describe("executeToolDirect", () => {
             isError: false,
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
-    const stillReachable = await executeDirectInTestOrg(proxy,
+    const stillReachable = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "recover-direct-mcp",
       "any_tool",
-      {}
+      {},
     );
     expect(stillReachable.isError).toBe(false);
     expect(stillReachable.content[0].text).toBe("still reachable");
@@ -2530,17 +3073,18 @@ describe("executeToolDirect", () => {
           id: 1,
           error: { code: -32602, message: "Invalid params" },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
     for (let i = 0; i < 3; i++) {
-      const result = await executeDirectInTestOrg(proxy,
+      const result = await executeDirectInTestOrg(
+        proxy,
         "agent1",
         "user1",
         "tool-error-direct-mcp",
         "any_tool",
-        {}
+        {},
       );
       expect(result.isError).toBe(true);
     }
@@ -2557,16 +3101,17 @@ describe("executeToolDirect", () => {
             isError: false,
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
     };
 
-    const result = await executeDirectInTestOrg(proxy,
+    const result = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "tool-error-direct-mcp",
       "any_tool",
-      {}
+      {},
     );
     expect(result.isError).toBe(false);
     expect(result.content[0].text).toBe("direct still callable");
@@ -2587,12 +3132,13 @@ describe("executeToolDirect", () => {
     globalThis.fetch = async () =>
       new Response("private upstream body", { status: 403 });
 
-    const result = await executeDirectInTestOrg(proxy,
+    const result = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "forbidden-mcp",
       "any_tool",
-      {}
+      {},
     );
 
     expect(result.isError).toBe(true);
@@ -2621,15 +3167,16 @@ describe("executeToolDirect", () => {
             diagnosticCode: "oauth_scope_denied",
           },
         }),
-        { status: 200, headers: { "Content-Type": "application/json" } }
+        { status: 200, headers: { "Content-Type": "application/json" } },
       );
 
-    const result = await executeDirectInTestOrg(proxy,
+    const result = await executeDirectInTestOrg(
+      proxy,
       "agent1",
       "user1",
       "scoped-mcp",
       "any_tool",
-      {}
+      {},
     );
 
     expect(result.isError).toBe(true);
@@ -2665,7 +3212,7 @@ describe("requiresToolApproval (approval-policy.ts)", () => {
     );
     // readOnlyHint=true short-circuits first; destructiveHint is ignored
     expect(
-      requiresToolApproval({ readOnlyHint: true, destructiveHint: true })
+      requiresToolApproval({ readOnlyHint: true, destructiveHint: true }),
     ).toBe(false);
   });
 

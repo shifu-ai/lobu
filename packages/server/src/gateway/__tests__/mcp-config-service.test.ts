@@ -4,7 +4,10 @@ process.env.ENCRYPTION_KEY =
 
 import { describe, expect, test } from "bun:test";
 import { generateWorkerToken } from "@lobu/core";
-import { McpConfigService } from "../auth/mcp/config-service.js";
+import {
+  computeMcpConfigDigest,
+  McpConfigService,
+} from "../auth/mcp/config-service.js";
 
 function makeToken(agentId = "agent1") {
   return generateWorkerToken("user1", "conv1", "deploy1", {
@@ -16,6 +19,75 @@ function makeToken(agentId = "agent1") {
 const BASE_URL = "http://localhost:8080/mcp";
 
 describe("McpConfigService", () => {
+  test("config digest covers canonical effective headers, OAuth, inputs, and source without exposing secrets", () => {
+    const base = {
+      id: "tenant-mcp",
+      upstreamUrl: "https://mcp.example.com/rpc",
+      transport: "streamable-http" as const,
+      headers: { Authorization: "Bearer tenant-a", "X-Tenant": "a" },
+      oauth: {
+        clientId: "client-1",
+        clientSecret: "oauth-secret-a",
+        scopes: ["calendar.read", "calendar.write"],
+        resource: "https://calendar.example.com",
+      },
+      inputs: [
+        {
+          type: "promptString" as const,
+          id: "workspace",
+          description: "Workspace",
+        },
+      ],
+      toolFilter: { include: ["read_*"], exclude: ["admin_*"] },
+      authScope: "channel" as const,
+      internal: false,
+      configSource: "agent" as const,
+    };
+
+    const digest = computeMcpConfigDigest(base);
+    const reordered = computeMcpConfigDigest({
+      ...base,
+      headers: { "X-Tenant": "a", authorization: "Bearer tenant-a" },
+    });
+    expect(digest).toBe(reordered);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(digest).not.toContain("tenant-a");
+    expect(digest).not.toContain("oauth-secret-a");
+    expect(
+      computeMcpConfigDigest({
+        ...base,
+        headers: { Authorization: "Bearer tenant-b", "X-Tenant": "b" },
+      }),
+    ).not.toBe(digest);
+    expect(
+      computeMcpConfigDigest({
+        ...base,
+        oauth: { ...base.oauth, scopes: ["calendar.read"] },
+      }),
+    ).not.toBe(digest);
+    expect(
+      computeMcpConfigDigest({
+        ...base,
+        inputs: [{ ...base.inputs[0], id: "other-workspace" }],
+      }),
+    ).not.toBe(digest);
+    expect(
+      computeMcpConfigDigest({ ...base, configSource: "global" }),
+    ).not.toBe(digest);
+    expect(
+      computeMcpConfigDigest({
+        ...base,
+        credentialScopeHash: "scope-b",
+      }),
+    ).not.toBe(digest);
+    expect(
+      computeMcpConfigDigest({
+        ...base,
+        credentialBindingId: "account-b",
+      }),
+    ).not.toBe(digest);
+  });
+
   test("registerGlobalServers - HTTP + stdio", async () => {
     const service = new McpConfigService();
     service.registerGlobalServers({
@@ -66,7 +138,7 @@ describe("McpConfigService", () => {
     expect(config.mcpServers["my-mcp"]).toBeDefined();
     const servers = await service.getAllHttpServers();
     expect(servers.get("my-mcp")?.upstreamUrl).toBe(
-      "https://first.example.com/mcp"
+      "https://first.example.com/mcp",
     );
   });
 
@@ -128,7 +200,7 @@ describe("McpConfigService", () => {
       const servers = await service.getAllHttpServers();
       const tavily = servers.get("tavily");
       expect(tavily?.upstreamUrl).toBe(
-        "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-test-key"
+        "https://mcp.tavily.com/mcp/?tavilyApiKey=tvly-test-key",
       );
       expect(tavily?.headers?.["X-Test-Key"]).toBe("tvly-test-key");
     } finally {
@@ -156,7 +228,7 @@ describe("McpConfigService", () => {
       const servers = await service.getAllHttpServers();
       const unsafe = servers.get("unsafe");
       expect(unsafe?.upstreamUrl).toBe(
-        "https://upstream.example.com/mcp?token="
+        "https://upstream.example.com/mcp?token=",
       );
       expect(unsafe?.headers?.Authorization).toBe("Bearer ");
     } finally {
@@ -301,7 +373,7 @@ describe("McpConfigService", () => {
 
     const servers = await service.getAllHttpServers("agent1");
     expect(servers.get("shared-mcp")?.upstreamUrl).toBe(
-      "https://agent-version.example.com/mcp"
+      "https://agent-version.example.com/mcp",
     );
   });
 
@@ -312,7 +384,8 @@ describe("McpConfigService", () => {
       } as any,
       lobuMemory: {
         publicBaseUrl: "https://app.lobu.ai",
-        resolveOrgSlug: async (agentId) => (agentId === "agent1" ? "buremba" : null),
+        resolveOrgSlug: async (agentId) =>
+          agentId === "agent1" ? "buremba" : null,
       },
     });
 
@@ -324,14 +397,14 @@ describe("McpConfigService", () => {
     expect(config.mcpServers["lobu-memory"]).toBeDefined();
     expect(config.mcpServers["lobu-memory"].url).toBe(BASE_URL);
     expect(config.mcpServers["lobu-memory"].headers["X-Mcp-Id"]).toBe(
-      "lobu-memory"
+      "lobu-memory",
     );
     expect(config.mcpServers["lobu-memory"].internal).toBe(true);
 
     const servers = await service.getAllHttpServers("agent1");
     const lobuMemoryServer = servers.get("lobu-memory");
     expect(lobuMemoryServer?.upstreamUrl).toBe(
-      "https://app.lobu.ai/mcp/buremba"
+      "https://app.lobu.ai/mcp/buremba",
     );
     expect(lobuMemoryServer?.internal).toBe(true);
   });
