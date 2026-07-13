@@ -273,6 +273,11 @@ describe("message consumer course boundary", () => {
 				title: "meeting",
 				source_url: null,
 				organization_id: "org",
+				semantic_type: "content",
+				origin_type: "audio",
+				origin_id: "gmeet-1#transcript",
+				connector_key: "google_workspace",
+				connection_id: 41,
 				metadata: {
 					owner_user_id: "u",
 					agent_id: "a",
@@ -343,6 +348,11 @@ describe("message consumer course boundary", () => {
 					title: "meeting",
 					source_url: null,
 					organization_id: "org",
+					semantic_type: "meeting_notes",
+					origin_type: "meeting",
+					origin_id: "gmeet-1",
+					connector_key: "google_workspace",
+					connection_id: 41,
 					metadata: {
 						owner_user_id: "u",
 						agent_id: "a",

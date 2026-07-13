@@ -127,8 +127,8 @@ describe("course context gate", () => {
 				owner_user_id: "u",
 				agent_id: "a",
 				course_entity_ids: ["course:a"],
-				evidence_kind: "meeting",
 			},
+			{semantic_type:"meeting_notes",origin_type:"meeting",origin_id:"gmeet-1",connector_key:"google_workspace",connection_id:41},
 		],
 		[
 			"canonical_only",
@@ -136,10 +136,11 @@ describe("course context gate", () => {
 				owner_user_id: "u",
 				agent_id: "a",
 				course_entity_ids: ["course:a"],
-				evidence_kind: "document",
+				source_type: "transcript",
 			},
+			{semantic_type:"note",origin_type:null,origin_id:"uc_caller",connector_key:null,connection_id:null},
 		],
-	] as const)("scheduled readiness becomes %s only from exact scoped evidence", async (expected, metadata) => {
+	] as const)("scheduled readiness becomes %s only from exact scoped evidence", async (expected, metadata, provenance) => {
 		const data = payload("準備排程課程任務");
 		data.organizationId = "org";
 		data.scheduledCourseContext = {
@@ -188,6 +189,7 @@ describe("course context gate", () => {
 					source_url: null,
 					organization_id: "org",
 					metadata,
+					...provenance,
 				},
 			]);
 		await attachCourseContextForReviewedScope(data, {
