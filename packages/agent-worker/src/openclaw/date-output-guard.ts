@@ -532,7 +532,7 @@ function normalizeTemporalEvidenceLabel(value: string): string {
 const REQUEST_PREFIX_RE =
   /^(?:(?:請幫我查|请帮我查|幫我查|帮我查|請問|请问|我想知道|麻煩查|麻烦查)\s*)+/u;
 const NEGATED_OCCURRENCE_REQUEST_RE =
-  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:(?:不要|別|别|不必|不用|無需|无需|不想)\s*(?:管|查|看)|忽略\s*(?:管|查|看)?)/gu;
+  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:不要|別|别|不必|不用|無需|无需|忽略|不想)\s*(?:管|查|看)?/gu;
 
 function hasBoundedOccurrenceRequestNegation(
   value: string,
@@ -540,10 +540,15 @@ function hasBoundedOccurrenceRequestNegation(
 ): boolean {
   const normalized = value.trim();
   for (const match of normalized.matchAll(NEGATED_OCCURRENCE_REQUEST_RE)) {
-    if (
+    const touchesBoundary =
       (boundary === "start" && match.index === 0) ||
       (boundary === "end" &&
-        (match.index ?? 0) + match[0].length === normalized.length)
+        (match.index ?? 0) + match[0].length === normalized.length);
+    const isExplicitBackwardNegation =
+      /忽略/u.test(match[0]) || /(?:管|查|看)\s*$/u.test(match[0]);
+    if (
+      touchesBoundary &&
+      (boundary === "end" || isExplicitBackwardNegation)
     ) {
       return true;
     }
