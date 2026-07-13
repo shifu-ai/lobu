@@ -122,6 +122,22 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("recognizes a bare weekday linked by an explicit date connector", () => {
+    for (const finalText of [
+      "這週三的日期為 7/9（三）",
+      "這週三的日期是 7/9（三）",
+    ]) {
+      const result = guardDateOutput({
+        userMessage: finalText,
+        finalText,
+        now: NOW,
+      });
+
+      expect(result.status).toBe("corrected");
+      expect(result.text).toBe(finalText.replace("7/9", "7/15"));
+    }
+  });
+
   test("corrects stale dates attached to relative day claims", () => {
     const finalText = "今天是 7/9（三）";
     const result = guardDateOutput({

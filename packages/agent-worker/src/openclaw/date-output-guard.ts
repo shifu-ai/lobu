@@ -96,6 +96,7 @@ function sameShortDate(parts: CalendarDate, month: number, day: number) {
 function isBareRelativeWeekdayClaim(continuation: string): boolean {
   const normalized = continuation.trim();
   if (normalized === "" || normalized === "是") return true;
+  if (/^的日期[為是]$/.test(normalized)) return true;
 
   return /^(?:期中考|期末考|考試|課程|會議|活動|銷講|講座|上課|開會)是$/.test(
     normalized
