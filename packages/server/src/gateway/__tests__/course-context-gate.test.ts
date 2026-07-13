@@ -4,6 +4,39 @@ import { attachCourseContextForReviewedScope, requiresCourseContext } from '../o
 const payload = (messageText:string, platformMetadata:Record<string,unknown>={}):MessagePayload => ({userId:'u',agentId:'a',conversationId:'c',channelId:'ch',messageId:'m',platform:'line',messageText,platformMetadata,agentOptions:{}} as MessagePayload);
 const candidate = {courseKey:'b',courseEntityId:'course:b',displayName:'B 課',aliases:['B'],status:'active',reasons:['message_alias']};
 describe('course context gate', () => {
+  test('scheduled course A overrides conversation binding B without persisting A',async()=>{
+    const data=payload('準備排程課程任務');
+    data.scheduledCourseContext={schemaVersion:1,source:'calendar_scheduled_wake',automationId:'auto-1',jobId:'job-1',runId:42,taskKind:'opp_coach_rehearsal_prompt',course:{ownerUserId:'u',agentId:'a',courseKey:'a',courseEntityId:'course:a',displayName:'A 課'},evidenceReadiness:'canonical_only'};
+    const manager={getSessionStrict:vi.fn().mockResolvedValue({shifuCourseContext:{courseKey:'b',courseEntityId:'course:b'}}),bindActiveCourse:vi.fn()};
+    const fetcher=vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({status:'resolved',confidence:'high',matchedBy:['explicit_course_key'],course:{courseKey:'a',courseEntityId:'course:a',displayName:'A 課'}}),{status:200})).mockResolvedValueOnce(new Response(JSON.stringify(canonicalBundle('a')),{status:200}));
+    const result=await attachCourseContextForReviewedScope(data,{baseUrl:'https://t',secret:'s',fetcher,sessionManager:manager as never,sessionKey:'session'});
+    const request=JSON.parse((fetcher.mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(request).toMatchObject({explicitCourseKey:'a'});
+    expect(request).not.toHaveProperty('boundCourseKey');
+    expect(result).toMatchObject({status:'ready',context:{course:{courseKey:'a'}}});
+    expect(manager.bindActiveCourse).not.toHaveBeenCalled();
+  });
+  test.each([
+    ['schema',{schemaVersion:2}],
+    ['owner',{course:{ownerUserId:'other'}}],
+    ['agent',{course:{agentId:'other'}}],
+  ])('invalid scheduled %s fails closed before Toolbox',async(_name,patch)=>{
+    const data=payload('scheduled');
+    const base:any={schemaVersion:1,source:'calendar_scheduled_wake',automationId:'auto',jobId:'job',runId:1,taskKind:'opp_coach_event_prompt',course:{ownerUserId:'u',agentId:'a',courseKey:'a',courseEntityId:'course:a',displayName:'A'},evidenceReadiness:'canonical_only'};
+    data.scheduledCourseContext={...base,...patch,course:{...base.course,...((patch as any).course??{})}};
+    const fetcher=vi.fn();
+    await expect(attachCourseContextForReviewedScope(data,{baseUrl:'https://t',secret:'s',fetcher})).resolves.toEqual({status:'context_unavailable',reasonCode:'invalid_scheduled_course_context'});
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  test.each([
+    [{status:'missing',reason:'archived_only'},'onboarding_required'],
+    [{status:'resolved',confidence:'high',matchedBy:['explicit_course_key'],course:{courseKey:'a',courseEntityId:'course:changed',displayName:'A'}},'context_unavailable'],
+  ])('scheduled canonical status fails closed: %#',async(response,status)=>{
+    const data=payload('scheduled');
+    data.scheduledCourseContext={schemaVersion:1,source:'calendar_scheduled_wake',automationId:'auto',jobId:'job',runId:1,taskKind:'opp_coach_event_prompt',course:{ownerUserId:'u',agentId:'a',courseKey:'a',courseEntityId:'course:a',displayName:'A'},evidenceReadiness:'canonical_only'};
+    const fetcher=vi.fn().mockResolvedValue(new Response(JSON.stringify(response),{status:200}));
+    await expect(attachCourseContextForReviewedScope(data,{baseUrl:'https://t',secret:'s',fetcher})).resolves.toMatchObject({status});
+  });
   test.each([['銷講',true],['三個秘密',true],['課綱',true],['課程',true],['老師回饋',true],['課程會議',true],['課程文件',true],['戰報',true],['招生 Offer',true],['提醒我明天繳電話費',false]])('%s => %s',(text,want)=>expect(requiresCourseContext(payload(text))).toBe(want));
   test('personal reminder bypasses skill, reviewed marker, and active binding unless course wording is explicit',()=>{
     expect(requiresCourseContext(payload('提醒我明天繳電話費',{courseScope:'reviewed'}),{courseSkillEnabled:true,hasActiveCourse:true})).toBe(false);

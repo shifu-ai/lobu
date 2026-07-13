@@ -700,6 +700,7 @@ export interface RunAISessionParams {
    */
   runJobToken?: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  scheduledCourseContext?: import("@lobu/core").ScheduledCourseContext;
 
   // Resolved workspace directory (from WorkspaceManager)
   workspaceDir: string;
@@ -1071,6 +1072,7 @@ export async function runAISession(
     agentId,
     runJobToken,
     resolvedCourseContext,
+    scheduledCourseContext,
     workspaceDir,
     progressProcessor,
     onSessionFilePathResolved,
@@ -1571,7 +1573,8 @@ export async function runAISession(
 
   // Merge gateway instructions into custom instructions
   const resolvedCourseInstructions = buildResolvedCourseContextInstructions(
-    resolvedCourseContext
+    resolvedCourseContext,
+    scheduledCourseContext
   );
   const gatewayInstructions = resolvedCourseContext
     ? removeLegacyToolboxActiveContext(context.gatewayInstructions)

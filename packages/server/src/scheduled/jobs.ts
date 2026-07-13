@@ -25,6 +25,9 @@ import {
   enqueueAgentMessage,
 } from '../gateway/services/agent-threads';
 import { buildScheduledWakeMessage, resolveWakeThreadId } from './wake-target.js';
+import { parseTrustedCourseWakeV1, type TrustedCourseWakeV1 } from './course-aware-wake.js';
+import { attachCourseContextForReviewedScope } from '../gateway/orchestration/course-context-gate.js';
+import type { MessagePayload, ResolvedCourseExecutionContext, ScheduledCourseContext } from '@lobu/core';
 
 /**
  * Construct the TaskScheduler, register every periodic task, start dispatch,
@@ -230,7 +233,7 @@ function registerMaintenanceTasks(
         sessionManager: coreServices.getSessionManager(),
         queueProducer: coreServices.getQueueProducer(),
       },
-      ctx.payload as WakeAgentTaskPayload
+      { ...(ctx.payload as WakeAgentTaskPayload), __scheduled_task_run_id: ctx.taskRunId }
     );
   });
 }
@@ -240,18 +243,27 @@ export interface WakeAgentTaskPayload {
   __created_by_user?: string | null;
   __created_by_agent?: string | null;
   __scheduled_job_id?: string;
+  __scheduled_job_external_key?: string | null;
   __scheduled_job_tick?: string;
+  __scheduled_task_run_id?: number;
   organization_id?: string;
   agent_id?: string;
   prompt?: string;
   thread_id?: string | null;
   reason?: string | null;
+  trustedCourseWake?: unknown;
 }
 
 export interface WakeAgentTaskDeps {
   sql: ReturnType<typeof getDb>;
   sessionManager: ISessionManager;
   queueProducer: QueueProducer;
+  resolveScheduledCourseContext?: (input:{payload:MessagePayload;trustedWake:TrustedCourseWakeV1})=>Promise<ResolvedCourseExecutionContext|null>;
+}
+
+async function resolveScheduledCourseContextAtFire(input:{payload:MessagePayload;trustedWake:TrustedCourseWakeV1}):Promise<ResolvedCourseExecutionContext|null>{
+  const result=await attachCourseContextForReviewedScope(input.payload,{baseUrl:process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim()??'',secret:process.env.TOOLBOX_INTERNAL_SECRET?.trim()??''});
+  return result.status==='ready'?result.context:null;
 }
 
 /**
@@ -296,6 +308,19 @@ export async function handleWakeAgentTask(
     return;
   }
   p.agent_id = resolvedAgentId;
+  let trustedWake:TrustedCourseWakeV1|undefined;
+  if(p.trustedCourseWake!==undefined){
+    if(p.reason!=='trusted-course-calendar-wake'||!p.__created_by_user||!p.__created_by_agent||!p.__scheduled_job_id||!Number.isSafeInteger(p.__scheduled_task_run_id)||p.__scheduled_task_run_id!<=0)return;
+    try{trustedWake=parseTrustedCourseWakeV1(p.trustedCourseWake,{ownerUserId:p.__created_by_user,agentId:p.agent_id});}catch{return;}
+    if(p.__created_by_agent!==p.agent_id)return;
+    const expectedExternalKey=`google_calendar:${trustedWake.calendarEventRef.accountRef}:${trustedWake.calendarEventRef.eventId}:${trustedWake.taskKind}`;
+    if(p.__scheduled_job_external_key!==expectedExternalKey||p.__scheduled_job_tick!==trustedWake.scheduledFor)return;
+    const ownerRows=await sql`
+      SELECT id FROM agents WHERE organization_id=${orgId} AND id=${p.agent_id}
+        AND owner_platform='toolbox' AND owner_user_id=${p.__created_by_user} LIMIT 1
+    `;
+    if(ownerRows.length===0)return;
+  }
   const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== '0';
   let threadId = p.thread_id ?? null;
   if (!threadId && reuseConversation) {
@@ -328,6 +353,14 @@ export async function handleWakeAgentTask(
     );
     threadId = result.threadId;
   }
+  let scheduledCourseContext:ScheduledCourseContext|undefined;
+  let resolvedCourseContext:ResolvedCourseExecutionContext|undefined;
+  if(trustedWake){
+    scheduledCourseContext={schemaVersion:1,source:'calendar_scheduled_wake',automationId:trustedWake.automationId,jobId:p.__scheduled_job_id!,runId:p.__scheduled_task_run_id!,taskKind:trustedWake.taskKind,course:{ownerUserId:trustedWake.trustedCourseScope.ownerUserId,agentId:trustedWake.trustedCourseScope.agentId,courseKey:trustedWake.trustedCourseScope.courseKey,courseEntityId:trustedWake.trustedCourseScope.courseEntityId,displayName:trustedWake.trustedCourseScope.courseDisplayName},evidenceReadiness:'canonical_only'};
+    const firePayload={userId:p.__created_by_user!,agentId:p.agent_id,organizationId:orgId,conversationId:threadId,channelId:'scheduled',messageId:`scheduled:${p.__scheduled_job_id}:${p.__scheduled_task_run_id}`,botId:'lobu-api',platform:'api',messageText:p.prompt,platformMetadata:{source:'scheduled-job'},agentOptions:{},scheduledCourseContext} as MessagePayload;
+    resolvedCourseContext=await (deps.resolveScheduledCourseContext??resolveScheduledCourseContextAtFire)({payload:firePayload,trustedWake})??undefined;
+    if(!resolvedCourseContext)return;
+  }
   await enqueueAgentMessage(
     { sessionManager, queueProducer },
     {
@@ -336,6 +369,8 @@ export async function handleWakeAgentTask(
         ? buildScheduledWakeMessage(renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick))
         : renderScheduledWakePrompt(p.prompt, p.__scheduled_job_tick),
       source: 'scheduled-job',
+      scheduledCourseContext,
+      resolvedCourseContext,
     }
   );
 }

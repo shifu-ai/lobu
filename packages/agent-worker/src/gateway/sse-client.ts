@@ -308,6 +308,12 @@ const JobEventSchema = z
         runId: z.number().optional(),
         runJobToken: z.string().optional(),
         resolvedCourseContext: ResolvedCourseContextSchema.optional(),
+        scheduledCourseContext: z.object({
+          schemaVersion:z.literal(1),source:z.literal('calendar_scheduled_wake'),automationId:z.string().min(1).max(256),jobId:z.string().min(1).max(256),runId:z.number().int().positive(),
+          taskKind:z.enum(['opp_coach_rehearsal_prompt','opp_coach_practice_prompt','opp_coach_event_prompt']),
+          course:z.object({ownerUserId:z.string().min(1).max(256),agentId:z.string().min(1).max(256),courseKey:z.string().min(1).max(200),courseEntityId:z.string().min(1).max(300),displayName:z.string().min(1).max(500)}).strict(),
+          evidenceReadiness:z.enum(['canonical_only','same_course_evidence']),
+        }).strict().optional(),
       })
       .passthrough(),
     processedIds: z.array(z.string()).optional(),
@@ -315,6 +321,8 @@ const JobEventSchema = z
   .superRefine((value, ctx) => {
     const context = value.payload.resolvedCourseContext;
     const trust = context?.trust;
+    const scheduled=value.payload.scheduledCourseContext;
+    if(scheduled&&(scheduled.course.ownerUserId!==value.payload.userId||scheduled.course.agentId!==value.payload.agentId||scheduled.course.courseKey!==context?.course.courseKey||scheduled.course.courseEntityId!==context?.course.courseEntityId))ctx.addIssue({code:'custom',message:'Scheduled course context does not match execution',path:['payload','scheduledCourseContext']});
     if (
       trust &&
       (trust.ownerUserId !== value.payload.userId ||
@@ -1008,6 +1016,7 @@ export class GatewayClient {
       botId: message.payload.botId,
       platform: message.payload.platform,
       resolvedCourseContext: message.payload.resolvedCourseContext,
+      scheduledCourseContext: message.payload.scheduledCourseContext,
     });
     return (
       stableCanonicalJson(identity(first)) ===
@@ -1245,6 +1254,7 @@ export class GatewayClient {
           ? payload.runJobToken
           : undefined,
       resolvedCourseContext: payload.resolvedCourseContext,
+      scheduledCourseContext: payload.scheduledCourseContext,
     };
   }
 

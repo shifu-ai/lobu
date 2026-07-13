@@ -379,7 +379,8 @@ export async function dispatchScheduledJobCandidate(
 				row.action_type,
 				{
 					...row.action_args,
-					__scheduled_job_id: row.id,
+						__scheduled_job_id: row.id,
+						__scheduled_job_external_key: row.external_key,
 					__scheduled_job_tick: tickIso,
 					__scheduled_job_revision: row.schedule_revision,
 					__organization_id: row.organization_id,

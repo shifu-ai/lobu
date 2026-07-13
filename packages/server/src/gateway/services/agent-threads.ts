@@ -118,6 +118,8 @@ export interface EnqueueAgentMessageArgs {
   messageId?: string;
   /** Free-form source tag for log lines / platformMetadata. */
   source?: string;
+  scheduledCourseContext?: MessagePayload["scheduledCourseContext"];
+  resolvedCourseContext?: MessagePayload["resolvedCourseContext"];
 }
 
 export interface EnqueueAgentMessageResult {
@@ -163,6 +165,8 @@ export async function enqueueAgentMessage(
     botId: "lobu-api",
     platform: "api",
     messageText,
+    scheduledCourseContext: args.scheduledCourseContext,
+    resolvedCourseContext: args.resolvedCourseContext,
     platformMetadata: {
       agentId: realAgentId,
       source: args.source || "internal",
