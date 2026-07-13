@@ -33,6 +33,7 @@ import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
 import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {resolveCourseSkillContextMetadata} from './course-skill-context-metadata.js';
+import { getDb } from "../../db/client.js";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import {
   type BaseDeploymentManager,
@@ -164,6 +165,23 @@ export class MessageConsumer {
       result = await attachCourseContextForReviewedScope(shadowPayload, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
         sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+        recordScheduledExecutionTrace: async (trace) => {
+          if (!data.organizationId || !data.scheduledCourseContext) throw new Error("scheduled_course_trace_scope_missing");
+          const sql = getDb();
+          const rows = await sql<{ id: string }>`
+            UPDATE scheduled_jobs
+            SET action_args = jsonb_set(action_args, '{courseWakeExecutionTrace}', ${sql.json(trace)}::jsonb, true),
+                updated_at = now()
+            WHERE id = ${data.scheduledCourseContext.jobId}
+              AND organization_id = ${data.organizationId}
+              AND created_by_user = ${data.userId}
+              AND created_by_agent = ${data.agentId}
+              AND action_args->>'reason' = 'trusted-course-calendar-wake'
+              AND action_args->'trustedCourseWake'->>'source' = 'calendar_scheduled_wake'
+            RETURNING id
+          `;
+          if (rows.length !== 1) throw new Error("scheduled_course_trace_job_missing");
+        },
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);

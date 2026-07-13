@@ -132,7 +132,39 @@ describe("course-aware wake routes", () => {
 			engineRef, externalKey: requestBody().externalKey, paused: false,
 			source: "calendar_scheduled_wake", automationId: "auto-1",
 			resolutionSource: "toolbox_calendar_course_resolver",
+			courseEntityId: "course:pm-1:course-a", courseKey: "course-a", scopeVersion: 1,
+			taskKind: "opp_coach_event_prompt",
+			eventStartAt: "2026-07-15T07:00:00.000Z",
+			scheduledFor: "2026-07-14T07:00:00.000Z",
+			nextRunAt: "2026-07-14T07:00:00.000Z",
+			fire: { status: "not_fired", runId: null },
 			runtime: { service: "lobu-api" },
+		});
+
+		const [run] = await getDb()<{ id: number }>`
+			INSERT INTO runs (organization_id, run_type, queue_name, action_input, status, run_at)
+			VALUES (${ORGANIZATION_ID}, 'task', 'task', '{}'::jsonb, 'completed', now())
+			RETURNING id
+		`;
+		await getDb()`
+			UPDATE scheduled_jobs SET action_args = jsonb_set(
+				action_args, '{courseWakeExecutionTrace}',
+				${getDb().json({
+					status: "context_ready", runId: run!.id, conversationId: "conversation-b",
+					conversationBindingCourseEntityId: "course:pm-1:course-b",
+					courseEntityId: "course:pm-1:course-a", scopeVersion: 1,
+					contextVersion: 7, evidenceReadiness: "same_course_evidence",
+				})}::jsonb, true)
+			WHERE id = ${engineRef}
+		`;
+		const fired = await app.request(`/api/internal/course-aware-wakes/${engineRef}/status?${query}`);
+		expect(await fired.json()).toMatchObject({
+			fire: {
+				status: "context_ready", runId: run!.id, conversationId: "conversation-b",
+				conversationBindingCourseEntityId: "course:pm-1:course-b",
+				courseEntityId: "course:pm-1:course-a", scopeVersion: 1,
+				contextVersion: 7, evidenceReadiness: "same_course_evidence", runStatus: "completed",
+			},
 		});
 	});
 
