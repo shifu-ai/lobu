@@ -595,6 +595,32 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("does not confuse temporal-role words inside exact event titles", () => {
+    for (const [target, finalText, expected] of [
+      [
+        "報名系統說明會",
+        "下一場報名系統說明會排在 7/22（三）。",
+        "下一場報名系統說明會排在 7/16（四）。",
+      ],
+      [
+        "退款政策講座",
+        "下一場退款政策講座排在 7/22（三）。",
+        "下一場退款政策講座排在 7/16（四）。",
+      ],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: `幫我查下一場${target}`,
+          finalText,
+          now: NOW,
+          trustedTemporalEvidence: [
+            { candidate: "2026-07-16", label: target },
+          ],
+        }).text
+      ).toBe(expected);
+    }
+  });
+
   test("rejects negated affirmative scheduling predicates", () => {
     for (const finalText of [
       "下一場不辦在 7/22（三）。",

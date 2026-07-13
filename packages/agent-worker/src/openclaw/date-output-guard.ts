@@ -366,7 +366,10 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
   ].sort((left, right) => left.index - right.index);
 }
 
-function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
+function isExplicitNextOccurrenceForwardBridge(
+  bridge: string,
+  requestedTarget: string | null
+): boolean {
   const normalized = bridge.trim();
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
@@ -378,12 +381,16 @@ function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
     return false;
   }
 
+  const temporalRoleText =
+    requestedTarget && normalized.startsWith(requestedTarget)
+      ? normalized.slice(requestedTarget.length).trim()
+      : normalized;
   const hasNonOccurrenceTemporalRole =
     /(?:報名|报名|售票|早鳥|早鸟|繳費|缴费|付款|開賣|开卖|退費|退费|退款)/u.test(
-      normalized
+      temporalRoleText
     ) ||
     /\b(?:registration|early\s+bird|ticket\s+sales?|payment|refund|deadline|due)\b/i.test(
-      normalized
+      temporalRoleText
     );
   if (hasNonOccurrenceTemporalRole) return false;
 
@@ -410,7 +417,10 @@ function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
   return /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
 }
 
-function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
+function findNextOccurrenceDateClaims(
+  text: string,
+  requestedTarget: string | null
+): LocatedDateClaim[] {
   const linkedClaims = new Map<number, LocatedDateClaim>();
   const occurrenceRegex = new RegExp(NEXT_OCCURRENCE_RE.source, "gi");
   for (const occurrence of text.matchAll(occurrenceRegex)) {
@@ -430,7 +440,7 @@ function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
     const forwardClaims = allDateClaimsIn(forwardScope, occurrenceEnd);
     for (const claim of forwardClaims) {
       const bridge = text.slice(occurrenceEnd, claim.index);
-      if (isExplicitNextOccurrenceForwardBridge(bridge)) {
+      if (isExplicitNextOccurrenceForwardBridge(bridge, requestedTarget)) {
         linkedClaims.set(claim.index, { ...claim, associationText: bridge });
         break;
       }
@@ -881,8 +891,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
+  const requestedTarget = normalizedRequestedOccurrenceTarget(
+    input.userMessage
+  );
   const nextOccurrenceDateClaims = isNextOccurrence
-    ? findNextOccurrenceDateClaims(text)
+    ? findNextOccurrenceDateClaims(text, requestedTarget)
     : [];
   if (nextOccurrenceDateClaims.length > 0) {
     const recurrence = explicitRecurrence(input.userMessage);
@@ -895,9 +908,6 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     }
     const recurrenceDate =
       recurrence === null ? null : resolveNextRecurrence(recurrence, input.now);
-    const requestedTarget = normalizedRequestedOccurrenceTarget(
-      input.userMessage
-    );
     const claimDescriptors = new Set(
       nextOccurrenceDateClaims
         .map(normalizedNextOccurrenceDescriptor)
