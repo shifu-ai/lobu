@@ -21,6 +21,10 @@ import {
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
+	AgentReleaseError,
+	createAgentReleaseService,
+} from "./agent-release-service.js";
+import {
 	validateExpectedGrantPatterns,
 	verifyRuntimeGrantPatterns,
 } from "./runtime-grant-verifier.js";
@@ -58,6 +62,7 @@ interface ProvisioningRoutesOptions {
 	mcpConfigService?: McpConfigService;
 	secretStore?: WritableSecretStore;
 	publicGatewayUrl?: string;
+	agentReleaseTrustedPublicKeysJson?: string;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -280,6 +285,11 @@ export function createProvisioningRoutes(
 	options: ProvisioningRoutesOptions = {},
 ): Hono<{ Bindings: Env }> {
 	const provisioningRoutes = new Hono<{ Bindings: Env }>();
+	const agentReleaseService = createAgentReleaseService({
+		trustedPublicKeysJson:
+			options.agentReleaseTrustedPublicKeysJson ??
+			process.env.AGENT_RELEASE_TRUSTED_PUBLIC_KEYS_JSON,
+	});
 
 	provisioningRoutes.post("/agents", async (c) => {
 		const denied = requireAdminPat(c);
@@ -397,6 +407,62 @@ export function createProvisioningRoutes(
 			agentId,
 			settings,
 		});
+	});
+
+	provisioningRoutes.put("/agents/:agentId/managed-settings", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId)
+			return c.json({ error: "Authentication required" }, 401);
+		const agentId = c.req.param("agentId")?.trim() ?? "";
+		const agentIdError = validateShifuAgentId(agentId);
+		if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+		let command: unknown;
+		try {
+			command = await c.req.json();
+		} catch {
+			return c.json({ error: "invalid_json" }, 400);
+		}
+
+		try {
+			const result = await agentReleaseService.apply({
+				organizationId,
+				agentId,
+				command,
+			});
+			return c.json(result, 200);
+		} catch (error) {
+			if (error instanceof AgentReleaseError) {
+				return c.json(
+					{ error: error.code, error_description: error.message },
+					error.status,
+				);
+			}
+			throw error;
+		}
+	});
+
+	provisioningRoutes.get("/agents/:agentId/managed-settings", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId)
+			return c.json({ error: "Authentication required" }, 401);
+		const agentId = c.req.param("agentId")?.trim() ?? "";
+		const agentIdError = validateShifuAgentId(agentId);
+		if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+		const evidence = await agentReleaseService.getEvidence({
+			organizationId,
+			agentId,
+		});
+		if (!evidence)
+			return c.json({ error: "agent_release_evidence_not_found" }, 404);
+		return c.json(evidence, 200);
 	});
 
 	provisioningRoutes.post(
@@ -637,7 +703,8 @@ export function createProvisioningRoutes(
 			if (!userId) return c.json({ error: "userId is required" }, 400);
 
 			const organizationId = c.get("organizationId") as string | null;
-			if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+			if (!organizationId)
+				return c.json({ error: "Authentication required" }, 401);
 
 			if (!(await isOwnedByToolboxUser(agentId, userId))) {
 				return c.json({ error: "agent_owner_mismatch" }, 404);
@@ -667,13 +734,15 @@ export function createProvisioningRoutes(
 					lobuConnectionRef: null,
 				});
 			}
-			if (!(await ensureUsableOAuthCredential(
-				options.secretStore,
-				agentId,
-				userId,
-				mcpId,
-				credential,
-			))) {
+			if (
+				!(await ensureUsableOAuthCredential(
+					options.secretStore,
+					agentId,
+					userId,
+					mcpId,
+					credential,
+				))
+			) {
 				return c.json({
 					ok: true,
 					agentId,
