@@ -206,6 +206,9 @@ export function isDateSensitiveTurn(promptText: string): boolean {
 
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<!\d)(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
+const EXPLICIT_ISO_DATE_RE = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
+const INVALID_CALENDAR_DATE_BLOCK_TEXT =
+  "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。";
 
 const RELATIVE_WEEK_DATE_RE =
   /(?<![上下本這大小前後])((上週|本週|這週|下週)\s*(?:(星期)([日天一二三四五六])|([日天一二三四五六])))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
@@ -264,7 +267,9 @@ function isSupportedRelativeDateConnector(continuation: string): boolean {
 }
 
 function validUtcDate(year: number, month: number, day: number): Date | null {
-  const date = new Date(Date.UTC(year, month - 1, day));
+  const date = new Date(0);
+  date.setUTCHours(0, 0, 0, 0);
+  date.setUTCFullYear(year, month - 1, day);
   if (
     date.getUTCFullYear() !== year ||
     date.getUTCMonth() !== month - 1 ||
@@ -607,6 +612,16 @@ function correctNextOccurrenceClaim(
 }
 
 export function guardDateOutput(input: DateGuardInput): DateGuardResult {
+  for (const match of input.finalText.matchAll(EXPLICIT_ISO_DATE_RE)) {
+    if (!validUtcDate(Number(match[1]), Number(match[2]), Number(match[3]))) {
+      return {
+        status: "blocked",
+        text: INVALID_CALENDAR_DATE_BLOCK_TEXT,
+        reason: "invalid_calendar_date",
+      };
+    }
+  }
+
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);

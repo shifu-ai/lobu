@@ -141,27 +141,35 @@ function formatWeek(dates: CalendarDate[]): string {
 }
 
 export function buildCurrentDateContext(now: Date = new Date()): string {
-  const today = getTaipeiDateParts(now);
-  const yesterday = addCalendarDays(today, -1);
-  const tomorrow = addCalendarDays(today, 1);
-  const currentTime = formatTaipeiTime(now);
-  const weeks = buildRelativeWeekCalendar(now);
+  try {
+    const today = getTaipeiDateParts(now);
+    const yesterday = addCalendarDays(today, -1);
+    const tomorrow = addCalendarDays(today, 1);
+    const currentTime = formatTaipeiTime(now);
+    const weeks = buildRelativeWeekCalendar(now);
 
-  return [
-    "## Current Date Context",
-    "",
-    "- Timezone: Asia/Taipei (UTC+08:00)",
-    `- Current time / 現在時間: ${currentTime}`,
-    `- Today / 今天: ${formatDatedWeekday(today)}`,
-    `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
-    `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,
-    `- Previous week / 上週: ${formatWeek(weeks.previous)}`,
-    `- Current week / 本週: ${formatWeek(weeks.current)}`,
-    `- Next week / 下週: ${formatWeek(weeks.next)}`,
-    "- Current Date Context overrides relative dates in old conversation history.",
-    "- Old today/yesterday/tomorrow/this week references describe the old message time, not this turn.",
-    "- Never guess a weekday. Use the deterministic date/weekday pairs above.",
-    "- For dates outside this table, use trusted tool data or deterministic computation; otherwise say you cannot confirm.",
-    "- For a next occurrence, choose the earliest candidate at or after the current Taipei time; without trusted candidates or an explicit recurrence, do not guess.",
-  ].join("\n");
+    return [
+      "## Current Date Context",
+      "",
+      "- Timezone: Asia/Taipei (UTC+08:00)",
+      `- Current time / 現在時間: ${currentTime}`,
+      `- Today / 今天: ${formatDatedWeekday(today)}`,
+      `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
+      `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,
+      `- Previous week / 上週: ${formatWeek(weeks.previous)}`,
+      `- Current week / 本週: ${formatWeek(weeks.current)}`,
+      `- Next week / 下週: ${formatWeek(weeks.next)}`,
+      "- Current Date Context overrides relative dates in old conversation history.",
+      "- Old today/yesterday/tomorrow/this week references describe the old message time, not this turn.",
+      "- Never guess a weekday. Use the deterministic date/weekday pairs above.",
+      "- For dates outside this table, use trusted tool data or deterministic computation; otherwise say you cannot confirm.",
+      "- For a next occurrence, choose the earliest candidate at or after the current Taipei time; without trusted candidates or an explicit recurrence, do not guess.",
+    ].join("\n");
+  } catch {
+    return [
+      "## Current Date Context",
+      "",
+      "- Current date computation is unavailable. Do not guess any date or weekday.",
+    ].join("\n");
+  }
 }

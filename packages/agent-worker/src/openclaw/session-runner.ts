@@ -102,6 +102,7 @@ import {
   getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
 import {
+  type DateGuardResult,
   extractTrustedTemporalCandidates,
   guardDateOutput,
   isDateSensitiveTurn,
@@ -2411,14 +2412,30 @@ Use it when the user references past discussions or you need context.`);
     // against user-facing text. Without this, getFinalResult() is always
     // null in production and the sandbox-leak redaction never fires.
     const finalText = progressProcessor.getOutputSnapshot();
-    const dateGuardDecision = guardDateOutput({
-      userMessage: userPrompt,
-      finalText,
-      now: turnNow,
-      trustedTemporalCandidates: Array.from(
-        currentTurnTrustedTemporalCandidates
-      ),
-    });
+    let dateGuardDecision: DateGuardResult;
+    try {
+      dateGuardDecision = guardDateOutput({
+        userMessage: userPrompt,
+        finalText,
+        now: turnNow,
+        trustedTemporalCandidates: Array.from(
+          currentTurnTrustedTemporalCandidates
+        ),
+      });
+    } catch (error) {
+      logger.error(
+        `Date output guard failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      dateGuardDecision = isDateSensitiveTurn(userPrompt)
+        ? {
+            status: "blocked",
+            text: "目前無法可靠確認日期，請稍後再試。",
+            reason: "date_guard_failure",
+          }
+        : { status: "unchanged", text: finalText };
+    }
     if (dateGuardDecision.status === "corrected") {
       logger.warn(
         `Date output guard corrected final answer: corrections=${dateGuardDecision.corrections.length}`

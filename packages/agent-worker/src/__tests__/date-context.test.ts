@@ -61,4 +61,41 @@ describe("date context", () => {
       "- For a next occurrence, choose the earliest candidate at or after the current Taipei time; without trusted candidates or an explicit recurrence, do not guess."
     );
   });
+
+  test("uses Taipei date while UTC is on the prior day", () => {
+    expect(
+      buildCurrentDateContext(new Date("2026-07-12T16:30:00.000Z"))
+    ).toContain("Today / 今天: 2026-07-13 (星期一)");
+  });
+
+  test("crosses a month boundary", () => {
+    const calendar = buildRelativeWeekCalendar(
+      new Date("2026-08-02T16:30:00.000Z")
+    );
+
+    expect(calendar.previous.map(formatCalendarDate).at(-1)).toBe("2026-08-02");
+    expect(calendar.current.map(formatCalendarDate).at(0)).toBe("2026-08-03");
+  });
+
+  test("crosses a year boundary", () => {
+    const calendar = buildRelativeWeekCalendar(
+      new Date("2026-12-31T16:30:00.000Z")
+    );
+
+    expect(calendar.current.map(formatCalendarDate)).toContain("2027-01-01");
+  });
+
+  test("handles leap day", () => {
+    const calendar = buildRelativeWeekCalendar(
+      new Date("2028-02-29T04:00:00.000Z")
+    );
+
+    expect(calendar.current.map(formatCalendarDate)).toContain("2028-02-29");
+  });
+
+  test("renders a fail-closed prompt when the clock value is invalid", () => {
+    expect(buildCurrentDateContext(new Date(Number.NaN))).toContain(
+      "Current date computation is unavailable. Do not guess any date or weekday."
+    );
+  });
 });

@@ -99,6 +99,32 @@ describe("relative date resolution", () => {
 });
 
 describe("guardDateOutput", () => {
+  test("blocks an impossible date instead of normalizing it", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "2026-02-30 是星期幾？",
+        finalText: "2026-02-30 (星期一)",
+        now: new Date("2026-02-20T04:00:00.000Z"),
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。",
+      reason: "invalid_calendar_date",
+    });
+  });
+
+  test("does not treat an invalid ISO-shaped code token as a date claim", () => {
+    const finalText = "const version_2026-02-30 = false;";
+
+    expect(
+      guardDateOutput({
+        userMessage: "請檢查這段程式",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({ status: "unchanged", text: finalText });
+  });
+
   test("blocks an unsupported next-occurrence date claim", () => {
     expect(
       guardDateOutput({
@@ -800,17 +826,6 @@ describe("guardDateOutput", () => {
 
   test("leaves a correct explicit weekday unchanged", () => {
     const finalText = "2026-07-16 (星期四)";
-    const result = guardDateOutput({
-      userMessage: finalText,
-      finalText,
-      now: new Date("2026-07-13T10:15:00.000Z"),
-    });
-
-    expect(result).toEqual({ status: "unchanged", text: finalText });
-  });
-
-  test("leaves an impossible calendar date unchanged", () => {
-    const finalText = "2026-02-30 (星期一)";
     const result = guardDateOutput({
       userMessage: finalText,
       finalText,
