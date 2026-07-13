@@ -305,18 +305,36 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
   ].sort((left, right) => left.index - right.index);
 }
 
-function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
-  const directBridge =
-    /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|將\s*(?:在|於)|預計|定於|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|date\s*[:：]|will\s+take\s+place\s+on|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i;
-  if (directBridge.test(bridge)) return true;
+function isExplicitNextOccurrenceForwardBridge(
+  bridge: string,
+  suffix: string
+): boolean {
+  const normalized = bridge.trim();
+  if (!normalized || normalized.length > 48) return false;
+  if (/[，,。！？；;\n\r]/.test(normalized)) return false;
+  if (
+    /(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知|不是|並非|取消|\b(?:reference|source|range|unknown|unconfirmed|cancelled)\b|\b(?:not|unable)\s+(?:found|confirmed|scheduled)\b)/i.test(
+      normalized
+    )
+  ) {
+    return false;
+  }
 
-  const descriptorBridge =
-    /^\s*([^，,。！？；;:：\n\r]{1,16}?)\s*(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為)|[:：])\s*$/;
-  const descriptor = descriptorBridge.exec(bridge)?.[1]?.trim();
-  if (!descriptor) return false;
-  return !/(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知)/.test(
-    descriptor
-  );
+  const hasChineseSchedulingSignal =
+    /(?:是|為|日期|[:：—-]|預計|定於|將\s*(?:在|於)|會\s*(?:在|於)|預定|(?:^|\s)(?:在|於)(?:\s|$))/.test(
+      normalized
+    );
+  const hasEnglishSchedulingSignal =
+    /\b(?:is|date|scheduled|on|at)\b|\bwill\s+(?:be(?:\s+held)?|take\s+place)\b/i.test(
+      normalized
+    );
+  if (hasChineseSchedulingSignal || hasEnglishSchedulingSignal) return true;
+
+  const hasSchedulingSuffix =
+    /^\s*(?:舉行|進行|開始|開課|登場|will\s+be\s+held|takes?\s+place)/i.test(
+      suffix
+    );
+  return hasSchedulingSuffix && /^[\p{L}\p{N}\s]{1,16}$/u.test(normalized);
 }
 
 function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
@@ -339,7 +357,11 @@ function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
     const forwardClaims = allDateClaimsIn(forwardScope, occurrenceEnd);
     for (const claim of forwardClaims) {
       const bridge = text.slice(occurrenceEnd, claim.index);
-      if (isExplicitNextOccurrenceForwardBridge(bridge)) {
+      const suffix = text.slice(
+        claim.index + claim.match[0].length,
+        occurrenceEnd + forwardScope.length
+      );
+      if (isExplicitNextOccurrenceForwardBridge(bridge, suffix)) {
         linkedClaims.set(claim.index, claim);
         break;
       }
@@ -426,37 +448,46 @@ type ExplicitRecurrence = {
   timeMinutes: number | null;
 };
 
-function explicitRecurrenceTimeMinutes(userMessage: string): number | null {
-  const clock = /(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?:$|[^\d])/.exec(
-    userMessage
-  );
-  if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
-
-  const chinese =
-    /(上午|早上|下午|晚上)\s*(\d{1,2})\s*點(?:\s*(\d{1,2})\s*分?)?/.exec(
-      userMessage
-    );
-  if (!chinese) return null;
-  let hour = Number(chinese[2]);
-  const minute = chinese[3] ? Number(chinese[3]) : 0;
-  if (hour < 1 || hour > 12 || minute > 59) return null;
-  const period = chinese[1];
-  if (period === "下午" || period === "晚上") {
-    if (hour < 12) hour += 12;
-  } else if (hour === 12 && (period === "上午" || period === "早上")) {
-    hour = 0;
+function explicitRecurrenceTimes(userMessage: string): number[] {
+  const times = new Set<number>();
+  for (const clock of userMessage.matchAll(
+    /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)/g
+  )) {
+    times.add(Number(clock[1]) * 60 + Number(clock[2]));
   }
-  return hour * 60 + minute;
+
+  for (const chinese of userMessage.matchAll(
+    /(上午|早上|下午|晚上)\s*(\d{1,2})\s*點(?:\s*(\d{1,2})\s*分?)?/g
+  )) {
+    let hour = Number(chinese[2]);
+    const minute = chinese[3] ? Number(chinese[3]) : 0;
+    if (hour < 1 || hour > 12 || minute > 59) continue;
+    const period = chinese[1];
+    if (period === "下午" || period === "晚上") {
+      if (hour < 12) hour += 12;
+    } else if (hour === 12 && (period === "上午" || period === "早上")) {
+      hour = 0;
+    }
+    times.add(hour * 60 + minute);
+  }
+  return Array.from(times);
 }
 
-function recurrenceInClause(clause: string): ExplicitRecurrence | null {
+function recurrenceInClause(
+  clause: string
+): ExplicitRecurrence | "ambiguous" | null {
+  const withClauseTime = (
+    weekday: number
+  ): ExplicitRecurrence | "ambiguous" => {
+    const times = explicitRecurrenceTimes(clause);
+    if (times.length > 1) return "ambiguous";
+    return { weekday, timeMinutes: times[0] ?? null };
+  };
   const chinese =
     /(?:每週|每星期)\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/.exec(clause);
   if (chinese) {
     const weekday = WEEKDAY_INDEX_ZH[`星期${chinese[1]}`];
-    return weekday === undefined
-      ? null
-      : { weekday, timeMinutes: explicitRecurrenceTimeMinutes(clause) };
+    return weekday === undefined ? null : withClauseTime(weekday);
   }
 
   const english =
@@ -465,10 +496,7 @@ function recurrenceInClause(clause: string): ExplicitRecurrence | null {
     );
   const weekday = english?.[1] ?? english?.[2];
   return weekday
-    ? {
-        weekday: ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!,
-        timeMinutes: explicitRecurrenceTimeMinutes(clause),
-      }
+    ? withClauseTime(ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!)
     : null;
 }
 
@@ -477,6 +505,7 @@ function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
   for (const clause of userMessage.split(/[，,；;。！？\n\r]+/)) {
     const recurrence = recurrenceInClause(clause);
     if (!recurrence) continue;
+    if (recurrence === "ambiguous") return null;
     distinct.set(
       `${recurrence.weekday}:${recurrence.timeMinutes ?? "ambiguous"}`,
       recurrence
