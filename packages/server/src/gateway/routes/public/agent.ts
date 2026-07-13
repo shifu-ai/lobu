@@ -747,6 +747,10 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       ? (await ownershipMetadataStore.getMetadata(agentId))?.organizationId
       : undefined;
     const tokenOrganizationId = metadataOrgId ?? callerOrgId;
+    const trustedPlatformContext =
+      c.get("authSource") === "pat" &&
+      ((c.get("mcpAuthInfo") as { scopes?: string[] } | undefined)?.scopes ??
+        []).includes("mcp:admin");
 
     const watcherIntent = intent?.kind === "watcher_run" ? intent : null;
     // userId backs `conversationId = ${agentId}_${userId}[_${thread}]`, which
@@ -828,6 +832,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
             platform: "api",
             sessionKey: userId,
             tokenKind: "session",
+            trustedPlatformContext,
           }
         );
 
@@ -859,6 +864,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       platform: "api",
       sessionKey: userId,
       tokenKind: "session",
+      trustedPlatformContext,
     });
 
     const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
@@ -1330,6 +1336,26 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
       !Array.isArray(body.platformMetadata)
         ? body.platformMetadata
         : {};
+    const {
+      automationModificationContext: requestedAutomationModificationContext,
+      ...safeRequestPlatformMetadata
+    } = requestPlatformMetadata;
+    const messageWorkerToken = tokenFromHeader(c);
+    const messageWorkerData = messageWorkerToken
+      ? verifyWorkerToken(messageWorkerToken)
+      : null;
+    const trustedAutomationModificationContext =
+      messageWorkerData?.tokenKind === "session" &&
+      messageWorkerData.trustedPlatformContext === true &&
+      messageWorkerData.conversationId === agentId &&
+      requestedAutomationModificationContext &&
+      typeof requestedAutomationModificationContext === "object" &&
+      !Array.isArray(requestedAutomationModificationContext)
+        ? {
+            ...requestedAutomationModificationContext,
+            trustedByServer: true,
+          }
+        : undefined;
 
     const { span: rootSpan, traceparent } = createRootSpan("message_received", {
       "lobu.agent_id": realAgentId,
@@ -1399,11 +1425,17 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         platform: "api",
         messageText: directMessageText,
         platformMetadata: {
-          ...requestPlatformMetadata,
+          ...safeRequestPlatformMetadata,
+          ...(trustedAutomationModificationContext
+            ? {
+                automationModificationContext:
+                  trustedAutomationModificationContext,
+              }
+            : {}),
           agentId: realAgentId,
           source:
-            typeof requestPlatformMetadata.source === "string"
-              ? requestPlatformMetadata.source
+            typeof safeRequestPlatformMetadata.source === "string"
+              ? safeRequestPlatformMetadata.source
               : session.intent?.kind === "watcher_run"
                 ? "watcher-run"
                 : "direct-api",

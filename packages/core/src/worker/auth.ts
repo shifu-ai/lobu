@@ -50,6 +50,8 @@ export interface WorkerTokenData {
    * run/session credentials. Older tokens omit this and keep the short TTL.
    */
   tokenKind?: "deployment" | "session" | "run";
+  /** Server-minted privilege for trusted platform context on direct messages. */
+  trustedPlatformContext?: boolean;
   courseToolScope?: {
     ownerUserId: string;
     agentId: string;
@@ -81,6 +83,7 @@ export function generateWorkerToken(
     messageId?: string;
     processedMessageIds?: string[];
     tokenKind?: WorkerTokenData["tokenKind"];
+    trustedPlatformContext?: boolean;
     courseToolScope?: WorkerTokenData["courseToolScope"];
   }
 ): string {
@@ -106,6 +109,7 @@ export function generateWorkerToken(
     messageId: options.messageId,
     processedMessageIds: options.processedMessageIds,
     tokenKind: options.tokenKind,
+    trustedPlatformContext: options.trustedPlatformContext,
     courseToolScope: options.courseToolScope,
   };
 
@@ -214,6 +218,14 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
       data.tokenKind !== "run"
     ) {
       logger.error("Worker token rejected: invalid tokenKind");
+      return null;
+    }
+    if (
+      data.trustedPlatformContext !== undefined &&
+      (typeof data.trustedPlatformContext !== "boolean" ||
+        (data.trustedPlatformContext && data.tokenKind !== "session"))
+    ) {
+      logger.error("Worker token rejected: invalid trusted platform context");
       return null;
     }
 
