@@ -54,6 +54,8 @@ interface SignedManifest {
 	releaseKind: "capability_activation" | "runtime_carrier";
 	createdAt: string;
 	managedSettings: ManagedSettings;
+	rollbackToSequence?: number;
+	rollbackToReleaseId?: string;
 	signing: SigningMetadata;
 }
 
@@ -63,7 +65,12 @@ interface FeedPublication {
 	manifestDigest: string;
 	manifest: SignedManifest;
 	publicationKind?: PublicationKind;
-	rollbackFromReleaseSequence?: number;
+	fromReleaseSequence?: number;
+	toReleaseSequence?: number;
+	allowDowngrade?: true;
+	reason?: string;
+	actor?: string;
+	expiresAt?: string;
 }
 
 interface SignedFeed {
@@ -97,6 +104,8 @@ export interface AgentReleaseEvidence {
 	releaseId: string;
 	releaseSequence: number;
 	feedSequence: number;
+	channel: "candidate" | "stable";
+	feedDigest: string;
 	manifestDigest: string;
 	status: "applied";
 	revisionRef: string;
@@ -121,9 +130,14 @@ export class AgentReleaseError extends Error {
 
 export function createAgentReleaseService(options: {
 	trustedPublicKeysJson?: string;
+	expectedEnvironment?: string;
+	now?: () => Date;
 	sql?: DbClient;
 }) {
 	const keyring = parseTrustedKeyring(options.trustedPublicKeysJson);
+	const expectedEnvironment = parseExpectedEnvironment(
+		options.expectedEnvironment,
+	);
 
 	return {
 		async apply(input: {
@@ -133,12 +147,17 @@ export function createAgentReleaseService(options: {
 		}): Promise<AgentReleaseApplyResult> {
 			const sql = options.sql ?? getDb();
 			if (keyring.error) throw keyring.error;
+			if (expectedEnvironment.error) throw expectedEnvironment.error;
 			assertAgentReleaseJsonValue(input.command);
 			const command = parseApplyCommand(input.command);
-			validateApplyEnvelope(input.agentId, command);
+			validateApplyEnvelope(input.agentId, command, expectedEnvironment.value);
 			verifySignedManifest(command.signedManifest, keyring.keys);
 			verifySignedFeed(command.signedFeed, keyring.keys);
-			const publication = validatePublication(command);
+			const publication = validatePublication(
+				command,
+				(options.now ?? (() => new Date()))(),
+			);
+			const feedDigest = digestValue(command.signedFeed);
 			const expectedCommandDigest = digestValue(
 				withoutOwnKey(command, "commandDigest"),
 			);
@@ -156,6 +175,7 @@ export function createAgentReleaseService(options: {
 					agentId: input.agentId,
 					command,
 					publication,
+					feedDigest,
 				}),
 			);
 		},
@@ -165,9 +185,12 @@ export function createAgentReleaseService(options: {
 			agentId: string;
 		}): Promise<AgentReleaseEvidence | null> {
 			const sql = options.sql ?? getDb();
+			if (expectedEnvironment.error) throw expectedEnvironment.error;
 			const rows = await sql<ReceiptRow>`
 				SELECT r.applied_release_id, r.applied_release_sequence,
-				       r.applied_feed_sequence, r.manifest_digest, r.status,
+				       r.applied_feed_sequence, r.applied_channel,
+				       r.applied_feed_digest, r.environment,
+				       r.manifest_digest, r.status,
 				       r.revision_ref, r.settings_hash, r.applied_at
 				FROM agent_release_applies r
 				JOIN agents a
@@ -177,6 +200,13 @@ export function createAgentReleaseService(options: {
 				  AND r.agent_id = ${input.agentId}
 				LIMIT 1
 			`;
+			if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
+				throw releaseError(
+					"agent_release_receipt_environment_mismatch",
+					409,
+					"Agent release evidence belongs to another runtime environment",
+				);
+			}
 			return rows[0] ? evidenceFromReceipt(input.agentId, rows[0]) : null;
 		},
 	};
@@ -189,6 +219,7 @@ async function applyInTransaction(
 		agentId: string;
 		command: AgentReleaseApplyCommand;
 		publication: FeedPublication;
+		feedDigest: string;
 	},
 ): Promise<AgentReleaseApplyResult> {
 	const agentRows = await tx<AgentSettingsRow>`
@@ -218,6 +249,7 @@ async function applyInTransaction(
 	const receiptRows = await tx<ReceiptRow>`
 		SELECT desired_release_id, desired_release_sequence, desired_feed_sequence,
 		       applied_release_id, applied_release_sequence, applied_feed_sequence,
+		       applied_channel, applied_feed_digest, environment,
 		       manifest_digest, status, revision_ref, settings_hash, applied_at
 		FROM agent_release_applies
 		WHERE organization_id = ${input.organizationId}
@@ -228,6 +260,42 @@ async function applyInTransaction(
 	const manifest = input.command.signedManifest;
 	const feed = input.command.signedFeed;
 	const manifestDigest = input.publication.manifestDigest;
+	if (current && current.environment !== manifest.environment) {
+		throw releaseError(
+			"agent_release_receipt_environment_mismatch",
+			409,
+			"Agent release receipt belongs to another runtime environment",
+		);
+	}
+
+	const cursorRows = await tx<FeedCursorRow>`
+		SELECT highest_feed_sequence, highest_feed_digest
+		FROM agent_release_feed_cursors
+		WHERE organization_id = ${input.organizationId}
+		  AND agent_id = ${input.agentId}
+		  AND environment = ${manifest.environment}
+		  AND channel = ${feed.channel}
+		FOR UPDATE
+	`;
+	const cursor = cursorRows[0] ?? null;
+	if (cursor && feed.feedSequence < cursor.highest_feed_sequence) {
+		throw releaseError(
+			"agent_release_feed_replay",
+			409,
+			"Agent release feed sequence is older than the channel cursor",
+		);
+	}
+	if (
+		cursor &&
+		feed.feedSequence === cursor.highest_feed_sequence &&
+		cursor.highest_feed_digest !== input.feedDigest
+	) {
+		throw releaseError(
+			"agent_release_feed_sequence_conflict",
+			409,
+			"Agent release feed sequence was already observed with different signed bytes",
+		);
+	}
 
 	if (current?.applied_release_sequence === manifest.releaseSequence) {
 		if (
@@ -240,23 +308,24 @@ async function applyInTransaction(
 				"Agent release sequence was already applied with another manifest",
 			);
 		}
-		if (feed.feedSequence < current.applied_feed_sequence) {
-			throw releaseError(
-				"agent_release_feed_replay",
-				409,
-				"Agent release feed sequence is older than the applied feed",
-			);
-		}
-		if (feed.feedSequence > current.applied_feed_sequence) {
+		await writeFeedCursor(tx, input, cursor);
+		if (
+			feed.feedSequence !== current.applied_feed_sequence ||
+			feed.channel !== current.applied_channel ||
+			input.feedDigest !== current.applied_feed_digest
+		) {
 			const advancedRows = await tx<ReceiptRow>`
 				UPDATE agent_release_applies SET
 					desired_feed_sequence = ${feed.feedSequence},
 					applied_feed_sequence = ${feed.feedSequence},
+					applied_channel = ${feed.channel},
+					applied_feed_digest = ${input.feedDigest},
 					updated_at = NOW()
 				WHERE organization_id = ${input.organizationId}
 				  AND agent_id = ${input.agentId}
 				RETURNING desired_release_id, desired_release_sequence, desired_feed_sequence,
 				          applied_release_id, applied_release_sequence, applied_feed_sequence,
+				          applied_channel, applied_feed_digest, environment,
 				          manifest_digest, status, revision_ref, settings_hash, applied_at
 			`;
 			return {
@@ -275,25 +344,28 @@ async function applyInTransaction(
 			"Agent release compare-and-set precondition does not match",
 		);
 	}
-	if (current && feed.feedSequence <= current.applied_feed_sequence) {
-		throw releaseError(
-			"agent_release_feed_replay",
-			409,
-			"Agent release feed sequence must advance monotonically",
-		);
-	}
 
 	const publicationKind = input.publication.publicationKind ?? "release";
 	if (current && manifest.releaseSequence < current.applied_release_sequence) {
-		if (
-			publicationKind !== "rollback" ||
-			input.publication.rollbackFromReleaseSequence !==
-				current.applied_release_sequence
-		) {
+		if (publicationKind !== "rollback") {
 			throw releaseError(
 				"agent_release_stale",
 				409,
 				"An older ordinary agent release cannot replace a newer applied release",
+			);
+		}
+		if (
+			input.publication.fromReleaseSequence !==
+				current.applied_release_sequence ||
+			input.publication.fromReleaseSequence !==
+				current.desired_release_sequence ||
+			input.publication.toReleaseSequence !== manifest.releaseSequence ||
+			manifest.rollbackToSequence !== manifest.releaseSequence
+		) {
+			throw releaseError(
+				"agent_release_rollback_target_mismatch",
+				409,
+				"Signed rollback source and target do not match the current receipt",
 			);
 		}
 	} else if (publicationKind === "rollback") {
@@ -303,6 +375,7 @@ async function applyInTransaction(
 			"A rollback publication must target an older release from the current sequence",
 		);
 	}
+	await writeFeedCursor(tx, input, cursor);
 
 	const settings = manifest.managedSettings;
 	const updatedRows = await tx<AgentSettingsRow>`
@@ -363,12 +436,14 @@ async function applyInTransaction(
 			organization_id, agent_id, environment,
 			desired_release_id, desired_release_sequence, desired_feed_sequence,
 			applied_release_id, applied_release_sequence, applied_feed_sequence,
+			applied_channel, applied_feed_digest,
 			manifest_digest, status, revision_ref, settings_hash, error_code,
 			created_at, updated_at, applied_at
 		) VALUES (
 			${input.organizationId}, ${input.agentId}, ${manifest.environment},
 			${manifest.releaseId}, ${manifest.releaseSequence}, ${feed.feedSequence},
 			${manifest.releaseId}, ${manifest.releaseSequence}, ${feed.feedSequence},
+			${feed.channel}, ${input.feedDigest},
 			${manifestDigest}, 'applied', ${revisionRef}, ${settingsHash}, NULL,
 			NOW(), NOW(), NOW()
 		)
@@ -380,6 +455,8 @@ async function applyInTransaction(
 			applied_release_id = EXCLUDED.applied_release_id,
 			applied_release_sequence = EXCLUDED.applied_release_sequence,
 			applied_feed_sequence = EXCLUDED.applied_feed_sequence,
+			applied_channel = EXCLUDED.applied_channel,
+			applied_feed_digest = EXCLUDED.applied_feed_digest,
 			manifest_digest = EXCLUDED.manifest_digest,
 			status = EXCLUDED.status,
 			revision_ref = EXCLUDED.revision_ref,
@@ -389,12 +466,46 @@ async function applyInTransaction(
 			applied_at = NOW()
 		RETURNING desired_release_id, desired_release_sequence, desired_feed_sequence,
 		          applied_release_id, applied_release_sequence, applied_feed_sequence,
+		          applied_channel, applied_feed_digest, environment,
 		          manifest_digest, status, revision_ref, settings_hash, applied_at
 	`;
 	return {
 		...evidenceFromReceipt(input.agentId, receipt[0]),
 		idempotent: false,
 	};
+}
+
+async function writeFeedCursor(
+	tx: DbClient,
+	input: {
+		organizationId: string;
+		agentId: string;
+		command: AgentReleaseApplyCommand;
+		feedDigest: string;
+	},
+	cursor: FeedCursorRow | null,
+): Promise<void> {
+	const feed = input.command.signedFeed;
+	if (
+		cursor &&
+		cursor.highest_feed_sequence === feed.feedSequence &&
+		cursor.highest_feed_digest === input.feedDigest
+	) {
+		return;
+	}
+	await tx`
+		INSERT INTO agent_release_feed_cursors (
+			organization_id, agent_id, environment, channel,
+			highest_feed_sequence, highest_feed_digest, created_at, updated_at
+		) VALUES (
+			${input.organizationId}, ${input.agentId}, ${feed.environment}, ${feed.channel},
+			${feed.feedSequence}, ${input.feedDigest}, NOW(), NOW()
+		)
+		ON CONFLICT (organization_id, agent_id, environment, channel) DO UPDATE SET
+			highest_feed_sequence = EXCLUDED.highest_feed_sequence,
+			highest_feed_digest = EXCLUDED.highest_feed_digest,
+			updated_at = NOW()
+	`;
 }
 
 interface AgentSettingsRow {
@@ -413,11 +524,19 @@ interface ReceiptRow {
 	applied_release_id: string;
 	applied_release_sequence: number;
 	applied_feed_sequence: number;
+	applied_channel: "candidate" | "stable";
+	applied_feed_digest: string;
+	environment: AgentReleaseEnvironment;
 	manifest_digest: string;
 	status: string;
 	revision_ref: string;
 	settings_hash: string;
 	applied_at: Date | string;
+}
+
+interface FeedCursorRow {
+	highest_feed_sequence: number;
+	highest_feed_digest: string;
 }
 
 function evidenceFromReceipt(
@@ -430,6 +549,8 @@ function evidenceFromReceipt(
 		releaseId: row.applied_release_id,
 		releaseSequence: Number(row.applied_release_sequence),
 		feedSequence: Number(row.applied_feed_sequence),
+		channel: row.applied_channel,
+		feedDigest: row.applied_feed_digest,
 		manifestDigest: row.manifest_digest,
 		status: "applied",
 		revisionRef: row.revision_ref,
@@ -496,6 +617,8 @@ function parseManifest(value: unknown): SignedManifest {
 			"releaseKind",
 			"createdAt",
 			"managedSettings",
+			"rollbackToSequence",
+			"rollbackToReleaseId",
 			"signing",
 		],
 		"manifest",
@@ -522,6 +645,23 @@ function parseManifest(value: unknown): SignedManifest {
 		throw invalidRequest("Agent release createdAt is invalid");
 	}
 	const managedSettings = parseManagedSettings(value.managedSettings);
+	if (
+		value.rollbackToSequence !== undefined &&
+		!isPositiveSafeInteger(value.rollbackToSequence)
+	) {
+		throw invalidRollback(
+			"Agent release manifest rollback target sequence is invalid",
+		);
+	}
+	if (
+		value.rollbackToReleaseId !== undefined &&
+		(typeof value.rollbackToReleaseId !== "string" ||
+			value.rollbackToReleaseId.trim() === "")
+	) {
+		throw invalidRollback(
+			"Agent release manifest rollback target id is invalid",
+		);
+	}
 	const signing = parseSigningMetadata(value.signing, "manifest");
 	return {
 		releaseId: value.releaseId,
@@ -530,6 +670,12 @@ function parseManifest(value: unknown): SignedManifest {
 		releaseKind: value.releaseKind,
 		createdAt: value.createdAt,
 		managedSettings,
+		...(value.rollbackToSequence !== undefined
+			? { rollbackToSequence: value.rollbackToSequence }
+			: {}),
+		...(value.rollbackToReleaseId !== undefined
+			? { rollbackToReleaseId: value.rollbackToReleaseId }
+			: {}),
 		signing,
 	};
 }
@@ -594,7 +740,12 @@ function parsePublication(value: unknown): FeedPublication {
 			"manifestDigest",
 			"manifest",
 			"publicationKind",
-			"rollbackFromReleaseSequence",
+			"fromReleaseSequence",
+			"toReleaseSequence",
+			"allowDowngrade",
+			"reason",
+			"actor",
+			"expiresAt",
 		],
 		"publication",
 	);
@@ -619,28 +770,41 @@ function parsePublication(value: unknown): FeedPublication {
 	) {
 		throw invalidRequest("Agent release publication kind is invalid");
 	}
-	if (
-		value.rollbackFromReleaseSequence !== undefined &&
-		!isPositiveSafeInteger(value.rollbackFromReleaseSequence)
-	) {
-		throw invalidRequest("Agent release rollback source sequence is invalid");
-	}
-	if (
-		value.publicationKind === "rollback" &&
-		value.rollbackFromReleaseSequence === undefined
-	) {
-		throw invalidRequest(
-			"Agent release rollback publication requires its source sequence",
-		);
-	}
-	if (
-		(value.publicationKind === undefined ||
-			value.publicationKind === "release") &&
-		value.rollbackFromReleaseSequence !== undefined
-	) {
-		throw invalidRequest(
-			"Ordinary agent release publication cannot declare a rollback source",
-		);
+	const rollbackFields = [
+		"fromReleaseSequence",
+		"toReleaseSequence",
+		"allowDowngrade",
+		"reason",
+		"actor",
+		"expiresAt",
+	] as const;
+	if (value.publicationKind !== "rollback") {
+		if (rollbackFields.some((key) => hasOwn(value, key))) {
+			throw invalidRollback(
+				"Ordinary agent release publication cannot include rollback-only fields",
+			);
+		}
+	} else {
+		if (!isPositiveSafeInteger(value.fromReleaseSequence)) {
+			throw invalidRollback("Signed rollback requires fromReleaseSequence");
+		}
+		if (!isPositiveSafeInteger(value.toReleaseSequence)) {
+			throw invalidRollback("Signed rollback requires toReleaseSequence");
+		}
+		if (value.allowDowngrade !== true) {
+			throw invalidRollback("Signed rollback requires allowDowngrade=true");
+		}
+		for (const key of ["reason", "actor"] as const) {
+			if (typeof value[key] !== "string" || value[key].trim() === "") {
+				throw invalidRollback(`Signed rollback requires nonempty ${key}`);
+			}
+		}
+		if (
+			typeof value.expiresAt !== "string" ||
+			!Number.isFinite(Date.parse(value.expiresAt))
+		) {
+			throw invalidRollback("Signed rollback requires a valid expiresAt");
+		}
 	}
 	return {
 		releaseId: value.releaseId,
@@ -650,8 +814,15 @@ function parsePublication(value: unknown): FeedPublication {
 		...(value.publicationKind
 			? { publicationKind: value.publicationKind }
 			: {}),
-		...(value.rollbackFromReleaseSequence
-			? { rollbackFromReleaseSequence: value.rollbackFromReleaseSequence }
+		...(value.publicationKind === "rollback"
+			? {
+					fromReleaseSequence: value.fromReleaseSequence as number,
+					toReleaseSequence: value.toReleaseSequence as number,
+					allowDowngrade: true as const,
+					reason: value.reason as string,
+					actor: value.actor as string,
+					expiresAt: value.expiresAt as string,
+				}
 			: {}),
 	};
 }
@@ -822,22 +993,31 @@ function parseSigningMetadata(
 function validateApplyEnvelope(
 	agentId: string,
 	command: AgentReleaseApplyCommand,
+	expectedEnvironment: AgentReleaseEnvironment,
 ): void {
-	if (
-		command.assignment.agentId !== agentId ||
-		command.assignment.environment !== command.signedManifest.environment ||
-		command.assignment.environment !== command.signedFeed.environment
-	) {
+	if (command.assignment.agentId !== agentId) {
 		throw releaseError(
 			"agent_release_assignment_scope_mismatch",
 			400,
 			"Agent release assignment does not match path, manifest, and feed scope",
 		);
 	}
+	if (
+		command.assignment.environment !== expectedEnvironment ||
+		command.signedManifest.environment !== expectedEnvironment ||
+		command.signedFeed.environment !== expectedEnvironment
+	) {
+		throw releaseError(
+			"agent_release_environment_mismatch",
+			400,
+			"Agent release manifest, feed, and assignment must match the runtime environment",
+		);
+	}
 }
 
 function validatePublication(
 	command: AgentReleaseApplyCommand,
+	now: Date,
 ): FeedPublication {
 	const manifest = command.signedManifest;
 	const matching = command.signedFeed.publications.filter(
@@ -876,6 +1056,34 @@ function validatePublication(
 			"agent_release_publication_digest_mismatch",
 			400,
 			"Agent release publication digest does not match the signed manifest",
+		);
+	}
+	if (publication.publicationKind === "rollback") {
+		if (
+			publication.toReleaseSequence !== manifest.releaseSequence ||
+			manifest.rollbackToSequence !== publication.toReleaseSequence ||
+			(manifest.rollbackToReleaseId !== undefined &&
+				manifest.rollbackToReleaseId !== manifest.releaseId)
+		) {
+			throw releaseError(
+				"agent_release_rollback_target_mismatch",
+				409,
+				"Signed rollback target does not match the immutable manifest",
+			);
+		}
+		if (new Date(publication.expiresAt as string).getTime() <= now.getTime()) {
+			throw releaseError(
+				"agent_release_rollback_expired",
+				400,
+				"Signed rollback publication has expired",
+			);
+		}
+	} else if (
+		manifest.rollbackToSequence !== undefined ||
+		manifest.rollbackToReleaseId !== undefined
+	) {
+		throw invalidRollback(
+			"Ordinary release manifest cannot contain rollback target fields",
 		);
 	}
 	return publication;
@@ -1120,6 +1328,24 @@ function parseEnvironment(
 	return value;
 }
 
+function parseExpectedEnvironment(
+	value: string | undefined,
+):
+	| { value: AgentReleaseEnvironment; error: null }
+	| { value: null; error: AgentReleaseError } {
+	if (value === "local" || value === "staging" || value === "production") {
+		return { value, error: null };
+	}
+	return {
+		value: null,
+		error: releaseError(
+			"agent_release_environment_unavailable",
+			503,
+			"AGENT_RELEASE_ENVIRONMENT must be local, staging, or production",
+		),
+	};
+}
+
 function isCanonicalBase64(value: string): boolean {
 	if (!value || !BASE64_PATTERN.test(value)) return false;
 	return Buffer.from(value, "base64").toString("base64") === value;
@@ -1149,6 +1375,10 @@ function invalidRequest(message: string): AgentReleaseError {
 
 function invalidManagedSettings(message: string): AgentReleaseError {
 	return releaseError("agent_release_invalid_managed_settings", 400, message);
+}
+
+function invalidRollback(message: string): AgentReleaseError {
+	return releaseError("agent_release_invalid_rollback", 400, message);
 }
 
 function releaseError(

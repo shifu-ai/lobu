@@ -33,6 +33,7 @@ import {
 	createPostgresAgentConfigStore,
 	createPostgresAgentConnectionStore,
 } from "./stores/postgres-stores";
+import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
@@ -63,6 +64,7 @@ interface ProvisioningRoutesOptions {
 	secretStore?: WritableSecretStore;
 	publicGatewayUrl?: string;
 	agentReleaseTrustedPublicKeysJson?: string;
+	agentReleaseEnvironment?: string;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -289,6 +291,8 @@ export function createProvisioningRoutes(
 		trustedPublicKeysJson:
 			options.agentReleaseTrustedPublicKeysJson ??
 			process.env.AGENT_RELEASE_TRUSTED_PUBLIC_KEYS_JSON,
+		expectedEnvironment:
+			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
 	});
 
 	provisioningRoutes.post("/agents", async (c) => {
@@ -422,9 +426,21 @@ export function createProvisioningRoutes(
 
 		let command: unknown;
 		try {
-			command = await c.req.json();
-		} catch {
-			return c.json({ error: "invalid_json" }, 400);
+			command = parseStrictJsonBytes(new Uint8Array(await c.req.arrayBuffer()));
+		} catch (error) {
+			if (error instanceof StrictJsonError) {
+				return c.json(
+					{
+						error:
+							error.code === "duplicate_json_member"
+								? "agent_release_duplicate_json_member"
+								: "invalid_json",
+						error_description: error.message,
+					},
+					400,
+				);
+			}
+			throw error;
 		}
 
 		try {
@@ -456,13 +472,23 @@ export function createProvisioningRoutes(
 		const agentIdError = validateShifuAgentId(agentId);
 		if (agentIdError) return c.json({ error: agentIdError }, 400);
 
-		const evidence = await agentReleaseService.getEvidence({
-			organizationId,
-			agentId,
-		});
-		if (!evidence)
-			return c.json({ error: "agent_release_evidence_not_found" }, 404);
-		return c.json(evidence, 200);
+		try {
+			const evidence = await agentReleaseService.getEvidence({
+				organizationId,
+				agentId,
+			});
+			if (!evidence)
+				return c.json({ error: "agent_release_evidence_not_found" }, 404);
+			return c.json(evidence, 200);
+		} catch (error) {
+			if (error instanceof AgentReleaseError) {
+				return c.json(
+					{ error: error.code, error_description: error.message },
+					error.status,
+				);
+			}
+			throw error;
+		}
 	});
 
 	provisioningRoutes.post(

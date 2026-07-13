@@ -45,10 +45,20 @@ interface ReleaseFixtureOptions {
 	managedSettings?: ManagedSettings | Record<string, unknown>;
 	environment?: "local" | "staging" | "production";
 	publicationKind?: PublicationKind;
-	rollbackFromReleaseSequence?: number;
+	fromReleaseSequence?: number;
+	toReleaseSequence?: number;
+	allowDowngrade?: boolean;
+	rollbackReason?: string;
+	rollbackActor?: string;
+	rollbackExpiresAt?: string;
+	manifestRollbackToSequence?: number;
+	manifestRollbackToReleaseId?: string;
+	omitManifestRollbackTarget?: boolean;
 	expectedCurrentReleaseSequence?: number | null;
 	agentId?: string;
 	keyId?: string;
+	channel?: "candidate" | "stable";
+	generatedAt?: string;
 }
 
 beforeAll(async () => {
@@ -90,8 +100,10 @@ describe("signed managed agent release apply", () => {
 			feedSequence: 1,
 			status: "applied",
 			idempotent: false,
+			channel: "candidate",
 		});
 		expect(applied.manifestDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
+		expect(applied.feedDigest).toMatch(/^sha256:[a-f0-9]{64}$/);
 		expect(applied.settingsHash).toMatch(/^sha256:[a-f0-9]{64}$/);
 		expect(applied.revisionRef).toMatch(/^lobu:shifu-u-irene:agent-release:1:/);
 
@@ -135,6 +147,8 @@ describe("signed managed agent release apply", () => {
 			releaseId: "agent-2026.07.13.1",
 			releaseSequence: 1,
 			feedSequence: 1,
+			channel: "candidate",
+			feedDigest: applied.feedDigest,
 			manifestDigest: applied.manifestDigest,
 			status: "applied",
 			revisionRef: applied.revisionRef,
@@ -195,7 +209,63 @@ describe("signed managed agent release apply", () => {
 		);
 		expect(wrongEnvironmentResponse.status).toBe(400);
 		await expect(wrongEnvironmentResponse.json()).resolves.toMatchObject({
-			error: "agent_release_assignment_scope_mismatch",
+			error: "agent_release_environment_mismatch",
+		});
+	});
+
+	test("fails closed when runtime environment is missing, invalid, or mismatched", async () => {
+		for (const agentReleaseEnvironment of ["", "qa"]) {
+			const response = await putApply(
+				await buildApp({ agentReleaseEnvironment }),
+				signedApplyRequest({}),
+			);
+			expect(response.status).toBe(503);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_release_environment_unavailable",
+			});
+		}
+
+		const mismatch = await putApply(
+			await buildApp({ agentReleaseEnvironment: "production" }),
+			signedApplyRequest({ environment: "staging" }),
+		);
+		expect(mismatch.status).toBe(400);
+		await expect(mismatch.json()).resolves.toMatchObject({
+			error: "agent_release_environment_mismatch",
+		});
+	});
+
+	test("does not overwrite an existing receipt from another runtime environment", async () => {
+		const app = await buildApp();
+		expect((await putApply(app, signedApplyRequest({}))).status).toBe(200);
+		const sql = await db();
+		await sql`
+			UPDATE agent_release_applies
+			SET environment = 'staging'
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+
+		const response = await putApply(
+			app,
+			signedApplyRequest({
+				releaseId: "agent-environment-2",
+				releaseSequence: 2,
+				feedSequence: 2,
+				expectedCurrentReleaseSequence: 1,
+			}),
+		);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_receipt_environment_mismatch",
+		});
+		const receipt = await sql`
+			SELECT environment, applied_release_sequence
+			FROM agent_release_applies
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+		`;
+		expect(receipt[0]).toEqual({
+			environment: "staging",
+			applied_release_sequence: 1,
 		});
 	});
 
@@ -322,6 +392,65 @@ describe("signed managed agent release apply", () => {
 		});
 	});
 
+	test("rejects reuse of a channel feed sequence with different signed bytes", async () => {
+		const app = await buildApp();
+		expect((await putApply(app, signedApplyRequest({}))).status).toBe(200);
+
+		const changedFeedBytes = signedApplyRequest({
+			generatedAt: "2026-07-13T13:09:00.000Z",
+			expectedCurrentReleaseSequence: 1,
+		});
+		const response = await putApply(app, changedFeedBytes);
+		expect(response.status).toBe(409);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_feed_sequence_conflict",
+		});
+	});
+
+	test("tracks candidate and stable feed sequences independently", async () => {
+		const app = await buildApp();
+		expect(
+			(
+				await putApply(
+					app,
+					signedApplyRequest({
+						feedSequence: 2,
+						channel: "candidate",
+					}),
+				)
+			).status,
+		).toBe(200);
+
+		const stable = await putApply(
+			app,
+			signedApplyRequest({
+				releaseSequence: 2,
+				releaseId: "agent-stable-2",
+				feedSequence: 1,
+				channel: "stable",
+				expectedCurrentReleaseSequence: 1,
+				managedSettings: { identityMd: "stable channel" },
+			}),
+		);
+		expect(stable.status).toBe(200);
+		await expect(stable.json()).resolves.toMatchObject({
+			releaseSequence: 2,
+			feedSequence: 1,
+			channel: "stable",
+		});
+
+		const cursors = await (await db())`
+			SELECT channel, highest_feed_sequence
+			FROM agent_release_feed_cursors
+			WHERE organization_id = ${ORG_ID} AND agent_id = ${AGENT_ID}
+			ORDER BY channel
+		`;
+		expect(cursors).toEqual([
+			{ channel: "candidate", highest_feed_sequence: 2 },
+			{ channel: "stable", highest_feed_sequence: 1 },
+		]);
+	});
+
 	test("conflicts when a sequence is reused with another digest", async () => {
 		const app = await buildApp();
 		expect((await putApply(app, signedApplyRequest({}))).status).toBe(200);
@@ -411,7 +540,8 @@ describe("signed managed agent release apply", () => {
 			releaseId: "agent-2026.07.13.1",
 			managedSettings: { identityMd: "signed rollback" },
 			publicationKind: "rollback",
-			rollbackFromReleaseSequence: 2,
+			fromReleaseSequence: 2,
+			toReleaseSequence: 1,
 			expectedCurrentReleaseSequence: 2,
 		});
 		const response = await putApply(app, rollback);
@@ -423,6 +553,164 @@ describe("signed managed agent release apply", () => {
 			idempotent: false,
 		});
 		await expect(currentIdentity()).resolves.toBe("signed rollback");
+	});
+
+	test("requires every signed rollback field and rejects expired rollback events", async () => {
+		const app = await buildApp();
+		expect(
+			(
+				await putApply(
+					app,
+					signedApplyRequest({
+						releaseSequence: 2,
+						feedSequence: 1,
+						releaseId: "agent-rollback-source",
+					}),
+				)
+			).status,
+		).toBe(200);
+
+		for (const field of [
+			"fromReleaseSequence",
+			"toReleaseSequence",
+			"allowDowngrade",
+			"reason",
+			"actor",
+			"expiresAt",
+		]) {
+			const missing = signedApplyRequest({
+				releaseSequence: 1,
+				feedSequence: 2,
+				publicationKind: "rollback",
+				fromReleaseSequence: 2,
+				expectedCurrentReleaseSequence: 2,
+			});
+			delete missing.signedFeed.publications[0][field];
+			resignFeed(missing.signedFeed);
+			missing.commandDigest = commandDigest(missing);
+			const response = await putApply(app, missing);
+			expect(response.status).toBe(400);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_release_invalid_rollback",
+			});
+		}
+
+		const expired = signedApplyRequest({
+			releaseSequence: 1,
+			feedSequence: 2,
+			publicationKind: "rollback",
+			fromReleaseSequence: 2,
+			rollbackExpiresAt: "2020-01-01T00:00:00.000Z",
+			expectedCurrentReleaseSequence: 2,
+		});
+		const expiredResponse = await putApply(app, expired);
+		expect(expiredResponse.status).toBe(400);
+		await expect(expiredResponse.json()).resolves.toMatchObject({
+			error: "agent_release_rollback_expired",
+		});
+	});
+
+	test("binds rollback from/to fields to current receipt and target manifest", async () => {
+		const app = await buildApp();
+		expect(
+			(
+				await putApply(
+					app,
+					signedApplyRequest({
+						releaseSequence: 2,
+						feedSequence: 1,
+						releaseId: "agent-rollback-current",
+					}),
+				)
+			).status,
+		).toBe(200);
+
+		for (const request of [
+			signedApplyRequest({
+				releaseSequence: 1,
+				feedSequence: 2,
+				publicationKind: "rollback",
+				fromReleaseSequence: 9,
+				expectedCurrentReleaseSequence: 2,
+			}),
+			signedApplyRequest({
+				releaseSequence: 1,
+				feedSequence: 2,
+				publicationKind: "rollback",
+				fromReleaseSequence: 2,
+				toReleaseSequence: 9,
+				expectedCurrentReleaseSequence: 2,
+			}),
+			signedApplyRequest({
+				releaseSequence: 1,
+				feedSequence: 2,
+				publicationKind: "rollback",
+				fromReleaseSequence: 2,
+				manifestRollbackToSequence: 9,
+				expectedCurrentReleaseSequence: 2,
+			}),
+			signedApplyRequest({
+				releaseSequence: 1,
+				feedSequence: 2,
+				publicationKind: "rollback",
+				fromReleaseSequence: 2,
+				omitManifestRollbackTarget: true,
+				expectedCurrentReleaseSequence: 2,
+			}),
+		]) {
+			const response = await putApply(app, request);
+			expect(response.status).toBe(409);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_release_rollback_target_mismatch",
+			});
+		}
+
+		const nonDowngrade = signedApplyRequest({
+			releaseSequence: 3,
+			feedSequence: 2,
+			publicationKind: "rollback",
+			fromReleaseSequence: 2,
+			expectedCurrentReleaseSequence: 2,
+		});
+		const nonDowngradeResponse = await putApply(app, nonDowngrade);
+		expect(nonDowngradeResponse.status).toBe(400);
+		await expect(nonDowngradeResponse.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_rollback",
+		});
+	});
+
+	test("ordinary publications reject rollback-only fields", async () => {
+		const app = await buildApp();
+		const request = signedApplyRequest({});
+		request.signedFeed.publications[0].fromReleaseSequence = 2;
+		resignFeed(request.signedFeed);
+		request.commandDigest = commandDigest(request);
+		const response = await putApply(app, request);
+		expect(response.status).toBe(400);
+		await expect(response.json()).resolves.toMatchObject({
+			error: "agent_release_invalid_rollback",
+		});
+	});
+
+	test("rejects top-level, nested, and escaped-equivalent duplicate JSON members", async () => {
+		const app = await buildApp();
+		const valid = JSON.stringify(signedApplyRequest({}));
+		const duplicateBodies = [
+			`{"commandDigest":"duplicate",${valid.slice(1)}`,
+			valid.replace('"assignment":{', '"assignment":{"agentId":"duplicate",'),
+			valid.replace(
+				'"assignment":{',
+				'"assignment":{"\\u0061gentId":"duplicate",',
+			),
+		];
+		for (const body of duplicateBodies) {
+			const response = await putRawApply(app, body);
+			expect(response.status).toBe(400);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_release_duplicate_json_member",
+			});
+		}
+		expect((await putRawApply(app, valid)).status).toBe(200);
 	});
 
 	test("serializes concurrent replicas through PostgreSQL row locks", async () => {
@@ -456,7 +744,11 @@ describe("signed managed agent release apply", () => {
 });
 
 async function buildApp(
-	options: { organizationId?: string; trustedPublicKeysJson?: string } = {},
+	options: {
+		organizationId?: string;
+		trustedPublicKeysJson?: string;
+		agentReleaseEnvironment?: string;
+	} = {},
 ) {
 	const organizationId = options.organizationId ?? ORG_ID;
 	const { createProvisioningRoutes } = await import(
@@ -477,6 +769,10 @@ async function buildApp(
 		createProvisioningRoutes({
 			agentReleaseTrustedPublicKeysJson:
 				options.trustedPublicKeysJson ?? trustedPublicKeysJson(),
+			agentReleaseEnvironment:
+				options.agentReleaseEnvironment === undefined
+					? "production"
+					: options.agentReleaseEnvironment,
 		}),
 	);
 	return app;
@@ -537,6 +833,14 @@ async function putApply(
 	});
 }
 
+async function putRawApply(app: Hono, body: string) {
+	return app.request(`/api/provisioning/agents/${AGENT_ID}/managed-settings`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body,
+	});
+}
+
 function signedApplyRequest(options: ReleaseFixtureOptions) {
 	const releaseSequence = options.releaseSequence ?? 1;
 	const feedSequence = options.feedSequence ?? 1;
@@ -552,6 +856,16 @@ function signedApplyRequest(options: ReleaseFixtureOptions) {
 		managedSettings: options.managedSettings ?? {
 			identityMd: "release identity",
 		},
+		...(options.publicationKind === "rollback" &&
+		!options.omitManifestRollbackTarget
+			? {
+					rollbackToSequence:
+						options.manifestRollbackToSequence ?? releaseSequence,
+					...(options.manifestRollbackToReleaseId
+						? { rollbackToReleaseId: options.manifestRollbackToReleaseId }
+						: {}),
+				}
+			: {}),
 	};
 	const signedManifest = {
 		...manifest,
@@ -571,16 +885,23 @@ function signedApplyRequest(options: ReleaseFixtureOptions) {
 		manifest: structuredClone(signedManifest),
 		publicationKind: options.publicationKind ?? "release",
 	};
-	if (options.rollbackFromReleaseSequence !== undefined) {
-		publication.rollbackFromReleaseSequence =
-			options.rollbackFromReleaseSequence;
+	if (options.publicationKind === "rollback") {
+		publication.fromReleaseSequence =
+			options.fromReleaseSequence ?? releaseSequence + 1;
+		publication.toReleaseSequence =
+			options.toReleaseSequence ?? releaseSequence;
+		publication.allowDowngrade = options.allowDowngrade ?? true;
+		publication.reason = options.rollbackReason ?? "rollback test fixture";
+		publication.actor = options.rollbackActor ?? "release-operator@test";
+		publication.expiresAt =
+			options.rollbackExpiresAt ?? "2099-07-13T13:02:00.000Z";
 	}
 	const unsignedFeed = {
 		feedVersion: 1,
 		feedSequence,
 		environment,
-		channel: "candidate",
-		generatedAt: "2026-07-13T13:01:00.000Z",
+		channel: options.channel ?? "candidate",
+		generatedAt: options.generatedAt ?? "2026-07-13T13:01:00.000Z",
 		publications: [publication],
 	};
 	const signedFeed = {
