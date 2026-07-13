@@ -544,6 +544,15 @@ describe("guardDateOutput", () => {
         }).text
       ).toBe(expected);
     }
+
+    expect(
+      guardDateOutput({
+        userMessage: "幫我查下一場銷講",
+        finalText: "下一場銷講舉行在 7/22（三）。",
+        now: NOW,
+        trustedTemporalCandidates: ["2026-07-16"],
+      }).text
+    ).toBe("下一場銷講舉行在 7/16（四）。");
   });
 
   test("associates clean bounded scheduling bridges without a verb whitelist", () => {
@@ -600,6 +609,18 @@ describe("guardDateOutput", () => {
           reason: "next_occurrence_without_temporal_evidence",
         });
       }
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
     }
   });
 
@@ -819,14 +840,14 @@ describe("guardDateOutput", () => {
   });
 
   test("does not confuse Chinese event-name characters with negation", () => {
-    for (const [finalText, expected] of [
-      ["下一場不動產講座是 7/22（三）。", "下一場不動產講座是 7/16（四）。"],
-      ["下一場非營利課程是 7/22（三）。", "下一場非營利課程是 7/16（四）。"],
-      ["下一場未來論壇是 7/22（三）。", "下一場未來論壇是 7/16（四）。"],
+    for (const [target, finalText, expected] of [
+      ["不動產講座", "下一場不動產講座是 7/22（三）。", "下一場不動產講座是 7/16（四）。"],
+      ["非營利課程", "下一場非營利課程是 7/22（三）。", "下一場非營利課程是 7/16（四）。"],
+      ["未來論壇", "下一場未來論壇是 7/22（三）。", "下一場未來論壇是 7/16（四）。"],
     ] as const) {
       expect(
         guardDateOutput({
-          userMessage: "請查下一場活動",
+          userMessage: `請查下一場${target}`,
           finalText,
           now: NOW,
         })
@@ -837,7 +858,7 @@ describe("guardDateOutput", () => {
       });
       expect(
         guardDateOutput({
-          userMessage: "請查下一場活動",
+          userMessage: `請查下一場${target}`,
           finalText,
           now: NOW,
           trustedTemporalCandidates: ["2026-07-16"],
@@ -847,27 +868,31 @@ describe("guardDateOutput", () => {
   });
 
   test("applies negation checks to scheduling predicates, not event titles", () => {
-    for (const [finalText, expected] of [
+    for (const [userMessage, finalText, expected] of [
       [
+        "請查下一場不能錯過的講座",
         "下一場不能錯過的講座是 7/22（三）。",
         "下一場不能錯過的講座是 7/16（四）。",
       ],
       [
+        "請查下一場不可思議體驗",
         "下一場不可思議體驗是 7/22（三）。",
         "下一場不可思議體驗是 7/16（四）。",
       ],
       [
+        "Please check the next session No Code Workshop",
         "The next session No Code Workshop is 7/22 (星期三).",
         "The next session No Code Workshop is 7/16 (星期四).",
       ],
       [
+        "請查下一場不能錯過的講座",
         "下一場不能錯過的講座排在 7/22（三）。",
         "下一場不能錯過的講座排在 7/16（四）。",
       ],
     ] as const) {
       expect(
         guardDateOutput({
-          userMessage: "請查下一場活動",
+          userMessage,
           finalText,
           now: NOW,
         })
@@ -878,7 +903,7 @@ describe("guardDateOutput", () => {
       });
       expect(
         guardDateOutput({
-          userMessage: "請查下一場活動",
+          userMessage,
           finalText,
           now: NOW,
           trustedTemporalCandidates: ["2026-07-16"],

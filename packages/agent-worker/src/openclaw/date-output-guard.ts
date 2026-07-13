@@ -984,10 +984,17 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
           .filter(({ label }) => label === matchedLabel)
           .map(({ item }) => item)
       : [];
+    const hasSafeUnlabeledCandidateBinding =
+      claimDescriptors.size === 0 ||
+      (claimDescriptors.size === 1 &&
+        requestedTarget !== null &&
+        claimDescriptor === requestedTarget);
     const candidateStrings =
       labeledEvidence.length > 0
         ? Array.from(new Set(matchingEvidence.map((item) => item.candidate)))
-        : (input.trustedTemporalCandidates ?? []);
+        : hasSafeUnlabeledCandidateBinding
+          ? (input.trustedTemporalCandidates ?? [])
+          : [];
     const trustedCandidate = candidateStrings
       .map(parseTrustedTemporalCandidate)
       .filter(
