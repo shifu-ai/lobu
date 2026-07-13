@@ -218,8 +218,16 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
 }
 
 function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
-  return /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i.test(
-    bridge
+  const directBridge =
+    /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i;
+  if (directBridge.test(bridge)) return true;
+
+  const descriptorBridge =
+    /^\s*([^，,。！？；;:：\n\r]{1,16}?)\s*(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為))\s*$/;
+  const descriptor = descriptorBridge.exec(bridge)?.[1]?.trim();
+  if (!descriptor) return false;
+  return !/(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知)/.test(
+    descriptor
   );
 }
 

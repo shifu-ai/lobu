@@ -228,6 +228,23 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("rejects reference, source, and range descriptors as date links", () => {
+    for (const finalText of [
+      "下一場參考日期是 7/13（一）。",
+      "下一場來源日期為 7/13（一）。",
+      "下一場日期範圍是 7/13（一）。",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "下一場銷講是什麼時候？",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
   test("associates an explicit next-occurrence date connector", () => {
     const result = guardDateOutput({
       userMessage: "請查下一場銷講",
@@ -238,6 +255,31 @@ describe("guardDateOutput", () => {
 
     expect(result.status).toBe("corrected");
     expect(result.text).toBe("下一場日期為 7/16（四）。");
+  });
+
+  test("associates a short event descriptor before the next-occurrence date", () => {
+    const finalText = "下一場銷講是 7/22（三）。";
+
+    expect(
+      guardDateOutput({
+        userMessage: "請查下一場銷講",
+        finalText,
+        now: NOW,
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
+
+    const corrected = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText,
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+    expect(corrected.status).toBe("corrected");
+    expect(corrected.text).toBe("下一場銷講是 7/16（四）。");
   });
 
   test("resolves an explicit current-turn weekly recurrence", () => {
