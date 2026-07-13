@@ -24,13 +24,16 @@ import type { Env } from '../../index';
 import { isPrivilegedToolContext, routeAction } from './action-router';
 import { getDb } from '../../db/client';
 import {
+  activateScheduledJobByExternalKey,
   countActiveScheduledJobs,
   createScheduledJob,
   deleteScheduledJob,
   getScheduledJob,
+  getScheduledJobByExternalKey,
   listScheduledJobs,
   pauseScheduledJob,
   resolveWakeAgentId,
+  stageScheduledJobByExternalKey,
   type ScheduledJobRow,
   upsertScheduledJobByExternalKeyWithQuota,
 } from '../../scheduled/scheduled-jobs-service';
@@ -77,6 +80,7 @@ const CreateAction = Type.Object({
   action: Type.Literal('create'),
   description: Type.String({ minLength: 1, maxLength: 200 }),
   creation_key: Type.Optional(CreationKey),
+  initial_state: Type.Optional(Type.Literal('staged')),
   /**
    * RFC3339 timestamp for the first (or only) firing. Required.
    * For one-shot schedules this is the only firing.
@@ -122,6 +126,17 @@ const CancelAction = Type.Object({
   id: Type.String({ format: 'uuid' }),
 });
 
+const GetByCreationKeyAction = Type.Object({
+  action: Type.Literal('get_by_creation_key'),
+  creation_key: CreationKey,
+});
+
+const ActivateAction = Type.Object({
+  action: Type.Literal('activate'),
+  creation_key: CreationKey,
+  expected_schedule_id: Type.String({ format: 'uuid' }),
+});
+
 /**
  * MCP-facing schema. Deliberately flat and union-free: the agent-worker's
  * schema projection strips union keywords (anyOf/oneOf) and quarantines
@@ -131,11 +146,17 @@ const CancelAction = Type.Object({
  */
 export const ManageSchedulesSchema = Type.Object({
   action: Type.String({
-    description: "One of 'create', 'list', 'pause', 'cancel'.",
+    description: "One of 'create', 'get_by_creation_key', 'activate', 'list', 'pause', 'cancel'.",
   }),
   // create
   description: Type.Optional(Type.String({ maxLength: 200 })),
   creation_key: Type.Optional(CreationKey),
+  initial_state: Type.Optional(
+    Type.Literal('staged', {
+      description: 'Persist without allowing execution until a later activate action.',
+    })
+  ),
+  expected_schedule_id: Type.Optional(Type.String()),
   run_at: Type.Optional(
     Type.String({
       description:
@@ -183,7 +204,14 @@ export const ManageSchedulesSchema = Type.Object({
   paused: Type.Optional(Type.Boolean()),
 });
 
-const InternalActionSchema = Type.Union([CreateAction, ListAction, PauseAction, CancelAction]);
+const InternalActionSchema = Type.Union([
+  CreateAction,
+  GetByCreationKeyAction,
+  ActivateAction,
+  ListAction,
+  PauseAction,
+  CancelAction,
+]);
 type ManageSchedulesArgs = Static<typeof InternalActionSchema>;
 
 const createValidator = TypeCompiler.Compile(CreateAction);
@@ -196,6 +224,8 @@ interface ToolResult {
   schedule?: ReturnType<typeof serializeSchedule>;
   schedules?: Array<ReturnType<typeof serializeSchedule>>;
   ok?: boolean;
+  found?: boolean;
+  status?: string;
   error?: string;
 }
 
@@ -207,6 +237,9 @@ interface ToolResult {
 export interface ManageSchedulesDeps {
   createScheduledJob: typeof createScheduledJob;
   upsertScheduledJobByExternalKeyWithQuota: typeof upsertScheduledJobByExternalKeyWithQuota;
+  stageScheduledJobByExternalKey: typeof stageScheduledJobByExternalKey;
+  getScheduledJobByExternalKey: typeof getScheduledJobByExternalKey;
+  activateScheduledJobByExternalKey: typeof activateScheduledJobByExternalKey;
   listScheduledJobs: typeof listScheduledJobs;
   getScheduledJob: typeof getScheduledJob;
   pauseScheduledJob: typeof pauseScheduledJob;
@@ -255,6 +288,9 @@ async function dbResolveWakeAgentId(
 export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   createScheduledJob,
   upsertScheduledJobByExternalKeyWithQuota,
+  stageScheduledJobByExternalKey,
+  getScheduledJobByExternalKey,
+  activateScheduledJobByExternalKey,
   listScheduledJobs,
   getScheduledJob,
   pauseScheduledJob,
@@ -273,6 +309,14 @@ export async function manageSchedules(
   return routeAction('manage_schedules', args.action, ctx, {
     create: () =>
       handleCreate(args as Extract<ManageSchedulesArgs, { action: 'create' }>, ctx, deps),
+    get_by_creation_key: () =>
+      handleGetByCreationKey(
+        args as Extract<ManageSchedulesArgs, { action: 'get_by_creation_key' }>,
+        ctx,
+        deps
+      ),
+    activate: () =>
+      handleActivate(args as Extract<ManageSchedulesArgs, { action: 'activate' }>, ctx, deps),
     list: () => handleList(args as Extract<ManageSchedulesArgs, { action: 'list' }>, ctx, deps),
     pause: () => handlePause(args as Extract<ManageSchedulesArgs, { action: 'pause' }>, ctx, deps),
     cancel: () =>
@@ -394,6 +438,9 @@ async function handleCreate(
       error: `Invalid args: ${errs.map((e) => `${e.path} ${e.message}`).join('; ')}. ${CREATE_SHAPE_HINT}`,
     };
   }
+  if (args.initial_state === 'staged' && !args.creation_key) {
+    return { error: 'initial_state staged requires a creation_key.' };
+  }
   if (args.creation_key && !ctx.userId) {
     return { error: 'creation_key requires an authenticated user.' };
   }
@@ -513,6 +560,20 @@ async function handleCreate(
     sourceThreadId: args.source_thread_id ?? null,
   };
   if (args.creation_key) {
+    if (args.initial_state === 'staged') {
+      const outcome = await deps.stageScheduledJobByExternalKey({
+        ...createParams,
+        externalKey: args.creation_key,
+        changeDetection: 'full',
+      });
+      if (outcome.status === 'conflict') {
+        return {
+          status: 'conflict',
+          error: 'A different schedule already uses this creation_key.',
+        };
+      }
+      return { status: outcome.job.state, schedule: serializeSchedule(outcome.job) };
+    }
     const outcome = await deps.upsertScheduledJobByExternalKeyWithQuota({
       ...createParams,
       externalKey: args.creation_key,
@@ -524,6 +585,12 @@ async function handleCreate(
         error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
       };
     }
+    if (outcome.status === 'conflict') {
+      return {
+        status: 'conflict',
+        error: 'A different schedule already uses this creation_key.',
+      };
+    }
     if (!isPrivilegedToolContext(ctx) && outcome.job.created_by_user !== ctx.userId) {
       return { error: 'Schedule could not be created.' };
     }
@@ -531,6 +598,47 @@ async function handleCreate(
   }
   const job = await deps.createScheduledJob(createParams);
   return { schedule: serializeSchedule(job) };
+}
+
+function trustedStagedActionError(ctx: ToolContext): ToolResult | null {
+  return isPrivilegedToolContext(ctx)
+    ? null
+    : { error: 'Staged schedule actions require trusted access.' };
+}
+
+async function handleGetByCreationKey(
+  args: Extract<ManageSchedulesArgs, { action: 'get_by_creation_key' }>,
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
+): Promise<ToolResult> {
+  const accessError = trustedStagedActionError(ctx);
+  if (accessError) return accessError;
+  const creationKey = args.creation_key.trim();
+  if (!creationKey) return { error: 'creation_key is required.' };
+  const job = await deps.getScheduledJobByExternalKey(ctx.organizationId, creationKey);
+  return job
+    ? { found: true, status: job.state, schedule: serializeSchedule(job) }
+    : { found: false, status: 'not_found' };
+}
+
+async function handleActivate(
+  args: Extract<ManageSchedulesArgs, { action: 'activate' }>,
+  ctx: ToolContext,
+  deps: ManageSchedulesDeps
+): Promise<ToolResult> {
+  const accessError = trustedStagedActionError(ctx);
+  if (accessError) return accessError;
+  const creationKey = args.creation_key.trim();
+  if (!creationKey) return { error: 'creation_key is required.' };
+  if (!args.expected_schedule_id) return { error: 'expected_schedule_id is required.' };
+  const outcome = await deps.activateScheduledJobByExternalKey({
+    organizationId: ctx.organizationId,
+    externalKey: creationKey,
+    expectedScheduleId: args.expected_schedule_id,
+  });
+  return outcome.status === 'ok'
+    ? { status: outcome.job.state, schedule: serializeSchedule(outcome.job) }
+    : { status: outcome.status };
 }
 
 async function handleList(
@@ -604,6 +712,7 @@ function serializeSchedule(row: ScheduledJobRow) {
   return {
     id: row.id,
     creation_key: row.external_key,
+    state: row.state,
     organization_id: row.organization_id,
     action_type: row.action_type,
     action_args: row.action_args,

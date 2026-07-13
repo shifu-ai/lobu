@@ -28,6 +28,7 @@ export interface ScheduledJobRow {
 	id: string;
 	external_key: string | null;
 	schedule_revision: number;
+	state: "staged" | "active";
 	organization_id: string;
 	action_type: string;
 	action_args: Record<string, unknown>;
@@ -74,7 +75,113 @@ export type UpsertScheduledJobByExternalKeyWithQuotaParams =
 
 export type UpsertScheduledJobByExternalKeyOutcome =
 	| { status: "ok"; job: ScheduledJobRow }
+	| { status: "conflict" }
 	| { status: "quota_exceeded"; activeCount: number };
+
+export type StageScheduledJobByExternalKeyOutcome =
+	| { status: "ok"; job: ScheduledJobRow }
+	| { status: "conflict" };
+
+export type ActivateScheduledJobByExternalKeyOutcome =
+	| { status: "ok"; job: ScheduledJobRow }
+	| { status: "not_found" | "expired" | "paused" };
+
+export async function stageScheduledJobByExternalKey(
+	params: UpsertScheduledJobByExternalKeyParams,
+): Promise<StageScheduledJobByExternalKeyOutcome> {
+	if (!params.externalKey.trim()) throw new Error("externalKey is required");
+	if (!params.createdByUser)
+		throw new Error("external-key schedules require created_by_user");
+	const sql = getDb();
+	return sql.begin(async (tx) => {
+		await tx`
+			SELECT pg_advisory_xact_lock(
+				hashtext(${`scheduled-jobs:${params.organizationId}`}),
+				hashtext(${params.externalKey})
+			)
+		`;
+		const existingRows = (await tx`
+			SELECT * FROM scheduled_jobs
+			WHERE organization_id = ${params.organizationId}
+			  AND external_key = ${params.externalKey}
+			FOR UPDATE
+		`) as unknown as ScheduledJobRow[];
+		const existing = existingRows[0];
+		if (existing) {
+			return stagedPayloadMatches(existing, params)
+				? { status: "ok", job: existing }
+				: { status: "conflict" };
+		}
+		const rows = (await tx`
+			INSERT INTO scheduled_jobs (
+				external_key, state, organization_id, action_type, action_args, cron, until_at,
+				next_run_at, description, created_by_user, created_by_agent,
+				source_run_id, source_event_id, source_thread_id
+			) VALUES (
+				${params.externalKey}, 'staged', ${params.organizationId}, ${params.actionType},
+				${tx.json(params.actionArgs)}, ${params.cron ?? null}, ${params.untilAt ?? null},
+				${params.runAt}, ${params.description}, ${params.createdByUser},
+				${params.createdByAgent ?? null}, ${params.sourceRunId ?? null},
+				${params.sourceEventId ?? null}, ${params.sourceThreadId ?? null}
+			)
+			RETURNING *
+		`) as unknown as ScheduledJobRow[];
+		return { status: "ok", job: rows[0] };
+	});
+}
+
+export async function getScheduledJobByExternalKey(
+	organizationId: string,
+	externalKey: string,
+): Promise<ScheduledJobRow | null> {
+	const sql = getDb();
+	const rows = (await sql`
+		SELECT * FROM scheduled_jobs
+		WHERE organization_id = ${organizationId}
+		  AND external_key = ${externalKey}
+		LIMIT 1
+	`) as unknown as ScheduledJobRow[];
+	return rows[0] ?? null;
+}
+
+export async function activateScheduledJobByExternalKey(params: {
+	organizationId: string;
+	externalKey: string;
+	expectedScheduleId: string;
+	now?: Date;
+}): Promise<ActivateScheduledJobByExternalKeyOutcome> {
+	const sql = getDb();
+	return sql.begin(async (tx) => {
+		const rows = (await tx`
+			SELECT *, now() AS evaluated_at FROM scheduled_jobs
+			WHERE organization_id = ${params.organizationId}
+			  AND external_key = ${params.externalKey}
+			  AND id = ${params.expectedScheduleId}
+			FOR UPDATE
+		`) as unknown as Array<ScheduledJobRow & { evaluated_at: string }>;
+		const row = rows[0];
+		if (!row) return { status: "not_found" };
+		if (row.paused) return { status: "paused" };
+		if (row.state === "active") return { status: "ok", job: row };
+		const now = params.now ?? new Date(row.evaluated_at);
+		if (
+			new Date(row.next_run_at).getTime() <= now.getTime() ||
+			(row.until_at !== null &&
+				new Date(row.until_at).getTime() <= now.getTime())
+		) {
+			return { status: "expired" };
+		}
+		const activated = (await tx`
+			UPDATE scheduled_jobs
+			SET state = 'active', schedule_revision = schedule_revision + 1, updated_at = now()
+			WHERE id = ${row.id} AND state = 'staged' AND NOT paused
+			RETURNING *
+		`) as unknown as ScheduledJobRow[];
+		return activated[0]
+			? { status: "ok", job: activated[0] }
+			: { status: "not_found" };
+	});
+}
 
 export async function upsertScheduledJobByExternalKey(
 	params: UpsertScheduledJobByExternalKeyParams,
@@ -82,6 +189,11 @@ export async function upsertScheduledJobByExternalKey(
 	const outcome = await upsertScheduledJobByExternalKeyWithQuota(params);
 	if (outcome.status === "quota_exceeded") {
 		throw new Error("unexpected quota outcome without activeQuota");
+	}
+	if (outcome.status === "conflict") {
+		throw new Error(
+			"a different staged schedule already uses this externalKey",
+		);
 	}
 	return outcome.job;
 }
@@ -119,6 +231,11 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
       FOR UPDATE
     `) as unknown as ScheduledJobRow[];
 		const existing = existingRows[0];
+		if (existing?.state === "staged") {
+			return stagedPayloadMatches(existing, params)
+				? { status: "ok", job: existing }
+				: { status: "conflict" };
+		}
 		if (existing && existing.created_by_user !== params.createdByUser) {
 			return { status: "ok", job: existing };
 		}
@@ -159,6 +276,7 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
         SELECT count(*)::int AS count FROM scheduled_jobs
         WHERE organization_id = ${params.organizationId}
           AND created_by_user = ${params.createdByUser}
+          AND state = 'active'
           AND NOT paused
       `) as unknown as Array<{ count: number }>;
 			if (activeCount >= params.activeQuota) {
@@ -231,6 +349,24 @@ function fullScheduledJobChanged(
 		existing.source_run_id !== (params.sourceRunId ?? null) ||
 		existing.source_event_id !== (params.sourceEventId ?? null) ||
 		existing.source_thread_id !== (params.sourceThreadId ?? null)
+	);
+}
+
+function stagedPayloadMatches(
+	existing: ScheduledJobRow,
+	params: UpsertScheduledJobByExternalKeyParams,
+): boolean {
+	return (
+		existing.action_type === params.actionType &&
+		canonicalJson(existing.action_args) === canonicalJson(params.actionArgs) &&
+		existing.cron === (params.cron ?? null) &&
+		dateValue(existing.until_at) === dateValue(params.untilAt ?? null) &&
+		new Date(existing.next_run_at).getTime() === params.runAt.getTime() &&
+		existing.description === params.description &&
+		existing.created_by_agent === (params.createdByAgent ?? null) &&
+		existing.source_run_id === (params.sourceRunId ?? null) &&
+		existing.source_event_id === (params.sourceEventId ?? null) &&
+		existing.source_thread_id === (params.sourceThreadId ?? null)
 	);
 }
 
@@ -365,6 +501,7 @@ export async function listScheduledJobs(opts: {
 	return (await sql`
     SELECT * FROM scheduled_jobs
     WHERE organization_id = ${opts.organizationId}
+      AND state = 'active'
       AND (${opts.createdByAgent ?? null}::text IS NULL OR created_by_agent = ${opts.createdByAgent ?? null})
       AND (${opts.createdByUser ?? null}::text IS NULL OR created_by_user = ${opts.createdByUser ?? null})
       AND (${opts.actionType ?? null}::text IS NULL OR action_type = ${opts.actionType ?? null})
@@ -387,6 +524,7 @@ export async function countActiveScheduledJobs(
     SELECT count(*)::int AS count FROM scheduled_jobs
     WHERE organization_id = ${organizationId}
       AND created_by_user = ${userId}
+      AND state = 'active'
       AND NOT paused
   `) as unknown as Array<{ count: number }>;
 	return rows[0]?.count ?? 0;
@@ -491,6 +629,7 @@ export async function dispatchScheduledJobCandidate(
       FROM scheduled_jobs
       WHERE id = ${candidate.id}
         AND schedule_revision = ${candidate.schedule_revision}
+        AND state = 'active'
         AND next_run_at <= now()
         AND NOT paused
       FOR UPDATE SKIP LOCKED
@@ -561,7 +700,7 @@ export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
 			const candidates = (await sql`
         SELECT id, schedule_revision
         FROM scheduled_jobs
-        WHERE next_run_at <= now() AND NOT paused
+        WHERE state = 'active' AND next_run_at <= now() AND NOT paused
         ORDER BY next_run_at ASC
         LIMIT 200
       `) as unknown as ScheduledJobCandidate[];
