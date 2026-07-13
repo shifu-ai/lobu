@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import type { AgentSettings, StoredConnection } from "@lobu/core";
 import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { getDb } from "../db/client.js";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
@@ -37,6 +38,7 @@ import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+const MAX_AGENT_RELEASE_BODY_BYTES = 1024 * 1024;
 const SHIFU_UI_MANAGED_MCP_IDS = new Set([
 	"google_workspace",
 	"notion",
@@ -413,53 +415,69 @@ export function createProvisioningRoutes(
 		});
 	});
 
-	provisioningRoutes.put("/agents/:agentId/managed-settings", async (c) => {
-		const denied = requireAdminPat(c);
-		if (denied) return denied;
-
-		const organizationId = c.get("organizationId") as string | null;
-		if (!organizationId)
-			return c.json({ error: "Authentication required" }, 401);
-		const agentId = c.req.param("agentId")?.trim() ?? "";
-		const agentIdError = validateShifuAgentId(agentId);
-		if (agentIdError) return c.json({ error: agentIdError }, 400);
-
-		let command: unknown;
-		try {
-			command = parseStrictJsonBytes(new Uint8Array(await c.req.arrayBuffer()));
-		} catch (error) {
-			if (error instanceof StrictJsonError) {
-				return c.json(
+	provisioningRoutes.put(
+		"/agents/:agentId/managed-settings",
+		bodyLimit({
+			maxSize: MAX_AGENT_RELEASE_BODY_BYTES,
+			onError: (c) =>
+				c.json(
 					{
-						error:
-							error.code === "duplicate_json_member"
-								? "agent_release_duplicate_json_member"
-								: "invalid_json",
-						error_description: error.message,
+						error: "agent_release_body_too_large",
+						error_description: "Agent release body exceeds one MiB",
 					},
-					400,
-				);
-			}
-			throw error;
-		}
+					413,
+				),
+		}),
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
 
-		try {
-			const result = await agentReleaseService.apply({
-				organizationId,
-				agentId,
-				command,
-			});
-			return c.json(result, 200);
-		} catch (error) {
-			if (error instanceof AgentReleaseError) {
-				return c.json(
-					{ error: error.code, error_description: error.message },
-					error.status,
+			const organizationId = c.get("organizationId") as string | null;
+			if (!organizationId)
+				return c.json({ error: "Authentication required" }, 401);
+			const agentId = c.req.param("agentId")?.trim() ?? "";
+			const agentIdError = validateShifuAgentId(agentId);
+			if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+			let command: unknown;
+			try {
+				command = parseStrictJsonBytes(
+					new Uint8Array(await c.req.arrayBuffer()),
 				);
+			} catch (error) {
+				if (error instanceof StrictJsonError) {
+					return c.json(
+						{
+							error:
+								error.code === "duplicate_json_member"
+									? "agent_release_duplicate_json_member"
+									: "invalid_json",
+							error_description: error.message,
+						},
+						400,
+					);
+				}
+				throw error;
 			}
-			throw error;
-		}
-	});
+
+			try {
+				const result = await agentReleaseService.apply({
+					organizationId,
+					agentId,
+					command,
+				});
+				return c.json(result, 200);
+			} catch (error) {
+				if (error instanceof AgentReleaseError) {
+					return c.json(
+						{ error: error.code, error_description: error.message },
+						error.status,
+					);
+				}
+				throw error;
+			}
+		},
+	);
 
 	provisioningRoutes.get("/agents/:agentId/managed-settings", async (c) => {
 		const denied = requireAdminPat(c);

@@ -16,6 +16,7 @@ const ORG_ID = "org-agent-release";
 const OTHER_ORG_ID = "org-agent-release-other";
 const AGENT_ID = "shifu-u-irene";
 const KEY_ID = "agent-release-test-2026";
+const MAX_RELEASE_BODY_BYTES = 1024 * 1024;
 const PRIVATE_KEY = `-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIIPVIttIdPiKTq8G2u58MHvf7DqR4wTOzHGSogMA6bou
 -----END PRIVATE KEY-----`;
@@ -60,6 +61,7 @@ interface ReleaseFixtureOptions {
 	agentId?: string;
 	keyId?: string;
 	channel?: "candidate" | "stable";
+	createdAt?: string;
 	generatedAt?: string;
 }
 
@@ -159,6 +161,141 @@ describe("signed managed agent release apply", () => {
 		});
 		expect(JSON.stringify(evidence)).not.toContain("release identity");
 		expect(evidence).not.toHaveProperty("settings");
+	});
+
+	test("reports live managed-settings drift and repairs it on the same signed retry", async () => {
+		const app = await buildApp();
+		const request = signedApplyRequest({
+			managedSettings: {
+				identityMd: "managed identity",
+				toolsConfig: {
+					allowedTools: ["manage_schedules"],
+					strictMode: true,
+				},
+			},
+		});
+		const appliedResponse = await putApply(app, request);
+		const applied = await appliedResponse.json();
+		expect(appliedResponse.status).toBe(200);
+
+		const sql = await db();
+		await sql`
+			UPDATE agents
+			SET tools_config = ${sql.json({ allowedTools: ["drifted_tool"] })}
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+		const driftResponse = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(driftResponse.status).toBe(200);
+		const drift = await driftResponse.json();
+		expect(drift).toMatchObject({
+			status: "drifted",
+			settingsHash: applied.settingsHash,
+			liveSettingsHash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+		});
+		expect(drift.liveSettingsHash).not.toBe(applied.settingsHash);
+		expect(drift).not.toHaveProperty("settings");
+		expect(JSON.stringify(drift)).not.toContain("drifted_tool");
+
+		const repairResponse = await putApply(app, request);
+		expect(repairResponse.status).toBe(200);
+		await expect(repairResponse.json()).resolves.toMatchObject({
+			status: "applied",
+			idempotent: false,
+			repaired: true,
+			settingsHash: applied.settingsHash,
+		});
+		const repairedEvidence = await app.request(
+			`/api/provisioning/agents/${AGENT_ID}/managed-settings`,
+		);
+		expect(repairedEvidence.status).toBe(200);
+		await expect(repairedEvidence.json()).resolves.toMatchObject({
+			status: "applied",
+			settingsHash: applied.settingsHash,
+		});
+	});
+
+	test("rejects declared and chunked release bodies above one MiB before parsing", async () => {
+		const app = await buildApp();
+		const path = `/api/provisioning/agents/${AGENT_ID}/managed-settings`;
+		const declared = await app.request(path, {
+			method: "PUT",
+			headers: {
+				"content-type": "application/json",
+				"content-length": String(MAX_RELEASE_BODY_BYTES + 1),
+			},
+			body: "{}",
+		});
+		expect(declared.status).toBe(413);
+
+		const chunk = new Uint8Array(600 * 1024).fill(0x20);
+		const stream = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(chunk);
+				controller.enqueue(chunk);
+				controller.close();
+			},
+		});
+		const chunkedRequest = new Request(`http://localhost${path}`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: stream,
+			duplex: "half",
+		} as RequestInit & { duplex: "half" });
+		expect((await app.request(chunkedRequest)).status).toBe(413);
+		expect((await putApply(app, signedApplyRequest({}))).status).toBe(200);
+	});
+
+	test("requires signed timestamps to be strict valid RFC3339 values", async () => {
+		const app = await buildApp();
+		for (const request of [
+			signedApplyRequest({ createdAt: "July 13, 2026 13:00" }),
+			signedApplyRequest({ createdAt: "2026-02-30T13:00:00Z" }),
+			signedApplyRequest({ generatedAt: "2026-07-13T13:01:00" }),
+			signedApplyRequest({
+				publicationKind: "rollback",
+				rollbackExpiresAt: "2099-07-13 13:02:00Z",
+			}),
+		]) {
+			const response = await putApply(app, request);
+			expect(response.status).toBe(400);
+		}
+		const offsetTimestamp = signedApplyRequest({
+			createdAt: "2026-07-13T21:00:00+08:00",
+			generatedAt: "2026-07-13T21:01:00+08:00",
+		});
+		expect((await putApply(app, offsetTimestamp)).status).toBe(200);
+	});
+
+	test("rejects duplicate keyring members while allowing bounded key rotation", async () => {
+		const encoded = JSON.parse(trustedPublicKeysJson())[KEY_ID] as string;
+		for (const trustedPublicKeysJson of [
+			`{"${KEY_ID}":${JSON.stringify(encoded)},"${KEY_ID}":${JSON.stringify(encoded)}}`,
+			`{"${KEY_ID}":${JSON.stringify(encoded)},"agent\\u002drelease-test-2026":${JSON.stringify(encoded)}}`,
+			JSON.stringify({ ["k".repeat(70 * 1024)]: encoded }),
+		]) {
+			const response = await putApply(
+				await buildApp({ trustedPublicKeysJson }),
+				signedApplyRequest({}),
+			);
+			expect(response.status).toBe(503);
+			await expect(response.json()).resolves.toMatchObject({
+				error: "agent_release_keyring_unavailable",
+			});
+		}
+
+		const rotatedKeyId = "agent-release-test-2026-b";
+		const rotatedApp = await buildApp({
+			trustedPublicKeysJson: JSON.stringify({
+				[KEY_ID]: encoded,
+				[rotatedKeyId]: encoded,
+			}),
+		});
+		expect(
+			(await putApply(rotatedApp, signedApplyRequest({ keyId: rotatedKeyId })))
+				.status,
+		).toBe(200);
 	});
 
 	test("rejects a tampered manifest before mutating the agent", async () => {
@@ -1003,7 +1140,7 @@ function signedApplyRequest(options: ReleaseFixtureOptions) {
 		releaseSequence,
 		environment,
 		releaseKind: "capability_activation",
-		createdAt: "2026-07-13T13:00:00.000Z",
+		createdAt: options.createdAt ?? "2026-07-13T13:00:00.000Z",
 		managedSettings: options.managedSettings ?? {
 			identityMd: "release identity",
 		},

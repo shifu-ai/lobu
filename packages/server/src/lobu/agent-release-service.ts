@@ -6,6 +6,7 @@ import {
 } from "node:crypto";
 import { canonicalize } from "json-canonicalize";
 import { type DbClient, getDb } from "../db/client.js";
+import { parseStrictJsonBytes } from "./strict-json-parser.js";
 
 const MANAGED_SETTING_KEYS = [
 	"identityMd",
@@ -17,6 +18,10 @@ const MANAGED_SETTING_KEYS = [
 const SHA256_PATTERN = /^sha256:[0-9a-f]{64}$/;
 const BASE64_PATTERN =
 	/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const MAX_KEYRING_BYTES = 64 * 1024;
+const MAX_KEYRING_KEYS = 32;
+const RFC3339_PATTERN =
+	/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 type AgentReleaseEnvironment = "local" | "staging" | "production";
 type PublicationKind = "release" | "rollback";
@@ -108,14 +113,16 @@ export interface AgentReleaseEvidence {
 	channel: "candidate" | "stable";
 	feedDigest: string;
 	manifestDigest: string;
-	status: "applied";
+	status: "applied" | "drifted";
 	revisionRef: string;
 	settingsHash: string;
+	liveSettingsHash?: string;
 	appliedAt: string;
 }
 
 export interface AgentReleaseApplyResult extends AgentReleaseEvidence {
 	idempotent: boolean;
+	repaired: boolean;
 }
 
 export class AgentReleaseError extends Error {
@@ -187,13 +194,16 @@ export function createAgentReleaseService(options: {
 		}): Promise<AgentReleaseEvidence | null> {
 			const sql = options.sql ?? getDb();
 			if (expectedEnvironment.error) throw expectedEnvironment.error;
-			const rows = await sql<ReceiptRow>`
+			return sql.begin(async (tx) => {
+				const rows = await tx<ReceiptWithAgentRow>`
 				SELECT r.applied_release_id, r.applied_release_sequence,
 				       r.applied_feed_sequence, r.applied_channel,
 				       r.applied_feed_digest, r.environment,
 				       r.rollback_to_release_id, r.rollback_to_sequence,
 				       r.manifest_digest, r.status,
-				       r.revision_ref, r.settings_hash, r.applied_at
+				       r.revision_ref, r.settings_hash, r.applied_at,
+				       a.owner_user_id, a.identity_md, a.soul_md, a.user_md,
+				       a.model_selection, a.tools_config
 				FROM agent_release_applies r
 				JOIN agents a
 				  ON a.organization_id = r.organization_id
@@ -201,15 +211,22 @@ export function createAgentReleaseService(options: {
 				WHERE r.organization_id = ${input.organizationId}
 				  AND r.agent_id = ${input.agentId}
 				LIMIT 1
+				FOR SHARE OF r, a
 			`;
-			if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
-				throw releaseError(
-					"agent_release_receipt_environment_mismatch",
-					409,
-					"Agent release evidence belongs to another runtime environment",
-				);
-			}
-			return rows[0] ? evidenceFromReceipt(input.agentId, rows[0]) : null;
+				if (rows[0] && rows[0].environment !== expectedEnvironment.value) {
+					throw releaseError(
+						"agent_release_receipt_environment_mismatch",
+						409,
+						"Agent release evidence belongs to another runtime environment",
+					);
+				}
+				if (!rows[0]) return null;
+				const evidence = evidenceFromReceipt(input.agentId, rows[0]);
+				const liveSettingsHash = settingsHashFromAgent(rows[0]);
+				return liveSettingsHash === rows[0].settings_hash
+					? evidence
+					: { ...evidence, status: "drifted", liveSettingsHash };
+			});
 		},
 	};
 }
@@ -311,8 +328,22 @@ async function applyInTransaction(
 				"Agent release sequence was already applied with another manifest",
 			);
 		}
+		const liveSettingsHash = settingsHashFromAgent(agent);
+		const repaired = liveSettingsHash !== current.settings_hash;
+		const repairedAgent = repaired
+			? await applyManagedSettings(
+					tx,
+					input.organizationId,
+					input.agentId,
+					manifest.managedSettings,
+				)
+			: agent;
+		const repairedSettingsHash = repaired
+			? settingsHashFromAgent(repairedAgent)
+			: current.settings_hash;
 		await writeFeedCursor(tx, input, cursor);
 		if (
+			repaired ||
 			feed.feedSequence !== current.applied_feed_sequence ||
 			feed.channel !== current.applied_channel ||
 			input.feedDigest !== current.applied_feed_digest
@@ -323,6 +354,7 @@ async function applyInTransaction(
 					applied_feed_sequence = ${feed.feedSequence},
 					applied_channel = ${feed.channel},
 					applied_feed_digest = ${input.feedDigest},
+					settings_hash = ${repairedSettingsHash},
 					updated_at = NOW()
 				WHERE organization_id = ${input.organizationId}
 				  AND agent_id = ${input.agentId}
@@ -334,10 +366,15 @@ async function applyInTransaction(
 			`;
 			return {
 				...evidenceFromReceipt(input.agentId, advancedRows[0]),
-				idempotent: true,
+				idempotent: !repaired,
+				repaired,
 			};
 		}
-		return { ...evidenceFromReceipt(input.agentId, current), idempotent: true };
+		return {
+			...evidenceFromReceipt(input.agentId, current),
+			idempotent: true,
+			repaired: false,
+		};
 	}
 
 	const currentReleaseSequence = current?.applied_release_sequence ?? null;
@@ -398,52 +435,13 @@ async function applyInTransaction(
 	}
 	await writeFeedCursor(tx, input, cursor);
 
-	const settings = manifest.managedSettings;
-	const updatedRows = await tx<AgentSettingsRow>`
-		UPDATE agents SET
-			identity_md = CASE
-				WHEN ${hasOwn(settings, "identityMd")} THEN ${settings.identityMd ?? ""}
-				ELSE identity_md
-			END,
-			soul_md = CASE
-				WHEN ${hasOwn(settings, "soulMd")} THEN ${settings.soulMd ?? ""}
-				ELSE soul_md
-			END,
-			user_md = CASE
-				WHEN ${hasOwn(settings, "userMd")} THEN ${settings.userMd ?? ""}
-				ELSE user_md
-			END,
-			model_selection = CASE
-				WHEN ${hasOwn(settings, "modelSelection")}
-					THEN ${tx.json(settings.modelSelection ?? {})}
-				ELSE model_selection
-			END,
-			tools_config = CASE
-				WHEN ${hasOwn(settings, "toolsConfig")}
-					THEN ${tx.json(settings.toolsConfig ?? {})}
-				ELSE tools_config
-			END,
-			updated_at = NOW()
-		WHERE organization_id = ${input.organizationId}
-		  AND id = ${input.agentId}
-		RETURNING owner_user_id, identity_md, soul_md, user_md,
-		          model_selection, tools_config
-	`;
-	const updated = updatedRows[0];
-	if (!updated) {
-		throw releaseError(
-			"agent_release_agent_not_found",
-			404,
-			"Agent release target disappeared during apply",
-		);
-	}
-	const settingsHash = digestValue({
-		identityMd: updated.identity_md ?? "",
-		soulMd: updated.soul_md ?? "",
-		userMd: updated.user_md ?? "",
-		modelSelection: updated.model_selection ?? {},
-		toolsConfig: updated.tools_config ?? {},
-	});
+	const updated = await applyManagedSettings(
+		tx,
+		input.organizationId,
+		input.agentId,
+		manifest.managedSettings,
+	);
+	const settingsHash = settingsHashFromAgent(updated);
 	const revisionRef = [
 		"lobu",
 		input.agentId,
@@ -498,7 +496,55 @@ async function applyInTransaction(
 	return {
 		...evidenceFromReceipt(input.agentId, receipt[0]),
 		idempotent: false,
+		repaired: false,
 	};
+}
+
+async function applyManagedSettings(
+	tx: DbClient,
+	organizationId: string,
+	agentId: string,
+	settings: ManagedSettings,
+): Promise<AgentSettingsRow> {
+	const updatedRows = await tx<AgentSettingsRow>`
+		UPDATE agents SET
+			identity_md = CASE
+				WHEN ${hasOwn(settings, "identityMd")} THEN ${settings.identityMd ?? ""}
+				ELSE identity_md
+			END,
+			soul_md = CASE
+				WHEN ${hasOwn(settings, "soulMd")} THEN ${settings.soulMd ?? ""}
+				ELSE soul_md
+			END,
+			user_md = CASE
+				WHEN ${hasOwn(settings, "userMd")} THEN ${settings.userMd ?? ""}
+				ELSE user_md
+			END,
+			model_selection = CASE
+				WHEN ${hasOwn(settings, "modelSelection")}
+					THEN ${tx.json(settings.modelSelection ?? {})}
+				ELSE model_selection
+			END,
+			tools_config = CASE
+				WHEN ${hasOwn(settings, "toolsConfig")}
+					THEN ${tx.json(settings.toolsConfig ?? {})}
+				ELSE tools_config
+			END,
+			updated_at = NOW()
+		WHERE organization_id = ${organizationId}
+		  AND id = ${agentId}
+		RETURNING owner_user_id, identity_md, soul_md, user_md,
+		          model_selection, tools_config
+	`;
+	const updated = updatedRows[0];
+	if (!updated) {
+		throw releaseError(
+			"agent_release_agent_not_found",
+			404,
+			"Agent release target disappeared during apply",
+		);
+	}
+	return updated;
 }
 
 async function writeFeedCursor(
@@ -562,6 +608,8 @@ interface ReceiptRow {
 	applied_at: Date | string;
 }
 
+type ReceiptWithAgentRow = ReceiptRow & AgentSettingsRow;
+
 interface FeedCursorRow {
 	highest_feed_sequence: number;
 	highest_feed_digest: string;
@@ -588,6 +636,16 @@ function evidenceFromReceipt(
 				? row.applied_at.toISOString()
 				: new Date(row.applied_at).toISOString(),
 	};
+}
+
+function settingsHashFromAgent(agent: AgentSettingsRow): string {
+	return digestValue({
+		identityMd: agent.identity_md ?? "",
+		soulMd: agent.soul_md ?? "",
+		userMd: agent.user_md ?? "",
+		modelSelection: agent.model_selection ?? {},
+		toolsConfig: agent.tools_config ?? {},
+	});
 }
 
 function parseApplyCommand(value: unknown): AgentReleaseApplyCommand {
@@ -668,7 +726,7 @@ function parseManifest(value: unknown): SignedManifest {
 	}
 	if (
 		typeof value.createdAt !== "string" ||
-		!Number.isFinite(Date.parse(value.createdAt))
+		!isStrictRfc3339(value.createdAt)
 	) {
 		throw invalidRequest("Agent release createdAt is invalid");
 	}
@@ -742,7 +800,7 @@ function parseFeed(value: unknown): SignedFeed {
 	}
 	if (
 		typeof value.generatedAt !== "string" ||
-		!Number.isFinite(Date.parse(value.generatedAt))
+		!isStrictRfc3339(value.generatedAt)
 	) {
 		throw invalidRequest("Agent release feed generatedAt is invalid");
 	}
@@ -842,7 +900,7 @@ function parsePublication(value: unknown): FeedPublication {
 		}
 		if (
 			typeof value.expiresAt !== "string" ||
-			!Number.isFinite(Date.parse(value.expiresAt))
+			!isStrictRfc3339(value.expiresAt)
 		) {
 			throw invalidRollback("Signed rollback requires a valid expiresAt");
 		}
@@ -1191,13 +1249,19 @@ function parseTrustedKeyring(value: string | undefined): {
 			"Agent release trusted public keyring is missing or malformed",
 		),
 	});
-	if (!value?.trim()) return unavailable();
+	if (!value?.trim() || value.length > MAX_KEYRING_BYTES) return unavailable();
 	try {
-		const parsed: unknown = JSON.parse(value);
-		if (!isRecord(parsed) || Object.keys(parsed).length === 0)
+		const parsed = parseStrictJsonBytes(new TextEncoder().encode(value), {
+			maxBytes: MAX_KEYRING_BYTES,
+			maxDepth: 2,
+			maxValues: MAX_KEYRING_KEYS + 1,
+		});
+		if (!isRecord(parsed)) return unavailable();
+		const entries = Object.entries(parsed);
+		if (entries.length === 0 || entries.length > MAX_KEYRING_KEYS)
 			return unavailable();
 		const keys = new Map<string, KeyObject>();
-		for (const [keyId, encodedKey] of Object.entries(parsed)) {
+		for (const [keyId, encodedKey] of entries) {
 			if (
 				!keyId.trim() ||
 				typeof encodedKey !== "string" ||
@@ -1217,6 +1281,53 @@ function parseTrustedKeyring(value: string | undefined): {
 	} catch {
 		return unavailable();
 	}
+}
+
+function isStrictRfc3339(value: string): boolean {
+	const match = RFC3339_PATTERN.exec(value);
+	if (!match) return false;
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const hour = Number(match[4]);
+	const minute = Number(match[5]);
+	const second = Number(match[6]);
+	if (
+		year < 1 ||
+		month < 1 ||
+		month > 12 ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59
+	) {
+		return false;
+	}
+	const days = [
+		31,
+		isLeapYear(year) ? 29 : 28,
+		31,
+		30,
+		31,
+		30,
+		31,
+		31,
+		30,
+		31,
+		30,
+		31,
+	];
+	if (day < 1 || day > days[month - 1]) return false;
+	const zone = match[7];
+	if (zone !== "Z") {
+		const offsetHour = Number(zone.slice(1, 3));
+		const offsetMinute = Number(zone.slice(4, 6));
+		if (offsetHour > 23 || offsetMinute > 59) return false;
+	}
+	return Number.isFinite(Date.parse(value));
+}
+
+function isLeapYear(year: number): boolean {
+	return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
 }
 
 export function digestAgentReleaseCommand(value: unknown): string {
