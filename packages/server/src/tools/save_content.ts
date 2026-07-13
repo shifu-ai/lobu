@@ -20,6 +20,7 @@ import { ensureMemberEntityType } from '../utils/member-entity-type';
 import { requireWriteAccess } from '../utils/organization-access';
 import { buildEventPermalink, getOrganizationSlug, getPublicWebUrl } from '../utils/url-builder';
 import { trackWatcherReaction } from '../utils/watcher-reactions';
+import { stripCallerEvidenceProvenance } from '../utils/trusted-evidence-provenance';
 import { authorizeMemoryAgentOwner } from './memory-read-scope';
 import type { ToolContext } from './registry';
 import type { SaveContentArgs } from './save_content_schema';
@@ -223,12 +224,12 @@ export async function saveContent(
     semanticType,
     metadata: personalScope
       ? {
-          ...args.metadata,
+          ...stripCallerEvidenceProvenance(args.metadata),
           agent_id: personalScope.agentId,
           owner_user_id: personalScope.ownerUserId,
           memory_visibility: 'personal_private',
         }
-      : args.metadata,
+      : stripCallerEvidenceProvenance(args.metadata),
     embedding: args.embedding,
     embeddingModel: args.embedding_model,
     createdBy: ctx.userId,

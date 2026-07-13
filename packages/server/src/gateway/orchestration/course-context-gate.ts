@@ -1,109 +1,781 @@
-import { createLogger, extractTraceId, type MessagePayload } from '@lobu/core';
-import { createHash } from 'node:crypto';
-import type {Env} from '@lobu/connector-sdk';
-import type { ActiveCourseBindingWriteResult, ISessionManager } from '../session.js';
-import { ToolboxCourseContextClient, type ToolboxCourseContextClientOptions } from '../services/toolbox-course-context-client.js';
-import { retrieveCourseMemory, type CourseMemorySearch } from './course-memory-retriever.js';
-import { emitJourneyEvent, type JourneyEventPayload } from '../services/journey-observability.js';
-import { gradeCourseEvidenceReadiness } from './course-evidence-readiness.js';
-import type {CourseReadinessField} from '@lobu/core';
+import { createLogger, extractTraceId, type MessagePayload } from "@lobu/core";
+import { createHash } from "node:crypto";
+import type { Env } from "@lobu/connector-sdk";
+import type {
+	ActiveCourseBindingWriteResult,
+	ISessionManager,
+} from "../session.js";
+import {
+	ToolboxCourseContextClient,
+	type ToolboxCourseContextClientOptions,
+} from "../services/toolbox-course-context-client.js";
+import {
+	retrieveCourseMemory,
+	type CourseMemorySearch,
+} from "./course-memory-retriever.js";
+import {
+	emitJourneyEvent,
+	type JourneyEventPayload,
+} from "../services/journey-observability.js";
+import { gradeCourseEvidenceReadiness } from "./course-evidence-readiness.js";
+import type { CourseReadinessField } from "@lobu/core";
 
-export interface CourseContextGateOptions extends ToolboxCourseContextClientOptions { sessionManager?: ISessionManager; sessionKey?: string; courseSkillEnabled?: boolean; courseSkillContextFields?:string[]; courseSkillRetrievalTerms?:string[]; courseSkillRetrievalLimit?:number; memorySearch?:CourseMemorySearch; env?:Env; traceEmitter?:(event:JourneyEventPayload)=>Promise<void> }
-export type CourseContextGateResult = { status: 'not_required' } | {status:'already_dispatched'} | { status: 'ready'; context: NonNullable<MessagePayload['resolvedCourseContext']>; bindingStatus?: ActiveCourseBindingWriteResult; replay?:{pendingId:string;messageId:string} } | { status: 'clarification_required'; candidates: Array<{courseKey:string;displayName:string}> } | { status: 'onboarding_required' } | { status: 'context_unavailable'; displayName?:string; reasonCode:string; resolvedCourse?:{courseKey:string;courseEntityId:string;displayName:string} };
-const COURSE_INTENT = /(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
-const PERSONAL_REMINDER = /提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
-const logger = createLogger('course-context-gate');
-const STRUCTURED_CONTEXT_FIELDS=new Set(['audience','dream_result','course_promise','key_learning','delivery_mechanism','evidence','offer']);
-function hashIdentity(value:string):string{return createHash('sha256').update(value).digest('hex');}
-const READINESS_FIELDS:CourseReadinessField[]=['audience','key_learning','course_promise','existing_sales_talk'];
-const CONFLICT_QUESTIONS:Record<CourseReadinessField,string>={audience:'課程受眾資料有衝突，請確認應以哪一個版本為準？',key_learning:'核心學習成果資料有衝突，請確認應以哪一個版本為準？',course_promise:'課程承諾資料有衝突，請確認應以哪一個版本為準？',existing_sales_talk:'既有銷講資料有衝突，請確認應以哪一個版本為準？'};
-function mergeReadiness(canonical:Partial<Record<CourseReadinessField,string|null>>,retrieval:Awaited<ReturnType<typeof retrieveCourseMemory>>){const values:Partial<Record<CourseReadinessField,string>>={};const conflictedFields:CourseReadinessField[]=[];const retrievedFields=new Set<CourseReadinessField>();for(const field of READINESS_FIELDS){const canonicalValue=canonical[field]?.trim();const retrieved=[...new Set(retrieval.snippets.map((snippet)=>snippet.readinessFields[field]?.trim()).filter((value):value is string=>Boolean(value)))];if(canonicalValue){values[field]=canonicalValue;if(retrieved.some((value)=>value!==canonicalValue))conflictedFields.push(field);}else if(retrieved.length===1)values[field]=retrieved[0];else if(retrieved.length>1)conflictedFields.push(field);if(retrieved.length>0)retrievedFields.add(field);}const assessment=gradeCourseEvidenceReadiness(values);if(conflictedFields.length){assessment.level='conflicted';assessment.answerPolicy='answer_conservatively';assessment.suggestedQuestions=[...conflictedFields.map((field)=>CONFLICT_QUESTIONS[field]),...assessment.suggestedQuestions].slice(0,3);}return{assessment,retrievedFields:[...retrievedFields]};}
-async function traceCourse(data:MessagePayload,options:CourseContextGateOptions|undefined,event:string,status:string,fields:Record<string,unknown>={}):Promise<void>{
-  const emitter=options?.traceEmitter??emitJourneyEvent;
-  const isMemoryEvent=event.startsWith('context.memory.');
-  try{void emitter({trace_id:extractTraceId(data)??`tr_${hashIdentity(data.messageId??data.conversationId).slice(0,32)}`,journey_id:typeof data.platformMetadata?.journeyId==='string'?data.platformMetadata.journeyId:'course_context_gate',event,service:'lobu',module:'course-context-gate',status,...(isMemoryEvent?{}:{owner_hash:hashIdentity(data.userId),conversation_hash:hashIdentity(data.conversationId),agent_key:hashIdentity(data.agentId)}),...fields}).catch(()=>{});}catch{}
+export interface CourseContextGateOptions
+	extends ToolboxCourseContextClientOptions {
+	sessionManager?: ISessionManager;
+	sessionKey?: string;
+	courseSkillEnabled?: boolean;
+	courseSkillContextFields?: string[];
+	courseSkillRetrievalTerms?: string[];
+	courseSkillRetrievalLimit?: number;
+	memorySearch?: CourseMemorySearch;
+	env?: Env;
+	traceEmitter?: (event: JourneyEventPayload) => Promise<void>;
+	recordScheduledExecutionTrace?: (trace: {
+		status: "context_ready"; runId: number; conversationId: string;
+		conversationBindingCourseEntityId: string | null; courseEntityId: string;
+		scopeVersion: 1; contextVersion: number;
+		evidenceReadiness: "canonical_only" | "same_course_evidence";
+	}) => Promise<void>;
+	/** Fire-time only: let the durable task runner retry transient Toolbox failures. */
+	propagateInfrastructureErrors?: boolean;
 }
-function projectRequiredCourseContext(bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>,fields:string[]):string{
-  const lines=['Required course context (canonical structured fields only):'];
-  for(const field of fields.filter((value)=>STRUCTURED_CONTEXT_FIELDS.has(value))){
-    if(field==='audience')lines.push(`audience: ${bundle.profile.audience??'[missing]'}`);
-    else if(field==='course_promise')lines.push(`course_promise: ${bundle.profile.coursePromise??'[missing]'}`);
-    else if(field==='evidence'){
-      lines.push('evidence:');
-      if(bundle.evidence.confirmed.length===0)lines.push('- [missing]');
-      else for(const item of bundle.evidence.confirmed.slice(0,8)){const title=(item.sourceTitle??item.sourceId).slice(0,200);const preview=item.excerptPreview?.slice(0,500);lines.push(`- ${item.id.slice(0,200)} | ${title}${preview?` | ${preview}`:''}`);}
-    }else lines.push(`${field}: [missing]`);
-  }
-  return lines.join('\n').slice(0,8000);
+export type CourseContextGateResult =
+	| { status: "not_required" }
+	| { status: "already_dispatched" }
+	| {
+			status: "ready";
+			context: NonNullable<MessagePayload["resolvedCourseContext"]>;
+			bindingStatus?: ActiveCourseBindingWriteResult;
+			replay?: { pendingId: string; messageId: string };
+	  }
+	| {
+			status: "clarification_required";
+			candidates: Array<{ courseKey: string; displayName: string }>;
+	  }
+	| { status: "onboarding_required" }
+	| {
+			status: "context_unavailable";
+			displayName?: string;
+			reasonCode: string;
+			resolvedCourse?: {
+				courseKey: string;
+				courseEntityId: string;
+				displayName: string;
+			};
+	  };
+const COURSE_INTENT =
+	/(?:銷講|三個秘密|課綱|課程|老師回饋|課程會議|課程文件|戰報|招生|offer)/iu;
+const PERSONAL_REMINDER =
+	/提醒我.{0,30}(?:繳|付|買|拿|帶|吃|喝|電話費|水費|電費)/u;
+const logger = createLogger("course-context-gate");
+const STRUCTURED_CONTEXT_FIELDS = new Set([
+	"audience",
+	"dream_result",
+	"course_promise",
+	"key_learning",
+	"delivery_mechanism",
+	"evidence",
+	"offer",
+]);
+function hashIdentity(value: string): string {
+	return createHash("sha256").update(value).digest("hex");
 }
-export function requiresCourseContext(data: MessagePayload, options: {courseSkillEnabled?:boolean;hasActiveCourse?:boolean} = {}): boolean {
-  const message = data.messageText?.trim() ?? '';
-  if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message)) return false;
-  if (options.courseSkillEnabled || data.platformMetadata?.courseScope === 'reviewed') return true;
-  if (COURSE_INTENT.test(message)) return true;
-  return Boolean(options.hasActiveCourse && /^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message));
+const READINESS_FIELDS: CourseReadinessField[] = [
+	"audience",
+	"key_learning",
+	"course_promise",
+	"existing_sales_talk",
+];
+const CONFLICT_QUESTIONS: Record<CourseReadinessField, string> = {
+	audience: "課程受眾資料有衝突，請確認應以哪一個版本為準？",
+	key_learning: "核心學習成果資料有衝突，請確認應以哪一個版本為準？",
+	course_promise: "課程承諾資料有衝突，請確認應以哪一個版本為準？",
+	existing_sales_talk: "既有銷講資料有衝突，請確認應以哪一個版本為準？",
+};
+function mergeReadiness(
+	canonical: Partial<Record<CourseReadinessField, string | null>>,
+	retrieval: Awaited<ReturnType<typeof retrieveCourseMemory>>,
+) {
+	const values: Partial<Record<CourseReadinessField, string>> = {};
+	const conflictedFields: CourseReadinessField[] = [];
+	const retrievedFields = new Set<CourseReadinessField>();
+	for (const field of READINESS_FIELDS) {
+		const canonicalValue = canonical[field]?.trim();
+		const retrieved = [
+			...new Set(
+				retrieval.snippets
+					.map((snippet) => snippet.readinessFields[field]?.trim())
+					.filter((value): value is string => Boolean(value)),
+			),
+		];
+		if (canonicalValue) {
+			values[field] = canonicalValue;
+			if (retrieved.some((value) => value !== canonicalValue))
+				conflictedFields.push(field);
+		} else if (retrieved.length === 1) values[field] = retrieved[0];
+		else if (retrieved.length > 1) conflictedFields.push(field);
+		if (retrieved.length > 0) retrievedFields.add(field);
+	}
+	const assessment = gradeCourseEvidenceReadiness(values);
+	if (conflictedFields.length) {
+		assessment.level = "conflicted";
+		assessment.answerPolicy = "answer_conservatively";
+		assessment.suggestedQuestions = [
+			...conflictedFields.map((field) => CONFLICT_QUESTIONS[field]),
+			...assessment.suggestedQuestions,
+		].slice(0, 3);
+	}
+	return { assessment, retrievedFields: [...retrievedFields] };
 }
-export function isExplicitPersonalBypass(data: MessagePayload): boolean { const message=data.messageText?.trim()??''; return PERSONAL_REMINDER.test(message)&&!COURSE_INTENT.test(message); }
+async function traceCourse(
+	data: MessagePayload,
+	options: CourseContextGateOptions | undefined,
+	event: string,
+	status: string,
+	fields: Record<string, unknown> = {},
+): Promise<void> {
+	const emitter = options?.traceEmitter ?? emitJourneyEvent;
+	const isMemoryEvent = event.startsWith("context.memory.");
+	try {
+		void emitter({
+			trace_id:
+				extractTraceId(data) ??
+				`tr_${hashIdentity(data.messageId ?? data.conversationId).slice(0, 32)}`,
+			journey_id:
+				typeof data.platformMetadata?.journeyId === "string"
+					? data.platformMetadata.journeyId
+					: "course_context_gate",
+			event,
+			service: "lobu",
+			module: "course-context-gate",
+			status,
+			...(isMemoryEvent
+				? {}
+				: {
+						owner_hash: hashIdentity(data.userId),
+						conversation_hash: hashIdentity(data.conversationId),
+						agent_key: hashIdentity(data.agentId),
+					}),
+			...fields,
+		}).catch(() => {});
+	} catch {}
+}
+function projectRequiredCourseContext(
+	bundle: Awaited<ReturnType<ToolboxCourseContextClient["bundle"]>>,
+	fields: string[],
+): string {
+	const lines = ["Required course context (canonical structured fields only):"];
+	for (const field of fields.filter((value) =>
+		STRUCTURED_CONTEXT_FIELDS.has(value),
+	)) {
+		if (field === "audience")
+			lines.push(`audience: ${bundle.profile.audience ?? "[missing]"}`);
+		else if (field === "course_promise")
+			lines.push(
+				`course_promise: ${bundle.profile.coursePromise ?? "[missing]"}`,
+			);
+		else if (field === "evidence") {
+			lines.push("evidence:");
+			if (bundle.evidence.confirmed.length === 0) lines.push("- [missing]");
+			else
+				for (const item of bundle.evidence.confirmed.slice(0, 8)) {
+					const title = (item.sourceTitle ?? item.sourceId).slice(0, 200);
+					const preview = item.excerptPreview?.slice(0, 500);
+					lines.push(
+						`- ${item.id.slice(0, 200)} | ${title}${preview ? ` | ${preview}` : ""}`,
+					);
+				}
+		} else lines.push(`${field}: [missing]`);
+	}
+	return lines.join("\n").slice(0, 8000);
+}
+export function requiresCourseContext(
+	data: MessagePayload,
+	options: { courseSkillEnabled?: boolean; hasActiveCourse?: boolean } = {},
+): boolean {
+	const message = data.messageText?.trim() ?? "";
+	if (PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message))
+		return false;
+	if (
+		options.courseSkillEnabled ||
+		data.platformMetadata?.courseScope === "reviewed"
+	)
+		return true;
+	if (COURSE_INTENT.test(message)) return true;
+	return Boolean(
+		options.hasActiveCourse &&
+			/^(?:繼續|接著|然後|再來|照剛才|就這個)/u.test(message),
+	);
+}
+export function isExplicitPersonalBypass(data: MessagePayload): boolean {
+	const message = data.messageText?.trim() ?? "";
+	return PERSONAL_REMINDER.test(message) && !COURSE_INTENT.test(message);
+}
 
-export async function attachCourseContextForReviewedScope(data: MessagePayload, options?: CourseContextGateOptions): Promise<CourseContextGateResult> {
-  if (isExplicitPersonalBypass(data)) return { status: 'not_required' };
-  const gateStarted=Date.now(); await traceCourse(data,options,'context.gate.started','started',{gate_mode:process.env.COURSE_CONTEXT_GATE_MODE??'enforce'});
-  let session = null; try { session = options?.sessionManager && options.sessionKey ? await options.sessionManager.getSessionStrict(options.sessionKey) : null; } catch { logger.warn({ category: 'session_read' }, 'Course context session unavailable'); return { status: 'context_unavailable', reasonCode: 'session_unavailable' }; }
-  const storedPending = session?.pendingCourseSelection;
-  // Old rolling-deployment records have no owner/agent scope. They must not be
-  // selected, replayed, or deleted by a different runtime identity.
-  if (storedPending && (storedPending.ownerUserId !== data.userId || storedPending.agentId !== data.agentId)) {
-    return { status: 'context_unavailable', reasonCode: 'pending_scope_mismatch' };
-  }
-  const pendingForExpiry = session?.pendingCourseSelection;
-  const pendingExpired = Boolean(pendingForExpiry?.status === 'pending' && Date.now() - pendingForExpiry.createdAt > 10 * 60_000);
-  if (pendingExpired && pendingForExpiry && options?.sessionManager && options.sessionKey && (await options.sessionManager.clearPendingCourseSelection(options.sessionKey, pendingForExpiry.pendingId, data.userId, data.agentId)).status !== 'cleared') return { status: 'context_unavailable', reasonCode: 'pending_clear_failed' };
-  let pending = !pendingExpired ? session?.pendingCourseSelection : undefined;
-  if(pending?.status==='dispatched'){if(pending.claimedMessageId===data.messageId)return{status:'already_dispatched'};if(!options?.sessionManager||!options.sessionKey||(await options.sessionManager.clearPendingCourseSelection(options.sessionKey,pending.pendingId,data.userId,data.agentId,pending.claimedMessageId)).status!=='cleared')return{status:'context_unavailable',reasonCode:'dispatched_cleanup_failed'};pending=undefined;}
-  const CLAIMED_RECOVERY_GRACE_MS=5*60_000;
-  if(pending?.status==='claimed'&&pending.claimedMessageId!==data.messageId&&pending.claimedAt&&Date.now()-pending.claimedAt>CLAIMED_RECOVERY_GRACE_MS){if(!options?.sessionManager||!options.sessionKey||(await options.sessionManager.clearPendingCourseSelection(options.sessionKey,pending.pendingId,data.userId,data.agentId,pending.claimedMessageId)).status!=='cleared')return{status:'context_unavailable',reasonCode:'claimed_recovery_failed'};pending=undefined;}
-  const text = typeof data.messageText === 'string' ? data.messageText.trim() : '';
-  const choice = pending?.status === 'claimed' && pending.claimedMessageId === data.messageId ? pending.candidates.find((candidate)=>candidate.courseKey===pending.claimedCourseKey) : pending ? pending.candidates.find((candidate, index) => text === String(index + 1) || text === candidate.courseKey || text === candidate.displayName) : undefined;
-  if (!choice && !pending && !requiresCourseContext(data, { courseSkillEnabled: options?.courseSkillEnabled, hasActiveCourse: Boolean(session?.shifuCourseContext) })) return { status: 'not_required' };
-  const baseUrl = options?.baseUrl ?? process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim();
-  const secret = options?.secret ?? process.env.TOOLBOX_INTERNAL_SECRET?.trim();
-  if (!baseUrl || !secret) return { status: 'context_unavailable', reasonCode: 'not_configured' };
-  const client = new ToolboxCourseContextClient({ ...options, baseUrl, secret });
-  if (pending && !choice) return { status: 'clarification_required', candidates: pending.candidates };
-  let replay:{pendingId:string;messageId:string}|undefined;
-  if(choice&&pending?.status==='pending'&&options?.sessionManager&&options.sessionKey){const claimed=await options.sessionManager.claimPendingCourseSelection(options.sessionKey,pending.pendingId,data.userId,data.agentId,choice.courseKey,data.messageId);if(claimed.status!=='claimed')return{status:'context_unavailable',reasonCode:'pending_claim_failed'};replay={pendingId:pending.pendingId,messageId:data.messageId};}
-  else if(choice&&pending?.status==='claimed')replay={pendingId:pending.pendingId,messageId:data.messageId};
-  if (choice && pending) data.messageText = pending.originalMessage;
-  let resolution:Awaited<ReturnType<ToolboxCourseContextClient['resolve']>>; try { resolution = await client.resolve({ ownerUserId: data.userId, agentId: data.agentId, conversationId: data.conversationId, message: typeof data.messageText==='string'?data.messageText:'', boundCourseKey: session?.shifuCourseContext?.courseKey, explicitCourseKey: choice?.courseKey }); await traceCourse(data,options,`context.course.${resolution.status}`,'ok',{duration_ms:Date.now()-gateStarted,...(resolution.status==='resolved'?{course_key:resolution.course.courseKey,course_entity_id:resolution.course.courseEntityId}:{}),reason_code:'reason'in resolution?resolution.reason:undefined}); } catch { logger.warn({ category: 'resolver' }, 'Course context resolver unavailable'); await traceCourse(data,options,'context.course.missing','failed',{reason_code:'resolver_unavailable'}); return { status: 'context_unavailable', reasonCode: 'resolver_unavailable' }; }
-  if (resolution.status === 'ambiguous') { const candidates = resolution.candidates.map(({courseKey,displayName}) => ({courseKey,displayName})); if (options?.sessionManager && options.sessionKey && (await options.sessionManager.createPendingCourseSelection(options.sessionKey, { ownerUserId:data.userId,agentId:data.agentId,candidates, originalMessage: (typeof data.messageText==='string'?data.messageText:'').slice(0, 8000), createdAt: Date.now() })).status!=='persisted') return { status: 'context_unavailable', reasonCode: 'pending_write_failed' }; return { status: 'clarification_required', candidates }; }
-  if (resolution.status === 'missing') return { status: 'onboarding_required' };
-  const course = resolution.course;
-  let bundle:Awaited<ReturnType<ToolboxCourseContextClient['bundle']>>; try { bundle = await client.bundle(course.courseKey, { ownerUserId: data.userId, agentId: data.agentId }); await traceCourse(data,options,'context.bundle.loaded','ok',{course_key:course.courseKey,course_entity_id:course.courseEntityId,context_version:bundle.context.version}); } catch { logger.warn({ category: 'bundle' }, 'Course context bundle unavailable'); await traceCourse(data,options,'context.bundle.failed','failed',{course_key:course.courseKey,reason_code:'bundle_unavailable'}); return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_unavailable',resolvedCourse:{courseKey:course.courseKey,courseEntityId:course.courseEntityId,displayName:course.displayName} }; }
-  if (bundle.course.courseKey !== course.courseKey || bundle.course.courseEntityId !== course.courseEntityId) return { status: 'context_unavailable', displayName: course.displayName, reasonCode: 'bundle_identity_mismatch' };
-  const context = bundle.context;
-  const skillTerms=options?.courseSkillEnabled?(options.courseSkillRetrievalTerms??[]):[];
-  const retrieval=data.organizationId&&options?.memorySearch?await retrieveCourseMemory({organizationId:data.organizationId,ownerUserId:data.userId,agentId:data.agentId,courseEntityId:course.courseEntityId,task:data.messageText,skillTerms,limit:options?.courseSkillRetrievalLimit,env:options.env},{search:options.memorySearch}):{status:'degraded' as const,crossCourseGuard:'passed' as const,candidateCount:0,safeCount:0,droppedCount:0,durationMs:0,eventIds:[],evidenceRefs:[],snippets:[]};
-  const canonicalReadiness={audience:bundle.profile.audience,course_promise:bundle.profile.coursePromise};
-  const mergedReadiness=mergeReadiness(canonicalReadiness,retrieval);
-  await traceCourse(data,options,`context.memory.${retrieval.status}` ,retrieval.status==='degraded'?'degraded':retrieval.status==='invariant_violation'?'failed':'ok',{candidate_count:retrieval.candidateCount,safe_count:retrieval.safeCount,dropped_count:retrieval.droppedCount,duration_ms:retrieval.durationMs});
-  await traceCourse(data,options,`context.guard.${retrieval.crossCourseGuard}` ,retrieval.crossCourseGuard==='passed'?'ok':'failed',{course_entity_id:course.courseEntityId});
-  const resolvedCourseContext:NonNullable<MessagePayload['resolvedCourseContext']> = {
-    trust:{ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseKey:course.courseKey,courseEntityId:course.courseEntityId,contextPackId:context.contextPackId,contextVersion:context.version},
-    course: { courseKey: course.courseKey, courseEntityId: course.courseEntityId, displayName: course.displayName },
-    resolution: { confidence: 'high', matchedBy: resolution.matchedBy },
-    context: { contextPackId: context.contextPackId, contextVersion: context.version, stale: context.stale, confirmedSummary: options?.courseSkillEnabled&&options.courseSkillContextFields?.length?projectRequiredCourseContext(bundle,options.courseSkillContextFields):context.agentMd.slice(0, 8000) },
-    retrieval,
-    readiness:mergedReadiness.assessment,
-    evidence:[{kind:'canonical_context',fields:[...new Set([...(bundle.profile.audience?['audience' as const]:[]),...(bundle.profile.coursePromise?['course_promise' as const]:[])])],sourceLabel:'已驗證的課程脈絡',sourceHash:hashIdentity(`${course.courseEntityId}:${context.contextPackId}`).slice(0,16)},...(mergedReadiness.retrievedFields.length?[{kind:'fresh_course_retrieval' as const,fields:mergedReadiness.retrievedFields,sourceLabel:'本次課程限定檢索',sourceHash:hashIdentity(retrieval.evidenceRefs.join('|')).slice(0,16)}]:[])],
-  };
-  data.resolvedCourseContext=resolvedCourseContext;
-  if (!options?.sessionManager || !options.sessionKey) return { status: 'ready', context: resolvedCourseContext };
-  const binding = await options.sessionManager.bindActiveCourse(options.sessionKey, {
-    courseKey: course.courseKey, courseEntityId: course.courseEntityId, source: 'resolver',
-    boundAt: new Date().toISOString(), contextPackId: context.contextPackId,
-  });
-  const bindingSucceeded = binding.status === 'persisted';
-  await traceCourse(data,options,`context.binding.${bindingSucceeded?'updated':'failed'}`,bindingSucceeded?'ok':'failed',{course_key:course.courseKey,course_entity_id:course.courseEntityId,reason_code:binding.status});
-  data.platformMetadata.courseContextBinding = binding;
-  return { status: 'ready', context: resolvedCourseContext, bindingStatus: binding, replay };
+function validScheduledCourseContext(
+	data: MessagePayload,
+): NonNullable<MessagePayload["scheduledCourseContext"]> | undefined {
+	const scheduled = data.scheduledCourseContext;
+	if (!scheduled) return undefined;
+	const taskKinds = new Set([
+		"opp_coach_rehearsal_prompt",
+		"opp_coach_practice_prompt",
+		"opp_coach_event_prompt",
+	]);
+	const c = scheduled.course;
+	return scheduled.schemaVersion === 1 &&
+		scheduled.source === "calendar_scheduled_wake" &&
+		Boolean(scheduled.automationId) &&
+		Boolean(scheduled.jobId) &&
+		Number.isSafeInteger(scheduled.runId) &&
+		scheduled.runId > 0 &&
+		taskKinds.has(scheduled.taskKind) &&
+		c.ownerUserId === data.userId &&
+		c.agentId === data.agentId &&
+		Boolean(c.courseKey) &&
+		Boolean(c.courseEntityId) &&
+		Boolean(c.displayName)
+		? scheduled
+		: undefined;
+}
+
+export async function attachCourseContextForReviewedScope(
+	data: MessagePayload,
+	options?: CourseContextGateOptions,
+): Promise<CourseContextGateResult> {
+	const scheduled = validScheduledCourseContext(data);
+	if (data.scheduledCourseContext && !scheduled)
+		return {
+			status: "context_unavailable",
+			reasonCode: "invalid_scheduled_course_context",
+		};
+	if (!scheduled && isExplicitPersonalBypass(data))
+		return { status: "not_required" };
+	const gateStarted = Date.now();
+	await traceCourse(data, options, "context.gate.started", "started", {
+		gate_mode: process.env.COURSE_CONTEXT_GATE_MODE ?? "enforce",
+	});
+	let session = null;
+	let scheduledConversationBindingCourseEntityId: string | null = null;
+	try {
+		if (options?.sessionManager && options.sessionKey) {
+			const loaded = await options.sessionManager.getSessionStrict(options.sessionKey);
+			if (scheduled) {
+				scheduledConversationBindingCourseEntityId = loaded?.shifuCourseContext?.courseEntityId ?? null;
+			} else session = loaded;
+		}
+	} catch (error) {
+		logger.warn(
+			{ category: "session_read" },
+			"Course context session unavailable",
+		);
+		return { status: "context_unavailable", reasonCode: "session_unavailable" };
+	}
+	const storedPending = session?.pendingCourseSelection;
+	// Old rolling-deployment records have no owner/agent scope. They must not be
+	// selected, replayed, or deleted by a different runtime identity.
+	if (
+		storedPending &&
+		(storedPending.ownerUserId !== data.userId ||
+			storedPending.agentId !== data.agentId)
+	) {
+		return {
+			status: "context_unavailable",
+			reasonCode: "pending_scope_mismatch",
+		};
+	}
+	const pendingForExpiry = session?.pendingCourseSelection;
+	const pendingExpired = Boolean(
+		pendingForExpiry?.status === "pending" &&
+			Date.now() - pendingForExpiry.createdAt > 10 * 60_000,
+	);
+	if (
+		pendingExpired &&
+		pendingForExpiry &&
+		options?.sessionManager &&
+		options.sessionKey &&
+		(
+			await options.sessionManager.clearPendingCourseSelection(
+				options.sessionKey,
+				pendingForExpiry.pendingId,
+				data.userId,
+				data.agentId,
+			)
+		).status !== "cleared"
+	)
+		return {
+			status: "context_unavailable",
+			reasonCode: "pending_clear_failed",
+		};
+	let pending = !pendingExpired ? session?.pendingCourseSelection : undefined;
+	if (pending?.status === "dispatched") {
+		if (pending.claimedMessageId === data.messageId)
+			return { status: "already_dispatched" };
+		if (
+			!options?.sessionManager ||
+			!options.sessionKey ||
+			(
+				await options.sessionManager.clearPendingCourseSelection(
+					options.sessionKey,
+					pending.pendingId,
+					data.userId,
+					data.agentId,
+					pending.claimedMessageId,
+				)
+			).status !== "cleared"
+		)
+			return {
+				status: "context_unavailable",
+				reasonCode: "dispatched_cleanup_failed",
+			};
+		pending = undefined;
+	}
+	const CLAIMED_RECOVERY_GRACE_MS = 5 * 60_000;
+	if (
+		pending?.status === "claimed" &&
+		pending.claimedMessageId !== data.messageId &&
+		pending.claimedAt &&
+		Date.now() - pending.claimedAt > CLAIMED_RECOVERY_GRACE_MS
+	) {
+		if (
+			!options?.sessionManager ||
+			!options.sessionKey ||
+			(
+				await options.sessionManager.clearPendingCourseSelection(
+					options.sessionKey,
+					pending.pendingId,
+					data.userId,
+					data.agentId,
+					pending.claimedMessageId,
+				)
+			).status !== "cleared"
+		)
+			return {
+				status: "context_unavailable",
+				reasonCode: "claimed_recovery_failed",
+			};
+		pending = undefined;
+	}
+	const text =
+		typeof data.messageText === "string" ? data.messageText.trim() : "";
+	const choice =
+		pending?.status === "claimed" && pending.claimedMessageId === data.messageId
+			? pending.candidates.find(
+					(candidate) => candidate.courseKey === pending.claimedCourseKey,
+				)
+			: pending
+				? pending.candidates.find(
+						(candidate, index) =>
+							text === String(index + 1) ||
+							text === candidate.courseKey ||
+							text === candidate.displayName,
+					)
+				: undefined;
+	if (
+		!scheduled &&
+		!choice &&
+		!pending &&
+		!requiresCourseContext(data, {
+			courseSkillEnabled: options?.courseSkillEnabled,
+			hasActiveCourse: Boolean(session?.shifuCourseContext),
+		})
+	)
+		return { status: "not_required" };
+	if (scheduled && data.resolvedCourseContext) {
+		const existing = data.resolvedCourseContext;
+		const trust = existing.trust;
+		if (
+			!trust ||
+			trust.ownerUserId !== data.userId ||
+			trust.agentId !== data.agentId ||
+			trust.conversationId !== data.conversationId ||
+			trust.courseKey !== scheduled.course.courseKey ||
+			trust.courseEntityId !== scheduled.course.courseEntityId
+		)
+			return {
+				status: "context_unavailable",
+				reasonCode: "invalid_prevalidated_scheduled_context",
+			};
+		const retrieval =
+			data.organizationId && options?.memorySearch
+				? await retrieveCourseMemory(
+						{
+							organizationId: data.organizationId,
+							ownerUserId: data.userId,
+							agentId: data.agentId,
+							courseEntityId: scheduled.course.courseEntityId,
+							task: data.messageText,
+							skillTerms: options?.courseSkillEnabled
+								? (options.courseSkillRetrievalTerms ?? [])
+								: [],
+							limit: options?.courseSkillRetrievalLimit,
+							env: options.env,
+						},
+						{ search: options.memorySearch },
+					)
+				: existing.retrieval;
+		existing.retrieval = retrieval;
+		const evidenceReadiness =
+			retrieval.status === "loaded" &&
+			retrieval.crossCourseGuard === "passed" &&
+			retrieval.snippets.some((snippet) => Boolean(snippet.trustedEvidenceKind))
+				? "same_course_evidence" as const
+				: "canonical_only" as const;
+		data.scheduledCourseContext = {
+			...scheduled,
+			evidenceReadiness,
+		};
+		if (retrieval.crossCourseGuard === "passed" && options?.recordScheduledExecutionTrace) {
+			await options.recordScheduledExecutionTrace({
+				status: "context_ready", runId: scheduled.runId,
+				conversationId: data.conversationId,
+				conversationBindingCourseEntityId: scheduledConversationBindingCourseEntityId,
+				courseEntityId: scheduled.course.courseEntityId, scopeVersion: 1,
+				contextVersion: existing.context.contextVersion,
+				evidenceReadiness,
+			});
+		}
+		return retrieval.crossCourseGuard === "passed"
+			? { status: "ready", context: existing }
+			: {
+					status: "context_unavailable",
+					reasonCode: "untrusted_scheduled_evidence",
+				};
+	}
+	const baseUrl =
+		options?.baseUrl ?? process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim();
+	const secret = options?.secret ?? process.env.TOOLBOX_INTERNAL_SECRET?.trim();
+	if (!baseUrl || !secret)
+		return { status: "context_unavailable", reasonCode: "not_configured" };
+	const client = new ToolboxCourseContextClient({
+		...options,
+		baseUrl,
+		secret,
+	});
+	if (pending && !choice)
+		return { status: "clarification_required", candidates: pending.candidates };
+	let replay: { pendingId: string; messageId: string } | undefined;
+	if (
+		choice &&
+		pending?.status === "pending" &&
+		options?.sessionManager &&
+		options.sessionKey
+	) {
+		const claimed = await options.sessionManager.claimPendingCourseSelection(
+			options.sessionKey,
+			pending.pendingId,
+			data.userId,
+			data.agentId,
+			choice.courseKey,
+			data.messageId,
+		);
+		if (claimed.status !== "claimed")
+			return {
+				status: "context_unavailable",
+				reasonCode: "pending_claim_failed",
+			};
+		replay = { pendingId: pending.pendingId, messageId: data.messageId };
+	} else if (choice && pending?.status === "claimed")
+		replay = { pendingId: pending.pendingId, messageId: data.messageId };
+	if (choice && pending) data.messageText = pending.originalMessage;
+	let resolution: Awaited<ReturnType<ToolboxCourseContextClient["resolve"]>>;
+	try {
+		resolution = await client.resolve({
+			ownerUserId: data.userId,
+			agentId: data.agentId,
+			conversationId: data.conversationId,
+			message: typeof data.messageText === "string" ? data.messageText : "",
+			boundCourseKey: scheduled
+				? undefined
+				: session?.shifuCourseContext?.courseKey,
+			explicitCourseKey: scheduled?.course.courseKey ?? choice?.courseKey,
+		});
+		await traceCourse(
+			data,
+			options,
+			`context.course.${resolution.status}`,
+			"ok",
+			{
+				duration_ms: Date.now() - gateStarted,
+				...(resolution.status === "resolved"
+					? {
+							course_key: resolution.course.courseKey,
+							course_entity_id: resolution.course.courseEntityId,
+						}
+					: {}),
+				reason_code: "reason" in resolution ? resolution.reason : undefined,
+			},
+		);
+	} catch (error) {
+		logger.warn(
+			{ category: "resolver" },
+			"Course context resolver unavailable",
+		);
+		await traceCourse(data, options, "context.course.missing", "failed", {
+			reason_code: "resolver_unavailable",
+		});
+		if (options?.propagateInfrastructureErrors) throw error;
+		return {
+			status: "context_unavailable",
+			reasonCode: "resolver_unavailable",
+		};
+	}
+	if (resolution.status === "ambiguous") {
+		const candidates = resolution.candidates.map(
+			({ courseKey, displayName }) => ({ courseKey, displayName }),
+		);
+		if (
+			options?.sessionManager &&
+			options.sessionKey &&
+			(
+				await options.sessionManager.createPendingCourseSelection(
+					options.sessionKey,
+					{
+						ownerUserId: data.userId,
+						agentId: data.agentId,
+						candidates,
+						originalMessage: (typeof data.messageText === "string"
+							? data.messageText
+							: ""
+						).slice(0, 8000),
+						createdAt: Date.now(),
+					},
+				)
+			).status !== "persisted"
+		)
+			return {
+				status: "context_unavailable",
+				reasonCode: "pending_write_failed",
+			};
+		return { status: "clarification_required", candidates };
+	}
+	if (resolution.status === "missing") return { status: "onboarding_required" };
+	const course = resolution.course;
+	if (
+		scheduled &&
+		(course.courseKey !== scheduled.course.courseKey ||
+			course.courseEntityId !== scheduled.course.courseEntityId)
+	)
+		return {
+			status: "context_unavailable",
+			displayName: scheduled.course.displayName,
+			reasonCode: "scheduled_course_mapping_changed",
+		};
+	let bundle: Awaited<ReturnType<ToolboxCourseContextClient["bundle"]>>;
+	try {
+		bundle = await client.bundle(course.courseKey, {
+			ownerUserId: data.userId,
+			agentId: data.agentId,
+		});
+		await traceCourse(data, options, "context.bundle.loaded", "ok", {
+			course_key: course.courseKey,
+			course_entity_id: course.courseEntityId,
+			context_version: bundle.context.version,
+		});
+	} catch (error) {
+		logger.warn({ category: "bundle" }, "Course context bundle unavailable");
+		await traceCourse(data, options, "context.bundle.failed", "failed", {
+			course_key: course.courseKey,
+			reason_code: "bundle_unavailable",
+		});
+		if (options?.propagateInfrastructureErrors) throw error;
+		return {
+			status: "context_unavailable",
+			displayName: course.displayName,
+			reasonCode: "bundle_unavailable",
+			resolvedCourse: {
+				courseKey: course.courseKey,
+				courseEntityId: course.courseEntityId,
+				displayName: course.displayName,
+			},
+		};
+	}
+	if (
+		bundle.course.courseKey !== course.courseKey ||
+		bundle.course.courseEntityId !== course.courseEntityId
+	)
+		return {
+			status: "context_unavailable",
+			displayName: course.displayName,
+			reasonCode: "bundle_identity_mismatch",
+		};
+	const context = bundle.context;
+	const skillTerms = options?.courseSkillEnabled
+		? (options.courseSkillRetrievalTerms ?? [])
+		: [];
+	const retrieval =
+		data.organizationId && options?.memorySearch
+			? await retrieveCourseMemory(
+					{
+						organizationId: data.organizationId,
+						ownerUserId: data.userId,
+						agentId: data.agentId,
+						courseEntityId: course.courseEntityId,
+						task: data.messageText,
+						skillTerms,
+						limit: options?.courseSkillRetrievalLimit,
+						env: options.env,
+					},
+					{ search: options.memorySearch },
+				)
+			: {
+					status: "degraded" as const,
+					crossCourseGuard: "passed" as const,
+					candidateCount: 0,
+					safeCount: 0,
+					droppedCount: 0,
+					durationMs: 0,
+					eventIds: [],
+					evidenceRefs: [],
+					snippets: [],
+				};
+	if (scheduled)
+		data.scheduledCourseContext = {
+			...scheduled,
+			evidenceReadiness:
+				retrieval.status === "loaded" &&
+				retrieval.crossCourseGuard === "passed" &&
+				retrieval.snippets.some((snippet) =>
+					Boolean(snippet.trustedEvidenceKind),
+				)
+					? "same_course_evidence"
+					: "canonical_only",
+		};
+	const canonicalReadiness = {
+		audience: bundle.profile.audience,
+		course_promise: bundle.profile.coursePromise,
+	};
+	const mergedReadiness = mergeReadiness(canonicalReadiness, retrieval);
+	await traceCourse(
+		data,
+		options,
+		`context.memory.${retrieval.status}`,
+		retrieval.status === "degraded"
+			? "degraded"
+			: retrieval.status === "invariant_violation"
+				? "failed"
+				: "ok",
+		{
+			candidate_count: retrieval.candidateCount,
+			safe_count: retrieval.safeCount,
+			dropped_count: retrieval.droppedCount,
+			duration_ms: retrieval.durationMs,
+		},
+	);
+	await traceCourse(
+		data,
+		options,
+		`context.guard.${retrieval.crossCourseGuard}`,
+		retrieval.crossCourseGuard === "passed" ? "ok" : "failed",
+		{ course_entity_id: course.courseEntityId },
+	);
+	const resolvedCourseContext: NonNullable<
+		MessagePayload["resolvedCourseContext"]
+	> = {
+		trust: {
+			ownerUserId: data.userId,
+			agentId: data.agentId,
+			conversationId: data.conversationId,
+			courseKey: course.courseKey,
+			courseEntityId: course.courseEntityId,
+			contextPackId: context.contextPackId,
+			contextVersion: context.version,
+		},
+		course: {
+			courseKey: course.courseKey,
+			courseEntityId: course.courseEntityId,
+			displayName: course.displayName,
+		},
+		resolution: { confidence: "high", matchedBy: resolution.matchedBy },
+		context: {
+			contextPackId: context.contextPackId,
+			contextVersion: context.version,
+			stale: context.stale,
+			confirmedSummary:
+				options?.courseSkillEnabled && options.courseSkillContextFields?.length
+					? projectRequiredCourseContext(
+							bundle,
+							options.courseSkillContextFields,
+						)
+					: context.agentMd.slice(0, 8000),
+		},
+		retrieval,
+		readiness: mergedReadiness.assessment,
+		evidence: [
+			{
+				kind: "canonical_context",
+				fields: [
+					...new Set([
+						...(bundle.profile.audience ? ["audience" as const] : []),
+						...(bundle.profile.coursePromise
+							? ["course_promise" as const]
+							: []),
+					]),
+				],
+				sourceLabel: "已驗證的課程脈絡",
+				sourceHash: hashIdentity(
+					`${course.courseEntityId}:${context.contextPackId}`,
+				).slice(0, 16),
+			},
+			...(mergedReadiness.retrievedFields.length
+				? [
+						{
+							kind: "fresh_course_retrieval" as const,
+							fields: mergedReadiness.retrievedFields,
+							sourceLabel: "本次課程限定檢索",
+							sourceHash: hashIdentity(retrieval.evidenceRefs.join("|")).slice(
+								0,
+								16,
+							),
+						},
+					]
+				: []),
+		],
+	};
+	data.resolvedCourseContext = resolvedCourseContext;
+	if (scheduled) {
+		const evidenceReadiness = retrieval.status === "loaded" && retrieval.crossCourseGuard === "passed"
+			&& retrieval.snippets.some((snippet) => Boolean(snippet.trustedEvidenceKind))
+			? "same_course_evidence" as const : "canonical_only" as const;
+		data.scheduledCourseContext = { ...scheduled, evidenceReadiness };
+		if (options?.recordScheduledExecutionTrace) await options.recordScheduledExecutionTrace({
+			status: "context_ready", runId: scheduled.runId, conversationId: data.conversationId,
+			conversationBindingCourseEntityId: scheduledConversationBindingCourseEntityId,
+			courseEntityId: scheduled.course.courseEntityId, scopeVersion: 1,
+			contextVersion: resolvedCourseContext.context.contextVersion, evidenceReadiness,
+		});
+		return { status: "ready", context: resolvedCourseContext };
+	}
+	if (!options?.sessionManager || !options.sessionKey)
+		return { status: "ready", context: resolvedCourseContext };
+	const binding = await options.sessionManager.bindActiveCourse(
+		options.sessionKey,
+		{
+			courseKey: course.courseKey,
+			courseEntityId: course.courseEntityId,
+			source: "resolver",
+			boundAt: new Date().toISOString(),
+			contextPackId: context.contextPackId,
+		},
+	);
+	const bindingSucceeded = binding.status === "persisted";
+	await traceCourse(
+		data,
+		options,
+		`context.binding.${bindingSucceeded ? "updated" : "failed"}`,
+		bindingSucceeded ? "ok" : "failed",
+		{
+			course_key: course.courseKey,
+			course_entity_id: course.courseEntityId,
+			reason_code: binding.status,
+		},
+	);
+	data.platformMetadata.courseContextBinding = binding;
+	return {
+		status: "ready",
+		context: resolvedCourseContext,
+		bindingStatus: binding,
+		replay,
+	};
 }

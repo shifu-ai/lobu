@@ -61,6 +61,8 @@ function adminCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
   return {
     id: "job-1",
+    external_key: null,
+    schedule_revision: 1,
     organization_id: ORG,
     action_type: "wake_agent",
     action_args: {},
@@ -126,6 +128,35 @@ function notifyCreateArgs(recipients: unknown, overrides: Record<string, unknown
 }
 
 describe("manage_schedules member self-scoping — create wake_agent", () => {
+  test("ordinary wake persistence strips trusted provenance but keeps benign extensions", async () => {
+    const deps = makeDeps();
+    await manageSchedules(
+      wakeCreateArgs(MEMBER_AGENT, {
+        payload: {
+          type: "wake_agent",
+          agent_id: MEMBER_AGENT,
+          prompt: "check X",
+          custom_metadata: { tolerated: true },
+          trustedCoursePreference: "course-a",
+          trustedCourseWake: { source: "calendar_scheduled_wake" },
+          trustedCourseScope: { courseKey: "course-a" },
+          __trustedCourseWakeProvenance: "internal",
+        },
+      }) as any,
+      {} as any,
+      memberCtx(),
+      deps
+    );
+
+    const call = (deps.createScheduledJob as any).mock.calls[0][0];
+    expect(call.actionArgs).toEqual({
+      agent_id: MEMBER_AGENT,
+      prompt: "check X",
+      custom_metadata: { tolerated: true },
+      trustedCoursePreference: "course-a",
+    });
+  });
+
   test("member targeting an agent they do NOT own → error, nothing persisted", async () => {
     const deps = makeDeps({ agentOwnedByUser: mock(async () => false) as any });
     const result = await manageSchedules(

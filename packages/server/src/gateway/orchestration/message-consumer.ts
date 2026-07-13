@@ -33,6 +33,7 @@ import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
 import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {resolveCourseSkillContextMetadata} from './course-skill-context-metadata.js';
+import { getDb } from "../../db/client.js";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import {
   type BaseDeploymentManager,
@@ -143,15 +144,16 @@ export class MessageConsumer {
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
-    if(this.courseContextRollout.mode==='off'||this.courseContextRollout.mode==='shadow')delete data.resolvedCourseContext;
-    if (this.courseContextRollout.mode === "off") {
+    const gateMode:CourseContextGateMode=data.scheduledCourseContext?'enforce':this.courseContextRollout.mode;
+    if(gateMode==='off'||gateMode==='shadow')delete data.resolvedCourseContext;
+    if (gateMode === "off") {
       data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);
       return true;
     }
     let result: CourseContextGateResult | void;
-    const isNonBindingEvaluation = this.courseContextRollout.mode === "shadow" || this.courseContextRollout.mode === "single_course";
+    const isNonBindingEvaluation = gateMode === "shadow" || gateMode === "single_course";
     const shadowPayload = isNonBindingEvaluation ? { ...data, platformMetadata: { ...data.platformMetadata }, resolvedCourseContext: undefined } : data;
     try { if (this.courseContextResolver === attachCourseContextForReviewedScope) {
       const personalBypass = isExplicitPersonalBypass(shadowPayload);
@@ -163,17 +165,34 @@ export class MessageConsumer {
       result = await attachCourseContextForReviewedScope(shadowPayload, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
         sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+        recordScheduledExecutionTrace: async (trace) => {
+          if (!data.organizationId || !data.scheduledCourseContext) throw new Error("scheduled_course_trace_scope_missing");
+          const sql = getDb();
+          const rows = await sql<{ id: string }>`
+            UPDATE scheduled_jobs
+            SET action_args = jsonb_set(action_args, '{courseWakeExecutionTrace}', ${sql.json(trace)}::jsonb, true),
+                updated_at = now()
+            WHERE id = ${data.scheduledCourseContext.jobId}
+              AND organization_id = ${data.organizationId}
+              AND created_by_user = ${data.userId}
+              AND created_by_agent = ${data.agentId}
+              AND action_args->>'reason' = 'trusted-course-calendar-wake'
+              AND action_args->'trustedCourseWake'->>'source' = 'calendar_scheduled_wake'
+            RETURNING id
+          `;
+          if (rows.length !== 1) throw new Error("scheduled_course_trace_job_missing");
+        },
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);
-    }} catch(error) { if(this.courseContextRollout.mode!=="shadow")throw error; result={status:"not_required"}; await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
-    if(this.courseContextRollout.mode==="shadow"){
+    }} catch(error) { if(gateMode!=="shadow")throw error; result={status:"not_required"}; await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.course.missing",service:"lobu",module:"course-context-gate",status:"failed",reason_code:"resolver_unavailable"}); }
+    if(gateMode==="shadow"){
       const resolved=result?.status==="ready"?result.context.course:result?.status==="context_unavailable"?result.resolvedCourse:undefined;const legacy=await readLegacyCourseContext(data);const comparison=compareCourseContextIdentity(resolved,legacy);await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison});
     }
-    if (this.courseContextRollout.mode === "shadow") result = { status: "not_required" };
-    if(this.courseContextRollout.mode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match")await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison:"match"});}
+    if (gateMode === "shadow") result = { status: "not_required" };
+    if(gateMode==="enforce"&&this.courseContextRollout.legacyFallback&&result?.status==="context_unavailable"&&result.resolvedCourse){const legacy=await readLegacyCourseContext(data);if(compareCourseContextIdentity(result.resolvedCourse,legacy)==="match")await this.emitJourneyFailOpen({trace_id:extractTraceId(data)??`tr_${createHash("sha256").update(data.messageId??data.conversationId).digest("hex").slice(0,32)}`,journey_id:"course_context_gate",event:"context.legacy.compared",service:"lobu",module:"course-context-gate",status:"ok",comparison:"match"});}
     if(result?.status==='ready'&&!hasTrustedCourseContext(data,result.context)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
-    if (this.courseContextRollout.mode === "single_course") {
+    if (gateMode === "single_course") {
       const isSingleCourseDefault = result?.status === "ready" && result.context.resolution.matchedBy.includes("single_course_default");
       if (isSingleCourseDefault) data.resolvedCourseContext = shadowPayload.resolvedCourseContext;
       // Only the gate's deterministic non-course/personal classification may
@@ -188,7 +207,7 @@ export class MessageConsumer {
       await this.deliverCourseContextTerminal(data, result);
       return false;
     }
-    data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, this.courseContextRollout.mode === "enforce" && result?.status === "ready");
+    data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, gateMode === "enforce" && result?.status === "ready");
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,

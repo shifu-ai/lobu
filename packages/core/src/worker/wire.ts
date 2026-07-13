@@ -103,12 +103,33 @@ export interface ResolvedCourseExecutionContext {
       provenanceKind: "fresh_course_retrieval";
       courseEntityId: string;
       readinessFields: Partial<Record<CourseReadinessField, string>>;
+      trustedEvidenceKind?: "meeting" | "transcript";
     }>;
   };
   /** Advisory completeness metadata. Older gateway payloads omit it. */
   readiness?: CourseReadinessAssessment;
   /** Bounded provenance labels only; never raw owner identifiers. */
   evidence?: CourseEvidenceProvenance[];
+}
+
+export interface ScheduledCourseContext {
+  schemaVersion: 1;
+  source: "calendar_scheduled_wake";
+  automationId: string;
+  jobId: string;
+  runId: number;
+  taskKind:
+    | "opp_coach_rehearsal_prompt"
+    | "opp_coach_practice_prompt"
+    | "opp_coach_event_prompt";
+  course: {
+    ownerUserId: string;
+    agentId: string;
+    courseKey: string;
+    courseEntityId: string;
+    displayName: string;
+  };
+  evidenceReadiness: "canonical_only" | "same_course_evidence";
 }
 
 /**
@@ -147,6 +168,7 @@ export interface MessagePayload {
   // ── Message content (used by worker) ───────────────────────────────
   messageText: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  scheduledCourseContext?: ScheduledCourseContext;
 
   // ── Platform-specific data (used by worker for context) ────────────
   platformMetadata: Record<string, unknown>;
