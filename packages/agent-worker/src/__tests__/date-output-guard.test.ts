@@ -530,6 +530,41 @@ describe("guardDateOutput", () => {
     }
   });
 
+  test("rejects negated affirmative scheduling predicates", () => {
+    for (const finalText of [
+      "下一場不辦在 7/22（三）。",
+      "下一場不办在 7/22（三）。",
+      "下一場不訂在 7/22（三）。",
+      "下一場不订在 7/22（三）。",
+      "下一場不安排在 7/22（三）。",
+      "下一場未安排在 7/22（三）。",
+      "下一場沒有安排在 7/22（三）。",
+      "下一場没有安排在 7/22（三）。",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場活動",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
+  test("corrects a later positive scheduling predicate after a negated one", () => {
+    const result = guardDateOutput({
+      userMessage: "幫我查下一場活動",
+      finalText: "下一場不安排在 7/22（三）；下次安排在 7/23（四）。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe(
+      "下一場不安排在 7/22（三）；下次安排在 7/16（四）。"
+    );
+  });
+
   test("does not rewrite negated next-occurrence date clauses", () => {
     for (const finalText of [
       "The next session is not 7/22 (星期三); it is 7/16 (星期四).",
@@ -724,6 +759,38 @@ describe("guardDateOutput", () => {
       expect(result.status).toBe("corrected");
       expect(result.text).toBe("下一場是 7/19（日）。");
     }
+  });
+
+  test("supports conventional Chinese and English weekday enumerations", () => {
+    for (const userMessage of [
+      "銷講每週三、日 19:00 舉行，下一場是哪天？",
+      "銷講每周三、日 19:00 舉行，下一場是哪天？",
+      "The session is every Wednesday and Sunday at 19:00; when is the next session?",
+      "The session is weekly on Wednesday, Sunday at 19:00; when is the next session?",
+    ]) {
+      const result = guardDateOutput({
+        userMessage,
+        finalText: "下一場是 7/22（三）。",
+        now: new Date("2026-07-16T04:00:00.000Z"),
+      });
+      expect(result.status).toBe("corrected");
+      expect(result.text).toBe("下一場是 7/19（日）。");
+    }
+  });
+
+  test("keeps distinct English recurrence clauses ambiguous", () => {
+    expect(
+      guardDateOutput({
+        userMessage:
+          "Originally weekly on Wednesday at 19:00, changed to weekly on Sunday at 19:00; when is the next session?",
+        finalText: "下一場是 7/19（日）。",
+        now: new Date("2026-07-16T04:00:00.000Z"),
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
+    });
   });
 
   test("corrects every explicitly linked next-occurrence claim", () => {
@@ -1092,6 +1159,67 @@ describe("extractTrustedTemporalCandidates", () => {
     expect(result).toEqual({
       status: "unchanged",
       text: "下一場銷講是 7/16（四）。",
+    });
+
+    expect(
+      guardDateOutput({
+        userMessage: "幫我查下一場",
+        finalText: "下一場銷講是 7/16（四）。",
+        now: NOW,
+        trustedTemporalCandidates: extractTrustedTemporalCandidates(envelope),
+        trustedTemporalEvidence: extractTrustedTemporalEvidence(envelope),
+      })
+    ).toEqual({
+      status: "unchanged",
+      text: "下一場銷講是 7/16（四）。",
+    });
+  });
+
+  test("fails closed when labeled evidence has zero or multiple label matches", () => {
+    const candidates = [
+      "2026-07-14T19:00:00+08:00",
+      "2026-07-16T19:00:00+08:00",
+    ];
+    const evidence = [
+      { candidate: candidates[0]!, label: "內部會議" },
+      { candidate: candidates[1]!, label: "銷講" },
+    ];
+
+    for (const [userMessage, finalText] of [
+      ["幫我查下一場銷售講座", "下一場銷售講座是 7/20（一）。"],
+      ["幫我比較下一場內部會議和銷講", "下一場內部會議和銷講是 7/20（一）。"],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: candidates,
+          trustedTemporalEvidence: evidence,
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+    }
+  });
+
+  test("does not use an unsafe one-character evidence label as a match", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "幫我查下一場會議",
+        finalText: "下一場會議是 7/20（一）。",
+        now: NOW,
+        trustedTemporalCandidates: ["2026-07-14T19:00:00+08:00"],
+        trustedTemporalEvidence: [
+          { candidate: "2026-07-14T19:00:00+08:00", label: "會" },
+        ],
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
     });
   });
 

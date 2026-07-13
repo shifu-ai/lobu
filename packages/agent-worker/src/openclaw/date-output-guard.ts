@@ -348,6 +348,7 @@ type LocatedDateClaim = {
   kind: "short" | "iso";
   match: RegExpExecArray;
   index: number;
+  associationText?: string;
 };
 
 function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
@@ -379,7 +380,7 @@ function isExplicitNextOccurrenceForwardBridge(
   }
 
   const hasNegativeSchedulingPredicate =
-    /(?:不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|未能(?:在|於)?|未在|未於|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/.test(
+    /(?:不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|不(?:辦|办|訂|订|安排)(?:在|於|于)?|未能(?:在|於)?|未在|未於|未(?:辦|办|訂|订|安排)(?:在|於|于)?|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|(?:沒有|没有|沒|没)安排(?:在|於|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/.test(
       normalized
     ) ||
     /(?:\b(?:is|are|was|were|will|would|can|could|should|do|does|did)\s+(?:not|never)(?:\s+(?:be|held|on|at|scheduled|for))*|\bcannot(?:\s+(?:be|held|on|at|scheduled|for))*|\bunable(?:\s+to)?(?:\s+(?:be|hold|schedule|occur|on|at|for))*|\b[a-z]+n['’]t(?:\s+(?:be|held|on|at|scheduled|for))*)$/i.test(
@@ -428,7 +429,7 @@ function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
         occurrenceEnd + forwardScope.length
       );
       if (isExplicitNextOccurrenceForwardBridge(bridge, suffix)) {
-        linkedClaims.set(claim.index, claim);
+        linkedClaims.set(claim.index, { ...claim, associationText: bridge });
         break;
       }
     }
@@ -558,30 +559,55 @@ function recurrenceInClause(
     return { weekdays, timeMinutes: times[0] ?? null };
   };
   if (/(?:每週|每周|每星期)/.test(clause)) {
+    const weekdaySet = new Set(
+      Array.from(
+        clause.matchAll(/(?:星期|週|周)\s*([日天一二三四五六])/g),
+        (match) => WEEKDAY_INDEX_ZH[`星期${match[1]}`]
+      ).filter((weekday): weekday is number => weekday !== undefined)
+    );
+    const recurrenceStart = /(?:每週|每周|每星期)\s*([日天一二三四五六])/.exec(
+      clause
+    );
+    if (recurrenceStart) {
+      const tail = clause.slice(
+        (recurrenceStart.index ?? 0) + recurrenceStart[0].length
+      );
+      for (const match of tail.matchAll(
+        /[、和與及]\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/g
+      )) {
+        const weekday = WEEKDAY_INDEX_ZH[`星期${match[1]}`];
+        if (weekday !== undefined) weekdaySet.add(weekday);
+      }
+    }
+    const weekdays = Array.from(weekdaySet).sort((left, right) => left - right);
+    if (weekdays.length > 0) return withClauseTime(weekdays);
+  }
+
+  if (/\b(?:every|weekly)\b/i.test(clause)) {
     const weekdays = Array.from(
       new Set(
         Array.from(
-          clause.matchAll(/(?:星期|週|周)\s*([日天一二三四五六])/g),
-          (match) => WEEKDAY_INDEX_ZH[`星期${match[1]}`]
-        ).filter((weekday): weekday is number => weekday !== undefined)
+          clause.matchAll(
+            /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/gi
+          ),
+          (match) => ENGLISH_WEEKDAY_INDEX[match[1]!.toLowerCase()]!
+        )
       )
     ).sort((left, right) => left - right);
     if (weekdays.length > 0) return withClauseTime(weekdays);
   }
-
-  const english =
-    /\bweekly\b[^.\n\r]{0,24}\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b|\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b[^.\n\r]{0,24}\bweekly\b/i.exec(
-      clause
-    );
-  const weekday = english?.[1] ?? english?.[2];
-  return weekday
-    ? withClauseTime([ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!])
-    : null;
+  return null;
 }
 
 function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
   const distinct = new Map<string, ExplicitRecurrence>();
-  for (const clause of userMessage.split(/[，,；;。！？\n\r]+/)) {
+  const protectedEnglishWeekdayLists = userMessage.replace(
+    /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b\s*,\s*(?=(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b)/gi,
+    "$1、"
+  );
+  for (const clause of protectedEnglishWeekdayLists.split(
+    /[，,；;。！？\n\r]+/
+  )) {
     const recurrence = recurrenceInClause(clause);
     if (!recurrence) continue;
     if (recurrence === "ambiguous") return null;
@@ -715,14 +741,33 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     const normalizedUserMessage = normalizeTemporalEvidenceLabel(
       input.userMessage
     );
-    const matchingEvidence = (input.trustedTemporalEvidence ?? []).filter(
-      (item) => {
-        const label = normalizeTemporalEvidenceLabel(item.label);
-        return label.length > 0 && normalizedUserMessage.includes(label);
-      }
+    const normalizedAssociationText = nextOccurrenceDateClaims
+      .map((claim) => claim.associationText ?? "")
+      .map(normalizeTemporalEvidenceLabel)
+      .join(" ");
+    const labelHaystack = `${normalizedUserMessage} ${normalizedAssociationText}`;
+    const labeledEvidence = input.trustedTemporalEvidence ?? [];
+    const safeEvidence = labeledEvidence.flatMap((item) => {
+      const label = normalizeTemporalEvidenceLabel(item.label);
+      const length = Array.from(label).length;
+      return length >= 2 && length <= 160 && /[\p{L}\p{N}]/u.test(label)
+        ? [{ item, label }]
+        : [];
+    });
+    const matchingLabels = new Set(
+      safeEvidence
+        .filter(({ label }) => labelHaystack.includes(label))
+        .map(({ label }) => label)
     );
+    const matchedLabel =
+      matchingLabels.size === 1 ? matchingLabels.values().next().value : null;
+    const matchingEvidence = matchedLabel
+      ? safeEvidence
+          .filter(({ label }) => label === matchedLabel)
+          .map(({ item }) => item)
+      : [];
     const candidateStrings =
-      matchingEvidence.length > 0
+      labeledEvidence.length > 0
         ? Array.from(new Set(matchingEvidence.map((item) => item.candidate)))
         : (input.trustedTemporalCandidates ?? []);
     const trustedCandidate = candidateStrings
