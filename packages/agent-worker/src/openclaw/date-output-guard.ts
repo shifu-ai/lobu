@@ -532,7 +532,6 @@ function normalizedRequestedOccurrenceTarget(
   userMessage: string
 ): string | null {
   const targets = new Set<string>();
-  let invalid = false;
   const addTarget = (raw: string | undefined) => {
     const target = raw
       ? normalizeRequestedOccurrenceTarget(raw)
@@ -544,11 +543,10 @@ function normalizedRequestedOccurrenceTarget(
     const index = occurrence.index ?? 0;
     const prefix = userMessage.slice(Math.max(0, index - 24), index);
     if (/(?:不要|別|别|不必|無需|无需|忽略)\s*(?:管|查|看)?\s*$/.test(prefix)) {
-      invalid = true;
       continue;
     }
     const tail = userMessage.slice(index + occurrence[0].length, index + 80);
-    const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?=\s*(?:是|為|为|在|於|于|哪|何|日期|時間|时间|[？?，,。！!；;]|$))/u.exec(
+    const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?:的(?:日期|時間|时间))?(?=\s*(?:是|為|为|在|於|于|哪|何|[？?，,。！!；;]|$))/u.exec(
       tail
     );
     addTarget(forward?.[1]);
@@ -566,7 +564,6 @@ function normalizedRequestedOccurrenceTarget(
     const index = occurrence.index ?? 0;
     const prefix = userMessage.slice(Math.max(0, index - 32), index);
     if (/\b(?:do\s+not|don't|ignore)\s*$/i.test(prefix)) {
-      invalid = true;
       continue;
     }
     const tail = userMessage.slice(
@@ -579,7 +576,7 @@ function normalizedRequestedOccurrenceTarget(
     addTarget(forward?.[1]);
   }
 
-  return !invalid && targets.size === 1
+  return targets.size === 1
     ? (targets.values().next().value ?? null)
     : null;
 }

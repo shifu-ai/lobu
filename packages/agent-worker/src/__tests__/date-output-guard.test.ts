@@ -1355,6 +1355,9 @@ describe("extractTrustedTemporalCandidates", () => {
       "不要管內部會議，幫我查下一場銷講",
       "內部會議已取消，幫我查下一場銷講",
       "幫我查銷講的下一場",
+      "幫我查下一場銷講的日期",
+      "幫我查下一場銷講的時間",
+      "不要查下一場內部會議，幫我查下一場銷講",
     ]) {
       expect(
         guardDateOutput({
@@ -1402,6 +1405,7 @@ describe("extractTrustedTemporalCandidates", () => {
       "幫我查下一場",
       "幫我查下一場銷講和內部會議",
       "不要查下一場銷講",
+      "幫我查下一場內部會議，也查下一場銷講",
     ]) {
       expect(
         guardDateOutput({
