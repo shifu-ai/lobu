@@ -231,16 +231,19 @@ describe("handleWakeAgentTask — trusted course fire gate", () => {
 	} satisfies ResolvedCourseExecutionContext;
 	test("revalidates owner and canonical course before enqueueing structured scheduled scope", async () => {
 		const enqueueMessage = mock(async () => "job");
-		const sql = mock(
-			async (strings: TemplateStringsArray) => {
-				const text = strings.raw.join("");
-				if (text.includes("owner_platform")) return [{ id: BARE_AGENT_ID }];
-				if (text.includes("SELECT id FROM agents"))
-					return [{ id: BARE_AGENT_ID }];
-				return [];
-			},
+		const sql = mock(async (strings: TemplateStringsArray) => {
+			const text = strings.raw.join("");
+			if (text.includes("owner_platform")) return [{ id: BARE_AGENT_ID }];
+			if (text.includes("SELECT id FROM agents"))
+				return [{ id: BARE_AGENT_ID }];
+			return [];
+		});
+		const resolveScheduledCourseContext = mock(
+			async ({ payload }: { payload: { conversationId: string } }) => ({
+				...resolved,
+				trust: { ...resolved.trust, conversationId: payload.conversationId },
+			}),
 		);
-		const resolveScheduledCourseContext = mock(async () => resolved);
 		await handleWakeAgentTask(
 			{
 				sql: sql as never,
@@ -274,6 +277,9 @@ describe("handleWakeAgentTask — trusted course fire gate", () => {
 			},
 		);
 		expect(resolveScheduledCourseContext).toHaveBeenCalledTimes(1);
+		expect(
+			resolveScheduledCourseContext.mock.calls[0]?.[0].payload.conversationId,
+		).toBe("existing");
 		expect(enqueueMessage).toHaveBeenCalledWith(
 			expect.objectContaining({
 				scheduledCourseContext: expect.objectContaining({
@@ -283,7 +289,9 @@ describe("handleWakeAgentTask — trusted course fire gate", () => {
 					runId: 42,
 					course: expect.objectContaining({ courseEntityId: "course:a" }),
 				}),
-				resolvedCourseContext: resolved,
+				resolvedCourseContext: expect.objectContaining({
+					trust: expect.objectContaining({ conversationId: "existing" }),
+				}),
 			}),
 			{ singletonKey: "scheduled-job-1-run-42", durableSingleton: true },
 		);

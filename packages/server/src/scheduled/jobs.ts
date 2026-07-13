@@ -28,8 +28,10 @@ import { runWatcherAutomationTick } from "../watchers/automation";
 import { checkStalledExecutions } from "./check-stalled-executions";
 import { runClassificationReconciliation } from "./classification-reconciliation";
 import {
-	buildTrustedCourseFireContext,
+	resolveTrustedCourseFireContext,
+	type TrustedCourseFireEligibility,
 	type TrustedCourseWakeV1,
+	validateTrustedCourseFireEligibility,
 } from "./course-aware-wake.js";
 import {
 	registerScheduledJobsTicker,
@@ -356,8 +358,9 @@ export async function handleWakeAgentTask(
 	const scheduledPrompt = p.prompt;
 	let scheduledCourseContext: ScheduledCourseContext | undefined;
 	let resolvedCourseContext: ResolvedCourseExecutionContext | undefined;
+	let trustedEligibility: TrustedCourseFireEligibility | null = null;
 	if (hasTrustedWake) {
-		const fire = await buildTrustedCourseFireContext(
+		trustedEligibility = await validateTrustedCourseFireEligibility(
 			{
 				rawWake: p.trustedCourseWake,
 				reason: p.reason,
@@ -376,29 +379,9 @@ export async function handleWakeAgentTask(
 						await sql`SELECT id FROM agents WHERE organization_id=${organizationId} AND id=${agentId} AND owner_platform='toolbox' AND owner_user_id=${ownerUserId} LIMIT 1`;
 					return rows.length > 0;
 				},
-				resolveContext: async ({ trustedWake, scheduledCourseContext }) => {
-					const firePayload = {
-						userId: scheduledUserId,
-						agentId: scheduledAgentId,
-						organizationId: orgId,
-						conversationId: scheduledMessageId ?? "",
-						channelId: "scheduled",
-						messageId: scheduledMessageId ?? "",
-						botId: "lobu-api",
-						platform: "api",
-						messageText: scheduledPrompt,
-						platformMetadata: { source: "scheduled-job" },
-						agentOptions: {},
-						scheduledCourseContext,
-					} as MessagePayload;
-					return (
-						deps.resolveScheduledCourseContext ??
-						resolveScheduledCourseContextAtFire
-					)({ payload: firePayload, trustedWake });
-				},
 			},
 		);
-		if (!fire) {
+		if (!trustedEligibility) {
 			logger.warn(
 				{
 					category: "trusted_course_fire_gate",
@@ -409,8 +392,7 @@ export async function handleWakeAgentTask(
 			);
 			return;
 		}
-		scheduledCourseContext = fire.scheduledCourseContext;
-		resolvedCourseContext = fire.resolvedCourseContext;
+		scheduledCourseContext = trustedEligibility.scheduledCourseContext;
 	}
 	const reuseConversation = process.env.SHIFU_WAKE_REUSE_CONVERSATION !== "0";
 	let threadId = p.thread_id ?? null;
@@ -447,6 +429,44 @@ export async function handleWakeAgentTask(
 			},
 		);
 		threadId = result.threadId;
+	}
+	if (trustedEligibility) {
+		resolvedCourseContext = await resolveTrustedCourseFireContext(
+			trustedEligibility,
+			{
+				resolveContext: async ({ trustedWake, scheduledCourseContext }) => {
+					const firePayload = {
+						userId: scheduledUserId,
+						agentId: scheduledAgentId,
+						organizationId: orgId,
+						conversationId: threadId,
+						channelId: "scheduled",
+						messageId: scheduledMessageId ?? "",
+						botId: "lobu-api",
+						platform: "api",
+						messageText: scheduledPrompt,
+						platformMetadata: { source: "scheduled-job" },
+						agentOptions: {},
+						scheduledCourseContext,
+					} as MessagePayload;
+					return (
+						deps.resolveScheduledCourseContext ??
+						resolveScheduledCourseContextAtFire
+					)({ payload: firePayload, trustedWake });
+				},
+			},
+		);
+		if (!resolvedCourseContext) {
+			logger.warn(
+				{
+					category: "trusted_course_context_gate",
+					scheduledJobId: p.__scheduled_job_id,
+					scheduledTaskRunId: p.__scheduled_task_run_id,
+				},
+				"[task] trusted course wake context rejected deterministically",
+			);
+			return;
+		}
 	}
 	await enqueueAgentMessage(
 		{ sessionManager, queueProducer },
