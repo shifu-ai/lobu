@@ -18,15 +18,30 @@ export interface CourseSkillContextMetadata {
 	retrievalLimit: number;
 }
 interface SkillLike {
+	name?: string;
 	enabled?: boolean;
 	content?: string;
 	instructions?: string;
 }
 export interface ResolvedCourseSkillContextMetadata {
 	enabled: boolean;
+	oppCoachAvailable: boolean;
 	contextFields: string[];
 	retrievalTerms: string[];
 	retrievalLimit: number;
+}
+
+export interface ActiveCourseSkillSelection {
+	activeSpecializedSkill: "opp-coach" | null;
+	contextFields: string[];
+	retrievalTerms: string[];
+	retrievalLimit: number;
+}
+
+const SALES_TALK_INTENT = /(?:銷講|彩排|Perfect\s*Webinar|Key\s*(?:Learning|Secret)|三個秘密|新舊答案|英雄之旅|試吃|Offer|價值堆疊|破價|成交|CTA|逐字稿.{0,20}(?:feedback|回饋|修改))/iu;
+
+export function isDeterministicSalesTalkIntent(message: string): boolean {
+	return SALES_TALK_INTENT.test(message.trim());
 }
 
 export function parseCourseSkillContextMetadata(
@@ -80,12 +95,14 @@ export function resolveCourseSkillContextMetadata(
 ): ResolvedCourseSkillContextMetadata {
 	const parsed = skills
 		.filter((skill) => skill.enabled)
+		.filter((skill) => resolvedSkillName(skill) === "opp-coach")
 		.map((skill) => parseCourseSkillContextMetadata(skill.content ?? "") ?? parseCourseSkillContextMetadata(skill.instructions ?? ""))
 		.filter(
 			(metadata): metadata is CourseSkillContextMetadata => metadata !== null,
 		);
 	return {
 		enabled: parsed.length > 0,
+		oppCoachAvailable: parsed.length > 0,
 		contextFields: unique(
 			parsed.flatMap((metadata) => metadata.contextFields),
 		).slice(0, MAX_CONTEXT_FIELDS),
@@ -97,6 +114,36 @@ export function resolveCourseSkillContextMetadata(
 				? 8
 				: Math.max(...parsed.map((metadata) => metadata.retrievalLimit)),
 	};
+}
+
+export function selectActiveCourseSkill(input: {
+	available: ResolvedCourseSkillContextMetadata;
+	message: string;
+	trustedScheduledTaskKind?: string;
+}): ActiveCourseSkillSelection {
+	const active = input.available.oppCoachAvailable &&
+		(isDeterministicSalesTalkIntent(input.message) || input.trustedScheduledTaskKind === "sales_rehearsal");
+	return active ? {
+		activeSpecializedSkill: "opp-coach",
+		contextFields: input.available.contextFields,
+		retrievalTerms: input.available.retrievalTerms,
+		retrievalLimit: input.available.retrievalLimit,
+	} : {
+		activeSpecializedSkill: null,
+		contextFields: [],
+		retrievalTerms: [],
+		retrievalLimit: 8,
+	};
+}
+
+function resolvedSkillName(skill: SkillLike): string | null {
+	if (skill.name) return skill.name.trim().toLowerCase();
+	for (const content of [skill.content, skill.instructions]) {
+		const frontmatter = content ? extractFrontmatter(content) : null;
+		const name = frontmatter?.find((line) => /^name:\s*/u.test(line))?.replace(/^name:\s*/u, "").trim();
+		if (name) return name.toLowerCase();
+	}
+	return null;
 }
 
 function extractFrontmatter(content: string): string[] | null {

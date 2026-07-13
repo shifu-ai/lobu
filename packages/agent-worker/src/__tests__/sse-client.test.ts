@@ -18,6 +18,7 @@ const basePayload = () => ({
   agentOptions: {},
 });
 const validResolvedCourseContext = () => ({
+  activeSpecializedSkill: null,
   trust: {
     ownerUserId: "user-1",
     agentId: "agent-1",
@@ -120,6 +121,76 @@ describe("GatewayClient heartbeat ACKs", () => {
     expect(
       (client as any).payloadToWorkerConfig(forwarded).trustedExecutionScope
     ).toEqual(trustedExecutionScope);
+  });
+
+  test.each([
+    null,
+    "opp-coach",
+  ] as const)("validates and preserves bounded course skill selection %s", async (activeSpecializedSkill) => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const resolvedCourseContext = {
+      ...validResolvedCourseContext(),
+      activeSpecializedSkill,
+    };
+    const trustedExecutionScope = {
+      mode: "course",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+      courseEntityId: "course:user:course-a",
+      contextPackId: "pack-a",
+      contextVersion: 2,
+      activeSpecializedSkill,
+    } as const;
+    const runJobToken = generateWorkerToken(
+      "user-1",
+      "conversation-1",
+      "worker-1",
+      {
+        channelId: "channel-1",
+        agentId: "agent-1",
+        runId: 11,
+        messageId: "message-1",
+        tokenKind: "run",
+        executionMode: "course",
+        courseToolScope: {
+          ownerUserId: "user-1",
+          agentId: "agent-1",
+          courseEntityId: "course:user:course-a",
+        },
+      }
+    );
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        payload: {
+          ...basePayload(),
+          runId: 11,
+          runJobToken,
+          resolvedCourseContext,
+          trustedExecutionScope,
+        },
+      })
+    );
+    expect(handleThreadMessage).toHaveBeenCalledTimes(1);
+    expect(
+      handleThreadMessage.mock.calls[0]?.[0].resolvedCourseContext
+        .activeSpecializedSkill
+    ).toBe(activeSpecializedSkill);
+    expect(
+      handleThreadMessage.mock.calls[0]?.[0].trustedExecutionScope
+        .activeSpecializedSkill
+    ).toBe(activeSpecializedSkill);
   });
 
   test("rejects onboarding scope identity mismatch and missing scope for an onboarding token", async () => {

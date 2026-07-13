@@ -63,6 +63,8 @@ export interface CourseEvidenceProvenance {
 }
 
 export interface ResolvedCourseExecutionContext {
+  /** Orchestrator-selected for this turn; installed capability alone is insufficient. */
+  activeSpecializedSkill: "opp-coach" | null;
   trust: {
     ownerUserId: string;
     agentId: string;

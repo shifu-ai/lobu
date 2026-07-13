@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
 	parseCourseSkillContextMetadata,
 	resolveCourseSkillContextMetadata,
+	selectActiveCourseSkill,
 } from "../orchestration/course-skill-context-metadata.js";
 
 const TOOLBOX_OPP_SKILL_FRONTMATTER = `---
@@ -97,5 +98,23 @@ describe("course skill context metadata", () => {
 		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "", instructions: validInstructions }]).enabled).toBe(true);
 		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "---\nmetadata:\n  scope: course\n---", instructions: validInstructions }]).enabled).toBe(true);
 		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: validInstructions, instructions: "invalid" }]).retrievalTerms).toEqual(["Key Learning", "Offer"]);
+	});
+
+	test.each([
+		["這堂課的三個秘密幫我想一下", "opp-coach"],
+		["幫我看這段銷講彩排哪裡要改", "opp-coach"],
+		["幫我寫信跟老師確認下週錄課時間", null],
+		["整理今天的課程會議待辦", null],
+		["提醒我繳電話費", null],
+		["你好", null],
+	] as const)("selects an installed opp-coach only for deterministic sales talk intent: %s", (message, expected) => {
+		const available=resolveCourseSkillContextMetadata([{enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
+		expect(selectActiveCourseSkill({available,message}).activeSpecializedSkill).toBe(expected);
+	});
+
+	test("accepts only the trusted scheduled sales rehearsal selector input",()=>{
+		const available=resolveCourseSkillContextMetadata([{enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
+		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"sales_rehearsal"}).activeSpecializedSkill).toBe("opp-coach");
+		expect(selectActiveCourseSkill({available,message:"",trustedScheduledTaskKind:"other"}).activeSpecializedSkill).toBeNull();
 	});
 });

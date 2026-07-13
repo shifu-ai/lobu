@@ -32,7 +32,7 @@ import {
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
 import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
 import type {CourseMemorySearch} from './course-memory-retriever.js';
-import {resolveCourseSkillContextMetadata} from './course-skill-context-metadata.js';
+import {resolveCourseSkillContextMetadata,selectActiveCourseSkill} from './course-skill-context-metadata.js';
 import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
 import {
   type BaseDeploymentManager,
@@ -171,9 +171,10 @@ export class MessageConsumer {
       }
       let settings = null; if (!personalBypass) try { settings = data.agentId && this.agentSettingsStore ? await this.agentSettingsStore.getSettings(data.agentId) : null; } catch { logger.warn({ category: "course_skill_settings", agentId: data.agentId }, "Course skill settings unavailable; using deterministic message scope"); }
       const courseSkillContext=resolveCourseSkillContextMetadata(settings?.skillsConfig?.skills??[]);
+      const activeCourseSkill=selectActiveCourseSkill({available:courseSkillContext,message:typeof shadowPayload.messageText==='string'?shadowPayload.messageText:''});
       result = await attachCourseContextForReviewedScope(shadowPayload, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
-        sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
+        sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),oppCoachAvailable:courseSkillContext.oppCoachAvailable,activeSpecializedSkill:activeCourseSkill.activeSpecializedSkill,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);
@@ -194,6 +195,10 @@ export class MessageConsumer {
       else if (result?.status === "ready") result = { status: "context_unavailable", reasonCode: "single_course_not_confirmed" };
     }
     if(data.resolvedCourseContext&&!hasTrustedCourseContext(data,data.resolvedCourseContext)){delete data.resolvedCourseContext;result={status:'context_unavailable',reasonCode:'untrusted_context'};}
+    if(result?.status==='ready'&&this.courseContextRollout.mode==='enforce'){
+      const context=result.context;
+      data.trustedExecutionScope={mode:'course',ownerUserId:data.userId,agentId:data.agentId,conversationId:data.conversationId,courseEntityId:context.course.courseEntityId,contextPackId:context.context.contextPackId,contextVersion:context.context.contextVersion,activeSpecializedSkill:context.activeSpecializedSkill};
+    }
     if (result?.status === "onboarding_ready") {
       // Onboarding and resolved-course execution are mutually exclusive,
       // including when an injected/custom resolver accidentally mutates data.

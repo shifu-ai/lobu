@@ -129,6 +129,7 @@ const CourseEvidenceProvenanceSchema = z.object({
 
 const ResolvedCourseContextSchema = z
   .object({
+    activeSpecializedSkill: z.literal("opp-coach").nullable().default(null),
     trust: z
       .object({
         ownerUserId: z.string().min(1).max(200),
@@ -369,6 +370,20 @@ const JobEventSchema = z
         ctx.addIssue({
           code: "custom",
           message: "Trusted execution scope does not match execution",
+          path: ["payload", "trustedExecutionScope"],
+        });
+      if (
+        scope.mode === "course" &&
+        (!context ||
+          scope.courseEntityId !== context.course.courseEntityId ||
+          scope.contextPackId !== context.context.contextPackId ||
+          scope.contextVersion !== context.context.contextVersion ||
+          scope.activeSpecializedSkill !== context.activeSpecializedSkill)
+      )
+        ctx.addIssue({
+          code: "custom",
+          message:
+            "Course execution scope does not match resolved course context",
           path: ["payload", "trustedExecutionScope"],
         });
       const token = value.payload.runJobToken
