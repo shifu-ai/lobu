@@ -523,6 +523,28 @@ function normalizedNextOccurrenceDescriptor(
   return descriptor || null;
 }
 
+function normalizedRecurrenceSubjects(userMessage: string): Set<string> {
+  const subjects = new Set<string>();
+  for (const clause of userMessage.split(/[，,；;。！？\n\r]+/)) {
+    for (const marker of clause.matchAll(
+      /(?:每週|每周|每星期)|\b(?:every|weekly)\b/gi
+    )) {
+      let prefix = clause.slice(0, marker.index).trim();
+      prefix = prefix
+        .replace(/(?:固定|\b(?:is|runs?|occurs?|meets?|fixed)\b)\s*$/i, "")
+        .trim();
+      if (!prefix) continue;
+      const bounded = Array.from(prefix).slice(-80).join("");
+      const normalized = normalizeTemporalEvidenceLabel(bounded).replace(
+        /^the\s+/,
+        ""
+      );
+      if (normalized) subjects.add(normalized);
+    }
+  }
+  return subjects;
+}
+
 const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
   sunday: 0,
   monday: 1,
@@ -791,6 +813,22 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
         reason: "next_occurrence_without_temporal_evidence",
       };
     }
+    const recurrenceSubjects = normalizedRecurrenceSubjects(input.userMessage);
+    const claimDescriptor = claimDescriptors.values().next().value;
+    const recurrenceSubject = recurrenceSubjects.values().next().value;
+    const hasNamedRecurrenceBinding =
+      recurrenceDate !== null &&
+      claimDescriptors.size === 1 &&
+      recurrenceSubjects.size === 1;
+    const namedClaimMatchesRecurrence =
+      hasNamedRecurrenceBinding && claimDescriptor === recurrenceSubject;
+    if (hasNamedRecurrenceBinding && !namedClaimMatchesRecurrence) {
+      return {
+        status: "blocked",
+        text: NEXT_OCCURRENCE_BLOCK_TEXT,
+        reason: "next_occurrence_without_temporal_evidence",
+      };
+    }
     const labelHaystack =
       claimDescriptors.size === 1
         ? (claimDescriptors.values().next().value ?? "")
@@ -829,7 +867,8 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     if (
       labeledEvidence.length > 0 &&
       !trustedCandidate &&
-      (claimDescriptors.size === 1 || recurrenceDate === null)
+      (claimDescriptors.size === 1 || recurrenceDate === null) &&
+      !namedClaimMatchesRecurrence
     ) {
       return {
         status: "blocked",
@@ -838,7 +877,9 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       };
     }
     const authoritativeDate =
-      claimDescriptors.size === 1 && labeledEvidence.length > 0
+      namedClaimMatchesRecurrence
+        ? recurrenceDate
+        : claimDescriptors.size === 1 && labeledEvidence.length > 0
         ? trustedCandidate?.date
         : (recurrenceDate ?? trustedCandidate?.date);
 

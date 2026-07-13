@@ -1266,7 +1266,7 @@ describe("extractTrustedTemporalCandidates", () => {
   test("uses a unique matching final claim descriptor", () => {
     expect(
       guardDateOutput({
-        userMessage: "銷講每週四 19:00 舉行，幫我查下一場銷講",
+        userMessage: "幫我查下一場銷講",
         finalText: "下一場內部會議是 7/20（一）。",
         now: NOW,
         trustedTemporalEvidence: [
@@ -1346,6 +1346,52 @@ describe("extractTrustedTemporalCandidates", () => {
           replacement: "7/15（三）",
         },
       ],
+    });
+  });
+
+  test("uses recurrence when a named claim matches the recurrence subject", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "銷講每週三舉行，下一場銷講是哪一天？",
+        finalText: "下一場銷講是 7/22（三）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-14T19:00:00+08:00",
+            label: "內部會議",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "corrected",
+      text: "下一場銷講是 7/15（三）。",
+      corrections: [
+        {
+          reason: "relative_date_mismatch",
+          original: "7/22（三）",
+          replacement: "7/15（三）",
+        },
+      ],
+    });
+  });
+
+  test("fails closed when a named claim conflicts with the recurrence subject", () => {
+    expect(
+      guardDateOutput({
+        userMessage: "銷講固定每週三舉行，下一場銷講是哪一天？",
+        finalText: "下一場內部會議是 7/22（三）。",
+        now: NOW,
+        trustedTemporalEvidence: [
+          {
+            candidate: "2026-07-14T19:00:00+08:00",
+            label: "內部會議",
+          },
+        ],
+      })
+    ).toEqual({
+      status: "blocked",
+      text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+      reason: "next_occurrence_without_temporal_evidence",
     });
   });
 
