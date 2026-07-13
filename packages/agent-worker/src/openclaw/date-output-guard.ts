@@ -545,6 +545,27 @@ function normalizedRecurrenceSubjects(userMessage: string): Set<string> {
   return subjects;
 }
 
+function recurrenceSubjectMatchesDescriptor(
+  subject: string,
+  descriptor: string
+): boolean {
+  const descriptorLength = Array.from(descriptor).length;
+  if (
+    descriptorLength < 2 ||
+    descriptorLength > 160 ||
+    !/[\p{L}\p{N}]/u.test(descriptor)
+  ) {
+    return false;
+  }
+  if (subject === descriptor) return true;
+  if (!subject.endsWith(descriptor)) return false;
+
+  const prefix = subject.slice(0, -descriptor.length);
+  const preceding = prefix.at(-1) ?? "";
+  const first = descriptor[0] ?? "";
+  return !(/[a-z0-9]/i.test(preceding) && /[a-z0-9]/i.test(first));
+}
+
 const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
   sunday: 0,
   monday: 1,
@@ -821,7 +842,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
       claimDescriptors.size === 1 &&
       recurrenceSubjects.size === 1;
     const namedClaimMatchesRecurrence =
-      hasNamedRecurrenceBinding && claimDescriptor === recurrenceSubject;
+      hasNamedRecurrenceBinding &&
+      recurrenceSubjectMatchesDescriptor(
+        recurrenceSubject ?? "",
+        claimDescriptor ?? ""
+      );
     if (hasNamedRecurrenceBinding && !namedClaimMatchesRecurrence) {
       return {
         status: "blocked",
