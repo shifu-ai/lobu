@@ -645,7 +645,7 @@ export async function attachCourseContextForReviewedScope(
 	const specializedActive =
 		scheduled !== undefined || options?.activeSpecializedSkill === "opp-coach";
 	const skillTerms = specializedActive
-		? (options.courseSkillRetrievalTerms ?? [])
+		? (options?.courseSkillRetrievalTerms ?? [])
 		: [];
 	const retrieval =
 		data.organizationId && options?.memorySearch
