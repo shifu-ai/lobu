@@ -1,6 +1,7 @@
 import type { CourseReadinessField } from "@lobu/core";
 import type { Env } from "@lobu/connector-sdk";
 import { createHash } from "node:crypto";
+import { verifiedEvidenceKind } from "../../utils/trusted-evidence-provenance.js";
 export const COURSE_MEMORY_RETRIEVAL_TIMEOUT_MS = 800;
 const MAX_HITS = 8,
 	MAX_SEARCH_ROWS = 64,
@@ -17,6 +18,11 @@ interface SearchRow {
 	source_url: string | null;
 	organization_id: string;
 	metadata: Record<string, unknown>;
+	connection_id?: number | null;
+	connector_key?: string | null;
+	origin_id?: string | null;
+	origin_type?: string | null;
+	semantic_type?: string | null;
 }
 export interface CourseMemoryRetrieval {
 	status: "loaded" | "empty" | "degraded" | "invariant_violation";
@@ -113,6 +119,14 @@ function parseRows(
 			return { rows: null, receivedCount };
 		if (row.source_url !== null && typeof row.source_url !== "string")
 			return { rows: null, receivedCount };
+		if (
+			(row.connection_id !== undefined && row.connection_id !== null && !Number.isSafeInteger(row.connection_id)) ||
+			(row.connector_key !== undefined && row.connector_key !== null && typeof row.connector_key !== "string") ||
+			(row.origin_id !== undefined && row.origin_id !== null && typeof row.origin_id !== "string") ||
+			(row.origin_type !== undefined && row.origin_type !== null && typeof row.origin_type !== "string") ||
+			(row.semantic_type !== undefined && row.semantic_type !== null && typeof row.semantic_type !== "string")
+		)
+			return { rows: null, receivedCount };
 		rows.push(row as unknown as SearchRow);
 	}
 	return { rows, receivedCount };
@@ -148,17 +162,6 @@ function readinessFields(
 			result[field] = clean(item, 500);
 	}
 	return result;
-}
-function trustedEvidenceKind(
-	metadata: Record<string, unknown>,
-): "meeting" | "transcript" | undefined {
-	const value =
-		metadata.evidence_kind ?? metadata.source_kind ?? metadata.source_type;
-	return value === "meeting" || value === "meeting_notes"
-		? "meeting"
-		: value === "transcript"
-			? "transcript"
-			: undefined;
 }
 function sourceRef(row: SearchRow): string {
 	const value = row.metadata.source_ref;
@@ -316,7 +319,7 @@ export async function retrieveCourseMemory(
 				provenanceKind: "fresh_course_retrieval",
 				courseEntityId: input.courseEntityId,
 				readinessFields: readinessFields(row.metadata),
-				trustedEvidenceKind: trustedEvidenceKind(row.metadata),
+				trustedEvidenceKind: verifiedEvidenceKind(row),
 			})),
 		});
 	} catch (error) {
