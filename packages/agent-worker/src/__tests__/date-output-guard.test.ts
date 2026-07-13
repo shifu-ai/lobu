@@ -282,6 +282,76 @@ describe("guardDateOutput", () => {
     expect(corrected.text).toBe("下一場銷講是 7/16（四）。");
   });
 
+  test("supports explicit next-occurrence bridge variants", () => {
+    for (const [finalText, expected] of [
+      ["下一場銷講：7/22（三）。", "下一場銷講：7/16（四）。"],
+      ["下一場將在 7/22（三）舉行。", "下一場將在 7/16（四）舉行。"],
+      [
+        "The next session date: 7/22 (星期三).",
+        "The next session date: 7/16 (星期四).",
+      ],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: "請查下一場銷講",
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).text
+      ).toBe(expected);
+    }
+  });
+
+  test("uses an unpassed same-day recurrence time and rolls a passed time forward", () => {
+    const wednesdayNow = new Date("2026-07-15T10:15:00.000Z");
+    for (const [userMessage, expected] of [
+      ["銷講每週三 20:00 舉行，下一場是哪一天？", "下一場是 7/15（三）。"],
+      ["銷講每週三 17:00 舉行，下一場是哪一天？", "下一場是 7/22（三）。"],
+      ["銷講每週三晚上 8 點舉行，下一場是哪一天？", "下一場是 7/15（三）。"],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/22（三）。",
+          now: wednesdayNow,
+        }).text
+      ).toBe(expected);
+    }
+  });
+
+  test("fails closed for a same-day recurrence without an explicit time", () => {
+    for (const userMessage of [
+      "銷講每週三舉行，下一場是哪一天？",
+      "銷講每週三 8 點舉行，下一場是哪一天？",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText: "下一場是 7/15（三）。",
+          now: new Date("2026-07-15T10:15:00.000Z"),
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+    }
+  });
+
+  test("corrects every explicitly linked next-occurrence claim", () => {
+    const result = guardDateOutput({
+      userMessage: "請查下一場銷講",
+      finalText: "下一場是 7/22（三）；換句話說，下次是 7/23（四）。",
+      now: NOW,
+      trustedTemporalCandidates: ["2026-07-16"],
+    });
+
+    expect(result.status).toBe("corrected");
+    expect(result.text).toBe(
+      "下一場是 7/16（四）；換句話說，下次是 7/16（四）。"
+    );
+  });
+
   test("resolves an explicit current-turn weekly recurrence", () => {
     const result = guardDateOutput({
       userMessage: "銷講每週三舉行，下一場是哪一天？",
@@ -557,6 +627,42 @@ describe("guardDateOutput", () => {
 });
 
 describe("extractTrustedTemporalCandidates", () => {
+  test("extracts dates from the production structured MCP text envelope", () => {
+    const result = extractTrustedTemporalCandidates({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            events: [{ startTime: "2026-07-16T20:00:00+08:00" }],
+          }),
+        },
+      ],
+      details: {},
+    });
+
+    expect(result).toEqual(["2026-07-16T20:00:00+08:00"]);
+  });
+
+  test("does not parse natural-language MCP text as trusted dates", () => {
+    expect(
+      extractTrustedTemporalCandidates({
+        content: [{ type: "text", text: "The next session is 2026-07-16." }],
+      })
+    ).toEqual([]);
+  });
+
+  test("does not parse oversized structured MCP text", () => {
+    const text = JSON.stringify({
+      padding: "x".repeat(64_000),
+      date: "2026-07-16",
+    });
+    expect(
+      extractTrustedTemporalCandidates({
+        content: [{ type: "text", text }],
+      })
+    ).toEqual([]);
+  });
+
   test("extracts only strict ISO strings under temporal keys and deduplicates", () => {
     const result = extractTrustedTemporalCandidates({
       events: [
@@ -598,5 +704,26 @@ describe("extractTrustedTemporalCandidates", () => {
     cyclic.self = cyclic;
 
     expect(extractTrustedTemporalCandidates(cyclic)).toEqual([]);
+  });
+
+  test("does not invoke accessors and survives hostile proxies", () => {
+    const withGetter = {} as Record<string, unknown>;
+    Object.defineProperty(withGetter, "date", {
+      enumerable: true,
+      get() {
+        throw new Error("getter must not run");
+      },
+    });
+    const hostileProxy = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error("proxy trap");
+        },
+      }
+    );
+
+    expect(extractTrustedTemporalCandidates(withGetter)).toEqual([]);
+    expect(extractTrustedTemporalCandidates(hostileProxy)).toEqual([]);
   });
 });

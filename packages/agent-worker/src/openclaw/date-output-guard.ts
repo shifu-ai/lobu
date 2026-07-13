@@ -53,6 +53,7 @@ const STRICT_ISO_DATETIME_RE =
   /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 const MAX_TEMPORAL_TRAVERSAL_DEPTH = 5;
 const MAX_TEMPORAL_VISITED_VALUES = 200;
+const MAX_STRUCTURED_MCP_TEXT_LENGTH = 64_000;
 
 function isStrictIsoTemporalString(value: string): boolean {
   const match =
@@ -69,7 +70,25 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
   const seen = new WeakSet<object>();
   let visited = 0;
 
-  const visit = (current: unknown, depth: number, temporalValue: boolean) => {
+  const ownDataEntries = (current: object): [string, unknown][] => {
+    try {
+      return Object.entries(Object.getOwnPropertyDescriptors(current)).flatMap(
+        ([key, descriptor]) =>
+          descriptor.enumerable && "value" in descriptor
+            ? [[key, descriptor.value] as [string, unknown]]
+            : []
+      );
+    } catch {
+      return [];
+    }
+  };
+
+  const visit = (
+    current: unknown,
+    depth: number,
+    temporalValue: boolean,
+    structuredMcpTextBlock = false
+  ) => {
     if (visited >= MAX_TEMPORAL_VISITED_VALUES) return;
     visited += 1;
     if (depth > MAX_TEMPORAL_TRAVERSAL_DEPTH) return;
@@ -85,16 +104,53 @@ export function extractTrustedTemporalCandidates(value: unknown): string[] {
     seen.add(current);
 
     if (Array.isArray(current)) {
-      for (const item of current) visit(item, depth + 1, temporalValue);
+      for (const [key, item] of ownDataEntries(current)) {
+        if (/^\d+$/.test(key)) {
+          visit(item, depth + 1, temporalValue, structuredMcpTextBlock);
+        }
+      }
       return;
     }
 
-    for (const [key, child] of Object.entries(current)) {
-      visit(child, depth + 1, TEMPORAL_KEY_RE.test(key));
+    const entries = ownDataEntries(current);
+    if (structuredMcpTextBlock) {
+      const block = new Map(entries);
+      const type = block.get("type");
+      const text = block.get("text");
+      if (
+        type === "text" &&
+        typeof text === "string" &&
+        text.length <= MAX_STRUCTURED_MCP_TEXT_LENGTH
+      ) {
+        const trimmed = text.trim();
+        const looksStructured =
+          (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+          (trimmed.startsWith("[") && trimmed.endsWith("]"));
+        if (looksStructured) {
+          try {
+            visit(JSON.parse(trimmed), 0, false);
+          } catch {
+            // Malformed or hostile text is not trusted temporal evidence.
+          }
+        }
+      }
+    }
+
+    for (const [key, child] of entries) {
+      visit(
+        child,
+        depth + 1,
+        TEMPORAL_KEY_RE.test(key),
+        key === "content" && Array.isArray(child)
+      );
     }
   };
 
-  visit(value, 0, false);
+  try {
+    visit(value, 0, false);
+  } catch {
+    // Tool results are untrusted values. Extraction must never fail a turn.
+  }
   return Array.from(candidates);
 }
 
@@ -219,11 +275,11 @@ function allDateClaimsIn(text: string, offset: number): LocatedDateClaim[] {
 
 function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
   const directBridge =
-    /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i;
+    /^(?:\s*(?:(?:[:：—-])|(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|將\s*(?:在|於)|(?:是|為))|(?:(?:date\s*)?(?:is|will\s+be)|date\s*[:：]|(?:is\s+)?scheduled\s+(?:for|on)|occurs?\s+on|(?:on|at)|[:—-]))\s*)$/i;
   if (directBridge.test(bridge)) return true;
 
   const descriptorBridge =
-    /^\s*([^，,。！？；;:：\n\r]{1,16}?)\s*(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為))\s*$/;
+    /^\s*([^，,。！？；;:：\n\r]{1,16}?)\s*(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|(?:是|為)|[:：])\s*$/;
   const descriptor = descriptorBridge.exec(bridge)?.[1]?.trim();
   if (!descriptor) return false;
   return !/(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知)/.test(
@@ -231,7 +287,8 @@ function isExplicitNextOccurrenceForwardBridge(bridge: string): boolean {
   );
 }
 
-function findNextOccurrenceDateClaim(text: string): LocatedDateClaim | null {
+function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
+  const linkedClaims = new Map<number, LocatedDateClaim>();
   const occurrenceRegex = new RegExp(NEXT_OCCURRENCE_RE.source, "gi");
   for (const occurrence of text.matchAll(occurrenceRegex)) {
     const occurrenceIndex = occurrence.index ?? 0;
@@ -250,7 +307,10 @@ function findNextOccurrenceDateClaim(text: string): LocatedDateClaim | null {
     const forwardClaims = allDateClaimsIn(forwardScope, occurrenceEnd);
     for (const claim of forwardClaims) {
       const bridge = text.slice(occurrenceEnd, claim.index);
-      if (isExplicitNextOccurrenceForwardBridge(bridge)) return claim;
+      if (isExplicitNextOccurrenceForwardBridge(bridge)) {
+        linkedClaims.set(claim.index, claim);
+        break;
+      }
     }
 
     let backwardStart = Math.max(
@@ -274,11 +334,14 @@ function findNextOccurrenceDateClaim(text: string): LocatedDateClaim | null {
         occurrenceIndex
       );
       if (/^\s*(?:(?:是|為|就是)|is\s+(?:the\s+)?)?\s*$/i.test(bridge)) {
-        return claim;
+        linkedClaims.set(claim.index, claim);
+        break;
       }
     }
   }
-  return null;
+  return Array.from(linkedClaims.values()).sort(
+    (left, right) => left.index - right.index
+  );
 }
 
 function taipeiStartOfDay(parts: CalendarDate): number {
@@ -326,12 +389,45 @@ const ENGLISH_WEEKDAY_INDEX: Record<string, number> = {
   saturday: 6,
 };
 
-function explicitRecurrenceWeekday(userMessage: string): number | null {
+type ExplicitRecurrence = {
+  weekday: number;
+  timeMinutes: number | null;
+};
+
+function explicitRecurrenceTimeMinutes(userMessage: string): number | null {
+  const clock = /(?:^|[^\d])([01]?\d|2[0-3]):([0-5]\d)(?:$|[^\d])/.exec(
+    userMessage
+  );
+  if (clock) return Number(clock[1]) * 60 + Number(clock[2]);
+
+  const chinese =
+    /(上午|早上|下午|晚上)\s*(\d{1,2})\s*點(?:\s*(\d{1,2})\s*分?)?/.exec(
+      userMessage
+    );
+  if (!chinese) return null;
+  let hour = Number(chinese[2]);
+  const minute = chinese[3] ? Number(chinese[3]) : 0;
+  if (hour < 1 || hour > 12 || minute > 59) return null;
+  const period = chinese[1];
+  if (period === "下午" || period === "晚上") {
+    if (hour < 12) hour += 12;
+  } else if (hour === 12 && (period === "上午" || period === "早上")) {
+    hour = 0;
+  }
+  return hour * 60 + minute;
+}
+
+function explicitRecurrence(userMessage: string): ExplicitRecurrence | null {
   const chinese =
     /(?:每週|每星期)\s*(?:(?:星期|週|周)\s*)?([日天一二三四五六])/.exec(
       userMessage
     );
-  if (chinese) return WEEKDAY_INDEX_ZH[`星期${chinese[1]}`] ?? null;
+  if (chinese) {
+    const weekday = WEEKDAY_INDEX_ZH[`星期${chinese[1]}`];
+    return weekday === undefined
+      ? null
+      : { weekday, timeMinutes: explicitRecurrenceTimeMinutes(userMessage) };
+  }
 
   const english =
     /\bweekly\b[^.\n\r]{0,24}\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b|\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b[^.\n\r]{0,24}\bweekly\b/i.exec(
@@ -339,19 +435,32 @@ function explicitRecurrenceWeekday(userMessage: string): number | null {
     );
   const weekday = english?.[1] ?? english?.[2];
   return weekday
-    ? (ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()] ?? null)
+    ? {
+        weekday: ENGLISH_WEEKDAY_INDEX[weekday.toLowerCase()]!,
+        timeMinutes: explicitRecurrenceTimeMinutes(userMessage),
+      }
     : null;
 }
 
 function resolveNextRecurrence(
-  weekday: number,
+  recurrence: ExplicitRecurrence,
   now: Date
 ): CalendarDate | null {
-  for (const reference of ["current", "next"] as const) {
-    const candidate = resolveRelativeWeekday(reference, weekday, now);
-    if (taipeiStartOfDay(candidate) >= now.getTime()) return candidate;
+  const current = resolveRelativeWeekday("current", recurrence.weekday, now);
+  const currentStart = taipeiStartOfDay(current);
+  const today = taipeiCalendarDate(now);
+  const isToday =
+    current.year === today.year &&
+    current.month === today.month &&
+    current.day === today.day;
+
+  if (currentStart > now.getTime()) return current;
+  if (isToday) {
+    if (recurrence.timeMinutes === null) return null;
+    const occurrenceEpoch = currentStart + recurrence.timeMinutes * 60 * 1000;
+    if (occurrenceEpoch >= now.getTime()) return current;
   }
-  return null;
+  return resolveRelativeWeekday("next", recurrence.weekday, now);
 }
 
 function correctNextOccurrenceClaim(
@@ -420,15 +529,13 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
-  const nextOccurrenceDateClaim = isNextOccurrence
-    ? findNextOccurrenceDateClaim(text)
-    : null;
-  if (nextOccurrenceDateClaim) {
-    const recurrenceWeekday = explicitRecurrenceWeekday(input.userMessage);
+  const nextOccurrenceDateClaims = isNextOccurrence
+    ? findNextOccurrenceDateClaims(text)
+    : [];
+  if (nextOccurrenceDateClaims.length > 0) {
+    const recurrence = explicitRecurrence(input.userMessage);
     const recurrenceDate =
-      recurrenceWeekday === null
-        ? null
-        : resolveNextRecurrence(recurrenceWeekday, input.now);
+      recurrence === null ? null : resolveNextRecurrence(recurrence, input.now);
     const trustedCandidate = (input.trustedTemporalCandidates ?? [])
       .map(parseTrustedTemporalCandidate)
       .filter(
@@ -445,12 +552,20 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
         reason: "next_occurrence_without_temporal_evidence",
       };
     }
-    text = correctNextOccurrenceClaim(
-      text,
-      authoritativeDate,
-      corrections,
-      nextOccurrenceDateClaim
-    );
+    for (
+      let index = nextOccurrenceDateClaims.length - 1;
+      index >= 0;
+      index -= 1
+    ) {
+      const claim = nextOccurrenceDateClaims[index];
+      if (!claim) continue;
+      text = correctNextOccurrenceClaim(
+        text,
+        authoritativeDate,
+        corrections,
+        claim
+      );
+    }
   }
 
   text = text.replace(
