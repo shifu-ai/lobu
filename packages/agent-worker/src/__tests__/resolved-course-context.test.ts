@@ -88,6 +88,14 @@ describe("resolved course context instructions", () => {
     expect(rendered).toContain(".skills/opp-coach/SKILL.md");
     expect(rendered).toContain("read the full file before answering");
     expect(rendered).toMatch(/apply its instructions to this turn/i);
+    expect(rendered).toContain("If the file is missing or unreadable");
+    expect(rendered).toContain(
+      "do not reconstruct the skill or claim that it was applied"
+    );
+    expect(rendered).toMatch(
+      /continue with the general canonical course context/i
+    );
+    expect(rendered).toContain("specialized skill is unavailable");
   });
 
   test("null selection suppresses only opp-coach for this turn", () => {

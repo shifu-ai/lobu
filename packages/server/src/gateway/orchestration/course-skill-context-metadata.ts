@@ -95,7 +95,10 @@ export function resolveCourseSkillContextMetadata(
 ): ResolvedCourseSkillContextMetadata {
 	const parsed = skills
 		.filter((skill) => skill.enabled)
-		.filter((skill) => resolvedSkillName(skill) === "opp-coach")
+		// The worker sync directory is derived from the configured skill name,
+		// not from SKILL.md frontmatter. Require the exact canonical name so an
+		// activated turn can actually read `.skills/opp-coach/SKILL.md`.
+		.filter((skill) => skill.name === "opp-coach")
 		.map((skill) => parseCourseSkillContextMetadata(skill.content ?? "") ?? parseCourseSkillContextMetadata(skill.instructions ?? ""))
 		.filter(
 			(metadata): metadata is CourseSkillContextMetadata => metadata !== null,
@@ -133,16 +136,6 @@ export function selectActiveCourseSkill(input: {
 		retrievalTerms: [],
 		retrievalLimit: 8,
 	};
-}
-
-function resolvedSkillName(skill: SkillLike): string | null {
-	if (skill.name) return skill.name.trim().toLowerCase();
-	for (const content of [skill.content, skill.instructions]) {
-		const frontmatter = content ? extractFrontmatter(content) : null;
-		const name = frontmatter?.find((line) => /^name:\s*/u.test(line))?.replace(/^name:\s*/u, "").trim();
-		if (name) return name.toLowerCase();
-	}
-	return null;
 }
 
 function extractFrontmatter(content: string): string[] | null {

@@ -140,6 +140,7 @@ export function buildResolvedCourseContextInstructions(
           "Turn-specialized skill authority: opp-coach",
           "- Use the normal Lobu skill-loading path and read the full file before answering: `cat .skills/opp-coach/SKILL.md` (or an equivalent file read).",
           "- Apply its instructions to this turn. Do not substitute the skill summary or recreate its content from memory.",
+          "- If the file is missing or unreadable, do not reconstruct the skill or claim that it was applied. Continue with the general canonical course context and explicitly state that the specialized skill is unavailable.",
         ]
       : resolved.activeSpecializedSkill === null
         ? [

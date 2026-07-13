@@ -17,6 +17,16 @@ metadata:
 ---`;
 
 describe("course skill context metadata", () => {
+	test.each([
+		["case-folded config name", { name: "Opp-Coach", enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER }],
+		["noncanonical config name", { name: "sales-helper", enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER }],
+		["frontmatter-only alias", { enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER }],
+	] as const)("rejects %s because it would sync outside .skills/opp-coach", (_label, skill) => {
+		const available = resolveCourseSkillContextMetadata([skill]);
+		expect(available.oppCoachAvailable).toBe(false);
+		expect(selectActiveCourseSkill({ available, message: "幫我修改銷講" }).activeSpecializedSkill).toBeNull();
+	});
+
 	test("parses the exact Toolbox opp-coach metadata contract", () => {
 		expect(
 			parseCourseSkillContextMetadata(TOOLBOX_OPP_SKILL_FRONTMATTER),
@@ -82,9 +92,10 @@ describe("course skill context metadata", () => {
 
 	test("merges only enabled course skills within global bounds", () => {
 		const resolved = resolveCourseSkillContextMetadata([
-			{ enabled: false, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
-			{ enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
+			{ name: "opp-coach", enabled: false, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
+			{ name: "opp-coach", enabled: true, content: TOOLBOX_OPP_SKILL_FRONTMATTER },
 			{
+				name: "opp-coach",
 				enabled: true,
 				instructions: `---\nmetadata:\n  course-context-contract: 1\n  scope: course\n  retrieval-terms: [第二詞]\n  retrieval-limit: 4\n---`,
 			},
@@ -95,9 +106,9 @@ describe("course skill context metadata", () => {
 
 	test("falls back to instructions only when content is invalid", () => {
 		const validInstructions = TOOLBOX_OPP_SKILL_FRONTMATTER;
-		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "", instructions: validInstructions }]).enabled).toBe(true);
-		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: "---\nmetadata:\n  scope: course\n---", instructions: validInstructions }]).enabled).toBe(true);
-		expect(resolveCourseSkillContextMetadata([{ enabled: true, content: validInstructions, instructions: "invalid" }]).retrievalTerms).toEqual(["Key Learning", "Offer"]);
+		expect(resolveCourseSkillContextMetadata([{ name: "opp-coach", enabled: true, content: "", instructions: validInstructions }]).enabled).toBe(true);
+		expect(resolveCourseSkillContextMetadata([{ name: "opp-coach", enabled: true, content: "---\nmetadata:\n  scope: course\n---", instructions: validInstructions }]).enabled).toBe(true);
+		expect(resolveCourseSkillContextMetadata([{ name: "opp-coach", enabled: true, content: validInstructions, instructions: "invalid" }]).retrievalTerms).toEqual(["Key Learning", "Offer"]);
 	});
 
 	test.each([
@@ -113,7 +124,7 @@ describe("course skill context metadata", () => {
 		["提醒我繳電話費", null],
 		["你好", null],
 	] as const)("selects an installed opp-coach only for deterministic sales talk intent: %s", (message, expected) => {
-		const available=resolveCourseSkillContextMetadata([{enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
+		const available=resolveCourseSkillContextMetadata([{name:"opp-coach",enabled:true,content:TOOLBOX_OPP_SKILL_FRONTMATTER}]);
 		expect(selectActiveCourseSkill({available,message}).activeSpecializedSkill).toBe(expected);
 	});
 
