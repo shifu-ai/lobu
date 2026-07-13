@@ -126,6 +126,8 @@ describe("guardDateOutput", () => {
     for (const finalText of [
       "這週三的日期為 7/9（三）",
       "這週三的日期是 7/9（三）",
+      "這週三，日期是 7/9（三）",
+      "這週三預定日期為 7/9（三）",
     ]) {
       const result = guardDateOutput({
         userMessage: finalText,
