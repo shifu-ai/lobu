@@ -345,29 +345,44 @@ describe("scheduled job revision guard", () => {
 		expect(count).toBe(1);
 	});
 
-	test("the same external key remains unique per user rather than per organization", async () => {
+	test("the same organization and external key return the original schedule across users", async () => {
 		const externalKey = "toolbox:schedule:shared-key";
 		const otherUserId = "pm-revision-other";
-		const common = {
+		const first = await upsertScheduledJobByExternalKey({
 			externalKey,
 			organizationId: ORGANIZATION_ID,
 			actionType: "wake_agent",
-			actionArgs: { agent_id: AGENT_ID, prompt: "ordinary wake" },
-			description: "ordinary",
+			actionArgs: { agent_id: AGENT_ID, prompt: "original wake" },
+			description: "original",
 			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByUser: OWNER_USER_ID,
 			createdByAgent: AGENT_ID,
-			changeDetection: "full" as const,
-		};
-
-		const first = await upsertScheduledJobByExternalKey({ ...common, createdByUser: OWNER_USER_ID });
-		const second = await upsertScheduledJobByExternalKey({ ...common, createdByUser: otherUserId });
+			changeDetection: "full",
+		});
+		const second = await upsertScheduledJobByExternalKey({
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "replacement wake" },
+			description: "replacement",
+			runAt: new Date("2030-01-02T09:00:00.000Z"),
+			createdByUser: otherUserId,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full",
+		});
 		const [{ count }] = await getDb()<[{ count: number }]>`
 			SELECT count(*)::int AS count FROM scheduled_jobs
 			WHERE organization_id = ${ORGANIZATION_ID} AND external_key = ${externalKey}
 		`;
 
-		expect(second.id).not.toBe(first.id);
-		expect(count).toBe(2);
+		expect(second).toMatchObject({
+			id: first.id,
+			created_by_user: OWNER_USER_ID,
+			action_args: { agent_id: AGENT_ID, prompt: "original wake" },
+			description: "original",
+			schedule_revision: first.schedule_revision,
+		});
+		expect(count).toBe(1);
 	});
 
 	test("full change detection rearms a paused key and increments its revision", async () => {
@@ -561,6 +576,38 @@ describe("scheduled job revision guard", () => {
 			WHERE organization_id = ${ORGANIZATION_ID}
 			  AND created_by_user = ${OWNER_USER_ID}
 			  AND external_key = ${externalKey}
+		`;
+
+		expect(second.id).toBe(first.id);
+		expect(count).toBe(1);
+	});
+
+	test("concurrent same-key creates across users return one organization schedule", async () => {
+		const externalKey = "toolbox:schedule:concurrent-cross-user";
+		const common = {
+			externalKey,
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "concurrent cross-user" },
+			description: "concurrent cross-user",
+			runAt: new Date("2030-01-01T09:00:00.000Z"),
+			createdByAgent: AGENT_ID,
+			changeDetection: "full" as const,
+		};
+
+		const [first, second] = await Promise.all([
+			upsertScheduledJobByExternalKey({
+				...common,
+				createdByUser: OWNER_USER_ID,
+			}),
+			upsertScheduledJobByExternalKey({
+				...common,
+				createdByUser: "pm-revision-other",
+			}),
+		]);
+		const [{ count }] = await getDb()<[{ count: number }]>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORGANIZATION_ID} AND external_key = ${externalKey}
 		`;
 
 		expect(second.id).toBe(first.id);

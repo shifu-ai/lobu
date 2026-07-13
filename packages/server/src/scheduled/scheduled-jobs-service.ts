@@ -103,17 +103,25 @@ export async function upsertScheduledJobByExternalKeyWithQuota(
 		await tx`
       SELECT pg_advisory_xact_lock(
         hashtext(${`scheduled-jobs:${params.organizationId}`}),
+        hashtext(${params.externalKey})
+      )
+    `;
+		await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${`scheduled-jobs-quota:${params.organizationId}`}),
         hashtext(${params.createdByUser})
       )
     `;
 		const existingRows = (await tx`
       SELECT * FROM scheduled_jobs
       WHERE organization_id = ${params.organizationId}
-        AND created_by_user = ${params.createdByUser}
         AND external_key = ${params.externalKey}
       FOR UPDATE
     `) as unknown as ScheduledJobRow[];
 		const existing = existingRows[0];
+		if (existing && existing.created_by_user !== params.createdByUser) {
+			return { status: "ok", job: existing };
+		}
 		const changeDetection = params.changeDetection ?? "trusted-course-wake";
 		const now = Date.now();
 		const existingUntilAt = dateValue(existing?.until_at ?? null);
