@@ -367,6 +367,8 @@ describe("guardDateOutput", () => {
       "下一場參考日期是 7/13（一）。",
       "下一場來源日期為 7/13（一）。",
       "下一場日期範圍是 7/13（一）。",
+      "下一場銷講參考排在 7/13（一）。",
+      "下一場銷講來源定在 7/13（一）。",
       "The next session reference date is 7/13 (星期一).",
       "The next session source date is 7/13 (星期一).",
       "The next session date range is 7/13 (星期一).",
@@ -524,6 +526,37 @@ describe("guardDateOutput", () => {
           userMessage: "幫我查下一場銷講",
           finalText,
           now: NOW,
+          trustedTemporalEvidence: [
+            { candidate: "2026-07-16", label: "銷講" },
+          ],
+        }).text
+      ).toBe(expected);
+    }
+  });
+
+  test("associates clean bounded scheduling bridges without a verb whitelist", () => {
+    for (const [finalText, expected] of [
+      ["下一場銷講排在 7/22（三）。", "下一場銷講排在 7/16（四）。"],
+      ["下一場銷講定在 7/22（三）。", "下一場銷講定在 7/16（四）。"],
+      ["下一場銷講設在 7/22（三）。", "下一場銷講設在 7/16（四）。"],
+      ["下一場銷講预排在 7/22（三）。", "下一場銷講预排在 7/16（四）。"],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場銷講",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我目前沒有取得可驗證的場次日期，因此不能猜下一場。請讓我先查詢實際排程，或提供固定週期與時間。",
+        reason: "next_occurrence_without_temporal_evidence",
+      });
+      expect(
+        guardDateOutput({
+          userMessage: "幫我查下一場銷講",
+          finalText,
+          now: NOW,
           trustedTemporalCandidates: ["2026-07-16"],
         }).text
       ).toBe(expected);
@@ -551,6 +584,10 @@ describe("guardDateOutput", () => {
       "下一場不會被安排在 7/22（三）。",
       "下一場不會被重新安排在 7/22（三）。",
       "下一場未能另行訂在 7/22（三）。",
+      "下一場不排在 7/22（三）。",
+      "下一場不會排在 7/22（三）。",
+      "下一場未定在 7/22（三）。",
+      "下一場沒有預排在 7/22（三）。",
     ]) {
       expect(
         guardDateOutput({
@@ -670,6 +707,10 @@ describe("guardDateOutput", () => {
       [
         "The next session No Code Workshop is 7/22 (星期三).",
         "The next session No Code Workshop is 7/16 (星期四).",
+      ],
+      [
+        "下一場不能錯過的講座排在 7/22（三）。",
+        "下一場不能錯過的講座排在 7/16（四）。",
       ],
     ] as const) {
       expect(

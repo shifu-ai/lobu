@@ -382,10 +382,13 @@ function isExplicitNextOccurrenceForwardBridge(
   }
 
   const hasNegativeSchedulingPredicate =
-    /(?:(?:不會|未能|無法|无法|不能|尚未|沒有|没有|沒|没)\s*(?:(?:再|被|重新|另行|再次|被重新)\s*){0,2}(?:辦|办|訂|订|安排)\s*(?:在|於|于)?|不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|不(?:辦|办|訂|订|安排)(?:在|於|于)?|未能(?:在|於)?|未在|未於|未(?:辦|办|訂|订|安排)(?:在|於|于)?|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|(?:沒有|没有|沒|没)安排(?:在|於|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/.test(
+    /(?:(?:不會|不会|未能|無法|无法|不能|尚未|沒有|没有|沒|没|未|不)\s*(?:(?:再|被|重新|另行|再次|被重新)\s*){0,2}[\p{L}\p{N}]{1,4}(?:在|於|于)|不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|不(?:辦|办|訂|订|安排)(?:在|於|于)?|未能(?:在|於)?|未在|未於|未(?:辦|办|訂|订|安排)(?:在|於|于)?|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|(?:沒有|没有|沒|没)安排(?:在|於|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/u.test(
       normalized
     ) ||
     /(?:\b(?:is|are|was|were|will|would|can|could|should|do|does|did)\s+(?:not|never)(?:\s+(?:be|held|on|at|scheduled|for))*|\bcannot(?:\s+(?:be|held|on|at|scheduled|for))*|\bunable(?:\s+to)?(?:\s+(?:be|hold|schedule|occur|on|at|for))*|\b[a-z]+n['’]t(?:\s+(?:be|held|on|at|scheduled|for))*)$/i.test(
+      normalized
+    ) ||
+    /\b(?:not|never|cannot|won['’]?t|can['’]?t|isn['’]?t|aren['’]?t|wasn['’]?t|weren['’]?t)\b/i.test(
       normalized
     );
   if (hasNegativeSchedulingPredicate) return false;
@@ -402,7 +405,10 @@ function isExplicitNextOccurrenceForwardBridge(
     /^\s*(?:舉行|進行|開始|開課|登場|will\s+be\s+held|takes?\s+place)/i.test(
       suffix
     );
-  return hasSchedulingSuffix && /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
+  if (hasSchedulingSuffix) {
+    return /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
+  }
+  return /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
 }
 
 function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
@@ -894,10 +900,25 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
     }
     const recurrenceDate =
       recurrence === null ? null : resolveNextRecurrence(recurrence, input.now);
+    const requestedTarget = normalizedRequestedOccurrenceTarget(
+      input.userMessage
+    );
     const claimDescriptors = new Set(
       nextOccurrenceDateClaims
         .map(normalizedNextOccurrenceDescriptor)
         .filter((descriptor): descriptor is string => descriptor !== null)
+        .map((descriptor) => {
+          if (!requestedTarget || !descriptor.startsWith(requestedTarget)) {
+            return descriptor;
+          }
+          const schedulingTail = descriptor.slice(requestedTarget.length);
+          const tailLength = Array.from(schedulingTail).length;
+          return tailLength >= 2 &&
+            tailLength <= 5 &&
+            /^[\p{L}\p{N}]+(?:在|於|于)$/u.test(schedulingTail)
+            ? requestedTarget
+            : descriptor;
+        })
     );
     if (claimDescriptors.size > 1) {
       return {
@@ -926,9 +947,6 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
         reason: "next_occurrence_without_temporal_evidence",
       };
     }
-    const requestedTarget = normalizedRequestedOccurrenceTarget(
-      input.userMessage
-    );
     const evidenceTarget =
       claimDescriptors.size === 1
         ? (claimDescriptors.values().next().value ?? null)
