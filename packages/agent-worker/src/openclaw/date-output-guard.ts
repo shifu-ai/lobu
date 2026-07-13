@@ -312,11 +312,15 @@ function isExplicitNextOccurrenceForwardBridge(
   const normalized = bridge.trim();
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
-  if (
-    /(?:尚未|未能|查不到|查到|未查|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知|不會|不在|不於|不是|並非|取消|\b(?:reference|source|range|unknown|unconfirmed|cancelled|not)\b|\b(?:isn|aren|wasn|weren|won|wouldn|can|couldn|shouldn|don|doesn|didn)['’]t\b|\bunable\s+(?:to\s+)?(?:find|confirm|schedule)|\bunable\s+(?:found|confirmed|scheduled)\b)/i.test(
+  const hasChineseNegativeOrNonAssertion =
+    /[不未無无没沒非否]|(?:查不到|查到|參考|來源|範圍|歷史|舊資料|但|然而|未知|取消)/.test(
       normalized
-    )
-  ) {
+    );
+  const hasEnglishNegativeOrNonAssertion =
+    /\b(?:not|never|cannot|unable|without|no|unknown|unconfirmed|unavailable|impossible|except|reference|source|range|cancelled)\b|\b[a-z]+n['’]t\b/i.test(
+      normalized
+    );
+  if (hasChineseNegativeOrNonAssertion || hasEnglishNegativeOrNonAssertion) {
     return false;
   }
 
