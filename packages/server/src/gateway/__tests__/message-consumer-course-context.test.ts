@@ -26,6 +26,7 @@ function setup(
 		| undefined;
 	const sends: Array<[string, unknown, unknown]> = [];
 	const order: string[] = [];
+	const recordScheduledExecutionTrace = vi.fn(async () => {});
 	let workerRejected = false;
 	const queue = {
 		start: vi.fn(),
@@ -64,6 +65,9 @@ function setup(
 			updateDeploymentActivity: vi.fn(),
 		} as never,
 		queue as never,
+		undefined,
+		undefined,
+		recordScheduledExecutionTrace,
 	);
 	let cleanupFailed = false;
 	let pending: any;
@@ -166,6 +170,7 @@ function setup(
 		order,
 		fetcher,
 		consumer,
+		recordScheduledExecutionTrace,
 		data,
 		run: async (nextText?: string, nextId?: string) => {
 			if (nextText) data.messageText = nextText;
@@ -260,6 +265,7 @@ describe("message consumer course boundary", () => {
 			(workerMessages[0]?.[1] as MessagePayload).resolvedCourseContext?.trust
 				.contextPackId,
 		).toBe("p");
+		expect(h.recordScheduledExecutionTrace).toHaveBeenCalledTimes(1);
 	});
 	test("prevalidated scheduled context skips Toolbox and performs memory hydration once", async () => {
 		const h = setup({});
