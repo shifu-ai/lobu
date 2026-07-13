@@ -49,7 +49,7 @@ const EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<!\d)(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
 
 const RELATIVE_WEEK_DATE_RE =
-  /((上週|本週|這週|下週)\s*(?:星期)?([日天一二三四五六]))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
+  /(?<![上下本這])((上週|本週|這週|下週)\s*(?:星期)?([日天一二三四五六]))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
 const RELATIVE_DAY_DATE_RE =
   /((今天|昨天|明天))((?:(?!(?:上週|本週|這週|下週|今天|昨天|明天))[^。\n\r！？；])*?)(?<!\d)(\d{1,2})\/(\d{1,2})(\s*[(（])((?:星期)?[日天一二三四五六])([)）])/g;
 const SHORT_DATE_WITH_WEEKDAY_RE =
@@ -79,6 +79,11 @@ function weekdayFor(parts: CalendarDate): number {
 }
 
 function weekdayWithStyle(original: string, expectedIndex: number): string {
+  const originalIndex = WEEKDAY_INDEX_ZH[
+    original.startsWith("星期") ? original : `星期${original}`
+  ];
+  if (originalIndex === expectedIndex) return original;
+
   const expected = WEEKDAYS_ZH[expectedIndex] ?? original;
   if (original.startsWith("星期")) return expected;
   return expected.slice(2);

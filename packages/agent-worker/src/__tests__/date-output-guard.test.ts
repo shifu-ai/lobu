@@ -67,6 +67,25 @@ describe("guardDateOutput", () => {
     ).toEqual({ status: "unchanged", text: finalText });
   });
 
+  test("preserves 星期天 on a correct relative Sunday", () => {
+    const finalText = "上週日 7/12（星期天）";
+
+    expect(
+      guardDateOutput({ userMessage: finalText, finalText, now: NOW })
+    ).toEqual({ status: "unchanged", text: finalText });
+  });
+
+  test("does not suffix-match unsupported multi-week expressions", () => {
+    for (const finalText of [
+      "下下週三 7/29（三）",
+      "上上週日 7/5（日）",
+    ]) {
+      expect(
+        guardDateOutput({ userMessage: finalText, finalText, now: NOW })
+      ).toEqual({ status: "unchanged", text: finalText });
+    }
+  });
+
   test("corrects stale dates attached to relative day claims", () => {
     const finalText = "今天是 7/9（三）";
     const result = guardDateOutput({
@@ -92,6 +111,14 @@ describe("guardDateOutput", () => {
 
     expect(result.status).toBe("corrected");
     expect(result.text).toBe("7/16（四）");
+  });
+
+  test("preserves 星期天 on a correct short Sunday date", () => {
+    const finalText = "7/12（星期天）";
+
+    expect(
+      guardDateOutput({ userMessage: finalText, finalText, now: NOW })
+    ).toEqual({ status: "unchanged", text: finalText });
   });
 
   test("supports 星期 labels and ASCII parentheses on short dates", () => {
