@@ -8,6 +8,10 @@ export interface CourseWakeDeliveryMetadata {
   lobuAgentId: string;
 }
 
+export type CourseWakeCompletion =
+  | { kind: "succeeded"; finalOutput: string }
+  | { kind: "failed"; failureCode: "generation_failed" | "invalid_final_output" };
+
 export function readCourseWakeDeliveryMetadata(
   platformMetadata: Record<string, unknown> | undefined,
 ): CourseWakeDeliveryMetadata | null {
@@ -45,7 +49,7 @@ export function readCourseWakeDeliveryMetadata(
 export async function deliverCourseWakeCompletion(
   input: {
     metadata: CourseWakeDeliveryMetadata;
-    finalOutput: string;
+    completion: CourseWakeCompletion;
     turnId: string;
   },
   deps: { fetchFn?: typeof fetch } = {},
@@ -54,12 +58,19 @@ export async function deliverCourseWakeCompletion(
   const secret = process.env.TOOLBOX_INTERNAL_SECRET?.trim();
   if (!url || !secret) throw new Error("course_wake_delivery_not_configured");
   if (
-    !input.finalOutput.trim() ||
-    input.finalOutput.length > 50_000 ||
     !bounded(input.turnId, 256)
   ) {
     throw new Error("course_wake_delivery_invalid_completion");
   }
+  if (
+    input.completion.kind === "succeeded"
+    && (!input.completion.finalOutput.trim() || input.completion.finalOutput.length > 50_000)
+  ) {
+    throw new Error("course_wake_delivery_invalid_completion");
+  }
+  const completionPayload = input.completion.kind === "succeeded"
+    ? { completionKind: "succeeded", finalOutput: input.completion.finalOutput }
+    : { completionKind: "failed", failureCode: input.completion.failureCode };
   const response = await (deps.fetchFn ?? fetch)(url, {
     method: "POST",
     headers: {
@@ -70,7 +81,7 @@ export async function deliverCourseWakeCompletion(
       ...input.metadata,
       turnId: input.turnId,
       occurredAt: new Date().toISOString(),
-      finalOutput: input.finalOutput,
+      ...completionPayload,
     }),
     signal: AbortSignal.timeout(10_000),
   });
@@ -87,6 +98,7 @@ export async function deliverCourseWakeCompletion(
       "delivered",
       "delivery_blocked_unbound",
       "failed",
+      "delivery_unknown",
       "retrying",
     ].includes(String(body.status))
   ) {

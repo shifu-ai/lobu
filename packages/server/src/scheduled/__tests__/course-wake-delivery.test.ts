@@ -31,13 +31,17 @@ describe("course wake mechanical completion delivery", () => {
     process.env.TOOLBOX_INTERNAL_SECRET = "secret";
     const fetchFn = mock(async () => new Response(JSON.stringify({ ok: true, status: "delivered" }), { status: 202 }));
 
-    await deliverCourseWakeCompletion({ metadata, finalOutput: "final answer", turnId: "turn-1" }, { fetchFn });
+    await deliverCourseWakeCompletion({
+      metadata, completion: { kind: "succeeded", finalOutput: "final answer" }, turnId: "turn-1",
+    }, { fetchFn });
 
     const [url, init] = fetchFn.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://toolbox.test/agent-workbench/internal/turn-completed");
     expect(init.headers).toEqual(expect.objectContaining({ "x-internal-secret": "secret" }));
     const body = JSON.parse(String(init.body));
-    expect(body).toMatchObject({ ...metadata, finalOutput: "final answer", turnId: "turn-1" });
+    expect(body).toMatchObject({
+      ...metadata, completionKind: "succeeded", finalOutput: "final answer", turnId: "turn-1",
+    });
     expect(JSON.stringify(body)).not.toContain("lineUserId");
   });
 
@@ -46,7 +50,7 @@ describe("course wake mechanical completion delivery", () => {
     process.env.TOOLBOX_INTERNAL_SECRET = "secret";
     const fetchFn = mock(async () => new Response(JSON.stringify({ status: "retrying" }), { status: 503 }));
     await expect(deliverCourseWakeCompletion(
-      { metadata, finalOutput: "stored output", turnId: "turn-1" }, { fetchFn },
+      { metadata, completion: { kind: "succeeded", finalOutput: "stored output" }, turnId: "turn-1" }, { fetchFn },
     )).rejects.toThrow("course_wake_delivery_retrying");
     expect(fetchFn).toHaveBeenCalledTimes(1);
   });
@@ -55,6 +59,21 @@ describe("course wake mechanical completion delivery", () => {
     process.env.TOOLBOX_TURN_COMPLETED_URL = "https://toolbox.test/turn-completed";
     process.env.TOOLBOX_INTERNAL_SECRET = "secret";
     const fetchFn = mock(async () => new Response(JSON.stringify({ ok: true, status }), { status: 202 }));
-    await deliverCourseWakeCompletion({ metadata, finalOutput: "stored output", turnId: "turn-1" }, { fetchFn });
+    await deliverCourseWakeCompletion({
+      metadata, completion: { kind: "succeeded", finalOutput: "stored output" }, turnId: "turn-1",
+    }, { fetchFn });
+  });
+
+  test("posts a bounded failure kind without worker error or unsafe final text", async () => {
+    process.env.TOOLBOX_TURN_COMPLETED_URL = "https://toolbox.test/turn-completed";
+    process.env.TOOLBOX_INTERNAL_SECRET = "secret";
+    const fetchFn = mock(async () => new Response(JSON.stringify({ ok: true, status: "failed" }), { status: 202 }));
+    await deliverCourseWakeCompletion({
+      metadata, completion: { kind: "failed", failureCode: "generation_failed" }, turnId: "turn-1",
+    }, { fetchFn });
+    const body = JSON.parse(String((fetchFn.mock.calls[0] as [string, RequestInit])[1].body));
+    expect(body).toMatchObject({ completionKind: "failed", failureCode: "generation_failed" });
+    expect(body).not.toHaveProperty("finalOutput");
+    expect(JSON.stringify(body)).not.toContain("provider secret failure detail");
   });
 });

@@ -97,10 +97,16 @@ export class UnifiedThreadResponseConsumer {
       const scheduledDelivery = readCourseWakeDeliveryMetadata(
         data.platformMetadata
       );
-      if (scheduledDelivery && !data.error && data.processedMessageIds?.length) {
+      if (scheduledDelivery && (data.error || data.processedMessageIds?.length)) {
+        const finalOutput = data.finalText ?? "";
+        const completion = data.error
+          ? { kind: "failed" as const, failureCode: "generation_failed" as const }
+          : !finalOutput.trim() || finalOutput.length > 50_000
+            ? { kind: "failed" as const, failureCode: "invalid_final_output" as const }
+            : { kind: "succeeded" as const, finalOutput };
         await this.courseWakeDelivery({
           metadata: scheduledDelivery,
-          finalOutput: data.finalText ?? "",
+          completion,
           turnId: data.messageId,
         });
         return;
