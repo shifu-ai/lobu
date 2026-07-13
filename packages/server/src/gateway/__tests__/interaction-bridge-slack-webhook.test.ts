@@ -20,6 +20,7 @@ function createHarness(options: {
   executeToolResult?: {
     content: Array<{ type: string; text: string }>;
     isError: boolean;
+    diagnosticCode?: string;
   };
 }) {
   const { executeToolResult } = options;
@@ -144,6 +145,121 @@ describe("Slack block_actions → registerActionHandlers (Tier B integration)", 
     expect(pattern).toBe("/mcp/github/tools/create_issue");
     expect(h.executeToolDirect).toHaveBeenCalledTimes(1);
     expect(h.postMessage).toHaveBeenCalled();
+  });
+
+  test("reserved automation approval forwards discovery identity, channel, and course scope", async () => {
+    const expectedMcpIdentity = {
+      upstreamOrigin: "https://mcp.shifu-ai.org",
+      configSource: "agent" as const,
+      configDigest: "digest-at-discovery",
+    };
+    const courseToolScope = {
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      courseEntityId: "course:user-1:a",
+    };
+    await storePendingTool(
+      "req-slack-automation",
+      {
+        mcpId: "shifu-toolbox",
+        toolName: "create_automation",
+        args: { prompt: "每隔一分鐘回報" },
+        agentId: "agent-1",
+        userId: "user-1",
+        channelId: "C_SCOPE",
+        expectedMcpIdentity,
+        courseToolScope,
+      },
+      24 * 60 * 60
+    );
+    const h = createHarness({});
+    const response = await h.chat.webhooks.slack(
+      buildSignedBlockActionsRequest(
+        SIGNING_SECRET,
+        blockActionsPayload({
+          teamId: "T123",
+          userId: "U_ACTOR",
+          channelId: "C_SCOPE",
+          messageTs: "1700000000.000300",
+          actionId: "tool:req-slack-automation:1h",
+          value: "1h",
+        })
+      )
+    );
+
+    expect(response.status).toBe(200);
+    await waitFor(() => expect(h.executeToolDirect).toHaveBeenCalled());
+    expect(h.executeToolDirect).toHaveBeenCalledWith(
+      "agent-1",
+      "user-1",
+      "shifu-toolbox",
+      "create_automation",
+      { prompt: "每隔一分鐘回報" },
+      { courseToolScope, expectedMcpIdentity, channelId: "C_SCOPE" }
+    );
+  });
+
+  test("reserved automation approval surfaces config-identity mismatch without dropping replay scope", async () => {
+    const expectedMcpIdentity = {
+      upstreamOrigin: "https://mcp.shifu-ai.org",
+      configSource: "agent" as const,
+      configDigest: "stale-digest",
+    };
+    await storePendingTool(
+      "req-slack-stale-config",
+      {
+        mcpId: "shifu-toolbox",
+        toolName: "cancel_automation",
+        args: { automationId: "auto-1" },
+        agentId: "agent-1",
+        userId: "user-1",
+        channelId: "C_SCOPE",
+        expectedMcpIdentity,
+      },
+      24 * 60 * 60
+    );
+    const h = createHarness({
+      executeToolResult: {
+        content: [
+          {
+            type: "text",
+            text: "MCP configuration changed after tool discovery.",
+          },
+        ],
+        isError: true,
+        diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
+      },
+    });
+    const response = await h.chat.webhooks.slack(
+      buildSignedBlockActionsRequest(
+        SIGNING_SECRET,
+        blockActionsPayload({
+          teamId: "T123",
+          userId: "U_ACTOR",
+          channelId: "C_SCOPE",
+          messageTs: "1700000000.000400",
+          actionId: "tool:req-slack-stale-config:1h",
+          value: "1h",
+        })
+      )
+    );
+
+    expect(response.status).toBe(200);
+    await waitFor(() => expect(h.executeToolDirect).toHaveBeenCalled());
+    expect(h.executeToolDirect).toHaveBeenCalledWith(
+      "agent-1",
+      "user-1",
+      "shifu-toolbox",
+      "cancel_automation",
+      { automationId: "auto-1" },
+      { expectedMcpIdentity, channelId: "C_SCOPE" }
+    );
+    await waitFor(() =>
+      expect(h.postMessage).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.stringContaining("Tool error")
+      )
+    );
   });
 
   test("signed question button invokes onAction with button value", async () => {
