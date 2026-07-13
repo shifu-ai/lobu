@@ -338,6 +338,28 @@ describe("guardDateOutput", () => {
         }).text
       ).toBe(expected);
     }
+
+    for (const [userMessage, finalText, expected] of [
+      [
+        "不想長大工作坊的下一場是哪天？",
+        "下一場不想長大工作坊是 7/22（三）。",
+        "下一場不想長大工作坊是 7/16（四）。",
+      ],
+      [
+        "不要錯過講座的下一場是哪天？",
+        "下一場不要錯過講座是 7/22（三）。",
+        "下一場不要錯過講座是 7/16（四）。",
+      ],
+    ] as const) {
+      expect(
+        guardDateOutput({
+          userMessage,
+          finalText,
+          now: NOW,
+          trustedTemporalCandidates: ["2026-07-16"],
+        }).text
+      ).toBe(expected);
+    }
   });
 
   test("preserves padded short-date style when correcting a next occurrence", () => {

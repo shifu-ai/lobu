@@ -532,7 +532,7 @@ function normalizeTemporalEvidenceLabel(value: string): string {
 const REQUEST_PREFIX_RE =
   /^(?:(?:請幫我查|请帮我查|幫我查|帮我查|請問|请问|我想知道|麻煩查|麻烦查)\s*)+/u;
 const NEGATED_OCCURRENCE_REQUEST_RE =
-  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:不要|別|别|不必|不用|無需|无需|忽略|不想)\s*(?:管|查|看)?/gu;
+  /(?:(?:請|请)\s*)?(?:我\s*)?(?:(?:先|暫時|暂时)\s*)?(?:(?:不要|別|别|不必|不用|無需|无需|不想)\s*(?:管|查|看)|忽略\s*(?:管|查|看)?)/gu;
 
 function hasBoundedOccurrenceRequestNegation(
   value: string,
@@ -600,6 +600,7 @@ function requestedOccurrenceTargetState(
     hasPositiveOccurrence = true;
     const tail = userMessage.slice(index + occurrence[0].length, index + 80);
     if (/^\s*(?:是|為|为)?\s*(?:哪天|哪一天|何時|何时|什麼時候|什么时候)/u.test(tail)) {
+      if (/的\s*$/u.test(prefix)) continue;
       hasBarePositiveOccurrence = true;
       continue;
     }
