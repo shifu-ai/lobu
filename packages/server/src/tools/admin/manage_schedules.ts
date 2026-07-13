@@ -21,7 +21,7 @@
 import { type Static, Type } from '@sinclair/typebox';
 import { TypeCompiler } from '@sinclair/typebox/compiler';
 import type { Env } from '../../index';
-import { routeAction } from './action-router';
+import { isPrivilegedToolContext, routeAction } from './action-router';
 import { getDb } from '../../db/client';
 import {
   countActiveScheduledJobs,
@@ -41,7 +41,7 @@ import { nextRunAt as nextCronTickAt } from '../../utils/cron';
 // SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
 // direct-auth sessions (see 1c52bc33) can reach this tool, but must be
 // confined to their own agent / own notifications / a bounded quota — see
-// `isPrivilegedRole` and the deps below.
+// `isPrivilegedToolContext` and the deps below.
 const MEMBER_SCHEDULE_QUOTA = 20;
 
 // ============================================
@@ -197,10 +197,6 @@ interface ToolResult {
   schedules?: Array<ReturnType<typeof serializeSchedule>>;
   ok?: boolean;
   error?: string;
-}
-
-function isPrivilegedRole(ctx: ToolContext): boolean {
-  return ctx.memberRole === 'owner' || ctx.memberRole === 'admin';
 }
 
 /**
@@ -401,6 +397,9 @@ async function handleCreate(
   if (args.creation_key && !ctx.userId) {
     return { error: 'creation_key requires an authenticated user.' };
   }
+  if (args.creation_key && !isPrivilegedToolContext(ctx)) {
+    return { error: 'Schedule creation keys require trusted access.' };
+  }
   const runAtDate = new Date(args.run_at);
   if (Number.isNaN(runAtDate.getTime())) {
     return { error: `run_at is not a valid ISO timestamp: ${args.run_at}` };
@@ -458,7 +457,7 @@ async function handleCreate(
   // (see 1c52bc33) — confine them to their own agent, their own
   // notification recipients, and a bounded active-schedule quota. Owner/admin
   // sessions are unrestricted.
-  if (!isPrivilegedRole(ctx)) {
+  if (!isPrivilegedToolContext(ctx)) {
     if (args.payload.type === 'wake_agent') {
       const owned = await deps.agentOwnedByUser(
         ctx.organizationId,
@@ -518,14 +517,14 @@ async function handleCreate(
       ...createParams,
       externalKey: args.creation_key,
       changeDetection: 'full',
-      activeQuota: isPrivilegedRole(ctx) ? undefined : MEMBER_SCHEDULE_QUOTA,
+      activeQuota: isPrivilegedToolContext(ctx) ? undefined : MEMBER_SCHEDULE_QUOTA,
     });
     if (outcome.status === 'quota_exceeded') {
       return {
         error: `Schedule quota reached (${MEMBER_SCHEDULE_QUOTA} active). Cancel unused schedules first. Current: ${outcome.activeCount}.`,
       };
     }
-    if (!isPrivilegedRole(ctx) && outcome.job.created_by_user !== ctx.userId) {
+    if (!isPrivilegedToolContext(ctx) && outcome.job.created_by_user !== ctx.userId) {
       return { error: 'Schedule could not be created.' };
     }
     return { schedule: serializeSchedule(outcome.job) };
@@ -541,7 +540,7 @@ async function handleList(
 ): Promise<ToolResult> {
   // SHIFU FORK: members can't list org-wide or spoof another user/agent via
   // args — force the filter to themselves regardless of what was passed.
-  const privileged = isPrivilegedRole(ctx);
+  const privileged = isPrivilegedToolContext(ctx);
   const rows = await deps.listScheduledJobs({
     organizationId: ctx.organizationId,
     createdByAgent: privileged ? args.agent_id ?? null : null,
@@ -575,7 +574,7 @@ async function handlePause(
   deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
   const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
-  if (!isPrivilegedRole(ctx)) {
+  if (!isPrivilegedToolContext(ctx)) {
     const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }
@@ -591,7 +590,7 @@ async function handleCancel(
   deps: ManageSchedulesDeps
 ): Promise<ToolResult> {
   const notFound = { error: `Schedule '${args.id}' not found in this organization.` };
-  if (!isPrivilegedRole(ctx)) {
+  if (!isPrivilegedToolContext(ctx)) {
     const existing = await deps.getScheduledJob(ctx.organizationId, args.id);
     if (!memberOwnsJob(existing, ctx)) return notFound;
   }

@@ -20,6 +20,16 @@ function isSystemContext(ctx: ToolContext): boolean {
   return ctx.isAuthenticated === true && ctx.userId === null && ctx.memberRole === null;
 }
 
+export function isPrivilegedToolContext(ctx: ToolContext): boolean {
+  if (ctx.memberRole === 'owner' || ctx.memberRole === 'admin') return true;
+  return (
+    ctx.isAuthenticated === true &&
+    ctx.tokenType === 'pat' &&
+    ctx.allowCrossOrg === false &&
+    ctx.scopes?.includes('mcp:admin') === true
+  );
+}
+
 function enforceActionAccess(toolName: string, action: string, ctx: ToolContext): void {
   // Watcher reactions and other in-process system calls historically run with
   // userId=null + isAuthenticated=true. Preserve that path while enforcing the
@@ -42,7 +52,7 @@ function enforceActionAccess(toolName: string, action: string, ctx: ToolContext)
   const effectiveAccess =
     isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
 
-  if (effectiveAccess === 'admin' && ctx.memberRole !== 'owner' && ctx.memberRole !== 'admin') {
+  if (effectiveAccess === 'admin' && !isPrivilegedToolContext(ctx)) {
     throw new Error(
       `Action ${toolName}.${action} requires admin or owner access. Ask an organization owner to grant elevated access.`
     );
