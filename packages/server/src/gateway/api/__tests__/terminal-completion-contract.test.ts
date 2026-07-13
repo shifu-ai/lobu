@@ -64,6 +64,61 @@ async function renderTerminalPayload(payload: ThreadResponsePayload) {
 }
 
 describe("API terminal completion contract", () => {
+	test("streams deltas before one authoritative terminal completion", async () => {
+		const sseManager = new SseManager();
+		sseManager.addConnection("conversation-1", {});
+
+		const renderer = new ApiResponseRenderer(sseManager);
+		const platformRegistry = new PlatformRegistry();
+		platformRegistry.register({
+			name: "api",
+			initialize: async () => undefined,
+			start: async () => undefined,
+			stop: async () => undefined,
+			isHealthy: () => true,
+			getResponseRenderer: () => renderer,
+		});
+		const consumer = new UnifiedThreadResponseConsumer(
+			{} as IMessageQueue,
+			platformRegistry,
+			sseManager,
+		);
+		const handleThreadResponse = Reflect.get(
+			consumer,
+			"handleThreadResponse",
+		) as (job: QueueJob<ThreadResponsePayload>) => Promise<void>;
+
+		await handleThreadResponse.call(consumer, {
+			id: "delta-job",
+			data: terminalPayload({
+				delta: "課程助理正在整理資料",
+				processedMessageIds: undefined,
+				finalText: undefined,
+			}),
+		});
+		await handleThreadResponse.call(consumer, {
+			id: "terminal-job",
+			data: terminalPayload({
+				finalText: "請選擇這次要處理的課程",
+			}),
+		});
+
+		const events = sseManager.getRecentEvents("conversation-1");
+		const matchingOutputs = events.filter(
+			(event) =>
+				event.event === "output" &&
+				event.data.content === "課程助理正在整理資料" &&
+				event.data.messageId === "message-1",
+		);
+		expect(matchingOutputs.length).toBeGreaterThanOrEqual(1);
+
+		const completions = events.filter((event) => event.event === "complete");
+		expect(completions).toHaveLength(1);
+		expect(completions[0]?.data.finalText).toBe(
+			"請選擇這次要處理的課程",
+		);
+	});
+
 	test("broadcasts one completion with the worker's authoritative final text", async () => {
 		const completions = (await renderTerminalPayload(terminalPayload()))
 			.filter((event) => event.event === "complete");

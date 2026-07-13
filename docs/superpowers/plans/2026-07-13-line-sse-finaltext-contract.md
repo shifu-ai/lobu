@@ -345,4 +345,3 @@ If clean, do not create an empty commit.
 ## Completion Gate
 
 Before opening a PR, compare every design success criterion against the final diff and fresh output, dispatch a final reviewer across `shifu/main...HEAD`, resolve all Critical and Important findings, and use `finishing-a-development-branch`. Do not push, merge, build an image, or deploy without explicit user authorization.
-
