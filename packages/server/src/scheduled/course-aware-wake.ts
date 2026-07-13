@@ -41,13 +41,49 @@ function nonEmpty(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0;
 }
 
-function isValidTimestamp(value: unknown): value is string {
-	return (
-		nonEmpty(value) &&
-		/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u.test(
+export class TrustedCourseWakeValidationError extends Error {}
+
+export function parseStrictRfc3339(value: unknown, field: string): Date {
+	if (!nonEmpty(value))
+		throw new TrustedCourseWakeValidationError(`${field} is required`);
+	const match =
+		/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?(Z|([+-])(\d{2}):(\d{2}))$/u.exec(
 			value,
-		) &&
-		Number.isFinite(Date.parse(value))
+		);
+	if (!match)
+		throw new TrustedCourseWakeValidationError(`${field} must be RFC3339`);
+	const year = Number(match[1]);
+	const month = Number(match[2]);
+	const day = Number(match[3]);
+	const hour = Number(match[4]);
+	const minute = Number(match[5]);
+	const second = Number(match[6]);
+	const millis = Number((match[7] ?? "").padEnd(3, "0").slice(0, 3));
+	const offsetHour = match[8] === "Z" ? 0 : Number(match[10]);
+	const offsetMinute = match[8] === "Z" ? 0 : Number(match[11]);
+	const maxDay =
+		month >= 1 && month <= 12
+			? new Date(Date.UTC(year, month, 0)).getUTCDate()
+			: 0;
+	if (
+		day < 1 ||
+		day > maxDay ||
+		hour > 23 ||
+		minute > 59 ||
+		second > 59 ||
+		offsetHour > 23 ||
+		offsetMinute > 59
+	) {
+		throw new TrustedCourseWakeValidationError(
+			`${field} is not a real timestamp`,
+		);
+	}
+	const offset =
+		match[8] === "Z"
+			? 0
+			: (match[9] === "+" ? 1 : -1) * (offsetHour * 60 + offsetMinute) * 60_000;
+	return new Date(
+		Date.UTC(year, month - 1, day, hour, minute, second, millis) - offset,
 	);
 }
 
@@ -89,15 +125,14 @@ export function parseTrustedCourseWakeV1(
 		!nonEmpty(eventRef.eventId) ||
 		!nonEmpty(eventRef.eventVersion) ||
 		!nonEmpty(eventRef.eventTitle) ||
-		!isValidTimestamp(eventRef.eventStartAt)
+		!nonEmpty(eventRef.eventStartAt)
 	) {
 		throw new Error("invalid calendarEventRef");
 	}
-	if (
-		!isValidTimestamp(value.scheduledFor)
-	) {
-		throw new Error("invalid scheduledFor");
-	}
+	parseStrictRfc3339(eventRef.eventStartAt, "calendarEventRef.eventStartAt");
+	if (!nonEmpty(value.scheduledFor)) throw new Error("invalid scheduledFor");
+	const scheduledFor = value.scheduledFor;
+	parseStrictRfc3339(scheduledFor, "scheduledFor");
 	if (
 		scope.ownerUserId !== expected.ownerUserId ||
 		scope.agentId !== expected.agentId
@@ -136,7 +171,7 @@ export function parseTrustedCourseWakeV1(
 			resolutionMatchedBy: [...scope.resolutionMatchedBy],
 			scopeVersion: 1,
 		},
-		scheduledFor: value.scheduledFor,
+		scheduledFor,
 		taskKind: value.taskKind,
 		delivery: "line",
 	};

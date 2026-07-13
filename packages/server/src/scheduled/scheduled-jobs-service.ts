@@ -25,6 +25,7 @@ import type { TaskScheduler } from './task-scheduler';
 export interface ScheduledJobRow {
   id: string;
   external_key: string | null;
+  schedule_revision: number;
   organization_id: string;
   action_type: string;
   action_args: Record<string, unknown>;
@@ -65,36 +66,78 @@ export async function upsertScheduledJobByExternalKey(
   params: UpsertScheduledJobByExternalKeyParams
 ): Promise<ScheduledJobRow> {
   if (!params.externalKey.trim()) throw new Error('externalKey is required');
-  if (!params.createdByUser && !params.createdByAgent) {
-    throw new Error('scheduled_jobs requires created_by_user or created_by_agent');
-  }
+  if (!params.createdByUser) throw new Error('external-key schedules require created_by_user');
   const sql = getDb();
-  const rows = (await sql`
-    INSERT INTO scheduled_jobs (
-      external_key, organization_id, action_type, action_args, cron, next_run_at,
-      description, created_by_user, created_by_agent,
-      source_run_id, source_event_id, source_thread_id
-    ) VALUES (
-      ${params.externalKey}, ${params.organizationId}, ${params.actionType},
-      ${sql.json(params.actionArgs)}, ${params.cron ?? null}, ${params.runAt},
-      ${params.description}, ${params.createdByUser ?? null}, ${params.createdByAgent ?? null},
-      ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null}, ${params.sourceThreadId ?? null}
-    )
-    ON CONFLICT (organization_id, external_key) WHERE external_key IS NOT NULL DO UPDATE SET
-      action_type = EXCLUDED.action_type,
-      action_args = EXCLUDED.action_args,
-      cron = EXCLUDED.cron,
-      next_run_at = EXCLUDED.next_run_at,
-      description = EXCLUDED.description,
-      created_by_user = EXCLUDED.created_by_user,
-      created_by_agent = EXCLUDED.created_by_agent,
-      paused = false,
-      last_fired_at = NULL,
-      last_fired_run_id = NULL,
-      updated_at = now()
-    RETURNING *
-  `) as unknown as ScheduledJobRow[];
-  return rows[0];
+  return sql.begin(async (tx) => {
+    await tx`
+      SELECT pg_advisory_xact_lock(
+        hashtext(${params.organizationId}),
+        hashtext(${`${params.createdByUser}:${params.externalKey}`})
+      )
+    `;
+    const existingRows = (await tx`
+      SELECT * FROM scheduled_jobs
+      WHERE organization_id = ${params.organizationId}
+        AND created_by_user = ${params.createdByUser}
+        AND external_key = ${params.externalKey}
+      FOR UPDATE
+    `) as unknown as ScheduledJobRow[];
+    const existing = existingRows[0];
+    if (!existing) {
+      const rows = (await tx`
+        INSERT INTO scheduled_jobs (
+          external_key, organization_id, action_type, action_args, cron, next_run_at,
+          description, created_by_user, created_by_agent,
+          source_run_id, source_event_id, source_thread_id
+        ) VALUES (
+          ${params.externalKey}, ${params.organizationId}, ${params.actionType},
+          ${tx.json(params.actionArgs)}, ${params.cron ?? null}, ${params.runAt},
+          ${params.description}, ${params.createdByUser}, ${params.createdByAgent ?? null},
+          ${params.sourceRunId ?? null}, ${params.sourceEventId ?? null}, ${params.sourceThreadId ?? null}
+        )
+        RETURNING *
+      `) as unknown as ScheduledJobRow[];
+      return rows[0];
+    }
+
+    const oldWake = trustedWakeIdentity(existing.action_args);
+    const newWake = trustedWakeIdentity(params.actionArgs);
+    const changed = oldWake.eventVersion !== newWake.eventVersion
+      || oldWake.scheduledFor !== newWake.scheduledFor;
+    if (!changed || params.runAt.getTime() <= Date.now()) return existing;
+
+    const rows = (await tx`
+      UPDATE scheduled_jobs SET
+        action_type = ${params.actionType}, action_args = ${tx.json(params.actionArgs)},
+        cron = ${params.cron ?? null}, next_run_at = ${params.runAt},
+        description = ${params.description}, created_by_agent = ${params.createdByAgent ?? null},
+        source_run_id = ${params.sourceRunId ?? null}, source_event_id = ${params.sourceEventId ?? null},
+        source_thread_id = ${params.sourceThreadId ?? null}, paused = false,
+        last_fired_at = NULL, last_fired_run_id = NULL,
+        schedule_revision = schedule_revision + 1, updated_at = now()
+      WHERE id = ${existing.id}
+      RETURNING *
+    `) as unknown as ScheduledJobRow[];
+    return rows[0];
+  });
+}
+
+function trustedWakeIdentity(actionArgs: Record<string, unknown>): {
+  eventVersion: string | null;
+  scheduledFor: string | null;
+} {
+  const wake = asRecord(actionArgs.trustedCourseWake);
+  const eventRef = asRecord(wake?.calendarEventRef);
+  return {
+    eventVersion: typeof eventRef?.eventVersion === 'string' ? eventRef.eventVersion : null,
+    scheduledFor: typeof wake?.scheduledFor === 'string' ? wake.scheduledFor : null,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 export async function createScheduledJob(
@@ -237,86 +280,88 @@ export async function deleteScheduledJob(
   return rows.length > 0;
 }
 
+export interface ScheduledJobCandidate {
+  id: string;
+  schedule_revision: number;
+}
+
 /**
- * Register the per-minute tick. Call once during bootTaskScheduler.
- *
- * The handler claims due rows transactionally (FOR UPDATE SKIP LOCKED so
- * concurrent pods coordinate without an advisory lock), spawns one task
- * per row, and advances next_run_at. A handler crash leaves rows un-
- * advanced — next minute's tick retries them. Per-row idempotency key
- * `scheduled_job:<id>:<tick-iso>` deduplicates if the same row is read
- * twice across pods.
+ * Dispatch one scanned candidate while holding its row lock. The revision
+ * predicate discards candidates made stale by a reschedule that committed
+ * after the scan. Holding the lock through spawn makes reschedule-vs-fire
+ * linearizable across replicas: either the reschedule commits first and the
+ * stale revision cannot spawn, or the firing commits first and reschedule is
+ * explicitly the later operation.
  */
+export async function dispatchScheduledJobCandidate(
+  candidate: ScheduledJobCandidate,
+  scheduler: Pick<TaskScheduler, 'spawn'>
+): Promise<void> {
+  const sql = getDb();
+  await sql.begin(async (tx) => {
+    const rows = (await tx`
+      SELECT * FROM scheduled_jobs
+      WHERE id = ${candidate.id}
+        AND schedule_revision = ${candidate.schedule_revision}
+        AND next_run_at <= now()
+        AND NOT paused
+      FOR UPDATE SKIP LOCKED
+    `) as unknown as ScheduledJobRow[];
+    const row = rows[0];
+    if (!row) return;
+
+    const tickIso = row.next_run_at;
+    const idempotencyKey = `scheduled_job:${row.id}:r${row.schedule_revision}:${tickIso}`;
+    try {
+      await scheduler.spawn(row.action_type, {
+        ...row.action_args,
+        __scheduled_job_id: row.id,
+        __scheduled_job_tick: tickIso,
+        __scheduled_job_revision: row.schedule_revision,
+        __organization_id: row.organization_id,
+        __created_by_user: row.created_by_user,
+        __created_by_agent: row.created_by_agent,
+      }, { idempotencyKey });
+    } catch (err) {
+      logger.warn(
+        { scheduled_job_id: row.id, err: errorMessage(err) },
+        '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
+      );
+      return;
+    }
+
+    const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
+    if (nextAt) {
+      await tx`
+        UPDATE scheduled_jobs
+        SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
+        WHERE id = ${row.id} AND schedule_revision = ${row.schedule_revision}
+      `;
+    } else {
+      await tx`
+        UPDATE scheduled_jobs
+        SET last_fired_at = now(), paused = true, updated_at = now()
+        WHERE id = ${row.id} AND schedule_revision = ${row.schedule_revision}
+      `;
+    }
+  });
+}
+
+/** Register the per-minute scheduled-jobs scan. */
 export function registerScheduledJobsTicker(scheduler: TaskScheduler): void {
   scheduler.register(
     'scheduled-jobs-tick',
     async () => {
       const sql = getDb();
-      const claimed = await sql.begin(async (tx) => {
-        return (await tx`
-          SELECT *
-          FROM scheduled_jobs
-          WHERE next_run_at <= now() AND NOT paused
-          ORDER BY next_run_at ASC
-          FOR UPDATE SKIP LOCKED
-          LIMIT 200
-        `) as unknown as ScheduledJobRow[];
-      });
-      if (claimed.length === 0) return;
-
-      for (const row of claimed) {
-        const tickIso = row.next_run_at;
-        const idempotencyKey = `scheduled_job:${row.id}:${tickIso}`;
-        try {
-          await scheduler.spawn(row.action_type, {
-            ...row.action_args,
-            __scheduled_job_id: row.id,
-            __scheduled_job_tick: tickIso,
-            __organization_id: row.organization_id,
-            __created_by_user: row.created_by_user,
-            __created_by_agent: row.created_by_agent,
-          }, { idempotencyKey });
-        } catch (err) {
-          logger.warn(
-            { scheduled_job_id: row.id, err: errorMessage(err) },
-            '[scheduled-jobs-tick] spawn failed; leaving next_run_at unchanged for retry'
-          );
-          continue;
-        }
-        // Advance OR pause-when-done depending on whether this is recurring.
-        //
-        // The claim transaction (FOR UPDATE SKIP LOCKED) commits when the
-        // closure above returns, releasing the row locks BEFORE this advance
-        // runs — so SKIP LOCKED gives no cross-pod exclusion during the
-        // spawn+advance window. The spawn idempotency key collapses duplicate
-        // tasks, but the advance itself must be conditional or two pods reading
-        // the same pre-advance `next_run_at` can both write (and clobber a
-        // concurrent pause/delete/re-schedule).
-        //
-        // Guard on `next_run_at <= now()` (same predicate as the claim SELECT),
-        // NOT equality against the value we read: postgres.js parses
-        // timestamptz to a millisecond-precision JS Date while the column
-        // stores microseconds, so an equality round-trip silently never
-        // matches for µs-precision rows — leaving them eternally due and
-        // re-claimed every tick. `<= now()` is a no-op once any pod has
-        // advanced the row (next_run_at is then in the future) and never
-        // clobbers an operator re-schedule to a future time.
-        const nextAt = row.cron ? nextCronTickAt(row.cron) : null;
-        if (nextAt) {
-          await sql`
-            UPDATE scheduled_jobs
-            SET last_fired_at = now(), next_run_at = ${nextAt}, updated_at = now()
-            WHERE id = ${row.id} AND next_run_at <= now()
-          `;
-        } else {
-          // One-shot: mark as fired + paused so the index ignores it.
-          // Re-pausing an already-paused row is idempotent.
-          await sql`
-            UPDATE scheduled_jobs
-            SET last_fired_at = now(), paused = true, updated_at = now()
-            WHERE id = ${row.id} AND next_run_at <= now()
-          `;
-        }
+      const candidates = (await sql`
+        SELECT id, schedule_revision
+        FROM scheduled_jobs
+        WHERE next_run_at <= now() AND NOT paused
+        ORDER BY next_run_at ASC
+        LIMIT 200
+      `) as unknown as ScheduledJobCandidate[];
+      for (const candidate of candidates) {
+        await dispatchScheduledJobCandidate(candidate, scheduler);
       }
     },
     { cron: '* * * * *' }

@@ -61,6 +61,8 @@ function adminCtx(overrides: Partial<ToolContext> = {}): ToolContext {
 function fakeJobRow(overrides: Partial<ScheduledJobRow> = {}): ScheduledJobRow {
   return {
     id: "job-1",
+    external_key: null,
+    schedule_revision: 1,
     organization_id: ORG,
     action_type: "wake_agent",
     action_args: {},
@@ -135,6 +137,7 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
           agent_id: MEMBER_AGENT,
           prompt: "check X",
           custom_metadata: { tolerated: true },
+          trustedCoursePreference: "course-a",
           trustedCourseWake: { source: "calendar_scheduled_wake" },
           trustedCourseScope: { courseKey: "course-a" },
           __trustedCourseWakeProvenance: "internal",
@@ -150,6 +153,7 @@ describe("manage_schedules member self-scoping — create wake_agent", () => {
       agent_id: MEMBER_AGENT,
       prompt: "check X",
       custom_metadata: { tolerated: true },
+      trustedCoursePreference: "course-a",
     });
   });
 

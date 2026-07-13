@@ -294,6 +294,15 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const WAKE_AGENT_FIELDS = ['agent_id', 'prompt', 'thread_id', 'reason'] as const;
+const RESERVED_WAKE_TRUST_KEYS = new Set([
+  'trustedcoursewake',
+  'trustedcoursescope',
+  'trustedcoursewakeprovenance',
+  'trustedprovenance',
+  'internaltrustedprovenance',
+  'internaltrustedcoursewake',
+  'internaltrustedcoursewakeprovenance',
+]);
 const NOTIFICATION_FIELDS = ['title', 'body', 'recipients', 'resource_url'] as const;
 
 /**
@@ -327,12 +336,7 @@ export function normalizeCreateArgs(raw: Record<string, unknown>): Record<string
   if (payload.type === 'wake_agent') {
     for (const key of Object.keys(payload)) {
       const normalizedKey = key.toLowerCase().replace(/[^a-z]/g, '');
-      if (
-        normalizedKey.startsWith('trustedcourse') ||
-        normalizedKey === 'internaltrustedprovenance' ||
-        normalizedKey === 'trustedprovenance' ||
-        (normalizedKey.startsWith('trusted') && normalizedKey.includes('provenance'))
-      ) {
+      if (RESERVED_WAKE_TRUST_KEYS.has(normalizedKey)) {
         delete payload[key];
       }
     }

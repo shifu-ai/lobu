@@ -1,7 +1,11 @@
 import { type Context, Hono } from "hono";
 import { getDb } from "../db/client.js";
 import type { Env } from "../index.js";
-import { parseTrustedCourseWakeV1 } from "../scheduled/course-aware-wake.js";
+import {
+	parseStrictRfc3339,
+	parseTrustedCourseWakeV1,
+	type TrustedCourseWakeV1,
+} from "../scheduled/course-aware-wake.js";
 import { upsertScheduledJobByExternalKey } from "../scheduled/scheduled-jobs-service.js";
 
 const EXTERNAL_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,255}$/;
@@ -33,7 +37,53 @@ function requiredString(record: Record<string, unknown>, key: string): string {
 	return value.trim();
 }
 
-export function createCourseAwareWakeRoutes(): Hono<{ Bindings: Env }> {
+interface ParsedCourseWakeRequest {
+	externalKey: string;
+	ownerUserId: string;
+	agentId: string;
+	runAt: Date;
+	payload: TrustedCourseWakeV1;
+}
+
+export interface CourseAwareWakeRoutesDeps {
+	upsertScheduledJobByExternalKey: typeof upsertScheduledJobByExternalKey;
+}
+
+function parseRequest(
+	raw: unknown,
+	organizationId: string,
+): ParsedCourseWakeRequest {
+	if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+		throw new Error("body must be an object");
+	}
+	const body = raw as Record<string, unknown>;
+	const requestedOrganizationId = requiredString(body, "organizationId");
+	const ownerUserId = requiredString(body, "ownerUserId");
+	const agentId = requiredString(body, "agentId");
+	const externalKey = requiredString(body, "externalKey");
+	if (requestedOrganizationId !== organizationId)
+		throw new Error("organizationId mismatch");
+	if (!EXTERNAL_KEY_PATTERN.test(externalKey))
+		throw new Error("invalid externalKey");
+	const runAt = parseStrictRfc3339(requiredString(body, "runAt"), "runAt");
+	if (runAt.getTime() <= Date.now())
+		throw new Error("runAt must be in the future");
+	const payload = parseTrustedCourseWakeV1(body.payload, {
+		ownerUserId,
+		agentId,
+	});
+	const scheduledFor = parseStrictRfc3339(payload.scheduledFor, "scheduledFor");
+	if (scheduledFor.getTime() !== runAt.getTime()) {
+		throw new Error("runAt must match payload.scheduledFor");
+	}
+	return { externalKey, ownerUserId, agentId, runAt, payload };
+}
+
+export function createCourseAwareWakeRoutes(
+	options: Partial<CourseAwareWakeRoutesDeps> = {},
+): Hono<{ Bindings: Env }> {
+	const upsert =
+		options.upsertScheduledJobByExternalKey ?? upsertScheduledJobByExternalKey;
 	const routes = new Hono<{ Bindings: Env }>();
 	routes.put("/", async (c) => {
 		const denied = requireAdminPat(c);
@@ -42,53 +92,9 @@ export function createCourseAwareWakeRoutes(): Hono<{ Bindings: Env }> {
 		if (!organizationId)
 			return c.json({ error: "Authentication required" }, 401);
 
+		let parsed: ParsedCourseWakeRequest;
 		try {
-			const raw = await c.req.json();
-			if (!raw || typeof raw !== "object" || Array.isArray(raw))
-				throw new Error("body must be an object");
-			const body = raw as Record<string, unknown>;
-			const requestedOrganizationId = requiredString(body, "organizationId");
-			const ownerUserId = requiredString(body, "ownerUserId");
-			const agentId = requiredString(body, "agentId");
-			const externalKey = requiredString(body, "externalKey");
-			if (requestedOrganizationId !== organizationId)
-				throw new Error("organizationId mismatch");
-			if (!EXTERNAL_KEY_PATTERN.test(externalKey))
-				throw new Error("invalid externalKey");
-			const runAt = new Date(requiredString(body, "runAt"));
-			if (!Number.isFinite(runAt.getTime())) throw new Error("invalid runAt");
-			const payload = parseTrustedCourseWakeV1(body.payload, {
-				ownerUserId,
-				agentId,
-			});
-
-			const ownerRows = await getDb()`
-        SELECT id FROM agents
-        WHERE organization_id = ${organizationId}
-          AND id = ${agentId}
-          AND owner_platform = 'toolbox'
-          AND owner_user_id = ${ownerUserId}
-        LIMIT 1
-      `;
-			if (ownerRows.length === 0)
-				return c.json({ error: "agent_owner_mismatch" }, 403);
-
-			const job = await upsertScheduledJobByExternalKey({
-				externalKey,
-				organizationId,
-				actionType: "wake_agent",
-				actionArgs: {
-					agent_id: agentId,
-					prompt: `Prepare the scheduled course task for ${payload.trustedCourseScope.courseDisplayName}.`,
-					reason: "trusted-course-calendar-wake",
-					trustedCourseWake: payload,
-				},
-				runAt,
-				description: `Course calendar wake: ${payload.taskKind}`,
-				createdByUser: ownerUserId,
-				createdByAgent: agentId,
-			});
-			return c.json({ ok: true, engineRef: job.id }, 200);
+			parsed = parseRequest(await c.req.json(), organizationId);
 		} catch (error) {
 			return c.json(
 				{
@@ -97,6 +103,38 @@ export function createCourseAwareWakeRoutes(): Hono<{ Bindings: Env }> {
 				},
 				400,
 			);
+		}
+
+		try {
+			const ownerRows = await getDb()`
+        SELECT id FROM agents
+        WHERE organization_id = ${organizationId}
+          AND id = ${parsed.agentId}
+          AND owner_platform = 'toolbox'
+          AND owner_user_id = ${parsed.ownerUserId}
+        LIMIT 1
+      `;
+			if (ownerRows.length === 0)
+				return c.json({ error: "agent_owner_mismatch" }, 403);
+
+			const job = await upsert({
+				externalKey: parsed.externalKey,
+				organizationId,
+				actionType: "wake_agent",
+				actionArgs: {
+					agent_id: parsed.agentId,
+					prompt: `Prepare the scheduled course task for ${parsed.payload.trustedCourseScope.courseDisplayName}.`,
+					reason: "trusted-course-calendar-wake",
+					trustedCourseWake: parsed.payload,
+				},
+				runAt: parsed.runAt,
+				description: `Course calendar wake: ${parsed.payload.taskKind}`,
+				createdByUser: parsed.ownerUserId,
+				createdByAgent: parsed.agentId,
+			});
+			return c.json({ ok: true, engineRef: job.id }, 200);
+		} catch {
+			return c.json({ error: "course_wake_upsert_failed" }, 500);
 		}
 	});
 	return routes;
