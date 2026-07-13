@@ -35,7 +35,7 @@ function hasAutomationIntent(text: string): boolean {
       text
     );
   const englishTemporal =
-    /\b(?:tomorrow|later|every|daily|weekly|monthly|recurring|continuously|until|next\s+(?:hour|day|week|month)|in\s+\d+\s+(?:minutes?|hours?|days?)|for\s+\d+\s+(?:minutes?|hours?|days?))\b/.test(
+    /\b(?:tomorrow|later|every|daily|weekly|monthly|recurring|continuously|until|(?:this|next)\s+(?:hour|day|week|month)|in\s+\d+\s+(?:minutes?|hours?|days?)|for\s+\d+\s+(?:minutes?|hours?|days?))\b/.test(
       text
     );
   if (englishAction && englishTemporal) return true;
@@ -45,15 +45,22 @@ function hasAutomationIntent(text: string): boolean {
       text
     );
   const chineseTemporal =
-    /(?:明天|後天|后天|下週|下周|未來|未来|每隔|每天|每日|每週|每周|每月|定期|持續|持续|直到|分鐘後|分钟后|小時後|小时后|\d+[點点時时])/.test(
+    /(?:明天|後天|后天|這週|这周|本週|本周|下週|下周|未來|未来|每隔|每天|每日|每週|每周|每月|定期|持續|持续|直到|分鐘後|分钟后|小時後|小时后|\d+[點点時时])/.test(
       text
     );
   return chineseAction && chineseTemporal;
 }
 
-function hasCalendarIntent(text: string): boolean {
+export function hasCalendarDateIntent(text: string): boolean {
   if (
     /\b\d{4}-\d{2}-\d{2}\b.{0,16}\b(?:weekday|day of (?:the )?week|date)\b/.test(
+      text
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:weekday|day of (?:the )?week)\b.{0,16}\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2})\b/.test(
       text
     )
   ) {
@@ -68,6 +75,9 @@ function hasCalendarIntent(text: string): boolean {
     ) ||
     /\b(?:this|next|previous|last)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(
       text
+    ) ||
+    /\b(?:this|next|previous|last)\s+week\b.{0,24}\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/.test(
+      text
     )
   ) {
     return true;
@@ -78,6 +88,10 @@ function hasCalendarIntent(text: string): boolean {
     ) ||
     /(?:這|这|本|下|上)(?:週|周)[一二三四五六日天]/.test(text) ||
     /\d{4}-\d{2}-\d{2}.{0,12}(?:星期|週|周|日期|幾號|几号)/.test(text) ||
+    /(?:星期|週幾|周几).{0,12}(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2})/.test(
+      text
+    ) ||
+    /\d{1,2}[/-]\d{1,2}.{0,12}(?:星期|週幾|周几)/.test(text) ||
     /下一場.{0,20}(?:日期|幾號|几号|星期|週幾|周几)/.test(text)
   ) {
     return true;
@@ -122,7 +136,7 @@ export function classifyToolIntent(text: string): ToolIntent {
     return "automation";
   }
 
-  if (hasCalendarIntent(normalized)) {
+  if (hasCalendarDateIntent(normalized)) {
     return "calendar";
   }
 

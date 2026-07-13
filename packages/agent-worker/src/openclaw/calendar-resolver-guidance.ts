@@ -32,5 +32,5 @@ export function buildCalendarResolverInstructions(
       : "call `resolve_calendar_date`";
   return `## Deterministic Calendar Dates
 
-For every relative weekday or relative date calculation, you MUST ${invocation}; do not calculate it yourself. Use the \`absolute_date\` expression to validate an absolute ISO date or its claimed weekday. In the answer, always show the complete absolute ISO date, weekday, timezone, and resolver version returned by the resolver.`;
+For every relative weekday or relative date calculation, you MUST ${invocation}; do not calculate it yourself. Use the \`absolute_date\` expression to validate an absolute ISO date or its claimed weekday. For a month/day without a year, use the current ISO year only when the user clearly means that year; otherwise ask for the year before calling the resolver. In the answer, always show the complete absolute ISO date, weekday, timezone, and resolver version returned by the resolver.`;
 }

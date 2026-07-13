@@ -15,7 +15,11 @@ export {
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
-import { classifyToolIntent, type ToolIntent } from "./tool-intent";
+import {
+  classifyToolIntent,
+  hasCalendarDateIntent,
+  type ToolIntent,
+} from "./tool-intent";
 
 export interface DynamicToolSelectionTrace {
   primaryIntent: ToolIntent;
@@ -132,12 +136,13 @@ function isPinnedDirectTool(
   entry: ToolCatalogEntry,
   primaryIntent: ToolIntent,
   provenanceById: McpCatalogProvenanceById | undefined,
-  trustedOrigins: ReadonlySet<string> | undefined
+  trustedOrigins: ReadonlySet<string> | undefined,
+  calendarAssist: boolean
 ): boolean {
   return (
     PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
     entry.name.startsWith("sales_battle_report_") ||
-    (primaryIntent === "calendar" &&
+    ((primaryIntent === "calendar" || calendarAssist) &&
       isTrustedShifuCalendarResolver({
         tool: entry.tool,
         mcpId: entry.mcpId,
@@ -155,21 +160,78 @@ function isPinnedDirectTool(
   );
 }
 
+function pinnedPreference(
+  entry: ToolCatalogEntry,
+  primaryIntent: ToolIntent,
+  provenanceById: McpCatalogProvenanceById | undefined,
+  trustedOrigins: ReadonlySet<string> | undefined,
+  calendarAssist: boolean
+): number {
+  if (
+    primaryIntent === "automation" &&
+    entry.domain === "automation" &&
+    PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES.has(entry.name) &&
+    isTrustedShifuToolMetadataSource({
+      mcpId: entry.mcpId,
+      provenance: provenanceById?.[entry.mcpId],
+      trustedOrigins,
+    })
+  ) {
+    return 0;
+  }
+  if (
+    (primaryIntent === "calendar" || calendarAssist) &&
+    isTrustedShifuCalendarResolver({
+      tool: entry.tool,
+      mcpId: entry.mcpId,
+      provenance: provenanceById?.[entry.mcpId],
+      trustedOrigins,
+    })
+  ) {
+    return primaryIntent === "calendar" ? 0 : 1;
+  }
+  return 2;
+}
+
 function selectRankedEntries(
   entries: ToolCatalogEntry[],
   primaryIntent: ToolIntent,
   budget: number,
   provenanceById?: McpCatalogProvenanceById,
-  trustedOrigins?: ReadonlySet<string>
+  trustedOrigins?: ReadonlySet<string>,
+  calendarAssist = false
 ): {
   selectedEntries: ToolCatalogEntry[];
   pinnedBudgetOverflow: ToolCatalogEntry[];
 } {
   const pinnedEntries = entries
     .filter((entry) =>
-      isPinnedDirectTool(entry, primaryIntent, provenanceById, trustedOrigins)
+      isPinnedDirectTool(
+        entry,
+        primaryIntent,
+        provenanceById,
+        trustedOrigins,
+        calendarAssist
+      )
     )
-    .sort((left, right) => compareEntries(primaryIntent, left, right));
+    .sort((left, right) => {
+      const preferenceDelta =
+        pinnedPreference(
+          left,
+          primaryIntent,
+          provenanceById,
+          trustedOrigins,
+          calendarAssist
+        ) -
+        pinnedPreference(
+          right,
+          primaryIntent,
+          provenanceById,
+          trustedOrigins,
+          calendarAssist
+        );
+      return preferenceDelta || compareEntries(primaryIntent, left, right);
+    });
   const nonPinnedEntries = entries
     .filter(
       (entry) =>
@@ -177,7 +239,8 @@ function selectRankedEntries(
           entry,
           primaryIntent,
           provenanceById,
-          trustedOrigins
+          trustedOrigins,
+          calendarAssist
         )
     )
     .sort((left, right) => compareEntries(primaryIntent, left, right));
@@ -214,6 +277,9 @@ export function selectMcpToolsForTurn(
   }
 
   const primaryIntent = classifyToolIntent(params.message);
+  const calendarAssist =
+    primaryIntent === "automation" &&
+    hasCalendarDateIntent(params.message.toLowerCase());
   const budget = Math.max(0, Math.floor(params.budget));
   const entries = params.tools
     .map((tool, index) =>
@@ -248,14 +314,17 @@ export function selectMcpToolsForTurn(
     .filter(
       (entry) =>
         (primaryIntent === "automation" || entry.domain !== "automation") &&
-        (primaryIntent === "calendar" || entry.domain !== "calendar")
+        (primaryIntent === "calendar" ||
+          calendarAssist ||
+          entry.domain !== "calendar")
     );
   const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
     entries,
     primaryIntent,
     budget,
     params.mcpProvenanceById,
-    params.trustedShifuToolboxOrigins
+    params.trustedShifuToolboxOrigins,
+    calendarAssist
   );
   const selectedToolNames = new Set(
     selectedEntries.map((entry) => entry.name).filter(Boolean)
@@ -292,6 +361,9 @@ export function selectMcpToolsByMcpForTurn(
   params: SelectMcpToolsByMcpForTurnParams
 ): SelectMcpToolsByMcpForTurnResult {
   const primaryIntent = classifyToolIntent(params.message);
+  const calendarAssist =
+    primaryIntent === "automation" &&
+    hasCalendarDateIntent(params.message.toLowerCase());
   const budget = Math.max(0, Math.floor(params.budget));
   const entries: ToolCatalogEntry[] = [];
   let originalIndex = 0;
@@ -333,7 +405,11 @@ export function selectMcpToolsByMcpForTurn(
       if (primaryIntent !== "automation" && entry.domain === "automation") {
         continue;
       }
-      if (primaryIntent !== "calendar" && entry.domain === "calendar") {
+      if (
+        primaryIntent !== "calendar" &&
+        !calendarAssist &&
+        entry.domain === "calendar"
+      ) {
         continue;
       }
       entries.push(entry);
@@ -345,7 +421,8 @@ export function selectMcpToolsByMcpForTurn(
     primaryIntent,
     budget,
     params.mcpProvenanceById,
-    params.trustedShifuToolboxOrigins
+    params.trustedShifuToolboxOrigins,
+    calendarAssist
   );
   const selectedKeys = new Set(
     selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))

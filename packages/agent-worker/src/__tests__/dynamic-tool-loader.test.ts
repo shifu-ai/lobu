@@ -191,6 +191,10 @@ describe("selectMcpToolsForTurn", () => {
     "下週三是幾號？",
     "下一場銷講日期",
     "2026-07-13 是星期幾？",
+    "What weekday is 2026-07-13?",
+    "星期幾是 2026-07-13？",
+    "7/13 是星期幾？",
+    "星期幾是 7/13？",
   ])("routes calendar date intent for %s", (message) => {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
@@ -253,6 +257,36 @@ describe("selectMcpToolsForTurn", () => {
     expect(result.trace.primaryIntent).toBe("automation");
     expect(result.trace.selectedToolNames).toEqual([
       "shifu-toolbox/plan_automation",
+    ]);
+  });
+
+  test.each([
+    "排程在這週三15:00發提醒",
+    "安排在本週三15:00通知大家",
+    "schedule a reminder this week on Wednesday at 15:00",
+    "schedule a reminder next week on Wednesday at 15:00",
+  ])("keeps scheduling as primary intent with calendar assistance for %s", (message) => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "shifu-toolbox": [
+          calendarResolverTool(),
+          tool("plan_automation", {
+            _meta: {
+              shifuTool: { domain: "automation", priority: "P1" },
+            },
+          }),
+        ],
+      },
+      message,
+      budget: 2,
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(result.trace.primaryIntent).toBe("automation");
+    expect(result.trace.selectedToolNames).toEqual([
+      "shifu-toolbox/plan_automation",
+      "shifu-toolbox/resolve_calendar_date",
     ]);
   });
 

@@ -43,6 +43,9 @@ describe("buildCalendarResolverInstructions", () => {
     expect(result).toContain("relative weekday or relative date");
     expect(result).toContain("absolute ISO date");
     expect(result).toContain("weekday, timezone, and resolver version");
+    expect(result).toContain("month/day without a year");
+    expect(result).toContain("current ISO year");
+    expect(result).toContain("ask for the year");
     expect(result).not.toContain("run `shifu-toolbox resolve_calendar_date`");
   });
 

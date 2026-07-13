@@ -524,9 +524,29 @@ type DateParts = {
   day: number;
 };
 
-function getTaipeiDateParts(now: Date): DateParts {
+function resolveIanaTimeZone(value: unknown): {
+  timeZone: string;
+  invalidInput: boolean;
+} {
+  if (value === undefined || value === null) {
+    return { timeZone: TAIPEI_TIME_ZONE, invalidInput: false };
+  }
+  if (typeof value !== "string" || !value.trim() || value.length > 100) {
+    return { timeZone: TAIPEI_TIME_ZONE, invalidInput: true };
+  }
+  try {
+    const timeZone = new Intl.DateTimeFormat("en", {
+      timeZone: value.trim(),
+    }).resolvedOptions().timeZone;
+    return { timeZone, invalidInput: false };
+  } catch {
+    return { timeZone: TAIPEI_TIME_ZONE, invalidInput: true };
+  }
+}
+
+function getZonedDateParts(now: Date, timeZone: string): DateParts {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -534,7 +554,7 @@ function getTaipeiDateParts(now: Date): DateParts {
 
   const valueFor = (type: string) => {
     const value = parts.find((part) => part.type === type)?.value;
-    if (!value) throw new Error(`Missing ${type} from Taipei date formatter`);
+    if (!value) throw new Error(`Missing ${type} from date formatter`);
     return Number(value);
   };
 
@@ -573,38 +593,53 @@ function formatDatedWeekday(parts: DateParts): string {
   return `${formatDateParts(parts)} (${weekdayLabel(parts)})`;
 }
 
-function formatTaipeiTime(now: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
+function formatZonedTimestamp(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
-    hour12: false,
-  })
-    .format(now)
-    .replace(", ", " ");
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+  }).formatToParts(now);
+  const valueFor = (type: string) => {
+    const value = parts.find((part) => part.type === type)?.value;
+    if (!value) throw new Error(`Missing ${type} from timestamp formatter`);
+    return value;
+  };
+  const rawOffset = valueFor("timeZoneName");
+  const offset = rawOffset === "GMT" ? "+00:00" : rawOffset.replace("GMT", "");
+  return `${valueFor("year")}-${valueFor("month")}-${valueFor("day")}T${valueFor("hour")}:${valueFor("minute")}:${valueFor("second")}${offset}`;
 }
 
-export function buildCurrentDateContext(now: Date = new Date()): string {
-  const today = getTaipeiDateParts(now);
+export function buildCurrentDateContext(
+  now: Date = new Date(),
+  requestedTimeZone?: unknown
+): string {
+  const { timeZone, invalidInput } = resolveIanaTimeZone(requestedTimeZone);
+  const today = getZonedDateParts(now, timeZone);
   const yesterday = addCalendarDays(today, -1);
   const tomorrow = addCalendarDays(today, 1);
-  const currentTime = formatTaipeiTime(now);
+  const currentTimestamp = formatZonedTimestamp(now, timeZone);
 
   return [
     "## Current Date Context",
     "",
-    "- Timezone: Asia/Taipei (UTC+08:00)",
-    `- Current time / 現在時間: ${currentTime}`,
+    `- Timezone / 時區 (IANA): ${timeZone}`,
+    ...(invalidInput
+      ? ["- Invalid timezone rejected; fail-closed fallback: Asia/Taipei"]
+      : []),
+    `- Current timestamp / 現在時間: ${currentTimestamp}`,
+    `- ISO date / 日期: ${formatDateParts(today)}`,
     `- Today / 今天: ${formatDatedWeekday(today)}`,
     `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
     `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,
-    "- When answering about dates, schedules, reports, or relative words such as " +
-      "today/yesterday/tomorrow/今天/昨天/明天, use this context instead of " +
-      "guessing weekdays.",
+    "- Use this clock metadata as the source of the current year, date, and timezone. " +
+      "Do not guess. When deterministic calendar resolver instructions are present, " +
+      "call that resolver for relative dates and weekdays.",
   ].join("\n");
 }
 
@@ -612,12 +647,13 @@ export function buildLobuSystemPrompt(
   basePrompt: string | undefined,
   agentInstructions: string | undefined,
   finalInstructions: string | undefined,
-  now: Date = new Date()
+  now: Date = new Date(),
+  timeZone?: unknown
 ): string {
   const base = basePrompt || "";
   const identity = agentInstructions?.trim();
   const extra = finalInstructions?.trim();
-  const currentDateContext = buildCurrentDateContext(now);
+  const currentDateContext = buildCurrentDateContext(now, timeZone);
   const promptWithIdentity = identity
     ? replaceBasePromptIdentity(base, identity)
     : base;
@@ -1933,6 +1969,9 @@ Use it when the user references past discussions or you need context.`);
   const finalInstructionsUpdated = instructionParts
     .filter(Boolean)
     .join("\n\n");
+  const turnTimeZone = isRecord(platformMetadata)
+    ? (platformMetadata.timeZone ?? rawOptions.timeZone)
+    : rawOptions.timeZone;
 
   const resourceLoader = new DefaultResourceLoader({
     cwd: workspaceDir,
@@ -1941,7 +1980,9 @@ Use it when the user references past discussions or you need context.`);
       buildLobuSystemPrompt(
         base,
         context.agentInstructions,
-        finalInstructionsUpdated
+        finalInstructionsUpdated,
+        new Date(),
+        turnTimeZone
       ),
   });
   await resourceLoader.reload();
