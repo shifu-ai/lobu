@@ -123,7 +123,9 @@ describe("GatewayClient heartbeat ACKs", () => {
       (client as any).payloadToWorkerConfig(forwarded).trustedExecutionScope
     ).toEqual(trustedExecutionScope);
     expect(forwarded.resolvedCourseContext).toBeUndefined();
-    expect(forwarded.trustedExecutionScope).not.toHaveProperty("courseEntityId");
+    expect(forwarded.trustedExecutionScope).not.toHaveProperty(
+      "courseEntityId"
+    );
     expect(forwarded.trustedExecutionScope).not.toHaveProperty("retrieval");
     expect(verifyWorkerToken(runJobToken)?.courseToolScope).toBeUndefined();
   });
@@ -201,27 +203,363 @@ describe("GatewayClient heartbeat ACKs", () => {
     ).toBe(activeSpecializedSkill);
   });
 
-  test("rejects native course-token scope mismatches before receipt or execution",async()=>{process.env.ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";__resetEncryptionKeyCacheForTests();const baseContext=validResolvedCourseContext();const {trust:_,...contextWithoutTrust}=baseContext;const baseScope={mode:"course",ownerUserId:"user-1",agentId:"agent-1",conversationId:"conversation-1",courseEntityId:"course:user:course-a",contextPackId:"pack-a",contextVersion:2,activeSpecializedSkill:null} as const;const makeToken=(overrides:Record<string,unknown>={})=>generateWorkerToken((overrides.userId as string)??"user-1",(overrides.conversationId as string)??"conversation-1",(overrides.deploymentName as string)??"worker-1",{channelId:"channel-1",agentId:(overrides.agentId as string)??"agent-1",runId:12,messageId:"message-1",tokenKind:"run",executionMode:"course",courseToolScope:{ownerUserId:(overrides.userId as string)??"user-1",agentId:(overrides.agentId as string)??"agent-1",courseEntityId:(overrides.courseEntityId as string)??"course:user:course-a",contextPackId:"pack-a",contextVersion:2,activeSpecializedSkill:null}});const cases=[
-    {name:"missing scope",payload:{resolvedCourseContext:baseContext},token:makeToken()},
-    {name:"missing context",payload:{trustedExecutionScope:baseScope},token:makeToken()},
-    {name:"missing context trust",payload:{resolvedCourseContext:contextWithoutTrust,trustedExecutionScope:baseScope},token:makeToken()},
-    {name:"wrong deployment",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:baseScope},token:makeToken({deploymentName:"other-worker"})},
-    {name:"wrong token owner",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:baseScope},token:makeToken({userId:"other-user"})},
-    {name:"wrong token agent",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:baseScope},token:makeToken({agentId:"other-agent"})},
-    {name:"wrong token conversation",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:baseScope},token:makeToken({conversationId:"other-conversation"})},
-    {name:"wrong token course",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:baseScope},token:makeToken({courseEntityId:"course:other"})},
-    {name:"wrong context pack",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:{...baseScope,contextPackId:"pack-other"}},token:makeToken()},
-    {name:"wrong context version",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:{...baseScope,contextVersion:3}},token:makeToken()},
-    {name:"wrong selected skill",payload:{resolvedCourseContext:baseContext,trustedExecutionScope:{...baseScope,activeSpecializedSkill:"opp-coach" as const}},token:makeToken()},
-  ];for(const item of cases){const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");const handleThreadMessage=mock(async()=>undefined);const sendDeliveryReceipt=mock(()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;(client as any).sendDeliveryReceipt=sendDeliveryReceipt;await (client as any).handleEvent("job",JSON.stringify({jobId:`job-${item.name}`,payload:{...basePayload(),runId:12,runJobToken:item.token,...item.payload}}));expect(handleThreadMessage).not.toHaveBeenCalled();expect(sendDeliveryReceipt).not.toHaveBeenCalled();}});
+  test("rejects native course-token scope mismatches before receipt or execution", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const baseContext = validResolvedCourseContext();
+    const { trust: _, ...contextWithoutTrust } = baseContext;
+    const baseScope = {
+      mode: "course",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+      courseEntityId: "course:user:course-a",
+      contextPackId: "pack-a",
+      contextVersion: 2,
+      activeSpecializedSkill: null,
+    } as const;
+    const makeToken = (overrides: Record<string, unknown> = {}) =>
+      generateWorkerToken(
+        (overrides.userId as string) ?? "user-1",
+        (overrides.conversationId as string) ?? "conversation-1",
+        (overrides.deploymentName as string) ?? "worker-1",
+        {
+          channelId: "channel-1",
+          agentId: (overrides.agentId as string) ?? "agent-1",
+          runId: 12,
+          messageId: "message-1",
+          tokenKind: "run",
+          executionMode: "course",
+          courseToolScope: {
+            ownerUserId: (overrides.userId as string) ?? "user-1",
+            agentId: (overrides.agentId as string) ?? "agent-1",
+            courseEntityId:
+              (overrides.courseEntityId as string) ?? "course:user:course-a",
+            contextPackId: "pack-a",
+            contextVersion: 2,
+            activeSpecializedSkill: null,
+          },
+        }
+      );
+    const cases = [
+      {
+        name: "missing scope",
+        payload: { resolvedCourseContext: baseContext },
+        token: makeToken(),
+      },
+      {
+        name: "missing context",
+        payload: { trustedExecutionScope: baseScope },
+        token: makeToken(),
+      },
+      {
+        name: "missing context trust",
+        payload: {
+          resolvedCourseContext: contextWithoutTrust,
+          trustedExecutionScope: baseScope,
+        },
+        token: makeToken(),
+      },
+      {
+        name: "wrong deployment",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: baseScope,
+        },
+        token: makeToken({ deploymentName: "other-worker" }),
+      },
+      {
+        name: "wrong token owner",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: baseScope,
+        },
+        token: makeToken({ userId: "other-user" }),
+      },
+      {
+        name: "wrong token agent",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: baseScope,
+        },
+        token: makeToken({ agentId: "other-agent" }),
+      },
+      {
+        name: "wrong token conversation",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: baseScope,
+        },
+        token: makeToken({ conversationId: "other-conversation" }),
+      },
+      {
+        name: "wrong token course",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: baseScope,
+        },
+        token: makeToken({ courseEntityId: "course:other" }),
+      },
+      {
+        name: "wrong context pack",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: { ...baseScope, contextPackId: "pack-other" },
+        },
+        token: makeToken(),
+      },
+      {
+        name: "wrong context version",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: { ...baseScope, contextVersion: 3 },
+        },
+        token: makeToken(),
+      },
+      {
+        name: "wrong selected skill",
+        payload: {
+          resolvedCourseContext: baseContext,
+          trustedExecutionScope: {
+            ...baseScope,
+            activeSpecializedSkill: "opp-coach" as const,
+          },
+        },
+        token: makeToken(),
+      },
+    ];
+    for (const item of cases) {
+      const client = new GatewayClient(
+        "https://gateway.example.com",
+        "worker-token",
+        "user-1",
+        "worker-1"
+      );
+      const handleThreadMessage = mock(async () => undefined);
+      const sendDeliveryReceipt = mock(() => undefined);
+      (client as any).handleThreadMessage = handleThreadMessage;
+      (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+      await (client as any).handleEvent(
+        "job",
+        JSON.stringify({
+          jobId: `job-${item.name}`,
+          payload: {
+            ...basePayload(),
+            runId: 12,
+            runJobToken: item.token,
+            ...item.payload,
+          },
+        })
+      );
+      expect(handleThreadMessage).not.toHaveBeenCalled();
+      expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+    }
+  });
 
-  test("rejects a native personal token carrying course tool scope",async()=>{process.env.ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";__resetEncryptionKeyCacheForTests();const token=generateWorkerToken("user-1","conversation-1","worker-1",{channelId:"channel-1",agentId:"agent-1",runId:13,messageId:"message-1",tokenKind:"run",executionMode:"personal",courseToolScope:{ownerUserId:"user-1",agentId:"agent-1",courseEntityId:"course:user:course-a"}});expect(verifyWorkerToken(token)).toBeNull();const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");const handleThreadMessage=mock(async()=>undefined);const sendDeliveryReceipt=mock(()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;(client as any).sendDeliveryReceipt=sendDeliveryReceipt;await (client as any).handleEvent("job",JSON.stringify({jobId:"job-invalid-personal",payload:{...basePayload(),runId:13,runJobToken:token}}));expect(handleThreadMessage).not.toHaveBeenCalled();expect(sendDeliveryReceipt).not.toHaveBeenCalled();});
+  test("rejects a native personal token carrying course tool scope", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const token = generateWorkerToken("user-1", "conversation-1", "worker-1", {
+      channelId: "channel-1",
+      agentId: "agent-1",
+      runId: 13,
+      messageId: "message-1",
+      tokenKind: "run",
+      executionMode: "personal",
+      courseToolScope: {
+        ownerUserId: "user-1",
+        agentId: "agent-1",
+        courseEntityId: "course:user:course-a",
+      },
+    });
+    expect(verifyWorkerToken(token)).toBeNull();
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    const sendDeliveryReceipt = mock(() => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "job-invalid-personal",
+        payload: { ...basePayload(), runId: 13, runJobToken: token },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+    expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+  });
 
-  test("rejects native personal-token replay mismatches before receipt or execution",async()=>{process.env.ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";__resetEncryptionKeyCacheForTests();const cases=[{userId:"other-user"},{agentId:"other-agent"},{conversationId:"other-conversation"},{runId:99},{messageId:"other-message"},{channelId:"other-channel"},{deploymentName:"other-worker"}];for(const override of cases){const token=generateWorkerToken(override.userId??"user-1",override.conversationId??"conversation-1",override.deploymentName??"worker-1",{channelId:override.channelId??"channel-1",agentId:override.agentId??"agent-1",runId:override.runId??14,messageId:override.messageId??"message-1",tokenKind:"run",executionMode:"personal"});const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");const handleThreadMessage=mock(async()=>undefined);const sendDeliveryReceipt=mock(()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;(client as any).sendDeliveryReceipt=sendDeliveryReceipt;await (client as any).handleEvent("job",JSON.stringify({jobId:"job-personal-replay",payload:{...basePayload(),runId:14,runJobToken:token}}));expect(handleThreadMessage).not.toHaveBeenCalled();expect(sendDeliveryReceipt).not.toHaveBeenCalled();}});
+  test("rejects native personal-token replay mismatches before receipt or execution", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const cases = [
+      { userId: "other-user" },
+      { agentId: "other-agent" },
+      { conversationId: "other-conversation" },
+      { runId: 99 },
+      { messageId: "other-message" },
+      { channelId: "other-channel" },
+      { deploymentName: "other-worker" },
+    ];
+    for (const override of cases) {
+      const token = generateWorkerToken(
+        override.userId ?? "user-1",
+        override.conversationId ?? "conversation-1",
+        override.deploymentName ?? "worker-1",
+        {
+          channelId: override.channelId ?? "channel-1",
+          agentId: override.agentId ?? "agent-1",
+          runId: override.runId ?? 14,
+          messageId: override.messageId ?? "message-1",
+          tokenKind: "run",
+          executionMode: "personal",
+        }
+      );
+      const client = new GatewayClient(
+        "https://gateway.example.com",
+        "worker-token",
+        "user-1",
+        "worker-1"
+      );
+      const handleThreadMessage = mock(async () => undefined);
+      const sendDeliveryReceipt = mock(() => undefined);
+      (client as any).handleThreadMessage = handleThreadMessage;
+      (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+      await (client as any).handleEvent(
+        "job",
+        JSON.stringify({
+          jobId: "job-personal-replay",
+          payload: { ...basePayload(), runId: 14, runJobToken: token },
+        })
+      );
+      expect(handleThreadMessage).not.toHaveBeenCalled();
+      expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+    }
+  });
 
-  test("rejects personal mode carrying resolved context or trusted scope",async()=>{process.env.ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";__resetEncryptionKeyCacheForTests();const token=generateWorkerToken("user-1","conversation-1","worker-1",{channelId:"channel-1",agentId:"agent-1",runId:16,messageId:"message-1",tokenKind:"run",executionMode:"personal"});const payloads=[{resolvedCourseContext:validResolvedCourseContext()},{trustedExecutionScope:{mode:"onboarding",source:"toolbox_course_resolution",reason:"no_courses",ownerUserId:"user-1",agentId:"agent-1",conversationId:"conversation-1"}}];for(const extra of payloads){const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");const handleThreadMessage=mock(async()=>undefined);const sendDeliveryReceipt=mock(()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;(client as any).sendDeliveryReceipt=sendDeliveryReceipt;await (client as any).handleEvent("job",JSON.stringify({jobId:"job-personal-pollution",payload:{...basePayload(),runId:16,runJobToken:token,...extra}}));expect(handleThreadMessage).not.toHaveBeenCalled();expect(sendDeliveryReceipt).not.toHaveBeenCalled();}});
+  test("rejects personal mode carrying resolved context or trusted scope", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const token = generateWorkerToken("user-1", "conversation-1", "worker-1", {
+      channelId: "channel-1",
+      agentId: "agent-1",
+      runId: 16,
+      messageId: "message-1",
+      tokenKind: "run",
+      executionMode: "personal",
+    });
+    const payloads = [
+      { resolvedCourseContext: validResolvedCourseContext() },
+      {
+        trustedExecutionScope: {
+          mode: "onboarding",
+          source: "toolbox_course_resolution",
+          reason: "no_courses",
+          ownerUserId: "user-1",
+          agentId: "agent-1",
+          conversationId: "conversation-1",
+        },
+      },
+    ];
+    for (const extra of payloads) {
+      const client = new GatewayClient(
+        "https://gateway.example.com",
+        "worker-token",
+        "user-1",
+        "worker-1"
+      );
+      const handleThreadMessage = mock(async () => undefined);
+      const sendDeliveryReceipt = mock(() => undefined);
+      (client as any).handleThreadMessage = handleThreadMessage;
+      (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+      await (client as any).handleEvent(
+        "job",
+        JSON.stringify({
+          jobId: "job-personal-pollution",
+          payload: {
+            ...basePayload(),
+            runId: 16,
+            runJobToken: token,
+            ...extra,
+          },
+        })
+      );
+      expect(handleThreadMessage).not.toHaveBeenCalled();
+      expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+    }
+  });
 
-  test("rejects simultaneous course scope and context mutation with the original token",async()=>{process.env.ENCRYPTION_KEY="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";__resetEncryptionKeyCacheForTests();const token=generateWorkerToken("user-1","conversation-1","worker-1",{channelId:"channel-1",agentId:"agent-1",runId:15,messageId:"message-1",tokenKind:"run",executionMode:"course",courseToolScope:{ownerUserId:"user-1",agentId:"agent-1",courseEntityId:"course:user:course-a",contextPackId:"pack-a",contextVersion:2,activeSpecializedSkill:null}});const context:any=validResolvedCourseContext();context.activeSpecializedSkill="opp-coach";context.trust.contextPackId="pack-mutated";context.trust.contextVersion=3;context.context.contextPackId="pack-mutated";context.context.contextVersion=3;const scope={mode:"course",ownerUserId:"user-1",agentId:"agent-1",conversationId:"conversation-1",courseEntityId:"course:user:course-a",contextPackId:"pack-mutated",contextVersion:3,activeSpecializedSkill:"opp-coach"} as const;const client=new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");const handleThreadMessage=mock(async()=>undefined);const sendDeliveryReceipt=mock(()=>undefined);(client as any).handleThreadMessage=handleThreadMessage;(client as any).sendDeliveryReceipt=sendDeliveryReceipt;await (client as any).handleEvent("job",JSON.stringify({jobId:"job-course-simultaneous-mutation",payload:{...basePayload(),runId:15,runJobToken:token,resolvedCourseContext:context,trustedExecutionScope:scope}}));expect(handleThreadMessage).not.toHaveBeenCalled();expect(sendDeliveryReceipt).not.toHaveBeenCalled();});
+  test("rejects simultaneous course scope and context mutation with the original token", async () => {
+    process.env.ENCRYPTION_KEY =
+      "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    __resetEncryptionKeyCacheForTests();
+    const token = generateWorkerToken("user-1", "conversation-1", "worker-1", {
+      channelId: "channel-1",
+      agentId: "agent-1",
+      runId: 15,
+      messageId: "message-1",
+      tokenKind: "run",
+      executionMode: "course",
+      courseToolScope: {
+        ownerUserId: "user-1",
+        agentId: "agent-1",
+        courseEntityId: "course:user:course-a",
+        contextPackId: "pack-a",
+        contextVersion: 2,
+        activeSpecializedSkill: null,
+      },
+    });
+    const context: any = validResolvedCourseContext();
+    context.activeSpecializedSkill = "opp-coach";
+    context.trust.contextPackId = "pack-mutated";
+    context.trust.contextVersion = 3;
+    context.context.contextPackId = "pack-mutated";
+    context.context.contextVersion = 3;
+    const scope = {
+      mode: "course",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+      courseEntityId: "course:user:course-a",
+      contextPackId: "pack-mutated",
+      contextVersion: 3,
+      activeSpecializedSkill: "opp-coach",
+    } as const;
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
+    const handleThreadMessage = mock(async () => undefined);
+    const sendDeliveryReceipt = mock(() => undefined);
+    (client as any).handleThreadMessage = handleThreadMessage;
+    (client as any).sendDeliveryReceipt = sendDeliveryReceipt;
+    await (client as any).handleEvent(
+      "job",
+      JSON.stringify({
+        jobId: "job-course-simultaneous-mutation",
+        payload: {
+          ...basePayload(),
+          runId: 15,
+          runJobToken: token,
+          resolvedCourseContext: context,
+          trustedExecutionScope: scope,
+        },
+      })
+    );
+    expect(handleThreadMessage).not.toHaveBeenCalled();
+    expect(sendDeliveryReceipt).not.toHaveBeenCalled();
+  });
 
   test("rejects onboarding scope identity mismatch and missing scope for an onboarding token", async () => {
     process.env.ENCRYPTION_KEY =
@@ -323,10 +661,34 @@ describe("GatewayClient heartbeat ACKs", () => {
         tokenChannelId: "channel-1",
         tokenDeployment: "other-worker",
       },
-      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenUserId:"other-user"},
-      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenConversationId:"other-conversation"},
-      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenAgentId:"other-agent"},
-      {tokenRunId:20,tokenMessageId:"message-1",tokenChannelId:"channel-1",tokenDeployment:"worker-1",tokenExecutionMode:"personal" as const},
+      {
+        tokenRunId: 20,
+        tokenMessageId: "message-1",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "worker-1",
+        tokenUserId: "other-user",
+      },
+      {
+        tokenRunId: 20,
+        tokenMessageId: "message-1",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "worker-1",
+        tokenConversationId: "other-conversation",
+      },
+      {
+        tokenRunId: 20,
+        tokenMessageId: "message-1",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "worker-1",
+        tokenAgentId: "other-agent",
+      },
+      {
+        tokenRunId: 20,
+        tokenMessageId: "message-1",
+        tokenChannelId: "channel-1",
+        tokenDeployment: "worker-1",
+        tokenExecutionMode: "personal" as const,
+      },
     ];
     for (const item of cases) {
       const runJobToken = generateWorkerToken(
@@ -1147,13 +1509,40 @@ describe("GatewayClient heartbeat ACKs", () => {
   });
 
   test("does not batch messages with distinct trusted execution scopes", async () => {
-    const client = new GatewayClient("https://gateway.example.com","worker-token","user-1","worker-1");
+    const client = new GatewayClient(
+      "https://gateway.example.com",
+      "worker-token",
+      "user-1",
+      "worker-1"
+    );
     const processSingleMessage = mock(async () => undefined);
     (client as any).processSingleMessage = processSingleMessage;
-    const onboardingScope = {mode:"onboarding",source:"toolbox_course_resolution",reason:"no_courses",ownerUserId:"user-1",agentId:"agent-1",conversationId:"conversation-1"} as const;
+    const onboardingScope = {
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    } as const;
     await (client as any).processBatchedMessages([
-      {timestamp:1,payload:{...basePayload(),messageId:"m1",platformMetadata:{responseId:"shared"},trustedExecutionScope:onboardingScope}},
-      {timestamp:2,payload:{...basePayload(),messageId:"m2",platformMetadata:{responseId:"shared"}}},
+      {
+        timestamp: 1,
+        payload: {
+          ...basePayload(),
+          messageId: "m1",
+          platformMetadata: { responseId: "shared" },
+          trustedExecutionScope: onboardingScope,
+        },
+      },
+      {
+        timestamp: 2,
+        payload: {
+          ...basePayload(),
+          messageId: "m2",
+          platformMetadata: { responseId: "shared" },
+        },
+      },
     ]);
     expect(processSingleMessage).toHaveBeenCalledTimes(2);
   });

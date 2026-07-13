@@ -254,7 +254,9 @@ const TrustedExecutionScopeSchema = z.discriminatedUnion("mode", [
 
 function looksLikeNativeWorkerToken(value: string): boolean {
   const parts = value.split(":");
-  return parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part));
+  return (
+    parts.length === 3 && parts.every((part) => /^[0-9a-f]+$/iu.test(part))
+  );
 }
 
 function normalizeLegacyCourseRetrieval(value: unknown): void {
@@ -474,7 +476,10 @@ const JobEventSchema = z
           message: "Native run token failed integrity validation",
           path: ["payload", "runJobToken"],
         });
-      if (token?.executionMode === "onboarding" || token?.executionMode === "course")
+      if (
+        token?.executionMode === "onboarding" ||
+        token?.executionMode === "course"
+      )
         ctx.addIssue({
           code: "custom",
           message: "Scoped run token requires trusted execution scope",

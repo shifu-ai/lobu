@@ -220,7 +220,9 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
           (data.courseToolScope.activeSpecializedSkill !== null &&
             data.courseToolScope.activeSpecializedSkill !== "opp-coach"))
       ) {
-        logger.error("Worker token rejected: incomplete course execution scope");
+        logger.error(
+          "Worker token rejected: incomplete course execution scope"
+        );
         return null;
       }
     }
