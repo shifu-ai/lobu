@@ -4,9 +4,49 @@ import {
   resolveRelativeDay,
   resolveRelativeWeekday,
 } from "../openclaw/date-context";
-import { guardDateOutput } from "../openclaw/date-output-guard";
+import {
+  guardDateOutput,
+  isDateSensitiveTurn,
+} from "../openclaw/date-output-guard";
 
 const NOW = new Date("2026-07-13T10:15:00.000Z");
+
+describe("isDateSensitiveTurn", () => {
+  test("detects Chinese relative and explicit date requests", () => {
+    for (const prompt of [
+      "今天是 7/13",
+      "昨天和明天分別是哪天？",
+      "上週、本週、這週和下週的日期",
+      "本週三是哪天？",
+      "星期五有空嗎？",
+      "上一場和最近一場是何時？",
+      "請查下一場銷講",
+      "2026-07-16 是星期幾？",
+      "2026-7-6 有活動嗎？",
+    ]) {
+      expect(isDateSensitiveTurn(prompt)).toBe(true);
+    }
+  });
+
+  test("detects English relative date requests", () => {
+    for (const prompt of [
+      "Is next Wednesday available?",
+      "What date is the session?",
+      "Can we meet next Wed?",
+      "Compare today, tomorrow, and yesterday",
+      "Show this week, last week, and next week",
+      "Is Monday a weekday?",
+    ]) {
+      expect(isDateSensitiveTurn(prompt)).toBe(true);
+    }
+  });
+
+  test("does not classify ordinary non-date prompts", () => {
+    for (const prompt of ["請整理會議摘要", "課程報名人數有多少？", "hello"]) {
+      expect(isDateSensitiveTurn(prompt)).toBe(false);
+    }
+  });
+});
 
 describe("relative date resolution", () => {
   test("resolves weekdays in the previous, current, and next Taipei weeks", () => {
@@ -76,10 +116,7 @@ describe("guardDateOutput", () => {
   });
 
   test("does not suffix-match unsupported multi-week expressions", () => {
-    for (const finalText of [
-      "下下週三 7/29（三）",
-      "上上週日 7/5（日）",
-    ]) {
+    for (const finalText of ["下下週三 7/29（三）", "上上週日 7/5（日）"]) {
       expect(
         guardDateOutput({ userMessage: finalText, finalText, now: NOW })
       ).toEqual({ status: "unchanged", text: finalText });

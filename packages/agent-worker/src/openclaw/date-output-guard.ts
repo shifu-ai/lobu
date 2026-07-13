@@ -45,6 +45,24 @@ export type DateGuardInput = {
   now: Date;
 };
 
+const CHINESE_DATE_SENSITIVE_RE =
+  /(?:今天|昨天|明天|上[週周]|本[週周]|這[週周]|这[周週]|下[週周]|(?:星期|週|周)[日天一二三四五六]|(?:上一場|下一場|最近一場))/;
+const ENGLISH_DATE_SENSITIVE_RE =
+  /\b(?:date|today|tomorrow|yesterday|weekday|monday|tuesday|wednesday|thursday|friday|saturday|sunday|(?:this|last|next)\s+week|next\s+(?:mon|tue|wed|thu|fri|sat|sun)(?:day)?)\b/i;
+const ISO_DATE_RE =
+  /(?:^|[^\d])\d{4}-(?:0?[1-9]|1[0-2])-(?:0?[1-9]|[12]\d|3[01])(?:$|[^\d])/;
+const SHORT_DATE_RE =
+  /(?:^|[^\d/])(?:0?[1-9]|1[0-2])\/(?:0?[1-9]|[12]\d|3[01])(?:$|[^\d/])/;
+
+export function isDateSensitiveTurn(promptText: string): boolean {
+  return (
+    CHINESE_DATE_SENSITIVE_RE.test(promptText) ||
+    ENGLISH_DATE_SENSITIVE_RE.test(promptText) ||
+    ISO_DATE_RE.test(promptText) ||
+    SHORT_DATE_RE.test(promptText)
+  );
+}
+
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<!\d)(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
 
@@ -79,9 +97,10 @@ function weekdayFor(parts: CalendarDate): number {
 }
 
 function weekdayWithStyle(original: string, expectedIndex: number): string {
-  const originalIndex = WEEKDAY_INDEX_ZH[
-    original.startsWith("星期") ? original : `星期${original}`
-  ];
+  const originalIndex =
+    WEEKDAY_INDEX_ZH[
+      original.startsWith("星期") ? original : `星期${original}`
+    ];
   if (originalIndex === expectedIndex) return original;
 
   const expected = WEEKDAYS_ZH[expectedIndex] ?? original;

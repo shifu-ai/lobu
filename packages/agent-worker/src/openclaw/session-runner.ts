@@ -101,7 +101,7 @@ import {
   getRequiredBattleReportMutationTools,
   getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
-import { guardDateOutput } from "./date-output-guard";
+import { guardDateOutput, isDateSensitiveTurn } from "./date-output-guard";
 import { buildCurrentDateContext } from "./date-context";
 export { buildCurrentDateContext } from "./date-context";
 const logger = createLogger("worker");
@@ -1889,7 +1889,7 @@ Use it when the user references past discussions or you need context.`);
     let turnNonce = 0;
     let suppressProgressOutput = false;
     const currentTurnExecutedTools = new Set<string>();
-    let bufferCurrentTurnOutputForCompletionClaimGuard = false;
+    let bufferCurrentTurnOutputForFinalGuards = false;
 
     // Wire events through progress processor with delta batching
     let pendingDelta = "";
@@ -1937,10 +1937,11 @@ Use it when the user references past discussions or you need context.`);
       // to this turn only.
       turnController.startTurn();
       currentTurnExecutedTools.clear();
-      bufferCurrentTurnOutputForCompletionClaimGuard =
+      bufferCurrentTurnOutputForFinalGuards =
         options?.silent === true
           ? false
-          : getRequiredBattleReportMutationTools(promptText).length > 0;
+          : getRequiredBattleReportMutationTools(promptText).length > 0 ||
+            isDateSensitiveTurn(promptText);
 
       const turnDone = new Promise<void>((resolve) => {
         resolveTurnDone = () => {
@@ -1992,7 +1993,7 @@ Use it when the user references past discussions or you need context.`);
         const delta = progressProcessor.getDelta();
         if (delta) {
           pendingDelta += delta;
-          if (!bufferCurrentTurnOutputForCompletionClaimGuard) {
+          if (!bufferCurrentTurnOutputForFinalGuards) {
             scheduleDeltaFlush();
           }
         }
@@ -2101,7 +2102,7 @@ Use it when the user references past discussions or you need context.`);
       }
 
       if (event.type === "agent_end") {
-        const flushBeforeDone = bufferCurrentTurnOutputForCompletionClaimGuard
+        const flushBeforeDone = bufferCurrentTurnOutputForFinalGuards
           ? Promise.resolve()
           : flushDelta();
         flushBeforeDone
@@ -2425,7 +2426,7 @@ Use it when the user references past discussions or you need context.`);
       );
     }
 
-    if (getRequiredBattleReportMutationTools(userPrompt).length > 0) {
+    if (bufferCurrentTurnOutputForFinalGuards) {
       pendingDelta = guardedFinalText;
       await flushDelta();
     }
