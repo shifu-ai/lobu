@@ -312,14 +312,6 @@ export class UnifiedThreadResponseConsumer {
 
     // Handle completion
     if (data.processedMessageIds?.length) {
-      if (cliSessionId) {
-        this.sseManager.broadcast(cliSessionId, "complete", {
-          type: "complete",
-          messageId: data.messageId,
-          processedMessageIds: data.processedMessageIds,
-          timestamp: data.timestamp,
-        });
-      }
       await renderer.handleCompletion(data, sessionKey);
     }
   }
