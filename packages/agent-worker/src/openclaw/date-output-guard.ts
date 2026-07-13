@@ -312,33 +312,37 @@ function isExplicitNextOccurrenceForwardBridge(
   const normalized = bridge.trim();
   if (!normalized || normalized.length > 48) return false;
   if (/[，,。！？；;\n\r]/.test(normalized)) return false;
-  const hasChineseNegativeOrNonAssertion =
-    /(?:不(?:會|是|在|於|能|可|應|可能)|未(?:能|在|於|查)|尚未|無法|无法|沒有|没有|沒辦法|没办法|並非|并非|是否|否定|查不到|參考|來源|範圍|歷史|舊資料|但|然而|未知|取消)/.test(
+  const hasReferenceSourceRangeOrUnresolvedMarker =
+    /(?:尚未|未查|查不到|參考|來源|範圍|歷史|舊資料|但|然而|不確定|未知|取消)|\b(?:unknown|unconfirmed|unavailable|reference|source|range|cancelled)\b/i.test(
       normalized
     );
-  const hasEnglishNegativeOrNonAssertion =
-    /\b(?:not|never|cannot|unable|without|no|unknown|unconfirmed|unavailable|impossible|except|reference|source|range|cancelled)\b|\b[a-z]+n['’]t\b/i.test(
-      normalized
-    );
-  if (hasChineseNegativeOrNonAssertion || hasEnglishNegativeOrNonAssertion) {
+  if (hasReferenceSourceRangeOrUnresolvedMarker) {
     return false;
   }
 
-  const hasChineseSchedulingSignal =
-    /(?:是|為|日期|[:：—-]|預計|定於|將\s*(?:在|於)|會\s*(?:在|於)|預定|(?:^|\s)(?:在|於)(?:\s|$))/.test(
+  const hasNegativeSchedulingPredicate =
+    /(?:不會(?:在|於)?|不是|不在|不於|不能(?:在|於)?|不可(?:在|於)?|不應(?:在|於)?|不可能(?:在|於)?|未能(?:在|於)?|未在|未於|尚未(?:在|於)?|無法(?:在|於)?|无法(?:在|于)?|沒有(?:在|於)?|没有(?:在|于)?|沒辦法(?:在|於)?|没办法(?:在|于)?|並非|并非|是否|否定)\s*$/.test(
+      normalized
+    ) ||
+    /(?:\b(?:is|are|was|were|will|would|can|could|should|do|does|did)\s+(?:not|never)(?:\s+(?:be|held|on|at|scheduled|for))*|\bcannot(?:\s+(?:be|held|on|at|scheduled|for))*|\bunable(?:\s+to)?(?:\s+(?:be|hold|schedule|occur|on|at|for))*|\b[a-z]+n['’]t(?:\s+(?:be|held|on|at|scheduled|for))*)$/i.test(
       normalized
     );
-  const hasEnglishSchedulingSignal =
-    /\b(?:is|date|scheduled|on|at)\b|\bwill\s+(?:be(?:\s+held)?|take\s+place)\b/i.test(
+  if (hasNegativeSchedulingPredicate) return false;
+
+  const terminalConnector =
+    /(?:(?:的\s*)?(?:預定)?日期\s*(?:是|為|[:：])|預定\s*(?:是|為)|預計(?:\s*(?:在|於))?|定於|將\s*(?:在|於)|會\s*(?:在|於)|(?:是|為)\s*(?:在|於)?|[:：—-]|\b(?:date\s*(?:is|will\s+be|[:：])|is|will\s+be(?:\s+held\s+on)?|will\s+take\s+place\s+on|scheduled\s+(?:for|on)|occurs?\s+on|on|at))\s*$/i.exec(
       normalized
     );
-  if (hasChineseSchedulingSignal || hasEnglishSchedulingSignal) return true;
+  if (terminalConnector) {
+    const descriptor = normalized.slice(0, terminalConnector.index).trim();
+    return descriptor.length <= 32;
+  }
 
   const hasSchedulingSuffix =
     /^\s*(?:舉行|進行|開始|開課|登場|will\s+be\s+held|takes?\s+place)/i.test(
       suffix
     );
-  return hasSchedulingSuffix && /^[\p{L}\p{N}\s]{1,16}$/u.test(normalized);
+  return hasSchedulingSuffix && /^[\p{L}\p{N}\s]{1,32}$/u.test(normalized);
 }
 
 function findNextOccurrenceDateClaims(text: string): LocatedDateClaim[] {
