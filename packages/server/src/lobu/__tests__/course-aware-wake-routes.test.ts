@@ -424,6 +424,21 @@ describe("course-aware wake routes", () => {
 		});
 	});
 
+	test("reads the actual persisted recent conversation binding through an injected session inspector", async () => {
+		const routes = createCourseAwareWakeRoutes({
+			inspectConversationBinding: async () => ({
+				conversationId: "line-thread-1", courseEntityId: "course:pm-1:course-b",
+			}),
+		});
+		const response = await buildApp(["mcp:admin"], routes).request(
+			`/api/internal/course-aware-wakes/conversation-binding?ownerUserId=${OWNER_USER_ID}&agentId=${AGENT_ID}`,
+		);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			conversationId: "line-thread-1", courseEntityId: "course:pm-1:course-b",
+		});
+	});
+
 	test("cancels a trusted wake through the narrow engine-ref route and is idempotent", async () => {
 		const app = buildApp();
 		const created = await app.request("/api/internal/course-aware-wakes", {
