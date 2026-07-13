@@ -28,6 +28,11 @@ export interface QueueOptions {
   actionKey?: string;
 }
 
+export interface QueueSendDisposition {
+  jobId: string;
+  deduplicated: boolean;
+}
+
 /**
  * Send options for TERMINAL `thread_response` rows (success completion or
  * error) that are subject to the API owner-gate in `routeToRenderer`. When a
@@ -81,6 +86,13 @@ export interface IMessageQueue {
    * Send a message to a queue
    */
   send<T>(queueName: string, data: T, options?: QueueOptions): Promise<string>;
+
+  /** Send with a receipt that remains unique after the run becomes terminal. */
+  sendDurable<T>(
+    queueName: string,
+    data: T,
+    options: QueueOptions & { singletonKey: string },
+  ): Promise<QueueSendDisposition>;
 
   /**
    * Subscribe to a queue and process jobs.

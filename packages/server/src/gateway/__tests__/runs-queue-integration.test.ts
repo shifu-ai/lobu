@@ -83,6 +83,27 @@ describe("RunsQueue — SKIP LOCKED claim concurrency", () => {
 });
 
 describe("RunsQueue — caller options", () => {
+  test("durable send reports first acceptance and atomic receipt deduplication", async () => {
+    if (!queue) throw new Error("queue not started");
+    const first = await queue.sendDurable(
+      "messages",
+      {},
+      { singletonKey: "message-api-conversation-delivery-1" },
+    );
+    const sql = getDb();
+    await sql`UPDATE runs SET status='completed', completed_at=now() WHERE id=${Number(first.jobId)}`;
+    const duplicate = await queue.sendDurable(
+      "messages",
+      {},
+      { singletonKey: "message-api-conversation-delivery-1" },
+    );
+
+    expect(first).toEqual({ jobId: expect.any(String), deduplicated: false });
+    expect(duplicate).toEqual({ jobId: first.jobId, deduplicated: true });
+    const rows = await sql<{ count: number }>`SELECT count(*)::int AS count FROM runs WHERE idempotency_key='message-api-conversation-delivery-1'`;
+    expect(rows[0]?.count).toBe(1);
+  });
+
   test("durable singleton survives terminal run state while distinct canonical keys remain independent", async () => {
     if (!queue) throw new Error("queue not started");
     const sql=getDb();

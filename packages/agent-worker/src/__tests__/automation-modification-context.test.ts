@@ -19,6 +19,7 @@ describe("trusted automation modification context", () => {
     const result = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
+		deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display,
@@ -52,6 +53,7 @@ describe("trusted automation modification context", () => {
     const result = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
+		deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-hidden",
         planId: "plan-hidden",
         display: {
@@ -77,6 +79,7 @@ describe("trusted automation modification context", () => {
     const valid = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
+		deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display: { ...display, title: "😀".repeat(200) },
@@ -88,6 +91,7 @@ describe("trusted automation modification context", () => {
     const invalid = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
+		deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display: { ...display, title: "😀".repeat(201) },
@@ -105,6 +109,7 @@ describe("trusted automation modification context", () => {
     expect(buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
+		deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display,
@@ -117,6 +122,25 @@ describe("trusted automation modification context", () => {
   it.each([
     ["missing", undefined],
     ["non-object", "context"],
+	[
+	  "missing delivery id",
+	  {
+		decisionId: "decision-selected",
+		planId: "plan-selected",
+		display,
+		expiresAt: "2026-07-13T12:15:00.000Z",
+	  },
+	],
+	[
+	  "invalid delivery id",
+	  {
+		deliveryId: "delivery id with spaces",
+		decisionId: "decision-selected",
+		planId: "plan-selected",
+		display,
+		expiresAt: "2026-07-13T12:15:00.000Z",
+	  },
+	],
     [
       "extra field",
       {

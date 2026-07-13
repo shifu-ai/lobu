@@ -74,6 +74,16 @@ afterEach(async () => {
 
 function makeApp(overrides: Record<string, unknown> = {}) {
 	const enqueued: EnqueuedMessage[] = [];
+	const durableReceipts = new Map<string, string>();
+	const enqueueDurableMessage = mock(async (payload: EnqueuedMessage) => {
+		const deliveryId = String(payload.messageId);
+		const existing = durableReceipts.get(deliveryId);
+		if (existing) return { jobId: existing, deduplicated: true };
+		const jobId = `job-${randomUUID()}`;
+		durableReceipts.set(deliveryId, jobId);
+		enqueued.push(payload);
+		return { jobId, deduplicated: false };
+	});
 	const sessions = new Map<string, Record<string, unknown>>([
 		[
 			CONVERSATION_ID,
@@ -94,6 +104,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 				enqueued.push(payload);
 				return `job-${randomUUID()}`;
 			}),
+			enqueueDurableMessage,
 		} as never,
 		sessionManager: {
 			getSession: mock(async (id: string) => sessions.get(id) || null),
@@ -116,7 +127,7 @@ function makeApp(overrides: Record<string, unknown> = {}) {
 		...overrides,
 	});
 
-	return { app, enqueued };
+	return { app, enqueued, enqueueDurableMessage };
 }
 
 function makeGatewayApp(overrides: Record<string, unknown> = {}) {
@@ -245,7 +256,7 @@ describe("direct API multipart attachments", () => {
 	});
 
 	test("strips forged automation modification context from an ordinary session caller", async () => {
-		const { app, enqueued } = makeApp();
+		const { app, enqueued, enqueueDurableMessage } = makeApp();
 		const res = await app.request(
 			`/api/v1/agents/${CONVERSATION_ID}/messages`,
 			{
@@ -256,8 +267,10 @@ describe("direct API multipart attachments", () => {
 				},
 				body: JSON.stringify({
 					content: "改成每小時",
+					messageId: "forged-delivery",
 					platformMetadata: {
 						automationModificationContext: {
+							deliveryId: "forged-delivery",
 							decisionId: "forged-decision",
 							planId: "forged-plan",
 							display: {
@@ -277,10 +290,11 @@ describe("direct API multipart attachments", () => {
 		expect(res.status).toBe(200);
 		expect(enqueued[0]?.messageText).toBe("改成每小時");
 		expect(enqueued[0]?.platformMetadata.automationModificationContext).toBeUndefined();
+		expect(enqueueDurableMessage).not.toHaveBeenCalled();
 	});
 
-	test("stamps automation modification context only for a privileged server-minted session", async () => {
-		const { app, enqueued } = makeApp();
+	test("durably accepts privileged automation modification context once", async () => {
+		const { app, enqueued, enqueueDurableMessage } = makeApp();
 		const token = generateWorkerToken(
 			"user-test",
 			CONVERSATION_ID,
@@ -295,6 +309,7 @@ describe("direct API multipart attachments", () => {
 			},
 		);
 		const context = {
+			deliveryId: "automation-modification-a1b2c3",
 			decisionId: "decision-selected",
 			planId: "plan-selected",
 			display: {
@@ -316,16 +331,41 @@ describe("direct API multipart attachments", () => {
 				},
 				body: JSON.stringify({
 					content: "改成每小時",
+					messageId: context.deliveryId,
 					platformMetadata: { automationModificationContext: context },
 				}),
 			},
 		);
 
 		expect(res.status).toBe(200);
+		expect(await res.json()).toMatchObject({ deduplicated: false });
 		expect(enqueued[0]?.platformMetadata.automationModificationContext).toEqual({
 			...context,
 			trustedByServer: true,
 		});
+		expect(enqueueDurableMessage).toHaveBeenCalledTimes(1);
+
+		const duplicate = await app.request(
+			`/api/v1/agents/${CONVERSATION_ID}/messages`,
+			{
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${token}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({
+					content: "這次內容不應重新入列",
+					messageId: context.deliveryId,
+					platformMetadata: { automationModificationContext: context },
+				}),
+			},
+		);
+
+		expect(duplicate.status).toBe(200);
+		expect(await duplicate.json()).toMatchObject({ deduplicated: true });
+		expect(enqueueDurableMessage).toHaveBeenCalledTimes(2);
+		expect(enqueued).toHaveLength(1);
+		expect(enqueued[0]?.messageText).toBe("改成每小時");
 	});
 
 	test("forwards direct API platformMetadata for session reset messages", async () => {

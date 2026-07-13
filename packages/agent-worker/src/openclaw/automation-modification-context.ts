@@ -1,6 +1,7 @@
 import { isRecord } from "../shared/type-guards";
 
 const CONTEXT_KEYS = new Set([
+  "deliveryId",
   "decisionId",
   "planId",
   "display",
@@ -12,6 +13,7 @@ const FORBIDDEN_DISPLAY_COPY =
   /cron|engine|hash|requires_confirmation|wake_agent|\bplan(?:id)?\b/i;
 
 interface AutomationModificationContext {
+  deliveryId: string;
   decisionId: string;
   planId: string;
   display: {
@@ -51,6 +53,8 @@ function parseAutomationModificationContext(
   if (!isRecord(context) || !exactKeys(context, CONTEXT_KEYS)) return null;
   if (context.trustedByServer !== true) return null;
   if (
+    !boundedString(context.deliveryId, 200) ||
+    !/^[A-Za-z0-9._-]+$/.test(context.deliveryId) ||
     !boundedString(context.decisionId, 200) ||
     !boundedString(context.planId, 200)
   )
@@ -82,6 +86,7 @@ function parseAutomationModificationContext(
     return null;
 
   return {
+    deliveryId: context.deliveryId,
     decisionId: context.decisionId,
     planId: context.planId,
     display: { title, summary, schedule, reason },

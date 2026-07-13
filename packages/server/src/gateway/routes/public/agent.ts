@@ -5,6 +5,7 @@ import {
   createLogger,
   createRootSpan,
   generateWorkerToken,
+  type MessagePayload,
   type McpServerConfig,
   type NetworkConfig,
   normalizeDomainPatterns,
@@ -1344,10 +1345,29 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
     const messageWorkerData = messageWorkerToken
       ? verifyWorkerToken(messageWorkerToken)
       : null;
-    const trustedAutomationModificationContext =
+    const mayProvideTrustedAutomationContext =
       messageWorkerData?.tokenKind === "session" &&
       messageWorkerData.trustedPlatformContext === true &&
-      messageWorkerData.conversationId === agentId &&
+      messageWorkerData.conversationId === agentId;
+    if (
+      mayProvideTrustedAutomationContext &&
+      requestedAutomationModificationContext !== undefined &&
+      (!requestedAutomationModificationContext ||
+        typeof requestedAutomationModificationContext !== "object" ||
+        Array.isArray(requestedAutomationModificationContext) ||
+        typeof requestedAutomationModificationContext.deliveryId !== "string" ||
+        !/^[A-Za-z0-9._-]{1,200}$/.test(
+          requestedAutomationModificationContext.deliveryId,
+        ) ||
+        requestedAutomationModificationContext.deliveryId !== messageId)
+    ) {
+      return c.json(
+        { success: false, error: "Invalid automation modification delivery" },
+        400,
+      );
+    }
+    const trustedAutomationModificationContext =
+      mayProvideTrustedAutomationContext &&
       requestedAutomationModificationContext &&
       typeof requestedAutomationModificationContext === "object" &&
       !Array.isArray(requestedAutomationModificationContext)
@@ -1411,7 +1431,7 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         ...remainingOptions
       } = agentOptions;
 
-      const jobId = await queueProducer.enqueueMessage({
+      const directPayload: MessagePayload = {
         userId: session.userId,
         conversationId: session.conversationId || agentId,
         messageId,
@@ -1458,15 +1478,24 @@ export function createAgentApi(config: AgentApiConfig): OpenAPIHono {
         mcpConfig: settingsMcpServers
           ? { mcpServers: settingsMcpServers }
           : session.mcpConfig,
-      });
+      };
+      const disposition = trustedAutomationModificationContext
+        ? await queueProducer.enqueueDurableMessage(directPayload)
+        : {
+            jobId: await queueProducer.enqueueMessage(directPayload),
+            deduplicated: false,
+          };
 
       rootSpan?.end();
 
       return c.json({
         success: true,
         messageId,
-        jobId,
+        jobId: disposition.jobId,
         queued: true,
+        ...(trustedAutomationModificationContext
+          ? { deduplicated: disposition.deduplicated }
+          : {}),
         traceparent: traceparent || undefined,
       });
     } catch (error) {
