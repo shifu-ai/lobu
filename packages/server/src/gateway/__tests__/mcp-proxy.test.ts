@@ -6,7 +6,11 @@ import {
   expect,
   test,
 } from "bun:test";
-import { generateWorkerToken, type SecretRef } from "@lobu/core";
+import {
+  generateWorkerToken,
+  RESERVED_AUTOMATION_TOOL_NAMES,
+  type SecretRef,
+} from "@lobu/core";
 import { MockMessageQueue } from "@lobu/core/testing";
 import { orgContext } from "../../lobu/stores/org-context.js";
 import { McpProxy } from "../auth/mcp/proxy.js";
@@ -1204,6 +1208,71 @@ describe("McpProxy", () => {
   // ---------- POST /:mcpId/tools/:toolName ----------
 
   describe("POST /:mcpId/tools/:toolName", () => {
+    test.each(RESERVED_AUTOMATION_TOOL_NAMES)("rejects reserved automation call without discovery identity: %s", async (toolName) => {
+      const configSource = createMockConfigSource({
+        "shifu-toolbox": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      let upstreamCalls = 0;
+      let approvalCalls = 0;
+      globalThis.fetch = async () => {
+        upstreamCalls++;
+        return jsonRpcToolsResponse();
+      };
+      proxy.onToolBlocked = async () => {
+        approvalCalls++;
+      };
+
+      const response = await proxy.getApp().request(
+        `/shifu-toolbox/tools/${toolName}`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            "Content-Type": "application/json",
+          },
+          body: "{}",
+        }
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
+      });
+      expect(upstreamCalls).toBe(0);
+      expect(approvalCalls).toBe(0);
+    });
+
+    test.each(RESERVED_AUTOMATION_TOOL_NAMES)("rejects reserved automation approval replay without discovery identity: %s", async (toolName) => {
+      const configSource = createMockConfigSource({
+        "shifu-toolbox": TEST_SERVER,
+      });
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+      });
+      let upstreamCalls = 0;
+      globalThis.fetch = async () => {
+        upstreamCalls++;
+        return jsonRpcToolsResponse();
+      };
+
+      const result = await inTestOrg(() =>
+        proxy.executeToolDirect(
+          "agent1",
+          "user1",
+          "shifu-toolbox",
+          toolName,
+          {}
+        )
+      );
+
+      expect(result.isError).toBe(true);
+      expect(result.diagnosticCode).toBe("MCP_CONFIG_IDENTITY_MISMATCH");
+      expect(upstreamCalls).toBe(0);
+    });
+
     test("forwards call and returns result", async () => {
       const configSource = createMockConfigSource({
         "test-mcp": TEST_SERVER,

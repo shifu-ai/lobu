@@ -1,4 +1,4 @@
-import type { McpToolDef } from "@lobu/core";
+import { isReservedAutomationToolName, type McpToolDef } from "@lobu/core";
 import { classifyToolIntent, type ToolIntent } from "./tool-intent";
 
 export type ToolDomain =
@@ -43,10 +43,6 @@ export type McpCatalogProvenanceById = Record<
 >;
 
 const SHIFU_TOOLBOX_MCP_ID = "shifu-toolbox";
-const RESERVED_AUTOMATION_TOOL_NAMES = new Set([
-  "plan_automation",
-  "create_automation",
-]);
 const DEFAULT_TRUSTED_SHIFU_TOOLBOX_ORIGIN = "https://mcp.shifu-ai.org";
 const MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS = 8;
 
@@ -117,9 +113,7 @@ export function isTrustedShifuToolMetadataSource(params: {
   );
 }
 
-export function isReservedAutomationToolName(name: string): boolean {
-  return RESERVED_AUTOMATION_TOOL_NAMES.has(name);
-}
+export { isReservedAutomationToolName };
 
 export const TOOL_PRIORITY_WEIGHT: Record<ToolPriority, number> = {
   P0: 0,

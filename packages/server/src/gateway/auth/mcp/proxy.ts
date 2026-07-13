@@ -3,6 +3,7 @@ import {
   applyMcpToolFilter,
   createLogger,
   type GuardrailRegistry,
+  isReservedAutomationToolName,
   type McpToolFilter,
   runGuardrailInstances,
   verifyWorkerToken,
@@ -39,10 +40,6 @@ import { applyTrustedCourseToolPolicy, isPlainToolArguments, type TrustedCourseT
 import { computeMcpConfigDigest } from "./config-service.js";
 
 const logger = createLogger("mcp-proxy");
-const RESERVED_AUTOMATION_TOOL_NAMES = new Set([
-  "plan_automation",
-  "create_automation",
-]);
 
 export interface ExpectedMcpConfigIdentity {
   upstreamOrigin: string;
@@ -962,7 +959,7 @@ export class McpProxy {
       };
     }
     if (
-      (RESERVED_AUTOMATION_TOOL_NAMES.has(toolName) &&
+      (isReservedAutomationToolName(toolName) &&
         !options?.expectedMcpIdentity) ||
       (options?.expectedMcpIdentity &&
         !matchesExpectedMcpConfig(httpServer, options.expectedMcpIdentity))
@@ -1910,7 +1907,7 @@ export class McpProxy {
         }
       : undefined;
     if (
-      (RESERVED_AUTOMATION_TOOL_NAMES.has(toolName) ||
+      (isReservedAutomationToolName(toolName) ||
         hasAnyExpectedIdentity) &&
       (!expectedIdentity ||
         !matchesExpectedMcpConfig(httpServer, expectedIdentity))
@@ -2898,7 +2895,7 @@ export class McpProxy {
     // Older callers and tests may seed the pre-provenance cache directly by
     // MCP id. Preserve that compatibility for ordinary third-party tools, but
     // never let a legacy entry authorize the reserved automation surface.
-    if (!RESERVED_AUTOMATION_TOOL_NAMES.has(toolName)) {
+    if (!isReservedAutomationToolName(toolName)) {
       const legacyCached = this.toolCache?.getServerInfo(mcpId, agentId);
       const legacyTool = legacyCached?.tools.find(
         (tool) => tool.name === toolName

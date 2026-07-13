@@ -19,6 +19,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { RESERVED_AUTOMATION_TOOL_NAMES } from "@lobu/core";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
 import { emitWorkerToolsRegisteredObsEvent } from "../openclaw/session-runner";
 import {
@@ -122,7 +123,9 @@ describe("callMcpTool", () => {
     expect(capturedAuth).toBe("Bearer tok-abc");
   });
 
-  test("binds the discovery config identity to the gateway tool call", async () => {
+  test.each(
+    RESERVED_AUTOMATION_TOOL_NAMES
+  )("binds the discovery config identity to fake gateway call for %s", async (toolName) => {
     let capturedHeaders = new Headers();
     globalThis.fetch = mock(async (_input, init) => {
       capturedHeaders = new Headers(init?.headers);
@@ -132,7 +135,7 @@ describe("callMcpTool", () => {
     await callMcpTool(
       gw,
       "shifu-toolbox",
-      "plan_automation",
+      toolName,
       {},
       {
         expectedMcpIdentity: {

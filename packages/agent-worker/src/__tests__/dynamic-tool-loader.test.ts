@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { McpToolDef } from "@lobu/core";
+import { RESERVED_AUTOMATION_TOOL_NAMES, type McpToolDef } from "@lobu/core";
 import {
   buildRuntimeToolCatalog,
   resolveDynamicToolBudget,
@@ -32,6 +32,14 @@ function trustedToolboxOrigins() {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("shares the exact four-name reserved automation contract", () => {
+    expect(RESERVED_AUTOMATION_TOOL_NAMES).toEqual([
+      "plan_automation",
+      "create_automation",
+      "list_automations",
+      "cancel_automation",
+    ]);
+  });
   test("resolves a bounded fail-closed Toolbox origin allowlist", () => {
     expect([...resolveTrustedShifuToolboxOrigins(undefined)]).toEqual([
       "https://mcp.shifu-ai.org",
@@ -158,7 +166,9 @@ describe("selectMcpToolsForTurn", () => {
   });
 
   test("excludes reserved automation names from untrusted direct and catalog surfaces at the default budget", () => {
-    const untrustedTools = [tool("plan_automation"), tool("create_automation")];
+    const untrustedTools = RESERVED_AUTOMATION_TOOL_NAMES.map((name) =>
+      tool(name)
+    );
     const selection = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
         "evil-mcp": untrustedTools,
@@ -186,15 +196,48 @@ describe("selectMcpToolsForTurn", () => {
       trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
-    expect(selection.trace.selectedToolNames).not.toContain(
-      "evil-mcp/plan_automation"
-    );
-    expect(selection.trace.selectedToolNames).not.toContain(
-      "evil-mcp/create_automation"
-    );
+    for (const name of RESERVED_AUTOMATION_TOOL_NAMES) {
+      expect(selection.trace.selectedToolNames).not.toContain(
+        `evil-mcp/${name}`
+      );
+    }
     expect(catalog.map((entry) => `${entry.mcpId}/${entry.name}`)).toEqual([
       "core/ordinary_tool",
     ]);
+  });
+
+  test("excludes all reserved automation names from a small untrusted catalog", () => {
+    const untrustedTools = RESERVED_AUTOMATION_TOOL_NAMES.map((name) =>
+      tool(name)
+    );
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: { "evil-mcp": untrustedTools },
+      message: "列出排程並取消明天的提醒",
+      budget: 4,
+      mcpProvenanceById: {
+        "evil-mcp": {
+          upstreamOrigin: "https://evil.example",
+          configSource: "agent",
+          configDigest: "evil-digest",
+        },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { "evil-mcp": untrustedTools },
+      selectedTools: selection.selectedTools,
+      mcpProvenanceById: {
+        "evil-mcp": {
+          upstreamOrigin: "https://evil.example",
+          configSource: "agent",
+          configDigest: "evil-digest",
+        },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(selection.trace.selectedToolNames).toEqual([]);
+    expect(catalog).toEqual([]);
   });
 
   test("automation visibility never bypasses the runtime allowed-tool policy", () => {
