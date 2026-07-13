@@ -162,8 +162,66 @@ describe("scheduled job revision guard", () => {
 	test("the final due run is inclusive when database now equals until_at", () => {
 		const finalRunAt = "2030-06-30T09:00:00.000Z";
 
-		expect(scheduleHasExpired(finalRunAt, finalRunAt)).toBe(false);
-		expect(scheduleHasExpired(finalRunAt, "2030-06-30T09:00:00.001Z")).toBe(true);
+		expect(scheduleHasExpired(finalRunAt, finalRunAt, finalRunAt)).toBe(false);
+		expect(
+			scheduleHasExpired(finalRunAt, finalRunAt, "2030-06-30T09:00:05.000Z"),
+		).toBe(false);
+		expect(
+			scheduleHasExpired(finalRunAt, finalRunAt, "2030-06-30T09:01:00.001Z"),
+		).toBe(true);
+	});
+
+	test("dispatches a final recurring run after a small scheduler delay and then pauses", async () => {
+		const finalRunAt = new Date(Date.now() - 5_000);
+		const job = await upsertScheduledJobByExternalKey({
+			externalKey: "toolbox:schedule:slightly-late-final",
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "final delayed wake" },
+			description: "slightly late final wake",
+			cron: "* * * * *",
+			runAt: finalRunAt,
+			untilAt: finalRunAt,
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full",
+		});
+		const spawn = mock(async () => "run-final-delayed");
+
+		await dispatchScheduledJobCandidate(job, { spawn } as never);
+
+		expect(spawn).toHaveBeenCalledTimes(1);
+		const [completed] = await getDb()<Array<{ paused: boolean; last_fired_at: Date | null }>>`
+			SELECT paused, last_fired_at FROM scheduled_jobs WHERE id = ${job.id}
+		`;
+		expect(completed?.paused).toBe(true);
+		expect(completed?.last_fired_at).not.toBeNull();
+	});
+
+	test("does not catch up a final recurring run that is clearly stale", async () => {
+		const finalRunAt = new Date(Date.now() - 120_000);
+		const job = await upsertScheduledJobByExternalKey({
+			externalKey: "toolbox:schedule:stale-final",
+			organizationId: ORGANIZATION_ID,
+			actionType: "wake_agent",
+			actionArgs: { agent_id: AGENT_ID, prompt: "stale final wake" },
+			description: "stale final wake",
+			cron: "* * * * *",
+			runAt: finalRunAt,
+			untilAt: finalRunAt,
+			createdByUser: OWNER_USER_ID,
+			createdByAgent: AGENT_ID,
+			changeDetection: "full",
+		});
+		const spawn = mock(async () => "run-stale-final");
+
+		await dispatchScheduledJobCandidate(job, { spawn } as never);
+
+		expect(spawn).not.toHaveBeenCalled();
+		const [expired] = await getDb()<Array<{ paused: boolean }>>`
+			SELECT paused FROM scheduled_jobs WHERE id = ${job.id}
+		`;
+		expect(expired?.paused).toBe(true);
 	});
 
 	test("narrow cancellation pauses only the exact trusted owner wake and is idempotent", async () => {

@@ -22,6 +22,8 @@ import { errorMessage } from "../utils/errors";
 import logger from "../utils/logger";
 import type { TaskScheduler } from "./task-scheduler";
 
+const BOUNDED_SCHEDULE_STALE_GRACE_MS = 60_000;
+
 export interface ScheduledJobRow {
 	id: string;
 	external_key: string | null;
@@ -229,10 +231,17 @@ function dateValue(value: string | Date | null): number | null {
 }
 
 export function scheduleHasExpired(
+	nextRunAt: string | Date,
 	untilAt: string | Date | null,
 	now: string | Date,
 ): boolean {
-	return untilAt !== null && new Date(now).getTime() > new Date(untilAt).getTime();
+	if (untilAt === null) return false;
+	const dueAtMs = new Date(nextRunAt).getTime();
+	const untilAtMs = new Date(untilAt).getTime();
+	const evaluatedAtMs = new Date(now).getTime();
+	if (dueAtMs > untilAtMs) return true;
+	if (evaluatedAtMs <= untilAtMs) return false;
+	return evaluatedAtMs - dueAtMs > BOUNDED_SCHEDULE_STALE_GRACE_MS;
 }
 
 export interface CancelTrustedCourseWakeParams {
@@ -480,7 +489,7 @@ export async function dispatchScheduledJobCandidate(
     `) as unknown as Array<ScheduledJobRow & { evaluated_at: string }>;
 		const row = rows[0];
 		if (!row) return;
-		if (scheduleHasExpired(row.until_at, row.evaluated_at)) {
+		if (scheduleHasExpired(row.next_run_at, row.until_at, row.evaluated_at)) {
 			await tx`
         UPDATE scheduled_jobs
         SET paused = true, updated_at = now()
