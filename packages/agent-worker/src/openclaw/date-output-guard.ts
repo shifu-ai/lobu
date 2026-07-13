@@ -207,7 +207,7 @@ export function isDateSensitiveTurn(promptText: string): boolean {
 const EXPLICIT_DATE_WITH_WEEKDAY_RE =
   /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(\s*[(（])(星期[日天一二三四五六])([)）])/g;
 const EXPLICIT_ISO_DATE_CLAIM_RE =
-  /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(?:(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))(?![A-Za-z0-9_./-])|(?=$|[^A-Za-z0-9_./-]))/g;
+  /(?<![A-Za-z0-9_./-])(\d{4})-(\d{2})-(\d{2})(?:T(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d))?(?![A-Za-z0-9_/-]|\.[A-Za-z0-9_])/g;
 const INVALID_CALENDAR_DATE_BLOCK_TEXT =
   "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。";
 

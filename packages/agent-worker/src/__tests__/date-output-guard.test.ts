@@ -145,6 +145,25 @@ describe("guardDateOutput", () => {
     });
   });
 
+  test("blocks impossible ISO dates before sentence-final ASCII punctuation", () => {
+    for (const finalText of [
+      "The date is 2026-02-30.",
+      "The schedule is 2026-02-30T10:00:00+08:00.",
+    ]) {
+      expect(
+        guardDateOutput({
+          userMessage: "Please check the date.",
+          finalText,
+          now: NOW,
+        })
+      ).toEqual({
+        status: "blocked",
+        text: "我偵測到無效或無法可靠判定的日期，因此沒有送出猜測結果。請確認日期後再試一次。",
+        reason: "invalid_calendar_date",
+      });
+    }
+  });
+
   test("does not treat slug or path tokens as date claims", () => {
     for (const finalText of [
       "release-2026-02-30",
