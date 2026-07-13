@@ -1,5 +1,6 @@
 import { type Context, Hono } from "hono";
 import { getDb } from "../db/client.js";
+import { getRuntimeInfo } from "../utils/runtime-info.js";
 import type { Env } from "../index.js";
 import {
 	parseStrictRfc3339,
@@ -196,6 +197,45 @@ export function createCourseAwareWakeRoutes(
 			return c.json({ error: "course_wake_upsert_failed" }, 500);
 		}
 	});
+	routes.get("/:engineRef/status", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+		const engineRef = c.req.param("engineRef")?.trim();
+		const externalKey = c.req.query("externalKey")?.trim();
+		const ownerUserId = c.req.query("ownerUserId")?.trim();
+		const agentId = c.req.query("agentId")?.trim();
+		if (!engineRef || !externalKey || !ownerUserId || !agentId ||
+			!EXTERNAL_KEY_PATTERN.test(externalKey)) {
+			return c.json({ error: "invalid_request" }, 400);
+		}
+		const rows = await getDb()<{
+			id: string; external_key: string; paused: boolean; schedule_revision: number;
+			next_run_at: Date; action_args: Record<string, unknown>;
+		}>`
+			SELECT id, external_key, paused, schedule_revision, next_run_at, action_args
+			FROM scheduled_jobs
+			WHERE id = ${engineRef} AND organization_id = ${organizationId}
+			  AND external_key = ${externalKey} AND created_by_user = ${ownerUserId}
+			  AND created_by_agent = ${agentId} AND action_type = 'wake_agent'
+			  AND action_args->>'reason' = 'trusted-course-calendar-wake'
+			  AND action_args->'trustedCourseWake'->>'source' = 'calendar_scheduled_wake'
+			LIMIT 1
+		`;
+		const row = rows[0];
+		if (!row) return c.json({ error: "course_wake_not_found" }, 404);
+		const wake = row.action_args.trustedCourseWake as Record<string, unknown>;
+		const scope = wake.trustedCourseScope as Record<string, unknown>;
+		return c.json({
+			engineRef: row.id, externalKey: row.external_key, paused: row.paused,
+			scheduleRevision: row.schedule_revision, nextRunAt: row.next_run_at.toISOString(),
+			source: wake.source, automationId: wake.automationId,
+			resolutionSource: scope.resolutionSource,
+			runtime: { service: "lobu-api", ...getRuntimeInfo() },
+		});
+	});
+
 	routes.delete("/:engineRef", async (c) => {
 		const denied = requireAdminPat(c);
 		if (denied) return denied;
