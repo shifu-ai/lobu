@@ -472,10 +472,10 @@ export async function initLobuGateway(): Promise<Hono | null> {
       })
     );
     lobuApp.route('/api/internal/course-aware-wakes', createCourseAwareWakeRoutes({
-      inspectConversationBinding: async ({ ownerUserId, agentId }) => {
+      inspectConversationBinding: async ({ organizationId, ownerUserId, agentId }) => {
         const sessionManager = coreServices.getSessionManager();
         const conversationId = await resolveWakeThreadId(
-          { sql: getDb(), sessionManager }, { agentId, userId: ownerUserId },
+          { sql: getDb(), sessionManager }, { organizationId, agentId, userId: ownerUserId },
         );
         if (!conversationId) return null;
         const session = await sessionManager.getSessionStrict(conversationId);
