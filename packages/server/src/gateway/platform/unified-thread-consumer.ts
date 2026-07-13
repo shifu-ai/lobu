@@ -288,7 +288,7 @@ export class UnifiedThreadResponseConsumer {
 
     // Handle error
     if (data.error) {
-      if (cliSessionId) {
+      if (cliSessionId && !isApiRow) {
         this.sseManager.broadcast(cliSessionId, "error", {
           type: "error",
           error: data.error,
@@ -298,7 +298,7 @@ export class UnifiedThreadResponseConsumer {
       }
       await renderer.handleError(data, sessionKey);
       // Also complete session on error
-      if (cliSessionId) {
+      if (cliSessionId && !isApiRow) {
         this.sseManager.broadcast(cliSessionId, "complete", {
           type: "complete",
           messageId: data.messageId,
@@ -312,7 +312,7 @@ export class UnifiedThreadResponseConsumer {
 
     // Handle completion
     if (data.processedMessageIds?.length) {
-      if (cliSessionId) {
+      if (cliSessionId && !isApiRow) {
         this.sseManager.broadcast(cliSessionId, "complete", {
           type: "complete",
           messageId: data.messageId,

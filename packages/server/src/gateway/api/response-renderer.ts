@@ -14,6 +14,14 @@ import { resolveWatcherRunsByMessageIds } from "../../watchers/run-completion.js
 
 const logger = createLogger("api-response-renderer");
 
+type ApiCompletionEvent = {
+  type: "complete";
+  messageId: string;
+  processedMessageIds: string[] | undefined;
+  finalText: string | undefined;
+  timestamp: number;
+};
+
 /**
  * Response renderer for API platform
  * Broadcasts responses to SSE clients instead of external platforms
@@ -79,13 +87,16 @@ export class ApiResponseRenderer implements ResponseRenderer {
       return;
     }
 
-    // Broadcast completion to SSE clients
-    this.sseManager.broadcast(sessionId, "complete", {
+    const completionEvent = {
       type: "complete",
       messageId: payload.messageId,
       processedMessageIds: payload.processedMessageIds,
+      finalText: payload.finalText,
       timestamp: payload.timestamp || Date.now(),
-    });
+    } satisfies ApiCompletionEvent;
+
+    // Broadcast completion to SSE clients
+    this.sseManager.broadcast(sessionId, "complete", completionEvent);
 
     logger.info(`Broadcast completion to session ${sessionId}`);
 
