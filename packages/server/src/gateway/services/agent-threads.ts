@@ -15,9 +15,9 @@
  */
 import { randomUUID } from "node:crypto";
 import {
-  createLogger,
-  generateWorkerToken,
-  type MessagePayload,
+	createLogger,
+	generateWorkerToken,
+	type MessagePayload,
 } from "@lobu/core";
 import type { QueueProducer } from "../infrastructure/queue/queue-producer.js";
 import type { ISessionManager, ThreadSession } from "../session.js";
@@ -32,31 +32,31 @@ const logger = createLogger("agent-threads");
  * internal callers always inherit the agent's stored settings.
  */
 export interface CreateThreadForAgentArgs {
-  /** Target agent id. The session and resulting thread will be scoped to this agent. */
-  agentId: string;
-  /** Owning organization id (informational; persisted onto the session). */
-  organizationId: string;
-  /** Optional human-recorded principal that triggered the open. */
-  createdByUserId?: string;
-  /** Free-form reason tag for log lines (e.g. "connector-repair"). */
-  reason?: string;
-  /**
-   * Optional caller-supplied id for the new thread. Lets callers mint the id
-   * BEFORE writing it to their own state (e.g. an atomic UPDATE that wins
-   * against racing workers) and only then commit the session.
-   */
-  externalThreadId?: string;
-  /** User id to attribute the thread to. Defaults to `agentId`. */
-  userId?: string;
+	/** Target agent id. The session and resulting thread will be scoped to this agent. */
+	agentId: string;
+	/** Owning organization id (informational; persisted onto the session). */
+	organizationId: string;
+	/** Optional human-recorded principal that triggered the open. */
+	createdByUserId?: string;
+	/** Free-form reason tag for log lines (e.g. "connector-repair"). */
+	reason?: string;
+	/**
+	 * Optional caller-supplied id for the new thread. Lets callers mint the id
+	 * BEFORE writing it to their own state (e.g. an atomic UPDATE that wins
+	 * against racing workers) and only then commit the session.
+	 */
+	externalThreadId?: string;
+	/** User id to attribute the thread to. Defaults to `agentId`. */
+	userId?: string;
 }
 
 export interface CreateThreadForAgentResult {
-  /** Thread / session identifier (also referred to as `conversationId`). */
-  threadId: string;
-  /** Worker token usable by the caller's HTTP client (rarely needed internally). */
-  token: string;
-  /** Token expiration timestamp (ms since epoch). */
-  expiresAt: number;
+	/** Thread / session identifier (also referred to as `conversationId`). */
+	threadId: string;
+	/** Worker token usable by the caller's HTTP client (rarely needed internally). */
+	token: string;
+	/** Token expiration timestamp (ms since epoch). */
+	expiresAt: number;
 }
 
 const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
@@ -69,66 +69,68 @@ const TOKEN_EXPIRATION_MS = 24 * 60 * 60 * 1000;
  * and then call {@link enqueueAgentMessage} to post the first message.
  */
 export async function createThreadForAgent(
-  deps: { sessionManager: ISessionManager },
-  args: CreateThreadForAgentArgs
+	deps: { sessionManager: ISessionManager },
+	args: CreateThreadForAgentArgs,
 ): Promise<CreateThreadForAgentResult> {
-  const { sessionManager } = deps;
-  const { agentId, organizationId, reason, externalThreadId } = args;
-  const userId = args.userId || args.createdByUserId || agentId;
+	const { sessionManager } = deps;
+	const { agentId, organizationId, reason, externalThreadId } = args;
+	const userId = args.userId || args.createdByUserId || agentId;
 
-  const threadId = externalThreadId || randomUUID();
-  const conversationId = `${agentId}_${userId}_${threadId}`;
-  const channelId = `api_${userId}`;
-  const deploymentName = `api-${agentId.slice(0, 8)}`;
+	const threadId = externalThreadId || randomUUID();
+	const conversationId = `${agentId}_${userId}_${threadId}`;
+	const channelId = `api_${userId}`;
+	const deploymentName = `api-${agentId.slice(0, 8)}`;
 
-  const token = generateWorkerToken(agentId, conversationId, deploymentName, {
-    channelId,
-    agentId,
-    organizationId,
-    platform: "api",
-    sessionKey: userId,
-    tokenKind: "session",
-  });
-  const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
+	const token = generateWorkerToken(agentId, conversationId, deploymentName, {
+		channelId,
+		agentId,
+		organizationId,
+		platform: "api",
+		sessionKey: userId,
+		tokenKind: "session",
+	});
+	const expiresAt = Date.now() + TOKEN_EXPIRATION_MS;
 
-  const session: ThreadSession = {
-    conversationId,
-    channelId,
-    userId,
-    threadCreator: userId,
-    lastActivity: Date.now(),
-    createdAt: Date.now(),
-    status: "created",
-    provider: "claude",
-    agentId,
-    organizationId,
-    dryRun: false,
-  };
-  await sessionManager.setSession(session);
+	const session: ThreadSession = {
+		conversationId,
+		channelId,
+		userId,
+		threadCreator: userId,
+		lastActivity: Date.now(),
+		createdAt: Date.now(),
+		status: "created",
+		provider: "claude",
+		agentId,
+		organizationId,
+		dryRun: false,
+	};
+	await sessionManager.setSession(session);
 
-  logger.info(
-    `Created thread ${conversationId} for agent ${agentId}${reason ? ` (reason=${reason})` : ""}`
-  );
+	logger.info(
+		`Created thread ${conversationId} for agent ${agentId}${reason ? ` (reason=${reason})` : ""}`,
+	);
 
-  return { threadId: conversationId, token, expiresAt };
+	return { threadId: conversationId, token, expiresAt };
 }
 
 export interface EnqueueAgentMessageArgs {
-  /** Thread id (conversationId) returned by `createThreadForAgent`. */
-  threadId: string;
-  /** Plain-text user message body. */
-  messageText: string;
-  /** Optional caller-supplied messageId (defaults to a fresh UUID). */
-  messageId?: string;
-  /** Free-form source tag for log lines / platformMetadata. */
-  source?: string;
-  scheduledCourseContext?: MessagePayload["scheduledCourseContext"];
-  resolvedCourseContext?: MessagePayload["resolvedCourseContext"];
+	/** Thread id (conversationId) returned by `createThreadForAgent`. */
+	threadId: string;
+	/** Plain-text user message body. */
+	messageText: string;
+	/** Optional caller-supplied messageId (defaults to a fresh UUID). */
+	messageId?: string;
+	queueSingletonKey?: string;
+	durableQueueSingleton?: boolean;
+	/** Free-form source tag for log lines / platformMetadata. */
+	source?: string;
+	scheduledCourseContext?: MessagePayload["scheduledCourseContext"];
+	resolvedCourseContext?: MessagePayload["resolvedCourseContext"];
 }
 
 export interface EnqueueAgentMessageResult {
-  messageId: string;
-  jobId: string;
+	messageId: string;
+	jobId: string;
 }
 
 /**
@@ -139,63 +141,69 @@ export interface EnqueueAgentMessageResult {
  * the unified message queue. Throws if the thread does not exist.
  */
 export async function enqueueAgentMessage(
-  deps: { sessionManager: ISessionManager; queueProducer: QueueProducer },
-  args: EnqueueAgentMessageArgs
+	deps: { sessionManager: ISessionManager; queueProducer: QueueProducer },
+	args: EnqueueAgentMessageArgs,
 ): Promise<EnqueueAgentMessageResult> {
-  const { sessionManager, queueProducer } = deps;
-  const { threadId, messageText } = args;
-  const messageId = args.messageId || randomUUID();
+	const { sessionManager, queueProducer } = deps;
+	const { threadId, messageText } = args;
+	const messageId = args.messageId || randomUUID();
 
-  const session = await sessionManager.getSession(threadId);
-  if (!session) {
-    throw new Error(`Thread ${threadId} not found`);
-  }
+	const session = await sessionManager.getSession(threadId);
+	if (!session) {
+		throw new Error(`Thread ${threadId} not found`);
+	}
 
-  await sessionManager.touchSession(threadId);
+	await sessionManager.touchSession(threadId);
 
-  const realAgentId = session.agentId || threadId;
-  const channelId = session.channelId || `api_${session.userId}`;
+	const realAgentId = session.agentId || threadId;
+	const channelId = session.channelId || `api_${session.userId}`;
 
-  const jobId = await queueProducer.enqueueMessage({
-    userId: session.userId,
-    conversationId: session.conversationId || threadId,
-    messageId,
-    channelId,
-    teamId: "api",
-    agentId: realAgentId,
-    ...(session.organizationId
-      ? { organizationId: session.organizationId }
-      : {}),
-    botId: "lobu-api",
-    platform: "api",
-    messageText,
-    scheduledCourseContext: args.scheduledCourseContext,
-    resolvedCourseContext: args.resolvedCourseContext,
-    platformMetadata: {
-      agentId: realAgentId,
-      source: args.source || "internal",
-      dryRun: session.dryRun || false,
-      ...(args.scheduledCourseContext?.source === "calendar_scheduled_wake"
-        ? {
-            scheduledCourseWake: {
-              schemaVersion: 1,
-              source: "calendar_scheduled_wake",
-              automationId: args.scheduledCourseContext.automationId,
-              jobId: args.scheduledCourseContext.jobId,
-              runId: args.scheduledCourseContext.runId,
-              toolboxUserId: args.scheduledCourseContext.course.ownerUserId,
-              lobuAgentId: args.scheduledCourseContext.course.agentId,
-            },
-          }
-        : {}),
-    },
-    agentOptions: {
-      provider: session.provider || "claude",
-      model: session.model,
-    },
-    networkConfig: session.networkConfig,
-    mcpConfig: session.mcpConfig,
-  });
+	const jobId = await queueProducer.enqueueMessage(
+		{
+			userId: session.userId,
+			conversationId: session.conversationId || threadId,
+			messageId,
+			channelId,
+			teamId: "api",
+			agentId: realAgentId,
+			...(session.organizationId
+				? { organizationId: session.organizationId }
+				: {}),
+			botId: "lobu-api",
+			platform: "api",
+			messageText,
+			scheduledCourseContext: args.scheduledCourseContext,
+			resolvedCourseContext: args.resolvedCourseContext,
+			platformMetadata: {
+				agentId: realAgentId,
+				source: args.source || "internal",
+				dryRun: session.dryRun || false,
+				...(args.scheduledCourseContext?.source === "calendar_scheduled_wake"
+					? {
+							scheduledCourseWake: {
+								schemaVersion: 1,
+								source: "calendar_scheduled_wake",
+								automationId: args.scheduledCourseContext.automationId,
+								jobId: args.scheduledCourseContext.jobId,
+								runId: args.scheduledCourseContext.runId,
+								toolboxUserId: args.scheduledCourseContext.course.ownerUserId,
+								lobuAgentId: args.scheduledCourseContext.course.agentId,
+							},
+						}
+					: {}),
+			},
+			agentOptions: {
+				provider: session.provider || "claude",
+				model: session.model,
+			},
+			networkConfig: session.networkConfig,
+			mcpConfig: session.mcpConfig,
+		},
+		{
+			singletonKey: args.queueSingletonKey,
+			durableSingleton: args.durableQueueSingleton,
+		},
+	);
 
-  return { messageId, jobId };
+	return { messageId, jobId };
 }
