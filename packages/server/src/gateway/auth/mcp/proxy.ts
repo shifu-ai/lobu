@@ -36,18 +36,52 @@ import {
 import { emitAgentObsEvent } from "@lobu/core";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../../services/journey-observability.js";
 import { applyTrustedCourseToolPolicy, isPlainToolArguments, type TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
+import { computeMcpConfigDigest } from "./config-service.js";
 
 const logger = createLogger("mcp-proxy");
+const RESERVED_AUTOMATION_TOOL_NAMES = new Set([
+  "plan_automation",
+  "create_automation",
+]);
+
+export interface ExpectedMcpConfigIdentity {
+  upstreamOrigin: string;
+  configSource: "global" | "agent" | "derived";
+  configDigest: string;
+}
 
 export interface McpDiscoveryProvenance {
   upstreamOrigin: string;
   configSource: "global" | "agent" | "derived";
+  configDigest: string;
 }
 
 export interface McpDiscoveryResult {
   tools: McpTool[];
   instructions?: string;
   provenance?: McpDiscoveryProvenance;
+}
+
+function resolvedMcpConfigIdentity(
+  config: HttpMcpServerConfig
+): ExpectedMcpConfigIdentity {
+  return {
+    upstreamOrigin: new URL(config.upstreamUrl).origin,
+    configSource: config.configSource,
+    configDigest: computeMcpConfigDigest(config),
+  };
+}
+
+function matchesExpectedMcpConfig(
+  config: HttpMcpServerConfig,
+  expected: ExpectedMcpConfigIdentity
+): boolean {
+  const actual = resolvedMcpConfigIdentity(config);
+  return (
+    actual.upstreamOrigin === expected.upstreamOrigin &&
+    actual.configSource === expected.configSource &&
+    actual.configDigest === expected.configDigest
+  );
 }
 
 const MAX_BODY_SIZE = 1024 * 1024; // 1MB
@@ -609,11 +643,10 @@ export function buildMcpSessionKey(
 
 function buildToolCacheMcpId(
   mcpId: string,
-  filter?: McpToolFilter
+  _filter?: McpToolFilter,
+  configDigest?: string
 ): string {
-  const cacheFilter = normalizeToolFilterForCache(filter);
-  if (!cacheFilter) return mcpId;
-  return `${mcpId}:toolFilter:${JSON.stringify(cacheFilter)}`;
+  return `${mcpId}:config:${configDigest || "missing"}`;
 }
 
 function hasActiveToolFilter(filter?: McpToolFilter): boolean {
@@ -770,6 +803,7 @@ export class McpProxy {
       teamId?: string;
       platform?: string;
       courseToolScope?: TrustedCourseToolScope;
+      expectedMcpIdentity?: ExpectedMcpConfigIdentity;
     } = {}
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -789,6 +823,7 @@ export class McpProxy {
       teamId: tokenContext.teamId,
       platform: tokenContext.platform,
       courseToolScope: tokenContext.courseToolScope,
+      expectedMcpIdentity: tokenContext.expectedMcpIdentity,
     };
     const token = tokenContext.token ?? "";
 
@@ -841,9 +876,21 @@ export class McpProxy {
       };
     }
 
-    const result = tokenData.courseToolScope
-      ? await this.executeToolDirect(agentId, userId, mcpId, toolName, args, { courseToolScope: tokenData.courseToolScope })
-      : await this.executeToolDirect(agentId, userId, mcpId, toolName, args);
+    const result = await this.executeToolDirect(
+      agentId,
+      userId,
+      mcpId,
+      toolName,
+      args,
+      {
+        ...(tokenData.courseToolScope
+          ? { courseToolScope: tokenData.courseToolScope }
+          : {}),
+        ...(tokenData.expectedMcpIdentity
+          ? { expectedMcpIdentity: tokenData.expectedMcpIdentity }
+          : {}),
+      }
+    );
     return { status: "executed", ...result };
   }
 
@@ -853,7 +900,11 @@ export class McpProxy {
     mcpId: string,
     toolName: string,
     args: Record<string, unknown>,
-    options?: { trace?: ShifuTraceContext; courseToolScope?: TrustedCourseToolScope }
+    options?: {
+      trace?: ShifuTraceContext;
+      courseToolScope?: TrustedCourseToolScope;
+      expectedMcpIdentity?: ExpectedMcpConfigIdentity;
+    }
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
@@ -908,6 +959,23 @@ export class McpProxy {
         content: [{ type: "text", text: `MCP server '${mcpId}' not found` }],
         isError: true,
         diagnosticCode: "tool_not_found",
+      };
+    }
+    if (
+      (RESERVED_AUTOMATION_TOOL_NAMES.has(toolName) &&
+        !options?.expectedMcpIdentity) ||
+      (options?.expectedMcpIdentity &&
+        !matchesExpectedMcpConfig(httpServer, options.expectedMcpIdentity))
+    ) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "MCP configuration changed after tool discovery.",
+          },
+        ],
+        isError: true,
+        diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
       };
     }
 
@@ -1225,10 +1293,8 @@ export class McpProxy {
       );
       return { tools: [] };
     }
-    const discoveryProvenance: McpDiscoveryProvenance = {
-      upstreamOrigin: new URL(httpServer.upstreamUrl).origin,
-      configSource: httpServer.configSource,
-    };
+    const discoveryProvenance: McpDiscoveryProvenance =
+      resolvedMcpConfigIdentity(httpServer);
     const bindDiscoveryProvenance = (
       result: Omit<McpDiscoveryResult, "provenance">
     ): McpDiscoveryResult => ({ ...result, provenance: discoveryProvenance });
@@ -1247,12 +1313,27 @@ export class McpProxy {
         internal: httpServer.internal === true,
       },
     });
-    const cacheMcpId = buildToolCacheMcpId(mcpId, httpServer.toolFilter);
+    const cacheMcpId = buildToolCacheMcpId(
+      mcpId,
+      httpServer.toolFilter,
+      discoveryProvenance.configDigest
+    );
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     let cached: CachedMcpServer | null = null;
     if (this.toolCache) {
       cached = this.toolCache.getServerInfo(cacheMcpId, agentId);
+      if (
+        cached &&
+        (cached.provenance?.upstreamOrigin !==
+          discoveryProvenance.upstreamOrigin ||
+          cached.provenance?.configSource !==
+            discoveryProvenance.configSource ||
+          cached.provenance?.configDigest !== discoveryProvenance.configDigest)
+      ) {
+        this.toolCache.delete(cacheMcpId, agentId);
+        cached = null;
+      }
     }
 
     const pause = this.serverHealth.getPause(healthKey);
@@ -1496,6 +1577,7 @@ export class McpProxy {
       const serverInfo: CachedMcpServer = {
         tools: filteredTools,
         instructions,
+        provenance: discoveryProvenance,
       };
       if (this.toolCache && (filteredTools.length > 0 || hasFilter)) {
         this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
@@ -1612,7 +1694,10 @@ export class McpProxy {
           httpServer.toolFilter
         );
         this.serverHealth.recordSuccess(healthKey);
-        const serverInfo: CachedMcpServer = { tools: filteredRetryTools };
+        const serverInfo: CachedMcpServer = {
+          tools: filteredRetryTools,
+          provenance: discoveryProvenance,
+        };
         if (filteredRetryTools.length > 0 || hasFilter) {
           if (this.toolCache) {
             this.toolCache.setServerInfo(cacheMcpId, serverInfo, agentId);
@@ -1808,6 +1893,37 @@ export class McpProxy {
     if (!httpServer) {
       return c.json({ error: `MCP server '${mcpId}' not found` }, 404);
     }
+    const expectedOrigin = c.req.header("x-lobu-mcp-expected-origin");
+    const expectedSource = c.req.header("x-lobu-mcp-expected-config-source");
+    const expectedDigest = c.req.header("x-lobu-mcp-expected-config-digest");
+    const hasAnyExpectedIdentity = Boolean(
+      expectedOrigin || expectedSource || expectedDigest
+    );
+    const hasCompleteExpectedIdentity = Boolean(
+      expectedOrigin && expectedSource && expectedDigest
+    );
+    const expectedIdentity = hasCompleteExpectedIdentity
+      ? {
+          upstreamOrigin: expectedOrigin!,
+          configSource: expectedSource as "global" | "agent" | "derived",
+          configDigest: expectedDigest!,
+        }
+      : undefined;
+    if (
+      (RESERVED_AUTOMATION_TOOL_NAMES.has(toolName) ||
+        hasAnyExpectedIdentity) &&
+      (!expectedIdentity ||
+        !matchesExpectedMcpConfig(httpServer, expectedIdentity))
+    ) {
+      return c.json(
+        {
+          error: "MCP configuration changed after tool discovery.",
+          diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
+        },
+        409
+      );
+    }
+    auth.tokenData.expectedMcpIdentity = expectedIdentity;
     const channelId = auth.tokenData.channelId || "";
     const scopeKey = this.computeScopeKey(
       httpServer,
@@ -2713,6 +2829,7 @@ export class McpProxy {
         originMessageId,
         processedMessageIds,
         courseToolScope: tokenData.courseToolScope,
+        expectedMcpIdentity: tokenData.expectedMcpIdentity,
       },
       this.PENDING_TOOL_TTL
     ).catch((err: unknown) =>
@@ -2757,6 +2874,39 @@ export class McpProxy {
     tokenData: any,
     workerToken?: string
   ): Promise<{ found: boolean; annotations?: McpTool["annotations"] }> {
+    const expectedIdentity = tokenData.expectedMcpIdentity as
+      | ExpectedMcpConfigIdentity
+      | undefined;
+    if (expectedIdentity) {
+      const expectedCacheId = buildToolCacheMcpId(
+        mcpId,
+        undefined,
+        expectedIdentity.configDigest
+      );
+      const expectedCatalog = this.toolCache?.getServerInfo(
+        expectedCacheId,
+        agentId
+      );
+      const expectedTool = expectedCatalog?.tools.find(
+        (tool) => tool.name === toolName
+      );
+      // Never re-discover against a potentially changed origin between the
+      // call CAS and approval evaluation. A missing bound catalog is treated
+      // as discovered-without-safe-annotations, which requires approval.
+      return { found: true, annotations: expectedTool?.annotations };
+    }
+    // Older callers and tests may seed the pre-provenance cache directly by
+    // MCP id. Preserve that compatibility for ordinary third-party tools, but
+    // never let a legacy entry authorize the reserved automation surface.
+    if (!RESERVED_AUTOMATION_TOOL_NAMES.has(toolName)) {
+      const legacyCached = this.toolCache?.getServerInfo(mcpId, agentId);
+      const legacyTool = legacyCached?.tools.find(
+        (tool) => tool.name === toolName
+      );
+      if (legacyTool) {
+        return { found: true, annotations: legacyTool.annotations };
+      }
+    }
     // Forward the worker JWT so internal MCPs (lobu-memory) can enumerate
     // tools — without it the discovery call goes unauthenticated and returns
     // an empty list, which would silently bypass the approval gate

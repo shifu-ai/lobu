@@ -18,6 +18,11 @@ export interface McpTool {
 export interface CachedMcpServer {
   tools: McpTool[];
   instructions?: string;
+  provenance?: {
+    upstreamOrigin: string;
+    configSource: "global" | "agent" | "derived";
+    configDigest: string;
+  };
 }
 
 /**

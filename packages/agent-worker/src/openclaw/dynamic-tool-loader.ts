@@ -1,6 +1,7 @@
 import type { McpToolDef } from "@lobu/core";
 import {
   catalogEntryForTool,
+  isReservedAutomationToolName,
   isTrustedShifuToolMetadataSource,
   TOOL_PRIORITY_WEIGHT,
   type McpCatalogProvenanceById,
@@ -218,6 +219,15 @@ export function selectMcpToolsForTurn(
         !params.isToolAllowed || params.isToolAllowed(entry.name, entry.mcpId)
     )
     .filter(
+      (entry) =>
+        !isReservedAutomationToolName(entry.name) ||
+        isTrustedShifuToolMetadataSource({
+          mcpId: entry.mcpId,
+          provenance: params.mcpProvenanceById?.[entry.mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
+    )
+    .filter(
       (entry) => primaryIntent === "automation" || entry.domain !== "automation"
     );
   const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
@@ -276,6 +286,16 @@ export function selectMcpToolsByMcpForTurn(
       if (
         params.isToolAllowed &&
         !params.isToolAllowed(entry.name, entry.mcpId)
+      ) {
+        continue;
+      }
+      if (
+        isReservedAutomationToolName(entry.name) &&
+        !isTrustedShifuToolMetadataSource({
+          mcpId: entry.mcpId,
+          provenance: params.mcpProvenanceById?.[entry.mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
       ) {
         continue;
       }

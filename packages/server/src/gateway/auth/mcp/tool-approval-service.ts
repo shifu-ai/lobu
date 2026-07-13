@@ -53,7 +53,14 @@ interface McpProxyDirectExecution {
     mcpId: string,
     toolName: string,
     args: Record<string, unknown>,
-    options?: { courseToolScope?: TrustedCourseToolScope }
+    options?: {
+      courseToolScope?: TrustedCourseToolScope;
+      expectedMcpIdentity?: {
+        upstreamOrigin: string;
+        configSource: "global" | "agent" | "derived";
+        configDigest: string;
+      };
+    }
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
@@ -140,16 +147,32 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         );
       }
 
-      const execute = () => pending.courseToolScope
-        ? deps.mcpProxy.executeToolDirect(
-          pending.agentId,
-          pending.userId,
-          pending.mcpId,
-          pending.toolName,
-          pending.args,
-          { courseToolScope: pending.courseToolScope }
-        )
-        : deps.mcpProxy.executeToolDirect(pending.agentId, pending.userId, pending.mcpId, pending.toolName, pending.args);
+      const execute = () => {
+        const options = {
+          ...(pending.courseToolScope
+            ? { courseToolScope: pending.courseToolScope }
+            : {}),
+          ...(pending.expectedMcpIdentity
+            ? { expectedMcpIdentity: pending.expectedMcpIdentity }
+            : {}),
+        };
+        return Object.keys(options).length > 0
+          ? deps.mcpProxy.executeToolDirect(
+              pending.agentId,
+              pending.userId,
+              pending.mcpId,
+              pending.toolName,
+              pending.args,
+              options
+            )
+          : deps.mcpProxy.executeToolDirect(
+              pending.agentId,
+              pending.userId,
+              pending.mcpId,
+              pending.toolName,
+              pending.args
+            );
+      };
       const result = organizationId
         ? await orgContext.run({ organizationId }, execute)
         : await execute();

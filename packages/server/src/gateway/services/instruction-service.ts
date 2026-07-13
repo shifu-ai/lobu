@@ -23,6 +23,7 @@ interface McpStatus {
   requiresInput: boolean;
   upstreamOrigin: string;
   configSource: "global" | "agent" | "derived";
+  configDigest: string;
 }
 
 interface SessionContextData {

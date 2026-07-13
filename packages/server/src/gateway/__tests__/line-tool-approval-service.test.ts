@@ -115,6 +115,28 @@ describe("createToolApprovalService", () => {
     );
   });
 
+  test("carries the discovery config identity through pending approval execution", async () => {
+    const expectedMcpIdentity = {
+      upstreamOrigin: "https://mcp.shifu-ai.org",
+      configSource: "agent" as const,
+      configDigest: "discovery-digest",
+    };
+    await seedLinePending("ta-line-1", { expectedMcpIdentity });
+    const { mcpProxy, service } = setupService();
+
+    const result = await submitApproveAll(service);
+
+    expect(result.status).toBe("executed");
+    expect(mcpProxy.executeToolDirect).toHaveBeenCalledWith(
+      "shifu-u-1",
+      "toolbox-user-1",
+      "google_workspace",
+      "gws_calendar_events_create",
+      { summary: "Demo" },
+      { expectedMcpIdentity }
+    );
+  });
+
   test("mismatched agent does not consume the pending approval", async () => {
     await seedLinePending("ta-line-1");
     const { grantStore, mcpProxy, service } = setupService();

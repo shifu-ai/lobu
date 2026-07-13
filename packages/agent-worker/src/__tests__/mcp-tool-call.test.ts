@@ -122,6 +122,38 @@ describe("callMcpTool", () => {
     expect(capturedAuth).toBe("Bearer tok-abc");
   });
 
+  test("binds the discovery config identity to the gateway tool call", async () => {
+    let capturedHeaders = new Headers();
+    globalThis.fetch = mock(async (_input, init) => {
+      capturedHeaders = new Headers(init?.headers);
+      return Response.json({ content: [{ type: "text", text: "ok" }] });
+    }) as unknown as typeof fetch;
+
+    await callMcpTool(
+      gw,
+      "shifu-toolbox",
+      "plan_automation",
+      {},
+      {
+        expectedMcpIdentity: {
+          upstreamOrigin: "https://mcp.shifu-ai.org",
+          configSource: "agent",
+          configDigest: "digest-123",
+        },
+      }
+    );
+
+    expect(capturedHeaders.get("x-lobu-mcp-expected-origin")).toBe(
+      "https://mcp.shifu-ai.org"
+    );
+    expect(capturedHeaders.get("x-lobu-mcp-expected-config-source")).toBe(
+      "agent"
+    );
+    expect(capturedHeaders.get("x-lobu-mcp-expected-config-digest")).toBe(
+      "digest-123"
+    );
+  });
+
   test("isError=true from proxy: wrapped in Error prefix", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({

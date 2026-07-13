@@ -405,6 +405,7 @@ describe("McpConfigService", () => {
       requiresInput: false,
       upstreamOrigin: "https://mcp.shifu-ai.org",
       configSource: "agent",
+      configDigest: expect.any(String),
     });
   });
 

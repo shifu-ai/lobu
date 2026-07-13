@@ -370,6 +370,239 @@ describe("McpProxy", () => {
       expect(fetchCount).toBe(firstFetchCount);
     });
 
+    test("keys cached catalogs by config identity across trusted to evil to trusted switches", async () => {
+      const trusted = {
+        ...TEST_SERVER,
+        upstreamUrl: "https://trusted.example/mcp",
+      };
+      const evil = { ...TEST_SERVER, upstreamUrl: "https://evil.example/mcp" };
+      let current = trusted;
+      const configSource = {
+        getHttpServer: async () => current,
+        getAllHttpServers: async () => new Map([["test-mcp", current]]),
+      };
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache: new McpToolCache(),
+      });
+      const listCounts = { trusted: 0, evil: 0 };
+      globalThis.fetch = async (input, init) => {
+        const url = String(input);
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          const side = url.includes("evil.example") ? "evil" : "trusted";
+          listCounts[side]++;
+          return jsonRpcToolsResponse([{ name: `${side}_tool` }]);
+        }
+        return jsonRpcToolsResponse();
+      };
+
+      const trustedFirst = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+      current = evil;
+      const evilResult = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+      current = trusted;
+      const trustedAgain = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+
+      expect(trustedFirst.tools.map((tool) => tool.name)).toEqual([
+        "trusted_tool",
+      ]);
+      expect(evilResult.tools.map((tool) => tool.name)).toEqual(["evil_tool"]);
+      expect(trustedAgain.tools.map((tool) => tool.name)).toEqual([
+        "trusted_tool",
+      ]);
+      expect(listCounts).toEqual({ trusted: 1, evil: 1 });
+      expect(trustedAgain.provenance).toEqual(trustedFirst.provenance);
+      expect(evilResult.provenance?.configDigest).not.toBe(
+        trustedFirst.provenance?.configDigest
+      );
+    });
+
+    test("rejects a cache entry whose provenance does not match its config digest key", async () => {
+      const trusted = {
+        ...TEST_SERVER,
+        upstreamUrl: "https://trusted.example/mcp",
+      };
+      const configSource = createMockConfigSource({ "test-mcp": trusted });
+      const toolCache = new McpToolCache();
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache,
+      });
+      let trustedListCalls = 0;
+      globalThis.fetch = async (_input, init) => {
+        if (String(init?.body ?? "").includes("tools/list")) {
+          trustedListCalls++;
+          return jsonRpcToolsResponse([{ name: "trusted_tool" }]);
+        }
+        return jsonRpcToolsResponse();
+      };
+      const first = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+      const cacheId = `test-mcp:config:${first.provenance!.configDigest}`;
+      inTestOrg(() =>
+        toolCache.setServerInfo(
+          cacheId,
+          {
+            tools: [{ name: "poisoned_tool" }],
+            provenance: {
+              upstreamOrigin: "https://evil.example",
+              configSource: "agent",
+              configDigest: first.provenance!.configDigest,
+            },
+          },
+          "agent1"
+        )
+      );
+
+      const second = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+
+      expect(second.tools.map((tool) => tool.name)).toEqual(["trusted_tool"]);
+      expect(trustedListCalls).toBe(2);
+      expect(second.provenance?.upstreamOrigin).toBe(
+        "https://trusted.example"
+      );
+    });
+
+    test("rejects a tool call when config changes after discovery without contacting the new origin", async () => {
+      const trusted = {
+        ...TEST_SERVER,
+        upstreamUrl: "https://trusted.example/mcp",
+      };
+      const evil = { ...TEST_SERVER, upstreamUrl: "https://evil.example/mcp" };
+      let current = trusted;
+      const configSource = {
+        getHttpServer: async () => current,
+        getAllHttpServers: async () => new Map([["test-mcp", current]]),
+      };
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache: new McpToolCache(),
+      });
+      const contactedOrigins: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(String(input));
+        contactedOrigins.push(url.origin);
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          return jsonRpcToolsResponse([
+            { name: "ordinary_tool", annotations: { readOnlyHint: true } },
+          ]);
+        }
+        return jsonRpcToolsResponse();
+      };
+      const discovery = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+      current = evil;
+      contactedOrigins.length = 0;
+
+      const response = await proxy.getApp().request(
+        "/test-mcp/tools/ordinary_tool",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            "Content-Type": "application/json",
+            "x-lobu-mcp-expected-origin":
+              discovery.provenance!.upstreamOrigin,
+            "x-lobu-mcp-expected-config-source":
+              discovery.provenance!.configSource,
+            "x-lobu-mcp-expected-config-digest":
+              discovery.provenance!.configDigest,
+          },
+          body: "{}",
+        }
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({
+        diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
+      });
+      expect(contactedOrigins).toEqual([]);
+    });
+
+    test("uses the matched config snapshot when a concurrent update lands after call resolution", async () => {
+      const trusted = {
+        ...TEST_SERVER,
+        upstreamUrl: "https://trusted.example/mcp",
+      };
+      const evil = { ...TEST_SERVER, upstreamUrl: "https://evil.example/mcp" };
+      let current = trusted;
+      let flipAfterResolve = false;
+      const configSource = {
+        getHttpServer: async () => {
+          const snapshot = current;
+          if (flipAfterResolve) current = evil;
+          return snapshot;
+        },
+        getAllHttpServers: async () => new Map([["test-mcp", current]]),
+      };
+      const proxy = new McpProxy(configSource, {
+        secretStore: createTestSecretStore(queue),
+        toolCache: new McpToolCache(),
+      });
+      const contactedOrigins: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        contactedOrigins.push(new URL(String(input)).origin);
+        const body = String(init?.body ?? "");
+        if (body.includes("tools/list")) {
+          return jsonRpcToolsResponse([
+            { name: "ordinary_tool", annotations: { readOnlyHint: true } },
+          ]);
+        }
+        if (body.includes("tools/call")) {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: { content: [{ type: "text", text: "ok" }] },
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return jsonRpcToolsResponse();
+      };
+      const discovery = await inTestOrg(() =>
+        proxy.fetchToolsForMcp("test-mcp", "agent1", { userId: "user1" })
+      );
+      contactedOrigins.length = 0;
+      flipAfterResolve = true;
+
+      const response = await proxy.getApp().request(
+        "/test-mcp/tools/ordinary_tool",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${validToken}`,
+            "Content-Type": "application/json",
+            "x-lobu-mcp-expected-origin":
+              discovery.provenance!.upstreamOrigin,
+            "x-lobu-mcp-expected-config-source":
+              discovery.provenance!.configSource,
+            "x-lobu-mcp-expected-config-digest":
+              discovery.provenance!.configDigest,
+          },
+          body: "{}",
+        }
+      );
+
+      expect(response.status).toBe(200);
+      expect(contactedOrigins.length).toBeGreaterThan(0);
+      expect(new Set(contactedOrigins)).toEqual(
+        new Set(["https://trusted.example"])
+      );
+      expect(current).toBe(evil);
+    });
+
     test("does not reuse cached catalog after toolFilter changes for the same agent and MCP", async () => {
       const server: HttpMcpServerConfig = {
         ...TEST_SERVER,
@@ -538,6 +771,7 @@ describe("McpProxy", () => {
           provenance: {
             upstreamOrigin: "http://upstream:9000",
             configSource: "agent",
+            configDigest: expect.any(String),
           },
         });
       }
@@ -677,6 +911,7 @@ describe("McpProxy", () => {
         provenance: {
           upstreamOrigin: "http://upstream:9000",
           configSource: "agent",
+          configDigest: expect.any(String),
         },
       });
     });

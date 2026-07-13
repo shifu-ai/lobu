@@ -4,6 +4,7 @@ import {
   createLogger,
   verifyWorkerToken,
 } from "@lobu/core";
+import { createHash } from "node:crypto";
 import type { ProviderConfigResolver } from "../../services/provider-config-resolver.js";
 import { getRevokedTokenStore } from "../revoked-token-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
@@ -56,6 +57,7 @@ interface McpStatus {
   requiresInput: boolean;
   upstreamOrigin: string;
   configSource: "global" | "agent" | "derived";
+  configDigest: string;
 }
 
 interface LoadedConfig {
@@ -72,6 +74,28 @@ function resolveCanonicalUpstreamOrigin(upstreamUrl: string): string {
   } catch {
     return "";
   }
+}
+
+export function computeMcpConfigDigest(config: {
+  id: string;
+  upstreamUrl: string;
+  toolFilter?: McpToolFilter;
+  authScope?: "user" | "channel";
+  internal?: boolean;
+  configSource: "global" | "agent" | "derived";
+}): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        id: config.id,
+        upstreamUrl: config.upstreamUrl,
+        toolFilter: config.toolFilter ?? null,
+        authScope: config.authScope ?? "user",
+        internal: config.internal === true,
+        configSource: config.configSource,
+      })
+    )
+    .digest("hex");
 }
 
 interface LobuMemoryConfigOptions {
@@ -276,6 +300,7 @@ export class McpConfigService {
         requiresInput,
         upstreamOrigin: resolveCanonicalUpstreamOrigin(httpServer.upstreamUrl),
         configSource: httpServer.configSource,
+        configDigest: computeMcpConfigDigest(httpServer),
       });
     }
 

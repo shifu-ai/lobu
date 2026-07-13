@@ -663,6 +663,7 @@ export class WorkerGateway {
 			requiresInput: boolean;
 			upstreamOrigin: string;
 			configSource: "global" | "agent" | "derived";
+			configDigest: string;
 		}>,
 		agentId: string,
 		userId: string,
@@ -676,6 +677,7 @@ export class WorkerGateway {
 			configured: boolean;
 			upstreamOrigin: string;
 			configSource: "global" | "agent" | "derived";
+			configDigest: string;
 		}>
 	> {
 		const secretStore = this.secretStore;
@@ -1420,6 +1422,7 @@ export class WorkerGateway {
 					{
 						upstreamOrigin: string;
 						configSource: "global" | "agent" | "derived";
+						configDigest: string;
 					}
 				>();
 				if (this.mcpProxy && enrichedMcpStatus.length > 0) {
@@ -1465,13 +1468,14 @@ export class WorkerGateway {
 					// can be stale if an agent config changes during session bootstrap.
 					runtimeMcpStatus = enrichedMcpStatus.map((mcp) => {
 						const provenance = discoveryProvenance.get(mcp.id);
-						const { upstreamOrigin, configSource, ...status } = mcp;
+						const { upstreamOrigin, configSource, configDigest, ...status } = mcp;
 						return provenance
 							? { ...status, ...provenance }
 							: {
 									...status,
 									upstreamOrigin: "",
 									configSource: "derived" as const,
+									configDigest: "",
 								};
 					});
 				}

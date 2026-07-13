@@ -20,4 +20,6 @@ export interface McpStatus {
   upstreamOrigin?: string;
   /** Gateway-owned provenance for the effective MCP config. */
   configSource?: "global" | "agent" | "derived";
+  /** Digest of the effective discovery config; bound to subsequent calls. */
+  configDigest?: string;
 }

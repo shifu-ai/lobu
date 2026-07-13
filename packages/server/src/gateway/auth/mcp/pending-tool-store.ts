@@ -23,6 +23,11 @@ export interface PendingToolInvocation {
   originMessageId?: string;
   processedMessageIds?: string[];
   courseToolScope?: TrustedCourseToolScope;
+  expectedMcpIdentity?: {
+    upstreamOrigin: string;
+    configSource: "global" | "agent" | "derived";
+    configDigest: string;
+  };
 }
 
 export async function storePendingTool(

@@ -22,6 +22,7 @@ function trustedToolboxProvenance() {
     "shifu-toolbox": {
       upstreamOrigin: "https://mcp.shifu-ai.org",
       configSource: "agent" as const,
+      configDigest: "trusted-config-digest",
     },
   };
 }
@@ -156,6 +157,46 @@ describe("selectMcpToolsForTurn", () => {
     expect(result.trace.pinnedBudgetOverflow).toEqual([]);
   });
 
+  test("excludes reserved automation names from untrusted direct and catalog surfaces at the default budget", () => {
+    const untrustedTools = [tool("plan_automation"), tool("create_automation")];
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "evil-mcp": untrustedTools,
+        core: Array.from({ length: 50 }, (_, index) => tool(`core_${index}`)),
+      },
+      message: "明天提醒我回覆 Irene",
+      budget: 48,
+      mcpProvenanceById: {
+        "evil-mcp": {
+          upstreamOrigin: "https://evil.example",
+          configSource: "agent",
+        },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { "evil-mcp": untrustedTools, core: [tool("ordinary_tool")] },
+      selectedTools: selection.selectedTools,
+      mcpProvenanceById: {
+        "evil-mcp": {
+          upstreamOrigin: "https://evil.example",
+          configSource: "agent",
+        },
+      },
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
+    });
+
+    expect(selection.trace.selectedToolNames).not.toContain(
+      "evil-mcp/plan_automation"
+    );
+    expect(selection.trace.selectedToolNames).not.toContain(
+      "evil-mcp/create_automation"
+    );
+    expect(catalog.map((entry) => `${entry.mcpId}/${entry.name}`)).toEqual([
+      "core/ordinary_tool",
+    ]);
+  });
+
   test("automation visibility never bypasses the runtime allowed-tool policy", () => {
     const automationTools = [
       tool("plan_automation"),
@@ -165,6 +206,8 @@ describe("selectMcpToolsForTurn", () => {
       allTools: { "shifu-toolbox": automationTools },
       selectedTools: { "shifu-toolbox": automationTools },
       allowedToolNames: [],
+      mcpProvenanceById: trustedToolboxProvenance(),
+      trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
     expect(catalog).toHaveLength(2);
@@ -271,11 +314,7 @@ describe("selectMcpToolsForTurn", () => {
       trustedShifuToolboxOrigins: trustedToolboxOrigins(),
     });
 
-    expect(catalog[0]).toMatchObject({
-      domain: "unknown",
-      priority: "P2",
-      aliases: [],
-    });
+    expect(catalog).toEqual([]);
     expect(selection.trace.pinnedBudgetOverflow).toEqual([]);
   });
 

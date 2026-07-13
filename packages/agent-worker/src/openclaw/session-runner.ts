@@ -1635,6 +1635,7 @@ Use it when the user references past discussions or you need context.`);
       {
         upstreamOrigin: status.upstreamOrigin,
         configSource: status.configSource,
+        configDigest: status.configDigest,
       },
     ])
   );
@@ -1684,6 +1685,7 @@ Use it when the user references past discussions or you need context.`);
         "ask_user posted — ending the turn so the model can't re-post."
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
+    mcpProvenanceById,
     shifuTrace,
   });
 
@@ -1709,6 +1711,7 @@ Use it when the user references past discussions or you need context.`);
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
@@ -1751,6 +1754,7 @@ Use it when the user references past discussions or you need context.`);
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
@@ -1791,7 +1795,7 @@ Use it when the user references past discussions or you need context.`);
       projectedMcp.tools,
       gwParams,
       context.mcpContext,
-      { shifuTrace }
+      { shifuTrace, mcpProvenanceById }
     );
     registeredMcpToolCount = mcpToolDefs.length;
     if (mcpToolDefs.length > 0) {

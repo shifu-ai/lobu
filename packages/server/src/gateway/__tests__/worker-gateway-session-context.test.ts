@@ -176,6 +176,7 @@ describe("WorkerGateway session context", () => {
 							requiresInput: false,
 							upstreamOrigin: "https://mcp.shifu-ai.org",
 							configSource: "agent",
+							configDigest: "initial-agent-digest",
 						},
 					],
 				}),
@@ -220,6 +221,7 @@ describe("WorkerGateway session context", () => {
 			configured: true,
 			upstreamOrigin: "https://mcp.shifu-ai.org",
 			configSource: "agent",
+			configDigest: "initial-agent-digest",
 		});
 	});
 
@@ -244,6 +246,7 @@ describe("WorkerGateway session context", () => {
 							requiresInput: false,
 							upstreamOrigin: "https://stale-or-evil.example",
 							configSource: "global",
+							configDigest: "stale-digest",
 						},
 						{
 							id: "unbound-catalog",
@@ -252,6 +255,7 @@ describe("WorkerGateway session context", () => {
 							requiresInput: false,
 							upstreamOrigin: "https://mcp.shifu-ai.org",
 							configSource: "agent",
+							configDigest: "unbound-digest",
 						},
 					],
 				}),
@@ -264,6 +268,7 @@ describe("WorkerGateway session context", () => {
 								provenance: {
 									upstreamOrigin: "https://mcp.shifu-ai.org",
 									configSource: "agent",
+									configDigest: "discovery-digest",
 								},
 							}
 						: { tools: [{ name: "create_automation" }] },
@@ -294,11 +299,13 @@ describe("WorkerGateway session context", () => {
 			id: "shifu-toolbox",
 			upstreamOrigin: "https://mcp.shifu-ai.org",
 			configSource: "agent",
+			configDigest: "discovery-digest",
 		});
 		expect(body.mcpStatus[1]).toMatchObject({
 			id: "unbound-catalog",
 			upstreamOrigin: "",
 			configSource: "derived",
+			configDigest: "",
 		});
 	});
 

@@ -34,6 +34,7 @@ export interface ToolCatalogEntry {
 export interface McpCatalogProvenance {
   upstreamOrigin?: string;
   configSource?: "global" | "agent" | "derived";
+  configDigest?: string;
 }
 
 export type McpCatalogProvenanceById = Record<
@@ -42,6 +43,10 @@ export type McpCatalogProvenanceById = Record<
 >;
 
 const SHIFU_TOOLBOX_MCP_ID = "shifu-toolbox";
+const RESERVED_AUTOMATION_TOOL_NAMES = new Set([
+  "plan_automation",
+  "create_automation",
+]);
 const DEFAULT_TRUSTED_SHIFU_TOOLBOX_ORIGIN = "https://mcp.shifu-ai.org";
 const MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS = 8;
 
@@ -97,7 +102,8 @@ export function isTrustedShifuToolMetadataSource(params: {
 }): boolean {
   if (
     params.mcpId !== SHIFU_TOOLBOX_MCP_ID ||
-    params.provenance?.configSource !== "agent"
+    params.provenance?.configSource !== "agent" ||
+    !params.provenance.configDigest
   ) {
     return false;
   }
@@ -109,6 +115,10 @@ export function isTrustedShifuToolMetadataSource(params: {
     upstreamOrigin === assertedOrigin &&
       params.trustedOrigins?.has(upstreamOrigin)
   );
+}
+
+export function isReservedAutomationToolName(name: string): boolean {
+  return RESERVED_AUTOMATION_TOOL_NAMES.has(name);
 }
 
 export const TOOL_PRIORITY_WEIGHT: Record<ToolPriority, number> = {
