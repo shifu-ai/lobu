@@ -30,7 +30,7 @@ import {
   TERMINAL_DELIVERY_SEND_OPTS,
 } from "../infrastructure/queue/index.js";
 import { armTurnTimeout, failTurnIfPending } from "./turn-liveness.js";
-import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateResult } from "./course-context-gate.js";
+import { attachCourseContextForReviewedScope, isExplicitPersonalBypass, type CourseContextGateOptions, type CourseContextGateResult } from "./course-context-gate.js";
 import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {resolveCourseSkillContextMetadata} from './course-skill-context-metadata.js';
 import { getDb } from "../../db/client.js";
@@ -55,6 +55,27 @@ function hasTrustedCourseContext(data:MessagePayload,context:NonNullable<Message
 type LegacyCourseContext={courseKey:string;courseEntityId:string;contextPackId:string;contextVersion:number;stale:boolean;confirmedSummary:string};
 async function readLegacyCourseContext(data:MessagePayload):Promise<LegacyCourseContext|undefined>{const root=process.env.COURSE_CONTEXT_LEGACY_COMPARE_URL?.trim();const secret=process.env.TOOLBOX_INTERNAL_SECRET?.trim();if(!root||!secret)return undefined;const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),500);try{const url=new URL(root);url.searchParams.set('ownerUserId',data.userId);url.searchParams.set('agentId',data.agentId);const response=await fetch(url,{headers:{'x-internal-secret':secret},signal:controller.signal});if(response.status===404)return undefined;if(!response.ok)return undefined;const value=await response.json() as Record<string,unknown>;if(typeof value.courseKey!=="string"||value.courseKey.length>200||typeof value.courseEntityId!=="string"||value.courseEntityId.length>300||typeof value.contextPackId!=="string"||value.contextPackId.length>300||!Number.isInteger(value.contextVersion)||typeof value.stale!=="boolean"||typeof value.confirmedSummary!=="string"||value.confirmedSummary.length>8000)return undefined;return value as LegacyCourseContext;}catch{return undefined;}finally{clearTimeout(timer);}}
 export function buildCourseMemorySearchEnv(source:NodeJS.ProcessEnv=process.env):Env{return{ENVIRONMENT:source.ENVIRONMENT??'production',EMBEDDINGS_SERVICE_URL:source.EMBEDDINGS_SERVICE_URL,EMBEDDINGS_SERVICE_TOKEN:source.EMBEDDINGS_SERVICE_TOKEN,EMBEDDINGS_MODEL:source.EMBEDDINGS_MODEL,EMBEDDINGS_DIMENSIONS:source.EMBEDDINGS_DIMENSIONS,EMBEDDINGS_TIMEOUT_MS:source.EMBEDDINGS_TIMEOUT_MS};}
+
+type ScheduledExecutionTrace = Parameters<NonNullable<CourseContextGateOptions["recordScheduledExecutionTrace"]>>[0];
+type ScheduledExecutionTraceRecorder = (data: MessagePayload, trace: ScheduledExecutionTrace) => Promise<void>;
+
+async function persistScheduledExecutionTrace(data: MessagePayload, trace: ScheduledExecutionTrace): Promise<void> {
+  if (!data.organizationId || !data.scheduledCourseContext) throw new Error("scheduled_course_trace_scope_missing");
+  const sql = getDb();
+  const rows = await sql<{ id: string }>`
+    UPDATE scheduled_jobs
+    SET action_args = jsonb_set(action_args, '{courseWakeExecutionTrace}', ${sql.json(trace)}::jsonb, true),
+        updated_at = now()
+    WHERE id = ${data.scheduledCourseContext.jobId}
+      AND organization_id = ${data.organizationId}
+      AND created_by_user = ${data.userId}
+      AND created_by_agent = ${data.agentId}
+      AND action_args->>'reason' = 'trusted-course-calendar-wake'
+      AND action_args->'trustedCourseWake'->>'source' = 'calendar_scheduled_wake'
+    RETURNING id
+  `;
+  if (rows.length !== 1) throw new Error("scheduled_course_trace_job_missing");
+}
 
 function getStringField(value: unknown, key: string): string | undefined {
   if (!value || typeof value !== "object") return undefined;
@@ -125,6 +146,7 @@ export class MessageConsumer {
   private readonly courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void>;
   private readonly courseContextRollout: ReturnType<typeof parseCourseContextRolloutConfig>;
   private readonly journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void>;
+  private readonly scheduledExecutionTraceRecorder: ScheduledExecutionTraceRecorder;
   private async emitJourneyFailOpen(event:Parameters<typeof emitJourneyObsEvent>[0]):Promise<void>{const controller=new AbortController();let timeout:ReturnType<typeof setTimeout>|undefined;try{const operation=this.journeyEmitter(event,controller.signal);const guarded=operation.catch(()=>{});await Promise.race([guarded,new Promise<void>(resolve=>{timeout=setTimeout(()=>{controller.abort();resolve();},20);})]);}catch{}finally{if(timeout)clearTimeout(timeout);}}
   private sessionManager?: ISessionManager;
   private courseMemorySearch?:CourseMemorySearch;
@@ -134,6 +156,7 @@ export class MessageConsumer {
     queue?: IMessageQueue,
     courseContextResolver: (payload: MessagePayload) => Promise<CourseContextGateResult | void> = attachCourseContextForReviewedScope,
     journeyEmitter: (event:Parameters<typeof emitJourneyObsEvent>[0],signal?:AbortSignal)=>Promise<void> = emitJourneyObsEvent,
+    scheduledExecutionTraceRecorder: ScheduledExecutionTraceRecorder = persistScheduledExecutionTrace,
   ) {
     this.config = config;
     this.deploymentManager = deploymentManager;
@@ -141,6 +164,7 @@ export class MessageConsumer {
     this.courseContextResolver = courseContextResolver;
     this.courseContextRollout = parseCourseContextRolloutConfig();
     this.journeyEmitter = journeyEmitter;
+    this.scheduledExecutionTraceRecorder = scheduledExecutionTraceRecorder;
   }
 
   private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
@@ -165,23 +189,7 @@ export class MessageConsumer {
       result = await attachCourseContextForReviewedScope(shadowPayload, {
         baseUrl: process.env.TOOLBOX_COURSE_CONTEXT_URL?.trim() ?? "", secret: process.env.TOOLBOX_INTERNAL_SECRET?.trim() ?? "",
         sessionManager:isNonBindingEvaluation ? undefined : this.sessionManager,sessionKey:computeSessionKey(data),courseSkillEnabled:courseSkillContext.enabled,courseSkillContextFields:courseSkillContext.contextFields,courseSkillRetrievalTerms:courseSkillContext.retrievalTerms,courseSkillRetrievalLimit:courseSkillContext.retrievalLimit,memorySearch:this.courseMemorySearch,env:buildCourseMemorySearchEnv(),
-        recordScheduledExecutionTrace: async (trace) => {
-          if (!data.organizationId || !data.scheduledCourseContext) throw new Error("scheduled_course_trace_scope_missing");
-          const sql = getDb();
-          const rows = await sql<{ id: string }>`
-            UPDATE scheduled_jobs
-            SET action_args = jsonb_set(action_args, '{courseWakeExecutionTrace}', ${sql.json(trace)}::jsonb, true),
-                updated_at = now()
-            WHERE id = ${data.scheduledCourseContext.jobId}
-              AND organization_id = ${data.organizationId}
-              AND created_by_user = ${data.userId}
-              AND created_by_agent = ${data.agentId}
-              AND action_args->>'reason' = 'trusted-course-calendar-wake'
-              AND action_args->'trustedCourseWake'->>'source' = 'calendar_scheduled_wake'
-            RETURNING id
-          `;
-          if (rows.length !== 1) throw new Error("scheduled_course_trace_job_missing");
-        },
+        recordScheduledExecutionTrace: (trace) => this.scheduledExecutionTraceRecorder(data, trace),
       });
     } else {
       result = await this.courseContextResolver(shadowPayload);
