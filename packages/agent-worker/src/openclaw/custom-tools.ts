@@ -139,7 +139,7 @@ function createToolSearchDefinition(
       const matches = searchRuntimeToolCatalog(runtimeToolCatalog, {
         query: args.query,
         limit: args.limit,
-      }).map((entry) => ({
+      }).map(({ entry, totalScore, reasons }) => ({
         name: entry.name,
         title: entry.title,
         mcpId: entry.mcpId,
@@ -155,6 +155,8 @@ function createToolSearchDefinition(
         directVisibleThisTurn: entry.directVisibleThisTurn,
         callableViaCatalog: entry.callableViaCatalog,
         callBlockedReason: entry.callBlockedReason,
+        totalScore,
+        reasons,
       }));
 
       return {

@@ -56,9 +56,119 @@ describe("tool catalog dispatcher", () => {
       query: "heavy export card",
     });
 
-    expect(matches.map((entry) => entry.name)).toContain(
+    expect(matches.map((match) => match.entry.name)).toContain(
       "card_studio_heavy_export"
     );
+  });
+
+  test("semantic catalog search finds personal reminder tools", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        "lobu-memory": [
+          tool("manage_schedules", "Manage delayed agent schedules"),
+        ],
+        google_workspace: [
+          tool("gws_calendar_events_create", "Create a Google Calendar event"),
+        ],
+      },
+      selectedTools: {},
+    });
+
+    expect(
+      searchRuntimeToolCatalog(catalog, {
+        query: "稍後提醒我回覆客戶",
+        limit: 5,
+      })[0]
+    ).toMatchObject({
+      entry: { mcpId: "lobu-memory", name: "manage_schedules" },
+      totalScore: expect.any(Number),
+      reasons: expect.any(Array),
+    });
+  });
+
+  test("catalog search defaults to five results and caps requests at twenty", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: Array.from({ length: 25 }, (_, index) =>
+          tool(`course_lookup_${index}`, "Search course records")
+        ),
+      },
+      selectedTools: {},
+    });
+
+    expect(searchRuntimeToolCatalog(catalog, { query: "course" })).toHaveLength(
+      5
+    );
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "course", limit: 100 })
+    ).toHaveLength(20);
+  });
+
+  test("tool_call cannot bypass clarification_required", async () => {
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "should not run" }],
+    }));
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        google_workspace: [tool("gws_calendar_events_create")],
+      },
+      selectedTools: {},
+      clarificationBlockedToolKeys: [
+        "google_workspace/gws_calendar_events_create",
+      ],
+    });
+
+    expect(
+      statusRuntimeToolCatalog(catalog, {
+        mcpId: "google_workspace",
+        toolName: "gws_calendar_events_create",
+      })
+    ).toMatchObject({
+      callableViaCatalog: false,
+      callBlockedReason: "clarification_required",
+    });
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })[0]
+    ).toMatchObject({
+      entry: {
+        name: "gws_calendar_events_create",
+        callBlockedReason: "clarification_required",
+      },
+    });
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "gws_calendar_events_create",
+      mcpId: "google_workspace",
+      args: {},
+      callTool,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "clarification_required",
+    });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  test("not_allowed takes precedence over clarification_required", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        google_workspace: [tool("gws_calendar_events_create")],
+      },
+      selectedTools: {},
+      allowedToolNames: [],
+      clarificationBlockedToolKeys: [
+        "google_workspace/gws_calendar_events_create",
+      ],
+    });
+
+    expect(catalog[0]).toMatchObject({
+      callableViaCatalog: false,
+      callBlockedReason: "not_allowed",
+    });
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })
+    ).toEqual([]);
   });
 
   test("tool_call rejects missing catalog entries with a stable error code", async () => {

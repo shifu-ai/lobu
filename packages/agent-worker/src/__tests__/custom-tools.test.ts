@@ -157,7 +157,16 @@ describe("createOpenClawCustomTools", () => {
       query: "發送戰報",
     });
 
-    expect(result.content[0]?.text).toContain("sales_battle_report_run_now");
+    const text = result.content[0]?.text;
+    expect(text).toBeDefined();
+    const parsed = JSON.parse(text!);
+    expect(parsed.matches[0]).toMatchObject({
+      name: "sales_battle_report_run_now",
+      mcpId: "shifu-toolbox",
+      totalScore: expect.any(Number),
+      reasons: expect.any(Array),
+    });
+    expect(JSON.stringify(parsed)).not.toContain("inputSchema");
   });
 
   test("tool_call catalog failures surface as failed tool results", async () => {
@@ -208,6 +217,62 @@ describe("createOpenClawCustomTools", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain('"code": "not_allowed"');
+  });
+
+  test("tool_status reports clarification blocks without exposing schemas or messages", async () => {
+    const tools = createOpenClawCustomTools({
+      gatewayUrl: "http://gateway",
+      workerToken: "worker-token",
+      agentId: "agent-1",
+      channelId: "channel-1",
+      conversationId: "conversation-1",
+      platform: "line",
+      workspaceDir: "/tmp/test-workspace",
+      runtimeToolCatalog: [
+        {
+          tool: {
+            name: "gws_calendar_events_create",
+            description: "Create a Google Calendar event",
+            inputSchema: {
+              type: "object",
+              properties: { privateNote: { type: "string" } },
+            },
+          },
+          name: "gws_calendar_events_create",
+          mcpId: "google_workspace",
+          domain: "calendar",
+          intent: "calendar",
+          priority: "P1",
+          aliases: [],
+          readOnly: false,
+          mutatesState: true,
+          requiresConfirmation: true,
+          originalIndex: 0,
+          availableThisTurn: false,
+          directVisibleThisTurn: false,
+          callableViaCatalog: false,
+          callBlockedReason: "clarification_required",
+          description: "Create a Google Calendar event",
+        },
+      ],
+    });
+    const statusTool = tools.find((tool) => tool.name === "tool_status");
+    expect(statusTool).toBeDefined();
+
+    const result = await statusTool!.execute("tool-call-1", {
+      tool_name: "gws_calendar_events_create",
+      mcp_id: "google_workspace",
+    });
+    const text = result.content[0]?.text;
+    expect(text).toBeDefined();
+    expect(JSON.parse(text!)).toMatchObject({
+      name: "gws_calendar_events_create",
+      callableViaCatalog: false,
+      callBlockedReason: "clarification_required",
+    });
+    expect(text).not.toContain("inputSchema");
+    expect(text).not.toContain("privateNote");
+    expect(text).not.toContain("user message");
   });
 
   test("tool_call delegated MCP failures surface as failed tool results", async () => {
