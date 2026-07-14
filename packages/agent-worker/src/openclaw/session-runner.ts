@@ -81,6 +81,10 @@ import {
 } from "./dynamic-tool-loader";
 import { createExecutionReporter } from "./execution-reporter";
 import {
+  buildEffectiveToolInventory,
+  buildPersonalReminderDeliveryInstructions,
+} from "./effective-tool-inventory";
+import {
   applyCapabilityLimitNotes,
   buildMcpAuthToolNames,
   type McpAuthToolNames,
@@ -1666,19 +1670,58 @@ export async function runAISession(
     }
     return { names, keys };
   };
-  const initialAllowedMcpTools = collectAllowedMcpTools(context.mcpTools);
-  const turnEligibleToolKeys = Object.freeze([...initialAllowedMcpTools.keys]);
-  const catalogAllowedToolNames = initialAllowedMcpTools.names;
+  const connectedMcpIds = new Set(
+    Object.keys(context.mcpTools).filter((mcpId) => {
+      const status = context.mcpStatus.find(
+        (candidate) => candidate.id === mcpId
+      );
+      return (
+        !status ||
+        ((!status.requiresAuth || status.authenticated) &&
+          (!status.requiresInput || status.configured))
+      );
+    })
+  );
+  const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
+  const untrustedProvenanceToolKeys: string[] = [];
+  for (const [mcpId, tools] of Object.entries(context.mcpTools)) {
+    for (const tool of tools) {
+      if (
+        !isMcpToolEligibleForCliExposure({
+          tool,
+          mcpId,
+          mcpProvenanceById,
+          trustedShifuToolboxOrigins,
+        })
+      ) {
+        untrustedProvenanceToolKeys.push(`${mcpId}/${tool.name}`);
+      }
+    }
+  }
+  const effectiveTools = buildEffectiveToolInventory({
+    scopedTools: context.mcpTools,
+    releaseState: context.releaseState ?? { status: "legacy_unenrolled" },
+    connectedMcpIds,
+    untrustedProvenanceToolKeys,
+    isPolicyAllowed: (_toolKey, toolName) =>
+      isToolAllowedByPolicy(toolName, toolsPolicy),
+  });
+  const effectiveAllowedMcpTools = collectAllowedMcpTools(
+    effectiveTools.toolsByMcp
+  );
+  const turnEligibleToolKeys = Object.freeze([
+    ...effectiveAllowedMcpTools.keys,
+  ]);
+  const catalogAllowedToolNames = effectiveTools.allowedToolKeys;
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
   const toolRouterMode = resolveToolRouterMode(
     process.env.LOBU_TOOL_ROUTER_MODE
   );
-  const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
   const toolRouting = initializeExternalTurnToolRouting(
     {
-      toolsByMcp: context.mcpTools,
+      toolsByMcp: effectiveTools.toolsByMcp,
       message: userPrompt,
       budget: dynamicToolBudget,
       allowedToolNames: catalogAllowedToolNames,
@@ -1693,6 +1736,26 @@ export async function runAISession(
   const selection = toolRouting.selection;
   const routeTotalMs = toolRouting.routeTotalMs;
   const selectedMcpToolsForTurn = selection.selectedTools;
+  const effectiveBlockedToolReasons = Object.freeze(
+    Object.fromEntries(
+      effectiveTools.blocked
+        .filter((entry) => entry.reason !== "not_discovered")
+        .map((entry) => [entry.toolKey, entry.reason])
+    )
+  ) as NonNullable<BuildRuntimeToolCatalogParams["blockedToolReasons"]>;
+  const buildEffectiveRuntimeCatalog = (
+    providerVisibleTools: BuildRuntimeToolCatalogParams["providerVisibleTools"]
+  ) =>
+    buildRuntimeToolCatalog({
+      allTools: effectiveTools.scopedTools,
+      selectedTools: selectedMcpToolsForTurn,
+      providerVisibleTools,
+      allowedToolNames: effectiveTools.allowedToolKeys,
+      blockedToolReasons: effectiveBlockedToolReasons,
+      clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
+    });
 
   // Build a mutable snapshot of MCP runtime state. The embedded CLI handlers
   // read through `mcpRuntimeRef.current` so that `auth check` / `logout` can
@@ -1702,7 +1765,7 @@ export async function runAISession(
   const mcpRuntimeRef = {
     current: {
       ...buildCliRuntimeState({
-        mcpTools: context.mcpTools,
+        mcpTools: effectiveTools.toolsByMcp,
         mcpStatus: context.mcpStatus,
         mcpContext: context.mcpContext,
       }),
@@ -1882,11 +1945,17 @@ export async function runAISession(
   );
   const trustedExecutionScopeInstructions =
     buildTrustedExecutionScopeInstructions(trustedExecutionScope);
-  const gatewayInstructions = resolvedCourseContext
+  const rawGatewayInstructions = resolvedCourseContext
     ? removeLegacyToolboxActiveContext(context.gatewayInstructions)
     : context.gatewayInstructions;
+  const gatewayInstructions = replaceMcpToolInventoryInstructions(
+    rawGatewayInstructions,
+    effectiveTools.toolsByMcp,
+    context.mcpStatus
+  );
   const instructionParts = [
     gatewayInstructions,
+    buildPersonalReminderDeliveryInstructions(effectiveTools),
     resolvedCourseInstructions,
     automationModificationTurn.systemInstructions,
     trustedExecutionScopeInstructions,
@@ -1960,6 +2029,8 @@ Use it when the user references past discussions or you need context.`);
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
     turnExecutionIntent,
+    personalReminderDeliveryExecutable:
+      effectiveTools.behaviors.personalReminderDelivery.executable,
     mcpProvenanceById,
     shifuTrace,
   });
@@ -1972,16 +2043,17 @@ Use it when the user references past discussions or you need context.`);
     selectedMcpToolsForTurn;
   let registeredMcpToolCount = 0;
   if (mcpExposure === "cli") {
-    const runtimeToolCatalog = toolRouting.buildRuntimeCatalog({
-      providerVisibleTools: {},
-    });
+    const runtimeToolCatalog = buildEffectiveRuntimeCatalog({});
     customTools.push(
       ...createOpenClawCustomTools({
         ...gwParams,
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        effectiveAllowedToolKeys: effectiveTools.allowedToolKeys,
         turnExecutionIntent,
+        personalReminderDeliveryExecutable:
+          effectiveTools.behaviors.personalReminderDelivery.executable,
         mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
@@ -2011,22 +2083,23 @@ Use it when the user references past discussions or you need context.`);
       selectionHint: userPrompt,
     });
     registeredDirectMcpTools = projectedMcp.tools;
-    const runtimeToolCatalog = toolRouting.buildRuntimeCatalog({
-      providerVisibleTools: projectedMcp.tools,
-    });
+    const runtimeToolCatalog = buildEffectiveRuntimeCatalog(projectedMcp.tools);
     customTools.push(
       ...createOpenClawCustomTools({
         ...gwParams,
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        effectiveAllowedToolKeys: effectiveTools.allowedToolKeys,
         turnExecutionIntent,
+        personalReminderDeliveryExecutable:
+          effectiveTools.behaviors.personalReminderDelivery.executable,
         mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
     instructionParts[0] = replaceMcpToolInventoryInstructions(
-      context.gatewayInstructions,
+      instructionParts[0] ?? gatewayInstructions,
       projectedMcp.tools,
       context.mcpStatus
     );
@@ -2062,7 +2135,14 @@ Use it when the user references past discussions or you need context.`);
       projectedMcp.tools,
       gwParams,
       context.mcpContext,
-      { shifuTrace, mcpProvenanceById, turnExecutionIntent }
+      {
+        shifuTrace,
+        mcpProvenanceById,
+        turnExecutionIntent,
+        personalReminderDeliveryExecutable:
+          effectiveTools.behaviors.personalReminderDelivery.executable,
+        effectiveAllowedToolKeys: effectiveTools.allowedToolKeys,
+      }
     );
     registeredMcpToolCount = mcpToolDefs.length;
     if (mcpToolDefs.length > 0) {
@@ -2075,13 +2155,15 @@ Use it when the user references past discussions or you need context.`);
 
   const calendarResolverInstructions = buildCalendarResolverInstructions({
     exposedTools:
-      mcpExposure === "cli" ? context.mcpTools : registeredDirectMcpTools,
+      mcpExposure === "cli"
+        ? effectiveTools.toolsByMcp
+        : registeredDirectMcpTools,
     mcpExposure,
     mcpProvenanceById,
     trustedShifuToolboxOrigins,
     isToolAllowed: (toolName, mcpId) =>
       isToolAllowedByPolicy(toolName, toolsPolicy) &&
-      Boolean(context.mcpTools[mcpId]?.some((tool) => tool.name === toolName)),
+      effectiveTools.allowedToolKeys.includes(`${mcpId}/${toolName}`),
   });
   if (calendarResolverInstructions) {
     instructionParts.push(calendarResolverInstructions);

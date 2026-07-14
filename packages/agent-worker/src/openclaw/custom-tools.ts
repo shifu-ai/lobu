@@ -257,6 +257,7 @@ function createToolStatusDefinition(
 function createToolCallDefinition(params: {
   runtimeToolCatalog: RuntimeToolCatalogEntry[];
   runtimeToolCaller: RuntimeToolCaller;
+  effectiveAllowedToolKeys?: Iterable<string>;
 }): ToolDefinition {
   return defineTool({
     name: "tool_call",
@@ -281,6 +282,7 @@ function createToolCallDefinition(params: {
     run: async (args) => {
       const result = await dispatchRuntimeToolCall({
         catalog: params.runtimeToolCatalog,
+        allowedToolKeys: params.effectiveAllowedToolKeys,
         toolName: args.tool_name,
         mcpId: args.mcp_id,
         args: (args.args || {}) as Record<string, unknown>,
@@ -374,7 +376,9 @@ export function createOpenClawCustomTools(params: {
   toolboxPersonalAgentTools?: ToolboxPersonalAgentToolGroup[];
   runtimeToolCatalog?: RuntimeToolCatalogEntry[];
   runtimeToolCaller?: RuntimeToolCaller;
+  effectiveAllowedToolKeys?: Iterable<string>;
   turnExecutionIntent?: TurnExecutionIntent;
+  personalReminderDeliveryExecutable?: boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   shifuTrace?: WorkerShifuTraceContext;
 }): ToolDefinition[] {
@@ -665,6 +669,8 @@ export function createOpenClawCustomTools(params: {
         toolName,
         args,
         callTool: rawRuntimeToolCaller,
+        personalReminderDeliveryExecutable:
+          params.personalReminderDeliveryExecutable,
         onTrace: (decision) =>
           emitMcpExecutionContractTrace(
             params.shifuTrace,
@@ -678,6 +684,7 @@ export function createOpenClawCustomTools(params: {
       createToolCallDefinition({
         runtimeToolCatalog: params.runtimeToolCatalog,
         runtimeToolCaller,
+        effectiveAllowedToolKeys: params.effectiveAllowedToolKeys,
       }),
       createToolStatusDefinition(params.runtimeToolCatalog)
     );
@@ -724,10 +731,16 @@ export function createMcpToolDefinitions(
     shifuTrace?: WorkerShifuTraceContext;
     mcpProvenanceById?: McpCatalogProvenanceById;
     turnExecutionIntent?: TurnExecutionIntent;
+    personalReminderDeliveryExecutable?: boolean;
+    effectiveAllowedToolKeys?: Iterable<string>;
   }
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   const registeredNames = new Set<string>();
+  const effectiveAllowedToolKeys =
+    options?.effectiveAllowedToolKeys === undefined
+      ? null
+      : new Set(options.effectiveAllowedToolKeys);
 
   const toToolDefinition = (
     mcpId: string,
@@ -754,6 +767,21 @@ export function createMcpToolDefinitions(
           : `${description} Alias for \`${upstreamToolName}\`.`,
       parameters: schema,
       execute: async (_toolCallId, args) => {
+        if (
+          effectiveAllowedToolKeys &&
+          !effectiveAllowedToolKeys.has(`${mcpId}/${upstreamToolName}`)
+        ) {
+          return toToolResult({
+            isError: true,
+            errorCode: "policy_denied",
+            content: [
+              {
+                type: "text",
+                text: `policy_denied: ${mcpId}/${upstreamToolName} is outside the effective tool inventory for this turn.`,
+              },
+            ],
+          });
+        }
         const argumentKeys = safeObjectKeys(args);
         if (options?.shifuTrace) {
           emitJourneyEvent({
@@ -784,6 +812,8 @@ export function createMcpToolDefinitions(
                 expectedMcpIdentity: options?.mcpProvenanceById?.[targetMcpId],
                 personalReminderDelivery: transport?.personalReminderDelivery,
               }),
+            personalReminderDeliveryExecutable:
+              options?.personalReminderDeliveryExecutable,
             onTrace: (decision) =>
               emitMcpExecutionContractTrace(
                 options?.shifuTrace,

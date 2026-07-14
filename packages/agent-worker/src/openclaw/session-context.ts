@@ -442,29 +442,6 @@ function optionalShifuTraceHeaders(
   return trace ? shifuTraceHeaders(trace) : {};
 }
 
-function buildToolboxPersonalAgentToolInstructions(
-  toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[]
-): string {
-  const entries = toolboxPersonalAgentTools
-    .map((group) => {
-      const toolNames = group.tools
-        .map((tool) => tool.name)
-        .filter((name) => name.trim().length > 0);
-      if (toolNames.length === 0) return null;
-      return `- ${group.connectorKey}: ${toolNames.map((name) => `\`${name}\``).join(", ")}`;
-    })
-    .filter((entry): entry is string => Boolean(entry));
-
-  if (entries.length === 0) return "";
-
-  return [
-    "## LINE Personal Agent Toolbox Sources",
-    "These Toolbox personal-agent tools are registered as first-class tools for this LINE user. Use the exact tool names below; do not call generic tools such as `search` or unlisted names.",
-    ...entries,
-    "If a source is not listed here, say it is not connected to this LINE personal agent and continue with the listed sources.",
-  ].join("\n");
-}
-
 /**
  * Fetch session context from gateway for OpenClaw worker.
  * Returns gateway instructions and dynamic provider configuration.
@@ -585,13 +562,7 @@ export async function getOpenClawSessionContext(
     const mcpServerInstructions = buildMcpServerInstructions(
       data.mcpInstructions || {}
     );
-    const mcpToolInventoryInstructions = buildMcpToolInventoryInstructions(
-      data.mcpTools || {},
-      data.mcpStatus || []
-    );
     const toolboxPersonalAgentTools = data.toolboxPersonalAgentTools || [];
-    const toolboxPersonalAgentToolInstructions =
-      buildToolboxPersonalAgentToolInstructions(toolboxPersonalAgentTools);
     const mcpCliInstructions =
       mcpExposure === "cli" ? buildMcpCliInstructions(data.mcpStatus) : "";
 
@@ -605,8 +576,6 @@ export async function getOpenClawSessionContext(
       data.skillsInstructions,
       mcpCliInstructions,
       mcpSetupInstructions,
-      mcpToolInventoryInstructions,
-      toolboxPersonalAgentToolInstructions,
       mcpServerInstructions,
     ]
       .filter(Boolean)
@@ -615,7 +584,7 @@ export async function getOpenClawSessionContext(
     const mcpTools = data.mcpTools || {};
 
     logger.info(
-      `Built gateway instructions: agent (${agentInstructions.length} chars, prepended) + platform (${data.platformInstructions.length} chars) + network (${data.networkInstructions.length} chars) + skills (${(data.skillsInstructions || "").length} chars) + MCP setup (${mcpSetupInstructions.length} chars) + MCP inventory (${mcpToolInventoryInstructions.length} chars) + Toolbox personal-agent tools (${toolboxPersonalAgentToolInstructions.length} chars) + MCP server instructions (${mcpServerInstructions.length} chars), mcpTools: ${Object.keys(mcpTools).length} servers`
+      `Built gateway instructions: agent (${agentInstructions.length} chars, prepended) + platform (${data.platformInstructions.length} chars) + network (${data.networkInstructions.length} chars) + skills (${(data.skillsInstructions || "").length} chars) + MCP setup (${mcpSetupInstructions.length} chars) + deferred MCP/toolbox inventory + MCP server instructions (${mcpServerInstructions.length} chars), mcpTools: ${Object.keys(mcpTools).length} servers`
     );
 
     const mcpContext = data.mcpContext || {};

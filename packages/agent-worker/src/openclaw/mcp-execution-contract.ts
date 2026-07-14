@@ -33,6 +33,8 @@ export interface ExecuteMcpToolForTurnParams {
   toolName: string;
   args: Record<string, unknown>;
   callTool: McpExecutionCaller;
+  /** Release-aware behavior projection. Legacy callers default to Phase-1 compatibility. */
+  personalReminderDeliveryExecutable?: boolean;
   onTrace?: (trace: McpExecutionTrace) => void;
 }
 
@@ -99,6 +101,7 @@ function shouldCanonicalize(
   requested: string | undefined
 ): boolean {
   return (
+    params.personalReminderDeliveryExecutable !== false &&
     params.intent.destination === "personal_reminder" &&
     params.intent.confidence === "explicit" &&
     !params.intent.requiresClarification &&
@@ -106,6 +109,17 @@ function shouldCanonicalize(
     params.toolName === "manage_schedules" &&
     params.args.action === "create" &&
     requested === "send_notification"
+  );
+}
+
+function isExplicitPersonalReminderAttempt(
+  params: ExecuteMcpToolForTurnParams
+): boolean {
+  return (
+    params.intent.destination === "personal_reminder" &&
+    params.intent.confidence === "explicit" &&
+    !params.intent.requiresClarification &&
+    isScheduleCreateAttempt(params)
   );
 }
 
@@ -147,6 +161,27 @@ export async function executeMcpToolForTurn(
   params: ExecuteMcpToolForTurnParams
 ): Promise<ToolContentResult> {
   const requested = requestedActionType(params.args);
+  if (
+    params.personalReminderDeliveryExecutable === false &&
+    isExplicitPersonalReminderAttempt(params)
+  ) {
+    params.onTrace?.({
+      ...(requested
+        ? { requestedActionType: requestedActionTypeBucket(requested) }
+        : {}),
+      canonicalized: false,
+    });
+    return {
+      isError: true,
+      errorCode: "capability_inactive",
+      content: [
+        {
+          type: "text",
+          text: "personal_reminder_release_inactive",
+        },
+      ],
+    };
+  }
   const canonicalized = shouldCanonicalize(params, requested);
   const isManageSchedules =
     params.mcpId === "lobu-memory" && params.toolName === "manage_schedules";

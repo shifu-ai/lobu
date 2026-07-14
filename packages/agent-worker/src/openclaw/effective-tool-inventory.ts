@@ -1,0 +1,336 @@
+import { createHash } from "node:crypto";
+import type { McpToolDef, ReleaseCapabilityState } from "@lobu/core";
+import { snapshotToolsByMcp } from "./tool-inventory-snapshot";
+
+export const PERSONAL_REMINDER_DELIVERY_CAPABILITY =
+  "personal_reminder_delivery.v1";
+
+const MAX_DISCOVERED_TOOLS = 4096;
+
+export type EffectiveToolBlockedReason =
+  | "not_discovered"
+  | "capability_inactive"
+  | "snapshot_missing"
+  | "snapshot_expired"
+  | "policy_denied"
+  | "not_connected"
+  | "untrusted_provenance"
+  | "approval_required"
+  | "clarification_required";
+
+export interface EffectiveToolBlockedEntry {
+  readonly toolKey: string;
+  readonly reason: EffectiveToolBlockedReason;
+}
+
+export interface EffectiveToolReleaseProvenance {
+  readonly status: ReleaseCapabilityState["status"];
+  readonly environment?: "staging" | "production";
+  readonly releaseId?: string;
+  readonly releaseSequence?: number;
+  readonly snapshotDigest?: string;
+  readonly expiresAt?: string;
+  readonly inactiveReason?:
+    | "receipt_invalid"
+    | "snapshot_unavailable"
+    | "capability_expired";
+}
+
+export interface EffectiveToolBehavior {
+  readonly capabilityId: string;
+  readonly state:
+    | "legacy_compatible"
+    | "active"
+    | "capability_inactive"
+    | "snapshot_missing"
+    | "snapshot_expired";
+  /** Whether the Phase-1 execution contract may run this turn. */
+  readonly executable: boolean;
+  /** Whether the prompt may claim signed release readiness/delivery. */
+  readonly mayPromiseDelivery: boolean;
+}
+
+export interface EffectiveToolInventory {
+  /** Immutable scoped-discovery snapshot. Never synthesized from release data. */
+  readonly scopedTools: Record<string, McpToolDef[]>;
+  /** Base-callable tools after the complete eligibility intersection. */
+  readonly toolsByMcp: Record<string, McpToolDef[]>;
+  /** Sorted external keys (`mcpId/toolName`) used by every final dispatcher. */
+  readonly allowedToolKeys: readonly string[];
+  readonly blocked: readonly EffectiveToolBlockedEntry[];
+  readonly releaseProvenance: EffectiveToolReleaseProvenance;
+  readonly behaviors: {
+    readonly personalReminderDelivery: EffectiveToolBehavior;
+  };
+  readonly fingerprint: string;
+}
+
+export interface BuildEffectiveToolInventoryParams {
+  scopedTools: Record<string, McpToolDef[]>;
+  releaseState: ReleaseCapabilityState;
+  connectedMcpIds?: Iterable<string>;
+  grantedToolKeys?: Iterable<string>;
+  isPolicyAllowed?: (
+    toolKey: string,
+    toolName: string,
+    mcpId: string
+  ) => boolean;
+  /** Explicit whole-tool release gates. Behavior capabilities stay separate. */
+  releaseCapabilityByToolKey?: Readonly<Record<string, string>>;
+  untrustedProvenanceToolKeys?: Iterable<string>;
+  approvalRequiredToolKeys?: Iterable<string>;
+  clarificationRequiredToolKeys?: Iterable<string>;
+  now?: Date;
+}
+
+function setFrom(values: Iterable<string> | undefined): Set<string> | null {
+  return values === undefined ? null : new Set(values);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+    .join(",")}}`;
+}
+
+function releaseProvenance(
+  state: ReleaseCapabilityState
+): EffectiveToolReleaseProvenance {
+  if (state.status === "legacy_unenrolled") {
+    return Object.freeze({ status: state.status });
+  }
+  if (state.status === "enrolled_inactive") {
+    return Object.freeze({
+      status: state.status,
+      environment: state.environment,
+      inactiveReason: state.reason,
+    });
+  }
+  return Object.freeze({
+    status: state.status,
+    environment: state.claim.environment,
+    releaseId: state.claim.releaseId,
+    releaseSequence: state.claim.releaseSequence,
+    snapshotDigest: state.claim.snapshotDigest,
+    expiresAt: state.claim.expiresAt,
+  });
+}
+
+function inactiveReleaseReason(
+  state: ReleaseCapabilityState,
+  now: Date
+): "snapshot_missing" | "snapshot_expired" | "capability_inactive" | null {
+  if (state.status === "legacy_unenrolled") return null;
+  if (state.status === "enrolled_inactive") {
+    if (state.reason === "snapshot_unavailable") return "snapshot_missing";
+    if (state.reason === "capability_expired") return "snapshot_expired";
+    return "capability_inactive";
+  }
+  const expiresAt = Date.parse(state.claim.expiresAt);
+  return !Number.isFinite(expiresAt) || expiresAt <= now.getTime()
+    ? "snapshot_expired"
+    : null;
+}
+
+function hasActiveCapability(
+  state: ReleaseCapabilityState,
+  capabilityId: string,
+  now: Date
+): boolean {
+  return (
+    state.status === "active" &&
+    Date.parse(state.claim.expiresAt) > now.getTime() &&
+    state.claim.capabilityIds.includes(capabilityId)
+  );
+}
+
+function personalReminderBehavior(
+  state: ReleaseCapabilityState,
+  now: Date
+): EffectiveToolBehavior {
+  const base = { capabilityId: PERSONAL_REMINDER_DELIVERY_CAPABILITY } as const;
+  if (state.status === "legacy_unenrolled") {
+    return Object.freeze({
+      ...base,
+      state: "legacy_compatible",
+      executable: true,
+      mayPromiseDelivery: false,
+    });
+  }
+  const inactive = inactiveReleaseReason(state, now);
+  if (
+    !inactive &&
+    hasActiveCapability(state, PERSONAL_REMINDER_DELIVERY_CAPABILITY, now)
+  ) {
+    return Object.freeze({
+      ...base,
+      state: "active",
+      executable: true,
+      mayPromiseDelivery: true,
+    });
+  }
+  return Object.freeze({
+    ...base,
+    state: inactive ?? "capability_inactive",
+    executable: false,
+    mayPromiseDelivery: false,
+  });
+}
+
+function freezeToolsByMcp(
+  entries: ReadonlyArray<readonly [string, McpToolDef]>
+): Record<string, McpToolDef[]> {
+  const grouped: Record<string, McpToolDef[]> = {};
+  for (const [mcpId, tool] of entries) {
+    const tools = grouped[mcpId] ?? [];
+    tools.push(tool);
+    grouped[mcpId] = tools;
+  }
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(grouped).map(([mcpId, tools]) => [
+        mcpId,
+        Object.freeze(tools),
+      ])
+    )
+  ) as Record<string, McpToolDef[]>;
+}
+
+/**
+ * Builds the one turn-local eligibility boundary. This owns no descriptor or
+ * retrieval cache: the raw immutable substrate is shared with the router via
+ * `snapshotToolsByMcp`.
+ */
+export function buildEffectiveToolInventory(
+  params: BuildEffectiveToolInventoryParams
+): EffectiveToolInventory {
+  const scopedTools = snapshotToolsByMcp(params.scopedTools);
+  const discovered = new Map<
+    string,
+    { mcpId: string; toolName: string; tool: McpToolDef }
+  >();
+  for (const [mcpId, tools] of Object.entries(scopedTools)) {
+    for (const tool of tools) {
+      const toolName = tool.name?.trim();
+      if (!toolName) continue;
+      discovered.set(`${mcpId}/${toolName}`, { mcpId, toolName, tool });
+    }
+  }
+  if (discovered.size > MAX_DISCOVERED_TOOLS) {
+    throw new Error(
+      `effective tool inventory exceeds ${MAX_DISCOVERED_TOOLS} discovered tools`
+    );
+  }
+
+  const now = params.now ?? new Date();
+  const connected = setFrom(params.connectedMcpIds);
+  const granted = setFrom(params.grantedToolKeys);
+  const untrusted = setFrom(params.untrustedProvenanceToolKeys);
+  const approvalRequired = setFrom(params.approvalRequiredToolKeys);
+  const clarificationRequired = setFrom(params.clarificationRequiredToolKeys);
+  const blocked: EffectiveToolBlockedEntry[] = [];
+  const allowed: Array<readonly [string, McpToolDef]> = [];
+  const releaseInactive = inactiveReleaseReason(params.releaseState, now);
+
+  for (const [toolKey, entry] of [...discovered.entries()].sort(([a], [b]) =>
+    a.localeCompare(b)
+  )) {
+    let reason: EffectiveToolBlockedReason | undefined;
+    if (connected && !connected.has(entry.mcpId)) reason = "not_connected";
+    else if (granted && !granted.has(toolKey)) reason = "policy_denied";
+    else if (untrusted?.has(toolKey)) reason = "untrusted_provenance";
+    else if (
+      params.isPolicyAllowed &&
+      !params.isPolicyAllowed(toolKey, entry.toolName, entry.mcpId)
+    )
+      reason = "policy_denied";
+    else {
+      const requiredCapability = params.releaseCapabilityByToolKey?.[toolKey];
+      if (requiredCapability) {
+        if (releaseInactive) reason = releaseInactive;
+        else if (
+          params.releaseState.status !== "legacy_unenrolled" &&
+          !hasActiveCapability(params.releaseState, requiredCapability, now)
+        )
+          reason = "capability_inactive";
+      }
+    }
+    if (!reason && approvalRequired?.has(toolKey)) reason = "approval_required";
+    if (!reason && clarificationRequired?.has(toolKey))
+      reason = "clarification_required";
+
+    if (reason) blocked.push(Object.freeze({ toolKey, reason }));
+    else allowed.push(Object.freeze([entry.mcpId, entry.tool] as const));
+  }
+
+  for (const toolKey of Object.keys(
+    params.releaseCapabilityByToolKey ?? {}
+  ).sort()) {
+    if (!discovered.has(toolKey)) {
+      blocked.push(Object.freeze({ toolKey, reason: "not_discovered" }));
+    }
+  }
+  blocked.sort((a, b) => a.toolKey.localeCompare(b.toolKey));
+
+  const allowedToolKeys = Object.freeze(
+    allowed.map(([mcpId, tool]) => `${mcpId}/${tool.name}`)
+  );
+  const provenance = releaseProvenance(params.releaseState);
+  const behaviors = Object.freeze({
+    personalReminderDelivery: personalReminderBehavior(
+      params.releaseState,
+      now
+    ),
+  });
+  const fingerprintInput = {
+    tools: [...discovered.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, entry.tool]),
+    allowedToolKeys,
+    blocked,
+    releaseProvenance: provenance,
+    behaviors,
+  };
+  const fingerprint = createHash("sha256")
+    .update(canonicalJson(fingerprintInput))
+    .digest("hex");
+
+  return Object.freeze({
+    scopedTools,
+    toolsByMcp: freezeToolsByMcp(allowed),
+    allowedToolKeys,
+    blocked: Object.freeze(blocked),
+    releaseProvenance: provenance,
+    behaviors,
+    fingerprint,
+  });
+}
+
+export function isEffectiveToolAllowed(
+  inventory: EffectiveToolInventory,
+  mcpId: string,
+  toolName: string
+): boolean {
+  return inventory.allowedToolKeys.includes(`${mcpId}/${toolName}`);
+}
+
+export function buildPersonalReminderDeliveryInstructions(
+  inventory: EffectiveToolInventory
+): string {
+  if (
+    !inventory.behaviors.personalReminderDelivery.mayPromiseDelivery ||
+    !isEffectiveToolAllowed(inventory, "lobu-memory", "manage_schedules")
+  ) {
+    return "";
+  }
+  return [
+    "## Personal Reminder Delivery",
+    "For an explicit conversational personal reminder, use `manage_schedules`; the reminder will return to this personal-agent conversation at the scheduled time.",
+  ].join("\n");
+}

@@ -21,6 +21,12 @@ import {
 export type RuntimeToolCallBlockedReason =
   | "not_discovered"
   | "not_allowed"
+  | "policy_denied"
+  | "capability_inactive"
+  | "snapshot_missing"
+  | "snapshot_expired"
+  | "not_connected"
+  | "untrusted_provenance"
   | "auth_required"
   | "approval_required"
   | "clarification_required";
@@ -51,6 +57,7 @@ export interface BuildRuntimeToolCatalogParams {
   providerVisibleTools?: Record<string, McpToolDef[]>;
   allowedToolNames?: Iterable<string>;
   clarificationBlockedToolKeys?: Iterable<string>;
+  blockedToolReasons?: Readonly<Record<string, RuntimeToolCallBlockedReason>>;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
@@ -128,6 +135,8 @@ export type RuntimeToolCallResult =
 
 export interface DispatchRuntimeToolCallParams {
   catalog: RuntimeToolCatalogEntry[];
+  /** Final turn-local authorization boundary; checked even for stale catalog entries. */
+  allowedToolKeys?: Iterable<string>;
   toolName: string;
   mcpId?: string;
   args: Record<string, unknown>;
@@ -253,12 +262,16 @@ export function buildRuntimeToolCatalog(
       const clarificationBlocked =
         clarificationBlockedToolKeys.has(externalToolKey(mcpId, entry.name)) ||
         clarificationBlockedToolKeys.has(toolIdentityKey(mcpId, entry.name));
+      const explicitBlockedReason =
+        params.blockedToolReasons?.[externalToolKey(mcpId, entry.name)] ??
+        params.blockedToolReasons?.[toolIdentityKey(mcpId, entry.name)];
       const callBlockedReason: RuntimeToolCallBlockedReason | undefined =
-        !allowed
+        explicitBlockedReason ??
+        (!allowed
           ? "not_allowed"
           : clarificationBlocked
             ? "clarification_required"
-            : undefined;
+            : undefined);
       catalog.push({
         ...entry,
         title: readCatalogTitle(tool),
@@ -308,7 +321,8 @@ export function searchRuntimeToolCatalog(
       .filter(
         (entry) =>
           entry.callableViaCatalog ||
-          entry.callBlockedReason === "clarification_required"
+          entry.callBlockedReason === "clarification_required" ||
+          entry.callBlockedReason === "approval_required"
       )
       .map((entry) => toolIdentityKey(entry.mcpId, entry.name))
   );
@@ -400,6 +414,12 @@ function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
   return (
     value === "not_discovered" ||
     value === "not_allowed" ||
+    value === "policy_denied" ||
+    value === "capability_inactive" ||
+    value === "snapshot_missing" ||
+    value === "snapshot_expired" ||
+    value === "not_connected" ||
+    value === "untrusted_provenance" ||
     value === "clarification_required" ||
     value === "ambiguous_tool" ||
     value === "auth_required" ||
@@ -469,6 +489,19 @@ export async function dispatchRuntimeToolCall(
     };
   }
   const entry = lookup.entry;
+  if (
+    params.allowedToolKeys !== undefined &&
+    !new Set(params.allowedToolKeys).has(
+      externalToolKey(entry.mcpId, entry.name)
+    )
+  ) {
+    return {
+      ok: false,
+      code: "policy_denied",
+      message: `Tool ${externalToolKey(entry.mcpId, entry.name)} is outside the effective tool inventory for this turn.`,
+      entry,
+    };
+  }
   if (!entry.callableViaCatalog) {
     return {
       ok: false,

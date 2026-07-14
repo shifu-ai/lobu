@@ -297,6 +297,29 @@ describe("tool catalog dispatcher", () => {
     expect(callTool).not.toHaveBeenCalled();
   });
 
+  test("final dispatcher rejects a stale callable entry outside the turn allowed keys", async () => {
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "should not run" }],
+    }));
+    const catalog = buildRuntimeToolCatalog({
+      allTools: { toolbox: [tool("stale_tool")] },
+      selectedTools: {},
+      allowedToolNames: ["toolbox/stale_tool"],
+    });
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      allowedToolKeys: [],
+      toolName: "stale_tool",
+      mcpId: "toolbox",
+      args: {},
+      callTool,
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "policy_denied" });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
   test("tool_call delegates successful calls to the injected MCP caller", async () => {
     const callTool = mock(async () => ({
       content: [{ type: "text" as const, text: "export queued" }],
