@@ -415,9 +415,8 @@ function isExplicitNextOccurrenceForwardBridge(
     );
   if (hasNegativeSchedulingPredicate) return false;
 
-  const terminalConnector = NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(
-    normalized
-  );
+  const terminalConnector =
+    NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(normalized);
   if (terminalConnector) {
     const descriptor = normalized.slice(0, terminalConnector.index).trim();
     return descriptor.length <= 32;
@@ -555,12 +554,8 @@ function hasBoundedOccurrenceRequestNegation(
       (boundary === "end" &&
         (match.index ?? 0) + match[0].length === normalized.length);
     const isExplicitBackwardNegation =
-      /忽略/u.test(match[0]) ||
-      /(?:管|查|看)(?:\s*一下)?\s*$/u.test(match[0]);
-    if (
-      touchesBoundary &&
-      (boundary === "end" || isExplicitBackwardNegation)
-    ) {
+      /忽略/u.test(match[0]) || /(?:管|查|看)(?:\s*一下)?\s*$/u.test(match[0]);
+    if (touchesBoundary && (boundary === "end" || isExplicitBackwardNegation)) {
       return true;
     }
   }
@@ -597,9 +592,7 @@ function requestedOccurrenceTargetState(
   let hasBarePositiveOccurrence = false;
   let hasInvalidPositiveTarget = false;
   const addTarget = (raw: string | undefined) => {
-    const target = raw
-      ? normalizeRequestedOccurrenceTarget(raw)
-      : null;
+    const target = raw ? normalizeRequestedOccurrenceTarget(raw) : null;
     if (target) {
       targets.add(target);
       return true;
@@ -615,14 +608,19 @@ function requestedOccurrenceTargetState(
     }
     hasPositiveOccurrence = true;
     const tail = userMessage.slice(index + occurrence[0].length, index + 80);
-    if (/^\s*(?:是|為|为)?\s*(?:哪天|哪一天|何時|何时|什麼時候|什么时候)/u.test(tail)) {
+    if (
+      /^\s*(?:是|為|为)?\s*(?:哪天|哪一天|何時|何时|什麼時候|什么时候)/u.test(
+        tail
+      )
+    ) {
       if (/的\s*$/u.test(prefix)) continue;
       hasBarePositiveOccurrence = true;
       continue;
     }
-    const forward = /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?:(?:的)?(?:目前|当前)?(?:報名狀況|报名状况|報名人數|报名人数|報名數|报名数)(?:\s*(?:嗎|吗|呢|如何|怎樣|怎样|怎麼樣|怎么样))?|的(?:日期|時間|时间))?(?=\s*(?:是|為|为|在|於|于|哪|何|[？?，,。！!；;]|$))/u.exec(
-      tail
-    );
+    const forward =
+      /^\s*(?:的\s*)?([\p{L}\p{N}]{2,32}?)(?:(?:的)?(?:目前|当前)?(?:報名狀況|报名状况|報名人數|报名人数|報名數|报名数)(?:\s*(?:嗎|吗|呢|如何|怎樣|怎样|怎麼樣|怎么样))?|的(?:日期|時間|时间))?(?=\s*(?:是|為|为|在|於|于|哪|何|[？?，,。！!；;]|$))/u.exec(
+        tail
+      );
     if (!forward?.[1] && /的\s*$/u.test(prefix)) continue;
     if (!addTarget(forward?.[1])) hasInvalidPositiveTarget = true;
   }
@@ -658,9 +656,10 @@ function requestedOccurrenceTargetState(
       hasBarePositiveOccurrence = true;
       continue;
     }
-    const forward = /^\s+(?:for\s+|of\s+)?([a-z0-9][a-z0-9 _-]{1,63}?)(?=\s*(?:is|will|on|at|when|what|[?.,;!]|$))/i.exec(
-      tail
-    );
+    const forward =
+      /^\s+(?:for\s+|of\s+)?([a-z0-9][a-z0-9 _-]{1,63}?)(?=\s*(?:is|will|on|at|when|what|[?.,;!]|$))/i.exec(
+        tail
+      );
     if (!addTarget(forward?.[1])) hasInvalidPositiveTarget = true;
   }
 
@@ -685,9 +684,8 @@ function normalizedNextOccurrenceDescriptor(
   const association = normalizeTemporalEvidenceLabel(
     normalizedNextOccurrenceBridge(claim.associationText)
   );
-  const terminalConnector = NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(
-    association
-  );
+  const terminalConnector =
+    NEXT_OCCURRENCE_TERMINAL_CONNECTOR_RE.exec(association);
   const descriptor = terminalConnector
     ? association.slice(0, terminalConnector.index).trim()
     : association;
@@ -730,10 +728,7 @@ function recurrenceSubjectMatchesDescriptor(
   }
   const eventTail = subject
     .replace(REQUEST_PREFIX_RE, "")
-    .replace(
-      /^(?:(?:請記得|请记得|目前|現在|现在|請注意|请注意)\s*)+/u,
-      ""
-    )
+    .replace(/^(?:(?:請記得|请记得|目前|現在|现在|請注意|请注意)\s*)+/u, "")
     .replace(/^(?:(?:please\s+remember|currently)\s+)+/i, "")
     .replace(/^the\s+/i, "")
     .trim();
@@ -979,11 +974,11 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
   const corrections: DateCorrection[] = [];
   let text = input.finalText;
   const isNextOccurrence = NEXT_OCCURRENCE_RE.test(input.userMessage);
-  const requestedTargetState = requestedOccurrenceTargetState(input.userMessage);
+  const requestedTargetState = requestedOccurrenceTargetState(
+    input.userMessage
+  );
   const requestedTarget =
-    requestedTargetState.kind === "unique"
-      ? requestedTargetState.target
-      : null;
+    requestedTargetState.kind === "unique" ? requestedTargetState.target : null;
   const nextOccurrenceDateClaims = isNextOccurrence
     ? findNextOccurrenceDateClaims(text, requestedTarget)
     : [];
@@ -1096,10 +1091,9 @@ export function guardDateOutput(input: DateGuardInput): DateGuardResult {
         reason: "next_occurrence_without_temporal_evidence",
       };
     }
-    const authoritativeDate =
-      namedClaimMatchesRecurrence
-        ? recurrenceDate
-        : claimDescriptors.size === 1 && labeledEvidence.length > 0
+    const authoritativeDate = namedClaimMatchesRecurrence
+      ? recurrenceDate
+      : claimDescriptors.size === 1 && labeledEvidence.length > 0
         ? trustedCandidate?.date
         : (recurrenceDate ?? trustedCandidate?.date);
 

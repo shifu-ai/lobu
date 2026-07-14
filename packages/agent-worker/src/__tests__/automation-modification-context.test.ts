@@ -19,7 +19,7 @@ describe("trusted automation modification context", () => {
     const result = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
-		deliveryId: "automation-modification-a1b2c3",
+        deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display,
@@ -32,7 +32,7 @@ describe("trusted automation modification context", () => {
     expect(result.userPrompt).toBe(userPrompt);
     expect(result.userPrompt).not.toContain(display.title);
     expect(result.systemInstructions).toContain(
-      "平台脈絡：使用者正在回覆先前點選的修改設定",
+      "平台脈絡：使用者正在回覆先前點選的修改設定"
     );
     expect(result.systemInstructions).toContain(display.title);
     expect(result.systemInstructions).toContain(display.schedule);
@@ -53,7 +53,7 @@ describe("trusted automation modification context", () => {
     const result = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
-		deliveryId: "automation-modification-a1b2c3",
+        deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-hidden",
         planId: "plan-hidden",
         display: {
@@ -79,7 +79,7 @@ describe("trusted automation modification context", () => {
     const valid = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
-		deliveryId: "automation-modification-a1b2c3",
+        deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display: { ...display, title: "😀".repeat(200) },
@@ -91,7 +91,7 @@ describe("trusted automation modification context", () => {
     const invalid = buildTrustedAutomationModificationTurnContext({
       userPrompt,
       platformMetadata: metadata({
-		deliveryId: "automation-modification-a1b2c3",
+        deliveryId: "automation-modification-a1b2c3",
         decisionId: "decision-selected",
         planId: "plan-selected",
         display: { ...display, title: "😀".repeat(201) },
@@ -106,41 +106,43 @@ describe("trusted automation modification context", () => {
   });
 
   it("ignores an otherwise valid context without the server marker", () => {
-    expect(buildTrustedAutomationModificationTurnContext({
-      userPrompt,
-      platformMetadata: metadata({
-		deliveryId: "automation-modification-a1b2c3",
-        decisionId: "decision-selected",
-        planId: "plan-selected",
-        display,
-        expiresAt: "2026-07-13T12:15:00.000Z",
-      }),
-      now: NOW,
-    })).toEqual({ userPrompt, systemInstructions: "" });
+    expect(
+      buildTrustedAutomationModificationTurnContext({
+        userPrompt,
+        platformMetadata: metadata({
+          deliveryId: "automation-modification-a1b2c3",
+          decisionId: "decision-selected",
+          planId: "plan-selected",
+          display,
+          expiresAt: "2026-07-13T12:15:00.000Z",
+        }),
+        now: NOW,
+      })
+    ).toEqual({ userPrompt, systemInstructions: "" });
   });
 
   it.each([
     ["missing", undefined],
     ["non-object", "context"],
-	[
-	  "missing delivery id",
-	  {
-		decisionId: "decision-selected",
-		planId: "plan-selected",
-		display,
-		expiresAt: "2026-07-13T12:15:00.000Z",
-	  },
-	],
-	[
-	  "invalid delivery id",
-	  {
-		deliveryId: "delivery id with spaces",
-		decisionId: "decision-selected",
-		planId: "plan-selected",
-		display,
-		expiresAt: "2026-07-13T12:15:00.000Z",
-	  },
-	],
+    [
+      "missing delivery id",
+      {
+        decisionId: "decision-selected",
+        planId: "plan-selected",
+        display,
+        expiresAt: "2026-07-13T12:15:00.000Z",
+      },
+    ],
+    [
+      "invalid delivery id",
+      {
+        deliveryId: "delivery id with spaces",
+        decisionId: "decision-selected",
+        planId: "plan-selected",
+        display,
+        expiresAt: "2026-07-13T12:15:00.000Z",
+      },
+    ],
     [
       "extra field",
       {
@@ -219,7 +221,7 @@ describe("trusted automation modification context", () => {
         userPrompt,
         platformMetadata: metadata(context),
         now: NOW,
-      }),
+      })
     ).toEqual({ userPrompt, systemInstructions: "" });
   });
 });

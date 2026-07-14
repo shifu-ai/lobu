@@ -345,7 +345,7 @@ describe("scheduled job revision guard", () => {
 		expect(count).toBe(1);
 	});
 
-	test("the same organization and external key return the original schedule across users", async () => {
+	test("the same organization and external key create separate schedules across users", async () => {
 		const externalKey = "toolbox:schedule:shared-key";
 		const otherUserId = "pm-revision-other";
 		const first = await upsertScheduledJobByExternalKey({
@@ -376,13 +376,12 @@ describe("scheduled job revision guard", () => {
 		`;
 
 		expect(second).toMatchObject({
-			id: first.id,
-			created_by_user: OWNER_USER_ID,
-			action_args: { agent_id: AGENT_ID, prompt: "original wake" },
-			description: "original",
-			schedule_revision: first.schedule_revision,
+			created_by_user: otherUserId,
+			action_args: { agent_id: AGENT_ID, prompt: "replacement wake" },
+			description: "replacement",
 		});
-		expect(count).toBe(1);
+		expect(second.id).not.toBe(first.id);
+		expect(count).toBe(2);
 	});
 
 	test("full change detection rearms a paused key and increments its revision", async () => {
@@ -582,8 +581,9 @@ describe("scheduled job revision guard", () => {
 		expect(count).toBe(1);
 	});
 
-	test("concurrent same-key creates across users return one organization schedule", async () => {
+	test("concurrent same-key creates across users keep separate owner schedules", async () => {
 		const externalKey = "toolbox:schedule:concurrent-cross-user";
+		const otherUserId = "pm-revision-other";
 		const common = {
 			externalKey,
 			organizationId: ORGANIZATION_ID,
@@ -602,16 +602,22 @@ describe("scheduled job revision guard", () => {
 			}),
 			upsertScheduledJobByExternalKey({
 				...common,
-				createdByUser: "pm-revision-other",
+				createdByUser: otherUserId,
 			}),
 		]);
-		const [{ count }] = await getDb()<[{ count: number }]>`
-			SELECT count(*)::int AS count FROM scheduled_jobs
+		const rows = await getDb()<
+			Array<{ created_by_user: string; external_key: string }>
+		>`
+			SELECT created_by_user, external_key FROM scheduled_jobs
 			WHERE organization_id = ${ORGANIZATION_ID} AND external_key = ${externalKey}
+			ORDER BY created_by_user
 		`;
 
-		expect(second.id).toBe(first.id);
-		expect(count).toBe(1);
+		expect(second.id).not.toBe(first.id);
+		expect(rows).toEqual([
+			{ created_by_user: OWNER_USER_ID, external_key: externalKey },
+			{ created_by_user: otherUserId, external_key: externalKey },
+		]);
 	});
 
 	test("atomic keyed quota allows active retry but rejects new and paused-to-active capacity", async () => {

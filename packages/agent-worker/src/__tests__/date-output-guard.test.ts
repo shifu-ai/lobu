@@ -416,8 +416,7 @@ describe("guardDateOutput", () => {
       guardDateOutput({
         userMessage:
           "I don't want to attend the next session for Sales; check the next session for Internal Meeting.",
-        finalText:
-          "The next session Internal Meeting is 7/22 (星期三).",
+        finalText: "The next session Internal Meeting is 7/22 (星期三).",
         now: NOW,
         trustedTemporalCandidates: ["2026-07-16"],
       }).text
@@ -703,9 +702,7 @@ describe("guardDateOutput", () => {
           userMessage: "幫我查下一場銷講",
           finalText,
           now: NOW,
-          trustedTemporalEvidence: [
-            { candidate: "2026-07-16", label: "銷講" },
-          ],
+          trustedTemporalEvidence: [{ candidate: "2026-07-16", label: "銷講" }],
         }).text
       ).toBe(expected);
     }
@@ -813,9 +810,7 @@ describe("guardDateOutput", () => {
           userMessage: "幫我查下一場銷講",
           finalText,
           now: NOW,
-          trustedTemporalEvidence: [
-            { candidate: "2026-07-16", label: "銷講" },
-          ],
+          trustedTemporalEvidence: [{ candidate: "2026-07-16", label: "銷講" }],
         })
       ).toEqual({ status: "unchanged", text: finalText });
     }
@@ -839,9 +834,7 @@ describe("guardDateOutput", () => {
           userMessage: `幫我查下一場${target}`,
           finalText,
           now: NOW,
-          trustedTemporalEvidence: [
-            { candidate: "2026-07-16", label: target },
-          ],
+          trustedTemporalEvidence: [{ candidate: "2026-07-16", label: target }],
         }).text
       ).toBe(expected);
     }
@@ -865,9 +858,7 @@ describe("guardDateOutput", () => {
           userMessage: `幫我查下一場的${target}`,
           finalText,
           now: NOW,
-          trustedTemporalEvidence: [
-            { candidate: "2026-07-16", label: target },
-          ],
+          trustedTemporalEvidence: [{ candidate: "2026-07-16", label: target }],
         }).text
       ).toBe(expected);
     }
@@ -893,9 +884,7 @@ describe("guardDateOutput", () => {
           userMessage: "幫我查下一場的銷講",
           finalText,
           now: NOW,
-          trustedTemporalEvidence: [
-            { candidate: "2026-07-16", label: "銷講" },
-          ],
+          trustedTemporalEvidence: [{ candidate: "2026-07-16", label: "銷講" }],
         }).status
       ).toBe("blocked");
     }
@@ -1006,9 +995,21 @@ describe("guardDateOutput", () => {
 
   test("does not confuse Chinese event-name characters with negation", () => {
     for (const [target, finalText, expected] of [
-      ["不動產講座", "下一場不動產講座是 7/22（三）。", "下一場不動產講座是 7/16（四）。"],
-      ["非營利課程", "下一場非營利課程是 7/22（三）。", "下一場非營利課程是 7/16（四）。"],
-      ["未來論壇", "下一場未來論壇是 7/22（三）。", "下一場未來論壇是 7/16（四）。"],
+      [
+        "不動產講座",
+        "下一場不動產講座是 7/22（三）。",
+        "下一場不動產講座是 7/16（四）。",
+      ],
+      [
+        "非營利課程",
+        "下一場非營利課程是 7/22（三）。",
+        "下一場非營利課程是 7/16（四）。",
+      ],
+      [
+        "未來論壇",
+        "下一場未來論壇是 7/22（三）。",
+        "下一場未來論壇是 7/16（四）。",
+      ],
     ] as const) {
       expect(
         guardDateOutput({
@@ -1652,9 +1653,7 @@ describe("extractTrustedTemporalCandidates", () => {
         userMessage: "銷講每週四 19:00 舉行，幫我查下一場銷講",
         finalText: "下一場內部會議是 7/14（二）。",
         now: NOW,
-        trustedTemporalCandidates: salesEvidence.map(
-          (item) => item.candidate
-        ),
+        trustedTemporalCandidates: salesEvidence.map((item) => item.candidate),
         trustedTemporalEvidence: salesEvidence,
       })
     ).toEqual({
@@ -1892,14 +1891,8 @@ describe("extractTrustedTemporalCandidates", () => {
         "目前內部會議每週三舉行，下一場銷講是哪一天？",
         "下一場銷講是 7/22（三）。",
       ],
-      [
-        "A班銷講每週三舉行，下一場銷講是哪一天？",
-        "下一場銷講是 7/22（三）。",
-      ],
-      [
-        "進階銷講每週三舉行，下一場銷講是哪一天？",
-        "下一場銷講是 7/22（三）。",
-      ],
+      ["A班銷講每週三舉行，下一場銷講是哪一天？", "下一場銷講是 7/22（三）。"],
+      ["進階銷講每週三舉行，下一場銷講是哪一天？", "下一場銷講是 7/22（三）。"],
     ]) {
       expect(
         guardDateOutput({
@@ -1925,8 +1918,7 @@ describe("extractTrustedTemporalCandidates", () => {
     expect(
       guardDateOutput({
         userMessage: "活動每週四 19:00 舉行，幫我查下一場活動",
-        finalText:
-          "下一場內部會議是 7/20（一）；下一場銷講是 7/21（二）。",
+        finalText: "下一場內部會議是 7/20（一）；下一場銷講是 7/21（二）。",
         now: NOW,
         trustedTemporalEvidence: [
           {
