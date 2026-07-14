@@ -117,16 +117,15 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 		);
 	}
 
-	return {
-		createDeviceAuthRoutes: () => new Hono(),
-		getStableCredentialBindingId: (credential: {
-			bindingId?: string;
-			refreshToken?: string;
-			clientId: string;
-			tokenUrl: string;
-			resource?: string;
-			tokenEndpointAuthMethod?: string;
-		}) =>
+	function getStableCredentialBindingId(credential: {
+		bindingId?: string;
+		refreshToken?: string;
+		clientId: string;
+		tokenUrl: string;
+		resource?: string;
+		tokenEndpointAuthMethod?: string;
+	}) {
+		return (
 			credential.bindingId ??
 			createHash("sha256")
 				.update(
@@ -139,7 +138,13 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 							credential.tokenEndpointAuthMethod ?? null,
 					}),
 				)
-				.digest("hex"),
+				.digest("hex")
+		);
+	}
+
+	return {
+		createDeviceAuthRoutes: () => new Hono(),
+		getStableCredentialBindingId,
 		deleteCredential: async (
 			secretStore: ReturnType<typeof createMemorySecretStore>,
 			agentId: string,
@@ -179,6 +184,7 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 			const token = await response.json();
 			const refreshed = {
 				...credential,
+				bindingId: getStableCredentialBindingId(credential),
 				accessToken: String(token.access_token ?? ""),
 				refreshToken: token.refresh_token
 					? String(token.refresh_token)
