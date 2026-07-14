@@ -30,6 +30,7 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
       mcpStatus: overrides.mcpStatus ?? [],
       mcpContext: overrides.mcpContext ?? {},
       allowedToolKeys: overrides.allowedToolKeys,
+      turnEligibleToolKeys: overrides.turnEligibleToolKeys,
       clarificationBlockedToolKeys: overrides.clarificationBlockedToolKeys,
     },
   };
@@ -348,6 +349,48 @@ describe("auth subcommand routing", () => {
     expect(JSON.parse(result.stderr).error).toBe("clarification_required");
     expect(gatewayCalls).toHaveLength(0);
     expect(ref.current.clarificationBlockedToolKeys).toEqual([blockedKey]);
+  });
+
+  test("auth refresh cannot expose a tool absent from the initial turn inventory", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ authenticated: true })
+    ) as unknown as typeof fetch;
+    const calendarCreate: McpToolDef = {
+      name: "gws_calendar_events_create",
+      description: "Create a Google Calendar event",
+      inputSchema: { type: "object", properties: {} },
+    };
+    const calendarKey = toolIdentityKey("google_workspace", calendarCreate.name);
+    const gatewayCalls: string[] = [];
+    const ref: McpRuntimeRef = {
+      current: {
+        mcpTools: { google_workspace: [] },
+        mcpStatus: [],
+        mcpContext: {},
+        allowedToolKeys: [],
+        turnEligibleToolKeys: [],
+      },
+      refresh: async () => ({
+        mcpTools: { google_workspace: [calendarCreate] },
+        mcpStatus: [],
+        mcpContext: {},
+        allowedToolKeys: [calendarKey],
+      }),
+    };
+    const handler = buildMcpServerHandler("google_workspace", ref, gw, {
+      callTool: async () => {
+        gatewayCalls.push("called");
+        return { content: [] };
+      },
+    });
+
+    await handler(["auth", "check"], {});
+    const result = await handler([calendarCreate.name], { stdin: "{}" });
+
+    expect(JSON.parse(result.stderr).error).toBe("not_allowed");
+    expect(gatewayCalls).toHaveLength(0);
+    expect(ref.current.allowedToolKeys).toEqual([]);
+    expect(ref.current.turnEligibleToolKeys).toEqual([]);
   });
 
   test("auth check refresh failure is swallowed (does not throw)", async () => {

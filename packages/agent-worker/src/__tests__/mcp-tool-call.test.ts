@@ -952,26 +952,28 @@ describe("external-turn tool router lifecycle", () => {
     });
   });
 
-  test("deep-freezes the decision used by provider and catalog projections", () => {
+  test("snapshots tool definitions, inventory, and allow names for every turn view", () => {
+    const reminderTool = {
+      name: "manage_schedules",
+      description: "Create a reminder",
+      inputSchema: {
+        type: "object",
+        properties: {
+          message: {
+            type: "string",
+            description: "Reminder text",
+          },
+        },
+      },
+    };
+    const toolsByMcp = { "lobu-memory": [reminderTool] };
+    const allowedToolNames = ["lobu-memory/manage_schedules"];
+    const emitted: Array<{ fields?: Record<string, unknown> }> = [];
     const routing = initializeExternalTurnToolRouting(
       {
-        toolsByMcp: {
-          "lobu-memory": [
-            {
-              name: "manage_schedules",
-              description: "Create a reminder",
-              inputSchema: { type: "object", properties: {} },
-            },
-          ],
-          google_workspace: [
-            {
-              name: "gws_calendar_events_create",
-              description: "Create a calendar event",
-              inputSchema: { type: "object", properties: {} },
-            },
-          ],
-        },
-        message: "幫我排明天下午三點跟老師開會",
+        toolsByMcp,
+        allowedToolNames,
+        message: "五分鐘後提醒我喝水",
         budget: 8,
         trace: {
           traceId: "tr_routerfreeze1234",
@@ -980,14 +982,27 @@ describe("external-turn tool router lifecycle", () => {
           traceSource: "incoming",
         },
       },
-      { emitEvent: () => undefined }
+      {
+        emitEvent: (event) =>
+          emitted.push(event as { fields?: Record<string, unknown> }),
+      }
     );
+
+    const selectedReminder = routing.selection.selectedTools["lobu-memory"][0];
+    expect(selectedReminder).toBeDefined();
+    expect(selectedReminder).not.toBe(reminderTool);
 
     expect(Object.isFrozen(routing)).toBe(true);
     expect(Object.isFrozen(routing.selection)).toBe(true);
     expect(Object.isFrozen(routing.selection.selectedTools)).toBe(true);
     expect(
       Object.isFrozen(routing.selection.selectedTools["lobu-memory"])
+    ).toBe(true);
+    expect(Object.isFrozen(selectedReminder)).toBe(true);
+    expect(Object.isFrozen(selectedReminder.inputSchema)).toBe(true);
+    expect(Object.isFrozen(selectedReminder.inputSchema.properties)).toBe(true);
+    expect(
+      Object.isFrozen(selectedReminder.inputSchema.properties.message)
     ).toBe(true);
     expect(Object.isFrozen(routing.selection.trace)).toBe(true);
     expect(Object.isFrozen(routing.selection.trace.blockedToolNames)).toBe(
@@ -999,16 +1014,31 @@ describe("external-turn tool router lifecycle", () => {
       Object.isFrozen(routing.selection.trace.candidates[0]?.scoreBreakdown)
     ).toBe(true);
     expect(() =>
-      (routing.selection.trace.blockedToolNames as string[]).splice(0)
-    ).toThrow();
-    expect(() =>
       (routing.selection.selectedTools["lobu-memory"] as unknown[]).splice(0)
     ).toThrow();
 
+    reminderTool.name = "mutated_after_routing";
+    reminderTool.inputSchema.properties.message.description = "mutated";
+    toolsByMcp["lobu-memory"].push({
+      name: "injected_after_routing",
+      description: "Must not enter this turn",
+      inputSchema: { type: "object", properties: {} },
+    });
+    allowedToolNames[0] = "lobu-memory/injected_after_routing";
+
+    expect(selectedReminder).toMatchObject({
+      name: "manage_schedules",
+      inputSchema: {
+        properties: { message: { description: "Reminder text" } },
+      },
+    });
     const catalog = routing.buildRuntimeCatalog({ providerVisibleTools: {} });
-    expect(catalog.map((entry) => entry.callBlockedReason)).toEqual([
-      "clarification_required",
-      "clarification_required",
+    expect(catalog.map((entry) => `${entry.mcpId}/${entry.name}`)).toEqual([
+      "lobu-memory/manage_schedules",
+    ]);
+    expect(catalog[0]?.callableViaCatalog).toBe(true);
+    expect(emitted[0]?.fields?.selected_tools).toEqual([
+      "lobu-memory/manage_schedules",
     ]);
   });
 

@@ -294,6 +294,38 @@ function freezeStringArray(values: readonly string[]): string[] {
   return Object.freeze([...values]) as unknown as string[];
 }
 
+function cloneAndFreezeJsonLike<T>(value: T, seen = new WeakMap()): T {
+  if (value === null || typeof value !== "object") return value;
+  const source = value as object;
+  const existing = seen.get(source);
+  if (existing) return existing as T;
+
+  const clone: unknown[] | Record<string, unknown> = Array.isArray(value)
+    ? []
+    : {};
+  seen.set(source, clone);
+  for (const [key, nestedValue] of Object.entries(source)) {
+    (clone as Record<string, unknown>)[key] = cloneAndFreezeJsonLike(
+      nestedValue,
+      seen
+    );
+  }
+  return Object.freeze(clone) as T;
+}
+
+function freezeToolsByMcp(
+  toolsByMcp: Record<string, McpToolDef[]>
+): Record<string, McpToolDef[]> {
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(toolsByMcp).map(([mcpId, tools]) => [
+        mcpId,
+        Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
+      ])
+    )
+  ) as Record<string, McpToolDef[]>;
+}
+
 function freezeToolRoutingSelection(
   selection: SelectMcpToolsByMcpForTurnResult
 ): SelectMcpToolsByMcpForTurnResult {
@@ -301,7 +333,7 @@ function freezeToolRoutingSelection(
     Object.fromEntries(
       Object.entries(selection.selectedTools).map(([mcpId, tools]) => [
         mcpId,
-        Object.freeze([...tools]),
+        Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
       ])
     )
   ) as unknown as SelectMcpToolsByMcpForTurnResult["selectedTools"];
@@ -351,7 +383,16 @@ export function initializeExternalTurnToolRouting(
   const selectTools = dependencies.selectTools ?? selectMcpToolsByMcpForTurn;
   const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
   const now = dependencies.now ?? performance.now.bind(performance);
-  const { trace, ...selectionParams } = params;
+  const { trace, ...rawSelectionParams } = params;
+  const toolsByMcp = freezeToolsByMcp(params.toolsByMcp);
+  const allowedToolNames = params.allowedToolNames
+    ? freezeStringArray([...params.allowedToolNames])
+    : undefined;
+  const selectionParams = {
+    ...rawSelectionParams,
+    toolsByMcp,
+    allowedToolNames,
+  };
   const routeStartedAt = now();
   const selection = freezeToolRoutingSelection(selectTools(selectionParams));
   const routeTotalMs = Math.max(0, now() - routeStartedAt);
@@ -375,10 +416,10 @@ export function initializeExternalTurnToolRouting(
       providerVisibleTools: BuildRuntimeToolCatalogParams["providerVisibleTools"];
     }) =>
       buildRuntimeToolCatalog({
-        allTools: params.toolsByMcp,
+        allTools: toolsByMcp,
         selectedTools: selection.selectedTools,
         providerVisibleTools,
-        allowedToolNames: params.allowedToolNames,
+        allowedToolNames,
         clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
       }),
   });
@@ -1583,6 +1624,9 @@ export async function runAISession(
     return { names, keys };
   };
   const initialAllowedMcpTools = collectAllowedMcpTools(context.mcpTools);
+  const turnEligibleToolKeys = Object.freeze([
+    ...initialAllowedMcpTools.keys,
+  ]);
   const catalogAllowedToolNames = initialAllowedMcpTools.names;
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
@@ -1611,7 +1655,8 @@ export async function runAISession(
       mcpTools: applyCapabilityLimitNotes(context.mcpTools),
       mcpStatus: context.mcpStatus,
       mcpContext: context.mcpContext,
-      allowedToolKeys: Object.freeze([...initialAllowedMcpTools.keys]),
+      allowedToolKeys: turnEligibleToolKeys,
+      turnEligibleToolKeys,
       clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
     },
     ...(mcpExposure === "cli" && {

@@ -57,6 +57,8 @@ export interface McpRuntimeState {
   mcpContext: Record<string, string>;
   /** Canonical identities callable under the frozen turn-local policy. */
   allowedToolKeys?: readonly string[];
+  /** Canonical identities eligible when this external turn began. */
+  turnEligibleToolKeys?: readonly string[];
   /** Canonical identities blocked until the user resolves write ambiguity. */
   clarificationBlockedToolKeys?: readonly string[];
 }
@@ -303,9 +305,23 @@ async function refreshRef(
   try {
     const fresh = await ref.refresh();
     if (fresh) {
+      const turnEligibleToolKeys =
+        ref.current.turnEligibleToolKeys ?? ref.current.allowedToolKeys;
+      const refreshedAllowedToolKeys =
+        fresh.allowedToolKeys ?? ref.current.allowedToolKeys;
+      const allowedToolKeys = turnEligibleToolKeys
+        ? refreshedAllowedToolKeys?.filter((key) =>
+            turnEligibleToolKeys.includes(key)
+          ) ?? turnEligibleToolKeys
+        : refreshedAllowedToolKeys;
       ref.current = {
         ...fresh,
-        allowedToolKeys: fresh.allowedToolKeys ?? ref.current.allowedToolKeys,
+        allowedToolKeys: allowedToolKeys
+          ? Object.freeze([...allowedToolKeys])
+          : undefined,
+        turnEligibleToolKeys: turnEligibleToolKeys
+          ? Object.freeze([...turnEligibleToolKeys])
+          : undefined,
         clarificationBlockedToolKeys:
           fresh.clarificationBlockedToolKeys ??
           ref.current.clarificationBlockedToolKeys,
