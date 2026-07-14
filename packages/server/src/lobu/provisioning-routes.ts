@@ -72,6 +72,12 @@ interface ProvisioningRoutesOptions {
 	agentReleaseTrustedPublicKeysJson?: string;
 	agentReleaseEvidenceSigningPrivateKeysJson?: string;
 	agentReleaseEnvironment?: string;
+	legacyProvisioningHooks?: {
+		afterAgentLock?: () => Promise<void>;
+	};
+	agentReleaseTransactionHooks?: {
+		afterAgentLock?: () => Promise<void>;
+	};
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -238,6 +244,7 @@ export function createProvisioningRoutes(
 			process.env.AGENT_RELEASE_EVIDENCE_SIGNING_PRIVATE_KEYS_JSON,
 		expectedEnvironment:
 			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
+		transactionHooks: options.agentReleaseTransactionHooks,
 	});
 
 	provisioningRoutes.post("/agents", async (c) => {
@@ -315,6 +322,7 @@ export function createProvisioningRoutes(
 					ownerUserId,
 				),
 				settings,
+				transactionHooks: options.legacyProvisioningHooks,
 			});
 		} catch (error) {
 			if (error instanceof AgentSettingsManagedByReleaseError) {

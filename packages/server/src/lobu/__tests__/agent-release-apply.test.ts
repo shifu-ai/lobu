@@ -143,30 +143,77 @@ describe("signed managed agent release apply", () => {
 		);
 	});
 
-	test("serializes legacy provisioning against managed release apply without post-release overwrite", async () => {
-		const app = await buildApp();
-		const [release, legacy] = await Promise.all([
-			putApply(app, latestSignedApplyRequest()),
-			app.request("/api/provisioning/agents", {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					agentId: AGENT_ID,
-					name: "Irene Agent",
-					ownerUserId: "irene",
-					settings: { userMd: "racing stale onboarding prompt" },
-				}),
-			}),
-		]);
+	test("lets a legacy transaction holding the agent lock commit before release apply wins", async () => {
+		const legacyLocked = deferred<void>();
+		const releaseLegacy = deferred<void>();
+		const app = await buildApp({
+			legacyProvisioningHooks: {
+				afterAgentLock: async () => {
+					legacyLocked.resolve(undefined);
+					await releaseLegacy.promise;
+				},
+			},
+		});
+		const legacyPromise = legacyProvision(app, "legacy-first prompt");
+		await within(legacyLocked.promise);
+		const releasePromise = putApply(app, latestSignedApplyRequest());
+		try {
+			await waitForBlockedAgentLock();
+		} finally {
+			releaseLegacy.resolve(undefined);
+		}
 
+		const legacy = await legacyPromise;
+		const release = await releasePromise;
+		expect(legacy.status).toBe(200);
 		expect(release.status).toBe(200);
-		expect([200, 409]).toContain(legacy.status);
-		const rows = await (await db())`
-			SELECT user_md
-			FROM agents
+		expect(await currentUserMd()).toBe("release user");
+	});
+
+	test("makes legacy provisioning reject after release apply holds and commits the agent lock", async () => {
+		const releaseLocked = deferred<void>();
+		const finishRelease = deferred<void>();
+		const app = await buildApp({
+			agentReleaseTransactionHooks: {
+				afterAgentLock: async () => {
+					releaseLocked.resolve(undefined);
+					await finishRelease.promise;
+				},
+			},
+		});
+		const releasePromise = putApply(app, latestSignedApplyRequest());
+		await within(releaseLocked.promise);
+		const legacyPromise = legacyProvision(app, "release-first stale prompt");
+		try {
+			await waitForBlockedAgentLock();
+		} finally {
+			finishRelease.resolve(undefined);
+		}
+
+		const release = await releasePromise;
+		const legacy = await legacyPromise;
+		expect(release.status).toBe(200);
+		expect(legacy.status).toBe(409);
+		await expect(legacy.json()).resolves.toMatchObject({
+			error: "agent_settings_managed_by_release",
+		});
+		expect(await currentUserMd()).toBe("release user");
+	});
+
+	test("requires release retry when apply observes an absent agent before legacy create", async () => {
+		const app = await buildApp();
+		await (await db())`
+			DELETE FROM agents
 			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
 		`;
-		expect(rows[0]?.user_md).toBe("release user");
+
+		const missing = await putApply(app, latestSignedApplyRequest());
+		expect(missing.status).toBe(404);
+		const created = await legacyProvision(app, "bootstrap before retry");
+		expect(created.status).toBe(201);
+		const retried = await putApply(app, latestSignedApplyRequest());
+		expect(retried.status).toBe(200);
+		expect(await currentUserMd()).toBe("release user");
 	});
 
 	test("accepts the current Toolbox policy envelope and returns attempt-bound signed post-apply evidence", async () => {
@@ -1468,6 +1515,12 @@ async function buildApp(
 		trustedPublicKeysJson?: string;
 		agentReleaseEnvironment?: string;
 		evidenceSigningPrivateKeysJson?: string;
+		legacyProvisioningHooks?: {
+			afterAgentLock?: () => Promise<void>;
+		};
+		agentReleaseTransactionHooks?: {
+			afterAgentLock?: () => Promise<void>;
+		};
 	} = {},
 ) {
 	const organizationId = options.organizationId ?? ORG_ID;
@@ -1496,6 +1549,8 @@ async function buildApp(
 				options.agentReleaseEnvironment === undefined
 					? "production"
 					: options.agentReleaseEnvironment,
+			legacyProvisioningHooks: options.legacyProvisioningHooks,
+			agentReleaseTransactionHooks: options.agentReleaseTransactionHooks,
 		}),
 	);
 	return app;
@@ -1543,6 +1598,74 @@ async function currentIdentity(): Promise<string | null> {
 		WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
 	`;
 	return rows[0]?.identity_md ?? null;
+}
+
+async function currentUserMd(): Promise<string | null> {
+	const rows = await (await db())`
+		SELECT user_md
+		FROM agents
+		WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+	`;
+	return rows[0]?.user_md ?? null;
+}
+
+function legacyProvision(app: Hono, userMd: string) {
+	return app.request("/api/provisioning/agents", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			agentId: AGENT_ID,
+			name: "Irene Agent",
+			ownerUserId: "irene",
+			settings: { userMd },
+		}),
+	});
+}
+
+function deferred<T>() {
+	let resolve!: (value: T | PromiseLike<T>) => void;
+	let reject!: (reason?: unknown) => void;
+	const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+		resolve = resolvePromise;
+		reject = rejectPromise;
+	});
+	return { promise, resolve, reject };
+}
+
+async function within<T>(promise: Promise<T>, timeoutMs = 1000): Promise<T> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timeout = setTimeout(
+					() => reject(new Error("Timed out waiting for transaction barrier")),
+					timeoutMs,
+				);
+			}),
+		]);
+	} finally {
+		if (timeout) clearTimeout(timeout);
+	}
+}
+
+async function waitForBlockedAgentLock(timeoutMs = 1000): Promise<void> {
+	const sql = await db();
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		const rows = await sql`
+			SELECT 1
+			FROM pg_stat_activity
+			WHERE pid <> pg_backend_pid()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%FROM agents%'
+			  AND query LIKE '%FOR UPDATE%'
+			LIMIT 1
+		`;
+		if (rows.length > 0) return;
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+	throw new Error("Timed out waiting for blocked agent row lock");
 }
 
 async function provisioningMutationSnapshot(

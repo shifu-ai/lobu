@@ -97,6 +97,10 @@ export async function provisionLegacyAgent(input: {
 	membershipId: string;
 	ownerEmail: string;
 	settings: Omit<AgentSettings, "updatedAt">;
+	/** Test barrier invoked while the transaction owns the agent row lock. */
+	transactionHooks?: {
+		afterAgentLock?: () => Promise<void>;
+	};
 }): Promise<{ created: boolean; membership: { ensured: true; role: string } }> {
 	const sql = getDb();
 	const result = await sql.begin(async (tx) => {
@@ -126,6 +130,7 @@ export async function provisionLegacyAgent(input: {
 		) {
 			throw new Error("Provisioned agent disappeared before settings write");
 		}
+		await input.transactionHooks?.afterAgentLock?.();
 
 		await tx`
 			INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")

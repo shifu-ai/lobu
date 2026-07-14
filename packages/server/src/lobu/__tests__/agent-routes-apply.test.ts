@@ -19,6 +19,7 @@ import {
 import {
   authStash,
   chatManagerStash,
+  coreServicesStash,
   fakeRouteAgents,
   fakeRouteConnections,
   fakeRouteSettings,
@@ -416,6 +417,166 @@ describe('PATCH /:agentId/config — managed release fence', () => {
     });
   });
 });
+
+describe('PATCH /:agentId/config — mixed settings and auth profiles', () => {
+  const oldMcpServers = { existing: { url: 'https://old.example' } };
+  const mixedBody = {
+    mcpServers: { changed: { url: 'https://changed.example' } },
+    authProfiles: [
+      {
+        id: 'profile-1',
+        provider: 'openai',
+        credential: 'secret-key',
+        authType: 'api-key',
+      },
+    ],
+  };
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    resetApplyRouteStores();
+    await seedOrg(ORG_A);
+    resetApplyAuth();
+    coreServicesStash.services = null;
+  });
+
+  async function seedMixedPatchAgent(agentId: string) {
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET mcp_servers = ${sql.json(oldMcpServers)}
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    return sql;
+  }
+
+  async function expectSplitRequired(response: Response) {
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_settings_auth_profiles_split_required',
+      error_description:
+        'Agent settings and authProfiles must be updated in separate requests',
+    });
+  }
+
+  test('rejects an admin PAT mixed request before settings or credential mutation', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-admin-pat';
+    const sql = await seedMixedPatchAgent(agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+    });
+    authStash.user = null;
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:admin'] };
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mixedBody),
+    });
+
+    await expectSplitRequired(response);
+    expect(upsertCalls).toBe(0);
+    expect((await sql`SELECT mcp_servers FROM agents WHERE id = ${agentId}`)[0]?.mcp_servers).toEqual(
+      oldMcpServers
+    );
+  });
+
+  test('rejects a mixed request when the auth-profile manager is missing without changing settings', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-manager-missing';
+    const sql = await seedMixedPatchAgent(agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mixedBody),
+    });
+
+    await expectSplitRequired(response);
+    expect((await sql`SELECT mcp_servers FROM agents WHERE id = ${agentId}`)[0]?.mcp_servers).toEqual(
+      oldMcpServers
+    );
+  });
+
+  test('rejects a mixed request before a failing auth-profile manager can create side effects', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-manager-failing';
+    const sql = await seedMixedPatchAgent(agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+      throw new Error('credential store unavailable');
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mixedBody),
+    });
+
+    await expectSplitRequired(response);
+    expect(upsertCalls).toBe(0);
+    expect((await sql`SELECT mcp_servers FROM agents WHERE id = ${agentId}`)[0]?.mcp_servers).toEqual(
+      oldMcpServers
+    );
+  });
+
+  test('rejects a mixed request for an applied release before credential side effects', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-applied-release';
+    await seedMixedPatchAgent(agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...mixedBody, userMd: 'stale managed prompt' }),
+    });
+
+    await expectSplitRequired(response);
+    expect(upsertCalls).toBe(0);
+  });
+
+  test('preserves authProfiles-only updates', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'auth-profiles-only';
+    await seedMixedPatchAgent(agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ authProfiles: mixedBody.authProfiles }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upsertCalls).toBe(1);
+  });
+});
+
+function authProfileServices(upsertProfile: () => Promise<void>) {
+  return {
+    getAuthProfilesManager: () => ({
+      getUserAuthProfileStore: () => ({
+        list: async () => [],
+        remove: async () => {},
+      }),
+      upsertProfile,
+    }),
+  };
+}
 
 describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
   beforeEach(async () => {

@@ -188,6 +188,10 @@ export function createAgentReleaseService(options: {
 	expectedEnvironment?: string;
 	now?: () => Date;
 	sql?: DbClient;
+	/** Test barrier invoked while the transaction owns the agent row lock. */
+	transactionHooks?: {
+		afterAgentLock?: () => Promise<void>;
+	};
 }) {
 	const keyring = parseTrustedKeyring(options.trustedPublicKeysJson);
 	const expectedEnvironment = parseExpectedEnvironment(
@@ -238,6 +242,7 @@ export function createAgentReleaseService(options: {
 					command,
 					publication,
 					feedDigest,
+					transactionHooks: options.transactionHooks,
 				}),
 			);
 			if (!isCurrentApplyCommand(command)) return result;
@@ -300,6 +305,9 @@ async function applyInTransaction(
 		command: AgentReleaseApplyCommand;
 		publication: FeedPublication;
 		feedDigest: string;
+		transactionHooks?: {
+			afterAgentLock?: () => Promise<void>;
+		};
 	},
 ): Promise<AgentReleaseApplyResult> {
 	const agentRows = await tx<AgentSettingsRow>`
@@ -318,6 +326,7 @@ async function applyInTransaction(
 			"Agent release target does not exist in the authenticated organization",
 		);
 	}
+	await input.transactionHooks?.afterAgentLock?.();
 	if (agent.owner_user_id !== input.command.assignment.toolboxUserId) {
 		throw releaseError(
 			"agent_release_assignment_target_mismatch",

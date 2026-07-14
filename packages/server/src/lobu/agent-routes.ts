@@ -2116,6 +2116,17 @@ routes.patch('/:agentId/config', async (c) => {
     authProfiles?: AuthProfile[];
   } & Record<string, unknown>;
 
+  if (authProfiles !== undefined && Object.keys(settingsUpdates).length > 0) {
+    return c.json(
+      {
+        error: 'agent_settings_auth_profiles_split_required',
+        error_description:
+          'Agent settings and authProfiles must be updated in separate requests',
+      },
+      409
+    );
+  }
+
   const organizationId = c.get('organizationId');
   if (!organizationId) return c.json({ error: 'Organization required' }, 401);
   try {
