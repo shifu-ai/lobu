@@ -15,7 +15,12 @@ export {
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
-import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
+import {
+  getOrBuildToolDescriptor,
+  inventoryFingerprint,
+  qualifiedToolKey,
+  toolIdentityKey,
+} from "./tool-descriptor";
 import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
 import {
   classifyToolIntent,
@@ -41,6 +46,7 @@ export interface DynamicToolSelectionTrace {
   selectionDiverged: boolean;
   semanticClarificationRequired: boolean;
   semanticComputed: boolean;
+  semanticLookupSkippedReason?: "definite_non_tool";
   primaryIntent: ToolIntent;
   budget: number;
   totalTools: number;
@@ -67,6 +73,8 @@ export interface DynamicToolSelectionTrace {
   effectiveToolInventoryFingerprint?: string;
   effectiveReleaseStatus?: "legacy_unenrolled" | "enrolled_inactive" | "active";
   effectiveReleaseReason?: string;
+  configuredRouterMode?: ToolRouterMode;
+  routerGateReason?: string;
   cacheHit: boolean;
   estimatedIndexBytes: number;
   cacheEvictionCount: number;
@@ -391,6 +399,22 @@ interface SharedToolSelection {
   routerMode: ToolRouterMode;
 }
 
+/** Only skip retrieval for high-confidence non-tool turns; unknown prose routes. */
+function isDefiniteNonToolTurn(message: string): boolean {
+  const normalized = message.trim().toLocaleLowerCase();
+  if (!normalized) return true;
+  if (
+    /^(?:(?:ok|okay|thanks|thank you|got it|收到|好的|好|謝謝|感謝)[,.，、!！。 ]*)+$/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+  return /^(?:\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F|\s)+$/u.test(
+    normalized
+  );
+}
+
 function selectEntriesForTurn(
   entries: ToolCatalogEntry[],
   message: string,
@@ -434,6 +458,33 @@ function selectEntriesForTurn(
         candidates: [],
         explicitDestinations: [],
         fallback: null,
+      },
+    };
+  }
+  if (isDefiniteNonToolTurn(message)) {
+    const descriptorFingerprint = inventoryFingerprint(
+      eligibleEntries.map((entry, index) =>
+        getOrBuildToolDescriptor(entry.tool, entry.mcpId, index)
+      )
+    );
+    return {
+      primaryIntent,
+      selectedEntries: legacySelection.selectedEntries,
+      eligibleEntries,
+      pinnedBudgetOverflow: legacySelection.pinnedBudgetOverflow,
+      routerMode,
+      route: {
+        routerVersion: "semantic-v1",
+        inventoryFingerprint: descriptorFingerprint,
+        cacheHit: false,
+        estimatedIndexBytes: 0,
+        cacheEvictionCount: 0,
+        timingMs: { build: 0, retrieve: 0, rank: 0 },
+        selectedEntries: legacySelection.selectedEntries,
+        candidates: [],
+        explicitDestinations: [],
+        fallback: "empty_query",
+        semanticLookupSkippedReason: "definite_non_tool",
       },
     };
   }
@@ -512,6 +563,7 @@ function routeTraceFields(
   | "selectionDiverged"
   | "semanticClarificationRequired"
   | "semanticComputed"
+  | "semanticLookupSkippedReason"
 > {
   const selectedToolNames = selectedEntries.map(displayToolName);
   const semanticSelectedToolNames = route.selectedEntries.map(displayToolName);
@@ -525,7 +577,10 @@ function routeTraceFields(
         (name, index) => name !== semanticSelectedToolNames[index]
       ),
     semanticClarificationRequired: route.clarification !== undefined,
-    semanticComputed: routerMode !== "legacy",
+    semanticComputed:
+      routerMode !== "legacy" &&
+      route.semanticLookupSkippedReason === undefined,
+    semanticLookupSkippedReason: route.semanticLookupSkippedReason,
     routerVersion: route.routerVersion,
     explicitDestinations: route.explicitDestinations,
     clarificationRequired:

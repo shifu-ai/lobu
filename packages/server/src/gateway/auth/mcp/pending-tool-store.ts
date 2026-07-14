@@ -31,6 +31,14 @@ export interface PendingToolInvocation {
     configDigest: string;
   };
 	releaseState?: ReleaseCapabilityState;
+	releaseBinding?: {
+		routerMode: "semantic";
+		effectiveInventoryFingerprint: string;
+		releaseId: string;
+		releaseSequence: number;
+		snapshotDigest: string;
+		authorizationExpiresAt: string;
+	};
 	/** Bounded non-secret identity used to re-sign an internal approval replay. */
 	originalRunIdentity?: {
 		runId: number;

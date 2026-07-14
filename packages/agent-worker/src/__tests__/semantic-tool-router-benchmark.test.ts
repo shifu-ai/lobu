@@ -12,7 +12,9 @@ import {
   clearToolRetrievalIndexCacheForTests,
   getOrBuildToolRetrievalIndex,
   searchToolRetrievalIndex,
+  toolRetrievalIndexCacheStats,
 } from "../openclaw/tool-retrieval-index";
+import { parseWorkerShifuTrace } from "../shared/journey-trace";
 import { routeToolEntries } from "../openclaw/tool-router";
 import { toolRouterRetainedMemoryStats } from "../openclaw/tool-router-memory-budget";
 
@@ -51,6 +53,50 @@ function percentile(values: number[], ratio: number): number {
 }
 
 describe("semantic tool router repeatable performance guard", () => {
+  test("high-confidence acknowledgements skip semantic retrieval while unknown prose still routes", () => {
+    clearToolRetrievalIndexCacheForTests();
+    const toolsByMcp = {
+      synthetic: Array.from({ length: 2_000 }, (_, index) =>
+        syntheticTool(index)
+      ),
+    };
+    const before = toolRetrievalIndexCacheStats();
+    let emitted: unknown;
+    const ack = initializeExternalTurnToolRouting(
+      {
+        toolsByMcp,
+        message: "收到，謝謝！",
+        budget: 12,
+        routerMode: "semantic",
+        trace: parseWorkerShifuTrace({}),
+      },
+      {
+        emitEvent: (event) => {
+          emitted = event;
+        },
+      }
+    );
+    expect(ack.selection.trace.semanticComputed).toBe(false);
+    expect(ack.selection.trace.semanticLookupSkippedReason).toBe(
+      "definite_non_tool"
+    );
+    expect(JSON.stringify(emitted)).not.toContain("收到，謝謝");
+    expect(toolRetrievalIndexCacheStats().misses).toBe(before.misses);
+
+    initializeExternalTurnToolRouting(
+      {
+        toolsByMcp,
+        message: "幫我處理一下這個",
+        budget: 12,
+        routerMode: "semantic",
+        trace: parseWorkerShifuTrace({}),
+      },
+      { emitEvent: () => undefined }
+    );
+    expect(toolRetrievalIndexCacheStats().misses).toBeGreaterThan(
+      before.misses
+    );
+  });
   for (const size of [100, 500, 1_000, 2_000]) {
     test(`external-turn lifecycle guard at ${size} tools; CI ceiling is not the product SLO`, () => {
       clearToolRetrievalIndexCacheForTests();

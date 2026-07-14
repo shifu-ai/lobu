@@ -42,6 +42,7 @@ export interface ToolRouteDecision {
   selectedEntries: ToolCatalogEntry[];
   candidates: ToolCandidateScore[];
   explicitDestinations: ToolDestination[];
+  semanticLookupSkippedReason?: "definite_non_tool";
   clarification?: {
     reason: "conflicting_destination" | "conflicting_side_effect";
     question: string;

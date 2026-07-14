@@ -10,6 +10,7 @@ import { McpProxy } from "../auth/mcp/proxy.js";
 import {
   createToolApprovalService,
   GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+  isPendingReleaseBindingCurrent,
 } from "../auth/mcp/tool-approval-service.js";
 import {
   ensureDbForGatewayTests,
@@ -91,6 +92,189 @@ describe("createToolApprovalService", () => {
 
   beforeEach(async () => {
     await resetTestDatabase();
+  });
+
+  test.each([
+    ["capability removed", { capabilityIds: [] }],
+    ["digest changed", { snapshotDigest: `sha256:${"c".repeat(64)}` }],
+    ["release advanced", { releaseId: "release-2", releaseSequence: 2 }],
+    ["authorization expired", { expiresAt: "2000-01-01T00:00:00.000Z" }],
+  ])("semantic continuation is stale when %s", (_label, claimOverride) => {
+    const pending: PendingToolInvocation = {
+      ...LINE_PENDING,
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        authorizationExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+    };
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "toolbox-user-1",
+      agentId: "shifu-u-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+      ...claimOverride,
+    };
+    expect(isPendingReleaseBindingCurrent(
+      pending,
+      { status: "active", claim },
+      new Date("2026-07-15T00:00:00.000Z"),
+    )).toBe(false);
+  });
+
+  test("semantic continuation accepts only its exact current release identity", () => {
+    const pending: PendingToolInvocation = {
+      ...LINE_PENDING,
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        authorizationExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+    };
+    expect(isPendingReleaseBindingCurrent(pending, {
+      status: "active",
+      claim: {
+        environment: "production",
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+      },
+    }, new Date("2026-07-15T00:00:00.000Z"))).toBe(true);
+  });
+
+  test("rejects a stale semantic release before approve_all can grant or execute", async () => {
+    await seedLinePending("ta-line-1", {
+      releaseState: {
+        status: "active",
+        claim: {
+          environment: "production",
+          toolboxUserId: "toolbox-user-1",
+          agentId: "shifu-u-1",
+          releaseId: "release-1",
+          releaseSequence: 1,
+          snapshotDigest: `sha256:${"a".repeat(64)}`,
+          expiresAt: "2099-01-01T00:00:00.000Z",
+          capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+        },
+      },
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        authorizationExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+    });
+    const grantStore = {
+      grant: mock(async () => undefined),
+      hasGrant: mock(async () => false),
+      revoke: mock(async () => undefined),
+    };
+    const mcpProxy = {
+      executeToolDirect: mock(async () => ({ content: [], isError: false })),
+    };
+    const service = createToolApprovalService({
+      grantStore,
+      mcpProxy,
+      userAgentsStore: { ownsAgent: mock(async () => true) },
+      organizationId: "org-1",
+      resolveReleaseSnapshot: mock(async () => ({
+        schemaVersion: 1 as const,
+        environment: "production" as const,
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        capabilities: [],
+        appliedReleaseId: "release-1",
+        appliedReleaseSequence: 1,
+        snapshotDigest: `sha256:${"c".repeat(64)}`,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+      })),
+      readReleaseState: mock(async () => ({
+        status: "enrolled_inactive" as const,
+        environment: "production" as const,
+        reason: "receipt_invalid" as const,
+      })),
+    });
+
+    expect(await submitApproveAll(service)).toEqual({
+      status: "stale",
+      diagnosticCode: "approval_inventory_stale",
+    });
+    expect(grantStore.grant).not.toHaveBeenCalled();
+    expect(mcpProxy.executeToolDirect).not.toHaveBeenCalled();
+    expect(await getPendingTool("ta-line-1")).toBeNull();
+  });
+
+  test("executes semantic approve_all after fresh snapshot and receipt match exactly", async () => {
+    const releaseState = {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+      },
+    };
+    await seedLinePending("ta-line-1", {
+      releaseState,
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: releaseState.claim.snapshotDigest,
+        authorizationExpiresAt: releaseState.claim.expiresAt,
+      },
+    });
+    const grantStore = {
+      grant: mock(async () => undefined),
+      hasGrant: mock(async () => false),
+      revoke: mock(async () => undefined),
+    };
+    const mcpProxy = {
+      executeToolDirect: mock(async () => ({ content: [], isError: false })),
+    };
+    const service = createToolApprovalService({
+      grantStore,
+      mcpProxy,
+      userAgentsStore: { ownsAgent: mock(async () => true) },
+      organizationId: "org-1",
+      resolveReleaseSnapshot: mock(async () => ({
+        schemaVersion: 1 as const,
+        environment: "production" as const,
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        capabilities: [...releaseState.claim.capabilityIds],
+        appliedReleaseId: "release-1",
+        appliedReleaseSequence: 1,
+        snapshotDigest: releaseState.claim.snapshotDigest,
+        expiresAt: releaseState.claim.expiresAt,
+      })),
+      readReleaseState: mock(async () => releaseState),
+    });
+
+    expect((await submitApproveAll(service)).status).toBe("executed");
+    expect(grantStore.grant).toHaveBeenCalledTimes(1);
+    expect(mcpProxy.executeToolDirect).toHaveBeenCalledTimes(1);
   });
 
   test("approve_all stores a global wildcard grant and executes one pending MCP tool", async () => {

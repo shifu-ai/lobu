@@ -15,6 +15,7 @@ import {
   getOptionalEnv,
   type McpStatus,
   type McpToolDef,
+  type ReleaseCapabilityState,
   type PluginsConfig,
   type ResolvedCourseExecutionContext,
   type ToolsConfig,
@@ -75,6 +76,7 @@ import {
   type RuntimeToolCatalogEntry,
   resolveDynamicToolBudget,
   resolveToolRouterMode,
+  type ToolRouterMode,
   type SelectMcpToolsByMcpForTurnParams,
   type SelectMcpToolsByMcpForTurnResult,
   selectMcpToolsByMcpForTurn,
@@ -223,6 +225,11 @@ export function buildToolRouterJourneyEventInput(params: {
     fields: {
       router_version: selectionTrace.routerVersion,
       router_mode: selectionTrace.routerMode,
+      configured_router_mode: selectionTrace.configuredRouterMode,
+      effective_router_mode: selectionTrace.routerMode,
+      router_gate_reason: selectionTrace.routerGateReason
+        ? boundedRouterString(selectionTrace.routerGateReason, 80)
+        : undefined,
       descriptor_inventory_fingerprint:
         selectionTrace.inventoryFingerprint.slice(0, 16),
       // Kept for existing dashboards; this is the descriptor index fingerprint.
@@ -249,6 +256,8 @@ export function buildToolRouterJourneyEventInput(params: {
       semantic_clarification_required:
         selectionTrace.semanticClarificationRequired,
       semantic_computed: selectionTrace.semanticComputed,
+      semantic_lookup_skipped_reason:
+        selectionTrace.semanticLookupSkippedReason,
       blocked_tools: selectionTrace.blockedToolNames
         .slice(0, 20)
         .map((value) => boundedRouterString(value)),
@@ -386,6 +395,8 @@ export function initializeExternalTurnToolRouting(
     effectiveToolInventoryFingerprint?: string;
     effectiveReleaseStatus?: DynamicToolSelectionTrace["effectiveReleaseStatus"];
     effectiveReleaseReason?: string;
+    configuredRouterMode?: ToolRouterMode;
+    routerGateReason?: string;
   },
   dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
 ): ExternalTurnToolRouting {
@@ -397,6 +408,8 @@ export function initializeExternalTurnToolRouting(
     effectiveToolInventoryFingerprint,
     effectiveReleaseStatus,
     effectiveReleaseReason,
+    configuredRouterMode,
+    routerGateReason,
     ...rawSelectionParams
   } = params;
   const evictionCountBefore = toolRouterRetainedMemoryStats().evictions;
@@ -423,6 +436,8 @@ export function initializeExternalTurnToolRouting(
       effectiveToolInventoryFingerprint,
       effectiveReleaseStatus,
       effectiveReleaseReason,
+      configuredRouterMode,
+      routerGateReason,
     },
   });
   const routeTotalMs = Math.max(0, now() - routeStartedAt);
@@ -455,6 +470,31 @@ export function initializeExternalTurnToolRouting(
         trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
       }),
   });
+}
+
+export const SEMANTIC_TOOL_ROUTER_EFFECTIVE_INVENTORY_CAPABILITY =
+  "semantic_tool_router.effective_inventory.v1";
+
+/** Environment mode is a ceiling; a signed, exact, unexpired release opts in. */
+export function resolveReleaseAwareToolRouterMode(
+  configuredMode: ToolRouterMode,
+  releaseState: ReleaseCapabilityState,
+  agentId: string,
+  now = new Date()
+): ToolRouterMode {
+  if (configuredMode !== "semantic") return configuredMode;
+  if (releaseState.status !== "active") return "shadow";
+  const { claim } = releaseState;
+  if (claim.agentId !== agentId) return "shadow";
+  const expiresAtMs = Date.parse(claim.expiresAt);
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now.getTime()) {
+    return "shadow";
+  }
+  return claim.capabilityIds.includes(
+    SEMANTIC_TOOL_ROUTER_EFFECTIVE_INVENTORY_CAPABILITY
+  )
+    ? "semantic"
+    : "shadow";
 }
 
 function readStringOrFallback(value: unknown, fallback: string): string {
@@ -1747,9 +1787,22 @@ export async function runAISession(
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
-  const toolRouterMode = resolveToolRouterMode(
+  const configuredToolRouterMode = resolveToolRouterMode(
     process.env.LOBU_TOOL_ROUTER_MODE
   );
+  const toolRouterMode = resolveReleaseAwareToolRouterMode(
+    configuredToolRouterMode,
+    context.releaseState ?? { status: "legacy_unenrolled" },
+    agentId || context.agentId || ""
+  );
+  const routerGateReason =
+    configuredToolRouterMode !== "semantic"
+      ? `configured_${configuredToolRouterMode}`
+      : toolRouterMode === "semantic"
+        ? "active_release_capability"
+        : context.releaseState?.status === "active"
+          ? "release_capability_or_identity_mismatch"
+          : `release_${context.releaseState?.status ?? "legacy_unenrolled"}`;
   const toolRouting = initializeExternalTurnToolRouting(
     {
       toolsByMcp: effectiveTools.toolsByMcp,
@@ -1766,6 +1819,8 @@ export async function runAISession(
       effectiveReleaseReason:
         effectiveTools.releaseProvenance.inactiveReason ??
         personalReminderDeliveryBlockedReason,
+      configuredRouterMode: configuredToolRouterMode,
+      routerGateReason,
       trace: shifuTrace,
     },
     runAISessionDependencies
@@ -1877,6 +1932,8 @@ export async function runAISession(
     channelId,
     conversationId,
     platform,
+    effectiveToolInventoryFingerprint: effectiveTools.fingerprint,
+    effectiveToolRouterMode: toolRouterMode,
     workspaceDir,
   };
   const executionReporter = createExecutionReporter({

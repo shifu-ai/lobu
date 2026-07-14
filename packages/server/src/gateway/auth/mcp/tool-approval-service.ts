@@ -5,6 +5,9 @@ import {
   type GrantStore,
 } from "../../permissions/grant-store.js";
 import type { UserAgentsStore } from "../user-agents-store.js";
+import { readAgentReleaseCapabilityState } from "../../../lobu/agent-release-service.js";
+import { resolveRuntimeCapabilitySnapshot } from "../../services/runtime-capability-snapshot.js";
+import type { ReleaseCapabilityState } from "@lobu/core";
 import {
 	buildPendingToolExecutionOptions,
 	getPendingTool,
@@ -28,6 +31,7 @@ export type ToolApprovalSubmitResult =
   | { status: "expired" }
   | { status: "forbidden" }
   | { status: "denied" }
+  | { status: "stale"; diagnosticCode: "approval_inventory_stale" }
   | {
       status: "executed";
       result: {
@@ -84,6 +88,73 @@ export interface ToolApprovalServiceDeps {
   mcpProxy: McpProxyDirectExecution;
   userAgentsStore?: Pick<UserAgentsStore, "ownsAgent">;
   organizationId?: string;
+  resolveReleaseSnapshot?: typeof resolveRuntimeCapabilitySnapshot;
+  readReleaseState?: typeof readAgentReleaseCapabilityState;
+}
+
+export function isPendingReleaseBindingCurrent(
+  pending: import("./pending-tool-store.js").PendingToolInvocation,
+  current: ReleaseCapabilityState,
+  now = new Date(),
+): boolean {
+  const binding = pending.releaseBinding;
+  if (!binding || current.status !== "active") return false;
+  return Date.parse(binding.authorizationExpiresAt) > now.getTime() &&
+    current.claim.agentId === pending.agentId &&
+    current.claim.toolboxUserId === pending.userId &&
+    current.claim.releaseId === binding.releaseId &&
+    current.claim.releaseSequence === binding.releaseSequence &&
+    current.claim.snapshotDigest === binding.snapshotDigest &&
+    current.claim.expiresAt === binding.authorizationExpiresAt &&
+    current.claim.capabilityIds.includes(
+      "semantic_tool_router.effective_inventory.v1",
+    );
+}
+
+async function revalidateReleaseBinding(
+  pending: import("./pending-tool-store.js").PendingToolInvocation,
+  organizationId: string,
+  deps: Pick<
+    ToolApprovalServiceDeps,
+    "resolveReleaseSnapshot" | "readReleaseState"
+  > = {},
+): Promise<boolean> {
+  const binding = pending.releaseBinding;
+  const state = pending.releaseState;
+  if (!binding) return true;
+  if (state?.status !== "active") return false;
+  const claim = state.claim;
+  if (
+    Date.parse(binding.authorizationExpiresAt) <= Date.now() ||
+    claim.agentId !== pending.agentId ||
+    claim.toolboxUserId !== pending.userId ||
+    claim.releaseId !== binding.releaseId ||
+    claim.releaseSequence !== binding.releaseSequence ||
+    claim.snapshotDigest !== binding.snapshotDigest ||
+    claim.expiresAt !== binding.authorizationExpiresAt ||
+    !claim.capabilityIds.includes(
+      "semantic_tool_router.effective_inventory.v1",
+    )
+  ) return false;
+  const snapshot = await (
+    deps.resolveReleaseSnapshot ?? resolveRuntimeCapabilitySnapshot
+  )(
+    {
+      environment: claim.environment,
+      toolboxUserId: claim.toolboxUserId,
+      agentId: claim.agentId,
+    },
+    { bypassCache: true },
+  );
+  const current = await (
+    deps.readReleaseState ?? readAgentReleaseCapabilityState
+  )({
+    organizationId,
+    agentId: pending.agentId,
+    environment: claim.environment,
+    snapshot,
+  });
+  return isPendingReleaseBindingCurrent(pending, current);
 }
 
 function organizationIdFor(
@@ -123,6 +194,23 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         !(await ownsToolboxAgent(input))
       ) {
         return { status: "forbidden" };
+      }
+
+      if (candidate.releaseBinding) {
+        const organizationId = organizationIdFor(input, deps.organizationId);
+        if (!organizationId) return { status: "forbidden" };
+        const isCurrent = await revalidateReleaseBinding(
+          candidate,
+          organizationId,
+          deps,
+        ).catch(() => false);
+        if (!isCurrent) {
+          await takePendingTool(input.approvalId);
+          return {
+            status: "stale",
+            diagnosticCode: "approval_inventory_stale",
+          };
+        }
       }
 
       const pending = await takePendingTool(input.approvalId);

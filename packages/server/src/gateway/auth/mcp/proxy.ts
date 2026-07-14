@@ -882,6 +882,8 @@ export class McpProxy {
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
 			releaseState?: import("@lobu/core").ReleaseCapabilityState;
+			effectiveToolInventoryFingerprint?: string;
+			effectiveToolRouterMode?: "semantic";
 			personalReminderDeliveryIntent?: true;
     } = {},
   ): Promise<{
@@ -904,6 +906,9 @@ export class McpProxy {
       courseToolScope: tokenContext.courseToolScope,
       expectedMcpIdentity: tokenContext.expectedMcpIdentity,
 			releaseState: tokenContext.releaseState,
+			effectiveToolInventoryFingerprint:
+				tokenContext.effectiveToolInventoryFingerprint,
+			effectiveToolRouterMode: tokenContext.effectiveToolRouterMode,
 			personalReminderDeliveryIntent:
 				tokenContext.personalReminderDeliveryIntent,
     };
@@ -2126,6 +2131,17 @@ export class McpProxy {
 		auth.tokenData.personalReminderDeliveryIntent =
 			c.req.header("x-lobu-personal-reminder-delivery-intent") ===
 			PERSONAL_REMINDER_DELIVERY_CONTRACT;
+	const inventoryFingerprint = c.req.header(
+		"x-lobu-effective-tool-inventory-fingerprint",
+	);
+	if (
+		auth.tokenData.tokenKind === "run" &&
+		c.req.header("x-lobu-effective-tool-router-mode") === "semantic" &&
+		/^[0-9a-f]{64}$/.test(inventoryFingerprint ?? "")
+	) {
+		auth.tokenData.effectiveToolInventoryFingerprint = inventoryFingerprint;
+		auth.tokenData.effectiveToolRouterMode = "semantic";
+	}
     const healthKey = this.buildServerHealthKey(agentId, mcpId);
 
     // Parse body early so tool arguments are available for the approval message.
@@ -3128,6 +3144,30 @@ export class McpProxy {
         organizationId: tokenData.organizationId,
 				...(verifiedRunMatches && verifiedRun?.releaseState
 					? { releaseState: verifiedRun.releaseState }
+					: {}),
+				...(verifiedRunMatches &&
+					verifiedRun?.releaseState?.status === "active" &&
+					tokenData.effectiveToolRouterMode === "semantic" &&
+					/^[0-9a-f]{64}$/.test(
+						tokenData.effectiveToolInventoryFingerprint ?? "",
+					) &&
+					verifiedRun.releaseState.claim.capabilityIds.includes(
+						"semantic_tool_router.effective_inventory.v1",
+					)
+					? {
+						releaseBinding: {
+							routerMode: "semantic" as const,
+							effectiveInventoryFingerprint:
+								tokenData.effectiveToolInventoryFingerprint!,
+							releaseId: verifiedRun.releaseState.claim.releaseId,
+							releaseSequence:
+								verifiedRun.releaseState.claim.releaseSequence,
+							snapshotDigest:
+								verifiedRun.releaseState.claim.snapshotDigest,
+							authorizationExpiresAt:
+								verifiedRun.releaseState.claim.expiresAt,
+						},
+					}
 					: {}),
 				...(tokenData.personalReminderDeliveryIntent === true
 					? { personalReminderDeliveryIntent: true as const }

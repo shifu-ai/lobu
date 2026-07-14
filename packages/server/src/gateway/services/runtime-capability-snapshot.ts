@@ -43,6 +43,7 @@ export async function resolveRuntimeCapabilitySnapshot(
   request: RuntimeCapabilitySnapshotRequest,
 	options: Parameters<typeof fetchRuntimeCapabilitySnapshot>[1] & {
 		cacheTtlMs?: number;
+		bypassCache?: boolean;
 	} = {},
 ): Promise<RuntimeCapabilitySnapshot> {
   const now = options.now?.() ?? new Date();
@@ -59,6 +60,7 @@ export async function resolveRuntimeCapabilitySnapshot(
 			? Math.min(configured, 5 * 60_000)
 			: 30_000;
 	if (
+		!options.bypassCache &&
 		cached &&
 		now.getTime() - cached.cachedAt < ttlMs &&
 		now.getTime() < Date.parse(cached.value.expiresAt)

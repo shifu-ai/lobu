@@ -273,6 +273,8 @@ export interface GatewayParams {
   channelId: string;
   conversationId: string;
   platform?: string;
+  effectiveToolInventoryFingerprint?: string;
+  effectiveToolRouterMode?: "legacy" | "shadow" | "semantic";
   /**
    * Session workspace directory. Relative file paths from the model get
    * resolved against this (not `process.cwd()`, which is the parent gateway
@@ -1385,6 +1387,14 @@ export async function callMcpTool(
       // RAG assertions. Other tools keep the formatted-markdown output the
       // agent has been seeing. External MCP servers ignore the header.
       if (wantsJson) headers["x-mcp-format"] = "json";
+      if (
+        gw.effectiveToolRouterMode === "semantic" &&
+        /^[0-9a-f]{64}$/.test(gw.effectiveToolInventoryFingerprint ?? "")
+      ) {
+        headers["x-lobu-effective-tool-inventory-fingerprint"] =
+          gw.effectiveToolInventoryFingerprint!;
+        headers["x-lobu-effective-tool-router-mode"] = "semantic";
+      }
       if (
         options.personalReminderDelivery &&
         mcpId === "lobu-memory" &&

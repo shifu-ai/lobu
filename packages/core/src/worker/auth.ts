@@ -67,6 +67,9 @@ export interface WorkerTokenData {
   };
   /** Explicit release enrollment state on every per-run token. */
   releaseState?: ReleaseCapabilityState;
+  /** Request-local metadata accepted only after authenticating a RUN token. */
+  effectiveToolInventoryFingerprint?: string;
+  effectiveToolRouterMode?: "semantic";
 }
 
 /** Server-resolved, short-lived release capability provenance. */

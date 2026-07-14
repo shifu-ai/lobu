@@ -56,6 +56,30 @@ describe("runtime capability snapshot transport", () => {
 			},
 		);
   });
+
+  test("approval revalidation can bypass a still-live cached snapshot", async () => {
+    resetRuntimeCapabilitySnapshotCacheForTests();
+    const fetchImpl = vi.fn(async () =>
+      new Response(JSON.stringify(envelope()))
+    );
+    const request = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+    };
+    const options = {
+      url: "https://toolbox.test",
+      secret: "secret",
+      fetchImpl,
+      cacheTtlMs: 30_000,
+    };
+    await resolveRuntimeCapabilitySnapshot(request, options);
+    await resolveRuntimeCapabilitySnapshot(request, {
+      ...options,
+      bypassCache: true,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
   test("posts the exact three-field server-only request and accepts a closed digest-bound envelope", async () => {
 		const fetchImpl = vi.fn(
 			async () => new Response(JSON.stringify(envelope())),

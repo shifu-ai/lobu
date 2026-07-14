@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
 import { initializeExternalTurnToolRouting } from "../openclaw/session-runner";
+import { resolveReleaseAwareToolRouterMode } from "../openclaw/session-runner";
 import {
   clearToolInventorySnapshotCacheForTests,
   snapshotToolsByMcp,
@@ -29,6 +30,70 @@ const UNPAIRED_HIGH = "bad\ud800";
 const UNPAIRED_LOW = "bad\udfff";
 
 describe("external-turn immutable tool inventory snapshots", () => {
+  test("raw descriptor snapshots remain content-addressed across releases", () => {
+    clearToolInventorySnapshotCacheForTests();
+    const source = { source: [tool("search", "Search")] };
+    const first = snapshotToolsByMcp(source);
+    const same = snapshotToolsByMcp(source);
+
+    expect(same).toBe(first);
+    expect(toolInventorySnapshotCacheStats().entries).toBe(1);
+  });
+
+  test("semantic enforcement requires the exact active release capability", () => {
+    const active = {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "user-1",
+        agentId: "agent-1",
+        releaseId: "release-1",
+        releaseSequence: 1,
+        snapshotDigest: "sha256:one",
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+      },
+    };
+    expect(
+      resolveReleaseAwareToolRouterMode("semantic", active, "agent-1")
+    ).toBe("semantic");
+    expect(
+      resolveReleaseAwareToolRouterMode("semantic", active, "agent-2")
+    ).toBe("shadow");
+    expect(
+      resolveReleaseAwareToolRouterMode(
+        "semantic",
+        {
+          ...active,
+          claim: { ...active.claim, capabilityIds: [] },
+        },
+        "agent-1"
+      )
+    ).toBe("shadow");
+    expect(
+      resolveReleaseAwareToolRouterMode(
+        "semantic",
+        {
+          status: "legacy_unenrolled",
+        },
+        "agent-1"
+      )
+    ).toBe("shadow");
+    expect(
+      resolveReleaseAwareToolRouterMode(
+        "semantic",
+        {
+          ...active,
+          claim: { ...active.claim, expiresAt: "2026-07-14T00:00:00.000Z" },
+        },
+        "agent-1",
+        new Date("2026-07-15T00:00:00.000Z")
+      )
+    ).toBe("shadow");
+    expect(resolveReleaseAwareToolRouterMode("shadow", active, "agent-1")).toBe(
+      "shadow"
+    );
+  });
   test.each([
     ["undefined", undefined],
     ["Map", new Map([["type", "string"]])],
