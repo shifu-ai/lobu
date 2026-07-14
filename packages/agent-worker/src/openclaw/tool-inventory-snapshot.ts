@@ -1,9 +1,15 @@
 import { createHash } from "node:crypto";
 import type { McpToolDef } from "@lobu/core";
+import {
+	clearToolRouterCacheNamespace,
+	releaseToolRouterCacheEntry,
+	retainToolRouterCacheEntry,
+	touchToolRouterCacheEntry,
+} from "./tool-router-memory-budget";
 
 const SNAPSHOT_SCHEMA_VERSION = 1;
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
-const MAX_CACHE_BYTES = 32 * 1024 * 1024;
+const CACHE_NAMESPACE = "inventory-snapshot";
 const SERIALIZED_MEMORY_MULTIPLIER = 4;
 
 interface CachedToolInventorySnapshot {
@@ -110,6 +116,7 @@ export function snapshotToolsByMcp(
 	if (cached?.serialized === serialized) {
 		snapshotCache.delete(cacheKey);
 		snapshotCache.set(cacheKey, cached);
+		touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
 		snapshotCacheHits++;
 		return cached.snapshot;
 	}
@@ -123,17 +130,22 @@ export function snapshotToolsByMcp(
 	if (cached) {
 		snapshotCache.delete(cacheKey);
 		snapshotCacheBytes -= cached.estimatedBytes;
+		releaseToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
 	}
-	while (
-		snapshotCache.size > 0 &&
-		snapshotCacheBytes + estimatedBytes > MAX_CACHE_BYTES
-	) {
-		const oldestKey = snapshotCache.keys().next().value;
-		if (oldestKey === undefined) break;
-		const oldest = snapshotCache.get(oldestKey);
-		snapshotCache.delete(oldestKey);
-		snapshotCacheBytes -= oldest?.estimatedBytes ?? 0;
-		snapshotCacheEvictions++;
+	const retained = retainToolRouterCacheEntry({
+		namespace: CACHE_NAMESPACE,
+		key: cacheKey,
+		estimatedBytes,
+		onEvict: () => {
+			const evicted = snapshotCache.get(cacheKey);
+			if (!evicted) return;
+			snapshotCache.delete(cacheKey);
+			snapshotCacheBytes -= evicted.estimatedBytes;
+			snapshotCacheEvictions++;
+		},
+	});
+	if (!retained) {
+		return snapshot;
 	}
 	snapshotCache.set(cacheKey, { serialized, snapshot, estimatedBytes });
 	snapshotCacheBytes += estimatedBytes;
@@ -159,6 +171,10 @@ export function toolInventorySnapshotCacheStats(): {
 }
 
 export function clearToolInventorySnapshotCacheForTests(): void {
+	for (const key of snapshotCache.keys()) {
+		releaseToolRouterCacheEntry(CACHE_NAMESPACE, key);
+	}
+	clearToolRouterCacheNamespace(CACHE_NAMESPACE);
 	snapshotCache.clear();
 	snapshotCacheBytes = 0;
 	snapshotCacheHits = 0;

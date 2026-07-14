@@ -1,6 +1,7 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
 import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
 import {
+	type CachedToolRetrievalIndex,
 	getOrBuildToolRetrievalIndex,
 	searchToolRetrievalIndex,
 	type ToolCandidateMatch,
@@ -10,9 +11,10 @@ import {
 	type ToolDestination,
 	type ToolOperation,
 } from "./tool-route-query";
+import { normalizeToolText } from "./tool-tokenizer";
 
 const AMBIGUITY_SCORE_RATIO = 1.25;
-const CLARIFICATION_QUESTION =
+const DESTINATION_CLARIFICATION_QUESTION =
 	"你要我建立 Google Calendar 行事曆事件，還是只在時間到時提醒你？";
 
 export interface ToolCandidateScore {
@@ -52,6 +54,12 @@ export interface RouteToolEntriesParams {
 	budget: number;
 	reservedEntries: ToolCatalogEntry[];
 	allowedToolNames?: Iterable<string>;
+	retrieval?: {
+		getOrBuild?: (
+			descriptors: ReturnType<typeof getOrBuildToolDescriptor>[],
+		) => CachedToolRetrievalIndex;
+		search?: typeof searchToolRetrievalIndex;
+	};
 }
 
 function canonicalToolKey(entry: ToolCatalogEntry): string {
@@ -189,17 +197,89 @@ function ambiguousWriteMatches(
 	);
 	const [first, second] = relevant;
 	if (!first || !second || second.totalScore <= 0) return [];
-	if (
-		first.descriptor.destinations.length === 0 ||
-		second.descriptor.destinations.length === 0 ||
-		first.descriptor.destinations.some((destination) =>
-			second.descriptor.destinations.includes(destination),
-		)
-	) {
-		return [];
-	}
+	if (!hasConflictingSideEffects(first, second)) return [];
 	if (first.totalScore / second.totalScore > AMBIGUITY_SCORE_RATIO) return [];
 	return [first, second];
+}
+
+function hasConflictingSideEffects(
+	first: ToolCandidateMatch,
+	second: ToolCandidateMatch,
+): boolean {
+	const firstDestinations = first.descriptor.destinations;
+	const secondDestinations = second.descriptor.destinations;
+	if (
+		firstDestinations.length > 0 &&
+		secondDestinations.length > 0 &&
+		!firstDestinations.some((value) => secondDestinations.includes(value))
+	) {
+		return true;
+	}
+	const firstClasses = first.descriptor.sideEffectClasses;
+	const secondClasses = second.descriptor.sideEffectClasses;
+	return (
+		firstClasses.length > 0 &&
+		secondClasses.length > 0 &&
+		!firstClasses.some((value) => secondClasses.includes(value))
+	);
+}
+
+function clarificationReason(
+	matches: ToolCandidateMatch[],
+): "conflicting_destination" | "conflicting_side_effect" {
+	const [first, second] = matches;
+	return first &&
+		second &&
+		first.descriptor.destinations.length > 0 &&
+		second.descriptor.destinations.length > 0
+		? "conflicting_destination"
+		: "conflicting_side_effect";
+}
+
+function clarificationQuestion(matches: ToolCandidateMatch[]): string {
+	if (clarificationReason(matches) === "conflicting_destination") {
+		return DESTINATION_CLARIFICATION_QUESTION;
+	}
+	const labels = matches.map(
+		(match) => match.descriptor.title || match.descriptor.name,
+	);
+	return `你要我使用 ${labels.join("，還是 ")}？這些工具會產生不同的寫入結果。`;
+}
+
+function safeReservedEntries(params: {
+	entries: ToolCatalogEntry[];
+	reservedEntries: ToolCatalogEntry[];
+	allowedToolNames?: Iterable<string>;
+	budget: number;
+}): ToolCatalogEntry[] {
+	const eligibleKeys = eligibleIdentityKeys(
+		params.entries,
+		params.allowedToolNames,
+	);
+	return params.reservedEntries
+		.filter(
+			(entry) => !eligibleKeys || eligibleKeys.has(canonicalToolKey(entry)),
+		)
+		.slice(0, Math.max(0, params.budget));
+}
+
+function fallbackDecision(
+	params: RouteToolEntriesParams,
+	fallback: "router_error" | "empty_query",
+	explicitDestinations: ToolDestination[] = [],
+): ToolRouteDecision {
+	return {
+		routerVersion: "semantic-v1",
+		inventoryFingerprint: "",
+		cacheHit: false,
+		estimatedIndexBytes: 0,
+		cacheEvictionCount: 0,
+		timingMs: { build: 0, retrieve: 0, rank: 0 },
+		selectedEntries: safeReservedEntries(params),
+		candidates: [],
+		explicitDestinations,
+		fallback,
+	};
 }
 
 export function routeToolEntries({
@@ -208,129 +288,188 @@ export function routeToolEntries({
 	budget,
 	reservedEntries,
 	allowedToolNames,
+	retrieval,
 }: RouteToolEntriesParams): ToolRouteDecision {
-	const buildStartedAt = performance.now();
 	const query = buildToolRouteQuery(message);
-	const descriptors = entries.map((entry) =>
-		getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
-	);
-	const cachedIndex = getOrBuildToolRetrievalIndex(descriptors);
-	const index = cachedIndex.index;
-	const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);
-	const buildMs = performance.now() - buildStartedAt;
-	const retrieveStartedAt = performance.now();
-	const matches = searchToolRetrievalIndex(
-		index,
-		retrievalQuery(message, query.operations, query.explicitDestinations),
-		entries.length,
-		eligibleKeys,
-	).filter(
-		(match) =>
-			!conflictsWithExplicitDestination(
-				match.descriptor,
+	if (!normalizeToolText(message)) {
+		return fallbackDecision(
+			{
+				entries,
+				message,
+				budget,
+				reservedEntries,
+				allowedToolNames,
+				retrieval,
+			},
+			"empty_query",
+			query.explicitDestinations,
+		);
+	}
+	try {
+		const buildStartedAt = performance.now();
+		const descriptors = entries.map((entry) =>
+			getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
+		);
+		const cachedIndex = (retrieval?.getOrBuild ?? getOrBuildToolRetrievalIndex)(
+			descriptors,
+		);
+		const index = cachedIndex.index;
+		const eligibleKeys = eligibleIdentityKeys(entries, allowedToolNames);
+		const buildMs = performance.now() - buildStartedAt;
+		const retrieveStartedAt = performance.now();
+		const matches = (retrieval?.search ?? searchToolRetrievalIndex)(
+			index,
+			retrievalQuery(message, query.operations, query.explicitDestinations),
+			entries.length,
+			eligibleKeys,
+		).filter(
+			(match) =>
+				!conflictsWithExplicitDestination(
+					match.descriptor,
+					query.explicitDestinations,
+				),
+		);
+		const descriptorsByIdentityKey = new Map(
+			descriptors.map(
+				(descriptor) => [descriptor.identityKey, descriptor] as const,
+			),
+		);
+		const retrieveMs = performance.now() - retrieveStartedAt;
+		const rankStartedAt = performance.now();
+		const entriesByIdentityKey = new Map(
+			descriptors.flatMap((descriptor, index) => {
+				const entry = entries[index];
+				return entry ? [[descriptor.identityKey, entry] as const] : [];
+			}),
+		);
+		const scoredEntries = matches.flatMap((match) => {
+			const entry = entriesByIdentityKey.get(match.descriptor.identityKey);
+			return entry ? [{ entry, score: candidateScore(match) }] : [];
+		});
+		const blockedMatches = ambiguousWriteMatches(
+			matches,
+			query.operations,
+			query.explicitDestinations,
+		);
+		const blockedKeys = new Set(
+			blockedMatches.map((match) => match.descriptor.identityKey),
+		);
+		const relevantMutatingMatches = matches.filter((match) =>
+			isRelevantMutatingMatch(
+				match,
+				query.operations,
 				query.explicitDestinations,
 			),
-	);
-	const descriptorsByIdentityKey = new Map(
-		descriptors.map(
-			(descriptor) => [descriptor.identityKey, descriptor] as const,
-		),
-	);
-	const retrieveMs = performance.now() - retrieveStartedAt;
-	const rankStartedAt = performance.now();
-	const entriesByIdentityKey = new Map(
-		descriptors.flatMap((descriptor, index) => {
-			const entry = entries[index];
-			return entry ? [[descriptor.identityKey, entry] as const] : [];
-		}),
-	);
-	const scoredEntries = matches.flatMap((match) => {
-		const entry = entriesByIdentityKey.get(match.descriptor.identityKey);
-		return entry ? [{ entry, score: candidateScore(match) }] : [];
-	});
-	const blockedMatches = ambiguousWriteMatches(
-		matches,
-		query.operations,
-		query.explicitDestinations,
-	);
-	const blockedKeys = new Set(
-		blockedMatches.map((match) => match.descriptor.identityKey),
-	);
-	const selectedEntries: ToolCatalogEntry[] = [];
-	const selectedKeys = new Set<string>();
-
-	for (const entry of [
-		...reservedEntries.filter((entry) => {
-			const identityKey = canonicalToolKey(entry);
-			const descriptor = descriptorsByIdentityKey.get(identityKey);
-			return (
-				(!eligibleKeys || eligibleKeys.has(identityKey)) &&
-				!blockedKeys.has(identityKey) &&
-				descriptor !== undefined &&
-				!conflictsWithExplicitDestination(
-					descriptor,
-					query.explicitDestinations,
-				)
-			);
-		}),
-		...scoredEntries
-			.filter(({ entry, score }) => {
-				if (blockedKeys.has(canonicalToolKey(entry)) || score.totalScore <= 0) {
-					return false;
+		);
+		const [topMutating, secondMutating] = relevantMutatingMatches;
+		const dominatedConflictingKeys = new Set<string>();
+		if (
+			blockedMatches.length === 0 &&
+			query.explicitDestinations.length === 0 &&
+			topMutating &&
+			secondMutating &&
+			hasConflictingSideEffects(topMutating, secondMutating) &&
+			topMutating.totalScore / secondMutating.totalScore > AMBIGUITY_SCORE_RATIO
+		) {
+			for (const match of relevantMutatingMatches.slice(1)) {
+				if (hasConflictingSideEffects(topMutating, match)) {
+					dominatedConflictingKeys.add(match.descriptor.identityKey);
 				}
-				const match = matches.find(
-					(candidate) =>
-						candidate.descriptor.identityKey === canonicalToolKey(entry),
-				);
-				return (
-					match !== undefined &&
-					(!match.descriptor.mutatesState ||
-						isRelevantMutatingMatch(
-							match,
-							query.operations,
-							query.explicitDestinations,
-						))
-				);
-			})
-			.map(({ entry }) => entry),
-	]) {
-		if (selectedEntries.length >= budget) break;
-		const key = canonicalToolKey(entry);
-		if (selectedKeys.has(key)) continue;
-		selectedKeys.add(key);
-		selectedEntries.push(entry);
-	}
+			}
+		}
+		const selectedEntries: ToolCatalogEntry[] = [];
+		const selectedKeys = new Set<string>();
 
-	return {
-		routerVersion: "semantic-v1",
-		inventoryFingerprint: index.fingerprint,
-		cacheHit: cachedIndex.cacheHit,
-		estimatedIndexBytes: index.estimatedBytes,
-		cacheEvictionCount: cachedIndex.cacheEvictionCount,
-		timingMs: {
-			build: buildMs,
-			retrieve: retrieveMs,
-			rank: performance.now() - rankStartedAt,
-		},
-		selectedEntries,
-		candidates: scoredEntries.map(({ score }) => score),
-		explicitDestinations: query.explicitDestinations,
-		clarification:
-			blockedMatches.length > 0
-				? {
-						reason: "conflicting_destination",
-						question: CLARIFICATION_QUESTION,
-						blockedToolKeys: blockedMatches.map(
-							(match) => match.descriptor.key,
-						),
-						blockedToolIdentityKeys: blockedMatches.map(
-							(match) => match.descriptor.identityKey,
-						),
-						blockedToolNames: blockedMatches
-							.map((match) => match.descriptor.key)
-							.sort(),
+		for (const entry of [
+			...reservedEntries.filter((entry) => {
+				const identityKey = canonicalToolKey(entry);
+				const descriptor = descriptorsByIdentityKey.get(identityKey);
+				return (
+					(!eligibleKeys || eligibleKeys.has(identityKey)) &&
+					!blockedKeys.has(identityKey) &&
+					descriptor !== undefined &&
+					!conflictsWithExplicitDestination(
+						descriptor,
+						query.explicitDestinations,
+					)
+				);
+			}),
+			...scoredEntries
+				.filter(({ entry, score }) => {
+					if (
+						blockedKeys.has(canonicalToolKey(entry)) ||
+						dominatedConflictingKeys.has(canonicalToolKey(entry)) ||
+						score.totalScore <= 0
+					) {
+						return false;
 					}
-				: undefined,
-		fallback: index.mode === "linear" ? "linear_scan" : null,
-	};
+					const match = matches.find(
+						(candidate) =>
+							candidate.descriptor.identityKey === canonicalToolKey(entry),
+					);
+					return (
+						match !== undefined &&
+						(!match.descriptor.mutatesState ||
+							isRelevantMutatingMatch(
+								match,
+								query.operations,
+								query.explicitDestinations,
+							))
+					);
+				})
+				.map(({ entry }) => entry),
+		]) {
+			if (selectedEntries.length >= budget) break;
+			const key = canonicalToolKey(entry);
+			if (selectedKeys.has(key)) continue;
+			selectedKeys.add(key);
+			selectedEntries.push(entry);
+		}
+
+		return {
+			routerVersion: "semantic-v1",
+			inventoryFingerprint: index.fingerprint,
+			cacheHit: cachedIndex.cacheHit,
+			estimatedIndexBytes: index.estimatedBytes,
+			cacheEvictionCount: cachedIndex.cacheEvictionCount,
+			timingMs: {
+				build: buildMs,
+				retrieve: retrieveMs,
+				rank: performance.now() - rankStartedAt,
+			},
+			selectedEntries,
+			candidates: scoredEntries.map(({ score }) => score),
+			explicitDestinations: query.explicitDestinations,
+			clarification:
+				blockedMatches.length > 0
+					? {
+							reason: clarificationReason(blockedMatches),
+							question: clarificationQuestion(blockedMatches),
+							blockedToolKeys: blockedMatches.map(
+								(match) => match.descriptor.key,
+							),
+							blockedToolIdentityKeys: blockedMatches.map(
+								(match) => match.descriptor.identityKey,
+							),
+							blockedToolNames: blockedMatches
+								.map((match) => match.descriptor.key)
+								.sort(),
+						}
+					: undefined,
+			fallback: index.mode === "linear" ? "linear_scan" : null,
+		};
+	} catch {
+		return fallbackDecision(
+			{
+				entries,
+				message,
+				budget,
+				reservedEntries,
+				allowedToolNames,
+				retrieval,
+			},
+			"router_error",
+			query.explicitDestinations,
+		);
+	}
 }

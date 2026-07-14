@@ -257,5 +257,71 @@ describe("semantic tool routing authorization and write ambiguity", () => {
 
 		expect(result.trace.candidates).toEqual([]);
 		expect(result.trace.selectedToolNames).toEqual([]);
+		expect(result.trace.fallback).toBe("empty_query");
+	});
+
+	test("falls back to eligible reserved tools when retrieval fails", () => {
+		const askUser = catalogEntryForTool(
+			tool("ask_user", "Ask the user"),
+			0,
+			"core",
+		);
+		const disallowed = catalogEntryForTool(
+			tool("secret_write", "Create secret"),
+			1,
+			"secret",
+		);
+		const route = routeToolEntries({
+			entries: [askUser, disallowed],
+			message: "create something",
+			budget: 2,
+			reservedEntries: [askUser],
+			allowedToolNames: ["core/ask_user"],
+			retrieval: {
+				search: () => {
+					throw new Error("synthetic retrieval failure");
+				},
+			},
+		});
+
+		expect(route.fallback).toBe("router_error");
+		expect(route.selectedEntries.map(({ name }) => name)).toEqual(["ask_user"]);
+		expect(route.candidates).toEqual([]);
+	});
+
+	test("clarifies conflicting generic write side effects", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				mail: [tool("send_email", "發布 announcement using email")],
+				social: [tool("publish_post", "發布 announcement using social post")],
+			},
+			message: "發布 announcement",
+			budget: 2,
+			routerMode: "semantic",
+		});
+
+		expect(result.trace.clarificationRequired).toBe(true);
+		expect(result.trace.clarificationReason).toBe("conflicting_side_effect");
+		expect(result.trace.blockedToolNames).toEqual([
+			"mail/send_email",
+			"social/publish_post",
+		]);
+		expect(result.trace.clarificationQuestion).toContain("send_email");
+		expect(result.trace.clarificationQuestion).toContain("publish_post");
+	});
+
+	test("explicit generic write evidence selects one side effect", () => {
+		const result = selectMcpToolsByMcpForTurn({
+			toolsByMcp: {
+				mail: [tool("send_email", "Send an email announcement")],
+				social: [tool("publish_post", "Publish a social post announcement")],
+			},
+			message: "send this announcement by email",
+			budget: 2,
+			routerMode: "semantic",
+		});
+
+		expect(result.trace.clarificationRequired).toBe(false);
+		expect(result.trace.selectedToolNames).toEqual(["mail/send_email"]);
 	});
 });

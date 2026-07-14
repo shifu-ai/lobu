@@ -3,11 +3,12 @@ import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ToolContentResult } from "../shared/tool-implementations";
 import { catalogEntryForTool, type ToolCatalogEntry } from "./tool-catalog";
-import { buildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
 import {
-  buildToolRetrievalIndex,
+  getOrBuildToolRetrievalIndex,
   searchToolRetrievalIndex,
   type ToolCandidateMatch,
+  type ToolRetrievalIndex,
 } from "./tool-retrieval-index";
 
 export type RuntimeToolCallBlockedReason =
@@ -56,10 +57,36 @@ export interface RuntimeToolSearchMatch {
   reasons: string[];
 }
 
+interface RuntimeToolSearchContext {
+  index: ToolRetrievalIndex;
+  entriesByIdentityKey: ReadonlyMap<string, RuntimeToolCatalogEntry>;
+}
+
+const runtimeToolSearchContexts = new WeakMap<
+  RuntimeToolCatalogEntry[],
+  RuntimeToolSearchContext
+>();
+
+function buildRuntimeToolSearchContext(
+  catalog: RuntimeToolCatalogEntry[],
+): RuntimeToolSearchContext {
+  const descriptors = catalog.map((entry) =>
+    getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex),
+  );
+  return {
+    index: getOrBuildToolRetrievalIndex(descriptors).index,
+    entriesByIdentityKey: new Map(
+      catalog.map(
+        (entry) => [toolIdentityKey(entry.mcpId, entry.name), entry] as const,
+      ),
+    ),
+  };
+}
+
 export type RuntimeToolCaller = (
   mcpId: string,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ) => Promise<ToolContentResult>;
 
 export type RuntimeToolCallResult =
@@ -107,7 +134,7 @@ function normalizeAllowedToolName(name: string): string {
 }
 
 function buildAllowedNameSet(
-  allowedToolNames: Iterable<string> | undefined
+  allowedToolNames: Iterable<string> | undefined,
 ): Set<string> | null {
   if (!allowedToolNames) return null;
   const allowed = new Set<string>();
@@ -120,12 +147,12 @@ function buildAllowedNameSet(
 
 function isEntryAllowed(
   entry: ToolCatalogEntry,
-  allowedToolNames: Set<string> | null
+  allowedToolNames: Set<string> | null,
 ): boolean {
   if (!allowedToolNames) return true;
   const plainName = normalizeAllowedToolName(entry.name);
   const qualifiedName = normalizeAllowedToolName(
-    externalToolKey(entry.mcpId, entry.name)
+    externalToolKey(entry.mcpId, entry.name),
   );
   return allowedToolNames.has(plainName) || allowedToolNames.has(qualifiedName);
 }
@@ -146,7 +173,7 @@ function readCatalogTitle(tool: McpToolDef): string | undefined {
 }
 
 export function buildRuntimeToolCatalog(
-  params: BuildRuntimeToolCatalogParams
+  params: BuildRuntimeToolCatalogParams,
 ): RuntimeToolCatalogEntry[] {
   const selectedToolKeys = new Set<string>();
   const directVisibleTools =
@@ -158,14 +185,17 @@ export function buildRuntimeToolCatalog(
         providerToolName?: string;
       };
       selectedToolKeys.add(
-        catalogToolKey(mcpId, projectedTool.upstreamToolName || tool.name || "")
+        catalogToolKey(
+          mcpId,
+          projectedTool.upstreamToolName || tool.name || "",
+        ),
       );
     }
   }
 
   const allowedToolNames = buildAllowedNameSet(params.allowedToolNames);
   const clarificationBlockedToolKeys = new Set(
-    params.clarificationBlockedToolKeys ?? []
+    params.clarificationBlockedToolKeys ?? [],
   );
   const catalog: RuntimeToolCatalogEntry[] = [];
   let originalIndex = 0;
@@ -175,7 +205,7 @@ export function buildRuntimeToolCatalog(
       originalIndex++;
       if (!entry.name) continue;
       const directVisibleThisTurn = selectedToolKeys.has(
-        catalogToolKey(mcpId, entry.name)
+        catalogToolKey(mcpId, entry.name),
       );
       const allowed = isEntryAllowed(entry, allowedToolNames);
       const clarificationBlocked =
@@ -198,6 +228,15 @@ export function buildRuntimeToolCatalog(
       });
     }
   }
+  try {
+    runtimeToolSearchContexts.set(
+      catalog,
+      buildRuntimeToolSearchContext(catalog),
+    );
+  } catch {
+    // Keep status/call enforcement available if semantic metadata is malformed.
+    // Search will make one guarded lazy retry and otherwise return no matches.
+  }
   return catalog;
 }
 
@@ -210,31 +249,37 @@ function scoreReasons(match: ToolCandidateMatch): string[] {
 
 export function searchRuntimeToolCatalog(
   catalog: RuntimeToolCatalogEntry[],
-  params: SearchRuntimeToolCatalogParams
+  params: SearchRuntimeToolCatalogParams,
 ): RuntimeToolSearchMatch[] {
   const limit = Math.min(20, Math.max(1, Math.floor(params.limit ?? 5)));
-  const descriptors = catalog.map((entry) =>
-    buildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex)
-  );
-  const index = buildToolRetrievalIndex(descriptors);
+  let context = runtimeToolSearchContexts.get(catalog);
+  if (!context) {
+    try {
+      context = buildRuntimeToolSearchContext(catalog);
+      runtimeToolSearchContexts.set(catalog, context);
+    } catch {
+      return [];
+    }
+  }
   const eligibleKeys = new Set(
     catalog
       .filter(
         (entry) =>
           entry.callableViaCatalog ||
-          entry.callBlockedReason === "clarification_required"
+          entry.callBlockedReason === "clarification_required",
       )
-      .map((entry) => toolIdentityKey(entry.mcpId, entry.name))
+      .map((entry) => toolIdentityKey(entry.mcpId, entry.name)),
   );
-  const entriesByIdentityKey = new Map(
-    catalog.map(
-      (entry) => [toolIdentityKey(entry.mcpId, entry.name), entry] as const
-    )
-  );
-
-  return searchToolRetrievalIndex(index, params.query, limit, eligibleKeys)
+  return searchToolRetrievalIndex(
+    context.index,
+    params.query,
+    limit,
+    eligibleKeys,
+  )
     .map((match) => {
-      const entry = entriesByIdentityKey.get(match.descriptor.identityKey);
+      const entry = context.entriesByIdentityKey.get(
+        match.descriptor.identityKey,
+      );
       return entry
         ? {
             entry,
@@ -257,7 +302,7 @@ type RuntimeToolCatalogLookupResult =
 function findRuntimeToolCatalogEntry(
   catalog: RuntimeToolCatalogEntry[],
   toolName: string,
-  mcpId?: string
+  mcpId?: string,
 ): RuntimeToolCatalogLookupResult {
   const normalizedToolName = toolName.trim();
   const normalizedMcpId = mcpId?.trim();
@@ -286,7 +331,7 @@ function findRuntimeToolCatalogEntry(
 
 function validateToolArgs(
   entry: RuntimeToolCatalogEntry,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
 ): RuntimeToolCallResult | null {
   if (!entry.tool.inputSchema) return null;
   try {
@@ -297,7 +342,7 @@ function validateToolArgs(
       code: "schema_invalid",
       message: `Arguments failed schema validation for ${externalToolKey(
         entry.mcpId,
-        entry.name
+        entry.name,
       )}.`,
       entry,
     };
@@ -328,7 +373,7 @@ function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
 }
 
 function classifyDelegatedToolError(
-  result: ToolContentResult
+  result: ToolContentResult,
 ): RuntimeToolCallErrorCode | null {
   const metadata = result as RuntimeMcpToolResultMetadata;
   if (isStableErrorCode(metadata.errorCode)) {
@@ -358,12 +403,12 @@ function classifyDelegatedToolError(
 }
 
 export async function dispatchRuntimeToolCall(
-  params: DispatchRuntimeToolCallParams
+  params: DispatchRuntimeToolCallParams,
 ): Promise<RuntimeToolCallResult> {
   const lookup = findRuntimeToolCatalogEntry(
     params.catalog,
     params.toolName,
-    params.mcpId
+    params.mcpId,
   );
   if (lookup.status === "missing") {
     return {
@@ -450,13 +495,13 @@ function summarizeEntry(entry: RuntimeToolCatalogEntry) {
 
 export function statusRuntimeToolCatalog(
   catalog: RuntimeToolCatalogEntry[],
-  query: RuntimeToolStatusQuery
+  query: RuntimeToolStatusQuery,
 ) {
   if (query.toolName) {
     const lookup = findRuntimeToolCatalogEntry(
       catalog,
       query.toolName,
-      query.mcpId
+      query.mcpId,
     );
     if (lookup.status === "found") {
       return summarizeEntry(lookup.entry);
@@ -490,10 +535,10 @@ export function statusRuntimeToolCatalog(
     mcpId: query.mcpId,
     toolCount: entries.length,
     directVisibleToolCount: entries.filter(
-      (entry) => entry.directVisibleThisTurn
+      (entry) => entry.directVisibleThisTurn,
     ).length,
     catalogCallableToolCount: entries.filter(
-      (entry) => entry.callableViaCatalog
+      (entry) => entry.callableViaCatalog,
     ).length,
     tools: entries.map(summarizeEntry),
   };

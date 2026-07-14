@@ -7,6 +7,7 @@ import {
 	toolInventorySnapshotCacheStats,
 } from "../openclaw/tool-inventory-snapshot";
 import { clearToolRetrievalIndexCacheForTests } from "../openclaw/tool-retrieval-index";
+import { toolRouterRetainedMemoryStats } from "../openclaw/tool-router-memory-budget";
 
 function tool(name: string, description: string): McpToolDef {
 	return {
@@ -158,8 +159,9 @@ describe("external-turn immutable tool inventory snapshots", () => {
 
 	test("bounds immutable inventory snapshots to the worker cache budget", () => {
 		clearToolInventorySnapshotCacheForTests();
+		clearToolRetrievalIndexCacheForTests();
 		for (let version = 0; version < 12; version++) {
-			snapshotToolsByMcp({
+			const snapshot = snapshotToolsByMcp({
 				synthetic: Array.from({ length: 100 }, (_, index) =>
 					tool(
 						`tool_${version}_${index}`,
@@ -167,11 +169,28 @@ describe("external-turn immutable tool inventory snapshots", () => {
 					),
 				),
 			});
+			initializeExternalTurnToolRouting(
+				{
+					toolsByMcp: snapshot,
+					message: "search synthetic",
+					budget: 5,
+					routerMode: "semantic",
+					trace: {
+						traceId: `mixed-${version}`,
+						journeyId: "test",
+						actor: "worker",
+						traceSource: "incoming",
+					},
+				},
+				{ emitEvent: () => undefined },
+			);
 		}
 		const stats = toolInventorySnapshotCacheStats();
+		const combined = toolRouterRetainedMemoryStats();
 
-		expect(stats.estimatedBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+		expect(combined.estimatedBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+		expect(combined.maxEntryBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
 		expect(stats.evictions).toBeGreaterThan(0);
-		expect(stats.entries).toBeLessThan(12);
+		expect(combined.evictions).toBeGreaterThan(0);
 	});
 });

@@ -1,9 +1,15 @@
 import { TOOL_PRIORITY_WEIGHT } from "./tool-catalog";
 import { inventoryFingerprint, type ToolDescriptor } from "./tool-descriptor";
+import {
+	clearToolRouterCacheNamespace,
+	releaseToolRouterCacheEntry,
+	retainToolRouterCacheEntry,
+	touchToolRouterCacheEntry,
+} from "./tool-router-memory-budget";
 import { normalizeToolText, tokenizeToolText } from "./tool-tokenizer";
 
 const MAX_INDEX_BYTES = 16 * 1024 * 1024;
-const MAX_CACHE_BYTES = 32 * 1024 * 1024;
+const CACHE_NAMESPACE = "retrieval-index";
 const TOOL_RETRIEVAL_INDEX_SCHEMA = "semantic-v1";
 const MAX_QUERY_BYTES = 4 * 1024;
 const MAX_QUERY_TOKENS = 128;
@@ -56,6 +62,8 @@ interface ToolRetrievalIndexCacheEntry {
 const toolRetrievalIndexCache = new Map<string, ToolRetrievalIndexCacheEntry>();
 let toolRetrievalIndexCacheBytes = 0;
 let toolRetrievalIndexCacheEvictions = 0;
+let toolRetrievalIndexCacheHits = 0;
+let toolRetrievalIndexCacheMisses = 0;
 
 interface TokenizedDescriptorFields {
 	allPositive: string[];
@@ -123,6 +131,7 @@ function freezeDescriptor(descriptor: ToolDescriptor): ToolDescriptor {
 		destinations: Object.freeze([...descriptor.destinations]),
 		positiveExamples: Object.freeze([...descriptor.positiveExamples]),
 		negativeExamples: Object.freeze([...descriptor.negativeExamples]),
+		sideEffectClasses: Object.freeze([...descriptor.sideEffectClasses]),
 	}) as ToolDescriptor;
 }
 
@@ -171,7 +180,7 @@ function estimateDescriptorBytes(descriptor: ToolDescriptor): number {
 		Buffer.byteLength(JSON.stringify(descriptor), "utf8") *
 			SERIALIZED_PAYLOAD_MULTIPLIER +
 		DESCRIPTOR_OBJECT_OVERHEAD_BYTES +
-		7 * ARRAY_OBJECT_OVERHEAD_BYTES
+		8 * ARRAY_OBJECT_OVERHEAD_BYTES
 	);
 }
 
@@ -327,6 +336,8 @@ export function getOrBuildToolRetrievalIndex(
 	if (cached) {
 		toolRetrievalIndexCache.delete(cacheKey);
 		toolRetrievalIndexCache.set(cacheKey, cached);
+		touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
+		toolRetrievalIndexCacheHits++;
 		return {
 			index: cached.index,
 			cacheHit: true,
@@ -334,29 +345,33 @@ export function getOrBuildToolRetrievalIndex(
 			cacheEvictionCount: 0,
 		};
 	}
+	toolRetrievalIndexCacheMisses++;
 
 	const index = buildToolRetrievalIndex(descriptors, {
 		maxIndexBytes: MAX_INDEX_BYTES,
 	});
 	let cacheEvictionCount = 0;
 	if (index.estimatedBytes <= MAX_INDEX_BYTES) {
-		while (
-			toolRetrievalIndexCache.size > 0 &&
-			toolRetrievalIndexCacheBytes + index.estimatedBytes > MAX_CACHE_BYTES
-		) {
-			const oldestKey = toolRetrievalIndexCache.keys().next().value;
-			if (oldestKey === undefined) break;
-			const oldest = toolRetrievalIndexCache.get(oldestKey);
-			toolRetrievalIndexCache.delete(oldestKey);
-			toolRetrievalIndexCacheBytes -= oldest?.estimatedBytes ?? 0;
-			cacheEvictionCount++;
-			toolRetrievalIndexCacheEvictions++;
-		}
-		toolRetrievalIndexCache.set(cacheKey, {
-			index,
+		const retained = retainToolRouterCacheEntry({
+			namespace: CACHE_NAMESPACE,
+			key: cacheKey,
 			estimatedBytes: index.estimatedBytes,
+			onEvict: () => {
+				const evicted = toolRetrievalIndexCache.get(cacheKey);
+				if (!evicted) return;
+				toolRetrievalIndexCache.delete(cacheKey);
+				toolRetrievalIndexCacheBytes -= evicted.estimatedBytes;
+				cacheEvictionCount++;
+				toolRetrievalIndexCacheEvictions++;
+			},
 		});
-		toolRetrievalIndexCacheBytes += index.estimatedBytes;
+		if (retained) {
+			toolRetrievalIndexCache.set(cacheKey, {
+				index,
+				estimatedBytes: index.estimatedBytes,
+			});
+			toolRetrievalIndexCacheBytes += index.estimatedBytes;
+		}
 	}
 
 	return {
@@ -371,18 +386,28 @@ export function toolRetrievalIndexCacheStats(): {
 	entries: number;
 	estimatedBytes: number;
 	evictionCount: number;
+	hits: number;
+	misses: number;
 } {
 	return {
 		entries: toolRetrievalIndexCache.size,
 		estimatedBytes: toolRetrievalIndexCacheBytes,
 		evictionCount: toolRetrievalIndexCacheEvictions,
+		hits: toolRetrievalIndexCacheHits,
+		misses: toolRetrievalIndexCacheMisses,
 	};
 }
 
 export function clearToolRetrievalIndexCacheForTests(): void {
+	for (const key of toolRetrievalIndexCache.keys()) {
+		releaseToolRouterCacheEntry(CACHE_NAMESPACE, key);
+	}
+	clearToolRouterCacheNamespace(CACHE_NAMESPACE);
 	toolRetrievalIndexCache.clear();
 	toolRetrievalIndexCacheBytes = 0;
 	toolRetrievalIndexCacheEvictions = 0;
+	toolRetrievalIndexCacheHits = 0;
+	toolRetrievalIndexCacheMisses = 0;
 }
 
 interface ScoringContext {

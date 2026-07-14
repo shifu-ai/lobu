@@ -2,15 +2,23 @@ import { createHash } from "node:crypto";
 import type { McpToolDef } from "@lobu/core";
 import { catalogEntryForTool, type ToolPriority } from "./tool-catalog";
 import type { ToolDestination, ToolOperation } from "./tool-route-query";
+import {
+	releaseToolRouterCacheEntry,
+	retainToolRouterCacheEntry,
+	touchToolRouterCacheEntry,
+} from "./tool-router-memory-budget";
 
 const MAX_INDEXED_TEXT_BYTES = 16 * 1024;
 const DESCRIPTOR_VERSION = 1;
+const DESCRIPTOR_CACHE_NAMESPACE = "descriptor-snapshot";
 const MAX_DESCRIPTOR_SNAPSHOTS_PER_TOOL = 8;
-const immutableDescriptorSources = new WeakSet<object>();
 const descriptorSnapshotCache = new WeakMap<
 	McpToolDef,
 	Map<string, ToolDescriptor>
 >();
+const descriptorSourceIds = new WeakMap<McpToolDef, number>();
+let nextDescriptorSourceId = 1;
+const deeplyImmutableDescriptorSources = new WeakSet<object>();
 
 export function toolIdentityKey(mcpId: string, name: string): string {
 	return JSON.stringify([mcpId, name]);
@@ -36,6 +44,7 @@ export interface ToolDescriptor {
 	readOnly: boolean;
 	mutatesState: boolean;
 	requiresConfirmation: boolean;
+	sideEffectClasses: string[];
 	priority: ToolPriority;
 	originalIndex: number;
 	indexedTextBytes: number;
@@ -46,22 +55,20 @@ function isDeeplyImmutable(
 	visited = new WeakSet<object>(),
 ): boolean {
 	if (value === null || typeof value !== "object") return true;
-	if (immutableDescriptorSources.has(value)) return true;
-	if (visited.has(value)) return true;
-	if (!Object.isFrozen(value)) return false;
+	if (deeplyImmutableDescriptorSources.has(value)) return true;
+	if (visited.has(value) || !Object.isFrozen(value)) return false;
 	const prototype = Object.getPrototypeOf(value);
 	if (
 		!Array.isArray(value) &&
 		prototype !== Object.prototype &&
 		prototype !== null
-	) {
+	)
 		return false;
-	}
 	visited.add(value);
 	for (const nested of Object.values(value)) {
 		if (!isDeeplyImmutable(nested, visited)) return false;
 	}
-	immutableDescriptorSources.add(value);
+	deeplyImmutableDescriptorSources.add(value);
 	return true;
 }
 
@@ -75,6 +82,7 @@ function freezeDescriptorSnapshot(descriptor: ToolDescriptor): ToolDescriptor {
 		destinations: Object.freeze([...descriptor.destinations]),
 		positiveExamples: Object.freeze([...descriptor.positiveExamples]),
 		negativeExamples: Object.freeze([...descriptor.negativeExamples]),
+		sideEffectClasses: Object.freeze([...descriptor.sideEffectClasses]),
 	}) as ToolDescriptor;
 }
 
@@ -145,6 +153,7 @@ function searchableText(descriptor: ToolDescriptor): string {
 		descriptor.destinations.join(" "),
 		descriptor.positiveExamples.join(" "),
 		descriptor.negativeExamples.join(" "),
+		descriptor.sideEffectClasses.join(" "),
 	]
 		.filter(Boolean)
 		.join("\n");
@@ -205,6 +214,7 @@ function boundSearchableText(descriptor: ToolDescriptor): void {
 	trimStringToFit(descriptor, "domain");
 	trimArrayToFit(descriptor, descriptor.operations);
 	trimArrayToFit(descriptor, descriptor.destinations);
+	trimArrayToFit(descriptor, descriptor.sideEffectClasses);
 	trimStringToFit(descriptor, "indexedKey");
 	trimStringToFit(descriptor, "indexedName");
 
@@ -214,18 +224,54 @@ function boundSearchableText(descriptor: ToolDescriptor): void {
 function inferOperations(name: string): ToolOperation[] {
 	const operations: ToolOperation[] = [];
 	const normalized = name.toLowerCase();
-	for (const operation of [
-		"read",
-		"search",
-		"create",
-		"update",
-		"delete",
-		"send",
-		"schedule",
+	for (const [operation, pattern] of [
+		["read", /(?:^|[_-])(read|get|list)(?:[_-]|$)/],
+		["search", /(?:^|[_-])(search|find|lookup)(?:[_-]|$)/],
+		["create", /(?:^|[_-])(create|add|insert)(?:[_-]|$)/],
+		["update", /(?:^|[_-])(update|edit|modify)(?:[_-]|$)/],
+		["delete", /(?:^|[_-])(delete|remove|archive)(?:[_-]|$)/],
+		["send", /(?:^|[_-])(send|post|publish)(?:[_-]|$)/],
+		["schedule", /(?:^|[_-])(schedule|remind)(?:[_-]|$)/],
 	] as const) {
-		if (normalized.includes(operation)) operations.push(operation);
+		if (pattern.test(normalized)) operations.push(operation);
 	}
 	return operations.length > 0 ? operations : ["unknown"];
+}
+
+function inferSideEffectClasses(
+	name: string,
+	description: string,
+	operations: readonly ToolOperation[],
+): string[] {
+	const classesFor = (text: string): string[] => {
+		const searchable = text.replace(/[_-]+/g, " ");
+		const classes: string[] = [];
+		const add = (value: string, pattern: RegExp) => {
+			if (pattern.test(searchable)) classes.push(value);
+		};
+		add("email", /\b(email|mail)\b/);
+		add("message", /\b(message|chat|slack|sms)\b|訊息|消息/);
+		add("publication", /\b(post|publish|social)\b|發布|发布/);
+		add("calendar_event", /\b(calendar|event|meeting)\b|行事曆|日曆|日历/);
+		add("personal_reminder", /\b(reminder|schedule)\b|提醒|排程/);
+		add("document", /\b(document|docs?|file)\b|文件|檔案/);
+		add("task", /\b(task|ticket|issue)\b|任務|工單/);
+		add("record", /\b(record|row|database)\b|資料列|紀錄/);
+		return classes;
+	};
+	// Stable tool identity is the strongest conservative hint. Description is
+	// untrusted ranking text and only fills a missing class; it never downgrades
+	// a write or grants callability.
+	const classes = classesFor(name.toLowerCase());
+	if (classes.length === 0)
+		classes.push(...classesFor(description.toLowerCase()));
+	if (classes.length === 0) {
+		const mutatingOperation = operations.find((operation) =>
+			["create", "update", "delete", "send", "schedule"].includes(operation),
+		);
+		if (mutatingOperation) classes.push(`${mutatingOperation}_write`);
+	}
+	return uniqueStrings(classes);
 }
 
 function parameterMetadata(tool: McpToolDef): {
@@ -290,6 +336,12 @@ export function buildToolDescriptor(
 		: indexedName;
 	const override = DESCRIPTOR_OVERRIDES[identityKey];
 	const parameters = parameterMetadata(tool);
+	const inferredOperations = inferOperations(name);
+	const inferredMutating = inferredOperations.some((operation) =>
+		["create", "update", "delete", "send", "schedule"].includes(operation),
+	);
+	const mutatesState =
+		override?.mutatesState ?? (entry.mutatesState || inferredMutating);
 	const descriptor: ToolDescriptor = {
 		key,
 		identityKey,
@@ -303,17 +355,22 @@ export function buildToolDescriptor(
 		parameterNames: parameters.names,
 		parameterDescriptions: parameters.descriptions,
 		domain: entry.domain === "unknown" ? undefined : entry.domain,
-		operations: [...(override?.operations ?? inferOperations(name))],
+		operations: [...(override?.operations ?? inferredOperations)],
 		destinations: [...(override?.destinations ?? [])],
 		positiveExamples: [...(override?.positiveExamples ?? [])],
 		negativeExamples: [...(override?.negativeExamples ?? [])],
-		readOnly: override?.readOnly ?? entry.readOnly,
-		mutatesState: override?.mutatesState ?? entry.mutatesState,
+		readOnly: override?.readOnly ?? (mutatesState ? false : entry.readOnly),
+		mutatesState,
 		requiresConfirmation:
 			override?.requiresConfirmation ?? entry.requiresConfirmation,
 		priority: entry.priority,
 		originalIndex,
 		indexedTextBytes: 0,
+		sideEffectClasses: inferSideEffectClasses(
+			name,
+			tool.description || "",
+			override?.operations ?? inferredOperations,
+		),
 	};
 
 	boundSearchableText(descriptor);
@@ -325,27 +382,45 @@ export function getOrBuildToolDescriptor(
 	mcpId: string,
 	originalIndex: number,
 ): ToolDescriptor {
-	if (!isDeeplyImmutable(tool)) {
+	if (!isDeeplyImmutable(tool))
 		return buildToolDescriptor(tool, mcpId, originalIndex);
-	}
-	const cacheKey = JSON.stringify([mcpId, originalIndex]);
-	const existingSnapshots = descriptorSnapshotCache.get(tool);
-	const cached = existingSnapshots?.get(cacheKey);
+	const localKey = JSON.stringify([mcpId, originalIndex]);
+	const sourceId = descriptorSourceIds.get(tool) ?? nextDescriptorSourceId++;
+	descriptorSourceIds.set(tool, sourceId);
+	const retainedKey = `${sourceId}:${localKey}`;
+	const snapshots = descriptorSnapshotCache.get(tool) ?? new Map();
+	const cached = snapshots.get(localKey);
 	if (cached) {
-		existingSnapshots?.delete(cacheKey);
-		existingSnapshots?.set(cacheKey, cached);
+		snapshots.delete(localKey);
+		snapshots.set(localKey, cached);
+		touchToolRouterCacheEntry(DESCRIPTOR_CACHE_NAMESPACE, retainedKey);
 		return cached;
 	}
-
 	const descriptor = freezeDescriptorSnapshot(
 		buildToolDescriptor(tool, mcpId, originalIndex),
 	);
-	const snapshots = descriptorSnapshotCache.get(tool) ?? new Map();
-	snapshots.set(cacheKey, descriptor);
+	const estimatedBytes =
+		Buffer.byteLength(JSON.stringify(descriptor), "utf8") * 2 + 512;
+	const toolReference = new WeakRef(tool);
+	const retained = retainToolRouterCacheEntry({
+		namespace: DESCRIPTOR_CACHE_NAMESPACE,
+		key: retainedKey,
+		estimatedBytes,
+		onEvict: () => {
+			const source = toolReference.deref();
+			if (source) descriptorSnapshotCache.get(source)?.delete(localKey);
+		},
+	});
+	if (!retained) return descriptor;
+	snapshots.set(localKey, descriptor);
 	while (snapshots.size > MAX_DESCRIPTOR_SNAPSHOTS_PER_TOOL) {
 		const oldestKey = snapshots.keys().next().value;
 		if (oldestKey === undefined) break;
 		snapshots.delete(oldestKey);
+		releaseToolRouterCacheEntry(
+			DESCRIPTOR_CACHE_NAMESPACE,
+			`${sourceId}:${oldestKey}`,
+		);
 	}
 	descriptorSnapshotCache.set(tool, snapshots);
 	return descriptor;

@@ -14,6 +14,7 @@ import {
 	searchToolRetrievalIndex,
 } from "../openclaw/tool-retrieval-index";
 import { routeToolEntries } from "../openclaw/tool-router";
+import { toolRouterRetainedMemoryStats } from "../openclaw/tool-router-memory-budget";
 
 function syntheticTool(index: number): McpToolDef {
 	return Object.freeze({
@@ -94,13 +95,17 @@ describe("semantic tool router repeatable performance guard", () => {
 			const lifecycleP95Ms = percentile(lifecycleLatencies, 0.95);
 			const selectionP95Ms = percentile(selectionLatencies, 0.95);
 			const productSloMs = size <= 500 ? 10 : 25;
+			const combinedMemory = toolRouterRetainedMemoryStats();
 			console.info(
-				`semantic-router external-turn-lifecycle size=${size} lifecycleP50=${percentile(lifecycleLatencies, 0.5).toFixed(3)}ms lifecycleP95=${lifecycleP95Ms.toFixed(3)}ms selectionP95=${selectionP95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${lifecycleP95Ms < productSloMs} ciCeiling=${size <= 500 ? 30 : 75}ms snapshotCacheHits=${toolInventorySnapshotCacheStats().hits}`,
+				`semantic-router external-turn-lifecycle size=${size} lifecycleP50=${percentile(lifecycleLatencies, 0.5).toFixed(3)}ms lifecycleP95=${lifecycleP95Ms.toFixed(3)}ms selectionP95=${selectionP95Ms.toFixed(3)}ms productSlo=${productSloMs}ms productSloPass=${lifecycleP95Ms < productSloMs} ciCeiling=${size <= 500 ? 30 : 75}ms snapshotCacheHits=${toolInventorySnapshotCacheStats().hits} combinedRetainedBytes=${combinedMemory.estimatedBytes} combinedRetainedEntries=${combinedMemory.entries}`,
 			);
 			expect(result.selection.trace.selectedToolNames).toContain(
 				"lobu-memory/manage_schedules",
 			);
 			expect(toolInventorySnapshotCacheStats().hits).toBeGreaterThan(0);
+			expect(combinedMemory.estimatedBytes).toBeLessThanOrEqual(
+				32 * 1024 * 1024,
+			);
 			expect(lifecycleP95Ms).toBeLessThan(size <= 500 ? 30 : 75);
 		});
 

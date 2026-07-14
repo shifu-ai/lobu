@@ -50,7 +50,7 @@ describe("tool tokenizer", () => {
 });
 
 describe("tool descriptors", () => {
-	test("reuses deeply immutable descriptor snapshots without identity staleness", () => {
+	test("reuses immutable descriptor snapshots through the unified accounted budget", () => {
 		const source = Object.freeze({
 			...tool("search_students", "Find students", {
 				email: Object.freeze({
