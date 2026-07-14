@@ -4,8 +4,8 @@
  * Used by both the MCP Streamable HTTP handler and the REST API proxy.
  */
 
-import { TypeCompiler, type TypeCheck } from '@sinclair/typebox/compiler';
-import type { Context } from 'hono';
+import { TypeCompiler, type TypeCheck } from "@sinclair/typebox/compiler";
+import type { Context } from "hono";
 import {
   getRequiredAccessLevel,
   hasRequiredMcpScope,
@@ -13,14 +13,14 @@ import {
   isPublicReadable,
   isVerifiedOrganizationAdminPat,
   type ToolAccessLevel,
-} from '../auth/tool-access';
-import type { Env } from '../index';
-import { trackMCPToolCall } from '../sentry';
-import { ToolNotRegisteredError, ToolUserError } from '../utils/errors';
-import { getConfiguredPublicOrigin } from '../utils/public-origin';
-import { recordToolInvocationAudit } from './audit';
-import { listOrganizations } from './organizations';
-import { getTool, type TokenType, type ToolContext } from './registry';
+} from "../auth/tool-access";
+import type { Env } from "../index";
+import { trackMCPToolCall } from "../sentry";
+import { ToolNotRegisteredError, ToolUserError } from "../utils/errors";
+import { getConfiguredPublicOrigin } from "../utils/public-origin";
+import { recordToolInvocationAudit } from "./audit";
+import { listOrganizations } from "./organizations";
+import { getTool, type TokenType, type ToolContext } from "./registry";
 
 export interface AuthContext {
   organizationId: string | null;
@@ -37,7 +37,7 @@ export interface AuthContext {
   agentId: string | null;
   conversationId?: string | null;
   personalReminderDeliveryIntent?: boolean;
-  releaseCapability?: import('@lobu/core').ReleaseCapabilityClaim;
+	releaseState?: import("@lobu/core").ReleaseCapabilityState;
   requestedAgentId: string | null;
   isAuthenticated: boolean;
   clientId: string | null;
@@ -55,11 +55,14 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
   const pathname = new URL(c.req.url).pathname;
   const mcpAuthInfo = c.var.mcpAuthInfo ?? null;
   const tokenType: TokenType =
-    mcpAuthInfo?.tokenType === 'pat' ? 'pat'
-    : mcpAuthInfo?.tokenType === 'access_token' ? 'oauth'
-    : c.var.session?.userId ? 'session'
-    : 'anonymous';
-  const scopedToOrg = !!c.req.param('orgSlug');
+		mcpAuthInfo?.tokenType === "pat"
+			? "pat"
+			: mcpAuthInfo?.tokenType === "access_token"
+				? "oauth"
+				: c.var.session?.userId
+					? "session"
+					: "anonymous";
+	const scopedToOrg = !!c.req.param("orgSlug");
 
   return {
     organizationId: c.var.organizationId,
@@ -75,52 +78,59 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     conversationId: mcpAuthInfo?.conversationId ?? null,
     personalReminderDeliveryIntent:
       mcpAuthInfo?.personalReminderDeliveryIntent === true,
-    releaseCapability: mcpAuthInfo?.releaseCapability,
+		releaseState: mcpAuthInfo?.releaseState,
     requestedAgentId: null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
     scopes: mcpAuthInfo?.scopes ?? null,
     tokenType,
     requestUrl: c.req.url,
-    baseUrl: getConfiguredPublicOrigin() ?? '',
+		baseUrl: getConfiguredPublicOrigin() ?? "",
     scopedToOrg,
-    allowCrossOrg: tokenType === 'oauth' && !scopedToOrg,
+		allowCrossOrg: tokenType === "oauth" && !scopedToOrg,
     allowInternalTools:
-      !pathname.startsWith('/mcp') || c.req.header('x-lobu-memory-direct-auth') === '1',
+			!pathname.startsWith("/mcp") ||
+			c.req.header("x-lobu-memory-direct-auth") === "1",
   };
 }
 
 /**
  * Check access control for a tool call. Throws on denial.
  */
-const ORG_AGNOSTIC_TOOLS = new Set(['list_organizations']);
+const ORG_AGNOSTIC_TOOLS = new Set(["list_organizations"]);
 
 // SHIFU FORK: internal tools a member-scoped (non-admin) MCP session may use.
 // Default-deny: new internal tools stay admin-only until added here.
 export const MEMBER_INTERNAL_TOOL_WHITELIST: ReadonlySet<string> = new Set([
-  'manage_schedules',
-  'save_memory',
-  'search_memory',
-  'read_knowledge',
+	"manage_schedules",
+	"save_memory",
+	"search_memory",
+	"read_knowledge",
 ]);
 
-export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthContext): void {
+export function checkToolAccess(
+	toolName: string,
+	args: unknown,
+	authCtx: AuthContext,
+): void {
   if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
     if (!authCtx.isAuthenticated) {
-      throw new Error('Authentication required.');
+			throw new Error("Authentication required.");
     }
     // list_organizations is read-tier; OAuth tokens without `mcp:read`
     // (e.g. profile-only) must not call it.
-    if (!hasRequiredMcpScope('read', authCtx.scopes)) {
+		if (!hasRequiredMcpScope("read", authCtx.scopes)) {
       throw new Error(
-        'This MCP session does not include read access. Reconnect with read access to list organizations.'
+				"This MCP session does not include read access. Reconnect with read access to list organizations.",
       );
     }
     return;
   }
 
   if (!authCtx.organizationId) {
-    throw new Error('Organization context required. Authenticate with OAuth or API key.');
+		throw new Error(
+			"Organization context required. Authenticate with OAuth or API key.",
+		);
   }
 
   const tool = getTool(toolName);
@@ -159,17 +169,18 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
   // frontend's `resolve_path` calls with a default `mcp:read mcp:write`
   // grant) — a flag-off regression. Genuinely internal non-public calls
   // (e.g. `manage_connections` writes) remain gated.
-  const isPrivilegedRole = authCtx.memberRole === 'owner' || authCtx.memberRole === 'admin';
+	const isPrivilegedRole =
+		authCtx.memberRole === "owner" || authCtx.memberRole === "admin";
   if (
     tool.internal &&
     authCtx.allowInternalTools &&
     !isPrivilegedRole &&
-    !hasRequiredMcpScope('admin', authCtx.scopes) &&
+		!hasRequiredMcpScope("admin", authCtx.scopes) &&
     !MEMBER_INTERNAL_TOOL_WHITELIST.has(toolName) &&
     !isPublicReadable(toolName, args)
   ) {
     throw new Error(
-      `Tool '${toolName}' requires organization admin access. Member sessions may use: ${[...MEMBER_INTERNAL_TOOL_WHITELIST].join(', ')}.`
+			`Tool '${toolName}' requires organization admin access. Member sessions may use: ${[...MEMBER_INTERNAL_TOOL_WHITELIST].join(", ")}.`,
     );
   }
 
@@ -192,45 +203,47 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
     toolName,
     role,
     authCtx.agentId,
-    authCtx.scopes
+		authCtx.scopes,
   );
   const effectiveAccess: ToolAccessLevel =
-    isScheduleWriteException && requiredAccess === 'admin' ? 'write' : requiredAccess;
+		isScheduleWriteException && requiredAccess === "admin"
+			? "write"
+			: requiredAccess;
   const isTrustedSchedulePat =
-    toolName === 'manage_schedules' && isVerifiedOrganizationAdminPat(authCtx);
+		toolName === "manage_schedules" && isVerifiedOrganizationAdminPat(authCtx);
 
   if (!role && !isPublicReadable(toolName, args)) {
     if (authCtx.userId) {
       throw new Error(
-        'This public workspace is read-only for your account. Join the workspace to unlock write access.'
+				"This public workspace is read-only for your account. Join the workspace to unlock write access.",
       );
     }
     throw new Error(
-      'This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.'
+			"This public workspace is read-only for anonymous access. Sign in with an OAuth client that has write access.",
     );
   }
 
-  if (effectiveAccess === 'admin') {
-    if (role !== 'owner' && role !== 'admin' && !isTrustedSchedulePat) {
+	if (effectiveAccess === "admin") {
+		if (role !== "owner" && role !== "admin" && !isTrustedSchedulePat) {
       throw new Error(
-        'This action requires admin or owner access. Ask an organization owner to grant elevated access.'
+				"This action requires admin or owner access. Ask an organization owner to grant elevated access.",
       );
     }
   }
 
   if (!hasRequiredMcpScope(effectiveAccess, authCtx.scopes)) {
-    if (effectiveAccess === 'read') {
+		if (effectiveAccess === "read") {
       throw new Error(
-        'This MCP session does not include read access. Reconnect with read access for this workspace.'
+				"This MCP session does not include read access. Reconnect with read access for this workspace.",
       );
     }
-    if (effectiveAccess === 'write') {
+		if (effectiveAccess === "write") {
       throw new Error(
-        'This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.'
+				"This MCP session is read-only. Reconnect with write-scoped OAuth, or ask an owner to add you.",
       );
     }
     throw new Error(
-      'This MCP session does not include admin access. Reconnect with admin access after an owner grants the role.'
+			"This MCP session does not include admin access. Reconnect with admin access after an owner grants the role.",
     );
   }
 }
@@ -247,7 +260,7 @@ export function checkToolAccess(toolName: string, args: unknown, authCtx: AuthCo
  * requires a per-tool audit — tracked in lobu#1137
  * ("Audit + enable global tool-arg validation safely").
  */
-const VALIDATED_TOOLS = new Set(['query_sdk', 'run_sdk']);
+const VALIDATED_TOOLS = new Set(["query_sdk", "run_sdk"]);
 
 /**
  * Per-tool compiled TypeBox validator cache.
@@ -266,7 +279,10 @@ const VALIDATED_TOOLS = new Set(['query_sdk', 'run_sdk']);
  */
 const validatorCache = new Map<string, TypeCheck<any> | null>();
 
-function getValidator(toolName: string, schema: unknown): TypeCheck<any> | null {
+function getValidator(
+	toolName: string,
+	schema: unknown,
+): TypeCheck<any> | null {
   if (validatorCache.has(toolName)) {
     return validatorCache.get(toolName) ?? null;
   }
@@ -280,8 +296,12 @@ function getValidator(toolName: string, schema: unknown): TypeCheck<any> | null 
   return validator;
 }
 
-function validateToolArgs(toolName: string, schema: unknown, args: unknown): void {
-  if (!schema || typeof schema !== 'object') return;
+function validateToolArgs(
+	toolName: string,
+	schema: unknown,
+	args: unknown,
+): void {
+	if (!schema || typeof schema !== "object") return;
   const validator = getValidator(toolName, schema);
   if (!validator) return;
   if (validator.Check(args)) return;
@@ -291,13 +311,15 @@ function validateToolArgs(toolName: string, schema: unknown, args: unknown): voi
   const seen = new Set<string>();
   const errs: string[] = [];
   for (const e of validator.Errors(args)) {
-    const path = e.path || '/';
+		const path = e.path || "/";
     if (seen.has(path)) continue;
     seen.add(path);
     errs.push(`${path}: ${e.message}`);
     if (errs.length >= 3) break;
   }
-  throw new ToolUserError(`Invalid arguments for ${toolName}: ${errs.join('; ')}`);
+	throw new ToolUserError(
+		`Invalid arguments for ${toolName}: ${errs.join("; ")}`,
+	);
 }
 
 /**
@@ -308,21 +330,21 @@ export async function executeTool(
   toolName: string,
   args: Record<string, unknown>,
   env: Env,
-  authCtx: AuthContext
+	authCtx: AuthContext,
 ): Promise<unknown> {
   checkToolAccess(toolName, args, authCtx);
 
   // Org-agnostic tools get a minimal context with just userId
   if (ORG_AGNOSTIC_TOOLS.has(toolName)) {
     if (!authCtx.userId) {
-      throw new Error('User context required.');
+			throw new Error("User context required.");
     }
-    if (toolName === 'list_organizations') {
+		if (toolName === "list_organizations") {
       return trackMCPToolCall(toolName, args, () =>
         listOrganizations(args as any, env, {
           userId: authCtx.userId!,
           currentOrganizationId: authCtx.organizationId,
-        })
+				}),
       );
     }
   }
@@ -349,7 +371,9 @@ export async function executeTool(
   }
 
   try {
-    const result = await trackMCPToolCall(toolName, args, () => tool.handler(args, env, toolContext));
+		const result = await trackMCPToolCall(toolName, args, () =>
+			tool.handler(args, env, toolContext),
+		);
     await recordToolInvocationAudit({
       toolName,
       args,
@@ -375,7 +399,9 @@ export async function executeTool(
  */
 export function toToolContext(authCtx: AuthContext): ToolContext {
   if (!authCtx.organizationId) {
-    throw new Error('Organization context required. Authenticate with OAuth or API key.');
+		throw new Error(
+			"Organization context required. Authenticate with OAuth or API key.",
+		);
   }
   return {
     organizationId: authCtx.organizationId,
@@ -386,7 +412,7 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
     conversationId: authCtx.conversationId,
     personalReminderDeliveryIntent:
       authCtx.personalReminderDeliveryIntent === true,
-    releaseCapability: authCtx.releaseCapability,
+		releaseState: authCtx.releaseState,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,
     scopes: authCtx.scopes,

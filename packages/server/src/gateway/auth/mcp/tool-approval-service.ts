@@ -5,7 +5,11 @@ import {
   type GrantStore,
 } from "../../permissions/grant-store.js";
 import type { UserAgentsStore } from "../user-agents-store.js";
-import { buildPendingToolExecutionOptions, getPendingTool, takePendingTool } from "./pending-tool-store.js";
+import {
+	buildPendingToolExecutionOptions,
+	getPendingTool,
+	takePendingTool,
+} from "./pending-tool-store.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
 
@@ -62,7 +66,7 @@ interface McpProxyDirectExecution {
       };
       channelId?: string;
       organizationId?: string;
-      releaseCapability?: import("@lobu/core").ReleaseCapabilityClaim;
+			releaseState?: import("@lobu/core").ReleaseCapabilityState;
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;

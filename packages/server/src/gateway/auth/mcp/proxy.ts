@@ -12,6 +12,7 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
+import { readAgentReleaseCapabilityState } from "../../../lobu/agent-release-service.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
 import {
@@ -45,8 +46,7 @@ import { McpServerHealth } from "./server-health.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
 
 const logger = createLogger("mcp-proxy");
-const PERSONAL_REMINDER_DELIVERY_CONTRACT =
-  "personal_reminder_delivery.v1";
+const PERSONAL_REMINDER_DELIVERY_CONTRACT = "personal_reminder_delivery.v1";
 
 export function trustedPersonalReminderForwardHeaders(input: {
   mcpId: string;
@@ -770,14 +770,15 @@ function extractSessionToken(c: Context): string | null {
 export async function validateApprovalReleaseCapability(
   input: {
     organizationId?: string;
-    releaseCapability: import("@lobu/core").ReleaseCapabilityClaim;
+		releaseState: import("@lobu/core").ReleaseCapabilityState;
   },
-  readState?: typeof import("../../../lobu/agent-release-service.js").readAgentReleaseCapabilityState,
+	readState: typeof readAgentReleaseCapabilityState = readAgentReleaseCapabilityState,
 ): Promise<boolean> {
-  const claim = input.releaseCapability;
-  if (!input.organizationId || Date.parse(claim.expiresAt) <= Date.now()) return false;
-  const reader = readState ?? (await import("../../../lobu/agent-release-service.js")).readAgentReleaseCapabilityState;
-  const state = await reader({
+	if (input.releaseState.status !== "active") return false;
+	const claim = input.releaseState.claim;
+	if (!input.organizationId || Date.parse(claim.expiresAt) <= Date.now())
+		return false;
+	const state = await readState({
     organizationId: input.organizationId,
     agentId: claim.agentId,
     environment: claim.environment,
@@ -910,7 +911,7 @@ export class McpProxy {
       platform?: string;
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
-      releaseCapability?: import("@lobu/core").ReleaseCapabilityClaim;
+			releaseState?: import("@lobu/core").ReleaseCapabilityState;
     } = {},
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -931,7 +932,7 @@ export class McpProxy {
       platform: tokenContext.platform,
       courseToolScope: tokenContext.courseToolScope,
       expectedMcpIdentity: tokenContext.expectedMcpIdentity,
-      releaseCapability: tokenContext.releaseCapability,
+			releaseState: tokenContext.releaseState,
     };
     const token = tokenContext.token ?? "";
 
@@ -1007,8 +1008,12 @@ export class McpProxy {
           ? { expectedMcpIdentity: tokenData.expectedMcpIdentity }
           : {}),
         ...(tokenData.channelId ? { channelId: tokenData.channelId } : {}),
-        ...(tokenData.organizationId ? { organizationId: tokenData.organizationId } : {}),
-        ...(tokenData.releaseCapability ? { releaseCapability: tokenData.releaseCapability } : {}),
+				...(tokenData.organizationId
+					? { organizationId: tokenData.organizationId }
+					: {}),
+				...(tokenData.releaseState
+					? { releaseState: tokenData.releaseState }
+					: {}),
       },
     );
     return { status: "executed", ...result };
@@ -1026,20 +1031,24 @@ export class McpProxy {
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
       channelId?: string;
       organizationId?: string;
-      releaseCapability?: import("@lobu/core").ReleaseCapabilityClaim;
+			releaseState?: import("@lobu/core").ReleaseCapabilityState;
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
     diagnosticCode?: string;
   }> {
-    if (options?.releaseCapability) {
-      if (!(await validateApprovalReleaseCapability({
+		if (options?.releaseState) {
+			if (
+				!(await validateApprovalReleaseCapability({
         organizationId: options.organizationId,
-        releaseCapability: options.releaseCapability,
-      }))) {
+					releaseState: options.releaseState,
+				}))
+			) {
         return {
-          content: [{ type: "text", text: "Release capability is no longer active." }],
+					content: [
+						{ type: "text", text: "Release capability is no longer active." },
+					],
           isError: true,
           diagnosticCode: "RELEASE_CAPABILITY_INACTIVE",
         };
@@ -3074,7 +3083,7 @@ export class McpProxy {
         courseToolScope: tokenData.courseToolScope,
         expectedMcpIdentity: tokenData.expectedMcpIdentity,
         organizationId: tokenData.organizationId,
-        releaseCapability: tokenData.releaseCapability,
+				releaseState: tokenData.releaseState,
       },
       this.PENDING_TOOL_TTL,
     ).catch((err: unknown) =>

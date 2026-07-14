@@ -7,7 +7,7 @@
 
 import { getDb } from "../../../db/client.js";
 import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
-import type { ReleaseCapabilityClaim } from "@lobu/core";
+import type { ReleaseCapabilityState } from "@lobu/core";
 
 const SCOPE = "pending-tool";
 
@@ -30,7 +30,7 @@ export interface PendingToolInvocation {
     configSource: "global" | "agent" | "derived";
     configDigest: string;
   };
-  releaseCapability?: ReleaseCapabilityClaim;
+	releaseState?: ReleaseCapabilityState;
 }
 
 export interface PendingToolExecutionOptions {
@@ -40,7 +40,7 @@ export interface PendingToolExecutionOptions {
   >;
   channelId?: string;
   organizationId?: string;
-  releaseCapability?: ReleaseCapabilityClaim;
+	releaseState?: ReleaseCapabilityState;
 }
 
 /**
@@ -50,7 +50,7 @@ export interface PendingToolExecutionOptions {
  * for legacy pending rows that carry no scoped context.
  */
 export function buildPendingToolExecutionOptions(
-  pending: PendingToolInvocation
+	pending: PendingToolInvocation,
 ): PendingToolExecutionOptions | undefined {
   const options: PendingToolExecutionOptions = {
     ...(pending.courseToolScope
@@ -60,10 +60,10 @@ export function buildPendingToolExecutionOptions(
       ? { expectedMcpIdentity: pending.expectedMcpIdentity }
       : {}),
     ...(pending.channelId ? { channelId: pending.channelId } : {}),
-    ...(pending.organizationId ? { organizationId: pending.organizationId } : {}),
-    ...(pending.releaseCapability
-      ? { releaseCapability: pending.releaseCapability }
+		...(pending.organizationId
+			? { organizationId: pending.organizationId }
       : {}),
+		...(pending.releaseState ? { releaseState: pending.releaseState } : {}),
   };
   return Object.keys(options).length > 0 ? options : undefined;
 }
@@ -71,7 +71,7 @@ export function buildPendingToolExecutionOptions(
 export async function storePendingTool(
   requestId: string,
   invocation: PendingToolInvocation,
-  ttlSeconds: number
+	ttlSeconds: number,
 ): Promise<void> {
   const sql = getDb();
   const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
@@ -90,7 +90,7 @@ export async function storePendingTool(
  * this to validate caller identity before the destructive `takePendingTool`.
  */
 export async function getPendingTool(
-  requestId: string
+	requestId: string,
 ): Promise<PendingToolInvocation | null> {
   const sql = getDb();
   const rows = await sql`
@@ -102,7 +102,7 @@ export async function getPendingTool(
     LIMIT 1
   `;
   if (rows.length === 0) return null;
-  return ((rows[0] as { payload: PendingToolInvocation }).payload) ?? null;
+	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
 }
 
 /**
@@ -112,7 +112,7 @@ export async function getPendingTool(
  * click see null and no-op.
  */
 export async function takePendingTool(
-  requestId: string
+	requestId: string,
 ): Promise<PendingToolInvocation | null> {
   const sql = getDb();
   const rows = await sql`
@@ -123,5 +123,5 @@ export async function takePendingTool(
     RETURNING payload
   `;
   if (rows.length === 0) return null;
-  return ((rows[0] as { payload: PendingToolInvocation }).payload) ?? null;
+	return (rows[0] as { payload: PendingToolInvocation }).payload ?? null;
 }

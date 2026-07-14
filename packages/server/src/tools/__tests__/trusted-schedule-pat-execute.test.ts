@@ -49,7 +49,7 @@ describe("executeTool trusted schedule PAT boundary", () => {
 			conversationId: "conversation-trusted-1",
 			clientId: "lobu-worker",
 			personalReminderDeliveryIntent: true,
-			releaseCapability,
+			releaseState: { status: "active", claim: releaseCapability },
 		});
 		expect(toToolContext(auth)).toMatchObject({
 			userId: USER_ID,
@@ -57,7 +57,7 @@ describe("executeTool trusted schedule PAT boundary", () => {
 			conversationId: "conversation-trusted-1",
 			clientId: "lobu-worker",
 			personalReminderDeliveryIntent: true,
-			releaseCapability,
+			releaseState: { status: "active", claim: releaseCapability },
 		});
 	});
 
@@ -116,21 +116,27 @@ describe("executeTool trusted schedule PAT boundary", () => {
 			auth,
 		)) as { status: string; schedule: { id: string; state: string } };
 		expect(activated.status).toBe("active");
-		expect(activated.schedule).toMatchObject({ id: created.schedule.id, state: "active" });
+		expect(activated.schedule).toMatchObject({
+			id: created.schedule.id,
+			state: "active",
+		});
 	});
 
 	test.each([
-		["session", trustedPat({ tokenType: "session", tokenOrganizationId: null })],
-		["OAuth", trustedPat({ tokenType: "oauth", tokenOrganizationId: ORGANIZATION_ID })],
+		[
+			"session",
+			trustedPat({ tokenType: "session", tokenOrganizationId: null }),
+		],
+		[
+			"OAuth",
+			trustedPat({ tokenType: "oauth", tokenOrganizationId: ORGANIZATION_ID }),
+		],
 		["unverified PAT", trustedPat({ isAuthenticated: false })],
 		[
 			"PAT bound to another organization",
 			trustedPat({ tokenOrganizationId: "org-other" }),
 		],
-		[
-			"ordinary member PAT",
-			trustedPat({ scopes: ["mcp:read", "mcp:write"] }),
-		],
+		["ordinary member PAT", trustedPat({ scopes: ["mcp:read", "mcp:write"] })],
 	])("%s cannot execute staged schedule actions even with forged-looking context", async (_label, auth) => {
 		for (const args of [
 			{

@@ -14,7 +14,10 @@
  */
 export interface OAuthClientMetadata {
   redirect_uris: string[];
-  token_endpoint_auth_method?: 'none' | 'client_secret_post' | 'client_secret_basic';
+	token_endpoint_auth_method?:
+		| "none"
+		| "client_secret_post"
+		| "client_secret_basic";
   grant_types?: string[];
   response_types?: string[];
   client_name?: string;
@@ -75,7 +78,7 @@ export interface StoredOAuthClient {
  */
 export interface OAuthTokenResponse {
   access_token: string;
-  token_type: 'Bearer';
+	token_type: "Bearer";
   expires_in: number;
   refresh_token?: string;
   scope?: string;
@@ -86,7 +89,7 @@ export interface OAuthTokenResponse {
  */
 export interface StoredOAuthToken {
   id: string;
-  token_type: 'access' | 'refresh';
+	token_type: "access" | "refresh";
   token_hash: string;
   client_id: string;
   user_id: string;
@@ -132,11 +135,11 @@ export interface StoredAuthorizationCode {
 export interface AuthorizationParams {
   client_id: string;
   redirect_uri: string;
-  response_type: 'code';
+	response_type: "code";
   scope?: string;
   state?: string;
   code_challenge: string;
-  code_challenge_method: 'S256';
+	code_challenge_method: "S256";
   resource?: string; // RFC 8707
 }
 
@@ -145,9 +148,9 @@ export interface AuthorizationParams {
  */
 export interface TokenRequestParams {
   grant_type:
-    | 'authorization_code'
-    | 'refresh_token'
-    | 'urn:ietf:params:oauth:grant-type:device_code';
+		| "authorization_code"
+		| "refresh_token"
+		| "urn:ietf:params:oauth:grant-type:device_code";
   client_id: string;
   client_secret?: string;
   code?: string;
@@ -174,7 +177,7 @@ export interface StoredDeviceCode {
   resource: string | null;
   user_id: string | null;
   organization_id: string | null;
-  status: 'pending' | 'approved' | 'denied' | 'expired';
+	status: "pending" | "approved" | "denied" | "expired";
   poll_interval: number;
   expires_at: Date;
   created_at: Date;
@@ -206,7 +209,7 @@ export interface AuthInfo {
   scopes: string[];
   expiresAt: number; // Unix timestamp
   resource?: string;
-  tokenType: 'access_token' | 'pat';
+	tokenType: "access_token" | "pat";
   /**
    * Optional binding to a specific device_workers.worker_id. Set on PATs
    * minted via /api/me/devices/mint-child-token; the worker-poll handler
@@ -227,7 +230,7 @@ export interface AuthInfo {
   /** Gateway-verified per-call personal-reminder delivery contract. */
   personalReminderDeliveryIntent?: boolean;
   /** Verified bounded capability claim from a per-run worker token only. */
-  releaseCapability?: import('@lobu/core').ReleaseCapabilityClaim;
+	releaseState?: import("@lobu/core").ReleaseCapabilityState;
 }
 
 // ============================================

@@ -10,6 +10,7 @@ import {
   type McpStatus,
   type McpToolDef,
   type ResolvedCourseExecutionContext,
+  type ReleaseCapabilityState,
   type TrustedExecutionScope,
   verifyWorkerToken,
 } from "@lobu/core";
@@ -260,6 +261,7 @@ const DEFAULT_SESSION_CONTEXT = {
   toolboxPersonalAgentTools: [] as ToolboxPersonalAgentToolGroup[],
   userId: "",
   agentId: "",
+  releaseState: { status: "legacy_unenrolled" } as ReleaseCapabilityState,
 } as const;
 
 // Module-level cache for session context
@@ -274,6 +276,7 @@ let cachedResult: {
   toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[];
   userId: string;
   agentId: string;
+  releaseState: ReleaseCapabilityState;
   mcpExposure: "tools" | "cli";
   cachedAt: number;
   authorizationKey: string;
@@ -494,11 +497,16 @@ export async function getOpenClawSessionContext(
   toolboxPersonalAgentTools: ToolboxPersonalAgentToolGroup[];
   userId: string;
   agentId: string;
+  releaseState: ReleaseCapabilityState;
 }> {
   const mcpExposure: "tools" | "cli" = opts.mcpExposure ?? "tools";
   const workerToken = opts.workerToken ?? process.env.WORKER_TOKEN;
   const verifiedToken = workerToken ? verifyWorkerToken(workerToken) : null;
-  const capability = verifiedToken?.releaseCapability;
+  const releaseState: ReleaseCapabilityState = verifiedToken?.releaseState ?? {
+    status: "legacy_unenrolled",
+  };
+  const capability =
+    releaseState.status === "active" ? releaseState.claim : undefined;
   const authorizationKey = capability
     ? [
         capability.snapshotDigest,
@@ -507,7 +515,7 @@ export async function getOpenClawSessionContext(
         capability.toolboxUserId,
         capability.agentId,
       ].join("\0")
-    : `legacy:${verifiedToken?.userId ?? ""}:${verifiedToken?.agentId ?? ""}:${workerToken ?? ""}`;
+    : `${releaseState.status}:${releaseState.status === "enrolled_inactive" ? `${releaseState.environment}:${releaseState.reason}` : ""}:${verifiedToken?.userId ?? ""}:${verifiedToken?.agentId ?? ""}:${workerToken ?? ""}`;
   const configuredCacheTtl = Number.parseInt(
     process.env.SESSION_CONTEXT_CACHE_TTL_MS ?? "",
     10
@@ -623,6 +631,7 @@ export async function getOpenClawSessionContext(
       toolboxPersonalAgentTools,
       userId: data.userId || "",
       agentId: data.agentId || "",
+      releaseState,
     };
 
     // Don't cache if any authenticated MCP returned no tools — likely a

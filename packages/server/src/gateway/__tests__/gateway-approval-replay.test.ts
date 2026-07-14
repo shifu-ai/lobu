@@ -5,7 +5,10 @@ import {
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
 import { createGatewayApp } from "../cli/gateway.js";
-import { ensureDbForGatewayTests, resetTestDatabase } from "./helpers/db-setup.js";
+import {
+	ensureDbForGatewayTests,
+	resetTestDatabase,
+} from "./helpers/db-setup.js";
 
 const AUTH_TOKEN = "gateway-approval-test-token";
 
@@ -106,16 +109,19 @@ describe("CLI gateway pending-tool approval replay", () => {
         courseToolScope,
         expectedMcpIdentity,
         organizationId: "org-1",
-        releaseCapability,
+				releaseState: { status: "active", claim: releaseCapability },
       },
-      60
+			60,
     );
     const executeToolDirect = mock(async () => ({
       content: [{ type: "text", text: "created" }],
       isError: false,
     }));
 
-    const response = await approve(makeApp(executeToolDirect), "cli-reserved-success");
+		const response = await approve(
+			makeApp(executeToolDirect),
+			"cli-reserved-success",
+		);
 
     expect(response.status).toBe(200);
     expect(executeToolDirect).toHaveBeenCalledWith(
@@ -124,7 +130,13 @@ describe("CLI gateway pending-tool approval replay", () => {
       "shifu-toolbox",
       "create_automation",
       { prompt: "提醒 Irene" },
-      { courseToolScope, expectedMcpIdentity, channelId: "line-user-1", organizationId: "org-1", releaseCapability }
+			{
+				courseToolScope,
+				expectedMcpIdentity,
+				channelId: "line-user-1",
+				organizationId: "org-1",
+				releaseState: { status: "active", claim: releaseCapability },
+			},
     );
   });
 
@@ -145,7 +157,7 @@ describe("CLI gateway pending-tool approval replay", () => {
         channelId: "line-user-1",
         expectedMcpIdentity,
       },
-      60
+			60,
     );
     const mismatch = {
       content: [
@@ -159,7 +171,10 @@ describe("CLI gateway pending-tool approval replay", () => {
     };
     const executeToolDirect = mock(async () => mismatch);
 
-    const response = await approve(makeApp(executeToolDirect), "cli-reserved-stale");
+		const response = await approve(
+			makeApp(executeToolDirect),
+			"cli-reserved-stale",
+		);
 
     expect(response.status).toBe(200);
     expect(executeToolDirect).toHaveBeenCalledTimes(1);
@@ -169,7 +184,7 @@ describe("CLI gateway pending-tool approval replay", () => {
       "shifu-toolbox",
       "list_automations",
       {},
-      { expectedMcpIdentity, channelId: "line-user-1" }
+			{ expectedMcpIdentity, channelId: "line-user-1" },
     );
   });
 

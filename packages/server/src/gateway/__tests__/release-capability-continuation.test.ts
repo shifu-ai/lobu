@@ -18,17 +18,34 @@ function claim(overrides: Record<string, unknown> = {}) {
 
 describe("release capability continuation", () => {
   test("MCP session reuse clears a missing per-request claim", () => {
-    const current = { personalReminderDeliveryIntent: true, releaseCapability: claim() };
+		const current = {
+			personalReminderDeliveryIntent: true,
+			releaseState: { status: "active" as const, claim: claim() },
+		};
     refreshPerRequestCapabilityContext(current, {});
-    expect(current).toEqual({ personalReminderDeliveryIntent: false, releaseCapability: undefined });
+		expect(current).toEqual({
+			personalReminderDeliveryIntent: false,
+			releaseState: undefined,
+		});
   });
 
   test("expired approval loses capability before consulting durable state", async () => {
-    const readState = vi.fn(async () => ({ status: "active" as const, claim: claim() }));
-    await expect(validateApprovalReleaseCapability({
+		const readState = vi.fn(async () => ({
+			status: "active" as const,
+			claim: claim(),
+		}));
+		await expect(
+			validateApprovalReleaseCapability(
+				{
       organizationId: "org-1",
-      releaseCapability: claim({ expiresAt: new Date(Date.now() - 1).toISOString() }),
-    }, readState as never)).resolves.toBe(false);
+					releaseState: {
+						status: "active",
+						claim: claim({ expiresAt: new Date(Date.now() - 1).toISOString() }),
+					},
+				},
+				readState as never,
+			),
+		).resolves.toBe(false);
     expect(readState).not.toHaveBeenCalled();
   });
 
@@ -39,9 +56,15 @@ describe("release capability continuation", () => {
       expect(input.snapshot.appliedReleaseSequence).toBe(3);
       return { status: "enrolled_inactive" as const };
     });
-    await expect(validateApprovalReleaseCapability({
-      organizationId: "org-1", releaseCapability: original,
-    }, readState as never)).resolves.toBe(false);
+		await expect(
+			validateApprovalReleaseCapability(
+				{
+					organizationId: "org-1",
+					releaseState: { status: "active", claim: original },
+				},
+				readState as never,
+			),
+		).resolves.toBe(false);
     expect(readState).toHaveBeenCalledTimes(1);
   });
 });
