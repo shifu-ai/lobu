@@ -87,3 +87,8 @@ CREATE TABLE agent_release_feed_cursors (
     CONSTRAINT agent_release_feed_cursors_digest_check
         CHECK (highest_feed_digest ~ '^sha256:[0-9a-f]{64}$')
 );
+
+-- migrate:down
+
+DROP TABLE agent_release_feed_cursors;
+DROP TABLE agent_release_applies;
