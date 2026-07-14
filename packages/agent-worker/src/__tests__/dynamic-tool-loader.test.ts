@@ -17,6 +17,40 @@ function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("routes a personal reminder to manage_schedules in a crowded catalog", () => {
+    const cardStudioDistractors = Array.from({ length: 60 }, (_, index) =>
+      tool(`card_studio_distractor_${index + 1}`, {
+        description: "Create visual cards and media assets",
+      })
+    );
+
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        card_studio: cardStudioDistractors,
+        "lobu-memory": [
+          tool("manage_schedules", {
+            description:
+              "Create and manage delayed or recurring agent schedules.",
+          }),
+        ],
+        google_workspace: [
+          tool("gws_calendar_events_create", {
+            description: "Create an event in Google Calendar.",
+          }),
+        ],
+      },
+      message: "幫我建立一個5分鐘後提醒我吃午餐的排程",
+      budget: 12,
+    });
+
+    expect(result.trace.routerVersion).toBe("semantic-v1");
+    expect(result.trace.explicitDestinations).toContain("personal_reminder");
+    expect(result.trace.selectedToolNames).toContain(
+      "lobu-memory/manage_schedules"
+    );
+    expect(result.trace.clarificationRequired).toBe(false);
+  });
+
   test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
       tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
