@@ -157,16 +157,9 @@ describe("tool descriptors", () => {
 	});
 
 	test("fingerprints clones deterministically and searchable changes distinctly", () => {
-		const original = buildToolDescriptor(
-			tool("search_students", "Find enrolled students"),
-			"school",
-			1,
-		);
-		const clone = buildToolDescriptor(
-			structuredClone(original.tool),
-			"school",
-			1,
-		);
+		const source = tool("search_students", "Find enrolled students");
+		const original = buildToolDescriptor(source, "school", 1);
+		const clone = buildToolDescriptor(structuredClone(source), "school", 1);
 		const changed = buildToolDescriptor(
 			tool("search_students", "Find active enrolled students"),
 			"school",
@@ -257,9 +250,7 @@ describe("tool retrieval index", () => {
 		const index = buildToolRetrievalIndex([descriptor]);
 		const serializedLowerBound = Buffer.byteLength(
 			JSON.stringify({
-				descriptors: index.descriptors.map(
-					({ tool: _tool, ...searchable }) => searchable,
-				),
+				descriptors: index.descriptors,
 				documentFrequency: [...index.documentFrequency],
 				postings: [...index.postings],
 			}),
@@ -381,7 +372,7 @@ describe("tool retrieval index", () => {
 		);
 	});
 
-	test("deep-clones and freezes tool definitions in index snapshots", () => {
+	test("freezes compact searchable snapshots independently of source tools", () => {
 		const source = tool("search_students", "Original description", {
 			email: { type: "string", description: "Original email" },
 		});
@@ -397,12 +388,32 @@ describe("tool retrieval index", () => {
 			).email as { description: string }
 		).description = "Mutated email";
 
-		expect(index.descriptors[0]?.tool.description).toBe("Original description");
-		expect(Object.isFrozen(index.descriptors[0]?.tool)).toBe(true);
-		expect(Object.isFrozen(index.descriptors[0]?.tool.inputSchema)).toBe(true);
-		expect(
-			Object.isFrozen(index.descriptors[0]?.tool.inputSchema?.properties),
-		).toBe(true);
+		expect(index.descriptors[0]?.description).toBe("Original description");
+		expect(index.descriptors[0]?.parameterDescriptions).toEqual([
+			"Original email",
+		]);
+		expect(index.descriptors[0]).not.toHaveProperty("tool");
+		expect(Object.isFrozen(index.descriptors[0])).toBe(true);
+		expect(Object.isFrozen(index.descriptors[0]?.parameterDescriptions)).toBe(
+			true,
+		);
+	});
+
+	test("does not retain a huge non-searchable tool schema in the index", () => {
+		const source = tool("compact_tool", "Compact searchable description", {
+			payload: {
+				type: "string",
+				description: "Small searchable parameter description",
+				examples: ["x".repeat(17 * 1024 * 1024)],
+			},
+		});
+		const index = buildToolRetrievalIndex([
+			buildToolDescriptor(source, "large-schema-mcp", 0),
+		]);
+
+		expect(index.mode).toBe("inverted");
+		expect(index.estimatedBytes).toBeLessThan(16 * 1024 * 1024);
+		expect(index.descriptors[0]).not.toHaveProperty("tool");
 	});
 });
 

@@ -96,7 +96,6 @@ class ImmutableReadonlyMap<K, V> implements ReadonlyMap<K, V> {
 }
 
 function freezeDescriptor(descriptor: ToolDescriptor): ToolDescriptor {
-	const immutableTool = deepFreeze(structuredClone(descriptor.tool));
 	return Object.freeze({
 		...descriptor,
 		aliases: Object.freeze([...descriptor.aliases]),
@@ -106,18 +105,7 @@ function freezeDescriptor(descriptor: ToolDescriptor): ToolDescriptor {
 		destinations: Object.freeze([...descriptor.destinations]),
 		positiveExamples: Object.freeze([...descriptor.positiveExamples]),
 		negativeExamples: Object.freeze([...descriptor.negativeExamples]),
-		tool: immutableTool,
 	}) as ToolDescriptor;
-}
-
-function deepFreeze<T>(value: T, seen = new WeakSet<object>()): T {
-	if (typeof value !== "object" || value === null || seen.has(value))
-		return value;
-	seen.add(value);
-	for (const key of Reflect.ownKeys(value)) {
-		deepFreeze((value as Record<PropertyKey, unknown>)[key], seen);
-	}
-	return Object.freeze(value);
 }
 
 function tokenizedFields(
@@ -161,9 +149,8 @@ function tokenizedFields(
 }
 
 function estimateDescriptorBytes(descriptor: ToolDescriptor): number {
-	const { tool: _tool, ...retainedDescriptor } = descriptor;
 	return (
-		Buffer.byteLength(JSON.stringify(retainedDescriptor), "utf8") *
+		Buffer.byteLength(JSON.stringify(descriptor), "utf8") *
 			SERIALIZED_PAYLOAD_MULTIPLIER +
 		DESCRIPTOR_OBJECT_OVERHEAD_BYTES +
 		7 * ARRAY_OBJECT_OVERHEAD_BYTES

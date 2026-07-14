@@ -29,7 +29,6 @@ export interface ToolDescriptor {
 	priority: ToolPriority;
 	originalIndex: number;
 	indexedTextBytes: number;
-	tool: McpToolDef;
 }
 
 interface DescriptorOverride {
@@ -268,7 +267,6 @@ export function buildToolDescriptor(
 		priority: entry.priority,
 		originalIndex,
 		indexedTextBytes: 0,
-		tool,
 	};
 
 	boundSearchableText(descriptor);
@@ -277,10 +275,7 @@ export function buildToolDescriptor(
 
 export function inventoryFingerprint(descriptors: ToolDescriptor[]): string {
 	const inventory = descriptors.map(
-		(
-			{ tool: _tool, indexedTextBytes: _indexedTextBytes, ...descriptor },
-			position,
-		) => ({
+		({ indexedTextBytes: _indexedTextBytes, ...descriptor }, position) => ({
 			position,
 			...descriptor,
 		}),
