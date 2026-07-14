@@ -94,9 +94,13 @@ import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
 import {
   buildRuntimeToolCatalog,
+  filterMcpToolsForCliExposure,
+  isMcpToolEligibleForCliExposure,
   resolveDynamicToolBudget,
   selectMcpToolsByMcpForTurn,
 } from "./dynamic-tool-loader";
+import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
+import { buildCalendarResolverInstructions } from "./calendar-resolver-guidance";
 import {
   checkCompletionClaim,
   getRequiredBattleReportMutationTools,
@@ -110,8 +114,8 @@ import {
   guardDateOutput,
   isDateSensitiveTurn,
 } from "./date-output-guard";
-import { buildCurrentDateContext } from "./date-context";
-export { buildCurrentDateContext } from "./date-context";
+import { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
+export { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -522,12 +526,13 @@ export function buildLobuSystemPrompt(
   basePrompt: string | undefined,
   agentInstructions: string | undefined,
   finalInstructions: string | undefined,
-  now: Date = new Date()
+  now: Date = new Date(),
+  timeZone?: unknown
 ): string {
   const base = basePrompt || "";
   const identity = agentInstructions?.trim();
   const extra = finalInstructions?.trim();
-  const currentDateContext = buildCurrentDateContext(now);
+  const currentDateContext = buildCurrentDateContext(now, timeZone);
   const promptWithIdentity = identity
     ? replaceBasePromptIdentity(base, identity)
     : base;
@@ -1340,6 +1345,37 @@ export async function runAISession(
       | string[]
       | undefined,
   });
+  const trustedShifuToolboxOrigins = resolveTrustedShifuToolboxOrigins(
+    process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS
+  );
+  const provenanceFromStatuses = (statuses: typeof context.mcpStatus) =>
+    Object.fromEntries(
+      statuses.map((status) => [
+        status.id,
+        {
+          upstreamOrigin: status.upstreamOrigin,
+          configSource: status.configSource,
+          configDigest: status.configDigest,
+        },
+      ])
+    );
+  const buildCliRuntimeState = (snapshot: {
+    mcpTools: Record<string, McpToolDef[]>;
+    mcpStatus: typeof context.mcpStatus;
+    mcpContext: Record<string, string>;
+  }) => {
+    const mcpProvenanceById = provenanceFromStatuses(snapshot.mcpStatus);
+    return {
+      ...snapshot,
+      mcpTools: filterMcpToolsForCliExposure({
+        toolsByMcp: applyCapabilityLimitNotes(snapshot.mcpTools),
+        isToolAllowed: (toolName) =>
+          isToolAllowedByPolicy(toolName, toolsPolicy),
+        mcpProvenanceById,
+        trustedShifuToolboxOrigins,
+      }),
+    };
+  };
 
   // Build a mutable snapshot of MCP runtime state. The embedded CLI handlers
   // read through `mcpRuntimeRef.current` so that `auth check` / `logout` can
@@ -1347,11 +1383,28 @@ export async function runAISession(
   // fetches session context — `checkMcpLogin`/`logoutMcp` already invalidate
   // the gateway cache, so the next fetch reaches the gateway.
   const mcpRuntimeRef = {
-    current: {
-      mcpTools: applyCapabilityLimitNotes(context.mcpTools),
+    current: buildCliRuntimeState({
+      mcpTools: context.mcpTools,
       mcpStatus: context.mcpStatus,
       mcpContext: context.mcpContext,
-    },
+    }),
+    isToolInvocationAllowed: (
+      mcpId: string,
+      tool: McpToolDef,
+      state: {
+        mcpTools: Record<string, McpToolDef[]>;
+        mcpStatus: typeof context.mcpStatus;
+        mcpContext: Record<string, string>;
+      }
+    ) =>
+      isMcpToolEligibleForCliExposure({
+        tool,
+        mcpId,
+        isToolAllowed: (toolName) =>
+          isToolAllowedByPolicy(toolName, toolsPolicy),
+        mcpProvenanceById: provenanceFromStatuses(state.mcpStatus),
+        trustedShifuToolboxOrigins,
+      }),
     ...(mcpExposure === "cli" && {
       refresh: async () => {
         try {
@@ -1359,11 +1412,11 @@ export async function runAISession(
             mcpExposure,
             shifuTrace,
           });
-          return {
-            mcpTools: applyCapabilityLimitNotes(fresh.mcpTools),
+          return buildCliRuntimeState({
+            mcpTools: fresh.mcpTools,
             mcpStatus: fresh.mcpStatus,
             mcpContext: fresh.mcpContext,
-          };
+          });
         } catch (err) {
           logger.warn(
             `Failed to refresh MCP session context after auth: ${err instanceof Error ? err.message : String(err)}`
@@ -1555,6 +1608,7 @@ Use it when the user references past discussions or you need context.`);
   const dynamicToolBudget = resolveDynamicToolBudget(
     process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
+  const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
   let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;
 
   if (mcpExposure !== "cli") {
@@ -1562,6 +1616,9 @@ Use it when the user references past discussions or you need context.`);
       toolsByMcp: context.mcpTools,
       message: userPrompt,
       budget: dynamicToolBudget,
+      isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
     });
     selectedMcpToolsForTurn = selection.selectedTools;
     logger.info(
@@ -1595,6 +1652,7 @@ Use it when the user references past discussions or you need context.`);
         "ask_user posted — ending the turn so the model can't re-post."
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
+    mcpProvenanceById,
     shifuTrace,
   });
 
@@ -1611,6 +1669,8 @@ Use it when the user references past discussions or you need context.`);
       selectedTools: selectedMcpToolsForTurn,
       providerVisibleTools: {},
       allowedToolNames: catalogAllowedToolNames,
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1618,6 +1678,7 @@ Use it when the user references past discussions or you need context.`);
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
@@ -1651,6 +1712,8 @@ Use it when the user references past discussions or you need context.`);
       selectedTools: selectedMcpToolsForTurn,
       providerVisibleTools: projectedMcp.tools,
       allowedToolNames: catalogAllowedToolNames,
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1658,6 +1721,7 @@ Use it when the user references past discussions or you need context.`);
         userId: context.userId,
         workspaceDir,
         runtimeToolCatalog,
+        mcpProvenanceById,
         shifuTrace,
       }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
@@ -1698,7 +1762,7 @@ Use it when the user references past discussions or you need context.`);
       projectedMcp.tools,
       gwParams,
       context.mcpContext,
-      { shifuTrace }
+      { shifuTrace, mcpProvenanceById }
     );
     registeredMcpToolCount = mcpToolDefs.length;
     if (mcpToolDefs.length > 0) {
@@ -1707,6 +1771,20 @@ Use it when the user references past discussions or you need context.`);
         `Registered ${mcpToolDefs.length} MCP tool(s): ${mcpToolDefs.map((t) => t.name).join(", ")}`
       );
     }
+  }
+
+  const calendarResolverInstructions = buildCalendarResolverInstructions({
+    exposedTools:
+      mcpExposure === "cli" ? context.mcpTools : registeredDirectMcpTools,
+    mcpExposure,
+    mcpProvenanceById,
+    trustedShifuToolboxOrigins,
+    isToolAllowed: (toolName, mcpId) =>
+      isToolAllowedByPolicy(toolName, toolsPolicy) &&
+      Boolean(context.mcpTools[mcpId]?.some((tool) => tool.name === toolName)),
+  });
+  if (calendarResolverInstructions) {
+    instructionParts.push(calendarResolverInstructions);
   }
 
   // Load OpenClaw plugins. Inject the worker's bound agentId into the Lobu
@@ -1821,6 +1899,10 @@ Use it when the user references past discussions or you need context.`);
   const finalInstructionsUpdated = instructionParts
     .filter(Boolean)
     .join("\n\n");
+  const turnTimeZone = resolveTurnTimeZone(
+    isRecord(platformMetadata) ? platformMetadata.timeZone : undefined,
+    rawOptions.timeZone
+  );
 
   const turnNow = new Date();
   const resourceLoader = new DefaultResourceLoader({
@@ -1831,7 +1913,8 @@ Use it when the user references past discussions or you need context.`);
         base,
         context.agentInstructions,
         finalInstructionsUpdated,
-        turnNow
+        turnNow,
+        turnTimeZone
       ),
   });
   await resourceLoader.reload();

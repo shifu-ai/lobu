@@ -276,7 +276,8 @@ expect_grep "lobu agent update -c local" "Updated agent" "$PROJ" agent update sm
 expect_fail_grep "lobu agent update (no flags -> graceful)" "at least one" "$PROJ" agent update smoke-agent -c local
 # config get --output, then round-trip that config back through patch (always valid).
 expect_grep "lobu agent config get --output -c local" "Wrote" "$PROJ" agent config get smoke-agent -c local --output "$RUN_DIR/agent-config.json"
-expect_grep "lobu agent config patch -c local" "Updated config" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-config.json"
+node -e 'const fs=require("node:fs"); const src=process.argv[1]; const dst=process.argv[2]; const json=JSON.parse(fs.readFileSync(src,"utf8")); delete json.authProfiles; fs.writeFileSync(dst, JSON.stringify(json));' "$RUN_DIR/agent-config.json" "$RUN_DIR/agent-settings-config.json"
+expect_grep "lobu agent config patch -c local" "Updated config" "$PROJ" agent config patch smoke-agent -c local --file "$RUN_DIR/agent-settings-config.json"
 expect_fail_grep "lobu agent delete (no --yes -> graceful)" "Refusing to delete" "$PROJ" agent delete smoke-agent -c local
 expect_grep "lobu agent delete --yes -c local" "Deleted agent" "$PROJ" agent delete smoke-agent -c local --yes
 

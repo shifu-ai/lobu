@@ -19,6 +19,7 @@ import {
 import {
   authStash,
   chatManagerStash,
+  coreServicesStash,
   fakeRouteAgents,
   fakeRouteConnections,
   fakeRouteSettings,
@@ -155,6 +156,31 @@ async function seedAgent(orgId: string, agentId: string): Promise<void> {
   `;
 }
 
+async function seedManagedReleaseReceipt(
+  orgId: string,
+  agentId: string,
+  status: 'applying' | 'applied' | 'failed' = 'applied'
+): Promise<void> {
+  const { getDb } = await import('../../db/client.js');
+  const sql = getDb();
+  const digest = `sha256:${'a'.repeat(64)}`;
+  await sql`
+    INSERT INTO agent_release_applies (
+      organization_id, agent_id, environment,
+      desired_release_id, desired_release_sequence, desired_feed_sequence,
+      applied_release_id, applied_release_sequence, applied_feed_sequence,
+      applied_channel, applied_feed_digest, manifest_digest, status,
+      revision_ref, settings_hash
+    ) VALUES (
+      ${orgId}, ${agentId}, 'production',
+      'agent-2026.07.14.1', 1, 1,
+      'agent-2026.07.14.1', 1, 1,
+      'stable', ${digest}, ${digest}, ${status},
+      ${`lobu:${agentId}:agent-release:1`}, ${digest}
+    )
+  `;
+}
+
 describe('POST /agents — idempotent same-org create', () => {
   beforeEach(async () => {
     await resetTestDatabase();
@@ -276,6 +302,281 @@ describe('POST /agents — idempotent same-org create', () => {
     expect(rows).toHaveLength(2);
   });
 });
+
+describe('PATCH /:agentId/config — managed release fence', () => {
+  beforeEach(async () => {
+    await resetTestDatabase();
+    resetApplyRouteStores();
+    await seedOrg(ORG_A);
+    resetApplyAuth();
+  });
+
+  test('allows managed settings during bootstrap before the first applied release', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'managed-bootstrap-patch';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userMd: 'bootstrap user prompt' }),
+    });
+
+    expect(response.status).toBe(200);
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT user_md
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows[0]?.user_md).toBe('bootstrap user prompt');
+  });
+
+  test.each([
+    ['applying'],
+    ['failed'],
+  ] as const)('allows managed settings while a release receipt is %s', async (status) => {
+    const app = await importAgentRoutes();
+    const agentId = `managed-receipt-${status}`;
+    await seedAgent(ORG_A, agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId, status);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userMd: `${status} receipt update` }),
+    });
+
+    expect(response.status).toBe(200);
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT user_md
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows[0]?.user_md).toBe(`${status} receipt update`);
+  });
+
+  test.each([
+    ['identityMd', 'stale identity'],
+    ['soulMd', 'stale soul'],
+    ['userMd', 'stale user'],
+    ['modelSelection', { mode: 'pinned', pinnedModel: 'openai/stale' }],
+    ['toolsConfig', { strictMode: false }],
+  ])('rejects release-owned %s after a managed release receipt exists', async (key, value) => {
+    const app = await importAgentRoutes();
+    const agentId = `managed-${String(key).toLowerCase()}`;
+    await seedAgent(ORG_A, agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ [key]: value }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_settings_managed_by_release',
+      error_description:
+        'Agent release-owned settings must be changed through managed release apply',
+    });
+  });
+
+  test('allows a non-managed patch without replaying stale release-owned settings', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'managed-non-owned-patch';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET user_md = 'release user',
+          mcp_servers = ${sql.json({ existing: { url: 'https://old.example' } })}
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    await seedManagedReleaseReceipt(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        mcpServers: { current: { url: 'https://current.example' } },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const rows = await sql`
+      SELECT user_md, mcp_servers
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows[0]?.user_md).toBe('release user');
+    expect(rows[0]?.mcp_servers).toEqual({
+      current: { url: 'https://current.example' },
+    });
+  });
+});
+
+describe('PATCH /:agentId/config — mixed settings and auth profiles', () => {
+  const oldMcpServers = { existing: { url: 'https://old.example' } };
+  const mixedBody = {
+    mcpServers: { changed: { url: 'https://changed.example' } },
+    authProfiles: [
+      {
+        id: 'profile-1',
+        provider: 'openai',
+        credential: 'secret-key',
+        authType: 'api-key',
+      },
+    ],
+  };
+
+  beforeEach(async () => {
+    await resetTestDatabase();
+    resetApplyRouteStores();
+    await seedOrg(ORG_A);
+    resetApplyAuth();
+    coreServicesStash.services = null;
+  });
+
+  async function seedMixedPatchAgent(agentId: string) {
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET mcp_servers = ${sql.json(oldMcpServers)}
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    return sql;
+  }
+
+  async function expectSplitRequired(response: Response) {
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_settings_auth_profiles_split_required',
+      error_description:
+        'Agent settings and authProfiles must be updated in separate requests',
+    });
+  }
+
+  test('rejects an admin PAT mixed request before settings or credential mutation', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-admin-pat';
+    const sql = await seedMixedPatchAgent(agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+    });
+    authStash.user = null;
+    authStash.authSource = 'pat';
+    authStash.mcpAuthInfo = { scopes: ['mcp:admin'] };
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mixedBody),
+    });
+
+    await expectSplitRequired(response);
+    expect(upsertCalls).toBe(0);
+    expect((await sql`SELECT mcp_servers FROM agents WHERE id = ${agentId}`)[0]?.mcp_servers).toEqual(
+      oldMcpServers
+    );
+  });
+
+  test('rejects a mixed request when the auth-profile manager is missing without changing settings', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-manager-missing';
+    const sql = await seedMixedPatchAgent(agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mixedBody),
+    });
+
+    await expectSplitRequired(response);
+    expect((await sql`SELECT mcp_servers FROM agents WHERE id = ${agentId}`)[0]?.mcp_servers).toEqual(
+      oldMcpServers
+    );
+  });
+
+  test('rejects a mixed request before a failing auth-profile manager can create side effects', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-manager-failing';
+    const sql = await seedMixedPatchAgent(agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+      throw new Error('credential store unavailable');
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(mixedBody),
+    });
+
+    await expectSplitRequired(response);
+    expect(upsertCalls).toBe(0);
+    expect((await sql`SELECT mcp_servers FROM agents WHERE id = ${agentId}`)[0]?.mcp_servers).toEqual(
+      oldMcpServers
+    );
+  });
+
+  test('rejects a mixed request for an applied release before credential side effects', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'mixed-applied-release';
+    await seedMixedPatchAgent(agentId);
+    await seedManagedReleaseReceipt(ORG_A, agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...mixedBody, userMd: 'stale managed prompt' }),
+    });
+
+    await expectSplitRequired(response);
+    expect(upsertCalls).toBe(0);
+  });
+
+  test('preserves authProfiles-only updates', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'auth-profiles-only';
+    await seedMixedPatchAgent(agentId);
+    let upsertCalls = 0;
+    coreServicesStash.services = authProfileServices(async () => {
+      upsertCalls += 1;
+    });
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ authProfiles: mixedBody.authProfiles }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upsertCalls).toBe(1);
+  });
+});
+
+function authProfileServices(upsertProfile: () => Promise<void>) {
+  return {
+    getAuthProfilesManager: () => ({
+      getUserAuthProfileStore: () => ({
+        list: async () => [],
+        remove: async () => {},
+      }),
+      upsertProfile,
+    }),
+  };
+}
 
 describe('PUT /agents/:agentId/platforms/by-stable-id/:stableId', () => {
   beforeEach(async () => {

@@ -36,6 +36,7 @@ import {
   type ProjectedMcpToolDef,
 } from "./mcp-tool-projection";
 import type { ToolboxPersonalAgentToolGroup } from "./session-context";
+import type { McpCatalogProvenanceById } from "./tool-catalog";
 import {
   dispatchRuntimeToolCall,
   searchRuntimeToolCatalog,
@@ -328,6 +329,7 @@ export function createOpenClawCustomTools(params: {
   toolboxPersonalAgentTools?: ToolboxPersonalAgentToolGroup[];
   runtimeToolCatalog?: RuntimeToolCatalogEntry[];
   runtimeToolCaller?: RuntimeToolCaller;
+  mcpProvenanceById?: McpCatalogProvenanceById;
   shifuTrace?: WorkerShifuTraceContext;
 }): ToolDefinition[] {
   const gw: GatewayParams = {
@@ -606,6 +608,7 @@ export function createOpenClawCustomTools(params: {
       ((mcpId, toolName, args) =>
         callMcpTool(gw, mcpId, toolName, args, {
           shifuTrace: params.shifuTrace,
+          expectedMcpIdentity: params.mcpProvenanceById?.[mcpId],
         }));
     tools.push(
       createToolSearchDefinition(params.runtimeToolCatalog),
@@ -654,7 +657,10 @@ export function createMcpToolDefinitions(
   mcpTools: Record<string, McpToolDef[]>,
   gw: GatewayParams,
   mcpContext?: Record<string, string>,
-  options?: { shifuTrace?: WorkerShifuTraceContext }
+  options?: {
+    shifuTrace?: WorkerShifuTraceContext;
+    mcpProvenanceById?: McpCatalogProvenanceById;
+  }
 ): ToolDefinition[] {
   const tools: ToolDefinition[] = [];
   const registeredNames = new Set<string>();
@@ -706,7 +712,10 @@ export function createMcpToolDefinitions(
             mcpId,
             upstreamToolName,
             (args || {}) as Record<string, unknown>,
-            { shifuTrace: options?.shifuTrace }
+            {
+              shifuTrace: options?.shifuTrace,
+              expectedMcpIdentity: options?.mcpProvenanceById?.[mcpId],
+            }
           );
         } catch (error) {
           if (options?.shifuTrace) {

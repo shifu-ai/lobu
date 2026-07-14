@@ -19,6 +19,7 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { RESERVED_AUTOMATION_TOOL_NAMES } from "@lobu/core";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
 import { emitWorkerToolsRegisteredObsEvent } from "../openclaw/session-runner";
 import {
@@ -120,6 +121,40 @@ describe("callMcpTool", () => {
     expect(extractText(result)).toBe("the answer");
     expect(capturedUrl).toBe("http://gateway/mcp/lobu/tools/search_memory");
     expect(capturedAuth).toBe("Bearer tok-abc");
+  });
+
+  test.each(
+    RESERVED_AUTOMATION_TOOL_NAMES
+  )("binds the discovery config identity to fake gateway call for %s", async (toolName) => {
+    let capturedHeaders = new Headers();
+    globalThis.fetch = mock(async (_input, init) => {
+      capturedHeaders = new Headers(init?.headers);
+      return Response.json({ content: [{ type: "text", text: "ok" }] });
+    }) as unknown as typeof fetch;
+
+    await callMcpTool(
+      gw,
+      "shifu-toolbox",
+      toolName,
+      {},
+      {
+        expectedMcpIdentity: {
+          upstreamOrigin: "https://mcp.shifu-ai.org",
+          configSource: "agent",
+          configDigest: "digest-123",
+        },
+      }
+    );
+
+    expect(capturedHeaders.get("x-lobu-mcp-expected-origin")).toBe(
+      "https://mcp.shifu-ai.org"
+    );
+    expect(capturedHeaders.get("x-lobu-mcp-expected-config-source")).toBe(
+      "agent"
+    );
+    expect(capturedHeaders.get("x-lobu-mcp-expected-config-digest")).toBe(
+      "digest-123"
+    );
   });
 
   test("isError=true from proxy: wrapped in Error prefix", async () => {

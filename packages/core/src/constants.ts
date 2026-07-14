@@ -27,6 +27,26 @@ export const TIME = {
  */
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 
+/**
+ * Automation MCP names that may mutate or expose a user's scheduled work.
+ * Worker discovery and gateway execution both consume this single contract so
+ * a newly protected operation cannot be omitted at one trust boundary.
+ */
+export const RESERVED_AUTOMATION_TOOL_NAMES = [
+  "plan_automation",
+  "create_automation",
+  "list_automations",
+  "cancel_automation",
+] as const;
+
+const RESERVED_AUTOMATION_TOOL_NAME_SET = new Set<string>(
+  RESERVED_AUTOMATION_TOOL_NAMES
+);
+
+export function isReservedAutomationToolName(name: string): boolean {
+  return RESERVED_AUTOMATION_TOOL_NAME_SET.has(name);
+}
+
 // Default configuration values
 export const DEFAULTS = {
   /** Default session TTL in milliseconds */

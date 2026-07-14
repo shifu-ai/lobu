@@ -1,6 +1,8 @@
 import { createLogger } from "@lobu/core";
 import {
+  buildPendingToolExecutionOptions,
   takePendingTool,
+  type PendingToolExecutionOptions,
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
 import type {
@@ -28,7 +30,8 @@ type ExecuteToolDirectFn = (
   userId: string,
   mcpId: string,
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  options?: PendingToolExecutionOptions
 ) => Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
@@ -830,14 +833,24 @@ export function registerActionHandlers(
       // Execute the pending tool call
       if (executeToolDirect) {
         try {
+          const options = buildPendingToolExecutionOptions(pending);
           const execute = () =>
-            executeToolDirect(
-              pending.agentId,
-              pending.userId,
-              pending.mcpId,
-              pending.toolName,
-              pending.args
-            );
+            options
+              ? executeToolDirect(
+                  pending.agentId,
+                  pending.userId,
+                  pending.mcpId,
+                  pending.toolName,
+                  pending.args,
+                  options
+                )
+              : executeToolDirect(
+                  pending.agentId,
+                  pending.userId,
+                  pending.mcpId,
+                  pending.toolName,
+                  pending.args
+                );
           const result = connection.organizationId
             ? await orgContext.run(
                 { organizationId: connection.organizationId },

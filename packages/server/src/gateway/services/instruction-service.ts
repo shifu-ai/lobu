@@ -21,6 +21,9 @@ interface McpStatus {
   name: string;
   requiresAuth: boolean;
   requiresInput: boolean;
+  upstreamOrigin: string;
+  configSource: "global" | "agent" | "derived";
+  configDigest: string;
 }
 
 interface SessionContextData {

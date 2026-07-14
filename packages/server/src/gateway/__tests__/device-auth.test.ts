@@ -207,6 +207,7 @@ describe("device auth secret storage", () => {
     );
     expect(credential?.accessToken).toBe("access-token-123");
     expect(credential?.refreshToken).toBe("refresh-token-456");
+    expect(credential?.bindingId).toMatch(/^[0-9a-f-]{36}$/);
 
     // Sanity: the only entries left are the issued credential and the cached
     // dynamic-client registration.

@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
 import {
   buildMcpCliCommands,
@@ -12,6 +12,12 @@ import {
 } from "../embedded/mcp-cli-commands";
 import { applyCapabilityLimitNotes } from "../openclaw/mcp-tool-projection";
 import type { GatewayParams } from "../shared/tool-implementations";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 const gw: GatewayParams = {
   gatewayUrl: "http://gateway",
@@ -41,6 +47,32 @@ const lobuTool: McpToolDef = {
     required: ["query"],
   },
 };
+
+const planAutomationTool: McpToolDef = {
+  name: "plan_automation",
+  description: "Plan an automation",
+  inputSchema: { type: "object", properties: {} },
+};
+
+const calendarResolverTool: McpToolDef = {
+  name: "resolve_calendar_date",
+  description: "Resolve a calendar date",
+  inputSchema: { type: "object", properties: {} },
+};
+
+function trustedToolboxStatus(configDigest: string) {
+  return {
+    id: "shifu-toolbox",
+    name: "ShiFu Toolbox",
+    requiresAuth: false,
+    requiresInput: false,
+    authenticated: true,
+    configured: true,
+    upstreamOrigin: "https://mcp.shifu-ai.org",
+    configSource: "agent" as const,
+    configDigest,
+  };
+}
 
 describe("parsePayload", () => {
   test("empty stdin and no inline arg yields empty object", () => {
@@ -103,6 +135,112 @@ describe("isMcpIdReserved", () => {
 });
 
 describe("buildMcpServerHandler", () => {
+  test("passes the exact discovered identity for trusted reserved automation calls", async () => {
+    const ref = makeRef({
+      mcpTools: { "shifu-toolbox": [planAutomationTool] },
+      mcpStatus: [trustedToolboxStatus("digest-v1")],
+    });
+    const identities: unknown[] = [];
+    const handler = buildMcpServerHandler("shifu-toolbox", ref, gw, {
+      callTool: async (_gw, _mcpId, _toolName, _payload, options) => {
+        identities.push(options?.expectedMcpIdentity);
+        return { content: [] };
+      },
+    });
+
+    expect((await handler(["plan_automation"], { stdin: "{}" })).exitCode).toBe(
+      0
+    );
+    expect(identities).toEqual([
+      {
+        upstreamOrigin: "https://mcp.shifu-ai.org",
+        configSource: "agent",
+        configDigest: "digest-v1",
+      },
+    ]);
+  });
+
+  test("uses the refreshed discovery identity on the next CLI call", async () => {
+    const ref = makeRef({
+      mcpTools: { "shifu-toolbox": [planAutomationTool] },
+      mcpStatus: [trustedToolboxStatus("digest-v1")],
+    });
+    const digests: Array<string | undefined> = [];
+    const handler = buildMcpServerHandler("shifu-toolbox", ref, gw, {
+      callTool: async (_gw, _mcpId, _toolName, _payload, options) => {
+        digests.push(options?.expectedMcpIdentity?.configDigest);
+        return { content: [] };
+      },
+    });
+
+    await handler(["plan_automation"], { stdin: "{}" });
+    ref.current = {
+      ...ref.current,
+      mcpStatus: [trustedToolboxStatus("digest-v2")],
+    };
+    await handler(["plan_automation"], { stdin: "{}" });
+
+    expect(digests).toEqual(["digest-v1", "digest-v2"]);
+  });
+
+  test("fails closed when the calendar gateway identity changed after CLI discovery", async () => {
+    const ref = makeRef({
+      mcpTools: { "shifu-toolbox": [calendarResolverTool] },
+      mcpStatus: [trustedToolboxStatus("stale-discovery-digest")],
+    });
+    let capturedDigest: string | null = null;
+    globalThis.fetch = mock(async (_input, init) => {
+      capturedDigest = new Headers(init?.headers).get(
+        "x-lobu-mcp-expected-config-digest"
+      );
+      return Response.json(
+        {
+          error: "MCP configuration identity changed after discovery",
+          diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
+        },
+        { status: 409 }
+      );
+    }) as unknown as typeof fetch;
+    const handler = buildMcpServerHandler("shifu-toolbox", ref, gw);
+
+    const result = await handler(["resolve_calendar_date"], { stdin: "{}" });
+
+    expect(capturedDigest).toBe("stale-discovery-digest");
+    expect(result.stdout).toContain("Error:");
+    expect(result.stdout).toContain("identity changed after discovery");
+    expect(result.stdout).not.toContain("completed");
+  });
+
+  test("revalidates the CLI exposure policy for help, schema, and call", async () => {
+    let allowed = false;
+    const ref = makeRef({ mcpTools: { lobu: [lobuTool] } });
+    ref.isToolInvocationAllowed = (mcpId, tool) =>
+      allowed && mcpId === "lobu" && tool.name === "search_memory";
+    let calls = 0;
+    const handler = buildMcpServerHandler("lobu", ref, gw, {
+      callTool: async () => {
+        calls++;
+        return { content: [] };
+      },
+    });
+
+    const deniedHelp = await handler(["--help"], {});
+    expect(deniedHelp.stdout).not.toContain("search_memory");
+    expect((await handler(["search_memory", "--schema"], {})).exitCode).toBe(2);
+    expect((await handler(["search_memory"], { stdin: "{}" })).exitCode).toBe(
+      2
+    );
+    expect(calls).toBe(0);
+
+    allowed = true;
+    expect((await handler(["--help"], {})).stdout).toContain("search_memory");
+    expect((await handler(["search_memory", "--schema"], {})).exitCode).toBe(0);
+    expect((await handler(["search_memory"], { stdin: "{}" })).exitCode).toBe(
+      0
+    );
+    expect(calls).toBe(1);
+  });
+
   test("--help lists tools and usage", async () => {
     const ref = makeRef({
       mcpTools: { lobu: [lobuTool] },
