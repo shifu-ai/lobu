@@ -12,6 +12,8 @@ import {
 	buildPendingToolExecutionOptions,
 	getPendingTool,
 	takePendingTool,
+	stableReleaseAuthorizationDigest,
+	stableToolEligibilityDigest,
 } from "./pending-tool-store.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
@@ -55,6 +57,9 @@ export interface ToolApprovalGlobalStatusInput {
 }
 
 interface McpProxyDirectExecution {
+  revalidatePendingToolEligibility?(
+    pending: import("./pending-tool-store.js").PendingToolInvocation,
+  ): Promise<boolean>;
   executeToolDirect(
     agentId: string,
     userId: string,
@@ -90,6 +95,9 @@ export interface ToolApprovalServiceDeps {
   organizationId?: string;
   resolveReleaseSnapshot?: typeof resolveRuntimeCapabilitySnapshot;
   readReleaseState?: typeof readAgentReleaseCapabilityState;
+  revalidateEligibility?: (
+    pending: import("./pending-tool-store.js").PendingToolInvocation,
+  ) => Promise<boolean>;
 }
 
 export function isPendingReleaseBindingCurrent(
@@ -100,12 +108,13 @@ export function isPendingReleaseBindingCurrent(
   const binding = pending.releaseBinding;
   if (!binding || current.status !== "active") return false;
   return Date.parse(binding.authorizationExpiresAt) > now.getTime() &&
+    Date.parse(current.claim.expiresAt) > now.getTime() &&
     current.claim.agentId === pending.agentId &&
     current.claim.toolboxUserId === pending.userId &&
     current.claim.releaseId === binding.releaseId &&
     current.claim.releaseSequence === binding.releaseSequence &&
-    current.claim.snapshotDigest === binding.snapshotDigest &&
-    current.claim.expiresAt === binding.authorizationExpiresAt &&
+    stableReleaseAuthorizationDigest(current.claim) ===
+      binding.stableAuthorizationDigest &&
     current.claim.capabilityIds.includes(
       "semantic_tool_router.effective_inventory.v1",
     );
@@ -132,6 +141,17 @@ async function revalidateReleaseBinding(
     claim.releaseSequence !== binding.releaseSequence ||
     claim.snapshotDigest !== binding.snapshotDigest ||
     claim.expiresAt !== binding.authorizationExpiresAt ||
+    stableReleaseAuthorizationDigest(claim) !==
+      binding.stableAuthorizationDigest ||
+    stableToolEligibilityDigest({
+      mcpId: pending.mcpId,
+      toolName: pending.toolName,
+      connectionId: pending.connectionId,
+      expectedMcpIdentity: pending.expectedMcpIdentity,
+      courseToolScope: pending.courseToolScope,
+      effectiveInventoryFingerprint: binding.effectiveInventoryFingerprint,
+      stableAuthorizationDigest: binding.stableAuthorizationDigest,
+    }) !== binding.eligibilityBindingDigest ||
     !claim.capabilityIds.includes(
       "semantic_tool_router.effective_inventory.v1",
     )
@@ -154,7 +174,35 @@ async function revalidateReleaseBinding(
     environment: claim.environment,
     snapshot,
   });
-  return isPendingReleaseBindingCurrent(pending, current);
+  return isPendingReleaseBindingCurrent(
+    pending,
+    current as ReleaseCapabilityState,
+  );
+}
+
+export async function validatePendingToolContinuation(
+  pending: import("./pending-tool-store.js").PendingToolInvocation,
+  organizationId: string,
+  deps: Partial<Pick<
+    ToolApprovalServiceDeps,
+    "resolveReleaseSnapshot" | "readReleaseState" | "revalidateEligibility" | "mcpProxy"
+  >> = {},
+): Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }> {
+  if (!pending.releaseBinding) return { valid: true };
+  const valid = await revalidateReleaseBinding(
+    pending,
+    organizationId,
+    deps,
+  ).catch(() => false);
+  const eligible = valid
+    ? await (
+        deps.revalidateEligibility ??
+        deps.mcpProxy?.revalidatePendingToolEligibility?.bind(deps.mcpProxy)
+      )?.(pending).catch(() => false)
+    : false;
+  return valid && eligible === true
+    ? { valid: true }
+    : { valid: false, diagnosticCode: "approval_inventory_stale" };
 }
 
 function organizationIdFor(
@@ -199,12 +247,12 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       if (candidate.releaseBinding) {
         const organizationId = organizationIdFor(input, deps.organizationId);
         if (!organizationId) return { status: "forbidden" };
-        const isCurrent = await revalidateReleaseBinding(
+        const validation = await validatePendingToolContinuation(
           candidate,
           organizationId,
           deps,
-        ).catch(() => false);
-        if (!isCurrent) {
+        );
+        if (!validation.valid) {
           await takePendingTool(input.approvalId);
           return {
             status: "stale",

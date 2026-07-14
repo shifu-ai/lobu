@@ -12,6 +12,19 @@ import {
 } from "@lobu/core";
 import type { Context } from "hono";
 import { Hono } from "hono";
+
+export function isToolNameAllowedByToolsConfig(
+  toolName: string,
+  toolsConfig: import("@lobu/core").ToolsConfig | undefined,
+): boolean {
+  const matches = (pattern: string) => {
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`^${escaped.replaceAll("*", ".*")}$`, "i").test(toolName);
+  };
+  if ((toolsConfig?.deniedTools ?? []).some(matches)) return false;
+  return toolsConfig?.strictMode !== true ||
+    (toolsConfig.allowedTools ?? []).some(matches);
+}
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
@@ -41,7 +54,11 @@ import { getRevokedTokenStore } from "../revoked-token-store.js";
 import type { AgentSettingsStore } from "../settings/agent-settings-store.js";
 import { computeMcpConfigDigest } from "./config-service.js";
 import { startAuthCodeFlow } from "./oauth-flow.js";
-import { storePendingTool } from "./pending-tool-store.js";
+import {
+	stableReleaseAuthorizationDigest,
+	stableToolEligibilityDigest,
+	storePendingTool,
+} from "./pending-tool-store.js";
 import { McpServerHealth } from "./server-health.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
 
@@ -768,6 +785,63 @@ function extractSessionToken(c: Context): string | null {
 }
 
 export class McpProxy {
+  async revalidatePendingToolEligibility(
+    pending: import("./pending-tool-store.js").PendingToolInvocation,
+  ): Promise<boolean> {
+    if (!this.agentSettingsStore || !this.guardrailRegistry) return false;
+    let settings;
+    try {
+      settings = await this.agentSettingsStore.getSettings(pending.agentId);
+    } catch {
+      return false;
+    }
+    if (!settings) return false;
+    if (!isToolNameAllowedByToolsConfig(
+      pending.toolName,
+      settings.toolsConfig,
+    )) return false;
+    if (await this.runPreToolGuardrails(
+      pending.agentId,
+      {
+        userId: pending.userId,
+        conversationId: pending.conversationId,
+        organizationId: pending.organizationId,
+      },
+      pending.toolName,
+      pending.args,
+    )) return false;
+    const coursePolicy = applyTrustedCourseToolPolicy(
+      pending.toolName,
+      pending.args,
+      pending.courseToolScope,
+    );
+    if (!coursePolicy.ok) return false;
+    const httpServer = await this.configService.getHttpServer(
+      pending.mcpId,
+      pending.agentId,
+    );
+    if (!httpServer) return false;
+    const scopeKey = this.computeScopeKey(
+      httpServer,
+      pending.userId,
+      pending.channelId,
+    );
+    const identityConfig = await this.bindCredentialIdentity(
+      httpServer,
+      pending.agentId,
+      scopeKey,
+    );
+    if (
+      pending.expectedMcpIdentity &&
+      !matchesExpectedMcpConfig(identityConfig, pending.expectedMcpIdentity)
+    ) return false;
+    const discovery = await this.listToolsDirect(
+      pending.agentId,
+      pending.userId,
+      pending.mcpId,
+    );
+    return discovery.tools.some((tool) => tool.name === pending.toolName);
+  }
   private readonly SESSION_TTL_SECONDS = 30 * 60; // 30 minutes
   // Tool-approval cards may sit in-thread for a long time before the user
   // actually clicks (Slack notifications, async review, etc.). The pending
@@ -3166,6 +3240,21 @@ export class McpProxy {
 								verifiedRun.releaseState.claim.snapshotDigest,
 							authorizationExpiresAt:
 								verifiedRun.releaseState.claim.expiresAt,
+							stableAuthorizationDigest: stableReleaseAuthorizationDigest(
+								verifiedRun.releaseState.claim,
+							),
+							eligibilityBindingDigest: stableToolEligibilityDigest({
+								mcpId,
+								toolName,
+								connectionId: tokenData.connectionId,
+								expectedMcpIdentity: tokenData.expectedMcpIdentity,
+								courseToolScope: tokenData.courseToolScope,
+								effectiveInventoryFingerprint:
+									tokenData.effectiveToolInventoryFingerprint!,
+								stableAuthorizationDigest: stableReleaseAuthorizationDigest(
+									verifiedRun.releaseState.claim,
+								),
+							}),
 						},
 					}
 					: {}),

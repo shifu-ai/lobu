@@ -30,7 +30,7 @@ export interface ToolCandidateScore {
 
 export interface ToolRouteDecision {
   routerVersion: "semantic-v1";
-  inventoryFingerprint: string;
+  inventoryFingerprint?: string;
   cacheHit: boolean;
   estimatedIndexBytes: number;
   cacheEvictionCount: number;

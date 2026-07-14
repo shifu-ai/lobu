@@ -6,6 +6,7 @@ import { catalogEntryForTool } from "../openclaw/tool-catalog";
 import { buildToolDescriptor } from "../openclaw/tool-descriptor";
 import {
   clearToolInventorySnapshotCacheForTests,
+  snapshotToolsByMcp,
   toolInventorySnapshotCacheStats,
 } from "../openclaw/tool-inventory-snapshot";
 import {
@@ -60,8 +61,11 @@ describe("semantic tool router repeatable performance guard", () => {
         syntheticTool(index)
       ),
     };
+    snapshotToolsByMcp(toolsByMcp);
     const before = toolRetrievalIndexCacheStats();
+    const retainedBefore = toolRouterRetainedMemoryStats();
     let emitted: unknown;
+    const skipStartedAt = performance.now();
     const ack = initializeExternalTurnToolRouting(
       {
         toolsByMcp,
@@ -80,8 +84,11 @@ describe("semantic tool router repeatable performance guard", () => {
     expect(ack.selection.trace.semanticLookupSkippedReason).toBe(
       "definite_non_tool"
     );
+    expect(ack.selection.trace.inventoryFingerprint).toBeUndefined();
+    expect(performance.now() - skipStartedAt).toBeLessThan(50);
     expect(JSON.stringify(emitted)).not.toContain("收到，謝謝");
     expect(toolRetrievalIndexCacheStats().misses).toBe(before.misses);
+    expect(toolRouterRetainedMemoryStats()).toEqual(retainedBefore);
 
     initializeExternalTurnToolRouting(
       {
@@ -96,6 +103,33 @@ describe("semantic tool router repeatable performance guard", () => {
     expect(toolRetrievalIndexCacheStats().misses).toBeGreaterThan(
       before.misses
     );
+
+    for (const message of ["谢谢！", "ありがとうございます", "감사합니다"]) {
+      const routed = initializeExternalTurnToolRouting(
+        {
+          toolsByMcp,
+          message,
+          budget: 12,
+          routerMode: "semantic",
+          trace: parseWorkerShifuTrace({}),
+        },
+        { emitEvent: () => undefined }
+      );
+      expect(routed.selection.trace.semanticComputed).toBe(false);
+    }
+    for (const message of ["⏰", "📅", "🔔", "🔍", "📝", "📧"]) {
+      const routed = initializeExternalTurnToolRouting(
+        {
+          toolsByMcp,
+          message,
+          budget: 12,
+          routerMode: "semantic",
+          trace: parseWorkerShifuTrace({}),
+        },
+        { emitEvent: () => undefined }
+      );
+      expect(routed.selection.trace.semanticComputed).toBe(true);
+    }
   });
   for (const size of [100, 500, 1_000, 2_000]) {
     test(`external-turn lifecycle guard at ${size} tools; CI ceiling is not the product SLO`, () => {

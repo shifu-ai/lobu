@@ -8,6 +8,8 @@
 import { getDb } from "../../../db/client.js";
 import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
 import type { ReleaseCapabilityState } from "@lobu/core";
+import { createHash } from "node:crypto";
+import { canonicalize } from "json-canonicalize";
 
 const SCOPE = "pending-tool";
 
@@ -38,6 +40,8 @@ export interface PendingToolInvocation {
 		releaseSequence: number;
 		snapshotDigest: string;
 		authorizationExpiresAt: string;
+		stableAuthorizationDigest: string;
+		eligibilityBindingDigest: string;
 	};
 	/** Bounded non-secret identity used to re-sign an internal approval replay. */
 	originalRunIdentity?: {
@@ -45,6 +49,43 @@ export interface PendingToolInvocation {
 		deploymentName: string;
 	};
 	personalReminderDeliveryIntent?: true;
+}
+
+export function stableToolEligibilityDigest(input: {
+	mcpId: string;
+	toolName: string;
+	connectionId?: string;
+	expectedMcpIdentity?: PendingToolInvocation["expectedMcpIdentity"];
+	courseToolScope?: TrustedCourseToolScope;
+	effectiveInventoryFingerprint: string;
+	stableAuthorizationDigest: string;
+}): string {
+	return createHash("sha256")
+		.update(canonicalize({
+			mcpId: input.mcpId,
+			toolName: input.toolName,
+			connectionId: input.connectionId ?? null,
+			expectedMcpIdentity: input.expectedMcpIdentity ?? null,
+			courseToolScope: input.courseToolScope ?? null,
+			effectiveInventoryFingerprint: input.effectiveInventoryFingerprint,
+			stableAuthorizationDigest: input.stableAuthorizationDigest,
+		}))
+		.digest("hex");
+}
+
+export function stableReleaseAuthorizationDigest(
+	claim: import("@lobu/core").ReleaseCapabilityClaim,
+): string {
+	return createHash("sha256")
+		.update(canonicalize({
+			environment: claim.environment,
+			toolboxUserId: claim.toolboxUserId,
+			agentId: claim.agentId,
+			releaseId: claim.releaseId,
+			releaseSequence: claim.releaseSequence,
+			capabilityIds: [...claim.capabilityIds].sort(),
+		}))
+		.digest("hex");
 }
 
 export interface PendingToolExecutionOptions {

@@ -8,10 +8,14 @@ import { secureHeaders } from "hono/secure-headers";
 import type { AgentMetadata } from "../auth/agent-metadata-store.js";
 import {
   buildPendingToolExecutionOptions,
+  getPendingTool,
   takePendingTool,
 } from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
-import { createToolApprovalService } from "../auth/mcp/tool-approval-service.js";
+import {
+  createToolApprovalService,
+  validatePendingToolContinuation,
+} from "../auth/mcp/tool-approval-service.js";
 import { OAuthClient } from "../auth/oauth/client.js";
 import { CLAUDE_PROVIDER } from "../auth/oauth/providers.js";
 import { createAuthProfileLabel } from "../auth/settings/auth-profiles-manager.js";
@@ -326,6 +330,24 @@ export function createGatewayApp(
           // double-clicks, Slack webhook retries) cannot double-execute the
           // tool. The Slack/Telegram interaction-bridge path uses the same
           // helper.
+          const candidate = await getPendingTool(requestId);
+          if (!candidate)
+            return { success: false, error: "Request not found or expired" };
+          const organizationId = candidate.organizationId;
+          if (candidate.releaseBinding) {
+            if (!organizationId || !approveMcpProxy) {
+              return { success: false, error: "approval_inventory_stale" };
+            }
+            const validation = await validatePendingToolContinuation(
+              candidate,
+              organizationId,
+              { mcpProxy: approveMcpProxy },
+            );
+            if (!validation.valid) {
+              await takePendingTool(requestId);
+              return { success: false, error: validation.diagnosticCode };
+            }
+          }
           const pending = await takePendingTool(requestId);
           if (!pending)
             return { success: false, error: "Request not found or expired" };

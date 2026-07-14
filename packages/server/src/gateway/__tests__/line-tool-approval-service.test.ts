@@ -3,10 +3,15 @@ import { generateWorkerToken, verifyWorkerToken } from "@lobu/core";
 import { orgContext, tryGetOrgId } from "../../lobu/stores/org-context.js";
 import {
   getPendingTool,
+  stableReleaseAuthorizationDigest,
+  stableToolEligibilityDigest,
   type PendingToolInvocation,
   storePendingTool,
 } from "../auth/mcp/pending-tool-store.js";
-import { McpProxy } from "../auth/mcp/proxy.js";
+import {
+  isToolNameAllowedByToolsConfig,
+  McpProxy,
+} from "../auth/mcp/proxy.js";
 import {
   createToolApprovalService,
   GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
@@ -27,6 +32,25 @@ const LINE_PENDING: PendingToolInvocation = {
   channelId: "line-user-1",
   connectionId: "line-connection",
 };
+
+const SEMANTIC_CLAIM = {
+  environment: "production" as const,
+  toolboxUserId: "toolbox-user-1",
+  agentId: "shifu-u-1",
+  releaseId: "release-1",
+  releaseSequence: 1,
+  snapshotDigest: `sha256:${"a".repeat(64)}`,
+  expiresAt: "2099-01-01T00:00:00.000Z",
+  capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+};
+const STABLE_SEMANTIC_DIGEST = stableReleaseAuthorizationDigest(SEMANTIC_CLAIM);
+const STABLE_ELIGIBILITY_DIGEST = stableToolEligibilityDigest({
+  mcpId: LINE_PENDING.mcpId,
+  toolName: LINE_PENDING.toolName,
+  connectionId: LINE_PENDING.connectionId,
+  effectiveInventoryFingerprint: "b".repeat(64),
+  stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+});
 
 async function seedLinePending(
   approvalId: string,
@@ -94,9 +118,24 @@ describe("createToolApprovalService", () => {
     await resetTestDatabase();
   });
 
+  test("semantic eligibility applies worker-compatible deny and strict allow policy to the tool name", () => {
+    expect(isToolNameAllowedByToolsConfig("manage_schedules", {
+      allowedTools: ["manage_*"],
+      deniedTools: ["manage_schedules"],
+      strictMode: true,
+    })).toBe(false);
+    expect(isToolNameAllowedByToolsConfig("manage_schedules", {
+      allowedTools: ["manage_*"],
+      strictMode: true,
+    })).toBe(true);
+    expect(isToolNameAllowedByToolsConfig("other_tool", {
+      allowedTools: ["manage_*"],
+      strictMode: true,
+    })).toBe(false);
+  });
+
   test.each([
     ["capability removed", { capabilityIds: [] }],
-    ["digest changed", { snapshotDigest: `sha256:${"c".repeat(64)}` }],
     ["release advanced", { releaseId: "release-2", releaseSequence: 2 }],
     ["authorization expired", { expiresAt: "2000-01-01T00:00:00.000Z" }],
   ])("semantic continuation is stale when %s", (_label, claimOverride) => {
@@ -109,6 +148,8 @@ describe("createToolApprovalService", () => {
         releaseSequence: 1,
         snapshotDigest: `sha256:${"a".repeat(64)}`,
         authorizationExpiresAt: "2099-01-01T00:00:00.000Z",
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
       },
     };
     const claim = {
@@ -139,6 +180,8 @@ describe("createToolApprovalService", () => {
         releaseSequence: 1,
         snapshotDigest: `sha256:${"a".repeat(64)}`,
         authorizationExpiresAt: "2099-01-01T00:00:00.000Z",
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
       },
     };
     expect(isPendingReleaseBindingCurrent(pending, {
@@ -178,6 +221,8 @@ describe("createToolApprovalService", () => {
         releaseSequence: 1,
         snapshotDigest: `sha256:${"a".repeat(64)}`,
         authorizationExpiresAt: "2099-01-01T00:00:00.000Z",
+        stableAuthorizationDigest: STABLE_SEMANTIC_DIGEST,
+        eligibilityBindingDigest: STABLE_ELIGIBILITY_DIGEST,
       },
     });
     const grantStore = {
@@ -187,6 +232,7 @@ describe("createToolApprovalService", () => {
     };
     const mcpProxy = {
       executeToolDirect: mock(async () => ({ content: [], isError: false })),
+      revalidatePendingToolEligibility: mock(async () => true),
     };
     const service = createToolApprovalService({
       grantStore,
@@ -243,6 +289,18 @@ describe("createToolApprovalService", () => {
         releaseSequence: 1,
         snapshotDigest: releaseState.claim.snapshotDigest,
         authorizationExpiresAt: releaseState.claim.expiresAt,
+        stableAuthorizationDigest: stableReleaseAuthorizationDigest(
+          releaseState.claim
+        ),
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: LINE_PENDING.mcpId,
+          toolName: LINE_PENDING.toolName,
+          connectionId: LINE_PENDING.connectionId,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest: stableReleaseAuthorizationDigest(
+            releaseState.claim
+          ),
+        }),
       },
     });
     const grantStore = {
@@ -252,6 +310,7 @@ describe("createToolApprovalService", () => {
     };
     const mcpProxy = {
       executeToolDirect: mock(async () => ({ content: [], isError: false })),
+      revalidatePendingToolEligibility: mock(async () => true),
     };
     const service = createToolApprovalService({
       grantStore,
@@ -269,7 +328,14 @@ describe("createToolApprovalService", () => {
         snapshotDigest: releaseState.claim.snapshotDigest,
         expiresAt: releaseState.claim.expiresAt,
       })),
-      readReleaseState: mock(async () => releaseState),
+      readReleaseState: mock(async () => ({
+        status: "active" as const,
+        claim: {
+          ...releaseState.claim,
+          snapshotDigest: `sha256:${"d".repeat(64)}`,
+          expiresAt: "2099-01-01T00:00:30.000Z",
+        },
+      })),
     });
 
     expect((await submitApproveAll(service)).status).toBe("executed");

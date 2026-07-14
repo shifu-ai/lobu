@@ -1,10 +1,12 @@
 import { createLogger } from "@lobu/core";
 import {
   buildPendingToolExecutionOptions,
+  getPendingTool,
   takePendingTool,
   type PendingToolExecutionOptions,
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
+import { validatePendingToolContinuation } from "../auth/mcp/tool-approval-service.js";
 import type {
   InteractionService,
   PostedLinkButton,
@@ -153,7 +155,14 @@ export function registerInteractionBridge(
   connection: PlatformConnection,
   chat: any,
   grantStore?: GrantStore,
-  executeToolDirect?: ExecuteToolDirectFn
+  executeToolDirect?: ExecuteToolDirectFn,
+  revalidatePendingToolEligibility?: (
+    pending: PendingToolInvocation
+  ) => Promise<boolean>,
+  continuationValidator?: (
+    pending: PendingToolInvocation,
+    organizationId: string,
+  ) => Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }>
 ): () => void {
   const { id: connectionId, platform } = connection;
 
@@ -633,7 +642,9 @@ export function registerInteractionBridge(
       });
     },
     async (channelId, conversationId) =>
-      resolveThread(manager, connectionId, channelId, conversationId)
+      resolveThread(manager, connectionId, channelId, conversationId),
+    revalidatePendingToolEligibility,
+    continuationValidator
   );
 
   logger.info({ connectionId, platform }, "Interaction bridge registered");
@@ -693,7 +704,14 @@ export function registerActionHandlers(
   resolveApprovalTarget?: (
     channelId: string,
     conversationId: string
-  ) => Promise<any | null>
+  ) => Promise<any | null>,
+  revalidatePendingToolEligibility?: (
+    pending: PendingToolInvocation
+  ) => Promise<boolean>,
+  continuationValidator?: (
+    pending: PendingToolInvocation,
+    organizationId: string,
+  ) => Promise<{ valid: true } | { valid: false; diagnosticCode: "approval_inventory_stale" }>
 ): void {
   chat.onAction(async (event: any) => {
     const actionId: string = event.actionId ?? "";
@@ -717,9 +735,38 @@ export function registerActionHandlers(
       // tracked — this is a real first click landing on an expired/missing
       // pending key, and we MUST surface that to the user. Otherwise the
       // click looks like it did nothing.
-      const pending = await takePendingToolInvocation(requestId).catch(
+      const candidate = await getPendingTool(requestId).catch(
         () => null
       );
+      if (candidate?.releaseBinding) {
+        if (
+          candidate.organizationId !== connection.organizationId ||
+          (candidate.connectionId !== undefined &&
+            candidate.connectionId !== connection.id)
+        ) {
+          await thread.post("approval_inventory_stale").catch(() => undefined);
+          return;
+        }
+        const validation = !connection.organizationId
+          ? { valid: false as const, diagnosticCode: "approval_inventory_stale" as const }
+          : continuationValidator
+            ? await continuationValidator(candidate, connection.organizationId)
+            : await validatePendingToolContinuation(
+                candidate,
+                connection.organizationId,
+                { revalidateEligibility: revalidatePendingToolEligibility }
+              );
+        if (!validation.valid) {
+          await takePendingToolInvocation(requestId).catch(() => null);
+          const sent = claimApprovalCard?.(requestId);
+          await sent?.edit("*Tool Approval*\n\n_approval_inventory_stale_").catch(() => undefined);
+          await thread.post("approval_inventory_stale").catch(() => undefined);
+          return;
+        }
+      }
+      const pending = candidate
+        ? await takePendingToolInvocation(requestId).catch(() => null)
+        : null;
       if (!pending) {
         const sent = claimApprovalCard?.(requestId);
         if (sent) {

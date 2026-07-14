@@ -231,9 +231,9 @@ export function buildToolRouterJourneyEventInput(params: {
         ? boundedRouterString(selectionTrace.routerGateReason, 80)
         : undefined,
       descriptor_inventory_fingerprint:
-        selectionTrace.inventoryFingerprint.slice(0, 16),
+        selectionTrace.inventoryFingerprint?.slice(0, 16),
       // Kept for existing dashboards; this is the descriptor index fingerprint.
-      inventory_fingerprint: selectionTrace.inventoryFingerprint.slice(0, 16),
+      inventory_fingerprint: selectionTrace.inventoryFingerprint?.slice(0, 16),
       effective_tools_fingerprint:
         selectionTrace.effectiveToolInventoryFingerprint?.slice(0, 16),
       effective_release_status: selectionTrace.effectiveReleaseStatus,

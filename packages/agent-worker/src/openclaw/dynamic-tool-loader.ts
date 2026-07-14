@@ -15,12 +15,7 @@ export {
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
-import {
-  getOrBuildToolDescriptor,
-  inventoryFingerprint,
-  qualifiedToolKey,
-  toolIdentityKey,
-} from "./tool-descriptor";
+import { qualifiedToolKey, toolIdentityKey } from "./tool-descriptor";
 import { isExplicitPersonalReminderAttempt } from "./mcp-execution-contract";
 import {
   classifyToolIntent,
@@ -68,7 +63,7 @@ export interface DynamicToolSelectionTrace {
   candidates: ToolCandidateScore[];
   fallback: ToolRouteDecision["fallback"];
   /** Descriptor/retrieval-index fingerprint, not the final eligibility set. */
-  inventoryFingerprint: string;
+  inventoryFingerprint?: string;
   /** Final turn-local eligibility/release fingerprint, when projected by the worker. */
   effectiveToolInventoryFingerprint?: string;
   effectiveReleaseStatus?: "legacy_unenrolled" | "enrolled_inactive" | "active";
@@ -404,15 +399,14 @@ function isDefiniteNonToolTurn(message: string): boolean {
   const normalized = message.trim().toLocaleLowerCase();
   if (!normalized) return true;
   if (
-    /^(?:(?:ok|okay|thanks|thank you|got it|收到|好的|好|謝謝|感謝)[,.，、!！。 ]*)+$/.test(
+    /^(?:(?:ok|okay|thanks|thank you|got it|收到|好的|好|謝謝|谢谢|感謝|感谢|了解です|ありがとう|ありがとうございます|확인|알겠습니다|감사합니다)[,.，、!！。 ]*)+$/.test(
       normalized
     )
   ) {
     return true;
   }
-  return /^(?:\p{Emoji_Presentation}|\p{Extended_Pictographic}|\uFE0F|\s)+$/u.test(
-    normalized
-  );
+  const reaction = normalized.replace(/[\uFE0E\uFE0F\s]/gu, "");
+  return /^(?:👍|🙏|❤|❤️|👏|🙌|👌|✅|🙂|😊|🎉)+$/u.test(reaction);
 }
 
 function selectEntriesForTurn(
@@ -462,11 +456,6 @@ function selectEntriesForTurn(
     };
   }
   if (isDefiniteNonToolTurn(message)) {
-    const descriptorFingerprint = inventoryFingerprint(
-      eligibleEntries.map((entry, index) =>
-        getOrBuildToolDescriptor(entry.tool, entry.mcpId, index)
-      )
-    );
     return {
       primaryIntent,
       selectedEntries: legacySelection.selectedEntries,
@@ -475,7 +464,6 @@ function selectEntriesForTurn(
       routerMode,
       route: {
         routerVersion: "semantic-v1",
-        inventoryFingerprint: descriptorFingerprint,
         cacheHit: false,
         estimatedIndexBytes: 0,
         cacheEvictionCount: 0,

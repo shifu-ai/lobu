@@ -1,6 +1,8 @@
 import { beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import {
   buildPendingToolExecutionOptions,
+  stableReleaseAuthorizationDigest,
+  stableToolEligibilityDigest,
   storePendingTool,
   type PendingToolInvocation,
 } from "../auth/mcp/pending-tool-store.js";
@@ -12,8 +14,10 @@ import {
 
 const AUTH_TOKEN = "gateway-approval-test-token";
 
-function makeApp(executeToolDirect: ReturnType<typeof mock>) {
-  const grant = mock(async () => undefined);
+function makeApp(
+  executeToolDirect: ReturnType<typeof mock>,
+  grant = mock(async () => undefined),
+) {
   const empty = () => undefined;
   const coreServices = {
     getPublicGatewayUrl: () => "https://lobu.example",
@@ -31,7 +35,10 @@ function makeApp(executeToolDirect: ReturnType<typeof mock>) {
     getMcpConfigService: empty,
     getImageGenerationService: empty,
     getGrantStore: () => ({ grant }),
-    getMcpProxy: () => ({ executeToolDirect }),
+    getMcpProxy: () => ({
+      executeToolDirect,
+      revalidatePendingToolEligibility: mock(async () => true),
+    }),
     getExternalAuthClient: empty,
     getAgentSettingsStore: empty,
     getConfigStore: empty,
@@ -75,6 +82,52 @@ async function approve(app: ReturnType<typeof makeApp>, requestId: string) {
 describe("CLI gateway pending-tool approval replay", () => {
   beforeAll(async () => ensureDbForGatewayTests());
   beforeEach(async () => resetTestDatabase());
+
+  test("stale semantic approval cannot grant or execute", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-1",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2000-01-01T00:00:00.000Z",
+      capabilityIds: ["semantic_tool_router.effective_inventory.v1"],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    await storePendingTool("cli-stale", {
+      mcpId: "github",
+      toolName: "create_issue",
+      args: {},
+      agentId: "agent-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "semantic",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: "github",
+          toolName: "create_issue",
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    }, 60);
+    const execute = mock(async () => ({ content: [], isError: false }));
+    const grant = mock(async () => undefined);
+    const response = await approve(makeApp(execute, grant), "cli-stale");
+    expect(await response.json()).toMatchObject({
+      error: "approval_inventory_stale",
+    });
+    expect(grant).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
 
   test("reserved automation approval forwards identity, channel, and existing course scope", async () => {
     const expectedMcpIdentity = {

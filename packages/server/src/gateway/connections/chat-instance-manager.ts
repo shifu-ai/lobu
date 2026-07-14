@@ -974,7 +974,8 @@ export class ChatInstanceManager {
         connection,
         chat,
         this.services.getGrantStore(),
-        mcpProxy?.executeToolDirect.bind(mcpProxy)
+        mcpProxy?.executeToolDirect.bind(mcpProxy),
+        mcpProxy?.revalidatePendingToolEligibility.bind(mcpProxy)
       );
       this.instances.get(connection.id)!.interactionCleanup =
         interactionCleanup;
