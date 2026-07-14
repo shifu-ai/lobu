@@ -101,6 +101,16 @@ import {
   getRequiredBattleReportMutationTools,
   getSuccessfulCompletionClaimToolNames,
 } from "./completion-claim-guard";
+import {
+  type DateGuardResult,
+  type TrustedTemporalEvidence,
+  extractTrustedTemporalCandidates,
+  extractTrustedTemporalEvidence,
+  guardDateOutput,
+  isDateSensitiveTurn,
+} from "./date-output-guard";
+import { buildCurrentDateContext } from "./date-context";
+export { buildCurrentDateContext } from "./date-context";
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -505,107 +515,6 @@ export function replaceBasePromptIdentity(
   // Upstream wording drifted — prepend identity with a framing note rather
   // than silently letting the upstream opener win.
   return `${identity}\n\nThe section below describes the runtime tooling available to you. It does not change your role.\n\n${basePrompt}`;
-}
-
-const TAIPEI_TIME_ZONE = "Asia/Taipei";
-const WEEKDAY_LABELS_ZH_TW = [
-  "星期日",
-  "星期一",
-  "星期二",
-  "星期三",
-  "星期四",
-  "星期五",
-  "星期六",
-];
-
-type DateParts = {
-  year: number;
-  month: number;
-  day: number;
-};
-
-function getTaipeiDateParts(now: Date): DateParts {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(now);
-
-  const valueFor = (type: string) => {
-    const value = parts.find((part) => part.type === type)?.value;
-    if (!value) throw new Error(`Missing ${type} from Taipei date formatter`);
-    return Number(value);
-  };
-
-  return {
-    year: valueFor("year"),
-    month: valueFor("month"),
-    day: valueFor("day"),
-  };
-}
-
-function formatDateParts(parts: DateParts): string {
-  return `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(
-    parts.day
-  ).padStart(2, "0")}`;
-}
-
-function addCalendarDays(parts: DateParts, days: number): DateParts {
-  const date = new Date(
-    Date.UTC(parts.year, parts.month - 1, parts.day + days)
-  );
-  return {
-    year: date.getUTCFullYear(),
-    month: date.getUTCMonth() + 1,
-    day: date.getUTCDate(),
-  };
-}
-
-function weekdayLabel(parts: DateParts): string {
-  const day = new Date(
-    Date.UTC(parts.year, parts.month - 1, parts.day)
-  ).getUTCDay();
-  return WEEKDAY_LABELS_ZH_TW[day] ?? "星期未知";
-}
-
-function formatDatedWeekday(parts: DateParts): string {
-  return `${formatDateParts(parts)} (${weekdayLabel(parts)})`;
-}
-
-function formatTaipeiTime(now: Date): string {
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  })
-    .format(now)
-    .replace(", ", " ");
-}
-
-export function buildCurrentDateContext(now: Date = new Date()): string {
-  const today = getTaipeiDateParts(now);
-  const yesterday = addCalendarDays(today, -1);
-  const tomorrow = addCalendarDays(today, 1);
-  const currentTime = formatTaipeiTime(now);
-
-  return [
-    "## Current Date Context",
-    "",
-    "- Timezone: Asia/Taipei (UTC+08:00)",
-    `- Current time / 現在時間: ${currentTime}`,
-    `- Today / 今天: ${formatDatedWeekday(today)}`,
-    `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
-    `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,
-    "- When answering about dates, schedules, reports, or relative words such as " +
-      "today/yesterday/tomorrow/今天/昨天/明天, use this context instead of " +
-      "guessing weekdays.",
-  ].join("\n");
 }
 
 export function buildLobuSystemPrompt(
@@ -1905,6 +1814,7 @@ Use it when the user references past discussions or you need context.`);
     .filter(Boolean)
     .join("\n\n");
 
+  const turnNow = new Date();
   const resourceLoader = new DefaultResourceLoader({
     cwd: workspaceDir,
     settingsManager,
@@ -1912,7 +1822,8 @@ Use it when the user references past discussions or you need context.`);
       buildLobuSystemPrompt(
         base,
         context.agentInstructions,
-        finalInstructionsUpdated
+        finalInstructionsUpdated,
+        turnNow
       ),
   });
   await resourceLoader.reload();
@@ -1985,7 +1896,12 @@ Use it when the user references past discussions or you need context.`);
     let turnNonce = 0;
     let suppressProgressOutput = false;
     const currentTurnExecutedTools = new Set<string>();
-    let bufferCurrentTurnOutputForCompletionClaimGuard = false;
+    const currentTurnTrustedTemporalCandidates = new Set<string>();
+    const currentTurnTrustedTemporalEvidence = new Map<
+      string,
+      TrustedTemporalEvidence
+    >();
+    let bufferCurrentTurnOutputForFinalGuards = false;
 
     // Wire events through progress processor with delta batching
     let pendingDelta = "";
@@ -2033,10 +1949,13 @@ Use it when the user references past discussions or you need context.`);
       // to this turn only.
       turnController.startTurn();
       currentTurnExecutedTools.clear();
-      bufferCurrentTurnOutputForCompletionClaimGuard =
+      currentTurnTrustedTemporalCandidates.clear();
+      currentTurnTrustedTemporalEvidence.clear();
+      bufferCurrentTurnOutputForFinalGuards =
         options?.silent === true
           ? false
-          : getRequiredBattleReportMutationTools(promptText).length > 0;
+          : getRequiredBattleReportMutationTools(promptText).length > 0 ||
+            isDateSensitiveTurn(promptText);
 
       const turnDone = new Promise<void>((resolve) => {
         resolveTurnDone = () => {
@@ -2088,7 +2007,7 @@ Use it when the user references past discussions or you need context.`);
         const delta = progressProcessor.getDelta();
         if (delta) {
           pendingDelta += delta;
-          if (!bufferCurrentTurnOutputForCompletionClaimGuard) {
+          if (!bufferCurrentTurnOutputForFinalGuards) {
             scheduleDeltaFlush();
           }
         }
@@ -2169,6 +2088,19 @@ Use it when the user references past discussions or you need context.`);
         })) {
           currentTurnExecutedTools.add(toolName);
         }
+        if (!event.isError) {
+          for (const candidate of extractTrustedTemporalCandidates(
+            event.result
+          )) {
+            currentTurnTrustedTemporalCandidates.add(candidate);
+          }
+          for (const evidence of extractTrustedTemporalEvidence(event.result)) {
+            currentTurnTrustedTemporalEvidence.set(
+              `${evidence.candidate}\u0000${evidence.label}`,
+              evidence
+            );
+          }
+        }
         const executionEventPromise = executionReporter.record({
           type: event.isError ? "tool.failed" : "tool.completed",
           message: `${event.isError ? "Tool failed" : "Tool completed"}: ${event.toolName}`,
@@ -2197,7 +2129,7 @@ Use it when the user references past discussions or you need context.`);
       }
 
       if (event.type === "agent_end") {
-        const flushBeforeDone = bufferCurrentTurnOutputForCompletionClaimGuard
+        const flushBeforeDone = bufferCurrentTurnOutputForFinalGuards
           ? Promise.resolve()
           : flushDelta();
         flushBeforeDone
@@ -2493,13 +2425,53 @@ Use it when the user references past discussions or you need context.`);
     // against user-facing text. Without this, getFinalResult() is always
     // null in production and the sandbox-leak redaction never fires.
     const finalText = progressProcessor.getOutputSnapshot();
+    let dateGuardDecision: DateGuardResult;
+    try {
+      dateGuardDecision = guardDateOutput({
+        userMessage: userPrompt,
+        finalText,
+        now: turnNow,
+        trustedTemporalCandidates: Array.from(
+          currentTurnTrustedTemporalCandidates
+        ),
+        trustedTemporalEvidence: Array.from(
+          currentTurnTrustedTemporalEvidence.values()
+        ),
+      });
+    } catch (error) {
+      const errorType =
+        error instanceof RangeError
+          ? "RangeError"
+          : error instanceof TypeError
+            ? "TypeError"
+            : error instanceof Error
+              ? "Error"
+              : typeof error;
+      logger.error(`Date output guard failed: errorType=${errorType}`);
+      dateGuardDecision = isDateSensitiveTurn(userPrompt)
+        ? {
+            status: "blocked",
+            text: "目前無法可靠確認日期，請稍後再試。",
+            reason: "date_guard_failure",
+          }
+        : { status: "unchanged", text: finalText };
+    }
+    if (dateGuardDecision.status === "corrected") {
+      logger.warn(
+        `Date output guard corrected final answer: corrections=${dateGuardDecision.corrections.length}`
+      );
+    } else if (dateGuardDecision.status === "blocked") {
+      logger.warn(
+        `Date output guard blocked final answer: reason=${dateGuardDecision.reason}`
+      );
+    }
     const completionClaimDecision = checkCompletionClaim({
       userMessage: userPrompt,
-      finalText,
+      finalText: dateGuardDecision.text,
       executedTools: Array.from(currentTurnExecutedTools),
     });
     const guardedFinalText = completionClaimDecision.allowed
-      ? finalText
+      ? dateGuardDecision.text
       : completionClaimDecision.safeText;
     if (!completionClaimDecision.allowed) {
       logger.warn(
@@ -2507,7 +2479,7 @@ Use it when the user references past discussions or you need context.`);
       );
     }
 
-    if (getRequiredBattleReportMutationTools(userPrompt).length > 0) {
+    if (bufferCurrentTurnOutputForFinalGuards) {
       pendingDelta = guardedFinalText;
       await flushDelta();
     }
