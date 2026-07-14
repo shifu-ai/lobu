@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ResolvedCourseExecutionContext } from "@lobu/core";
 import {
   buildResolvedCourseContextInstructions,
+  buildTrustedExecutionScopeInstructions,
   removeLegacyToolboxActiveContext,
 } from "../openclaw/session-context";
 
@@ -9,6 +10,7 @@ function context(
   overrides: Partial<ResolvedCourseExecutionContext> = {}
 ): ResolvedCourseExecutionContext {
   return {
+    activeSpecializedSkill: null,
     course: {
       courseKey: "course-a",
       courseEntityId: "course:pm:course-a",
@@ -40,6 +42,26 @@ function context(
 }
 
 describe("resolved course context instructions", () => {
+  test("renders only the bounded onboarding scope instruction", () => {
+    const rendered = buildTrustedExecutionScopeInstructions({
+      mode: "onboarding",
+      source: "toolbox_course_resolution",
+      reason: "no_courses",
+      ownerUserId: "user-1",
+      agentId: "agent-1",
+      conversationId: "conversation-1",
+    });
+    expect(rendered).toBe(
+      [
+        "Runtime Execution Scope: onboarding",
+        "Toolbox 尚無 canonical course。依既有 authorization-first onboarding instructions 執行；",
+        "不得聲稱已載入課程 context，不得把本輪當成已知課程的生成任務。",
+      ].join("\n")
+    );
+    expect(rendered).not.toContain("受眾");
+    expect(rendered).not.toContain("submit_course_pm_profile");
+    expect(buildTrustedExecutionScopeInstructions(undefined)).toBe("");
+  });
   test("labels canonical-only scheduled coaching as a draft without meeting-evidence claims", () => {
     const rendered = buildResolvedCourseContextInstructions(context(), {
       schemaVersion: 1,
@@ -48,15 +70,36 @@ describe("resolved course context instructions", () => {
       jobId: "job-1",
       runId: 42,
       taskKind: "opp_coach_rehearsal_prompt",
-      course: { ownerUserId: "u", agentId: "a", courseKey: "course-a", courseEntityId: "course:pm:course-a", displayName: "Course A" },
+      course: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseKey: "course-a",
+        courseEntityId: "course:pm:course-a",
+        displayName: "Course A",
+      },
       evidenceReadiness: "canonical_only",
     });
     expect(rendered).toContain("排程任務草稿");
     expect(rendered).toContain("沒有可用的同課程會議或逐字稿證據");
     expect(rendered).not.toContain("已根據會議紀錄");
   });
-  test("does not label a scheduled task as canonical-only when exact same-course evidence is ready",()=>{
-    const rendered=buildResolvedCourseContextInstructions(context(),{schemaVersion:1,source:"calendar_scheduled_wake",automationId:"auto-1",jobId:"job-1",runId:42,taskKind:"opp_coach_rehearsal_prompt",course:{ownerUserId:"u",agentId:"a",courseKey:"course-a",courseEntityId:"course:pm:course-a",displayName:"Course A"},evidenceReadiness:"same_course_evidence"});
+  test("does not label a scheduled task as canonical-only when exact same-course evidence is ready", () => {
+    const rendered = buildResolvedCourseContextInstructions(context(), {
+      schemaVersion: 1,
+      source: "calendar_scheduled_wake",
+      automationId: "auto-1",
+      jobId: "job-1",
+      runId: 42,
+      taskKind: "opp_coach_rehearsal_prompt",
+      course: {
+        ownerUserId: "u",
+        agentId: "a",
+        courseKey: "course-a",
+        courseEntityId: "course:pm:course-a",
+        displayName: "Course A",
+      },
+      evidenceReadiness: "same_course_evidence",
+    });
     expect(rendered).not.toContain("排程任務草稿");
     expect(rendered).toContain("Retrieved background");
   });
@@ -77,6 +120,33 @@ describe("resolved course context instructions", () => {
     expect(rendered).not.toContain("token=secret");
     expect(rendered).not.toContain("#private");
     expect(rendered.length).toBeLessThanOrEqual(6000);
+  });
+
+  test("requires the selected opp-coach skill file before answering", () => {
+    const rendered = buildResolvedCourseContextInstructions(
+      context({ activeSpecializedSkill: "opp-coach" })
+    );
+    expect(rendered).toContain(".skills/opp-coach/SKILL.md");
+    expect(rendered).toContain("read the full file before answering");
+    expect(rendered).toMatch(/apply its instructions to this turn/i);
+    expect(rendered).toContain("If the file is missing or unreadable");
+    expect(rendered).toContain(
+      "do not reconstruct the skill or claim that it was applied"
+    );
+    expect(rendered).toMatch(
+      /continue with the general canonical course context/i
+    );
+    expect(rendered).toContain("specialized skill is unavailable");
+  });
+
+  test("null selection suppresses only opp-coach for this turn", () => {
+    const rendered = buildResolvedCourseContextInstructions(
+      context({ activeSpecializedSkill: null })
+    );
+    expect(rendered).toContain(
+      "Do not load or apply `.skills/opp-coach/SKILL.md`"
+    );
+    expect(rendered).toContain("does not disable unrelated skills");
   });
 
   test("quotes hostile multiline content and normalizes identity controls", () => {

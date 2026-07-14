@@ -53,7 +53,7 @@ function createConsumer(overrides?: {
 
 describe("UnifiedThreadResponseConsumer completion contract", () => {
   test("preserves awaitingHumanDecision in complete SSE data", async () => {
-    const { consumer, sseManager } = createConsumer();
+    const { consumer, renderer, sseManager } = createConsumer();
     sseManager.hasActiveConnection.mockReturnValue(true);
 
     await consumer.handleThreadResponse({
@@ -67,10 +67,9 @@ describe("UnifiedThreadResponseConsumer completion contract", () => {
       },
     });
 
-    expect(sseManager.broadcast).toHaveBeenCalledWith(
-      "cli-session-1",
-      "complete",
-      expect.objectContaining({ awaitingHumanDecision: true })
+    expect(renderer.handleCompletion).toHaveBeenCalledWith(
+      expect.objectContaining({ awaitingHumanDecision: true }),
+      expect.any(String)
     );
   });
 });

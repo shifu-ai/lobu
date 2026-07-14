@@ -1,4 +1,8 @@
-import type { MessagePayload } from "@lobu/core";
+import {
+	__resetEncryptionKeyCacheForTests,
+	type MessagePayload,
+	verifyWorkerToken,
+} from "@lobu/core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
 	MessageConsumer,
@@ -26,6 +30,7 @@ function setup(
 		| undefined;
 	const sends: Array<[string, unknown, unknown]> = [];
 	const order: string[] = [];
+	const recordScheduledExecutionTrace = vi.fn(async () => {});
 	let workerRejected = false;
 	const queue = {
 		start: vi.fn(),
@@ -64,6 +69,9 @@ function setup(
 			updateDeploymentActivity: vi.fn(),
 		} as never,
 		queue as never,
+		undefined,
+		undefined,
+		recordScheduledExecutionTrace,
 	);
 	let cleanupFailed = false;
 	let pending: any;
@@ -166,6 +174,7 @@ function setup(
 		order,
 		fetcher,
 		consumer,
+		recordScheduledExecutionTrace,
 		data,
 		run: async (nextText?: string, nextId?: string) => {
 			if (nextText) data.messageText = nextText;
@@ -197,6 +206,7 @@ describe("message consumer course boundary", () => {
 	const prevalidated = (): NonNullable<
 		MessagePayload["resolvedCourseContext"]
 	> => ({
+		activeSpecializedSkill: "opp-coach",
 		trust: {
 			ownerUserId: "u",
 			agentId: "a",
@@ -246,20 +256,40 @@ describe("message consumer course boundary", () => {
 		"single_course",
 		"enforce",
 	] as const)("scheduled scope enforces the prevalidated fire context in %s rollout mode without refetching", async (mode) => {
-		process.env.COURSE_CONTEXT_GATE_MODE = mode;
-		const h = setup({});
-		h.data.scheduledCourseContext = scheduled();
-		h.data.resolvedCourseContext = prevalidated();
-		await h.run();
-		expect(h.fetcher).not.toHaveBeenCalled();
-		const workerMessages = h.sends.filter(([name]) =>
-			name.startsWith("thread_message_"),
-		);
-		expect(workerMessages).toHaveLength(1);
-		expect(
-			(workerMessages[0]?.[1] as MessagePayload).resolvedCourseContext?.trust
-				.contextPackId,
-		).toBe("p");
+		const previousKey = process.env.ENCRYPTION_KEY;
+		process.env.ENCRYPTION_KEY = "a".repeat(64);
+		__resetEncryptionKeyCacheForTests();
+		try {
+			process.env.COURSE_CONTEXT_GATE_MODE = mode;
+			const h = setup({});
+			h.data.runId = 7;
+			h.data.scheduledCourseContext = scheduled();
+			h.data.resolvedCourseContext = prevalidated();
+			await h.run();
+			expect(h.fetcher).not.toHaveBeenCalled();
+			const workerMessages = h.sends.filter(([name]) =>
+				name.startsWith("thread_message_"),
+			);
+			expect(workerMessages).toHaveLength(1);
+			const workerPayload = workerMessages[0]?.[1] as MessagePayload;
+			expect(workerPayload.resolvedCourseContext?.trust.contextPackId).toBe("p");
+			expect(workerPayload.resolvedCourseContext?.activeSpecializedSkill).toBe(
+				"opp-coach",
+			);
+			expect(workerPayload.trustedExecutionScope).toMatchObject({
+				mode: "course",
+				activeSpecializedSkill: "opp-coach",
+			});
+			expect(verifyWorkerToken(workerPayload.runJobToken ?? "")).toMatchObject({
+				executionMode: "course",
+				courseToolScope: { activeSpecializedSkill: "opp-coach" },
+			});
+			expect(h.recordScheduledExecutionTrace).toHaveBeenCalledTimes(1);
+		} finally {
+			if (previousKey === undefined) delete process.env.ENCRYPTION_KEY;
+			else process.env.ENCRYPTION_KEY = previousKey;
+			__resetEncryptionKeyCacheForTests();
+		}
 	});
 	test("prevalidated scheduled context skips Toolbox and performs memory hydration once", async () => {
 		const h = setup({});
@@ -469,9 +499,8 @@ describe("message consumer course boundary", () => {
 		);
 		course.consumer.setGuardrails(undefined, broken as never);
 		await course.run();
-		expect(course.sends.filter(([n]) => n === "thread_response")).toHaveLength(
-			1,
-		);
+		expect(course.sends.filter(([n]) => n === "thread_response")).toHaveLength(0);
+		expect(course.sends.some(([n]) => n.startsWith("thread_message_"))).toBe(true);
 	});
 	test("strict malformed ambiguous contract terminalizes and never dispatches worker", async () => {
 		const h = setup({
@@ -483,9 +512,8 @@ describe("message consumer course boundary", () => {
 		expect(h.sends.filter(([n]) => n === "thread_response")).toHaveLength(1);
 		expect(h.sends.some(([n]) => n.startsWith("thread_message_"))).toBe(false);
 	});
-	test("valid ambiguity and missing each terminalize once", async () => {
-		for (const body of [
-			{
+	test("valid ambiguity terminalizes while no-courses dispatches onboarding", async () => {
+		const ambiguous = setup({
 				status: "ambiguous",
 				reason: "multiple_active_courses",
 				candidates: [
@@ -498,16 +526,14 @@ describe("message consumer course boundary", () => {
 						reasons: [],
 					},
 				],
-			},
-			{ status: "missing", reason: "no_courses" },
-		]) {
-			const h = setup(body);
-			await h.run();
-			expect(h.sends.filter(([n]) => n === "thread_response")).toHaveLength(1);
-			expect(h.sends.some(([n]) => n.startsWith("thread_message_"))).toBe(
-				false,
-			);
-		}
+			});
+		await ambiguous.run();
+		expect(ambiguous.sends.filter(([n]) => n === "thread_response")).toHaveLength(1);
+		expect(ambiguous.sends.some(([n]) => n.startsWith("thread_message_"))).toBe(false);
+		const missing = setup({ status: "missing", reason: "no_courses" });
+		await missing.run();
+		expect(missing.sends.filter(([n]) => n === "thread_response")).toHaveLength(0);
+		expect(missing.sends.some(([n]) => n.startsWith("thread_message_"))).toBe(true);
 	});
 	test("ready binds before arm and worker send", async () => {
 		const h = setup([
@@ -642,7 +668,7 @@ describe("message consumer course boundary", () => {
 	});
 	test("missing durable receipt migration fails terminal enqueue closed with zero worker dispatch", async () => {
 		const h = setup(
-			{ status: "missing", reason: "no_courses" },
+			{ status: "missing", reason: "archived_only" },
 			"課程",
 			{},
 			true,
@@ -806,7 +832,7 @@ describe("message consumer course boundary", () => {
 		await h.run("整理課程", "m-next");
 		expect(
 			h.sends.filter(([n]) => n.startsWith("thread_message_")),
-		).toHaveLength(1);
-		expect(h.sends.some(([n]) => n === "thread_response")).toBe(true);
+		).toHaveLength(2);
+		expect(h.sends.filter(([n]) => n === "thread_response")).toHaveLength(1);
 	});
 });

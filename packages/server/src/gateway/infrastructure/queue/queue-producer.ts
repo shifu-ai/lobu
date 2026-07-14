@@ -10,85 +10,90 @@ const logger = createLogger("queue-producer");
  * Handles both direct_message and thread_message queues with bot isolation.
  */
 export class QueueProducer {
-  private queue: IMessageQueue;
-  private isInitialized = false;
+	private queue: IMessageQueue;
+	private isInitialized = false;
 
-  constructor(queue: IMessageQueue) {
-    this.queue = queue;
-  }
+	constructor(queue: IMessageQueue) {
+		this.queue = queue;
+	}
 
-  /**
-   * Initialize the queue producer
-   * Creates required queues
-   */
-  async start(): Promise<void> {
-    try {
-      // Create the messages queue if it doesn't exist
-      await this.queue.createQueue("messages");
-      this.isInitialized = true;
-      logger.debug("Queue producer initialized");
-    } catch (error) {
-      logger.error("Failed to initialize queue producer:", error);
-      throw error;
-    }
-  }
+	/**
+	 * Initialize the queue producer
+	 * Creates required queues
+	 */
+	async start(): Promise<void> {
+		try {
+			// Create the messages queue if it doesn't exist
+			await this.queue.createQueue("messages");
+			this.isInitialized = true;
+			logger.debug("Queue producer initialized");
+		} catch (error) {
+			logger.error("Failed to initialize queue producer:", error);
+			throw error;
+		}
+	}
 
-  /**
-   * Stop the queue producer (no-op since queue lifecycle is managed externally)
-   */
-  async stop(): Promise<void> {
-    this.isInitialized = false;
-    logger.debug("Queue producer stopped");
-  }
+	/**
+	 * Stop the queue producer (no-op since queue lifecycle is managed externally)
+	 */
+	async stop(): Promise<void> {
+		this.isInitialized = false;
+		logger.debug("Queue producer stopped");
+	}
 
-  /**
-   * Enqueue any message (direct or thread) to the single 'messages' queue
-   * Orchestrator will determine if it needs to create a deployment or route to existing thread
-   */
-  async enqueueMessage(
-    payload: MessagePayload,
-    options?: {
-      priority?: number;
-      retryLimit?: number;
-      retryDelay?: number;
-      expireInSeconds?: number;
-    }
-  ): Promise<string> {
-    if (!this.isInitialized) {
-      throw new Error("Queue producer is not initialized");
-    }
+	/**
+	 * Enqueue any message (direct or thread) to the single 'messages' queue
+	 * Orchestrator will determine if it needs to create a deployment or route to existing thread
+	 */
+	async enqueueMessage(
+		payload: MessagePayload,
+		options?: {
+			priority?: number;
+			retryLimit?: number;
+			retryDelay?: number;
+			expireInSeconds?: number;
+			singletonKey?: string;
+			durableSingleton?: boolean;
+		},
+	): Promise<string> {
+		if (!this.isInitialized) {
+			throw new Error("Queue producer is not initialized");
+		}
 
-    try {
-      // All messages go to the single 'messages' queue.
-      //
-      // BullMQ interprets ':' in custom jobIds as an internal repeatable-job
-      // separator and rejects anything with more/fewer than 3 colon segments.
-      // Platform identifiers from the Chat SDK (e.g. Slack's
-      // `slack:C09EH3ASNQ1`, message timestamps like `1776219228.000100`
-      // that can embed colons in some paths) would all blow up enqueue.
-      // Sanitize the *entire* singletonKey — not just the messageId — so any
-      // platform's channelId/conversationId/messageId scheme is safe.
-      const rawSingletonKey = `message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId || Date.now()}`;
-      const jobId = await this.queue.send("messages", payload, {
-        priority: options?.priority || 0,
-        retryLimit: options?.retryLimit || 3,
-        retryDelay: options?.retryDelay || 30,
-        expireInSeconds: options?.expireInSeconds || 300, // 5 minutes = 300 seconds
-        singletonKey: rawSingletonKey.replace(/:/g, "-"), // Prevent duplicates within canonical conversation identity
-      });
+		try {
+			// All messages go to the single 'messages' queue.
+			//
+			// BullMQ interprets ':' in custom jobIds as an internal repeatable-job
+			// separator and rejects anything with more/fewer than 3 colon segments.
+			// Platform identifiers from the Chat SDK (e.g. Slack's
+			// `slack:C09EH3ASNQ1`, message timestamps like `1776219228.000100`
+			// that can embed colons in some paths) would all blow up enqueue.
+			// Sanitize the *entire* singletonKey — not just the messageId — so any
+			// platform's channelId/conversationId/messageId scheme is safe.
+			const rawSingletonKey =
+				options?.singletonKey ??
+				`message-${payload.platform}-${payload.channelId}-${payload.conversationId}-${payload.messageId || Date.now()}`;
+			const jobId = await this.queue.send("messages", payload, {
+				priority: options?.priority || 0,
+				retryLimit: options?.retryLimit || 3,
+				retryDelay: options?.retryDelay || 30,
+				expireInSeconds: options?.expireInSeconds || 300, // 5 minutes = 300 seconds
+				singletonKey: rawSingletonKey.replace(/:/g, "-"), // Prevent duplicates within canonical conversation identity
+				durableSingleton: options?.durableSingleton,
+			});
 
-      logger.info(
-        `Enqueued message job ${jobId} for user ${payload.userId}, conversation ${payload.conversationId}`
-      );
-      return jobId || "job-sent";
-    } catch (error) {
-      logger.error(
-        `Failed to enqueue message for user ${payload.userId}:`,
-        error
-      );
-      throw error;
-    }
-  }
+			logger.info(
+				`Enqueued message job ${jobId} for user ${payload.userId}, conversation ${payload.conversationId}`,
+			);
+			return jobId || "job-sent";
+		} catch (error) {
+			logger.error(
+				`Failed to enqueue message for user ${payload.userId}:`,
+				error,
+			);
+			throw error;
+		}
+	}
 
   async enqueueDurableMessage(
     payload: MessagePayload,

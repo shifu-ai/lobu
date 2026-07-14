@@ -52,10 +52,18 @@ export interface WorkerTokenData {
   tokenKind?: "deployment" | "session" | "run";
   /** Server-minted privilege for trusted platform context on direct messages. */
   trustedPlatformContext?: boolean;
+  /** Integrity-bound execution mode for a dispatched run. */
+  executionMode?: "personal" | "onboarding" | "course";
   courseToolScope?: {
     ownerUserId: string;
     agentId: string;
     courseEntityId: string;
+    /** Required for `executionMode: "course"` run tokens. */
+    contextPackId?: string;
+    /** Required for `executionMode: "course"` run tokens. */
+    contextVersion?: number;
+    /** Required (including explicit null) for course run tokens. */
+    activeSpecializedSkill?: "opp-coach" | null;
   };
 }
 
@@ -84,6 +92,7 @@ export function generateWorkerToken(
     processedMessageIds?: string[];
     tokenKind?: WorkerTokenData["tokenKind"];
     trustedPlatformContext?: boolean;
+    executionMode?: WorkerTokenData["executionMode"];
     courseToolScope?: WorkerTokenData["courseToolScope"];
   }
 ): string {
@@ -110,6 +119,7 @@ export function generateWorkerToken(
     processedMessageIds: options.processedMessageIds,
     tokenKind: options.tokenKind,
     trustedPlatformContext: options.trustedPlatformContext,
+    executionMode: options.executionMode,
     courseToolScope: options.courseToolScope,
   };
 
@@ -190,6 +200,35 @@ export function verifyWorkerToken(token: string): WorkerTokenData | null {
         !scope.courseEntityId
       )
         return null;
+    }
+    if (data.executionMode !== undefined) {
+      if (
+        (data.executionMode !== "personal" &&
+          data.executionMode !== "onboarding" &&
+          data.executionMode !== "course") ||
+        data.tokenKind !== "run" ||
+        !Number.isInteger(data.runId) ||
+        (data.runId ?? 0) <= 0 ||
+        (data.executionMode === "course") !== Boolean(data.courseToolScope)
+      ) {
+        logger.error("Worker token rejected: invalid execution mode binding");
+        return null;
+      }
+      if (
+        data.executionMode === "course" &&
+        (!data.courseToolScope ||
+          typeof data.courseToolScope.contextPackId !== "string" ||
+          !data.courseToolScope.contextPackId ||
+          !Number.isInteger(data.courseToolScope.contextVersion) ||
+          (data.courseToolScope.contextVersion ?? 0) <= 0 ||
+          (data.courseToolScope.activeSpecializedSkill !== null &&
+            data.courseToolScope.activeSpecializedSkill !== "opp-coach"))
+      ) {
+        logger.error(
+          "Worker token rejected: incomplete course execution scope"
+        );
+        return null;
+      }
     }
     if (
       data.messageId !== undefined &&

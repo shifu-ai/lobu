@@ -245,21 +245,24 @@ export interface TrustedCourseFireDeps {
 	}): Promise<ResolvedCourseExecutionContext | null>;
 }
 
-export async function buildTrustedCourseFireContext(
-	input: TrustedCourseFireInput,
-	deps: TrustedCourseFireDeps,
-): Promise<{
+export interface TrustedCourseFireEligibility {
 	trustedWake: TrustedCourseWakeV1;
 	scheduledCourseContext: ScheduledCourseContext;
-	resolvedCourseContext: ResolvedCourseExecutionContext;
-} | null> {
+}
+
+export async function validateTrustedCourseFireEligibility(
+	input: TrustedCourseFireInput,
+	deps: Pick<TrustedCourseFireDeps, "verifyOwner">,
+): Promise<TrustedCourseFireEligibility | null> {
+	const scheduledTaskRunId = input.scheduledTaskRunId;
 	if (
 		input.reason !== "trusted-course-calendar-wake" ||
 		!input.createdByUser ||
 		!input.createdByAgent ||
 		!input.scheduledJobId ||
-		!Number.isSafeInteger(input.scheduledTaskRunId) ||
-		input.scheduledTaskRunId! <= 0
+		!Number.isSafeInteger(scheduledTaskRunId) ||
+		typeof scheduledTaskRunId !== "number" ||
+		scheduledTaskRunId <= 0
 	)
 		return null;
 	let trustedWake: TrustedCourseWakeV1;
@@ -288,36 +291,61 @@ export async function buildTrustedCourseFireContext(
 		}))
 	)
 		return null;
-	const scheduledCourseContext: ScheduledCourseContext = {
-		schemaVersion: 1,
-		source: "calendar_scheduled_wake",
-		automationId: trustedWake.automationId,
-		jobId: input.scheduledJobId,
-		runId: input.scheduledTaskRunId!,
-		taskKind: trustedWake.taskKind,
-		course: {
-			ownerUserId: trustedWake.trustedCourseScope.ownerUserId,
-			agentId: trustedWake.trustedCourseScope.agentId,
-			courseKey: trustedWake.trustedCourseScope.courseKey,
-			courseEntityId: trustedWake.trustedCourseScope.courseEntityId,
-			displayName: trustedWake.trustedCourseScope.courseDisplayName,
-		},
-		evidenceReadiness: "canonical_only",
-	};
-	const resolvedCourseContext = await deps.resolveContext({
+	return {
 		trustedWake,
-		scheduledCourseContext,
-	});
+		scheduledCourseContext: {
+			schemaVersion: 1,
+			source: "calendar_scheduled_wake",
+			automationId: trustedWake.automationId,
+			jobId: input.scheduledJobId,
+			runId: scheduledTaskRunId,
+			taskKind: trustedWake.taskKind,
+			course: {
+				ownerUserId: trustedWake.trustedCourseScope.ownerUserId,
+				agentId: trustedWake.trustedCourseScope.agentId,
+				courseKey: trustedWake.trustedCourseScope.courseKey,
+				courseEntityId: trustedWake.trustedCourseScope.courseEntityId,
+				displayName: trustedWake.trustedCourseScope.courseDisplayName,
+			},
+			evidenceReadiness: "canonical_only",
+		},
+	};
+}
+
+export async function resolveTrustedCourseFireContext(
+	eligibility: TrustedCourseFireEligibility,
+	deps: Pick<TrustedCourseFireDeps, "resolveContext">,
+): Promise<ResolvedCourseExecutionContext | null> {
+	const resolvedCourseContext = await deps.resolveContext(eligibility);
 	if (
 		!resolvedCourseContext ||
 		resolvedCourseContext.course.courseKey !==
-			scheduledCourseContext.course.courseKey ||
+			eligibility.scheduledCourseContext.course.courseKey ||
 		resolvedCourseContext.course.courseEntityId !==
-			scheduledCourseContext.course.courseEntityId
+			eligibility.scheduledCourseContext.course.courseEntityId
 	)
 		return null;
-	return { trustedWake, scheduledCourseContext, resolvedCourseContext };
+	return resolvedCourseContext;
 }
+
+export async function buildTrustedCourseFireContext(
+	input: TrustedCourseFireInput,
+	deps: TrustedCourseFireDeps,
+): Promise<{
+	trustedWake: TrustedCourseWakeV1;
+	scheduledCourseContext: ScheduledCourseContext;
+	resolvedCourseContext: ResolvedCourseExecutionContext;
+} | null> {
+	const eligibility = await validateTrustedCourseFireEligibility(input, deps);
+	if (!eligibility) return null;
+	const resolvedCourseContext = await resolveTrustedCourseFireContext(
+		eligibility,
+		deps,
+	);
+	if (!resolvedCourseContext) return null;
+	return { ...eligibility, resolvedCourseContext };
+}
+
 import type {
 	ResolvedCourseExecutionContext,
 	ScheduledCourseContext,

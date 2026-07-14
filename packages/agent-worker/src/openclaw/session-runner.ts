@@ -17,6 +17,7 @@ import {
   type McpToolDef,
   type PluginsConfig,
   type ResolvedCourseExecutionContext,
+  type TrustedExecutionScope,
   type ToolsConfig,
 } from "@lobu/core";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
@@ -79,6 +80,7 @@ import { buildTrustedAutomationModificationTurnContext } from "./automation-modi
 import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import {
   buildResolvedCourseContextInstructions,
+  buildTrustedExecutionScopeInstructions,
   getOpenClawSessionContext,
   removeLegacyToolboxActiveContext,
 } from "./session-context";
@@ -698,9 +700,10 @@ export interface RunAISessionParams {
    * gateway calls made by first-class tools must use this token instead of
    * the deployment-lifetime WORKER_TOKEN so worker-auth can resolve the
    * current agent/user/run context.
-   */
+  */
   runJobToken?: string;
   resolvedCourseContext?: ResolvedCourseExecutionContext;
+  trustedExecutionScope?: TrustedExecutionScope;
   scheduledCourseContext?: import("@lobu/core").ScheduledCourseContext;
 
   // Resolved workspace directory (from WorkspaceManager)
@@ -1073,6 +1076,7 @@ export async function runAISession(
     agentId,
     runJobToken,
     resolvedCourseContext,
+    trustedExecutionScope,
     scheduledCourseContext,
     workspaceDir,
     progressProcessor,
@@ -1582,6 +1586,8 @@ export async function runAISession(
     resolvedCourseContext,
     scheduledCourseContext
   );
+  const trustedExecutionScopeInstructions =
+    buildTrustedExecutionScopeInstructions(trustedExecutionScope);
   const gatewayInstructions = resolvedCourseContext
     ? removeLegacyToolboxActiveContext(context.gatewayInstructions)
     : context.gatewayInstructions;
@@ -1589,6 +1595,7 @@ export async function runAISession(
     gatewayInstructions,
     resolvedCourseInstructions,
     automationModificationTurn.systemInstructions,
+    trustedExecutionScopeInstructions,
     customInstructions,
   ];
 

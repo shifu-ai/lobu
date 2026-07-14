@@ -134,9 +134,9 @@ describe("course-aware wake routes", () => {
 			resolutionSource: "toolbox_calendar_course_resolver",
 			courseEntityId: "course:pm-1:course-a", courseKey: "course-a", scopeVersion: 1,
 			taskKind: "opp_coach_event_prompt",
-			eventStartAt: "2026-07-15T07:00:00.000Z",
-			scheduledFor: "2026-07-14T07:00:00.000Z",
-			nextRunAt: "2026-07-14T07:00:00.000Z",
+			eventStartAt: new Date(requestBody().payload.calendarEventRef.eventStartAt).toISOString(),
+			scheduledFor: requestBody().runAt,
+			nextRunAt: requestBody().runAt,
 			fire: { status: "not_fired", runId: null },
 			runtime: { service: "lobu-api" },
 		});
