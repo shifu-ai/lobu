@@ -119,6 +119,27 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 
 	return {
 		createDeviceAuthRoutes: () => new Hono(),
+		getStableCredentialBindingId: (credential: {
+			bindingId?: string;
+			refreshToken?: string;
+			clientId: string;
+			tokenUrl: string;
+			resource?: string;
+			tokenEndpointAuthMethod?: string;
+		}) =>
+			credential.bindingId ??
+			createHash("sha256")
+				.update(
+					JSON.stringify({
+						refreshToken: credential.refreshToken ?? null,
+						clientId: credential.clientId,
+						tokenUrl: credential.tokenUrl,
+						resource: credential.resource ?? null,
+						tokenEndpointAuthMethod:
+							credential.tokenEndpointAuthMethod ?? null,
+					}),
+				)
+				.digest("hex"),
 		deleteCredential: async (
 			secretStore: ReturnType<typeof createMemorySecretStore>,
 			agentId: string,
