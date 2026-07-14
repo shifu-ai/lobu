@@ -1,3 +1,5 @@
+-- migrate:up
+
 CREATE TABLE agent_release_applies (
     organization_id text NOT NULL,
     agent_id text NOT NULL,
