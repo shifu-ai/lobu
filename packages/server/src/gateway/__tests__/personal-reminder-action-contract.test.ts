@@ -103,6 +103,7 @@ function deps(captured: ScheduledJobRow[]): ManageSchedulesDeps {
 		countActiveScheduledJobs: mock(async () => 0) as never,
 		agentOwnedByUser: mock(async () => true) as never,
 		resolveWakeAgentId: mock(async (_org: string, raw: string) => raw) as never,
+		readReleaseCapabilityState: mock(async () => ({ status: "legacy_unenrolled" })) as never,
 	};
 }
 

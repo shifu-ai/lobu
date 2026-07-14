@@ -809,8 +809,7 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
       // Per-call capability: always overwrite, including false, so a prior
       // reminder call cannot lend delivery authority to the next MCP call on
       // the same session.
-      session.authCtx.personalReminderDeliveryIntent =
-        freshCtx.personalReminderDeliveryIntent === true;
+      refreshPerRequestCapabilityContext(session.authCtx, freshCtx);
 
       if (session.authCtx.scopedToOrg) {
         if (freshCtx.organizationId !== session.authCtx.organizationId) {
@@ -973,4 +972,14 @@ export async function handleMcp(c: Context<{ Bindings: Env }>): Promise<Response
   }
 
   return new Response('Method not allowed', { status: 405 });
+}
+
+/** Security-sensitive per-call fields must overwrite, including absence. */
+export function refreshPerRequestCapabilityContext(
+  current: Pick<AuthContext, 'personalReminderDeliveryIntent' | 'releaseCapability'>,
+  fresh: Pick<AuthContext, 'personalReminderDeliveryIntent' | 'releaseCapability'>,
+): void {
+  current.personalReminderDeliveryIntent =
+    fresh.personalReminderDeliveryIntent === true;
+  current.releaseCapability = fresh.releaseCapability;
 }

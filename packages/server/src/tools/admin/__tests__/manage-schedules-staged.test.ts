@@ -82,6 +82,7 @@ function deps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedulesDeps
 		countActiveScheduledJobs: mock(async () => 0) as any,
 		agentOwnedByUser: mock(async () => true) as any,
 		resolveWakeAgentId: mock(async (_org: string, id: string) => id) as any,
+		readReleaseCapabilityState: mock(async () => ({ status: "legacy_unenrolled" })) as any,
 		...overrides,
 	};
 }

@@ -767,6 +767,35 @@ function extractSessionToken(c: Context): string | null {
   return null;
 }
 
+export async function validateApprovalReleaseCapability(
+  input: {
+    organizationId?: string;
+    releaseCapability: import("@lobu/core").ReleaseCapabilityClaim;
+  },
+  readState?: typeof import("../../../lobu/agent-release-service.js").readAgentReleaseCapabilityState,
+): Promise<boolean> {
+  const claim = input.releaseCapability;
+  if (!input.organizationId || Date.parse(claim.expiresAt) <= Date.now()) return false;
+  const reader = readState ?? (await import("../../../lobu/agent-release-service.js")).readAgentReleaseCapabilityState;
+  const state = await reader({
+    organizationId: input.organizationId,
+    agentId: claim.agentId,
+    environment: claim.environment,
+    snapshot: {
+      schemaVersion: 1,
+      environment: claim.environment,
+      toolboxUserId: claim.toolboxUserId,
+      agentId: claim.agentId,
+      capabilities: claim.capabilityIds,
+      appliedReleaseId: claim.releaseId,
+      appliedReleaseSequence: claim.releaseSequence,
+      expiresAt: claim.expiresAt,
+      snapshotDigest: claim.snapshotDigest,
+    },
+  });
+  return state.status === "active";
+}
+
 export class McpProxy {
   private readonly SESSION_TTL_SECONDS = 30 * 60; // 30 minutes
   // Tool-approval cards may sit in-thread for a long time before the user
@@ -881,6 +910,7 @@ export class McpProxy {
       platform?: string;
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
+      releaseCapability?: import("@lobu/core").ReleaseCapabilityClaim;
     } = {},
   ): Promise<{
     status: "executed" | "blocked-notified" | "blocked-no-channel";
@@ -901,6 +931,7 @@ export class McpProxy {
       platform: tokenContext.platform,
       courseToolScope: tokenContext.courseToolScope,
       expectedMcpIdentity: tokenContext.expectedMcpIdentity,
+      releaseCapability: tokenContext.releaseCapability,
     };
     const token = tokenContext.token ?? "";
 
@@ -976,6 +1007,8 @@ export class McpProxy {
           ? { expectedMcpIdentity: tokenData.expectedMcpIdentity }
           : {}),
         ...(tokenData.channelId ? { channelId: tokenData.channelId } : {}),
+        ...(tokenData.organizationId ? { organizationId: tokenData.organizationId } : {}),
+        ...(tokenData.releaseCapability ? { releaseCapability: tokenData.releaseCapability } : {}),
       },
     );
     return { status: "executed", ...result };
@@ -992,12 +1025,26 @@ export class McpProxy {
       courseToolScope?: TrustedCourseToolScope;
       expectedMcpIdentity?: ExpectedMcpConfigIdentity;
       channelId?: string;
+      organizationId?: string;
+      releaseCapability?: import("@lobu/core").ReleaseCapabilityClaim;
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
     diagnosticCode?: string;
   }> {
+    if (options?.releaseCapability) {
+      if (!(await validateApprovalReleaseCapability({
+        organizationId: options.organizationId,
+        releaseCapability: options.releaseCapability,
+      }))) {
+        return {
+          content: [{ type: "text", text: "Release capability is no longer active." }],
+          isError: true,
+          diagnosticCode: "RELEASE_CAPABILITY_INACTIVE",
+        };
+      }
+    }
     const coursePolicy = applyTrustedCourseToolPolicy(
       toolName,
       args,
@@ -3026,6 +3073,8 @@ export class McpProxy {
         processedMessageIds,
         courseToolScope: tokenData.courseToolScope,
         expectedMcpIdentity: tokenData.expectedMcpIdentity,
+        organizationId: tokenData.organizationId,
+        releaseCapability: tokenData.releaseCapability,
       },
       this.PENDING_TOOL_TTL,
     ).catch((err: unknown) =>

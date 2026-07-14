@@ -335,6 +335,7 @@ export class MultiTenantProvider implements WorkspaceProvider {
           personalReminderDeliveryIntent:
             c.req.header('x-lobu-trusted-personal-reminder-delivery') ===
             'personal_reminder_delivery.v1',
+          releaseCapability: tokenData.releaseCapability,
           expiresAt: Math.floor((tokenData.timestamp + 2 * 60 * 60 * 1000) / 1000),
           tokenType: 'pat',
         },

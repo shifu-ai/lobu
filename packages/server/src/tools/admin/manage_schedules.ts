@@ -41,6 +41,7 @@ import type { ToolContext } from '../registry';
 import logger from '../../utils/logger';
 import { nextRunAt as nextCronTickAt } from '../../utils/cron';
 import { buildTrustedPersonalReminder } from '../../scheduled/personal-reminder';
+import { readAgentReleaseCapabilityState } from '../../lobu/agent-release-service';
 
 // SHIFU FORK: member-scope-internal-tools plan, Task 3. Member-owned
 // direct-auth sessions (see 1c52bc33) can reach this tool, but must be
@@ -261,6 +262,7 @@ export interface ManageSchedulesDeps {
    * new error path).
    */
   resolveWakeAgentId: (organizationId: string, rawAgentId: string) => Promise<string | null>;
+  readReleaseCapabilityState: typeof readAgentReleaseCapabilityState;
 }
 
 async function dbAgentOwnedByUser(
@@ -299,6 +301,7 @@ export const defaultManageSchedulesDeps: ManageSchedulesDeps = {
   countActiveScheduledJobs,
   agentOwnedByUser: dbAgentOwnedByUser,
   resolveWakeAgentId: dbResolveWakeAgentId,
+  readReleaseCapabilityState: readAgentReleaseCapabilityState,
 };
 
 export async function manageSchedules(
@@ -525,10 +528,47 @@ async function handleCreate(
     ctx.userId &&
     ctx.agentId &&
     ctx.conversationId;
+  let personalReminderReleaseReady = false;
+  if (hasPersonalReminderDeliveryMarker && isDirectAuthWake && args.payload.type === 'wake_agent') {
+    const claim = ctx.releaseCapability;
+    const requestedEnvironment = claim?.environment ??
+      (process.env.AGENT_RELEASE_ENVIRONMENT === 'staging' ? 'staging' : 'production');
+    const snapshot = claim ? {
+      schemaVersion: 1 as const,
+      environment: claim.environment,
+      toolboxUserId: claim.toolboxUserId,
+      agentId: claim.agentId,
+      capabilities: claim.capabilityIds,
+      appliedReleaseId: claim.releaseId,
+      appliedReleaseSequence: claim.releaseSequence,
+      expiresAt: claim.expiresAt,
+      snapshotDigest: claim.snapshotDigest,
+    } : null;
+    const releaseState = await deps.readReleaseCapabilityState({
+      organizationId: ctx.organizationId,
+      agentId: ctx.agentId!,
+      environment: requestedEnvironment,
+      snapshot,
+    });
+    if (releaseState.status === 'legacy_unenrolled') {
+      personalReminderReleaseReady = true;
+    } else if (
+      releaseState.status === 'active' &&
+      claim?.toolboxUserId === ctx.userId &&
+      claim.agentId === ctx.agentId &&
+      claim.capabilityIds.includes('personal_reminder_delivery.v1') &&
+      Date.parse(claim.expiresAt) > Date.now()
+    ) {
+      personalReminderReleaseReady = true;
+    } else {
+      return { error: 'personal_reminder_release_inactive' };
+    }
+  }
   const trustedPersonalReminder =
     hasPersonalReminderDeliveryMarker &&
     ctx.personalReminderDeliveryIntent === true &&
     isDirectAuthWake &&
+    personalReminderReleaseReady &&
     args.payload.type === 'wake_agent' &&
     args.payload.agent_id === ctx.agentId &&
     args.payload.thread_id === ctx.conversationId

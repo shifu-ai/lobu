@@ -84,6 +84,16 @@ describe("CLI gateway pending-tool approval replay", () => {
       agentId: "agent-1",
       courseEntityId: "course:user-1:a",
     };
+    const releaseCapability = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-original",
+      releaseSequence: 3,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      capabilityIds: ["personal_reminder_delivery.v1"],
+    };
     await storePendingTool(
       "cli-reserved-success",
       {
@@ -95,6 +105,8 @@ describe("CLI gateway pending-tool approval replay", () => {
         channelId: "line-user-1",
         courseToolScope,
         expectedMcpIdentity,
+        organizationId: "org-1",
+        releaseCapability,
       },
       60
     );
@@ -112,7 +124,7 @@ describe("CLI gateway pending-tool approval replay", () => {
       "shifu-toolbox",
       "create_automation",
       { prompt: "提醒 Irene" },
-      { courseToolScope, expectedMcpIdentity, channelId: "line-user-1" }
+      { courseToolScope, expectedMcpIdentity, channelId: "line-user-1", organizationId: "org-1", releaseCapability }
     );
   });
 

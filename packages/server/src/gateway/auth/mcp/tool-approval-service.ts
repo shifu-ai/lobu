@@ -5,7 +5,7 @@ import {
   type GrantStore,
 } from "../../permissions/grant-store.js";
 import type { UserAgentsStore } from "../user-agents-store.js";
-import { getPendingTool, takePendingTool } from "./pending-tool-store.js";
+import { buildPendingToolExecutionOptions, getPendingTool, takePendingTool } from "./pending-tool-store.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
 
@@ -61,6 +61,8 @@ interface McpProxyDirectExecution {
         configDigest: string;
       };
       channelId?: string;
+      organizationId?: string;
+      releaseCapability?: import("@lobu/core").ReleaseCapabilityClaim;
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
@@ -149,16 +151,8 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       }
 
       const execute = () => {
-        const options = {
-          ...(pending.courseToolScope
-            ? { courseToolScope: pending.courseToolScope }
-            : {}),
-          ...(pending.expectedMcpIdentity
-            ? { expectedMcpIdentity: pending.expectedMcpIdentity }
-            : {}),
-          ...(pending.channelId ? { channelId: pending.channelId } : {}),
-        };
-        return Object.keys(options).length > 0
+        const options = buildPendingToolExecutionOptions(pending);
+        return options
           ? deps.mcpProxy.executeToolDirect(
               pending.agentId,
               pending.userId,

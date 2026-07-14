@@ -133,6 +133,7 @@ function makeDeps(overrides: Partial<ManageSchedulesDeps> = {}): ManageSchedules
     // form, matching every pre-existing test in this file. Tests exercising
     // the conversation-id normalization below override this.
     resolveWakeAgentId: mock(async (_organizationId: string, rawAgentId: string) => rawAgentId) as any,
+    readReleaseCapabilityState: mock(async () => ({ status: "legacy_unenrolled" })) as any,
     ...overrides,
   };
 }
@@ -158,6 +159,20 @@ function notifyCreateArgs(recipients: unknown, overrides: Record<string, unknown
 }
 
 describe("manage_schedules member self-scoping — create wake_agent", () => {
+  test("enrolled inactive reminder rejects before quota or persistence", async () => {
+    const deps = makeDeps({
+      readReleaseCapabilityState: mock(async () => ({ status: "enrolled_inactive" })) as any,
+    });
+    const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;
+    const result = await manageSchedules(wakeCreateArgs(MEMBER_AGENT, {
+      delivery_intent: { contract: "personal_reminder_delivery.v1", destination: "personal_reminder" },
+      payload: { type: "wake_agent", agent_id: MEMBER_AGENT, prompt: "提醒我", thread_id: conversationId },
+    }) as any, {} as any, memberCtx({ conversationId }), deps);
+    expect(result).toEqual({ error: "personal_reminder_release_inactive" });
+    expect(deps.countActiveScheduledJobs).not.toHaveBeenCalled();
+    expect(deps.createScheduledJob).not.toHaveBeenCalled();
+  });
+
   test("trusted direct-auth own-thread wake persists only server-built personal reminder provenance", async () => {
     const deps = makeDeps();
     const conversationId = `${MEMBER_AGENT}_${MEMBER_USER}_thread-current`;

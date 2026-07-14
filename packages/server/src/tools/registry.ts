@@ -69,6 +69,8 @@ export interface ToolContext {
   conversationId?: string | null;
   /** Gateway-verified per-call personal-reminder delivery contract. */
   personalReminderDeliveryIntent?: boolean;
+  /** Verified bounded capability provenance for the current worker request. */
+  releaseCapability?: import('@lobu/core').ReleaseCapabilityClaim;
   /** Whether request was authenticated */
   isAuthenticated: boolean;
   /** OAuth client ID that created this request (null for session/anonymous) */

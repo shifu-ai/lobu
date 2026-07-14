@@ -8,6 +8,7 @@ import {
   getTraceparent,
   type GuardrailRegistry,
   type MessagePayload,
+  type ReleaseCapabilityClaim,
   OrchestratorError,
   retryWithBackoff,
   runGuardrailInstances,
@@ -35,6 +36,8 @@ import type {CourseMemorySearch} from './course-memory-retriever.js';
 import {resolveCourseSkillContextMetadata,selectActiveCourseSkill} from './course-skill-context-metadata.js';
 import { getDb } from "../../db/client.js";
 import { emitJourneyEvent as emitJourneyObsEvent } from "../services/journey-observability.js";
+import { resolveRuntimeCapabilitySnapshot, type RuntimeEnvironment } from "../services/runtime-capability-snapshot.js";
+import { readAgentReleaseCapabilityState } from "../../lobu/agent-release-service.js";
 import {
   type BaseDeploymentManager,
   buildCanonicalConversationKey,
@@ -87,7 +90,8 @@ export function mintRunJobToken(
   data: MessagePayload,
   effectiveConversationId: string,
   deploymentName: string,
-  includeTrustedCourseScope = false
+  includeTrustedCourseScope = false,
+  releaseCapability?: ReleaseCapabilityClaim,
 ): string | undefined {
   if (data.runId === undefined) return undefined;
   return generateWorkerToken(data.userId, effectiveConversationId, deploymentName, {
@@ -119,6 +123,7 @@ export function mintRunJobToken(
 			activeSpecializedSkill:
 				data.resolvedCourseContext.activeSpecializedSkill ?? null,
     } : undefined,
+    releaseCapability,
   });
 }
 
@@ -178,13 +183,47 @@ export class MessageConsumer {
     this.scheduledExecutionTraceRecorder = scheduledExecutionTraceRecorder;
   }
 
+  private async mintReleaseAwareRunToken(
+    data: MessagePayload,
+    deploymentName: string,
+    includeTrustedCourseScope = false,
+  ): Promise<string | undefined> {
+    let claim: ReleaseCapabilityClaim | undefined;
+    const environment = process.env.AGENT_RELEASE_ENVIRONMENT?.trim() ?? process.env.ENVIRONMENT?.trim();
+    if (
+      data.organizationId && data.agentId &&
+      (environment === "staging" || environment === "production")
+    ) {
+      const scope = {
+        organizationId: data.organizationId,
+        agentId: data.agentId,
+        environment: environment as RuntimeEnvironment,
+      };
+      try {
+        const enrollment = await readAgentReleaseCapabilityState({ ...scope, snapshot: null });
+        if (enrollment.status !== "legacy_unenrolled") {
+          const snapshot = await resolveRuntimeCapabilitySnapshot({
+            environment: environment as RuntimeEnvironment,
+            toolboxUserId: data.userId,
+            agentId: data.agentId,
+          });
+          const resolved = await readAgentReleaseCapabilityState({ ...scope, snapshot });
+          if (resolved.status === "active") claim = resolved.claim;
+        }
+      } catch (error) {
+        logger.warn({ err: error, agentId: data.agentId }, "Release capability state unavailable; dispatching without gated capabilities");
+      }
+    }
+    return mintRunJobToken(data, data.conversationId, deploymentName, includeTrustedCourseScope, claim);
+  }
+
 	private async dispatchCourseContextBoundary(data: MessagePayload, deploymentName: string): Promise<boolean> {
 		delete data.trustedExecutionScope;
 		const gateMode:CourseContextGateMode=data.scheduledCourseContext?'enforce':this.courseContextRollout.mode;
 		if(!data.scheduledCourseContext||gateMode==='off'||gateMode==='shadow')delete data.resolvedCourseContext;
 		if (gateMode === "off") {
 			await this.emitExecutionSelection(data);
-      data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName);
+      data.runJobToken = await this.mintReleaseAwareRunToken(data, deploymentName);
       await armTurnTimeout(this.queue, { messageId:data.messageId,channelId:data.channelId,conversationId:data.conversationId,userId:data.userId,platform:data.platform,platformMetadata:data.platformMetadata,deploymentName,organizationId:data.organizationId });
       await this.sendToWorkerQueue(data, deploymentName);
       return true;
@@ -246,7 +285,7 @@ export class MessageConsumer {
       return false;
 	}
 	await this.emitExecutionSelection(data);
-	data.runJobToken = mintRunJobToken(data, data.conversationId, deploymentName, gateMode === "enforce" && result?.status === "ready");
+	data.runJobToken = await this.mintReleaseAwareRunToken(data, deploymentName, gateMode === "enforce" && result?.status === "ready");
     await armTurnTimeout(this.queue, {
       messageId: data.messageId, channelId: data.channelId, conversationId: data.conversationId,
       userId: data.userId, platform: data.platform, platformMetadata: data.platformMetadata,

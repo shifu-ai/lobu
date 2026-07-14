@@ -7,6 +7,7 @@
 
 import { getDb } from "../../../db/client.js";
 import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
+import type { ReleaseCapabilityClaim } from "@lobu/core";
 
 const SCOPE = "pending-tool";
 
@@ -16,6 +17,7 @@ export interface PendingToolInvocation {
   args: Record<string, unknown>;
   agentId: string;
   userId: string;
+  organizationId?: string;
   channelId?: string;
   conversationId?: string;
   teamId?: string;
@@ -28,6 +30,7 @@ export interface PendingToolInvocation {
     configSource: "global" | "agent" | "derived";
     configDigest: string;
   };
+  releaseCapability?: ReleaseCapabilityClaim;
 }
 
 export interface PendingToolExecutionOptions {
@@ -36,6 +39,8 @@ export interface PendingToolExecutionOptions {
     PendingToolInvocation["expectedMcpIdentity"]
   >;
   channelId?: string;
+  organizationId?: string;
+  releaseCapability?: ReleaseCapabilityClaim;
 }
 
 /**
@@ -55,6 +60,10 @@ export function buildPendingToolExecutionOptions(
       ? { expectedMcpIdentity: pending.expectedMcpIdentity }
       : {}),
     ...(pending.channelId ? { channelId: pending.channelId } : {}),
+    ...(pending.organizationId ? { organizationId: pending.organizationId } : {}),
+    ...(pending.releaseCapability
+      ? { releaseCapability: pending.releaseCapability }
+      : {}),
   };
   return Object.keys(options).length > 0 ? options : undefined;
 }

@@ -37,6 +37,7 @@ export interface AuthContext {
   agentId: string | null;
   conversationId?: string | null;
   personalReminderDeliveryIntent?: boolean;
+  releaseCapability?: import('@lobu/core').ReleaseCapabilityClaim;
   requestedAgentId: string | null;
   isAuthenticated: boolean;
   clientId: string | null;
@@ -74,6 +75,7 @@ export function extractAuthContext(c: Context<{ Bindings: Env }>): AuthContext {
     conversationId: mcpAuthInfo?.conversationId ?? null,
     personalReminderDeliveryIntent:
       mcpAuthInfo?.personalReminderDeliveryIntent === true,
+    releaseCapability: mcpAuthInfo?.releaseCapability,
     requestedAgentId: null,
     isAuthenticated: c.var.mcpIsAuthenticated || false,
     clientId: mcpAuthInfo?.clientId ?? null,
@@ -384,6 +386,7 @@ export function toToolContext(authCtx: AuthContext): ToolContext {
     conversationId: authCtx.conversationId,
     personalReminderDeliveryIntent:
       authCtx.personalReminderDeliveryIntent === true,
+    releaseCapability: authCtx.releaseCapability,
     isAuthenticated: authCtx.isAuthenticated,
     clientId: authCtx.clientId,
     scopes: authCtx.scopes,

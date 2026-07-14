@@ -226,6 +226,8 @@ export interface AuthInfo {
   conversationId?: string;
   /** Gateway-verified per-call personal-reminder delivery contract. */
   personalReminderDeliveryIntent?: boolean;
+  /** Verified bounded capability claim from a per-run worker token only. */
+  releaseCapability?: import('@lobu/core').ReleaseCapabilityClaim;
 }
 
 // ============================================

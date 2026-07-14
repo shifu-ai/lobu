@@ -34,11 +34,22 @@ function trustedPat(overrides: Partial<AuthContext> = {}): AuthContext {
 
 describe("executeTool trusted schedule PAT boundary", () => {
 	test("verified worker conversation provenance reaches ToolContext", () => {
+		const releaseCapability = {
+			environment: "production" as const,
+			toolboxUserId: USER_ID,
+			agentId: AGENT_ID,
+			releaseId: "release-1",
+			releaseSequence: 1,
+			snapshotDigest: `sha256:${"a".repeat(64)}`,
+			expiresAt: new Date(Date.now() + 60_000).toISOString(),
+			capabilityIds: ["personal_reminder_delivery.v1"],
+		};
 		const auth = trustedPat({
 			agentId: AGENT_ID,
 			conversationId: "conversation-trusted-1",
 			clientId: "lobu-worker",
 			personalReminderDeliveryIntent: true,
+			releaseCapability,
 		});
 		expect(toToolContext(auth)).toMatchObject({
 			userId: USER_ID,
@@ -46,6 +57,7 @@ describe("executeTool trusted schedule PAT boundary", () => {
 			conversationId: "conversation-trusted-1",
 			clientId: "lobu-worker",
 			personalReminderDeliveryIntent: true,
+			releaseCapability,
 		});
 	});
 

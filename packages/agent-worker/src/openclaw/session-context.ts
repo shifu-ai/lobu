@@ -11,6 +11,7 @@ import {
   type McpToolDef,
   type ResolvedCourseExecutionContext,
   type TrustedExecutionScope,
+  verifyWorkerToken,
 } from "@lobu/core";
 import type { WorkerShifuTraceContext } from "../shared/journey-trace";
 import { shifuTraceHeaders } from "../shared/journey-trace";
@@ -275,6 +276,8 @@ let cachedResult: {
   agentId: string;
   mcpExposure: "tools" | "cli";
   cachedAt: number;
+  authorizationKey: string;
+  authorizationExpiresAt: number;
 } | null = null;
 
 /**
@@ -469,6 +472,8 @@ export async function getOpenClawSessionContext(
   opts: {
     mcpExposure?: "tools" | "cli";
     shifuTrace?: WorkerShifuTraceContext;
+    /** Per-run token preferred by session-runner over the deployment token. */
+    workerToken?: string;
   } = {}
 ): Promise<{
   /**
@@ -491,19 +496,42 @@ export async function getOpenClawSessionContext(
   agentId: string;
 }> {
   const mcpExposure: "tools" | "cli" = opts.mcpExposure ?? "tools";
+  const workerToken = opts.workerToken ?? process.env.WORKER_TOKEN;
+  const verifiedToken = workerToken ? verifyWorkerToken(workerToken) : null;
+  const capability = verifiedToken?.releaseCapability;
+  const authorizationKey = capability
+    ? [
+        capability.snapshotDigest,
+        capability.releaseId,
+        capability.releaseSequence,
+        capability.toolboxUserId,
+        capability.agentId,
+      ].join("\0")
+    : `legacy:${verifiedToken?.userId ?? ""}:${verifiedToken?.agentId ?? ""}:${workerToken ?? ""}`;
+  const configuredCacheTtl = Number.parseInt(
+    process.env.SESSION_CONTEXT_CACHE_TTL_MS ?? "",
+    10
+  );
+  const cacheTtl =
+    Number.isFinite(configuredCacheTtl) && configuredCacheTtl > 0
+      ? Math.min(configuredCacheTtl, CACHE_TTL_MS)
+      : CACHE_TTL_MS;
+  const authorizationExpiresAt = capability
+    ? Date.parse(capability.expiresAt)
+    : Number.POSITIVE_INFINITY;
 
   if (
     cachedResult &&
     cachedResult.mcpExposure === mcpExposure &&
-    Date.now() - cachedResult.cachedAt < CACHE_TTL_MS
+    cachedResult.authorizationKey === authorizationKey &&
+    Date.now() - cachedResult.cachedAt < cacheTtl &&
+    Date.now() < cachedResult.authorizationExpiresAt
   ) {
     logger.debug("Returning cached session context");
     return cachedResult;
   }
 
   const dispatcherUrl = process.env.DISPATCHER_URL;
-  const workerToken = process.env.WORKER_TOKEN;
-
   if (!dispatcherUrl || !workerToken) {
     logger.warn("Missing dispatcher URL or worker token for session context");
     return { ...DEFAULT_SESSION_CONTEXT };
@@ -603,7 +631,13 @@ export async function getOpenClawSessionContext(
       (mcp) => mcp.authenticated && !toolMcpIds.has(mcp.id)
     );
     if (!hasEmptyAuthenticatedMcp) {
-      cachedResult = { ...result, mcpExposure, cachedAt: Date.now() };
+      cachedResult = {
+        ...result,
+        mcpExposure,
+        cachedAt: Date.now(),
+        authorizationKey,
+        authorizationExpiresAt,
+      };
     } else {
       logger.warn(
         "Skipping session context cache — authenticated MCP(s) returned no tools",

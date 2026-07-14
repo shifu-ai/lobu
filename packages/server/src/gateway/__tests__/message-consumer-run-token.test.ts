@@ -61,6 +61,25 @@ describe("mintRunJobToken", () => {
     expect(token).toBeUndefined();
   });
 
+  test("binds a server-resolved release capability into the RUN token", () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-3",
+      releaseSequence: 3,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      capabilityIds: ["personal_reminder_delivery.v1"],
+    };
+    const token = mintRunJobToken({
+      userId: "user-1", agentId: "agent-1", organizationId: "org-1",
+      platform: "line", channelId: "line-user-1", conversationId: "conv-1",
+      messageId: "msg-1", messageText: "提醒我", runId: 124,
+    } as MessagePayload, "conv-1", "deploy-1", false, claim);
+    expect(verifyWorkerToken(token!)?.releaseCapability).toEqual(claim);
+  });
+
   test("defaults connectionId to the conversationId for api-platform payloads", () => {
     __resetEncryptionKeyCacheForTests();
     const token = mintRunJobToken(

@@ -1312,9 +1312,14 @@ export async function runAISession(
   // MCP setup instructions use the right call syntax.
   const contextLoader =
     runAISessionDependencies?.sessionContextLoader ?? getOpenClawSessionContext;
+  const sessionContextWorkerToken = resolveGatewayWorkerToken(
+    runJobToken,
+    process.env.WORKER_TOKEN ?? ""
+  );
   const context = await contextLoader({
     mcpExposure,
     shifuTrace,
+    workerToken: sessionContextWorkerToken,
   });
 
   // Sync enabled skills to workspace filesystem so the agent can `cat` them.
@@ -1728,6 +1733,7 @@ export async function runAISession(
           const fresh = await getOpenClawSessionContext({
             mcpExposure,
             shifuTrace,
+            workerToken: sessionContextWorkerToken,
           });
           const refreshedAllowedMcpTools = collectAllowedMcpTools(
             fresh.mcpTools
