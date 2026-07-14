@@ -41,6 +41,74 @@ class InMemoryWritableStore implements WritableSecretStore {
 }
 
 describe("McpProxy executeToolDirect", () => {
+  test.each([
+    { status: "legacy_unenrolled" as const },
+    {
+      status: "enrolled_inactive" as const,
+      environment: "production" as const,
+      reason: "capability_expired" as const,
+    },
+    {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "user1",
+        agentId: "agent1",
+        releaseId: "release-expired",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+        capabilityIds: ["personal_reminder_delivery.v1"],
+      },
+    },
+  ])("ordinary direct MCP calls remain available for release state %#", async (releaseState) => {
+    const originalFetch = globalThis.fetch;
+    const proxy = new McpProxy({
+      getHttpServer: async (id: string) => ({
+        id,
+        upstreamUrl: "http://ordinary.example.com/mcp",
+      }),
+      getAllHttpServers: async () => new Map(),
+    }, {
+      secretStore: new InMemoryWritableStore(),
+    });
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { id?: number; method?: string };
+      if (body.method === "initialize") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { protocolVersion: "2025-03-26" },
+        }), { headers: { "Content-Type": "application/json", "Mcp-Session-Id": "ordinary-session" } });
+      }
+      if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { content: [{ type: "text", text: "ordinary-ok" }], isError: false },
+      }), { headers: { "Content-Type": "application/json" } });
+    };
+    try {
+      const result = await orgContext.run(
+        { organizationId: "test-org" },
+        () => proxy.executeToolDirect(
+          "agent1",
+          "user1",
+          "ordinary-mcp",
+          "read_ordinary_data",
+          {},
+          { organizationId: "test-org", releaseState },
+        ),
+      );
+      expect(result).toEqual({
+        content: [{ type: "text", text: "ordinary-ok" }],
+        isError: false,
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("initializes a session before calling sessionful MCP tools", async () => {
     const originalFetch = globalThis.fetch;
     const upstreamContent = [

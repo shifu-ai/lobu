@@ -1,6 +1,6 @@
-import { describe, expect, test, vi } from "bun:test";
-import { validateApprovalReleaseCapability } from "../auth/mcp/proxy";
+import { describe, expect, test } from "bun:test";
 import { refreshPerRequestCapabilityContext } from "../../mcp-handler";
+import { buildPendingToolExecutionOptions } from "../auth/mcp/pending-tool-store";
 
 function claim(overrides: Record<string, unknown> = {}) {
   return {
@@ -29,42 +29,20 @@ describe("release capability continuation", () => {
 		});
   });
 
-  test("expired approval loses capability before consulting durable state", async () => {
-		const readState = vi.fn(async () => ({
-			status: "active" as const,
-			claim: claim(),
-		}));
-		await expect(
-			validateApprovalReleaseCapability(
-				{
+  test("pending replay preserves the original inactive state for the action boundary", () => {
+    const releaseState = {
+      status: "enrolled_inactive" as const,
+      environment: "production" as const,
+      reason: "capability_expired" as const,
+    };
+    expect(buildPendingToolExecutionOptions({
+      mcpId: "lobu-memory",
+      toolName: "manage_schedules",
+      args: {},
+      agentId: "agent-1",
+      userId: "user-1",
       organizationId: "org-1",
-					releaseState: {
-						status: "active",
-						claim: claim({ expiresAt: new Date(Date.now() - 1).toISOString() }),
-					},
-				},
-				readState as never,
-			),
-		).resolves.toBe(false);
-    expect(readState).not.toHaveBeenCalled();
-  });
-
-  test("revocation removes the original approval and cannot substitute a newer release", async () => {
-    const original = claim();
-    const readState = vi.fn(async (input: any) => {
-      expect(input.snapshot.appliedReleaseId).toBe("release-original");
-      expect(input.snapshot.appliedReleaseSequence).toBe(3);
-      return { status: "enrolled_inactive" as const };
-    });
-		await expect(
-			validateApprovalReleaseCapability(
-				{
-					organizationId: "org-1",
-					releaseState: { status: "active", claim: original },
-				},
-				readState as never,
-			),
-		).resolves.toBe(false);
-    expect(readState).toHaveBeenCalledTimes(1);
+      releaseState,
+    })).toEqual({ organizationId: "org-1", releaseState });
   });
 });

@@ -232,6 +232,99 @@ describe("createToolApprovalService", () => {
     );
   });
 
+  test.each([
+    { status: "legacy_unenrolled" as const },
+    {
+      status: "enrolled_inactive" as const,
+      environment: "production" as const,
+      reason: "capability_expired" as const,
+    },
+    {
+      status: "active" as const,
+      claim: {
+        environment: "production" as const,
+        toolboxUserId: "toolbox-user-1",
+        agentId: "shifu-u-1",
+        releaseId: "release-expired",
+        releaseSequence: 1,
+        snapshotDigest: `sha256:${"a".repeat(64)}`,
+        expiresAt: new Date(Date.now() - 1_000).toISOString(),
+        capabilityIds: ["personal_reminder_delivery.v1"],
+      },
+    },
+  ])("ordinary approval replay remains available for release state %#", async (releaseState) => {
+    const originalFetch = globalThis.fetch;
+    const approvalId = `ordinary-release-${releaseState.status}`;
+    await seedLinePending(approvalId, {
+      organizationId: "org-1",
+      releaseState,
+      mcpId: "ordinary_mcp",
+      toolName: "read_ordinary_data",
+      args: {},
+    });
+    const proxy = new McpProxy(
+      {
+        getHttpServer: async () => ({
+          id: "ordinary_mcp",
+          upstreamUrl: "https://ordinary.test/mcp",
+        }),
+        getAllHttpServers: async () => new Map(),
+      },
+      {
+        secretStore: {
+          get: async () => null,
+          put: async () => "secret://test" as const,
+          delete: async () => undefined,
+          list: async () => [],
+        },
+      },
+    );
+    globalThis.fetch = mock(async (_input, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.method === "initialize") {
+        return new Response(JSON.stringify({
+          jsonrpc: "2.0",
+          id: body.id,
+          result: { protocolVersion: "2025-03-26" },
+        }), { headers: { "content-type": "application/json", "mcp-session-id": "replay-session" } });
+      }
+      if (body.method === "notifications/initialized") return new Response("", { status: 202 });
+      return new Response(JSON.stringify({
+        jsonrpc: "2.0",
+        id: body.id,
+        result: { content: [{ type: "text", text: "ordinary-replayed" }], isError: false },
+      }), { headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const service = createToolApprovalService({
+        grantStore: {
+          grant: mock(async () => undefined),
+          hasGrant: mock(async () => false),
+          revoke: mock(async () => undefined),
+        },
+        mcpProxy: proxy,
+        userAgentsStore: { ownsAgent: mock(async () => true) },
+        organizationId: "org-1",
+      });
+      const replay = await service.submit({
+        action: "approve_once",
+        approvalId,
+        toolboxUserId: "toolbox-user-1",
+        lineUserId: "line-user-1",
+        agentId: "shifu-u-1",
+      });
+      expect(replay).toMatchObject({
+        status: "executed",
+        result: {
+          content: [{ type: "text", text: "ordinary-replayed" }],
+          isError: false,
+        },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("durable legacy approval replay preserves course scope and denies meeting_search before execution upstream", async () => {
     const fetchCalls: string[] = [];
     globalThis.fetch = mock(async (_input, init) => {

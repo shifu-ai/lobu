@@ -12,7 +12,6 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
-import { readAgentReleaseCapabilityState } from "../../../lobu/agent-release-service.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
 import {
@@ -767,36 +766,6 @@ function extractSessionToken(c: Context): string | null {
   return null;
 }
 
-export async function validateApprovalReleaseCapability(
-  input: {
-    organizationId?: string;
-		releaseState: import("@lobu/core").ReleaseCapabilityState;
-  },
-	readState: typeof readAgentReleaseCapabilityState = readAgentReleaseCapabilityState,
-): Promise<boolean> {
-	if (input.releaseState.status !== "active") return false;
-	const claim = input.releaseState.claim;
-	if (!input.organizationId || Date.parse(claim.expiresAt) <= Date.now())
-		return false;
-	const state = await readState({
-    organizationId: input.organizationId,
-    agentId: claim.agentId,
-    environment: claim.environment,
-    snapshot: {
-      schemaVersion: 1,
-      environment: claim.environment,
-      toolboxUserId: claim.toolboxUserId,
-      agentId: claim.agentId,
-      capabilities: claim.capabilityIds,
-      appliedReleaseId: claim.releaseId,
-      appliedReleaseSequence: claim.releaseSequence,
-      expiresAt: claim.expiresAt,
-      snapshotDigest: claim.snapshotDigest,
-    },
-  });
-  return state.status === "active";
-}
-
 export class McpProxy {
   private readonly SESSION_TTL_SECONDS = 30 * 60; // 30 minutes
   // Tool-approval cards may sit in-thread for a long time before the user
@@ -1038,22 +1007,6 @@ export class McpProxy {
     isError: boolean;
     diagnosticCode?: string;
   }> {
-		if (options?.releaseState) {
-			if (
-				!(await validateApprovalReleaseCapability({
-        organizationId: options.organizationId,
-					releaseState: options.releaseState,
-				}))
-			) {
-        return {
-					content: [
-						{ type: "text", text: "Release capability is no longer active." },
-					],
-          isError: true,
-          diagnosticCode: "RELEASE_CAPABILITY_INACTIVE",
-        };
-      }
-    }
     const coursePolicy = applyTrustedCourseToolPolicy(
       toolName,
       args,

@@ -68,6 +68,36 @@ async function seedActiveRelease(): Promise<ReleaseCapabilityState> {
 }
 
 describe("personal reminder release validation and persistence transaction", () => {
+	test("an expired replay state cannot create the gated personal reminder", async () => {
+		const active = await seedActiveRelease();
+		if (active.status !== "active") throw new Error("expected active test state");
+		const expired: ReleaseCapabilityState = {
+			status: "active",
+			claim: {
+				...active.claim,
+				expiresAt: new Date(Date.now() - 1_000).toISOString(),
+			},
+		};
+		const outcome = await createScheduledJobWithGuards(
+			{
+				organizationId: ORG,
+				actionType: "wake_agent",
+				actionArgs: { agent_id: AGENT, prompt: "提醒我回覆客戶" },
+				description: "提醒我回覆客戶",
+				runAt: new Date(Date.now() + 60_000),
+				createdByUser: USER,
+				createdByAgent: AGENT,
+			},
+			{ targetAgentId: AGENT, userId: USER, activeQuota: 20, releaseState: expired },
+		);
+		expect(outcome).toEqual({ status: "release_inactive" });
+		const [{ count }] = await getDb()<{ count: number }>`
+			SELECT count(*)::int AS count FROM scheduled_jobs
+			WHERE organization_id = ${ORG}
+		`;
+		expect(count).toBe(0);
+	});
+
 	test("a concurrent revocation that commits first prevents the waiting reminder write", async () => {
 		const releaseState = await seedActiveRelease();
 		const sql = getDb();

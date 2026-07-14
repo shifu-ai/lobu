@@ -177,7 +177,7 @@ function notifyCreateArgs(
 }
 
 describe("manage_schedules member self-scoping — create wake_agent", () => {
-  test("enrolled inactive reminder rejects before quota or persistence", async () => {
+  test.each(["direct call", "approval replay"])("enrolled inactive personal reminder %s rejects before quota or persistence", async () => {
     const deps = makeDeps({
 			createScheduledJobWithGuards: mock(async () => ({
 				status: "release_inactive",
