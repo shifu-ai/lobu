@@ -183,14 +183,15 @@ describe("worker model observability", () => {
   const obsBase = {
     trace: {
       traceId: "tr_modelobs123456",
+      parentSpanId: "sp_gatewaymodel123",
       journeyId: "line_reply",
       turnId: "turn_modelobs123",
       actor: "worker",
       traceSource: "incoming" as const,
     },
     conversationId: "conv-1",
-    agentId: "agent-1",
-    userId: "user-1",
+    agentId: "shifu-u-agent-secret",
+    userId: "toolbox-user-secret",
     provider: "openai",
     modelId: "gpt-4.1",
     toolCount: 7,
@@ -272,7 +273,9 @@ describe("worker model observability", () => {
         schema_version: "journey.trace.v1",
         event: "provider.call.started",
         trace_id: "tr_modelobs123456",
+        parent_span_id: "sp_gatewaymodel123",
         journey_id: "line_reply",
+        turn_id: "turn_modelobs123",
         service: "lobu",
         module: "agent-worker",
         status: "started",
@@ -285,6 +288,8 @@ describe("worker model observability", () => {
         },
       },
     });
+    expect(JSON.stringify(events[0])).not.toContain("shifu-u-agent-secret");
+    expect(JSON.stringify(events[0])).not.toContain("toolbox-user-secret");
     expect(events[1]).toMatchObject({
       eventName: "provider.call.started",
       status: "started",

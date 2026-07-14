@@ -779,6 +779,62 @@ export function emitWorkerLifecycleObsEvent(input: {
   });
 }
 
+export function emitWorkerLifecycleObsEventFromPlatformMetadata(input: {
+  platformMetadata: unknown;
+  conversationId?: string;
+  sessionId?: string;
+  agentId?: string;
+  userId?: string;
+  event: "lobu.worker.started" | "lobu.worker.completed" | "lobu.worker.failed";
+  status: "started" | "ok" | "failed";
+  durationMs?: number;
+  fields?: Record<string, unknown>;
+}): WorkerShifuTraceContext {
+  const trace = parseWorkerShifuTrace(input.platformMetadata, "worker");
+  emitWorkerLifecycleObsEvent({
+    trace,
+    conversationId: input.conversationId,
+    sessionId: input.sessionId,
+    agentId: input.agentId,
+    userId: input.userId,
+    event: input.event,
+    status: input.status,
+    durationMs: input.durationMs,
+    fields: input.fields,
+  });
+  return trace;
+}
+
+export function emitMcpToolCallLifecycleObsEvent(input: {
+  trace: WorkerShifuTraceContext;
+  conversationId?: string;
+  sessionId?: string;
+  agentId?: string;
+  userId?: string;
+  toolCallId: string;
+  toolName: string;
+  isError: boolean;
+  durationMs?: number;
+  fields?: Record<string, unknown>;
+}): void {
+  emitWorkerJourneyObsEvent({
+    trace: input.trace,
+    conversationId: input.conversationId,
+    sessionId: input.sessionId,
+    agentId: input.agentId,
+    userId: input.userId,
+    event: input.isError ? "mcp.tool_call.failed" : "mcp.tool_call.completed",
+    status: input.isError ? "failed" : "ok",
+    durationMs: input.durationMs,
+    fields: {
+      tool_call_id: input.toolCallId,
+      tool: { name: input.toolName },
+      is_error: input.isError,
+      ...input.fields,
+    },
+  });
+}
+
 function normalizeJourneyTraceStatus(status: string): JourneyTraceStatus {
   switch (status) {
     case "started":
@@ -1071,12 +1127,11 @@ export async function runAISession(
   )?.mcpExposure;
   const mcpExposure: "tools" | "cli" =
     configuredMcpExposure === "cli" ? "cli" : "tools";
-  const shifuTrace = parseWorkerShifuTrace(platformMetadata, "worker");
   const workerRunStartedAt = Date.now();
   const workerRunDurationMs = () =>
     Math.max(0, Date.now() - workerRunStartedAt);
-  emitWorkerLifecycleObsEvent({
-    trace: shifuTrace,
+  const shifuTrace = emitWorkerLifecycleObsEventFromPlatformMetadata({
+    platformMetadata,
     conversationId,
     sessionId: sessionKey,
     agentId,
@@ -2191,23 +2246,19 @@ Use it when the user references past discussions or you need context.`);
         pendingToolArgs.delete(event.toolCallId);
         const toolStartedAt = pendingToolStartTimes.get(event.toolCallId);
         pendingToolStartTimes.delete(event.toolCallId);
-        emitWorkerJourneyObsEvent({
+        emitMcpToolCallLifecycleObsEvent({
           trace: shifuTrace,
           conversationId,
           sessionId: sessionKey,
           agentId: agentId || context.agentId,
           userId: context.userId,
-          event: "mcp.tool_call.completed",
-          status: event.isError ? "failed" : "ok",
+          toolCallId: event.toolCallId,
+          toolName: event.toolName,
+          isError: event.isError,
           durationMs:
             toolStartedAt === undefined
               ? undefined
               : Math.max(0, Date.now() - toolStartedAt),
-          fields: {
-            tool_call_id: event.toolCallId,
-            tool: { name: event.toolName },
-            is_error: event.isError,
-          },
         });
         const payload = buildToolUseEventPayload({
           toolCallId: event.toolCallId,
