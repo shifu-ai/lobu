@@ -5,6 +5,7 @@ import {
 	buildToolDescriptor,
 	inventoryFingerprint,
 	type ToolDescriptor,
+	toolIdentityKey,
 } from "../openclaw/tool-descriptor";
 import {
 	buildToolRetrievalIndex,
@@ -313,8 +314,8 @@ describe("tool retrieval index", () => {
 		const right = buildToolDescriptor(tool("c", "shared"), "a/b", 1);
 
 		expect(left.key).toBe(right.key);
-		expect(left.identityKey).toBe("a\u0000b/c");
-		expect(right.identityKey).toBe("a/b\u0000c");
+		expect(left.identityKey).toBe(toolIdentityKey("a", "b/c"));
+		expect(right.identityKey).toBe(toolIdentityKey("a/b", "c"));
 		const index = buildToolRetrievalIndex([left, right]);
 		const matches = searchToolRetrievalIndex(
 			index,
@@ -324,6 +325,24 @@ describe("tool retrieval index", () => {
 		);
 
 		expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual(["a"]);
+	});
+
+	test("keeps raw NUL-containing identity components injective", () => {
+		const left = buildToolDescriptor(tool("c", "shared"), "a\u0000b", 0);
+		const right = buildToolDescriptor(tool("b\u0000c", "shared"), "a", 1);
+		const index = buildToolRetrievalIndex([left, right]);
+
+		expect(left.identityKey).not.toBe(right.identityKey);
+		const matches = searchToolRetrievalIndex(
+			index,
+			"shared",
+			2,
+			new Set([left.identityKey]),
+		);
+
+		expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual([
+			"a\u0000b",
+		]);
 	});
 
 	test("computes relevance statistics over eligible descriptors only", () => {

@@ -6,6 +6,10 @@ import type { ToolDestination, ToolOperation } from "./tool-route-query";
 const MAX_INDEXED_TEXT_BYTES = 16 * 1024;
 const DESCRIPTOR_VERSION = 1;
 
+export function toolIdentityKey(mcpId: string, name: string): string {
+	return JSON.stringify([mcpId, name]);
+}
+
 export interface ToolDescriptor {
 	key: string;
 	identityKey: string;
@@ -43,7 +47,7 @@ interface DescriptorOverride {
 }
 
 const DESCRIPTOR_OVERRIDES: Readonly<Record<string, DescriptorOverride>> = {
-	"lobu-memory\u0000manage_schedules": {
+	[toolIdentityKey("lobu-memory", "manage_schedules")]: {
 		aliases: ["提醒我", "稍後叫我", "個人提醒", "延遲提醒", "agent schedule"],
 		operations: ["create", "update", "delete", "schedule"],
 		destinations: ["personal_reminder"],
@@ -53,7 +57,7 @@ const DESCRIPTOR_OVERRIDES: Readonly<Record<string, DescriptorOverride>> = {
 		mutatesState: true,
 		requiresConfirmation: true,
 	},
-	"google_workspace\u0000gws_calendar_events_create": {
+	[toolIdentityKey("google_workspace", "gws_calendar_events_create")]: {
 		aliases: ["Google Calendar", "建立行事曆事件", "建立日曆事件"],
 		operations: ["create"],
 		destinations: ["google_calendar"],
@@ -235,7 +239,7 @@ export function buildToolDescriptor(
 	const entry = catalogEntryForTool(tool, originalIndex, mcpId);
 	const name = entry.name;
 	const key = mcpId ? `${mcpId}/${name}` : name;
-	const identityKey = `${mcpId}\u0000${name}`;
+	const identityKey = toolIdentityKey(mcpId, name);
 	const indexedName = sanitize(name);
 	const indexedMcpId = sanitize(mcpId);
 	const indexedKey = indexedMcpId

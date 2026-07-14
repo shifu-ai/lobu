@@ -1,5 +1,5 @@
 import type { ToolCatalogEntry } from "./tool-catalog";
-import { buildToolDescriptor } from "./tool-descriptor";
+import { buildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
 import {
 	buildToolRetrievalIndex,
 	searchToolRetrievalIndex,
@@ -35,7 +35,7 @@ export interface RouteToolEntriesParams {
 }
 
 function canonicalToolKey(entry: ToolCatalogEntry): string {
-	return `${entry.mcpId}\u0000${entry.name}`;
+	return toolIdentityKey(entry.mcpId, entry.name);
 }
 
 function candidateScore(match: ToolCandidateMatch): ToolCandidateScore {
