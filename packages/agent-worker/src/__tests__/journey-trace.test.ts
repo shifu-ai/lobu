@@ -1,4 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
+import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { buildToolRouterJourneyEventInput } from "../openclaw/session-runner";
 import {
   emitJourneyEvent,
   journeyEvent,
@@ -121,5 +123,155 @@ describe("worker journey trace", () => {
       trace_id: "tr_worker_emit",
       status: "started",
     });
+  });
+
+  test("builds a bounded tool-router decision event without raw prompt data", () => {
+    const userPrompt = `幫我排明天下午三點跟老師開會-${"private".repeat(200)}`;
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Create a personal reminder schedule.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                raw_schema_secret: { description: "oauth-secret" },
+              },
+            },
+          },
+        ],
+        google_workspace: [
+          {
+            name: "gws_calendar_events_create",
+            description: "Create a Google Calendar event.",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      message: userPrompt,
+      budget: 8,
+      routerMode: "semantic",
+    });
+    const input = buildToolRouterJourneyEventInput({
+      trace: parseWorkerShifuTrace({
+        shifuTrace: {
+          trace_id: "tr_toolrouter1234",
+          journey_id: "line_text_agent_turn",
+        },
+      }),
+      selectionTrace: selection.trace,
+      totalMs: 12.5,
+    });
+    const event = journeyEvent(input);
+    const serializedEvent = JSON.stringify(event);
+    const emitted = JSON.parse(serializedEvent) as Record<string, unknown>;
+
+    expect(emitted.inventory_fingerprint).toHaveLength(16);
+    expect(emitted.candidates).toHaveLength(
+      Math.min(5, selection.trace.candidateCount)
+    );
+    expect(serializedEvent).not.toContain(userPrompt);
+    expect(serializedEvent).not.toContain("raw_schema_secret");
+    expect(serializedEvent).not.toContain("oauth-secret");
+    expect((emitted.candidates as unknown[]).length <= 5).toBe(true);
+    expect(emitted.selected_tools).toHaveLength(0);
+    expect(emitted.blocked_tools).toHaveLength(2);
+    expect(emitted.candidates).toEqual(
+      selection.trace.candidates.slice(0, 5).map((candidate) => ({
+        key: candidate.key,
+        totalScore: candidate.totalScore,
+        reasons: candidate.reasons,
+        scoreBreakdown: candidate.scoreBreakdown,
+      }))
+    );
+    expect(emitted).toMatchObject({
+      event: "lobu.worker.tool_router_decision",
+      module: "agent-worker",
+      status: "ok",
+      router_version: "semantic-v1",
+      router_mode: "semantic",
+      semantic_computed: true,
+      cache_hit: expect.any(Boolean),
+      tool_count: expect.any(Number),
+      eligible_tool_count: expect.any(Number),
+      selected_tools: expect.any(Array),
+      blocked_tools: expect.any(Array),
+      timing_ms: expect.objectContaining({ total: expect.any(Number) }),
+    });
+  });
+
+  test("normalizes every non-finite or negative router metric", () => {
+    const selection = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        lobu: [
+          {
+            name: "search_memory",
+            description: "Search memory",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      message: "search memory",
+      budget: 1,
+    });
+    const invalidTrace = {
+      ...selection.trace,
+      totalTools: Number.NaN,
+      eligibleToolCount: Number.POSITIVE_INFINITY,
+      candidateCount: Number.NEGATIVE_INFINITY,
+      estimatedIndexBytes: Number.NEGATIVE_INFINITY,
+      cacheEvictionCount: -1,
+      timingMs: {
+        build: Number.NaN,
+        retrieve: Number.POSITIVE_INFINITY,
+        rank: -1,
+      },
+      candidates: selection.trace.candidates.map((candidate) => ({
+        ...candidate,
+        totalScore: Number.NaN,
+        scoreBreakdown: candidate.scoreBreakdown
+          ? {
+              ...candidate.scoreBreakdown,
+              exactName: Number.POSITIVE_INFINITY,
+              negativePenalty: -1,
+            }
+          : undefined,
+      })),
+    };
+    const event = journeyEvent(
+      buildToolRouterJourneyEventInput({
+        trace: parseWorkerShifuTrace({}),
+        selectionTrace: invalidTrace,
+        totalMs: Number.POSITIVE_INFINITY,
+      })
+    );
+
+    expect(event).toMatchObject({
+      tool_count: 0,
+      eligible_tool_count: 0,
+      candidate_count: 0,
+      timing_ms: { build: 0, retrieve: 0, rank: 0, total: 0 },
+      estimated_index_bytes: 0,
+      cache_eviction_count: 0,
+    });
+    for (const candidate of event.candidates as Array<{
+      totalScore: number;
+      scoreBreakdown?: Record<string, number>;
+    }>) {
+      expect(candidate.totalScore).toBe(0);
+      expect(candidate.scoreBreakdown?.exactName).toBe(0);
+      expect(candidate.scoreBreakdown?.negativePenalty).toBe(0);
+    }
+    const serialized = JSON.stringify(event);
+    for (const field of [
+      "tool_count",
+      "eligible_tool_count",
+      "candidate_count",
+      "estimated_index_bytes",
+      "cache_eviction_count",
+    ]) {
+      expect(serialized).not.toContain(`"${field}":null`);
+    }
   });
 });

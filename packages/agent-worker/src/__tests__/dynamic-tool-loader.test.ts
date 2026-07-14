@@ -4,10 +4,15 @@ import {
   buildRuntimeToolCatalog,
   filterMcpToolsForCliExposure,
   resolveDynamicToolBudget,
+  resolveToolRouterMode,
   selectMcpToolsByMcpForTurn,
   selectMcpToolsForTurn,
 } from "../openclaw/dynamic-tool-loader";
 import { resolveTrustedShifuToolboxOrigins } from "../openclaw/tool-catalog";
+import {
+  clearToolRetrievalIndexCacheForTests,
+  toolRetrievalIndexCacheStats,
+} from "../openclaw/tool-retrieval-index";
 
 function tool(name: string, extras: Record<string, unknown> = {}): McpToolDef {
   return {
@@ -49,6 +54,52 @@ function trustedToolboxOrigins() {
 }
 
 describe("selectMcpToolsForTurn", () => {
+  test("routes a personal reminder to manage_schedules in a crowded catalog", () => {
+    const distractors = Array.from({ length: 60 }, (_, index) =>
+      tool(`card_studio_distractor_${index + 1}`, {
+        description: "Create visual cards and media assets",
+      })
+    );
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        card_studio: distractors,
+        "lobu-memory": [
+          tool("manage_schedules", {
+            description:
+              "Create and manage delayed or recurring agent schedules.",
+          }),
+        ],
+        google_workspace: [
+          tool("gws_calendar_events_create", {
+            description: "Create an event in Google Calendar.",
+          }),
+        ],
+      },
+      message: "幫我建立一個5分鐘後提醒我吃午餐的排程",
+      budget: 12,
+      routerMode: "semantic",
+    });
+    expect(result.trace.explicitDestinations).toContain("personal_reminder");
+    expect(result.trace.selectedToolNames).toContain(
+      "lobu-memory/manage_schedules"
+    );
+    expect(result.trace.clarificationRequired).toBe(false);
+  });
+
+  test("routes a personal reminder to the qualified tool across MCP name collisions", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "aaa-mcp": [tool("manage_schedules")],
+        "lobu-memory": [tool("manage_schedules")],
+      },
+      message: "5分鐘後提醒我吃午餐",
+      budget: 1,
+      routerMode: "semantic",
+    });
+    expect(result.trace.selectedToolNames).toEqual([
+      "lobu-memory/manage_schedules",
+    ]);
+  });
   test("filters CLI tools with the same policy and exact trusted provenance contract", () => {
     const automationMetadata = {
       _meta: {
@@ -1163,5 +1214,93 @@ describe("selectMcpToolsForTurn", () => {
     expect(resolveDynamicToolBudget("-2")).toBe(48);
     expect(resolveDynamicToolBudget("0")).toBe(48);
     expect(resolveDynamicToolBudget(" 12.9 ")).toBe(12);
+  });
+
+  test("defaults the rollout guard to shadow and accepts only known modes", () => {
+    expect(resolveToolRouterMode(undefined)).toBe("shadow");
+    expect(resolveToolRouterMode("SEMANTIC")).toBe("shadow");
+    expect(resolveToolRouterMode("legacy")).toBe("legacy");
+    expect(resolveToolRouterMode("shadow")).toBe("shadow");
+    expect(resolveToolRouterMode("semantic")).toBe("semantic");
+  });
+
+  test("shadow keeps legacy visibility while tracing one semantic comparison", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        aaa: Array.from({ length: 60 }, (_, index) =>
+          tool(`aaa_distractor_${index}`, {
+            description: "Unrelated synthetic utility",
+          })
+        ),
+        "lobu-memory": [
+          tool("manage_schedules", {
+            description: "Create a personal reminder schedule",
+          }),
+        ],
+      },
+      message: "五分鐘後提醒我喝水",
+      budget: 12,
+      routerMode: "shadow",
+    });
+    expect(result.trace.selectedToolNames).not.toContain(
+      "lobu-memory/manage_schedules"
+    );
+    expect(result.trace.semanticSelectedToolNames).toContain(
+      "lobu-memory/manage_schedules"
+    );
+    expect(result.trace.selectionDiverged).toBe(true);
+  });
+
+  test("legacy mode bypasses semantic retrieval", () => {
+    clearToolRetrievalIndexCacheForTests();
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        aaa: Array.from({ length: 20 }, (_, index) =>
+          tool(`aaa_distractor_${index}`)
+        ),
+        "lobu-memory": [tool("manage_schedules")],
+      },
+      message: "五分鐘後提醒我喝水",
+      budget: 4,
+      routerMode: "legacy",
+    });
+    expect(result.trace.inventoryFingerprint).toBe("legacy-bypass");
+    expect(result.trace.semanticComputed).toBe(false);
+    expect(toolRetrievalIndexCacheStats().entries).toBe(0);
+  });
+
+  test("semantic mode enforces semantic selection", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        aaa: Array.from({ length: 60 }, (_, index) =>
+          tool(`aaa_distractor_${index}`)
+        ),
+        "lobu-memory": [tool("manage_schedules")],
+      },
+      message: "五分鐘後提醒我喝水",
+      budget: 12,
+      routerMode: "semantic",
+    });
+    expect(result.trace.selectedToolNames).toContain(
+      "lobu-memory/manage_schedules"
+    );
+    expect(result.trace.selectedToolNames).toEqual(
+      result.trace.semanticSelectedToolNames
+    );
+  });
+
+  test("shadow traces ambiguity without enforcing clarification blocks", () => {
+    const result = selectMcpToolsByMcpForTurn({
+      toolsByMcp: {
+        "lobu-memory": [tool("manage_schedules")],
+        google_workspace: [tool("gws_calendar_events_create")],
+      },
+      message: "幫我排明天下午三點跟老師開會",
+      budget: 8,
+      routerMode: "shadow",
+    });
+    expect(result.trace.semanticClarificationRequired).toBe(true);
+    expect(result.trace.clarificationRequired).toBe(false);
+    expect(result.trace.blockedToolIdentityKeys).toEqual([]);
   });
 });

@@ -1,11 +1,11 @@
 import type { McpToolDef } from "@lobu/core";
 import {
   catalogEntryForTool,
-  isTrustedShifuCalendarResolver,
   isReservedAutomationToolName,
+  isTrustedShifuCalendarResolver,
   isTrustedShifuToolMetadataSource,
-  TOOL_PRIORITY_WEIGHT,
   type McpCatalogProvenanceById,
+  TOOL_PRIORITY_WEIGHT,
   type ToolCatalogEntry,
 } from "./tool-catalog";
 
@@ -15,21 +15,51 @@ export {
   type RuntimeToolCatalogEntry,
 } from "./tool-catalog-dispatcher";
 
+import { toolIdentityKey } from "./tool-descriptor";
 import {
   classifyToolIntent,
   hasCalendarDateIntent,
   type ToolIntent,
 } from "./tool-intent";
+import {
+  filterEligibleToolEntries,
+  routeToolEntries,
+  type ToolCandidateScore,
+  type ToolRouteDecision,
+} from "./tool-router";
 
 export interface DynamicToolSelectionTrace {
+  routerMode: ToolRouterMode;
+  semanticSelectedToolNames: string[];
+  selectionDiverged: boolean;
+  semanticClarificationRequired: boolean;
+  semanticComputed: boolean;
   primaryIntent: ToolIntent;
   budget: number;
   totalTools: number;
+  eligibleToolCount: number;
   selectedToolNames: string[];
   omittedToolNames: string[];
   pinnedBudgetOverflow: string[];
   selected: string[];
   omitted: string[];
+  routerVersion: "semantic-v1";
+  explicitDestinations: string[];
+  clarificationRequired: boolean;
+  blockedToolNames: string[];
+  blockedToolKeys: string[];
+  blockedToolIdentityKeys: string[];
+  clarificationQuestion?: string;
+  clarificationReason?: string;
+  clarificationChoices?: string[];
+  candidates: ToolCandidateScore[];
+  fallback: ToolRouteDecision["fallback"];
+  inventoryFingerprint: string;
+  cacheHit: boolean;
+  estimatedIndexBytes: number;
+  cacheEvictionCount: number;
+  candidateCount: number;
+  timingMs: ToolRouteDecision["timingMs"];
 }
 
 export interface SelectMcpToolsForTurnParams {
@@ -37,6 +67,8 @@ export interface SelectMcpToolsForTurnParams {
   message: string;
   budget: number;
   mcpId?: string;
+  allowedToolNames?: Iterable<string>;
+  routerMode?: ToolRouterMode;
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
@@ -51,6 +83,8 @@ export interface SelectGroupedMcpToolsForTurnParams {
   toolsByMcp: Record<string, McpToolDef[]>;
   userMessage: string;
   maxProviderVisibleTools: number;
+  allowedToolNames?: Iterable<string>;
+  routerMode?: ToolRouterMode;
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
@@ -65,6 +99,8 @@ export interface SelectMcpToolsByMcpForTurnParams {
   toolsByMcp: Record<string, McpToolDef[]>;
   message: string;
   budget: number;
+  allowedToolNames?: Iterable<string>;
+  routerMode?: ToolRouterMode;
   isToolAllowed?: (toolName: string, mcpId: string) => boolean;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
@@ -98,9 +134,8 @@ export function isMcpToolEligibleForCliExposure(
       provenance: params.mcpProvenanceById?.[params.mcpId],
       trustedOrigins: params.trustedShifuToolboxOrigins,
     })
-  ) {
+  )
     return false;
-  }
   if (
     toolName === "resolve_calendar_date" &&
     !isTrustedShifuCalendarResolver({
@@ -109,9 +144,8 @@ export function isMcpToolEligibleForCliExposure(
       provenance: params.mcpProvenanceById?.[params.mcpId],
       trustedOrigins: params.trustedShifuToolboxOrigins,
     })
-  ) {
+  )
     return false;
-  }
   return true;
 }
 
@@ -136,6 +170,17 @@ export function resolveDynamicToolBudget(value: string | undefined): number {
   const parsed = Number(trimmed);
   if (!Number.isFinite(parsed) || parsed <= 0) return 48;
   return Math.floor(parsed);
+}
+
+export type ToolRouterMode = "legacy" | "shadow" | "semantic";
+
+export function resolveToolRouterMode(
+  value: string | undefined
+): ToolRouterMode {
+  if (value === "legacy" || value === "shadow" || value === "semantic") {
+    return value;
+  }
+  return "shadow";
 }
 
 function intentBoost(
@@ -190,9 +235,9 @@ const PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES = new Set([
 function isPinnedDirectTool(
   entry: ToolCatalogEntry,
   primaryIntent: ToolIntent,
-  provenanceById: McpCatalogProvenanceById | undefined,
-  trustedOrigins: ReadonlySet<string> | undefined,
-  calendarAssist: boolean
+  provenanceById?: McpCatalogProvenanceById,
+  trustedOrigins?: ReadonlySet<string>,
+  calendarAssist = false
 ): boolean {
   return (
     PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
@@ -206,21 +251,21 @@ function isPinnedDirectTool(
       })) ||
     (primaryIntent === "automation" &&
       entry.domain === "automation" &&
+      PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES.has(entry.name) &&
       isTrustedShifuToolMetadataSource({
         mcpId: entry.mcpId,
         provenance: provenanceById?.[entry.mcpId],
         trustedOrigins,
-      }) &&
-      PINNED_TOOLBOX_AUTOMATION_TOOL_NAMES.has(entry.name))
+      }))
   );
 }
 
 function pinnedPreference(
   entry: ToolCatalogEntry,
   primaryIntent: ToolIntent,
-  provenanceById: McpCatalogProvenanceById | undefined,
-  trustedOrigins: ReadonlySet<string> | undefined,
-  calendarAssist: boolean
+  provenanceById?: McpCatalogProvenanceById,
+  trustedOrigins?: ReadonlySet<string>,
+  calendarAssist = false
 ): number {
   if (
     primaryIntent === "automation" &&
@@ -231,9 +276,8 @@ function pinnedPreference(
       provenance: provenanceById?.[entry.mcpId],
       trustedOrigins,
     })
-  ) {
+  )
     return 0;
-  }
   if (
     (primaryIntent === "calendar" || calendarAssist) &&
     isTrustedShifuCalendarResolver({
@@ -242,13 +286,12 @@ function pinnedPreference(
       provenance: provenanceById?.[entry.mcpId],
       trustedOrigins,
     })
-  ) {
+  )
     return primaryIntent === "calendar" ? 0 : 1;
-  }
   return 2;
 }
 
-function selectRankedEntries(
+function selectLegacyRankedEntries(
   entries: ToolCatalogEntry[],
   primaryIntent: ToolIntent,
   budget: number,
@@ -269,8 +312,8 @@ function selectRankedEntries(
         calendarAssist
       )
     )
-    .sort((left, right) => {
-      const preferenceDelta =
+    .sort(
+      (left, right) =>
         pinnedPreference(
           left,
           primaryIntent,
@@ -278,15 +321,14 @@ function selectRankedEntries(
           trustedOrigins,
           calendarAssist
         ) -
-        pinnedPreference(
-          right,
-          primaryIntent,
-          provenanceById,
-          trustedOrigins,
-          calendarAssist
-        );
-      return preferenceDelta || compareEntries(primaryIntent, left, right);
-    });
+          pinnedPreference(
+            right,
+            primaryIntent,
+            provenanceById,
+            trustedOrigins,
+            calendarAssist
+          ) || compareEntries(primaryIntent, left, right)
+    );
   const nonPinnedEntries = entries
     .filter(
       (entry) =>
@@ -307,6 +349,183 @@ function selectRankedEntries(
   };
 }
 
+interface SharedToolSelection {
+  primaryIntent: ToolIntent;
+  selectedEntries: ToolCatalogEntry[];
+  eligibleEntries: ToolCatalogEntry[];
+  pinnedBudgetOverflow: ToolCatalogEntry[];
+  route: ToolRouteDecision;
+  routerMode: ToolRouterMode;
+}
+
+function selectEntriesForTurn(
+  entries: ToolCatalogEntry[],
+  message: string,
+  budget: number,
+  allowedToolNames?: Iterable<string>,
+  routerMode: ToolRouterMode = "shadow",
+  provenanceById?: McpCatalogProvenanceById,
+  trustedOrigins?: ReadonlySet<string>,
+  calendarAssist = false
+): SharedToolSelection {
+  const normalizedAllowedToolNames =
+    allowedToolNames === undefined ? undefined : [...allowedToolNames];
+  const eligibleEntries = filterEligibleToolEntries(
+    entries,
+    normalizedAllowedToolNames
+  );
+  const primaryIntent = classifyToolIntent(message);
+  const legacySelection = selectLegacyRankedEntries(
+    eligibleEntries,
+    primaryIntent,
+    budget,
+    provenanceById,
+    trustedOrigins,
+    calendarAssist
+  );
+  if (routerMode === "legacy") {
+    return {
+      primaryIntent,
+      selectedEntries: legacySelection.selectedEntries,
+      eligibleEntries,
+      pinnedBudgetOverflow: legacySelection.pinnedBudgetOverflow,
+      routerMode,
+      route: {
+        routerVersion: "semantic-v1",
+        inventoryFingerprint: "legacy-bypass",
+        cacheHit: false,
+        estimatedIndexBytes: 0,
+        cacheEvictionCount: 0,
+        timingMs: { build: 0, retrieve: 0, rank: 0 },
+        selectedEntries: legacySelection.selectedEntries,
+        candidates: [],
+        explicitDestinations: [],
+        fallback: null,
+      },
+    };
+  }
+  const { selectedEntries: rankedEntries } = selectLegacyRankedEntries(
+    entries,
+    primaryIntent,
+    entries.length,
+    provenanceById,
+    trustedOrigins,
+    calendarAssist
+  );
+  const pinnedEntries = rankedEntries.filter((entry) =>
+    isPinnedDirectTool(
+      entry,
+      primaryIntent,
+      provenanceById,
+      trustedOrigins,
+      calendarAssist
+    )
+  );
+  const rankedForRouting = rankedEntries.map((entry, originalIndex) => ({
+    ...entry,
+    originalIndex,
+  }));
+  const pinnedKeys = new Set(
+    pinnedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
+  );
+  const reservedEntries = rankedForRouting.filter((entry) =>
+    pinnedKeys.has(catalogToolKey(entry.mcpId, entry.name))
+  );
+  const route = routeToolEntries({
+    entries: rankedForRouting,
+    message,
+    budget,
+    reservedEntries,
+    allowedToolNames: normalizedAllowedToolNames,
+  });
+  return {
+    primaryIntent,
+    selectedEntries:
+      routerMode === "semantic"
+        ? route.selectedEntries
+        : legacySelection.selectedEntries,
+    eligibleEntries,
+    pinnedBudgetOverflow: legacySelection.pinnedBudgetOverflow,
+    route,
+    routerMode,
+  };
+}
+
+function routeTraceFields(
+  route: ToolRouteDecision,
+  routerMode: ToolRouterMode,
+  selectedEntries: ToolCatalogEntry[]
+): Pick<
+  DynamicToolSelectionTrace,
+  | "routerVersion"
+  | "explicitDestinations"
+  | "clarificationRequired"
+  | "blockedToolNames"
+  | "blockedToolKeys"
+  | "blockedToolIdentityKeys"
+  | "candidates"
+  | "fallback"
+  | "inventoryFingerprint"
+  | "cacheHit"
+  | "estimatedIndexBytes"
+  | "cacheEvictionCount"
+  | "candidateCount"
+  | "timingMs"
+  | "clarificationQuestion"
+  | "clarificationReason"
+  | "clarificationChoices"
+  | "routerMode"
+  | "semanticSelectedToolNames"
+  | "selectionDiverged"
+  | "semanticClarificationRequired"
+  | "semanticComputed"
+> {
+  const selectedToolNames = selectedEntries.map(displayToolName);
+  const semanticSelectedToolNames = route.selectedEntries.map(displayToolName);
+  const semanticEnforced = routerMode === "semantic";
+  return {
+    routerMode,
+    semanticSelectedToolNames,
+    selectionDiverged:
+      selectedToolNames.length !== semanticSelectedToolNames.length ||
+      selectedToolNames.some(
+        (name, index) => name !== semanticSelectedToolNames[index]
+      ),
+    semanticClarificationRequired: route.clarification !== undefined,
+    semanticComputed: routerMode !== "legacy",
+    routerVersion: route.routerVersion,
+    explicitDestinations: route.explicitDestinations,
+    clarificationRequired:
+      semanticEnforced && route.clarification !== undefined,
+    blockedToolNames: semanticEnforced
+      ? (route.clarification?.blockedToolNames ?? [])
+      : [],
+    blockedToolKeys: semanticEnforced
+      ? (route.clarification?.blockedToolKeys ?? [])
+      : [],
+    blockedToolIdentityKeys: semanticEnforced
+      ? (route.clarification?.blockedToolIdentityKeys ?? [])
+      : [],
+    clarificationQuestion: semanticEnforced
+      ? route.clarification?.question
+      : undefined,
+    clarificationReason: semanticEnforced
+      ? route.clarification?.reason
+      : undefined,
+    clarificationChoices: semanticEnforced
+      ? route.clarification?.blockedToolNames
+      : undefined,
+    candidates: route.candidates,
+    fallback: route.fallback,
+    inventoryFingerprint: route.inventoryFingerprint,
+    cacheHit: route.cacheHit,
+    estimatedIndexBytes: route.estimatedIndexBytes,
+    cacheEvictionCount: route.cacheEvictionCount,
+    candidateCount: route.candidates.length,
+    timingMs: route.timingMs,
+  };
+}
+
 export function selectMcpToolsForTurn(
   params: SelectMcpToolsForTurnParams
 ): SelectMcpToolsForTurnResult;
@@ -321,6 +540,8 @@ export function selectMcpToolsForTurn(
       toolsByMcp: params.toolsByMcp,
       message: params.userMessage,
       budget: params.maxProviderVisibleTools,
+      allowedToolNames: params.allowedToolNames,
+      routerMode: params.routerMode,
       isToolAllowed: params.isToolAllowed,
       mcpProvenanceById: params.mcpProvenanceById,
       trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
@@ -331,15 +552,16 @@ export function selectMcpToolsForTurn(
     };
   }
 
-  const primaryIntent = classifyToolIntent(params.message);
-  const calendarAssist =
-    primaryIntent === "automation" &&
-    hasCalendarDateIntent(params.message.toLowerCase());
   const budget = Math.max(0, Math.floor(params.budget));
+  const intentForEligibility = classifyToolIntent(params.message);
+  const calendarAssist =
+    intentForEligibility === "automation" &&
+    hasCalendarDateIntent(params.message.toLowerCase());
+  const mcpId = params.mcpId ?? "";
   const entries = params.tools
     .map((tool, index) =>
       catalogEntryForTool(tool, index, params.mcpId, {
-        provenance: params.mcpProvenanceById?.[params.mcpId || ""],
+        provenance: params.mcpProvenanceById?.[mcpId],
         trustedOrigins: params.trustedShifuToolboxOrigins,
       })
     )
@@ -354,25 +576,38 @@ export function selectMcpToolsForTurn(
     )
     .filter(
       (entry) =>
-        (primaryIntent === "automation" || entry.domain !== "automation") &&
-        (primaryIntent === "calendar" ||
+        (intentForEligibility === "automation" ||
+          entry.domain !== "automation") &&
+        (intentForEligibility === "calendar" ||
           calendarAssist ||
           entry.domain !== "calendar")
     );
-  const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
-    entries,
+  const {
     primaryIntent,
+    selectedEntries,
+    eligibleEntries,
+    pinnedBudgetOverflow,
+    route,
+    routerMode,
+  } = selectEntriesForTurn(
+    entries,
+    params.message,
     budget,
+    params.allowedToolNames,
+    params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
     calendarAssist
   );
-  const selectedToolNames = new Set(
-    selectedEntries.map((entry) => entry.name).filter(Boolean)
+  const selectedKeys = new Set(
+    selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
   );
-  const omittedToolNames = entries
+  const omittedToolNames = eligibleEntries
+    .filter(
+      (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))
+    )
     .map((entry) => entry.name)
-    .filter((name) => name && !selectedToolNames.has(name));
+    .filter(Boolean);
   const selectedTraceNames = selectedEntries.map((entry) => entry.name);
 
   return {
@@ -381,17 +616,19 @@ export function selectMcpToolsForTurn(
       primaryIntent,
       budget,
       totalTools: entries.length,
+      eligibleToolCount: eligibleEntries.length,
       selectedToolNames: selectedTraceNames,
       omittedToolNames,
       pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
       selected: selectedTraceNames,
       omitted: omittedToolNames,
+      ...routeTraceFields(route, routerMode, selectedEntries),
     },
   };
 }
 
 function catalogToolKey(mcpId: string, toolName: string): string {
-  return `${mcpId}\u0000${toolName}`;
+  return toolIdentityKey(mcpId, toolName);
 }
 
 function displayToolName(entry: ToolCatalogEntry): string {
@@ -401,11 +638,11 @@ function displayToolName(entry: ToolCatalogEntry): string {
 export function selectMcpToolsByMcpForTurn(
   params: SelectMcpToolsByMcpForTurnParams
 ): SelectMcpToolsByMcpForTurnResult {
-  const primaryIntent = classifyToolIntent(params.message);
-  const calendarAssist =
-    primaryIntent === "automation" &&
-    hasCalendarDateIntent(params.message.toLowerCase());
   const budget = Math.max(0, Math.floor(params.budget));
+  const intentForEligibility = classifyToolIntent(params.message);
+  const calendarAssist =
+    intentForEligibility === "automation" &&
+    hasCalendarDateIntent(params.message.toLowerCase());
   const entries: ToolCatalogEntry[] = [];
   let originalIndex = 0;
 
@@ -419,32 +656,41 @@ export function selectMcpToolsByMcpForTurn(
       if (
         !isMcpToolEligibleForCliExposure({
           tool: entry.tool,
-          mcpId: entry.mcpId,
+          mcpId,
           isToolAllowed: params.isToolAllowed,
           mcpProvenanceById: params.mcpProvenanceById,
           trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
         })
-      ) {
+      )
         continue;
-      }
-      if (primaryIntent !== "automation" && entry.domain === "automation") {
-        continue;
-      }
       if (
-        primaryIntent !== "calendar" &&
+        intentForEligibility !== "automation" &&
+        entry.domain === "automation"
+      )
+        continue;
+      if (
+        intentForEligibility !== "calendar" &&
         !calendarAssist &&
         entry.domain === "calendar"
-      ) {
+      )
         continue;
-      }
       entries.push(entry);
     }
   }
 
-  const { selectedEntries, pinnedBudgetOverflow } = selectRankedEntries(
-    entries,
+  const {
     primaryIntent,
+    selectedEntries,
+    eligibleEntries,
+    pinnedBudgetOverflow,
+    route,
+    routerMode,
+  } = selectEntriesForTurn(
+    entries,
+    params.message,
     budget,
+    params.allowedToolNames,
+    params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
     calendarAssist
@@ -461,7 +707,7 @@ export function selectMcpToolsByMcpForTurn(
   }
 
   const selectedTraceNames = selectedEntries.map(displayToolName);
-  const omittedTraceNames = entries
+  const omittedTraceNames = eligibleEntries
     .filter(
       (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))
     )
@@ -473,11 +719,13 @@ export function selectMcpToolsByMcpForTurn(
       primaryIntent,
       budget,
       totalTools: entries.length,
+      eligibleToolCount: eligibleEntries.length,
       selectedToolNames: selectedTraceNames,
       omittedToolNames: omittedTraceNames,
       pinnedBudgetOverflow: pinnedBudgetOverflow.map(displayToolName),
       selected: selectedTraceNames,
       omitted: omittedTraceNames,
+      ...routeTraceFields(route, routerMode, selectedEntries),
     },
   };
 }

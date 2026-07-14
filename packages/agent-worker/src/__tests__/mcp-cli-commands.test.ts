@@ -11,6 +11,7 @@ import {
   summariseAuthStart,
 } from "../embedded/mcp-cli-commands";
 import { applyCapabilityLimitNotes } from "../openclaw/mcp-tool-projection";
+import { toolIdentityKey } from "../openclaw/tool-descriptor";
 import type { GatewayParams } from "../shared/tool-implementations";
 
 const originalFetch = globalThis.fetch;
@@ -34,6 +35,9 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
       mcpTools: overrides.mcpTools ?? {},
       mcpStatus: overrides.mcpStatus ?? [],
       mcpContext: overrides.mcpContext ?? {},
+      allowedToolKeys: overrides.allowedToolKeys,
+      turnEligibleToolKeys: overrides.turnEligibleToolKeys,
+      clarificationBlockedToolKeys: overrides.clarificationBlockedToolKeys,
     },
   };
 }
@@ -135,6 +139,62 @@ describe("isMcpIdReserved", () => {
 });
 
 describe("buildMcpServerHandler", () => {
+  test("blocks clarification-required CLI writes before gateway dispatch", async () => {
+    const calls: string[] = [];
+    const key = toolIdentityKey("lobu-memory", "manage_schedules");
+    const ref = makeRef({
+      mcpTools: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            description: "Create reminder",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      allowedToolKeys: [key],
+      clarificationBlockedToolKeys: [key],
+    });
+    const handler = buildMcpServerHandler("lobu-memory", ref, gw, {
+      callTool: async () => {
+        calls.push("gateway");
+        return { content: [] };
+      },
+    });
+    const result = await handler(["manage_schedules"], {
+      stdin: '{"delay":"5m"}',
+    });
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stderr)).toMatchObject({
+      error: "clarification_required",
+      mcp_id: "lobu-memory",
+      tool_name: "manage_schedules",
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("not_allowed precedes clarification_required in CLI dispatch", async () => {
+    const key = toolIdentityKey("lobu-memory", "manage_schedules");
+    const ref = makeRef({
+      mcpTools: {
+        "lobu-memory": [
+          {
+            name: "manage_schedules",
+            inputSchema: { type: "object", properties: {} },
+          },
+        ],
+      },
+      allowedToolKeys: [],
+      clarificationBlockedToolKeys: [key],
+    });
+    const handler = buildMcpServerHandler("lobu-memory", ref, gw, {
+      callTool: async () => ({ content: [] }),
+    });
+    const result = await handler(["manage_schedules"], {});
+    expect(result.exitCode).toBe(1);
+    expect(JSON.parse(result.stderr).error).toBe("not_allowed");
+  });
+
   test("passes the exact discovered identity for trusted reserved automation calls", async () => {
     const ref = makeRef({
       mcpTools: { "shifu-toolbox": [planAutomationTool] },

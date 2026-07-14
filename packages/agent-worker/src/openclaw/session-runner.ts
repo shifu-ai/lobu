@@ -17,8 +17,8 @@ import {
   type McpToolDef,
   type PluginsConfig,
   type ResolvedCourseExecutionContext,
-  type TrustedExecutionScope,
   type ToolsConfig,
+  type TrustedExecutionScope,
 } from "@lobu/core";
 import { getModel, type ImageContent } from "@mariozechner/pi-ai";
 import {
@@ -28,28 +28,66 @@ import {
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
 import type { ProgressUpdate, SessionExecutionResult } from "../core/types";
-import type { GatewayParams } from "../shared/tool-implementations";
-import { createExecutionReporter } from "./execution-reporter";
-import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
 import { emitJourneyObservabilityEvent } from "../shared/journey-observability";
-import { isRecord } from "../shared/type-guards";
 import {
   emitJourneyEvent,
-  parseWorkerShifuTrace,
   type JourneyTraceStatus,
+  parseWorkerShifuTrace,
+  type WorkerJourneyEventInput,
   type WorkerShifuTraceContext,
 } from "../shared/journey-trace";
+import { getApiKeyEnvVarForProvider } from "../shared/provider-auth-hints";
+import type { GatewayParams } from "../shared/tool-implementations";
+import { isRecord } from "../shared/type-guards";
+import { buildTrustedAutomationModificationTurnContext } from "./automation-modification-context";
+import { buildCalendarResolverInstructions } from "./calendar-resolver-guidance";
 import {
-  createMcpAuthToolDefinitions,
-  createMcpToolDefinitions,
-  createOpenClawCustomTools,
-} from "./custom-tools";
+  checkCompletionClaim,
+  getRequiredBattleReportMutationTools,
+  getSuccessfulCompletionClaimToolNames,
+} from "./completion-claim-guard";
+import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import {
   isProviderPromptTooLongError,
   prepareUserPromptForContext,
   userFacingContextPressureMessage,
 } from "./context-pressure";
-import { TurnController, wrapToolsWithTurnGuard } from "./turn-controller";
+import {
+  createMcpAuthToolDefinitions,
+  createMcpToolDefinitions,
+  createOpenClawCustomTools,
+} from "./custom-tools";
+import { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
+import {
+  type DateGuardResult,
+  extractTrustedTemporalCandidates,
+  extractTrustedTemporalEvidence,
+  guardDateOutput,
+  isDateSensitiveTurn,
+  type TrustedTemporalEvidence,
+} from "./date-output-guard";
+import {
+  type BuildRuntimeToolCatalogParams,
+  buildRuntimeToolCatalog,
+  type DynamicToolSelectionTrace,
+  filterMcpToolsForCliExposure,
+  isMcpToolEligibleForCliExposure,
+  type RuntimeToolCatalogEntry,
+  resolveDynamicToolBudget,
+  resolveToolRouterMode,
+  type SelectMcpToolsByMcpForTurnParams,
+  type SelectMcpToolsByMcpForTurnResult,
+  selectMcpToolsByMcpForTurn,
+} from "./dynamic-tool-loader";
+import { createExecutionReporter } from "./execution-reporter";
+import {
+  applyCapabilityLimitNotes,
+  buildMcpAuthToolNames,
+  type McpAuthToolNames,
+  projectMcpToolsForProvider,
+  projectToolParametersForProvider,
+  requiresProviderSafeToolNames,
+} from "./mcp-tool-projection";
 import {
   buildDynamicOpenAIModel,
   buildProviderProxyAuthHeaders,
@@ -60,14 +98,6 @@ import {
   resolveModelRef,
 } from "./model-resolver";
 import {
-  applyCapabilityLimitNotes,
-  buildMcpAuthToolNames,
-  type McpAuthToolNames,
-  projectMcpToolsForProvider,
-  projectToolParametersForProvider,
-  requiresProviderSafeToolNames,
-} from "./mcp-tool-projection";
-import {
   loadPlugins,
   runPluginHooks,
   startPluginServices,
@@ -76,46 +106,31 @@ import {
 } from "./plugin-loader";
 import type { OpenClawProgressProcessor } from "./processor";
 import { buildAgentSession } from "./session-builder";
-import { buildTrustedAutomationModificationTurnContext } from "./automation-modification-context";
-import { toUserVisibleSessionError } from "./context-overflow-recovery";
 import {
   buildResolvedCourseContextInstructions,
   buildTrustedExecutionScopeInstructions,
   getOpenClawSessionContext,
   removeLegacyToolboxActiveContext,
 } from "./session-context";
+import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
+import { toolIdentityKey } from "./tool-descriptor";
+import {
+  cloneAndFreezeJsonLike,
+  snapshotToolsByMcp,
+} from "./tool-inventory-snapshot";
 import {
   buildToolPolicy,
   enforceBashCommandPolicy,
   isToolAllowedByPolicy,
 } from "./tool-policy";
+import { toolRouterRetainedMemoryStats } from "./tool-router-memory-budget";
 import { buildToolUseEventPayload } from "./tool-use-events";
 import { createOpenClawTools } from "./tools";
 import { clearSnapshots, hydrateFromSnapshot } from "./transcript-snapshot";
-import {
-  buildRuntimeToolCatalog,
-  filterMcpToolsForCliExposure,
-  isMcpToolEligibleForCliExposure,
-  resolveDynamicToolBudget,
-  selectMcpToolsByMcpForTurn,
-} from "./dynamic-tool-loader";
-import { resolveTrustedShifuToolboxOrigins } from "./tool-catalog";
-import { buildCalendarResolverInstructions } from "./calendar-resolver-guidance";
-import {
-  checkCompletionClaim,
-  getRequiredBattleReportMutationTools,
-  getSuccessfulCompletionClaimToolNames,
-} from "./completion-claim-guard";
-import {
-  type DateGuardResult,
-  type TrustedTemporalEvidence,
-  extractTrustedTemporalCandidates,
-  extractTrustedTemporalEvidence,
-  guardDateOutput,
-  isDateSensitiveTurn,
-} from "./date-output-guard";
-import { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
+import { TurnController, wrapToolsWithTurnGuard } from "./turn-controller";
+
 export { buildCurrentDateContext, resolveTurnTimeZone } from "./date-context";
+
 const logger = createLogger("worker");
 
 // ---------------------------------------------------------------------------
@@ -167,6 +182,251 @@ const RUNTIME_CATALOG_CUSTOM_TOOL_NAMES = [
   "tool_call",
   "tool_status",
 ];
+const TOOL_ROUTER_CLARIFICATION_INSTRUCTION =
+  "The requested write destination is ambiguous. Ask the user the supplied clarification question before calling either blocked tool.";
+
+function boundedRouterString(value: string, maxLength = 160): string {
+  return value.slice(0, maxLength);
+}
+
+function boundedRouterNumber(value: number): number {
+  return Number.isFinite(value) && value >= 0 ? value : 0;
+}
+
+function boundedRouterCount(value: number): number {
+  return Math.floor(boundedRouterNumber(value));
+}
+
+export function buildToolRouterClarificationInstruction(
+  trace: DynamicToolSelectionTrace
+): string | null {
+  if (!trace.clarificationRequired || !trace.clarificationQuestion) return null;
+  return `${TOOL_ROUTER_CLARIFICATION_INSTRUCTION}\nClarification question: ${boundedRouterString(trace.clarificationQuestion, 320)}`;
+}
+
+export function buildToolRouterJourneyEventInput(params: {
+  trace: WorkerShifuTraceContext;
+  selectionTrace: DynamicToolSelectionTrace;
+  totalMs: number;
+}): WorkerJourneyEventInput {
+  const selectionTrace = params.selectionTrace;
+  return {
+    event: "lobu.worker.tool_router_decision",
+    trace: params.trace,
+    module: "agent-worker",
+    status: selectionTrace.fallback === "router_error" ? "degraded" : "ok",
+    fields: {
+      router_version: selectionTrace.routerVersion,
+      router_mode: selectionTrace.routerMode,
+      inventory_fingerprint: selectionTrace.inventoryFingerprint.slice(0, 16),
+      cache_hit: selectionTrace.cacheHit,
+      tool_count: boundedRouterCount(selectionTrace.totalTools),
+      eligible_tool_count: boundedRouterCount(selectionTrace.eligibleToolCount),
+      explicit_destinations: selectionTrace.explicitDestinations
+        .slice(0, 8)
+        .map((value) => boundedRouterString(value, 80)),
+      selected_tools: selectionTrace.selectedToolNames
+        .slice(0, 48)
+        .map((value) => boundedRouterString(value)),
+      semantic_selected_tools: selectionTrace.semanticSelectedToolNames
+        .slice(0, 48)
+        .map((value) => boundedRouterString(value)),
+      selection_diverged: selectionTrace.selectionDiverged,
+      semantic_clarification_required:
+        selectionTrace.semanticClarificationRequired,
+      semantic_computed: selectionTrace.semanticComputed,
+      blocked_tools: selectionTrace.blockedToolNames
+        .slice(0, 20)
+        .map((value) => boundedRouterString(value)),
+      clarification_required: selectionTrace.clarificationRequired,
+      clarification_reason: selectionTrace.clarificationReason,
+      candidates: selectionTrace.candidates.slice(0, 5).map((candidate) => ({
+        key: boundedRouterString(candidate.key),
+        totalScore: boundedRouterNumber(candidate.totalScore),
+        reasons: candidate.reasons
+          .slice(0, 8)
+          .map((reason) => boundedRouterString(reason, 48)),
+        scoreBreakdown: candidate.scoreBreakdown
+          ? {
+              exactName: boundedRouterNumber(
+                candidate.scoreBreakdown.exactName
+              ),
+              nameTitle: boundedRouterNumber(
+                candidate.scoreBreakdown.nameTitle
+              ),
+              aliasesExamples: boundedRouterNumber(
+                candidate.scoreBreakdown.aliasesExamples
+              ),
+              description: boundedRouterNumber(
+                candidate.scoreBreakdown.description
+              ),
+              parameters: boundedRouterNumber(
+                candidate.scoreBreakdown.parameters
+              ),
+              domain: boundedRouterNumber(candidate.scoreBreakdown.domain),
+              negativePenalty: boundedRouterNumber(
+                candidate.scoreBreakdown.negativePenalty
+              ),
+            }
+          : undefined,
+      })),
+      candidate_count: boundedRouterCount(selectionTrace.candidateCount),
+      timing_ms: {
+        build: boundedRouterNumber(selectionTrace.timingMs.build),
+        retrieve: boundedRouterNumber(selectionTrace.timingMs.retrieve),
+        rank: boundedRouterNumber(selectionTrace.timingMs.rank),
+        total: boundedRouterNumber(params.totalMs),
+      },
+      estimated_index_bytes: boundedRouterCount(
+        selectionTrace.estimatedIndexBytes
+      ),
+      cache_eviction_count: boundedRouterCount(
+        selectionTrace.cacheEvictionCount
+      ),
+      fallback: selectionTrace.fallback,
+    },
+  };
+}
+
+export interface ExternalTurnToolRouting {
+  readonly selection: SelectMcpToolsByMcpForTurnResult;
+  readonly clarificationInstruction: string | null;
+  readonly routeTotalMs: number;
+  buildRuntimeCatalog(params: {
+    providerVisibleTools: BuildRuntimeToolCatalogParams["providerVisibleTools"];
+  }): RuntimeToolCatalogEntry[];
+}
+
+export interface ExternalTurnToolRoutingDependencies {
+  selectTools: (
+    params: SelectMcpToolsByMcpForTurnParams
+  ) => SelectMcpToolsByMcpForTurnResult;
+  emitEvent: typeof emitJourneyEvent;
+  now: () => number;
+}
+
+export interface RunAISessionDependencies
+  extends Partial<ExternalTurnToolRoutingDependencies> {
+  sessionContextLoader: typeof getOpenClawSessionContext;
+  agentSessionBuilder: typeof buildAgentSession;
+}
+
+function freezeStringArray(values: readonly string[]): string[] {
+  return Object.freeze([...values]) as unknown as string[];
+}
+
+function freezeToolRoutingSelection(
+  selection: SelectMcpToolsByMcpForTurnResult
+): SelectMcpToolsByMcpForTurnResult {
+  const selectedTools = Object.freeze(
+    Object.fromEntries(
+      Object.entries(selection.selectedTools).map(([mcpId, tools]) => [
+        mcpId,
+        Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
+      ])
+    )
+  ) as unknown as SelectMcpToolsByMcpForTurnResult["selectedTools"];
+  const candidates = Object.freeze(
+    selection.trace.candidates.map((candidate) =>
+      Object.freeze({
+        ...candidate,
+        reasons: freezeStringArray(candidate.reasons),
+        scoreBreakdown: candidate.scoreBreakdown
+          ? Object.freeze({ ...candidate.scoreBreakdown })
+          : undefined,
+      })
+    )
+  ) as unknown as DynamicToolSelectionTrace["candidates"];
+  const trace = Object.freeze({
+    ...selection.trace,
+    selectedToolNames: freezeStringArray(selection.trace.selectedToolNames),
+    semanticSelectedToolNames: freezeStringArray(
+      selection.trace.semanticSelectedToolNames
+    ),
+    omittedToolNames: freezeStringArray(selection.trace.omittedToolNames),
+    pinnedBudgetOverflow: freezeStringArray(
+      selection.trace.pinnedBudgetOverflow
+    ),
+    selected: freezeStringArray(selection.trace.selected),
+    omitted: freezeStringArray(selection.trace.omitted),
+    explicitDestinations: freezeStringArray(
+      selection.trace.explicitDestinations
+    ),
+    blockedToolNames: freezeStringArray(selection.trace.blockedToolNames),
+    blockedToolKeys: freezeStringArray(selection.trace.blockedToolKeys),
+    blockedToolIdentityKeys: freezeStringArray(
+      selection.trace.blockedToolIdentityKeys
+    ),
+    clarificationChoices: selection.trace.clarificationChoices
+      ? freezeStringArray(selection.trace.clarificationChoices)
+      : undefined,
+    candidates,
+    timingMs: Object.freeze({ ...selection.trace.timingMs }),
+  }) as DynamicToolSelectionTrace;
+  return Object.freeze({ selectedTools, trace });
+}
+
+export function initializeExternalTurnToolRouting(
+  params: SelectMcpToolsByMcpForTurnParams & {
+    trace: WorkerShifuTraceContext;
+  },
+  dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
+): ExternalTurnToolRouting {
+  const selectTools = dependencies.selectTools ?? selectMcpToolsByMcpForTurn;
+  const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
+  const now = dependencies.now ?? performance.now.bind(performance);
+  const { trace, ...rawSelectionParams } = params;
+  const evictionCountBefore = toolRouterRetainedMemoryStats().evictions;
+  const toolsByMcp = snapshotToolsByMcp(params.toolsByMcp);
+  const allowedToolNames = params.allowedToolNames
+    ? freezeStringArray([...params.allowedToolNames])
+    : undefined;
+  const selectionParams = {
+    ...rawSelectionParams,
+    toolsByMcp,
+    allowedToolNames,
+  };
+  const routeStartedAt = now();
+  const rawSelection = selectTools(selectionParams);
+  const cacheEvictionCount = Math.max(
+    0,
+    toolRouterRetainedMemoryStats().evictions - evictionCountBefore
+  );
+  const selection = freezeToolRoutingSelection({
+    ...rawSelection,
+    trace: { ...rawSelection.trace, cacheEvictionCount },
+  });
+  const routeTotalMs = Math.max(0, now() - routeStartedAt);
+  emitEvent(
+    buildToolRouterJourneyEventInput({
+      trace,
+      selectionTrace: selection.trace,
+      totalMs: routeTotalMs,
+    })
+  );
+
+  return Object.freeze({
+    selection,
+    clarificationInstruction: buildToolRouterClarificationInstruction(
+      selection.trace
+    ),
+    routeTotalMs,
+    buildRuntimeCatalog: ({
+      providerVisibleTools,
+    }: {
+      providerVisibleTools: BuildRuntimeToolCatalogParams["providerVisibleTools"];
+    }) =>
+      buildRuntimeToolCatalog({
+        allTools: toolsByMcp,
+        selectedTools: selection.selectedTools,
+        providerVisibleTools,
+        allowedToolNames,
+        clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
+        mcpProvenanceById: params.mcpProvenanceById,
+        trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
+      }),
+  });
+}
 
 function readStringOrFallback(value: unknown, fallback: string): string {
   if (typeof value !== "string") {
@@ -657,6 +917,8 @@ export interface RunAISessionParams {
     provider: string,
     modelId: string
   ) => string;
+  /** Injectable run seams; production always uses the module defaults. */
+  runAISessionDependencies?: Partial<RunAISessionDependencies>;
 }
 
 export function resolveGatewayWorkerToken(
@@ -999,6 +1261,7 @@ export async function runAISession(
     loadImageAttachments,
     maybeRunPreCompactionMemoryFlush,
     maybeBuildAuthHintMessage,
+    runAISessionDependencies,
   } = params;
   const automationModificationTurn =
     buildTrustedAutomationModificationTurnContext({
@@ -1045,7 +1308,9 @@ export async function runAISession(
 
   // Fetch session context BEFORE model resolution. Pass `mcpExposure` so
   // MCP setup instructions use the right call syntax.
-  const context = await getOpenClawSessionContext({
+  const contextLoader =
+    runAISessionDependencies?.sessionContextLoader ?? getOpenClawSessionContext;
+  const context = await contextLoader({
     mcpExposure,
     shifuTrace,
   });
@@ -1345,6 +1610,7 @@ export async function runAISession(
       | string[]
       | undefined,
   });
+
   const trustedShifuToolboxOrigins = resolveTrustedShifuToolboxOrigins(
     process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS
   );
@@ -1377,17 +1643,66 @@ export async function runAISession(
     };
   };
 
+  const collectAllowedMcpTools = (
+    toolsByMcp: Record<string, McpToolDef[]>
+  ): { names: string[]; keys: string[] } => {
+    const names: string[] = [];
+    const keys: string[] = [];
+    for (const [mcpId, toolsForMcp] of Object.entries(toolsByMcp)) {
+      for (const tool of toolsForMcp) {
+        const toolName = tool.name?.trim();
+        if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy))
+          continue;
+        names.push(toolName, `${mcpId}/${toolName}`);
+        keys.push(toolIdentityKey(mcpId, toolName));
+      }
+    }
+    return { names, keys };
+  };
+  const initialAllowedMcpTools = collectAllowedMcpTools(context.mcpTools);
+  const turnEligibleToolKeys = Object.freeze([...initialAllowedMcpTools.keys]);
+  const catalogAllowedToolNames = initialAllowedMcpTools.names;
+  const dynamicToolBudget = resolveDynamicToolBudget(
+    process.env.LOBU_DYNAMIC_TOOL_BUDGET
+  );
+  const toolRouterMode = resolveToolRouterMode(
+    process.env.LOBU_TOOL_ROUTER_MODE
+  );
+  const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
+  const toolRouting = initializeExternalTurnToolRouting(
+    {
+      toolsByMcp: context.mcpTools,
+      message: userPrompt,
+      budget: dynamicToolBudget,
+      allowedToolNames: catalogAllowedToolNames,
+      routerMode: toolRouterMode,
+      isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
+      mcpProvenanceById,
+      trustedShifuToolboxOrigins,
+      trace: shifuTrace,
+    },
+    runAISessionDependencies
+  );
+  const selection = toolRouting.selection;
+  const routeTotalMs = toolRouting.routeTotalMs;
+  const selectedMcpToolsForTurn = selection.selectedTools;
+
   // Build a mutable snapshot of MCP runtime state. The embedded CLI handlers
   // read through `mcpRuntimeRef.current` so that `auth check` / `logout` can
   // swap in refreshed tools/state without rebuilding Bash. `refresh()` re-
   // fetches session context — `checkMcpLogin`/`logoutMcp` already invalidate
   // the gateway cache, so the next fetch reaches the gateway.
   const mcpRuntimeRef = {
-    current: buildCliRuntimeState({
-      mcpTools: context.mcpTools,
-      mcpStatus: context.mcpStatus,
-      mcpContext: context.mcpContext,
-    }),
+    current: {
+      ...buildCliRuntimeState({
+        mcpTools: context.mcpTools,
+        mcpStatus: context.mcpStatus,
+        mcpContext: context.mcpContext,
+      }),
+      allowedToolKeys: turnEligibleToolKeys,
+      turnEligibleToolKeys,
+      clarificationBlockedToolKeys: selection.trace.blockedToolIdentityKeys,
+    },
     isToolInvocationAllowed: (
       mcpId: string,
       tool: McpToolDef,
@@ -1412,11 +1727,19 @@ export async function runAISession(
             mcpExposure,
             shifuTrace,
           });
-          return buildCliRuntimeState({
-            mcpTools: fresh.mcpTools,
-            mcpStatus: fresh.mcpStatus,
-            mcpContext: fresh.mcpContext,
-          });
+          const refreshedAllowedMcpTools = collectAllowedMcpTools(
+            fresh.mcpTools
+          );
+          return {
+            ...buildCliRuntimeState({
+              mcpTools: fresh.mcpTools,
+              mcpStatus: fresh.mcpStatus,
+              mcpContext: fresh.mcpContext,
+            }),
+            allowedToolKeys: Object.freeze([...refreshedAllowedMcpTools.keys]),
+            clarificationBlockedToolKeys:
+              selection.trace.blockedToolIdentityKeys,
+          };
         } catch (err) {
           logger.warn(
             `Failed to refresh MCP session context after auth: ${err instanceof Error ? err.message : String(err)}`
@@ -1605,35 +1928,11 @@ Use it when the user references past discussions or you need context.`);
     },
   });
 
-  const dynamicToolBudget = resolveDynamicToolBudget(
-    process.env.LOBU_DYNAMIC_TOOL_BUDGET
+  const clarificationInstruction = toolRouting.clarificationInstruction;
+  if (clarificationInstruction) instructionParts.push(clarificationInstruction);
+  logger.info(
+    `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, mode=${selection.trace.routerMode}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`
   );
-  const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
-  let selectedMcpToolsForTurn: Record<string, McpToolDef[]> = context.mcpTools;
-
-  if (mcpExposure !== "cli") {
-    const selection = selectMcpToolsByMcpForTurn({
-      toolsByMcp: context.mcpTools,
-      message: userPrompt,
-      budget: dynamicToolBudget,
-      isToolAllowed: (toolName) => isToolAllowedByPolicy(toolName, toolsPolicy),
-      mcpProvenanceById,
-      trustedShifuToolboxOrigins,
-    });
-    selectedMcpToolsForTurn = selection.selectedTools;
-    logger.info(
-      `Dynamic MCP tool selection: primaryIntent=${selection.trace.primaryIntent}, selected=${selection.trace.selectedToolNames.length}/${selection.trace.totalTools}, omitted=${selection.trace.omittedToolNames.length}, omittedPreview=${selection.trace.omittedToolNames.slice(0, 12).join(", ")}`
-    );
-  }
-
-  const catalogAllowedToolNames: string[] = [];
-  for (const [mcpId, toolsForMcp] of Object.entries(context.mcpTools)) {
-    for (const tool of toolsForMcp) {
-      const toolName = tool.name?.trim();
-      if (!toolName || !isToolAllowedByPolicy(toolName, toolsPolicy)) continue;
-      catalogAllowedToolNames.push(toolName, `${mcpId}/${toolName}`);
-    }
-  }
 
   let customTools = createOpenClawCustomTools({
     ...gwParams,
@@ -1664,13 +1963,8 @@ Use it when the user references past discussions or you need context.`);
     selectedMcpToolsForTurn;
   let registeredMcpToolCount = 0;
   if (mcpExposure === "cli") {
-    const runtimeToolCatalog = buildRuntimeToolCatalog({
-      allTools: context.mcpTools,
-      selectedTools: selectedMcpToolsForTurn,
+    const runtimeToolCatalog = toolRouting.buildRuntimeCatalog({
       providerVisibleTools: {},
-      allowedToolNames: catalogAllowedToolNames,
-      mcpProvenanceById,
-      trustedShifuToolboxOrigins,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1707,13 +2001,8 @@ Use it when the user references past discussions or you need context.`);
       selectionHint: userPrompt,
     });
     registeredDirectMcpTools = projectedMcp.tools;
-    const runtimeToolCatalog = buildRuntimeToolCatalog({
-      allTools: context.mcpTools,
-      selectedTools: selectedMcpToolsForTurn,
+    const runtimeToolCatalog = toolRouting.buildRuntimeCatalog({
       providerVisibleTools: projectedMcp.tools,
-      allowedToolNames: catalogAllowedToolNames,
-      mcpProvenanceById,
-      trustedShifuToolboxOrigins,
     });
     customTools.push(
       ...createOpenClawCustomTools({
@@ -1899,6 +2188,7 @@ Use it when the user references past discussions or you need context.`);
   const finalInstructionsUpdated = instructionParts
     .filter(Boolean)
     .join("\n\n");
+
   const turnTimeZone = resolveTurnTimeZone(
     isRecord(platformMetadata) ? platformMetadata.timeZone : undefined,
     rawOptions.timeZone
@@ -1936,7 +2226,9 @@ Use it when the user references past discussions or you need context.`);
   };
 
   try {
-    const createdSession = await buildAgentSession({
+    const agentSessionBuilder =
+      runAISessionDependencies?.agentSessionBuilder ?? buildAgentSession;
+    const createdSession = await agentSessionBuilder({
       cwd: workspaceDir,
       model,
       // pi's createAgentSession() uses `tools` only to derive active tool

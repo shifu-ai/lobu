@@ -10,12 +10,20 @@ import {
   type McpCatalogProvenanceById,
   type ToolCatalogEntry,
 } from "./tool-catalog";
+import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
+import {
+  getOrBuildToolRetrievalIndex,
+  searchToolRetrievalIndex,
+  type ToolCandidateMatch,
+  type ToolRetrievalIndex,
+} from "./tool-retrieval-index";
 
 export type RuntimeToolCallBlockedReason =
   | "not_discovered"
   | "not_allowed"
   | "auth_required"
-  | "approval_required";
+  | "approval_required"
+  | "clarification_required";
 
 export type RuntimeToolCallErrorCode =
   | RuntimeToolCallBlockedReason
@@ -42,6 +50,7 @@ export interface BuildRuntimeToolCatalogParams {
   selectedTools: Record<string, McpToolDef[]>;
   providerVisibleTools?: Record<string, McpToolDef[]>;
   allowedToolNames?: Iterable<string>;
+  clarificationBlockedToolKeys?: Iterable<string>;
   mcpProvenanceById?: McpCatalogProvenanceById;
   trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
@@ -49,6 +58,52 @@ export interface BuildRuntimeToolCatalogParams {
 export interface SearchRuntimeToolCatalogParams {
   query: string;
   limit?: number;
+}
+
+export interface RuntimeToolSearchMatch {
+  entry: RuntimeToolCatalogEntry;
+  totalScore: number;
+  reasons: string[];
+}
+
+interface RuntimeToolSearchContext {
+  fingerprint: string;
+  entriesByIdentityKey: ReadonlyMap<string, RuntimeToolCatalogEntry>;
+}
+
+const runtimeToolSearchContexts = new WeakMap<
+  RuntimeToolCatalogEntry[],
+  RuntimeToolSearchContext
+>();
+
+function buildRuntimeToolSearchContext(
+  catalog: RuntimeToolCatalogEntry[]
+): RuntimeToolSearchContext {
+  const descriptors = catalog.map((entry) =>
+    getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex)
+  );
+  const index = getOrBuildToolRetrievalIndex(descriptors).index;
+  return {
+    fingerprint: index.fingerprint,
+    entriesByIdentityKey: new Map(
+      catalog.map(
+        (entry) => [toolIdentityKey(entry.mcpId, entry.name), entry] as const
+      )
+    ),
+  };
+}
+
+function resolveRuntimeToolSearchIndex(
+  catalog: RuntimeToolCatalogEntry[]
+): ToolRetrievalIndex {
+  const descriptors = catalog.map((entry) =>
+    getOrBuildToolDescriptor(entry.tool, entry.mcpId, entry.originalIndex)
+  );
+  const index = getOrBuildToolRetrievalIndex(descriptors).index;
+  // The context intentionally retains no complete retrieval index. A cache
+  // eviction must rebuild through the shared, accounted coordinator instead
+  // of reviving an evicted index (or its descriptors) from a weak seed.
+  return index;
 }
 
 export type RuntimeToolCaller = (
@@ -159,6 +214,9 @@ export function buildRuntimeToolCatalog(
   }
 
   const allowedToolNames = buildAllowedNameSet(params.allowedToolNames);
+  const clarificationBlockedToolKeys = new Set(
+    params.clarificationBlockedToolKeys ?? []
+  );
   const catalog: RuntimeToolCatalogEntry[] = [];
   let originalIndex = 0;
   for (const [mcpId, tools] of Object.entries(params.allTools)) {
@@ -176,9 +234,8 @@ export function buildRuntimeToolCatalog(
           provenance: params.mcpProvenanceById?.[mcpId],
           trustedOrigins: params.trustedShifuToolboxOrigins,
         })
-      ) {
+      )
         continue;
-      }
       if (
         entry.name === "resolve_calendar_date" &&
         !isTrustedShifuCalendarResolver({
@@ -187,15 +244,21 @@ export function buildRuntimeToolCatalog(
           provenance: params.mcpProvenanceById?.[mcpId],
           trustedOrigins: params.trustedShifuToolboxOrigins,
         })
-      ) {
+      )
         continue;
-      }
       const directVisibleThisTurn = selectedToolKeys.has(
         catalogToolKey(mcpId, entry.name)
       );
       const allowed = isEntryAllowed(entry, allowedToolNames);
+      const clarificationBlocked =
+        clarificationBlockedToolKeys.has(externalToolKey(mcpId, entry.name)) ||
+        clarificationBlockedToolKeys.has(toolIdentityKey(mcpId, entry.name));
       const callBlockedReason: RuntimeToolCallBlockedReason | undefined =
-        allowed ? undefined : "not_allowed";
+        !allowed
+          ? "not_allowed"
+          : clarificationBlocked
+            ? "clarification_required"
+            : undefined;
       catalog.push({
         ...entry,
         title: readCatalogTitle(tool),
@@ -207,64 +270,63 @@ export function buildRuntimeToolCatalog(
       });
     }
   }
+  try {
+    runtimeToolSearchContexts.set(
+      catalog,
+      buildRuntimeToolSearchContext(catalog)
+    );
+  } catch {
+    // Keep status/call enforcement available if semantic metadata is malformed.
+    // Search will make one guarded lazy retry and otherwise return no matches.
+  }
   return catalog;
 }
 
-function scoreCatalogEntry(
-  entry: RuntimeToolCatalogEntry,
-  query: string
-): number {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return 0;
-  const haystack = [
-    entry.name,
-    entry.title || "",
-    entry.description || entry.tool.description || "",
-    entry.mcpId,
-    entry.domain,
-    entry.intent,
-    entry.priority,
-    ...(entry.aliases || []),
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  if (haystack.includes(normalizedQuery)) return 100;
-
-  const termScore = normalizedQuery
-    .split(/\s+/)
-    .filter(Boolean)
-    .reduce((score, term) => score + (haystack.includes(term) ? 10 : 0), 0);
-  if (termScore > 0) return termScore;
-
-  return Array.from(normalizedQuery).reduce(
-    (score, char) => score + (haystack.includes(char) ? 1 : 0),
-    0
-  );
+function scoreReasons(match: ToolCandidateMatch): string[] {
+  return Object.entries(match.scoreBreakdown)
+    .filter(([, score]) => score > 0)
+    .map(([field]) => field)
+    .slice(0, 8);
 }
 
 export function searchRuntimeToolCatalog(
   catalog: RuntimeToolCatalogEntry[],
   params: SearchRuntimeToolCatalogParams
-): RuntimeToolCatalogEntry[] {
-  const limit = Math.min(20, Math.max(1, Math.floor(params.limit ?? 10)));
-  return catalog
-    .map((entry) => ({
-      entry,
-      score: scoreCatalogEntry(entry, params.query),
-    }))
-    .filter((match) => match.score > 0)
-    .sort((left, right) => {
-      if (right.score !== left.score) return right.score - left.score;
-      if (
-        left.entry.directVisibleThisTurn !== right.entry.directVisibleThisTurn
-      ) {
-        return left.entry.directVisibleThisTurn ? -1 : 1;
-      }
-      return left.entry.originalIndex - right.entry.originalIndex;
+): RuntimeToolSearchMatch[] {
+  const limit = Math.min(20, Math.max(1, Math.floor(params.limit ?? 5)));
+  let context = runtimeToolSearchContexts.get(catalog);
+  if (!context) {
+    try {
+      context = buildRuntimeToolSearchContext(catalog);
+      runtimeToolSearchContexts.set(catalog, context);
+    } catch {
+      return [];
+    }
+  }
+  const eligibleKeys = new Set(
+    catalog
+      .filter(
+        (entry) =>
+          entry.callableViaCatalog ||
+          entry.callBlockedReason === "clarification_required"
+      )
+      .map((entry) => toolIdentityKey(entry.mcpId, entry.name))
+  );
+  const index = resolveRuntimeToolSearchIndex(catalog);
+  return searchToolRetrievalIndex(index, params.query, limit, eligibleKeys)
+    .map((match) => {
+      const entry = context.entriesByIdentityKey.get(
+        match.descriptor.identityKey
+      );
+      return entry
+        ? {
+            entry,
+            totalScore: match.totalScore,
+            reasons: scoreReasons(match),
+          }
+        : undefined;
     })
-    .slice(0, limit)
-    .map((match) => match.entry);
+    .filter((match): match is RuntimeToolSearchMatch => match !== undefined);
 }
 
 type RuntimeToolCatalogLookupResult =
@@ -338,6 +400,7 @@ function isStableErrorCode(value: unknown): value is RuntimeToolCallErrorCode {
   return (
     value === "not_discovered" ||
     value === "not_allowed" ||
+    value === "clarification_required" ||
     value === "ambiguous_tool" ||
     value === "auth_required" ||
     value === "approval_required" ||

@@ -26,6 +26,7 @@ import {
   startMcpLogin,
 } from "../shared/tool-implementations";
 import { isDirectPackageInstallCommand } from "../openclaw/tool-policy";
+import { toolIdentityKey } from "../openclaw/tool-descriptor";
 
 const logger = createLogger("mcp-cli");
 
@@ -57,6 +58,12 @@ export interface McpRuntimeState {
   mcpTools: Record<string, McpToolDef[]>;
   mcpStatus: McpStatus[];
   mcpContext: Record<string, string>;
+  /** Canonical identities callable under the frozen turn-local policy. */
+  allowedToolKeys?: readonly string[];
+  /** Canonical identities eligible when this external turn began. */
+  turnEligibleToolKeys?: readonly string[];
+  /** Canonical identities blocked until the user resolves write ambiguity. */
+  clarificationBlockedToolKeys?: readonly string[];
 }
 
 export interface McpRuntimeRef {
@@ -205,6 +212,18 @@ function expectedMcpIdentityFor(
   };
 }
 
+function blockedToolResult(
+  error: "not_allowed" | "clarification_required",
+  mcpId: string,
+  toolName: string
+): { stdout: string; stderr: string; exitCode: number } {
+  return {
+    stdout: "",
+    stderr: `${JSON.stringify({ error, mcp_id: mcpId, tool_name: toolName })}\n`,
+    exitCode: 1,
+  };
+}
+
 export function parsePayload(
   stdin: string | undefined,
   inlineArg: string | undefined
@@ -281,6 +300,17 @@ export function buildMcpServerHandler(
       };
     }
 
+    const canonicalToolKey = toolIdentityKey(mcpId, subcommand);
+    if (
+      state.allowedToolKeys !== undefined &&
+      !state.allowedToolKeys.includes(canonicalToolKey)
+    ) {
+      return blockedToolResult("not_allowed", mcpId, subcommand);
+    }
+    if (state.clarificationBlockedToolKeys?.includes(canonicalToolKey)) {
+      return blockedToolResult("clarification_required", mcpId, subcommand);
+    }
+
     const parsed = parsePayload(ctx.stdin, args[1]);
     if (!parsed.ok) {
       return { stdout: "", stderr: `${parsed.error}\n`, exitCode: 2 };
@@ -321,7 +351,29 @@ async function refreshRef(
   if (!ref.refresh) return;
   try {
     const fresh = await ref.refresh();
-    if (fresh) ref.current = fresh;
+    if (fresh) {
+      const turnEligibleToolKeys =
+        ref.current.turnEligibleToolKeys ?? ref.current.allowedToolKeys;
+      const refreshedAllowedToolKeys =
+        fresh.allowedToolKeys ?? ref.current.allowedToolKeys;
+      const allowedToolKeys = turnEligibleToolKeys
+        ? (refreshedAllowedToolKeys?.filter((key) =>
+            turnEligibleToolKeys.includes(key)
+          ) ?? turnEligibleToolKeys)
+        : refreshedAllowedToolKeys;
+      ref.current = {
+        ...fresh,
+        allowedToolKeys: allowedToolKeys
+          ? Object.freeze([...allowedToolKeys])
+          : undefined,
+        turnEligibleToolKeys: turnEligibleToolKeys
+          ? Object.freeze([...turnEligibleToolKeys])
+          : undefined,
+        clarificationBlockedToolKeys:
+          fresh.clarificationBlockedToolKeys ??
+          ref.current.clarificationBlockedToolKeys,
+      };
+    }
   } catch (err) {
     logger.warn(
       `Failed to refresh MCP state after ${mcpId} auth ${verb}: ${err instanceof Error ? err.message : String(err)}`

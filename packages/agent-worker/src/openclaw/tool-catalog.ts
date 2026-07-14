@@ -274,6 +274,13 @@ function parseShifuToolMetadata(
   };
 }
 
+export function hasTrustedReadOnlyToolMetadata(tool: McpToolDef): boolean {
+  // Descriptor construction has no verified discovery provenance. Fail closed
+  // instead of trusting self-labelled metadata based on an MCP id alone.
+  const metadata = parseShifuToolMetadata(tool, false);
+  return metadata?.readOnly === true && metadata.mutatesState === false;
+}
+
 export function catalogEntryForTool(
   tool: McpToolDef,
   originalIndex = 0,

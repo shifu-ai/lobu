@@ -1,12 +1,20 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { McpToolDef } from "@lobu/core";
+import { projectMcpToolsForProvider } from "../openclaw/mcp-tool-projection";
 import {
   buildRuntimeToolCatalog,
   dispatchRuntimeToolCall,
   searchRuntimeToolCatalog,
   statusRuntimeToolCatalog,
 } from "../openclaw/tool-catalog-dispatcher";
-import { projectMcpToolsForProvider } from "../openclaw/mcp-tool-projection";
+import {
+  clearToolRetrievalIndexCacheForTests,
+  toolRetrievalIndexCacheStats,
+} from "../openclaw/tool-retrieval-index";
+import {
+  clearToolRouterRetainedMemoryForTests,
+  toolRouterRetainedMemoryStats,
+} from "../openclaw/tool-router-memory-budget";
 
 function tool(name: string, description?: string): McpToolDef {
   return {
@@ -22,6 +30,82 @@ function tool(name: string, description?: string): McpToolDef {
 }
 
 describe("tool catalog dispatcher", () => {
+  test("prebuilds and reuses one semantic search context per runtime catalog", () => {
+    clearToolRetrievalIndexCacheForTests();
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        school: [tool("search_students", "Search student records")],
+        secret: [tool("search_payroll", "Search payroll records")],
+      },
+      selectedTools: {},
+      allowedToolNames: ["school/search_students"],
+    });
+    const afterBuild = toolRetrievalIndexCacheStats();
+
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "search records" })
+    ).toHaveLength(1);
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "search records" })
+    ).toHaveLength(1);
+    expect(toolRetrievalIndexCacheStats().misses).toBe(afterBuild.misses);
+    expect(toolRetrievalIndexCacheStats().hits).toBe(afterBuild.hits + 2);
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "payroll" }).map(
+        ({ entry }) => entry.name
+      )
+    ).not.toContain("search_payroll");
+  });
+
+  test("live runtime catalogs do not retain evicted indexes outside the unified budget", () => {
+    clearToolRouterRetainedMemoryForTests();
+    clearToolRetrievalIndexCacheForTests();
+    const catalogs = Array.from({ length: 32 }, (_, version) =>
+      buildRuntimeToolCatalog({
+        allTools: {
+          allowed: [
+            tool(
+              `search_allowed_${version}`,
+              `shared lookup ${version} ${"a".repeat(3_000)}`
+            ),
+          ],
+          forbidden: [
+            tool(
+              `search_forbidden_${version}`,
+              `shared lookup ${version} ${"b".repeat(3_000)}`
+            ),
+          ],
+          bulk: Array.from({ length: 180 }, (_, index) =>
+            tool(
+              `bulk_${version}_${index}`,
+              `bulk ${version} ${index} ${"x".repeat(3_000)}`
+            )
+          ),
+        },
+        selectedTools: {},
+        allowedToolNames: [`allowed/search_allowed_${version}`],
+      })
+    );
+    const beforeSearch = toolRetrievalIndexCacheStats();
+    expect(toolRouterRetainedMemoryStats().estimatedBytes).toBeLessThanOrEqual(
+      32 * 1024 * 1024
+    );
+    expect(toolRouterRetainedMemoryStats().evictions).toBeGreaterThan(0);
+
+    const matches = searchRuntimeToolCatalog(catalogs[0]!, {
+      query: "shared lookup",
+    });
+    expect(matches.map(({ entry }) => entry.name)).toEqual([
+      "search_allowed_0",
+    ]);
+    expect(toolRetrievalIndexCacheStats().misses).toBeGreaterThan(
+      beforeSearch.misses
+    );
+    expect(toolRouterRetainedMemoryStats().estimatedBytes).toBeLessThanOrEqual(
+      32 * 1024 * 1024
+    );
+  });
+
   test("catalog-only allowed tools remain callable and searchable", () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: {
@@ -56,9 +140,119 @@ describe("tool catalog dispatcher", () => {
       query: "heavy export card",
     });
 
-    expect(matches.map((entry) => entry.name)).toContain(
+    expect(matches.map((match) => match.entry.name)).toContain(
       "card_studio_heavy_export"
     );
+  });
+
+  test("semantic catalog search finds personal reminder tools", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        "lobu-memory": [
+          tool("manage_schedules", "Manage delayed agent schedules"),
+        ],
+        google_workspace: [
+          tool("gws_calendar_events_create", "Create a Google Calendar event"),
+        ],
+      },
+      selectedTools: {},
+    });
+
+    expect(
+      searchRuntimeToolCatalog(catalog, {
+        query: "稍後提醒我回覆客戶",
+        limit: 5,
+      })[0]
+    ).toMatchObject({
+      entry: { mcpId: "lobu-memory", name: "manage_schedules" },
+      totalScore: expect.any(Number),
+      reasons: expect.any(Array),
+    });
+  });
+
+  test("catalog search defaults to five results and caps requests at twenty", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: Array.from({ length: 25 }, (_, index) =>
+          tool(`course_lookup_${index}`, "Search course records")
+        ),
+      },
+      selectedTools: {},
+    });
+
+    expect(searchRuntimeToolCatalog(catalog, { query: "course" })).toHaveLength(
+      5
+    );
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "course", limit: 100 })
+    ).toHaveLength(20);
+  });
+
+  test("tool_call cannot bypass clarification_required", async () => {
+    const callTool = mock(async () => ({
+      content: [{ type: "text" as const, text: "should not run" }],
+    }));
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        google_workspace: [tool("gws_calendar_events_create")],
+      },
+      selectedTools: {},
+      clarificationBlockedToolKeys: [
+        "google_workspace/gws_calendar_events_create",
+      ],
+    });
+
+    expect(
+      statusRuntimeToolCatalog(catalog, {
+        mcpId: "google_workspace",
+        toolName: "gws_calendar_events_create",
+      })
+    ).toMatchObject({
+      callableViaCatalog: false,
+      callBlockedReason: "clarification_required",
+    });
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })[0]
+    ).toMatchObject({
+      entry: {
+        name: "gws_calendar_events_create",
+        callBlockedReason: "clarification_required",
+      },
+    });
+
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "gws_calendar_events_create",
+      mcpId: "google_workspace",
+      args: {},
+      callTool,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      code: "clarification_required",
+    });
+    expect(callTool).not.toHaveBeenCalled();
+  });
+
+  test("not_allowed takes precedence over clarification_required", () => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        google_workspace: [tool("gws_calendar_events_create")],
+      },
+      selectedTools: {},
+      allowedToolNames: [],
+      clarificationBlockedToolKeys: [
+        "google_workspace/gws_calendar_events_create",
+      ],
+    });
+
+    expect(catalog[0]).toMatchObject({
+      callableViaCatalog: false,
+      callBlockedReason: "not_allowed",
+    });
+    expect(
+      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })
+    ).toEqual([]);
   });
 
   test("tool_call rejects missing catalog entries with a stable error code", async () => {

@@ -12,6 +12,7 @@ import {
 } from "../embedded/mcp-cli-commands";
 import { capEmbeddedBashStreamOutput } from "../embedded/just-bash-bootstrap";
 import type { GatewayParams } from "../shared/tool-implementations";
+import { toolIdentityKey } from "../openclaw/tool-descriptor";
 
 const gw: GatewayParams = {
   gatewayUrl: "http://gateway",
@@ -28,6 +29,9 @@ function makeRef(overrides: Partial<McpRuntimeState> = {}): McpRuntimeRef {
       mcpTools: overrides.mcpTools ?? {},
       mcpStatus: overrides.mcpStatus ?? [],
       mcpContext: overrides.mcpContext ?? {},
+      allowedToolKeys: overrides.allowedToolKeys,
+      turnEligibleToolKeys: overrides.turnEligibleToolKeys,
+      clarificationBlockedToolKeys: overrides.clarificationBlockedToolKeys,
     },
   };
 }
@@ -314,6 +318,88 @@ describe("auth subcommand routing", () => {
     expect(r.exitCode).toBe(0);
     expect(refreshCalls).toBe(1);
     expect(ref.current.mcpTools.lobu).toEqual([lobuTool]);
+  });
+
+  test("auth refresh preserves the turn-local clarification block", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ authenticated: true })
+    ) as unknown as typeof fetch;
+    const blockedKey = toolIdentityKey("lobu", "search_memory");
+    const gatewayCalls: string[] = [];
+    const ref: McpRuntimeRef = {
+      current: {
+        mcpTools: {},
+        mcpStatus: [],
+        mcpContext: {},
+        allowedToolKeys: [blockedKey],
+        clarificationBlockedToolKeys: [blockedKey],
+      },
+      refresh: async () => ({
+        mcpTools: { lobu: [lobuTool] },
+        mcpStatus: [],
+        mcpContext: {},
+      }),
+    };
+    const handler = buildMcpServerHandler("lobu", ref, gw, {
+      callTool: async () => {
+        gatewayCalls.push("called");
+        return { content: [] };
+      },
+    });
+
+    await handler(["auth", "check"], {});
+    const result = await handler(["search_memory"], {
+      stdin: '{"query":"secret"}',
+    });
+
+    expect(JSON.parse(result.stderr).error).toBe("clarification_required");
+    expect(gatewayCalls).toHaveLength(0);
+    expect(ref.current.clarificationBlockedToolKeys).toEqual([blockedKey]);
+  });
+
+  test("auth refresh cannot expose a tool absent from the initial turn inventory", async () => {
+    globalThis.fetch = mock(async () =>
+      Response.json({ authenticated: true })
+    ) as unknown as typeof fetch;
+    const calendarCreate: McpToolDef = {
+      name: "gws_calendar_events_create",
+      description: "Create a Google Calendar event",
+      inputSchema: { type: "object", properties: {} },
+    };
+    const calendarKey = toolIdentityKey(
+      "google_workspace",
+      calendarCreate.name
+    );
+    const gatewayCalls: string[] = [];
+    const ref: McpRuntimeRef = {
+      current: {
+        mcpTools: { google_workspace: [] },
+        mcpStatus: [],
+        mcpContext: {},
+        allowedToolKeys: [],
+        turnEligibleToolKeys: [],
+      },
+      refresh: async () => ({
+        mcpTools: { google_workspace: [calendarCreate] },
+        mcpStatus: [],
+        mcpContext: {},
+        allowedToolKeys: [calendarKey],
+      }),
+    };
+    const handler = buildMcpServerHandler("google_workspace", ref, gw, {
+      callTool: async () => {
+        gatewayCalls.push("called");
+        return { content: [] };
+      },
+    });
+
+    await handler(["auth", "check"], {});
+    const result = await handler([calendarCreate.name], { stdin: "{}" });
+
+    expect(JSON.parse(result.stderr).error).toBe("not_allowed");
+    expect(gatewayCalls).toHaveLength(0);
+    expect(ref.current.allowedToolKeys).toEqual([]);
+    expect(ref.current.turnEligibleToolKeys).toEqual([]);
   });
 
   test("auth check refresh failure is swallowed (does not throw)", async () => {
