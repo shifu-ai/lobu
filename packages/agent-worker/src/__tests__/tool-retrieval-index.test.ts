@@ -116,6 +116,25 @@ describe("tool descriptors", () => {
 		expect(descriptor.mutatesState).toBe(false);
 	});
 
+	test("does not share mutable override arrays across descriptors", () => {
+		const first = buildToolDescriptor(
+			tool("manage_schedules", "Manage schedules"),
+			"lobu-memory",
+			0,
+		);
+		first.operations.push("read");
+		first.positiveExamples.push("mutated example");
+
+		const second = buildToolDescriptor(
+			tool("manage_schedules", "Manage schedules"),
+			"lobu-memory",
+			1,
+		);
+
+		expect(second.operations).not.toContain("read");
+		expect(second.positiveExamples).not.toContain("mutated example");
+	});
+
 	test("reads metadata titles using dispatcher precedence", () => {
 		const metaTitle = buildToolDescriptor(
 			Object.assign(tool("meta_tool", "Meta tool"), {
@@ -264,7 +283,126 @@ describe("tool retrieval index", () => {
 
 		expect(index.mode).toBe("linear");
 		expect(index.descriptors).toHaveLength(2);
+		expect(index.postings.size).toBe(0);
+		expect(index.documentFrequency.size).toBe(0);
+		expect(index.documentIdsByIdentity.size).toBe(0);
 		expect(searchToolRetrievalIndex(index, "tool", 2)).toHaveLength(2);
+	});
+
+	test("uses inverted postings instead of scanning every descriptor", () => {
+		const descriptor = buildToolDescriptor(
+			tool("needle_tool", "Find the needle"),
+			"mcp",
+			0,
+		);
+		const index = buildToolRetrievalIndex([descriptor]);
+		const withoutPostings = {
+			...index,
+			postings: new Map<string, readonly number[]>(),
+		};
+
+		expect(searchToolRetrievalIndex(withoutPostings, "needle", 1)).toEqual([]);
+	});
+
+	test("bounds query bytes before tokenization", () => {
+		const descriptor = buildToolDescriptor(
+			tool("needle_tool", "Find the needle"),
+			"mcp",
+			0,
+		);
+		const index = buildToolRetrievalIndex([descriptor]);
+
+		expect(
+			searchToolRetrievalIndex(index, `${"x".repeat(5_000)} needle`, 1),
+		).toEqual([]);
+	});
+
+	test("uses collision-safe identities for eligibility", () => {
+		const left = buildToolDescriptor(tool("b/c", "shared"), "a", 0);
+		const right = buildToolDescriptor(tool("c", "shared"), "a/b", 1);
+
+		expect(left.key).toBe(right.key);
+		expect(left.identityKey).toBe("a\u0000b/c");
+		expect(right.identityKey).toBe("a/b\u0000c");
+		const index = buildToolRetrievalIndex([left, right]);
+		const matches = searchToolRetrievalIndex(
+			index,
+			"shared",
+			2,
+			new Set([left.identityKey]),
+		);
+
+		expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual(["a"]);
+	});
+
+	test("computes relevance statistics over eligible descriptors only", () => {
+		const first = buildToolDescriptor(tool("first", "needle"), "mcp", 0);
+		const second = buildToolDescriptor(tool("second", "needle"), "mcp", 1);
+		const eligible = new Set([first.identityKey, second.identityKey]);
+		const base = searchToolRetrievalIndex(
+			buildToolRetrievalIndex([first, second]),
+			"needle",
+			2,
+			eligible,
+		);
+		const ineligible = Array.from({ length: 20 }, (_, index) =>
+			buildToolDescriptor(tool(`noise_${index}`, "needle"), "other", index + 2),
+		);
+		const expanded = searchToolRetrievalIndex(
+			buildToolRetrievalIndex([first, second, ...ineligible]),
+			"needle",
+			2,
+			eligible,
+		);
+
+		expect(expanded.map(({ descriptor }) => descriptor.name)).toEqual(
+			base.map(({ descriptor }) => descriptor.name),
+		);
+		expect(expanded.map(({ totalScore }) => totalScore)).toEqual(
+			base.map(({ totalScore }) => totalScore),
+		);
+
+		const baseLinear = searchToolRetrievalIndex(
+			buildToolRetrievalIndex([first, second], { maxIndexBytes: 1 }),
+			"needle",
+			2,
+			eligible,
+		);
+		const expandedLinear = searchToolRetrievalIndex(
+			buildToolRetrievalIndex([first, second, ...ineligible], {
+				maxIndexBytes: 1,
+			}),
+			"needle",
+			2,
+			eligible,
+		);
+		expect(expandedLinear.map(({ totalScore }) => totalScore)).toEqual(
+			baseLinear.map(({ totalScore }) => totalScore),
+		);
+	});
+
+	test("deep-clones and freezes tool definitions in index snapshots", () => {
+		const source = tool("search_students", "Original description", {
+			email: { type: "string", description: "Original email" },
+		});
+		const descriptor = buildToolDescriptor(source, "school", 0);
+		const index = buildToolRetrievalIndex([descriptor]);
+		source.description = "Mutated description";
+		(
+			(
+				source.inputSchema?.properties as Record<
+					string,
+					{ description: string }
+				>
+			).email as { description: string }
+		).description = "Mutated email";
+
+		expect(index.descriptors[0]?.tool.description).toBe("Original description");
+		expect(Object.isFrozen(index.descriptors[0]?.tool)).toBe(true);
+		expect(Object.isFrozen(index.descriptors[0]?.tool.inputSchema)).toBe(true);
+		expect(
+			Object.isFrozen(index.descriptors[0]?.tool.inputSchema?.properties),
+		).toBe(true);
 	});
 });
 

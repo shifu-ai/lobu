@@ -62,13 +62,14 @@ export function routeToolEntries({
 	);
 	const index = buildToolRetrievalIndex(descriptors);
 	const matches = searchToolRetrievalIndex(index, message, entries.length);
-	const entriesByCanonicalKey = new Map(
-		entries.map((entry) => [canonicalToolKey(entry), entry] as const),
+	const entriesByIdentityKey = new Map(
+		descriptors.flatMap((descriptor, index) => {
+			const entry = entries[index];
+			return entry ? [[descriptor.identityKey, entry] as const] : [];
+		}),
 	);
 	const scoredEntries = matches.flatMap((match) => {
-		const entry = entriesByCanonicalKey.get(
-			`${match.descriptor.mcpId}\u0000${match.descriptor.name}`,
-		);
+		const entry = entriesByIdentityKey.get(match.descriptor.identityKey);
 		return entry ? [{ entry, score: candidateScore(match) }] : [];
 	});
 	const selectedEntries: ToolCatalogEntry[] = [];
@@ -77,6 +78,7 @@ export function routeToolEntries({
 	for (const entry of [
 		...reservedEntries,
 		...scoredEntries.map(({ entry }) => entry),
+		...entries,
 	]) {
 		if (selectedEntries.length >= budget) break;
 		const key = canonicalToolKey(entry);

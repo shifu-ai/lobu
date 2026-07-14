@@ -8,6 +8,7 @@ const DESCRIPTOR_VERSION = 1;
 
 export interface ToolDescriptor {
 	key: string;
+	identityKey: string;
 	mcpId: string;
 	name: string;
 	indexedKey: string;
@@ -123,11 +124,12 @@ function truncateUtf8(value: string, maxBytes: number): string {
 }
 
 function trimArrayToFit(descriptor: ToolDescriptor, values: string[]): void {
-	while (
-		values.length > 0 &&
-		indexedBytes(descriptor) > MAX_INDEXED_TEXT_BYTES
-	) {
-		values.pop();
+	let excess = indexedBytes(descriptor) - MAX_INDEXED_TEXT_BYTES;
+	while (values.length > 0 && excess > 0) {
+		const removed = values.pop();
+		if (removed === undefined) break;
+		excess -= Buffer.byteLength(removed, "utf8");
+		if (values.length > 0) excess--;
 	}
 }
 
@@ -234,15 +236,17 @@ export function buildToolDescriptor(
 	const entry = catalogEntryForTool(tool, originalIndex, mcpId);
 	const name = entry.name;
 	const key = mcpId ? `${mcpId}/${name}` : name;
+	const identityKey = `${mcpId}\u0000${name}`;
 	const indexedName = sanitize(name);
 	const indexedMcpId = sanitize(mcpId);
 	const indexedKey = indexedMcpId
 		? `${indexedMcpId}/${indexedName}`
 		: indexedName;
-	const override = DESCRIPTOR_OVERRIDES[`${mcpId}\u0000${name}`];
+	const override = DESCRIPTOR_OVERRIDES[identityKey];
 	const parameters = parameterMetadata(tool);
 	const descriptor: ToolDescriptor = {
 		key,
+		identityKey,
 		mcpId,
 		name,
 		indexedKey,
@@ -253,10 +257,10 @@ export function buildToolDescriptor(
 		parameterNames: parameters.names,
 		parameterDescriptions: parameters.descriptions,
 		domain: entry.domain === "unknown" ? undefined : entry.domain,
-		operations: override?.operations ?? inferOperations(name),
-		destinations: override?.destinations ?? [],
-		positiveExamples: override?.positiveExamples ?? [],
-		negativeExamples: override?.negativeExamples ?? [],
+		operations: [...(override?.operations ?? inferOperations(name))],
+		destinations: [...(override?.destinations ?? [])],
+		positiveExamples: [...(override?.positiveExamples ?? [])],
+		negativeExamples: [...(override?.negativeExamples ?? [])],
 		readOnly: override?.readOnly ?? entry.readOnly,
 		mutatesState: override?.mutatesState ?? entry.mutatesState,
 		requiresConfirmation:
