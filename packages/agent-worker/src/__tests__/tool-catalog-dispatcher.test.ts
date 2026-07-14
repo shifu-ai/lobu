@@ -43,17 +43,17 @@ describe("tool catalog dispatcher", () => {
     const afterBuild = toolRetrievalIndexCacheStats();
 
     expect(
-      searchRuntimeToolCatalog(catalog, { query: "search records" }),
+      searchRuntimeToolCatalog(catalog, { query: "search records" })
     ).toHaveLength(1);
     expect(
-      searchRuntimeToolCatalog(catalog, { query: "search records" }),
+      searchRuntimeToolCatalog(catalog, { query: "search records" })
     ).toHaveLength(1);
     expect(toolRetrievalIndexCacheStats().misses).toBe(afterBuild.misses);
     expect(toolRetrievalIndexCacheStats().hits).toBe(afterBuild.hits + 2);
     expect(
       searchRuntimeToolCatalog(catalog, { query: "payroll" }).map(
-        ({ entry }) => entry.name,
-      ),
+        ({ entry }) => entry.name
+      )
     ).not.toContain("search_payroll");
   });
 
@@ -66,29 +66,29 @@ describe("tool catalog dispatcher", () => {
           allowed: [
             tool(
               `search_allowed_${version}`,
-              `shared lookup ${version} ${"a".repeat(3_000)}`,
+              `shared lookup ${version} ${"a".repeat(3_000)}`
             ),
           ],
           forbidden: [
             tool(
               `search_forbidden_${version}`,
-              `shared lookup ${version} ${"b".repeat(3_000)}`,
+              `shared lookup ${version} ${"b".repeat(3_000)}`
             ),
           ],
           bulk: Array.from({ length: 180 }, (_, index) =>
             tool(
               `bulk_${version}_${index}`,
-              `bulk ${version} ${index} ${"x".repeat(3_000)}`,
-            ),
+              `bulk ${version} ${index} ${"x".repeat(3_000)}`
+            )
           ),
         },
         selectedTools: {},
         allowedToolNames: [`allowed/search_allowed_${version}`],
-      }),
+      })
     );
     const beforeSearch = toolRetrievalIndexCacheStats();
     expect(toolRouterRetainedMemoryStats().estimatedBytes).toBeLessThanOrEqual(
-      32 * 1024 * 1024,
+      32 * 1024 * 1024
     );
     expect(toolRouterRetainedMemoryStats().evictions).toBeGreaterThan(0);
 
@@ -99,10 +99,10 @@ describe("tool catalog dispatcher", () => {
       "search_allowed_0",
     ]);
     expect(toolRetrievalIndexCacheStats().misses).toBeGreaterThan(
-      beforeSearch.misses,
+      beforeSearch.misses
     );
     expect(toolRouterRetainedMemoryStats().estimatedBytes).toBeLessThanOrEqual(
-      32 * 1024 * 1024,
+      32 * 1024 * 1024
     );
   });
 
@@ -113,7 +113,7 @@ describe("tool catalog dispatcher", () => {
           tool("sales_battle_report_run_now", "Send the latest sales report"),
           tool(
             "card_studio_heavy_export",
-            "Export a large course promotion card deck",
+            "Export a large course promotion card deck"
           ),
         ],
       },
@@ -127,7 +127,7 @@ describe("tool catalog dispatcher", () => {
     });
 
     const omitted = catalog.find(
-      (entry) => entry.name === "card_studio_heavy_export",
+      (entry) => entry.name === "card_studio_heavy_export"
     );
 
     expect(omitted).toMatchObject({
@@ -141,7 +141,7 @@ describe("tool catalog dispatcher", () => {
     });
 
     expect(matches.map((match) => match.entry.name)).toContain(
-      "card_studio_heavy_export",
+      "card_studio_heavy_export"
     );
   });
 
@@ -162,7 +162,7 @@ describe("tool catalog dispatcher", () => {
       searchRuntimeToolCatalog(catalog, {
         query: "稍後提醒我回覆客戶",
         limit: 5,
-      })[0],
+      })[0]
     ).toMatchObject({
       entry: { mcpId: "lobu-memory", name: "manage_schedules" },
       totalScore: expect.any(Number),
@@ -174,17 +174,17 @@ describe("tool catalog dispatcher", () => {
     const catalog = buildRuntimeToolCatalog({
       allTools: {
         toolbox: Array.from({ length: 25 }, (_, index) =>
-          tool(`course_lookup_${index}`, "Search course records"),
+          tool(`course_lookup_${index}`, "Search course records")
         ),
       },
       selectedTools: {},
     });
 
     expect(searchRuntimeToolCatalog(catalog, { query: "course" })).toHaveLength(
-      5,
+      5
     );
     expect(
-      searchRuntimeToolCatalog(catalog, { query: "course", limit: 100 }),
+      searchRuntimeToolCatalog(catalog, { query: "course", limit: 100 })
     ).toHaveLength(20);
   });
 
@@ -206,13 +206,13 @@ describe("tool catalog dispatcher", () => {
       statusRuntimeToolCatalog(catalog, {
         mcpId: "google_workspace",
         toolName: "gws_calendar_events_create",
-      }),
+      })
     ).toMatchObject({
       callableViaCatalog: false,
       callBlockedReason: "clarification_required",
     });
     expect(
-      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })[0],
+      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })[0]
     ).toMatchObject({
       entry: {
         name: "gws_calendar_events_create",
@@ -251,7 +251,7 @@ describe("tool catalog dispatcher", () => {
       callBlockedReason: "not_allowed",
     });
     expect(
-      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" }),
+      searchRuntimeToolCatalog(catalog, { query: "Google Calendar" })
     ).toEqual([]);
   });
 
@@ -321,7 +321,7 @@ describe("tool catalog dispatcher", () => {
     expect(callTool).toHaveBeenCalledWith(
       "toolbox",
       "card_studio_heavy_export",
-      { format: "pdf" },
+      { format: "pdf" }
     );
   });
 
@@ -374,7 +374,7 @@ describe("tool catalog dispatcher", () => {
       statusRuntimeToolCatalog(catalog, {
         mcpId: "toolbox",
         toolName: "card_studio_heavy_export",
-      }),
+      })
     ).toMatchObject({
       mcpId: "toolbox",
       name: "card_studio_heavy_export",
@@ -411,7 +411,7 @@ describe("tool catalog dispatcher", () => {
       statusRuntimeToolCatalog(catalog, {
         mcpId: "toolbox",
         toolName: "sales_battle_report_run_now",
-      }),
+      })
     ).toMatchObject({
       directVisibleThisTurn: true,
       callableViaCatalog: true,
@@ -420,7 +420,7 @@ describe("tool catalog dispatcher", () => {
       statusRuntimeToolCatalog(catalog, {
         mcpId: "toolbox",
         toolName: "card_studio_heavy_export",
-      }),
+      })
     ).toMatchObject({
       directVisibleThisTurn: false,
       callableViaCatalog: true,
@@ -435,32 +435,29 @@ describe("tool catalog dispatcher", () => {
     ],
     ["tool_error", "Error: Upstream validation failed."],
     ["server_unavailable", "Error: MCP tool toolbox/export timed out"],
-  ] as const)(
-    "tool_call surfaces delegated MCP %s failures as stable codes",
-    async (code, text) => {
-      const catalog = buildRuntimeToolCatalog({
-        allTools: {
-          toolbox: [tool("card_studio_heavy_export")],
-        },
-        selectedTools: {},
-        allowedToolNames: ["toolbox/card_studio_heavy_export"],
-      });
+  ] as const)("tool_call surfaces delegated MCP %s failures as stable codes", async (code, text) => {
+    const catalog = buildRuntimeToolCatalog({
+      allTools: {
+        toolbox: [tool("card_studio_heavy_export")],
+      },
+      selectedTools: {},
+      allowedToolNames: ["toolbox/card_studio_heavy_export"],
+    });
 
-      const result = await dispatchRuntimeToolCall({
-        catalog,
-        toolName: "card_studio_heavy_export",
-        args: {},
-        callTool: mock(async () => ({
-          content: [{ type: "text" as const, text }],
-          isError: true,
-          errorCode: code,
-        })),
-      });
+    const result = await dispatchRuntimeToolCall({
+      catalog,
+      toolName: "card_studio_heavy_export",
+      args: {},
+      callTool: mock(async () => ({
+        content: [{ type: "text" as const, text }],
+        isError: true,
+        errorCode: code,
+      })),
+    });
 
-      expect(result).toMatchObject({
-        ok: false,
-        code,
-      });
-    },
-  );
+    expect(result).toMatchObject({
+      ok: false,
+      code,
+    });
+  });
 });

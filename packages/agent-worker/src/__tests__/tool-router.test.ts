@@ -11,7 +11,7 @@ import { routeToolEntries } from "../openclaw/tool-router";
 function tool(
   name: string,
   description: string,
-  extras: Record<string, unknown> = {},
+  extras: Record<string, unknown> = {}
 ): McpToolDef {
   return {
     name,
@@ -23,11 +23,11 @@ function tool(
 
 const manageSchedules = tool(
   "manage_schedules",
-  "Create and manage delayed or recurring personal reminders.",
+  "Create and manage delayed or recurring personal reminders."
 );
 const createCalendarEvent = tool(
   "gws_calendar_events_create",
-  "Create meetings and events in Google Calendar.",
+  "Create meetings and events in Google Calendar."
 );
 
 function schedulingTools() {
@@ -38,7 +38,7 @@ function schedulingTools() {
 }
 
 function selectMcpToolsByMcpForTurn(
-  params: Omit<SelectMcpToolsByMcpForTurnParams, "routerMode">,
+  params: Omit<SelectMcpToolsByMcpForTurnParams, "routerMode">
 ) {
   return selectMcpToolsByMcpForTurnRaw({ ...params, routerMode: "semantic" });
 }
@@ -57,13 +57,13 @@ describe("semantic tool routing authorization and write ambiguity", () => {
       "lobu-memory/manage_schedules",
     ]);
     expect(result.trace.clarificationQuestion).toBe(
-      "你要我建立 Google Calendar 行事曆事件，還是只在時間到時提醒你？",
+      "你要我建立 Google Calendar 行事曆事件，還是只在時間到時提醒你？"
     );
     expect(result.trace.selectedToolNames).not.toContain(
-      "google_workspace/gws_calendar_events_create",
+      "google_workspace/gws_calendar_events_create"
     );
     expect(result.trace.selectedToolNames).not.toContain(
-      "lobu-memory/manage_schedules",
+      "lobu-memory/manage_schedules"
     );
   });
 
@@ -76,22 +76,22 @@ describe("semantic tool routing authorization and write ambiguity", () => {
     });
 
     expect(
-      result.trace.candidates.map((candidate) => candidate.key),
+      result.trace.candidates.map((candidate) => candidate.key)
     ).not.toContain("google_workspace/gws_calendar_events_create");
     expect(result.trace.selectedToolNames).not.toContain(
-      "google_workspace/gws_calendar_events_create",
+      "google_workspace/gws_calendar_events_create"
     );
     expect(result.trace.blockedToolNames).not.toContain(
-      "google_workspace/gws_calendar_events_create",
+      "google_workspace/gws_calendar_events_create"
     );
     expect(result.trace.clarificationChoices ?? []).not.toContain(
-      "google_workspace/gws_calendar_events_create",
+      "google_workspace/gws_calendar_events_create"
     );
     expect(result.trace.omittedToolNames).not.toContain(
-      "google_workspace/gws_calendar_events_create",
+      "google_workspace/gws_calendar_events_create"
     );
     expect(result.trace.omitted).not.toContain(
-      "google_workspace/gws_calendar_events_create",
+      "google_workspace/gws_calendar_events_create"
     );
   });
 
@@ -284,12 +284,12 @@ describe("semantic tool routing authorization and write ambiguity", () => {
     const askUser = catalogEntryForTool(
       tool("ask_user", "Ask the user"),
       0,
-      "core",
+      "core"
     );
     const disallowed = catalogEntryForTool(
       tool("secret_write", "Create secret"),
       1,
-      "secret",
+      "secret"
     );
     const route = routeToolEntries({
       entries: [askUser, disallowed],
@@ -316,7 +316,7 @@ describe("semantic tool routing authorization and write ambiguity", () => {
       "sales_battle_report_schedule_create",
       "gws_calendar_events_create",
     ].map((name, index) =>
-      catalogEntryForTool(tool(name, `Handle ${name}`), index, "toolbox"),
+      catalogEntryForTool(tool(name, `Handle ${name}`), index, "toolbox")
     );
     for (const message of ["", "handle request"]) {
       const route = routeToolEntries({
@@ -335,7 +335,7 @@ describe("semantic tool routing authorization and write ambiguity", () => {
       });
       expect(route.selectedEntries).toEqual([]);
       expect(route.fallback).toBe(
-        message === "" ? "empty_query" : "router_error",
+        message === "" ? "empty_query" : "router_error"
       );
     }
   });

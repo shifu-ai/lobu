@@ -64,12 +64,18 @@ const undescribedTool: McpToolDef = {
 // ---------------------------------------------------------------------------
 
 describe("isMcpIdReserved (edge cases)", () => {
-  test.each(["cd", "echo", "export", "test", "true", "false", "set", "unset"])(
-    "rejects bash builtin %s",
-    (name) => {
-      expect(isMcpIdReserved(name)).toContain("reserved");
-    }
-  );
+  test.each([
+    "cd",
+    "echo",
+    "export",
+    "test",
+    "true",
+    "false",
+    "set",
+    "unset",
+  ])("rejects bash builtin %s", (name) => {
+    expect(isMcpIdReserved(name)).toContain("reserved");
+  });
 
   test.each([".", ":", "["])("rejects POSIX builtin %s", (name) => {
     expect(isMcpIdReserved(name)).toContain("reserved");
@@ -360,7 +366,10 @@ describe("auth subcommand routing", () => {
       description: "Create a Google Calendar event",
       inputSchema: { type: "object", properties: {} },
     };
-    const calendarKey = toolIdentityKey("google_workspace", calendarCreate.name);
+    const calendarKey = toolIdentityKey(
+      "google_workspace",
+      calendarCreate.name
+    );
     const gatewayCalls: string[] = [];
     const ref: McpRuntimeRef = {
       current: {

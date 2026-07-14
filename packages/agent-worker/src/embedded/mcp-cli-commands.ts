@@ -357,9 +357,9 @@ async function refreshRef(
       const refreshedAllowedToolKeys =
         fresh.allowedToolKeys ?? ref.current.allowedToolKeys;
       const allowedToolKeys = turnEligibleToolKeys
-        ? refreshedAllowedToolKeys?.filter((key) =>
+        ? (refreshedAllowedToolKeys?.filter((key) =>
             turnEligibleToolKeys.includes(key)
-          ) ?? turnEligibleToolKeys
+          ) ?? turnEligibleToolKeys)
         : refreshedAllowedToolKeys;
       ref.current = {
         ...fresh,

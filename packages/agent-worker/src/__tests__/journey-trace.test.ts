@@ -169,7 +169,7 @@ describe("worker journey trace", () => {
 
     expect(emitted.inventory_fingerprint).toHaveLength(16);
     expect(emitted.candidates).toHaveLength(
-      Math.min(5, selection.trace.candidateCount),
+      Math.min(5, selection.trace.candidateCount)
     );
     expect(serializedEvent).not.toContain(userPrompt);
     expect(serializedEvent).not.toContain("raw_schema_secret");
@@ -183,7 +183,7 @@ describe("worker journey trace", () => {
         totalScore: candidate.totalScore,
         reasons: candidate.reasons,
         scoreBreakdown: candidate.scoreBreakdown,
-      })),
+      }))
     );
     expect(emitted).toMatchObject({
       event: "lobu.worker.tool_router_decision",
@@ -244,7 +244,7 @@ describe("worker journey trace", () => {
         trace: parseWorkerShifuTrace({}),
         selectionTrace: invalidTrace,
         totalMs: Number.POSITIVE_INFINITY,
-      }),
+      })
     );
 
     expect(event).toMatchObject({

@@ -61,7 +61,7 @@ function canonicalHttpsOrigin(value: string): string | null {
 }
 
 export function resolveTrustedShifuToolboxOrigins(
-  configuredValue: string | undefined,
+  configuredValue: string | undefined
 ): ReadonlySet<string> {
   const rawOrigins = configuredValue?.trim()
     ? configuredValue.split(",")
@@ -69,7 +69,7 @@ export function resolveTrustedShifuToolboxOrigins(
   const origins = new Set<string>();
   for (const rawOrigin of rawOrigins.slice(
     0,
-    MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS,
+    MAX_TRUSTED_SHIFU_TOOLBOX_ORIGINS
   )) {
     const configuredOrigin = rawOrigin.trim();
     const canonical = canonicalHttpsOrigin(configuredOrigin);
@@ -111,7 +111,7 @@ export function isTrustedShifuToolMetadataSource(params: {
     : null;
   return Boolean(
     upstreamOrigin === assertedOrigin &&
-      params.trustedOrigins?.has(upstreamOrigin),
+      params.trustedOrigins?.has(upstreamOrigin)
   );
 }
 
@@ -177,13 +177,13 @@ export function isTrustedShifuCalendarResolver(params: {
       metadata.domain === "calendar" &&
       metadata.priority === "P0" &&
       SHIFU_CALENDAR_RESOLVER_ALIASES.every(
-        (alias, index) => aliases[index] === alias,
+        (alias, index) => aliases[index] === alias
       ) &&
       aliases.length === SHIFU_CALENDAR_RESOLVER_ALIASES.length &&
       metadata.readOnly === true &&
       metadata.mutatesState === false &&
       metadata.requiresConfirmation === false &&
-      metadata.freshness === "realtime",
+      metadata.freshness === "realtime"
   );
 }
 
@@ -223,7 +223,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function parseShifuToolMetadata(
   tool: McpToolDef,
-  trustedMetadata: boolean,
+  trustedMetadata: boolean
 ): ShifuToolMetadata | null {
   if (!trustedMetadata) return null;
 
@@ -288,7 +288,7 @@ export function catalogEntryForTool(
   options: {
     provenance?: McpCatalogProvenance;
     trustedOrigins?: ReadonlySet<string>;
-  } = {},
+  } = {}
 ): ToolCatalogEntry {
   const name = tool.name || "";
   const trustedMetadata = isTrustedShifuToolMetadataSource({
@@ -359,7 +359,7 @@ export function catalogEntryForTool(
   }
 
   const intent = classifyToolIntent(
-    [name, tool.description || ""].filter(Boolean).join(" "),
+    [name, tool.description || ""].filter(Boolean).join(" ")
   );
 
   return {

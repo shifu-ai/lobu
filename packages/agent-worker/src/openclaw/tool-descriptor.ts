@@ -25,7 +25,7 @@ let nextDescriptorSourceId = 1;
 const deeplyImmutableDescriptorSources = new WeakSet<object>();
 const descriptorSourceFinalizer = new FinalizationRegistry<string>(
   (retainedKey) =>
-    releaseToolRouterCacheEntry(DESCRIPTOR_CACHE_NAMESPACE, retainedKey),
+    releaseToolRouterCacheEntry(DESCRIPTOR_CACHE_NAMESPACE, retainedKey)
 );
 
 export function toolIdentityKey(mcpId: string, name: string): string {
@@ -65,7 +65,7 @@ export interface ToolDescriptor {
 
 function isDeeplyImmutable(
   value: unknown,
-  visited = new WeakSet<object>(),
+  visited = new WeakSet<object>()
 ): boolean {
   if (value === null || typeof value !== "object") return true;
   if (deeplyImmutableDescriptorSources.has(value)) return true;
@@ -206,7 +206,7 @@ function trimArrayToFit(descriptor: ToolDescriptor, values: string[]): void {
 
 function trimStringToFit(
   descriptor: ToolDescriptor,
-  field: "indexedKey" | "indexedName" | "title" | "description" | "domain",
+  field: "indexedKey" | "indexedName" | "title" | "description" | "domain"
 ): void {
   const value = descriptor[field];
   if (!value || indexedBytes(descriptor) <= MAX_INDEXED_TEXT_BYTES) return;
@@ -326,7 +326,7 @@ function standardToolAnnotations(tool: McpToolDef): {
 function primarySideEffect(
   name: string,
   mcpId: string,
-  destinations: readonly ToolDestination[],
+  destinations: readonly ToolDestination[]
 ): ToolDescriptor["primarySideEffect"] {
   const tokens = identifierTokens(name);
   const action =
@@ -335,7 +335,7 @@ function primarySideEffect(
     (token) =>
       !MUTATING_ACTIONS.has(token) &&
       !READ_ACTIONS.has(token) &&
-      !["gws", "tool", "tools", "api"].includes(token),
+      !["gws", "tool", "tools", "api"].includes(token)
   );
   return {
     action,
@@ -347,7 +347,7 @@ function primarySideEffect(
 function inferSideEffectClasses(
   name: string,
   description: string,
-  operations: readonly ToolOperation[],
+  operations: readonly ToolOperation[]
 ): string[] {
   const classesFor = (text: string): string[] => {
     const searchable = text.replace(/[_-]+/g, " ");
@@ -373,7 +373,7 @@ function inferSideEffectClasses(
     classes.push(...classesFor(description.toLowerCase()));
   if (classes.length === 0) {
     const mutatingOperation = operations.find((operation) =>
-      ["create", "update", "delete", "send", "schedule"].includes(operation),
+      ["create", "update", "delete", "send", "schedule"].includes(operation)
     );
     if (mutatingOperation) classes.push(`${mutatingOperation}_write`);
   }
@@ -400,7 +400,7 @@ function parameterMetadata(tool: McpToolDef): {
     if (sanitizedName) names.push(sanitizedName);
     if (schema && typeof schema === "object" && !Array.isArray(schema)) {
       const description = sanitize(
-        (schema as Record<string, unknown>).description,
+        (schema as Record<string, unknown>).description
       );
       if (description) descriptions.push(description);
     }
@@ -429,7 +429,7 @@ function readDescriptorTitle(tool: McpToolDef): string | undefined {
 export function buildToolDescriptor(
   tool: McpToolDef,
   mcpId: string,
-  originalIndex: number,
+  originalIndex: number
 ): ToolDescriptor {
   const entry = catalogEntryForTool(tool, originalIndex, mcpId);
   const name = entry.name;
@@ -482,7 +482,7 @@ export function buildToolDescriptor(
     sideEffectClasses: inferSideEffectClasses(
       name,
       tool.description || "",
-      override?.operations ?? inferredOperations,
+      override?.operations ?? inferredOperations
     ),
     primarySideEffect: mutatesState
       ? primarySideEffect(name, mcpId, override?.destinations ?? [])
@@ -496,7 +496,7 @@ export function buildToolDescriptor(
 export function getOrBuildToolDescriptor(
   tool: McpToolDef,
   mcpId: string,
-  originalIndex: number,
+  originalIndex: number
 ): ToolDescriptor {
   if (!isDeeplyImmutable(tool))
     return buildToolDescriptor(tool, mcpId, originalIndex);
@@ -513,7 +513,7 @@ export function getOrBuildToolDescriptor(
     return cached;
   }
   const descriptor = freezeDescriptorSnapshot(
-    buildToolDescriptor(tool, mcpId, originalIndex),
+    buildToolDescriptor(tool, mcpId, originalIndex)
   );
   const estimatedBytes =
     Buffer.byteLength(JSON.stringify(descriptor), "utf8") * 2 + 512;
@@ -536,7 +536,7 @@ export function getOrBuildToolDescriptor(
     snapshots.delete(oldestKey);
     releaseToolRouterCacheEntry(
       DESCRIPTOR_CACHE_NAMESPACE,
-      `${sourceId}:${oldestKey}`,
+      `${sourceId}:${oldestKey}`
     );
   }
   descriptorSnapshotCache.set(tool, snapshots);
@@ -548,7 +548,7 @@ export function inventoryFingerprint(descriptors: ToolDescriptor[]): string {
     ({ indexedTextBytes: _indexedTextBytes, ...descriptor }, position) => ({
       position,
       ...descriptor,
-    }),
+    })
   );
   return createHash("sha256")
     .update(JSON.stringify({ version: DESCRIPTOR_VERSION, inventory }))

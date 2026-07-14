@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import type { McpToolDef } from "@lobu/core";
 import {
-	clearToolRouterCacheNamespace,
-	releaseToolRouterCacheEntry,
-	retainToolRouterCacheEntry,
-	touchToolRouterCacheEntry,
+  clearToolRouterCacheNamespace,
+  releaseToolRouterCacheEntry,
+  retainToolRouterCacheEntry,
+  touchToolRouterCacheEntry,
 } from "./tool-router-memory-budget";
 
 const SNAPSHOT_SCHEMA_VERSION = 1;
@@ -13,9 +13,9 @@ const CACHE_NAMESPACE = "inventory-snapshot";
 const SERIALIZED_MEMORY_MULTIPLIER = 4;
 
 interface CachedToolInventorySnapshot {
-	serialized: string;
-	snapshot: Record<string, McpToolDef[]>;
-	estimatedBytes: number;
+  serialized: string;
+  snapshot: Record<string, McpToolDef[]>;
+  estimatedBytes: number;
 }
 
 const snapshotCache = new Map<string, CachedToolInventorySnapshot>();
@@ -27,158 +27,158 @@ let immutableInventoryReuses = 0;
 const deeplyImmutableJsonValues = new WeakSet<object>();
 
 function isDeeplyImmutableJsonLike(
-	value: unknown,
-	visited = new WeakSet<object>(),
+  value: unknown,
+  visited = new WeakSet<object>()
 ): boolean {
-	if (value === null || typeof value !== "object") return true;
-	if (deeplyImmutableJsonValues.has(value)) return true;
-	if (visited.has(value)) return true;
-	if (!Object.isFrozen(value)) return false;
-	const prototype = Object.getPrototypeOf(value);
-	if (
-		!Array.isArray(value) &&
-		prototype !== Object.prototype &&
-		prototype !== null
-	) {
-		return false;
-	}
-	visited.add(value);
-	for (const nested of Object.values(value)) {
-		if (!isDeeplyImmutableJsonLike(nested, visited)) return false;
-	}
-	deeplyImmutableJsonValues.add(value);
-	return true;
+  if (value === null || typeof value !== "object") return true;
+  if (deeplyImmutableJsonValues.has(value)) return true;
+  if (visited.has(value)) return true;
+  if (!Object.isFrozen(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  if (
+    !Array.isArray(value) &&
+    prototype !== Object.prototype &&
+    prototype !== null
+  ) {
+    return false;
+  }
+  visited.add(value);
+  for (const nested of Object.values(value)) {
+    if (!isDeeplyImmutableJsonLike(nested, visited)) return false;
+  }
+  deeplyImmutableJsonValues.add(value);
+  return true;
 }
 
 export function cloneAndFreezeJsonLike<T>(value: T, seen = new WeakMap()): T {
-	if (value === null || typeof value !== "object") return value;
-	const source = value as object;
-	const existing = seen.get(source);
-	if (existing) return existing as T;
+  if (value === null || typeof value !== "object") return value;
+  const source = value as object;
+  const existing = seen.get(source);
+  if (existing) return existing as T;
 
-	const clone: unknown[] | Record<string, unknown> = Array.isArray(value)
-		? []
-		: {};
-	seen.set(source, clone);
-	for (const [key, nestedValue] of Object.entries(source)) {
-		(clone as Record<string, unknown>)[key] = cloneAndFreezeJsonLike(
-			nestedValue,
-			seen,
-		);
-	}
-	return Object.freeze(clone) as T;
+  const clone: unknown[] | Record<string, unknown> = Array.isArray(value)
+    ? []
+    : {};
+  seen.set(source, clone);
+  for (const [key, nestedValue] of Object.entries(source)) {
+    (clone as Record<string, unknown>)[key] = cloneAndFreezeJsonLike(
+      nestedValue,
+      seen
+    );
+  }
+  return Object.freeze(clone) as T;
 }
 
 function freezeInventory(
-	toolsByMcp: Record<string, McpToolDef[]>,
+  toolsByMcp: Record<string, McpToolDef[]>
 ): Record<string, McpToolDef[]> {
-	return Object.freeze(
-		Object.fromEntries(
-			Object.entries(toolsByMcp).map(([mcpId, tools]) => [
-				mcpId,
-				Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
-			]),
-		),
-	) as Record<string, McpToolDef[]>;
+  return Object.freeze(
+    Object.fromEntries(
+      Object.entries(toolsByMcp).map(([mcpId, tools]) => [
+        mcpId,
+        Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
+      ])
+    )
+  ) as Record<string, McpToolDef[]>;
 }
 
 function serializeInventory(
-	toolsByMcp: Record<string, McpToolDef[]>,
+  toolsByMcp: Record<string, McpToolDef[]>
 ): string | null {
-	try {
-		return JSON.stringify({
-			version: SNAPSHOT_SCHEMA_VERSION,
-			inventory: toolsByMcp,
-		});
-	} catch {
-		return null;
-	}
+  try {
+    return JSON.stringify({
+      version: SNAPSHOT_SCHEMA_VERSION,
+      inventory: toolsByMcp,
+    });
+  } catch {
+    return null;
+  }
 }
 
 function snapshotCacheKey(serialized: string): string {
-	return createHash("sha256").update(serialized).digest("hex");
+  return createHash("sha256").update(serialized).digest("hex");
 }
 
 export function snapshotToolsByMcp(
-	toolsByMcp: Record<string, McpToolDef[]>,
+  toolsByMcp: Record<string, McpToolDef[]>
 ): Record<string, McpToolDef[]> {
-	if (isDeeplyImmutableJsonLike(toolsByMcp)) {
-		immutableInventoryReuses++;
-		return toolsByMcp;
-	}
-	const serialized = serializeInventory(toolsByMcp);
-	if (serialized === null) {
-		snapshotCacheMisses++;
-		return freezeInventory(toolsByMcp);
-	}
-	const cacheKey = snapshotCacheKey(serialized);
-	const cached = snapshotCache.get(cacheKey);
-	if (cached?.serialized === serialized) {
-		snapshotCache.delete(cacheKey);
-		snapshotCache.set(cacheKey, cached);
-		touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
-		snapshotCacheHits++;
-		return cached.snapshot;
-	}
+  if (isDeeplyImmutableJsonLike(toolsByMcp)) {
+    immutableInventoryReuses++;
+    return toolsByMcp;
+  }
+  const serialized = serializeInventory(toolsByMcp);
+  if (serialized === null) {
+    snapshotCacheMisses++;
+    return freezeInventory(toolsByMcp);
+  }
+  const cacheKey = snapshotCacheKey(serialized);
+  const cached = snapshotCache.get(cacheKey);
+  if (cached?.serialized === serialized) {
+    snapshotCache.delete(cacheKey);
+    snapshotCache.set(cacheKey, cached);
+    touchToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
+    snapshotCacheHits++;
+    return cached.snapshot;
+  }
 
-	snapshotCacheMisses++;
-	const snapshot = freezeInventory(toolsByMcp);
-	const estimatedBytes =
-		Buffer.byteLength(serialized, "utf8") * SERIALIZED_MEMORY_MULTIPLIER;
-	if (estimatedBytes > MAX_SNAPSHOT_BYTES) return snapshot;
+  snapshotCacheMisses++;
+  const snapshot = freezeInventory(toolsByMcp);
+  const estimatedBytes =
+    Buffer.byteLength(serialized, "utf8") * SERIALIZED_MEMORY_MULTIPLIER;
+  if (estimatedBytes > MAX_SNAPSHOT_BYTES) return snapshot;
 
-	if (cached) {
-		snapshotCache.delete(cacheKey);
-		snapshotCacheBytes -= cached.estimatedBytes;
-		releaseToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
-	}
-	const retained = retainToolRouterCacheEntry({
-		namespace: CACHE_NAMESPACE,
-		key: cacheKey,
-		estimatedBytes,
-		onEvict: () => {
-			const evicted = snapshotCache.get(cacheKey);
-			if (!evicted) return;
-			snapshotCache.delete(cacheKey);
-			snapshotCacheBytes -= evicted.estimatedBytes;
-			snapshotCacheEvictions++;
-		},
-	});
-	if (!retained.retained) {
-		return snapshot;
-	}
-	snapshotCache.set(cacheKey, { serialized, snapshot, estimatedBytes });
-	snapshotCacheBytes += estimatedBytes;
-	return snapshot;
+  if (cached) {
+    snapshotCache.delete(cacheKey);
+    snapshotCacheBytes -= cached.estimatedBytes;
+    releaseToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);
+  }
+  const retained = retainToolRouterCacheEntry({
+    namespace: CACHE_NAMESPACE,
+    key: cacheKey,
+    estimatedBytes,
+    onEvict: () => {
+      const evicted = snapshotCache.get(cacheKey);
+      if (!evicted) return;
+      snapshotCache.delete(cacheKey);
+      snapshotCacheBytes -= evicted.estimatedBytes;
+      snapshotCacheEvictions++;
+    },
+  });
+  if (!retained.retained) {
+    return snapshot;
+  }
+  snapshotCache.set(cacheKey, { serialized, snapshot, estimatedBytes });
+  snapshotCacheBytes += estimatedBytes;
+  return snapshot;
 }
 
 export function toolInventorySnapshotCacheStats(): {
-	entries: number;
-	estimatedBytes: number;
-	hits: number;
-	misses: number;
-	evictions: number;
-	immutableReuses: number;
+  entries: number;
+  estimatedBytes: number;
+  hits: number;
+  misses: number;
+  evictions: number;
+  immutableReuses: number;
 } {
-	return {
-		entries: snapshotCache.size,
-		estimatedBytes: snapshotCacheBytes,
-		hits: snapshotCacheHits,
-		misses: snapshotCacheMisses,
-		evictions: snapshotCacheEvictions,
-		immutableReuses: immutableInventoryReuses,
-	};
+  return {
+    entries: snapshotCache.size,
+    estimatedBytes: snapshotCacheBytes,
+    hits: snapshotCacheHits,
+    misses: snapshotCacheMisses,
+    evictions: snapshotCacheEvictions,
+    immutableReuses: immutableInventoryReuses,
+  };
 }
 
 export function clearToolInventorySnapshotCacheForTests(): void {
-	for (const key of snapshotCache.keys()) {
-		releaseToolRouterCacheEntry(CACHE_NAMESPACE, key);
-	}
-	clearToolRouterCacheNamespace(CACHE_NAMESPACE);
-	snapshotCache.clear();
-	snapshotCacheBytes = 0;
-	snapshotCacheHits = 0;
-	snapshotCacheMisses = 0;
-	snapshotCacheEvictions = 0;
-	immutableInventoryReuses = 0;
+  for (const key of snapshotCache.keys()) {
+    releaseToolRouterCacheEntry(CACHE_NAMESPACE, key);
+  }
+  clearToolRouterCacheNamespace(CACHE_NAMESPACE);
+  snapshotCache.clear();
+  snapshotCacheBytes = 0;
+  snapshotCacheHits = 0;
+  snapshotCacheMisses = 0;
+  snapshotCacheEvictions = 0;
+  immutableInventoryReuses = 0;
 }

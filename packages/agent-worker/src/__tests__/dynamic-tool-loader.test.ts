@@ -58,7 +58,7 @@ describe("selectMcpToolsForTurn", () => {
     const distractors = Array.from({ length: 60 }, (_, index) =>
       tool(`card_studio_distractor_${index + 1}`, {
         description: "Create visual cards and media assets",
-      }),
+      })
     );
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
@@ -81,7 +81,7 @@ describe("selectMcpToolsForTurn", () => {
     });
     expect(result.trace.explicitDestinations).toContain("personal_reminder");
     expect(result.trace.selectedToolNames).toContain(
-      "lobu-memory/manage_schedules",
+      "lobu-memory/manage_schedules"
     );
     expect(result.trace.clarificationRequired).toBe(false);
   });
@@ -153,9 +153,9 @@ describe("selectMcpToolsForTurn", () => {
           "not-a-url",
           ...Array.from(
             { length: 10 },
-            (_, index) => `https://trusted-${index}.example`,
+            (_, index) => `https://trusted-${index}.example`
           ),
-        ].join(","),
+        ].join(",")
       ),
     ]).toEqual([
       "https://trusted-0.example",
@@ -239,7 +239,7 @@ describe("selectMcpToolsForTurn", () => {
         _meta: {
           shifuTool: { domain: "diagnostics", priority: "P0" },
         },
-      }),
+      })
     );
     const automationMetadata = {
       _meta: {
@@ -305,7 +305,7 @@ describe("selectMcpToolsForTurn", () => {
               _meta: {
                 shifuTool: { domain: "diagnostics", priority: "P0" },
               },
-            }),
+            })
           ),
           calendarResolverTool(),
         ],
@@ -470,13 +470,13 @@ describe("selectMcpToolsForTurn", () => {
 
     expect(denied.trace.selectedToolNames).toEqual([]);
     expect(hidden.trace.selectedToolNames).not.toContain(
-      "shifu-toolbox/resolve_calendar_date",
+      "shifu-toolbox/resolve_calendar_date"
     );
   });
 
   test("excludes reserved automation names from untrusted direct and catalog surfaces at the default budget", () => {
     const untrustedTools = RESERVED_AUTOMATION_TOOL_NAMES.map((name) =>
-      tool(name),
+      tool(name)
     );
     const selection = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
@@ -507,7 +507,7 @@ describe("selectMcpToolsForTurn", () => {
 
     for (const name of RESERVED_AUTOMATION_TOOL_NAMES) {
       expect(selection.trace.selectedToolNames).not.toContain(
-        `evil-mcp/${name}`,
+        `evil-mcp/${name}`
       );
     }
     expect(catalog.map((entry) => `${entry.mcpId}/${entry.name}`)).toEqual([
@@ -517,7 +517,7 @@ describe("selectMcpToolsForTurn", () => {
 
   test("excludes all reserved automation names from a small untrusted catalog", () => {
     const untrustedTools = RESERVED_AUTOMATION_TOOL_NAMES.map((name) =>
-      tool(name),
+      tool(name)
     );
     const selection = selectMcpToolsByMcpForTurn({
       toolsByMcp: { "evil-mcp": untrustedTools },
@@ -569,7 +569,7 @@ describe("selectMcpToolsForTurn", () => {
         directVisibleThisTurn: entry.directVisibleThisTurn,
         callableViaCatalog: entry.callableViaCatalog,
         callBlockedReason: entry.callBlockedReason,
-      })),
+      }))
     ).toEqual([
       {
         name: "plan_automation",
@@ -701,7 +701,7 @@ describe("selectMcpToolsForTurn", () => {
 
   test("keeps P0 battle report tools inside a crowded Toolbox MCP catalog", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
-      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`),
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
     );
     const battleReportTools = [
       tool("sales_battle_report_schedule_list"),
@@ -720,7 +720,7 @@ describe("selectMcpToolsForTurn", () => {
     });
 
     const selectedNames = result.selected["shifu-toolbox"].map(
-      (toolDef) => toolDef.name,
+      (toolDef) => toolDef.name
     );
 
     expect(selectedNames).toContain("sales_battle_report_schedule_list");
@@ -731,13 +731,13 @@ describe("selectMcpToolsForTurn", () => {
     expect(result.selected["shifu-toolbox"]).toHaveLength(48);
     expect(result.trace.primaryIntent).toBe("battle_report");
     expect(result.trace.omitted).toContain(
-      "shifu-toolbox/card_studio_distractor_75",
+      "shifu-toolbox/card_studio_distractor_75"
     );
   });
 
   test("keeps P0 battle report tools when the Toolbox catalog is crowded", () => {
     const cardStudioDistractors = Array.from({ length: 75 }, (_, index) =>
-      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`),
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
     );
     const battleReportTools = [
       tool("sales_battle_report_schedule_list"),
@@ -774,7 +774,7 @@ describe("selectMcpToolsForTurn", () => {
             priority: index % 2 === 0 ? "P0" : "P1",
           },
         },
-      }),
+      })
     );
 
     const result = selectMcpToolsForTurn({
@@ -791,7 +791,7 @@ describe("selectMcpToolsForTurn", () => {
     });
 
     const selectedNames = result.selected["shifu-toolbox"].map(
-      (toolDef) => toolDef.name,
+      (toolDef) => toolDef.name
     );
 
     expect(selectedNames.slice(0, 3)).toEqual([
@@ -835,7 +835,7 @@ describe("selectMcpToolsForTurn", () => {
 
   test("keeps Toolbox _meta PM verification tools ahead of crowded P3 distractors", () => {
     const cardStudioDistractors = Array.from({ length: 60 }, (_, index) =>
-      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`),
+      tool(`card_studio_distractor_${String(index + 1).padStart(2, "0")}`)
     );
     const communityApprovalTool = tool("line_community_member_approve", {
       _meta: {
@@ -892,7 +892,7 @@ describe("selectMcpToolsForTurn", () => {
       "shifu-toolbox/sales_battle_report_run_now",
     ]);
     expect(result.trace.omittedToolNames).toContain(
-      "evil-mcp/foreign_report_export",
+      "evil-mcp/foreign_report_export"
     );
   });
 
@@ -958,7 +958,7 @@ describe("selectMcpToolsForTurn", () => {
         requiresConfirmation: entry.requiresConfirmation,
         freshness: entry.freshness,
         availableThisTurn: entry.availableThisTurn,
-      })),
+      }))
     ).toEqual([
       {
         name: "line_community_member_lookup",
@@ -1051,7 +1051,7 @@ describe("selectMcpToolsForTurn", () => {
         priority: entry.priority,
         aliases: entry.aliases,
         freshness: entry.freshness,
-      })),
+      }))
     ).toEqual([
       {
         name: "meeting_search",
@@ -1190,8 +1190,8 @@ describe("selectMcpToolsForTurn", () => {
         Object.entries(result.selectedTools).map(([mcpId, tools]) => [
           mcpId,
           tools.map((toolDef) => toolDef.name),
-        ]),
-      ),
+        ])
+      )
     ).toEqual({
       toolbox: ["sales_battle_report_run_now"],
       workspace: ["workspace_drive_search"],
@@ -1230,7 +1230,7 @@ describe("selectMcpToolsForTurn", () => {
         aaa: Array.from({ length: 60 }, (_, index) =>
           tool(`aaa_distractor_${index}`, {
             description: "Unrelated synthetic utility",
-          }),
+          })
         ),
         "lobu-memory": [
           tool("manage_schedules", {
@@ -1243,10 +1243,10 @@ describe("selectMcpToolsForTurn", () => {
       routerMode: "shadow",
     });
     expect(result.trace.selectedToolNames).not.toContain(
-      "lobu-memory/manage_schedules",
+      "lobu-memory/manage_schedules"
     );
     expect(result.trace.semanticSelectedToolNames).toContain(
-      "lobu-memory/manage_schedules",
+      "lobu-memory/manage_schedules"
     );
     expect(result.trace.selectionDiverged).toBe(true);
   });
@@ -1256,7 +1256,7 @@ describe("selectMcpToolsForTurn", () => {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
         aaa: Array.from({ length: 20 }, (_, index) =>
-          tool(`aaa_distractor_${index}`),
+          tool(`aaa_distractor_${index}`)
         ),
         "lobu-memory": [tool("manage_schedules")],
       },
@@ -1273,7 +1273,7 @@ describe("selectMcpToolsForTurn", () => {
     const result = selectMcpToolsByMcpForTurn({
       toolsByMcp: {
         aaa: Array.from({ length: 60 }, (_, index) =>
-          tool(`aaa_distractor_${index}`),
+          tool(`aaa_distractor_${index}`)
         ),
         "lobu-memory": [tool("manage_schedules")],
       },
@@ -1282,10 +1282,10 @@ describe("selectMcpToolsForTurn", () => {
       routerMode: "semantic",
     });
     expect(result.trace.selectedToolNames).toContain(
-      "lobu-memory/manage_schedules",
+      "lobu-memory/manage_schedules"
     );
     expect(result.trace.selectedToolNames).toEqual(
-      result.trace.semanticSelectedToolNames,
+      result.trace.semanticSelectedToolNames
     );
   });
 

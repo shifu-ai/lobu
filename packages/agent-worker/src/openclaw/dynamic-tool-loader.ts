@@ -120,7 +120,7 @@ export interface CliMcpToolEligibilityParams {
 }
 
 export function isMcpToolEligibleForCliExposure(
-  params: CliMcpToolEligibilityParams,
+  params: CliMcpToolEligibilityParams
 ): boolean {
   const toolName = params.tool.name?.trim();
   if (!toolName) return false;
@@ -152,12 +152,12 @@ export function isMcpToolEligibleForCliExposure(
 export function filterMcpToolsForCliExposure(
   params: Omit<CliMcpToolEligibilityParams, "tool" | "mcpId"> & {
     toolsByMcp: Record<string, McpToolDef[]>;
-  },
+  }
 ): Record<string, McpToolDef[]> {
   const filtered: Record<string, McpToolDef[]> = {};
   for (const [mcpId, tools] of Object.entries(params.toolsByMcp)) {
     const eligible = tools.filter((tool) =>
-      isMcpToolEligibleForCliExposure({ ...params, tool, mcpId }),
+      isMcpToolEligibleForCliExposure({ ...params, tool, mcpId })
     );
     if (eligible.length > 0) filtered[mcpId] = eligible;
   }
@@ -175,7 +175,7 @@ export function resolveDynamicToolBudget(value: string | undefined): number {
 export type ToolRouterMode = "legacy" | "shadow" | "semantic";
 
 export function resolveToolRouterMode(
-  value: string | undefined,
+  value: string | undefined
 ): ToolRouterMode {
   if (value === "legacy" || value === "shadow" || value === "semantic") {
     return value;
@@ -185,7 +185,7 @@ export function resolveToolRouterMode(
 
 function intentBoost(
   entry: ToolCatalogEntry,
-  primaryIntent: ToolIntent,
+  primaryIntent: ToolIntent
 ): number {
   if (primaryIntent === "unknown") return 0;
   return entry.intent === primaryIntent ? -1 : 0;
@@ -194,7 +194,7 @@ function intentBoost(
 function compareEntries(
   primaryIntent: ToolIntent,
   left: ToolCatalogEntry,
-  right: ToolCatalogEntry,
+  right: ToolCatalogEntry
 ): number {
   const priorityDelta =
     TOOL_PRIORITY_WEIGHT[left.priority] - TOOL_PRIORITY_WEIGHT[right.priority];
@@ -237,7 +237,7 @@ function isPinnedDirectTool(
   primaryIntent: ToolIntent,
   provenanceById?: McpCatalogProvenanceById,
   trustedOrigins?: ReadonlySet<string>,
-  calendarAssist = false,
+  calendarAssist = false
 ): boolean {
   return (
     PINNED_DIRECT_TOOL_NAMES.has(entry.name) ||
@@ -265,7 +265,7 @@ function pinnedPreference(
   primaryIntent: ToolIntent,
   provenanceById?: McpCatalogProvenanceById,
   trustedOrigins?: ReadonlySet<string>,
-  calendarAssist = false,
+  calendarAssist = false
 ): number {
   if (
     primaryIntent === "automation" &&
@@ -297,7 +297,7 @@ function selectLegacyRankedEntries(
   budget: number,
   provenanceById?: McpCatalogProvenanceById,
   trustedOrigins?: ReadonlySet<string>,
-  calendarAssist = false,
+  calendarAssist = false
 ): {
   selectedEntries: ToolCatalogEntry[];
   pinnedBudgetOverflow: ToolCatalogEntry[];
@@ -309,8 +309,8 @@ function selectLegacyRankedEntries(
         primaryIntent,
         provenanceById,
         trustedOrigins,
-        calendarAssist,
-      ),
+        calendarAssist
+      )
     )
     .sort(
       (left, right) =>
@@ -319,15 +319,15 @@ function selectLegacyRankedEntries(
           primaryIntent,
           provenanceById,
           trustedOrigins,
-          calendarAssist,
+          calendarAssist
         ) -
           pinnedPreference(
             right,
             primaryIntent,
             provenanceById,
             trustedOrigins,
-            calendarAssist,
-          ) || compareEntries(primaryIntent, left, right),
+            calendarAssist
+          ) || compareEntries(primaryIntent, left, right)
     );
   const nonPinnedEntries = entries
     .filter(
@@ -337,8 +337,8 @@ function selectLegacyRankedEntries(
           primaryIntent,
           provenanceById,
           trustedOrigins,
-          calendarAssist,
-        ),
+          calendarAssist
+        )
     )
     .sort((left, right) => compareEntries(primaryIntent, left, right));
   const rankedEntries = [...pinnedEntries, ...nonPinnedEntries];
@@ -366,13 +366,13 @@ function selectEntriesForTurn(
   routerMode: ToolRouterMode = "shadow",
   provenanceById?: McpCatalogProvenanceById,
   trustedOrigins?: ReadonlySet<string>,
-  calendarAssist = false,
+  calendarAssist = false
 ): SharedToolSelection {
   const normalizedAllowedToolNames =
     allowedToolNames === undefined ? undefined : [...allowedToolNames];
   const eligibleEntries = filterEligibleToolEntries(
     entries,
-    normalizedAllowedToolNames,
+    normalizedAllowedToolNames
   );
   const primaryIntent = classifyToolIntent(message);
   const legacySelection = selectLegacyRankedEntries(
@@ -381,7 +381,7 @@ function selectEntriesForTurn(
     budget,
     provenanceById,
     trustedOrigins,
-    calendarAssist,
+    calendarAssist
   );
   if (routerMode === "legacy") {
     return {
@@ -410,7 +410,7 @@ function selectEntriesForTurn(
     entries.length,
     provenanceById,
     trustedOrigins,
-    calendarAssist,
+    calendarAssist
   );
   const pinnedEntries = rankedEntries.filter((entry) =>
     isPinnedDirectTool(
@@ -418,18 +418,18 @@ function selectEntriesForTurn(
       primaryIntent,
       provenanceById,
       trustedOrigins,
-      calendarAssist,
-    ),
+      calendarAssist
+    )
   );
   const rankedForRouting = rankedEntries.map((entry, originalIndex) => ({
     ...entry,
     originalIndex,
   }));
   const pinnedKeys = new Set(
-    pinnedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
+    pinnedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
   );
   const reservedEntries = rankedForRouting.filter((entry) =>
-    pinnedKeys.has(catalogToolKey(entry.mcpId, entry.name)),
+    pinnedKeys.has(catalogToolKey(entry.mcpId, entry.name))
   );
   const route = routeToolEntries({
     entries: rankedForRouting,
@@ -454,7 +454,7 @@ function selectEntriesForTurn(
 function routeTraceFields(
   route: ToolRouteDecision,
   routerMode: ToolRouterMode,
-  selectedEntries: ToolCatalogEntry[],
+  selectedEntries: ToolCatalogEntry[]
 ): Pick<
   DynamicToolSelectionTrace,
   | "routerVersion"
@@ -489,7 +489,7 @@ function routeTraceFields(
     selectionDiverged:
       selectedToolNames.length !== semanticSelectedToolNames.length ||
       selectedToolNames.some(
-        (name, index) => name !== semanticSelectedToolNames[index],
+        (name, index) => name !== semanticSelectedToolNames[index]
       ),
     semanticClarificationRequired: route.clarification !== undefined,
     semanticComputed: routerMode !== "legacy",
@@ -527,13 +527,13 @@ function routeTraceFields(
 }
 
 export function selectMcpToolsForTurn(
-  params: SelectMcpToolsForTurnParams,
+  params: SelectMcpToolsForTurnParams
 ): SelectMcpToolsForTurnResult;
 export function selectMcpToolsForTurn(
-  params: SelectGroupedMcpToolsForTurnParams,
+  params: SelectGroupedMcpToolsForTurnParams
 ): SelectGroupedMcpToolsForTurnResult;
 export function selectMcpToolsForTurn(
-  params: SelectMcpToolsForTurnParams | SelectGroupedMcpToolsForTurnParams,
+  params: SelectMcpToolsForTurnParams | SelectGroupedMcpToolsForTurnParams
 ): SelectMcpToolsForTurnResult | SelectGroupedMcpToolsForTurnResult {
   if ("toolsByMcp" in params) {
     const result = selectMcpToolsByMcpForTurn({
@@ -563,7 +563,7 @@ export function selectMcpToolsForTurn(
       catalogEntryForTool(tool, index, params.mcpId, {
         provenance: params.mcpProvenanceById?.[mcpId],
         trustedOrigins: params.trustedShifuToolboxOrigins,
-      }),
+      })
     )
     .filter((entry) =>
       isMcpToolEligibleForCliExposure({
@@ -572,7 +572,7 @@ export function selectMcpToolsForTurn(
         isToolAllowed: params.isToolAllowed,
         mcpProvenanceById: params.mcpProvenanceById,
         trustedShifuToolboxOrigins: params.trustedShifuToolboxOrigins,
-      }),
+      })
     )
     .filter(
       (entry) =>
@@ -580,7 +580,7 @@ export function selectMcpToolsForTurn(
           entry.domain !== "automation") &&
         (intentForEligibility === "calendar" ||
           calendarAssist ||
-          entry.domain !== "calendar"),
+          entry.domain !== "calendar")
     );
   const {
     primaryIntent,
@@ -597,14 +597,14 @@ export function selectMcpToolsForTurn(
     params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
-    calendarAssist,
+    calendarAssist
   );
   const selectedKeys = new Set(
-    selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
+    selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
   );
   const omittedToolNames = eligibleEntries
     .filter(
-      (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name)),
+      (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))
     )
     .map((entry) => entry.name)
     .filter(Boolean);
@@ -636,7 +636,7 @@ function displayToolName(entry: ToolCatalogEntry): string {
 }
 
 export function selectMcpToolsByMcpForTurn(
-  params: SelectMcpToolsByMcpForTurnParams,
+  params: SelectMcpToolsByMcpForTurnParams
 ): SelectMcpToolsByMcpForTurnResult {
   const budget = Math.max(0, Math.floor(params.budget));
   const intentForEligibility = classifyToolIntent(params.message);
@@ -693,10 +693,10 @@ export function selectMcpToolsByMcpForTurn(
     params.routerMode,
     params.mcpProvenanceById,
     params.trustedShifuToolboxOrigins,
-    calendarAssist,
+    calendarAssist
   );
   const selectedKeys = new Set(
-    selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name)),
+    selectedEntries.map((entry) => catalogToolKey(entry.mcpId, entry.name))
   );
   const selectedTools: Record<string, McpToolDef[]> = {};
 
@@ -709,7 +709,7 @@ export function selectMcpToolsByMcpForTurn(
   const selectedTraceNames = selectedEntries.map(displayToolName);
   const omittedTraceNames = eligibleEntries
     .filter(
-      (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name)),
+      (entry) => !selectedKeys.has(catalogToolKey(entry.mcpId, entry.name))
     )
     .map(displayToolName);
 

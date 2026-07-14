@@ -153,7 +153,7 @@ export const MEMORY_FLUSH_STATE_CUSTOM_TYPE = "lobu.memory_flush_state";
 const APPROX_IMAGE_TOKENS = 1200;
 
 export function findDuplicateToolNames(
-  tools: Array<{ name?: string }>,
+  tools: Array<{ name?: string }>
 ): Array<{ name: string; count: number }> {
   const counts = new Map<string, number>();
   for (const tool of tools) {
@@ -198,7 +198,7 @@ function boundedRouterCount(value: number): number {
 }
 
 export function buildToolRouterClarificationInstruction(
-  trace: DynamicToolSelectionTrace,
+  trace: DynamicToolSelectionTrace
 ): string | null {
   if (!trace.clarificationRequired || !trace.clarificationQuestion) return null;
   return `${TOOL_ROUTER_CLARIFICATION_INSTRUCTION}\nClarification question: ${boundedRouterString(trace.clarificationQuestion, 320)}`;
@@ -249,23 +249,23 @@ export function buildToolRouterJourneyEventInput(params: {
         scoreBreakdown: candidate.scoreBreakdown
           ? {
               exactName: boundedRouterNumber(
-                candidate.scoreBreakdown.exactName,
+                candidate.scoreBreakdown.exactName
               ),
               nameTitle: boundedRouterNumber(
-                candidate.scoreBreakdown.nameTitle,
+                candidate.scoreBreakdown.nameTitle
               ),
               aliasesExamples: boundedRouterNumber(
-                candidate.scoreBreakdown.aliasesExamples,
+                candidate.scoreBreakdown.aliasesExamples
               ),
               description: boundedRouterNumber(
-                candidate.scoreBreakdown.description,
+                candidate.scoreBreakdown.description
               ),
               parameters: boundedRouterNumber(
-                candidate.scoreBreakdown.parameters,
+                candidate.scoreBreakdown.parameters
               ),
               domain: boundedRouterNumber(candidate.scoreBreakdown.domain),
               negativePenalty: boundedRouterNumber(
-                candidate.scoreBreakdown.negativePenalty,
+                candidate.scoreBreakdown.negativePenalty
               ),
             }
           : undefined,
@@ -278,10 +278,10 @@ export function buildToolRouterJourneyEventInput(params: {
         total: boundedRouterNumber(params.totalMs),
       },
       estimated_index_bytes: boundedRouterCount(
-        selectionTrace.estimatedIndexBytes,
+        selectionTrace.estimatedIndexBytes
       ),
       cache_eviction_count: boundedRouterCount(
-        selectionTrace.cacheEvictionCount,
+        selectionTrace.cacheEvictionCount
       ),
       fallback: selectionTrace.fallback,
     },
@@ -299,7 +299,7 @@ export interface ExternalTurnToolRouting {
 
 export interface ExternalTurnToolRoutingDependencies {
   selectTools: (
-    params: SelectMcpToolsByMcpForTurnParams,
+    params: SelectMcpToolsByMcpForTurnParams
   ) => SelectMcpToolsByMcpForTurnResult;
   emitEvent: typeof emitJourneyEvent;
   now: () => number;
@@ -316,15 +316,15 @@ function freezeStringArray(values: readonly string[]): string[] {
 }
 
 function freezeToolRoutingSelection(
-  selection: SelectMcpToolsByMcpForTurnResult,
+  selection: SelectMcpToolsByMcpForTurnResult
 ): SelectMcpToolsByMcpForTurnResult {
   const selectedTools = Object.freeze(
     Object.fromEntries(
       Object.entries(selection.selectedTools).map(([mcpId, tools]) => [
         mcpId,
         Object.freeze(tools.map((tool) => cloneAndFreezeJsonLike(tool))),
-      ]),
-    ),
+      ])
+    )
   ) as unknown as SelectMcpToolsByMcpForTurnResult["selectedTools"];
   const candidates = Object.freeze(
     selection.trace.candidates.map((candidate) =>
@@ -334,28 +334,28 @@ function freezeToolRoutingSelection(
         scoreBreakdown: candidate.scoreBreakdown
           ? Object.freeze({ ...candidate.scoreBreakdown })
           : undefined,
-      }),
-    ),
+      })
+    )
   ) as unknown as DynamicToolSelectionTrace["candidates"];
   const trace = Object.freeze({
     ...selection.trace,
     selectedToolNames: freezeStringArray(selection.trace.selectedToolNames),
     semanticSelectedToolNames: freezeStringArray(
-      selection.trace.semanticSelectedToolNames,
+      selection.trace.semanticSelectedToolNames
     ),
     omittedToolNames: freezeStringArray(selection.trace.omittedToolNames),
     pinnedBudgetOverflow: freezeStringArray(
-      selection.trace.pinnedBudgetOverflow,
+      selection.trace.pinnedBudgetOverflow
     ),
     selected: freezeStringArray(selection.trace.selected),
     omitted: freezeStringArray(selection.trace.omitted),
     explicitDestinations: freezeStringArray(
-      selection.trace.explicitDestinations,
+      selection.trace.explicitDestinations
     ),
     blockedToolNames: freezeStringArray(selection.trace.blockedToolNames),
     blockedToolKeys: freezeStringArray(selection.trace.blockedToolKeys),
     blockedToolIdentityKeys: freezeStringArray(
-      selection.trace.blockedToolIdentityKeys,
+      selection.trace.blockedToolIdentityKeys
     ),
     clarificationChoices: selection.trace.clarificationChoices
       ? freezeStringArray(selection.trace.clarificationChoices)
@@ -370,7 +370,7 @@ export function initializeExternalTurnToolRouting(
   params: SelectMcpToolsByMcpForTurnParams & {
     trace: WorkerShifuTraceContext;
   },
-  dependencies: Partial<ExternalTurnToolRoutingDependencies> = {},
+  dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
 ): ExternalTurnToolRouting {
   const selectTools = dependencies.selectTools ?? selectMcpToolsByMcpForTurn;
   const emitEvent = dependencies.emitEvent ?? emitJourneyEvent;
@@ -390,7 +390,7 @@ export function initializeExternalTurnToolRouting(
   const rawSelection = selectTools(selectionParams);
   const cacheEvictionCount = Math.max(
     0,
-    toolRouterRetainedMemoryStats().evictions - evictionCountBefore,
+    toolRouterRetainedMemoryStats().evictions - evictionCountBefore
   );
   const selection = freezeToolRoutingSelection({
     ...rawSelection,
@@ -402,13 +402,13 @@ export function initializeExternalTurnToolRouting(
       trace,
       selectionTrace: selection.trace,
       totalMs: routeTotalMs,
-    }),
+    })
   );
 
   return Object.freeze({
     selection,
     clarificationInstruction: buildToolRouterClarificationInstruction(
-      selection.trace,
+      selection.trace
     ),
     routeTotalMs,
     buildRuntimeCatalog: ({
@@ -441,7 +441,7 @@ function readStringOrFallback(value: unknown, fallback: string): string {
 
 function readNonNegativeNumberOrFallback(
   value: unknown,
-  fallback: number,
+  fallback: number
 ): number {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
     return fallback;
@@ -457,7 +457,7 @@ function readOptionalNonNegativeInteger(value: unknown): number | undefined {
 }
 
 function readConfiguredDirectMcpToolLimit(
-  rawOptions: Record<string, unknown>,
+  rawOptions: Record<string, unknown>
 ): number | undefined {
   const toolsConfig = isRecord(rawOptions.toolsConfig)
     ? rawOptions.toolsConfig
@@ -472,7 +472,7 @@ function readConfiguredDirectMcpToolLimit(
 function resolveProviderDirectMcpToolLimit(
   rawProvider: string,
   provider: string,
-  configuredLimit: number | undefined,
+  configuredLimit: number | undefined
 ): number {
   const isGemini =
     rawProvider.toLowerCase() === "gemini" ||
@@ -482,7 +482,7 @@ function resolveProviderDirectMcpToolLimit(
   if (isGemini) {
     return Math.min(
       configuredLimit ?? GEMINI_DIRECT_MCP_TOOL_LIMIT,
-      GEMINI_DIRECT_MCP_TOOL_LIMIT,
+      GEMINI_DIRECT_MCP_TOOL_LIMIT
     );
   }
   return configuredLimit ?? DEFAULT_DIRECT_MCP_TOOL_LIMIT;
@@ -494,7 +494,7 @@ function toSafeMcpToolAlias(name: string): string {
 
 function removeInstructionSection(
   instructions: string,
-  heading: string,
+  heading: string
 ): string {
   const lines = instructions.split("\n");
   const kept: string[] = [];
@@ -521,7 +521,7 @@ function removeInstructionSection(
 
 function buildProjectedMcpToolInventoryInstructions(
   mcpTools: Record<string, McpToolDef[]>,
-  mcpStatus: McpStatus[],
+  mcpStatus: McpStatus[]
 ): string {
   const entries = Object.entries(mcpTools)
     .map(([mcpId, tools]) => {
@@ -553,7 +553,7 @@ function buildProjectedMcpToolInventoryInstructions(
 function replaceMcpToolInventoryInstructions(
   instructions: string,
   mcpTools: Record<string, McpToolDef[]>,
-  mcpStatus: McpStatus[],
+  mcpStatus: McpStatus[]
 ): string {
   return [
     removeInstructionSection(instructions, "## Available MCP Tools"),
@@ -566,7 +566,7 @@ function replaceMcpToolInventoryInstructions(
 function buildMcpAuthToolNameMap(
   mcpStatus: McpStatus[],
   reservedNames: Set<string>,
-  providerSafeNames: boolean,
+  providerSafeNames: boolean
 ): Record<string, McpAuthToolNames> {
   const names: Record<string, McpAuthToolNames> = {};
   const reserved = new Set(reservedNames);
@@ -583,7 +583,7 @@ function buildMcpAuthToolNameMap(
 function buildProjectedMcpSetupInstructions(
   mcpStatus: McpStatus[],
   mcpTools: Record<string, McpToolDef[]>,
-  authToolNames: Record<string, McpAuthToolNames>,
+  authToolNames: Record<string, McpAuthToolNames>
 ): string {
   if (!mcpStatus || mcpStatus.length === 0) {
     return "";
@@ -591,10 +591,10 @@ function buildProjectedMcpSetupInstructions(
 
   const mcpToolIds = new Set(Object.keys(mcpTools));
   const needsAuthentication = mcpStatus.filter(
-    (mcp) => mcp.requiresAuth && !mcp.authenticated,
+    (mcp) => mcp.requiresAuth && !mcp.authenticated
   );
   const needsConfiguration = mcpStatus.filter(
-    (mcp) => mcp.requiresInput && !mcp.configured,
+    (mcp) => mcp.requiresInput && !mcp.configured
   );
   const undiscoveredMcps = mcpStatus.filter((mcp) => !mcpToolIds.has(mcp.id));
 
@@ -611,20 +611,20 @@ function buildProjectedMcpSetupInstructions(
   for (const mcp of needsAuthentication) {
     const names = authToolNames[mcp.id] ?? buildMcpAuthToolNames(mcp.id);
     lines.push(
-      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Authentication is required. To start login, call \`${names.login}\`. After the user completes login, call \`${names.loginCheck}\`. Newly available MCP tools will refresh on the next message.`,
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Authentication is required. To start login, call \`${names.login}\`. After the user completes login, call \`${names.loginCheck}\`. Newly available MCP tools will refresh on the next message.`
     );
   }
 
   for (const mcp of needsConfiguration) {
     lines.push(
-      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Additional MCP input is required before this server can be used. Tell the user an admin must configure the MCP inputs in settings.`,
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): Additional MCP input is required before this server can be used. Tell the user an admin must configure the MCP inputs in settings.`
     );
   }
 
   for (const mcp of undiscoveredMcps) {
     if (mcp.requiresAuth || mcp.requiresInput) continue;
     lines.push(
-      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): No tools were discovered for this MCP in the current session. Do not assume a login tool exists unless it is actually registered.`,
+      `- ⚠️ **${mcp.name}** (id: ${mcp.id}): No tools were discovered for this MCP in the current session. Do not assume a login tool exists unless it is actually registered.`
     );
   }
 
@@ -635,7 +635,7 @@ function replaceMcpSetupInstructions(
   instructions: string,
   mcpStatus: McpStatus[],
   mcpTools: Record<string, McpToolDef[]>,
-  authToolNames: Record<string, McpAuthToolNames>,
+  authToolNames: Record<string, McpAuthToolNames>
 ): string {
   return [
     removeInstructionSection(instructions, "## MCP Tools Requiring Setup"),
@@ -646,7 +646,7 @@ function replaceMcpSetupInstructions(
 }
 
 export function resolveMemoryFlushConfig(
-  rawOptions: Record<string, unknown>,
+  rawOptions: Record<string, unknown>
 ): ResolvedMemoryFlushConfig {
   const compaction = isRecord(rawOptions.compaction)
     ? rawOptions.compaction
@@ -663,22 +663,22 @@ export function resolveMemoryFlushConfig(
         : DEFAULT_MEMORY_FLUSH_CONFIG.enabled,
     softThresholdTokens: readNonNegativeNumberOrFallback(
       memoryFlush?.softThresholdTokens,
-      DEFAULT_MEMORY_FLUSH_CONFIG.softThresholdTokens,
+      DEFAULT_MEMORY_FLUSH_CONFIG.softThresholdTokens
     ),
     systemPrompt: readStringOrFallback(
       memoryFlush?.systemPrompt,
-      DEFAULT_MEMORY_FLUSH_CONFIG.systemPrompt,
+      DEFAULT_MEMORY_FLUSH_CONFIG.systemPrompt
     ),
     prompt: readStringOrFallback(
       memoryFlush?.prompt,
-      DEFAULT_MEMORY_FLUSH_CONFIG.prompt,
+      DEFAULT_MEMORY_FLUSH_CONFIG.prompt
     ),
   };
 }
 
 export function estimatePromptTokenCost(
   promptText: string,
-  imageCount: number,
+  imageCount: number
 ): number {
   const textTokens = Math.ceil(promptText.length / 4);
   const imageTokens = Math.max(0, imageCount) * APPROX_IMAGE_TOKENS;
@@ -686,7 +686,7 @@ export function estimatePromptTokenCost(
 }
 
 export function countCompactionsOnCurrentBranch(
-  sessionManager: Awaited<ReturnType<typeof openOrCreateSessionManager>>,
+  sessionManager: Awaited<ReturnType<typeof openOrCreateSessionManager>>
 ): number {
   const branch = sessionManager.getBranch();
   return branch.reduce((count, entry) => {
@@ -698,7 +698,7 @@ export function countCompactionsOnCurrentBranch(
 }
 
 export function readLastFlushedCompactionCount(
-  sessionManager: Awaited<ReturnType<typeof openOrCreateSessionManager>>,
+  sessionManager: Awaited<ReturnType<typeof openOrCreateSessionManager>>
 ): number | null {
   const branch = sessionManager.getBranch();
   for (let i = branch.length - 1; i >= 0; i--) {
@@ -720,7 +720,7 @@ export function readLastFlushedCompactionCount(
 }
 
 export function getLatestAssistantText(
-  messages: unknown[],
+  messages: unknown[]
 ): { text: string; normalizedNoReply: boolean } | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
@@ -772,7 +772,7 @@ const PI_CODING_AGENT_OPENER_RE =
 
 export function replaceBasePromptIdentity(
   basePrompt: string,
-  identity: string,
+  identity: string
 ): string {
   if (PI_CODING_AGENT_OPENER_RE.test(basePrompt)) {
     return basePrompt.replace(PI_CODING_AGENT_OPENER_RE, identity);
@@ -787,7 +787,7 @@ export function buildLobuSystemPrompt(
   agentInstructions: string | undefined,
   finalInstructions: string | undefined,
   now: Date = new Date(),
-  timeZone?: unknown,
+  timeZone?: unknown
 ): string {
   const base = basePrompt || "";
   const identity = agentInstructions?.trim();
@@ -816,7 +816,7 @@ const LOBU_MEMORY_PLUGIN_SOURCE = "@lobu/openclaw-plugin";
  */
 function injectAgentIdIntoLobuPlugin(
   pluginsConfig: PluginsConfig | undefined,
-  agentId: string | undefined,
+  agentId: string | undefined
 ): PluginsConfig | undefined {
   if (!pluginsConfig?.plugins?.length || !agentId) return pluginsConfig;
   const plugins = pluginsConfig.plugins.map((plugin) => {
@@ -915,7 +915,7 @@ export interface RunAISessionParams {
   maybeBuildAuthHintMessage: (
     errorMessage: string,
     provider: string,
-    modelId: string,
+    modelId: string
   ) => string;
   /** Injectable run seams; production always uses the module defaults. */
   runAISessionDependencies?: Partial<RunAISessionDependencies>;
@@ -923,7 +923,7 @@ export interface RunAISessionParams {
 
 export function resolveGatewayWorkerToken(
   runJobToken: string | undefined,
-  envWorkerToken: string,
+  envWorkerToken: string
 ): string {
   return runJobToken && runJobToken.length > 0 ? runJobToken : envWorkerToken;
 }
@@ -1076,7 +1076,7 @@ export async function runModelWithObs(
     modelId: string;
     toolCount: number;
   },
-  run: () => Promise<ModelObsRunResult>,
+  run: () => Promise<ModelObsRunResult>
 ): Promise<ModelObsRunResult> {
   const startedAt = Date.now();
   emitWorkerJourneyObsEvent({
@@ -1236,7 +1236,7 @@ export async function runModelWithObs(
 // ---------------------------------------------------------------------------
 
 export async function runAISession(
-  params: RunAISessionParams,
+  params: RunAISessionParams
 ): Promise<SessionExecutionResult> {
   const {
     userPrompt: rawUserPrompt,
@@ -1275,7 +1275,7 @@ export async function runAISession(
     rawOptions = JSON.parse(agentOptions) as Record<string, unknown>;
   } catch (error) {
     logger.error(
-      `Failed to parse agentOptions: ${error instanceof Error ? error.message : String(error)}`,
+      `Failed to parse agentOptions: ${error instanceof Error ? error.message : String(error)}`
     );
     rawOptions = {};
   }
@@ -1323,7 +1323,7 @@ export async function runAISession(
   const nextSkillNames = new Set(
     context.skillsConfig
       .map((skill) => path.basename((skill.name || "").trim()))
-      .filter(Boolean),
+      .filter(Boolean)
   );
 
   const existingSkillEntries = await fs
@@ -1353,7 +1353,7 @@ export async function runAISession(
   }
 
   logger.info(
-    `Synced ${context.skillsConfig.length} skill(s) to .skills/ directory`,
+    `Synced ${context.skillsConfig.length} skill(s) to .skills/ directory`
   );
 
   // Store credentials in a local map instead of mutating process.env
@@ -1371,7 +1371,7 @@ export async function runAISession(
   }
   if (pc.credentialPlaceholders) {
     for (const [envVar, placeholder] of Object.entries(
-      pc.credentialPlaceholders,
+      pc.credentialPlaceholders
     )) {
       credentialStore.set(envVar, placeholder);
     }
@@ -1397,7 +1397,7 @@ export async function runAISession(
   const providerDirectToolLimit = resolveProviderDirectMcpToolLimit(
     rawProvider,
     provider,
-    readConfiguredDirectMcpToolLimit(rawOptions),
+    readConfiguredDirectMcpToolLimit(rawOptions)
   );
 
   // Dynamic provider base URL from agentOptions.providerBaseUrlMappings
@@ -1440,7 +1440,7 @@ export async function runAISession(
       PROVIDER_REGISTRY_ALIASES[rawProvider] || rawProvider;
     if (registryProvider === "openai" || rawProvider !== provider) {
       logger.info(
-        `Creating dynamic model entry for ${rawProvider}/${modelId} (openai-compatible)`,
+        `Creating dynamic model entry for ${rawProvider}/${modelId} (openai-compatible)`
       );
       // Throws if a non-OpenAI provider's base URL is unresolved, rather
       // than silently routing to OpenAI's public endpoint.
@@ -1452,7 +1452,7 @@ export async function runAISession(
       });
     } else {
       throw new Error(
-        `Model "${modelId}" not found for provider "${provider}". Check that the model ID is valid and registered in the model registry.`,
+        `Model "${modelId}" not found for provider "${provider}". Check that the model ID is valid and registered in the model registry.`
       );
     }
   }
@@ -1461,7 +1461,7 @@ export async function runAISession(
     : baseModel;
   const providerProxyAuthHeaders = buildProviderProxyAuthHeaders(
     providerBaseUrl,
-    process.env.WORKER_TOKEN,
+    process.env.WORKER_TOKEN
   );
   const providerModel = providerProxyAuthHeaders
     ? {
@@ -1502,7 +1502,7 @@ export async function runAISession(
   const providerStateFile = path.join(
     workspaceDir,
     ".openclaw",
-    "provider.json",
+    "provider.json"
   );
 
   // Hydrate from the latest completed Postgres snapshot BEFORE the
@@ -1520,7 +1520,7 @@ export async function runAISession(
     const gatewayUrl = process.env.DISPATCHER_URL;
     const workerToken = resolveGatewayWorkerToken(
       runJobToken,
-      process.env.WORKER_TOKEN ?? "",
+      process.env.WORKER_TOKEN ?? ""
     );
     if (gatewayUrl && workerToken) {
       try {
@@ -1534,12 +1534,12 @@ export async function runAISession(
         // Worst case the worker boots without history and the user re-
         // grounds the conversation. Better than refusing to start.
         logger.warn(
-          `Snapshot hydrate failed; continuing with local session file: ${err instanceof Error ? err.message : String(err)}`,
+          `Snapshot hydrate failed; continuing with local session file: ${err instanceof Error ? err.message : String(err)}`
         );
       }
     } else {
       logger.warn(
-        "Snapshot hydrate skipped: DISPATCHER_URL or WORKER_TOKEN missing",
+        "Snapshot hydrate skipped: DISPATCHER_URL or WORKER_TOKEN missing"
       );
     }
   }
@@ -1554,7 +1554,7 @@ export async function runAISession(
     };
     if (prevState.provider && prevState.provider !== provider) {
       logger.info(
-        `Provider changed from ${prevState.provider} to ${provider}, resetting session`,
+        `Provider changed from ${prevState.provider} to ${provider}, resetting session`
       );
 
       // Read old session content for summary context
@@ -1584,7 +1584,7 @@ export async function runAISession(
       (error as NodeJS.ErrnoException).code === "ENOENT";
     if (!isFileNotFound) {
       logger.warn(
-        `Failed to read provider state file: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to read provider state file: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -1593,12 +1593,12 @@ export async function runAISession(
   await fs.writeFile(
     providerStateFile,
     JSON.stringify({ provider, modelId }),
-    "utf-8",
+    "utf-8"
   );
 
   const sessionManager = await openOrCreateSessionManager(
     sessionFile,
-    workspaceDir,
+    workspaceDir
   );
   const settingsManager = SettingsManager.inMemory();
 
@@ -1612,7 +1612,7 @@ export async function runAISession(
   });
 
   const trustedShifuToolboxOrigins = resolveTrustedShifuToolboxOrigins(
-    process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS,
+    process.env.LOBU_TRUSTED_SHIFU_TOOLBOX_MCP_ORIGINS
   );
   const provenanceFromStatuses = (statuses: typeof context.mcpStatus) =>
     Object.fromEntries(
@@ -1623,7 +1623,7 @@ export async function runAISession(
           configSource: status.configSource,
           configDigest: status.configDigest,
         },
-      ]),
+      ])
     );
   const buildCliRuntimeState = (snapshot: {
     mcpTools: Record<string, McpToolDef[]>;
@@ -1644,7 +1644,7 @@ export async function runAISession(
   };
 
   const collectAllowedMcpTools = (
-    toolsByMcp: Record<string, McpToolDef[]>,
+    toolsByMcp: Record<string, McpToolDef[]>
   ): { names: string[]; keys: string[] } => {
     const names: string[] = [];
     const keys: string[] = [];
@@ -1663,10 +1663,10 @@ export async function runAISession(
   const turnEligibleToolKeys = Object.freeze([...initialAllowedMcpTools.keys]);
   const catalogAllowedToolNames = initialAllowedMcpTools.names;
   const dynamicToolBudget = resolveDynamicToolBudget(
-    process.env.LOBU_DYNAMIC_TOOL_BUDGET,
+    process.env.LOBU_DYNAMIC_TOOL_BUDGET
   );
   const toolRouterMode = resolveToolRouterMode(
-    process.env.LOBU_TOOL_ROUTER_MODE,
+    process.env.LOBU_TOOL_ROUTER_MODE
   );
   const mcpProvenanceById = provenanceFromStatuses(context.mcpStatus);
   const toolRouting = initializeExternalTurnToolRouting(
@@ -1681,7 +1681,7 @@ export async function runAISession(
       trustedShifuToolboxOrigins,
       trace: shifuTrace,
     },
-    runAISessionDependencies,
+    runAISessionDependencies
   );
   const selection = toolRouting.selection;
   const routeTotalMs = toolRouting.routeTotalMs;
@@ -1710,7 +1710,7 @@ export async function runAISession(
         mcpTools: Record<string, McpToolDef[]>;
         mcpStatus: typeof context.mcpStatus;
         mcpContext: Record<string, string>;
-      },
+      }
     ) =>
       isMcpToolEligibleForCliExposure({
         tool,
@@ -1728,7 +1728,7 @@ export async function runAISession(
             shifuTrace,
           });
           const refreshedAllowedMcpTools = collectAllowedMcpTools(
-            fresh.mcpTools,
+            fresh.mcpTools
           );
           return {
             ...buildCliRuntimeState({
@@ -1742,7 +1742,7 @@ export async function runAISession(
           };
         } catch (err) {
           logger.warn(
-            `Failed to refresh MCP session context after auth: ${err instanceof Error ? err.message : String(err)}`,
+            `Failed to refresh MCP session context after auth: ${err instanceof Error ? err.message : String(err)}`
           );
           return null;
         }
@@ -1754,7 +1754,7 @@ export async function runAISession(
     gatewayUrl: getOptionalEnv("DISPATCHER_URL", ""),
     workerToken: resolveGatewayWorkerToken(
       runJobToken,
-      getOptionalEnv("WORKER_TOKEN", ""),
+      getOptionalEnv("WORKER_TOKEN", "")
     ),
     agentId: agentId || "",
     channelId,
@@ -1870,7 +1870,7 @@ export async function runAISession(
   // Merge gateway instructions into custom instructions
   const resolvedCourseInstructions = buildResolvedCourseContextInstructions(
     resolvedCourseContext,
-    scheduledCourseContext,
+    scheduledCourseContext
   );
   const trustedExecutionScopeInstructions =
     buildTrustedExecutionScopeInstructions(trustedExecutionScope);
@@ -1892,7 +1892,7 @@ export async function runAISession(
       .map((b) => {
         const cmd = `${b.command} ${(b.args || []).join(" ")}`;
         const aliases = [b.name, b.providerId].filter(
-          (v, i, a) => v && a.indexOf(v) === i,
+          (v, i, a) => v && a.indexOf(v) === i
         );
         return `### ${aliases.join(" / ")}
 Run via Bash exactly as shown (do NOT modify the command):
@@ -1908,7 +1908,7 @@ You have access to the following AI coding agents. When the user mentions any of
 
 ${agentList}
 
-Replace "YOUR_PROMPT_HERE" with the user's request. These agents can read/write files, install packages, and run commands in the working directory.`,
+Replace "YOUR_PROMPT_HERE" with the user's request. These agents can read/write files, install packages, and run commands in the working directory.`
     );
   }
 
@@ -1931,7 +1931,7 @@ Use it when the user references past discussions or you need context.`);
   const clarificationInstruction = toolRouting.clarificationInstruction;
   if (clarificationInstruction) instructionParts.push(clarificationInstruction);
   logger.info(
-    `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, mode=${selection.trace.routerMode}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`,
+    `Dynamic MCP tool selection: router=${selection.trace.routerVersion}, mode=${selection.trace.routerMode}, selected=${selection.trace.selectedToolNames.length}, eligible=${selection.trace.eligibleToolCount}, total=${selection.trace.totalTools}, clarification=${selection.trace.clarificationRequired}, cacheHit=${selection.trace.cacheHit}, totalMs=${routeTotalMs.toFixed(2)}, fallback=${selection.trace.fallback ?? "none"}`
   );
 
   let customTools = createOpenClawCustomTools({
@@ -1948,7 +1948,7 @@ Use it when the user references past discussions or you need context.`);
     onAskUserPosted: () =>
       turnController.terminate(
         "ask-user",
-        "ask_user posted — ending the turn so the model can't re-post.",
+        "ask_user posted — ending the turn so the model can't re-post."
       ),
     toolboxPersonalAgentTools: context.toolboxPersonalAgentTools,
     mcpProvenanceById,
@@ -1974,12 +1974,10 @@ Use it when the user references past discussions or you need context.`);
         runtimeToolCatalog,
         mcpProvenanceById,
         shifuTrace,
-      }).filter((tool) =>
-        RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name),
-      ),
+      }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
     logger.info(
-      "mcpExposure='cli' — skipping first-class MCP tool registration (tools reachable via <server> <tool> in Bash).",
+      "mcpExposure='cli' — skipping first-class MCP tool registration (tools reachable via <server> <tool> in Bash)."
     );
     emitJourneyEvent({
       event: "worker.tools_registered",
@@ -2014,31 +2012,29 @@ Use it when the user references past discussions or you need context.`);
         runtimeToolCatalog,
         mcpProvenanceById,
         shifuTrace,
-      }).filter((tool) =>
-        RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name),
-      ),
+      }).filter((tool) => RUNTIME_CATALOG_CUSTOM_TOOL_NAMES.includes(tool.name))
     );
     instructionParts[0] = replaceMcpToolInventoryInstructions(
       context.gatewayInstructions,
       projectedMcp.tools,
-      context.mcpStatus,
+      context.mcpStatus
     );
     if (projectedMcp.quarantined.length > 0) {
       logger.warn(
         `Quarantined ${projectedMcp.quarantined.length} MCP tool(s) before direct registration: ${projectedMcp.quarantined
           .map(
-            (notice) => `${notice.mcpId}/${notice.toolName} (${notice.reason})`,
+            (notice) => `${notice.mcpId}/${notice.toolName} (${notice.reason})`
           )
-          .join(", ")}`,
+          .join(", ")}`
       );
     }
     if (projectedMcp.projected.length > 0) {
       logger.warn(
         `Projected ${projectedMcp.projected.length} MCP schema node(s) before direct registration: ${projectedMcp.projected
           .map(
-            (notice) => `${notice.mcpId}/${notice.toolName} (${notice.reason})`,
+            (notice) => `${notice.mcpId}/${notice.toolName} (${notice.reason})`
           )
-          .join(", ")}`,
+          .join(", ")}`
       );
     }
     if (projectedMcp.omittedForCap.length > 0) {
@@ -2046,22 +2042,22 @@ Use it when the user references past discussions or you need context.`);
         `Applied ${rawProvider} direct MCP tool cap: ${projectedMcp.omittedForCap
           .map(
             (notice) =>
-              `${notice.mcpId} omitted ${notice.omitted} over limit ${notice.limit}`,
+              `${notice.mcpId} omitted ${notice.omitted} over limit ${notice.limit}`
           )
-          .join(", ")})`,
+          .join(", ")})`
       );
     }
     const mcpToolDefs = createMcpToolDefinitions(
       projectedMcp.tools,
       gwParams,
       context.mcpContext,
-      { shifuTrace, mcpProvenanceById },
+      { shifuTrace, mcpProvenanceById }
     );
     registeredMcpToolCount = mcpToolDefs.length;
     if (mcpToolDefs.length > 0) {
       customTools.push(...mcpToolDefs);
       logger.info(
-        `Registered ${mcpToolDefs.length} MCP tool(s): ${mcpToolDefs.map((t) => t.name).join(", ")}`,
+        `Registered ${mcpToolDefs.length} MCP tool(s): ${mcpToolDefs.map((t) => t.name).join(", ")}`
       );
     }
   }
@@ -2086,7 +2082,7 @@ Use it when the user references past discussions or you need context.`);
   // memory-scope axis search_memory's `agent_id` filter reads.
   const pluginsConfig = injectAgentIdIntoLobuPlugin(
     rawOptions.pluginsConfig as PluginsConfig | undefined,
-    agentId,
+    agentId
   );
   const loadedPlugins = await loadPlugins(pluginsConfig, workspaceDir);
   const pluginTools = loadedPlugins.flatMap((p) => p.tools);
@@ -2095,7 +2091,7 @@ Use it when the user references past discussions or you need context.`);
   if (pluginToolCount > 0) {
     customTools.push(...pluginTools);
     logger.info(
-      `Loaded ${pluginToolCount} tool(s) from ${loadedPlugins.length} plugin(s)`,
+      `Loaded ${pluginToolCount} tool(s) from ${loadedPlugins.length} plugin(s)`
     );
   }
 
@@ -2107,13 +2103,13 @@ Use it when the user references past discussions or you need context.`);
     const authToolNames = buildMcpAuthToolNameMap(
       context.mcpStatus,
       existingToolNames,
-      providerSafeAuthToolNames,
+      providerSafeAuthToolNames
     );
     instructionParts[0] = replaceMcpSetupInstructions(
       instructionParts[0] ?? context.gatewayInstructions,
       context.mcpStatus,
       registeredDirectMcpTools,
-      authToolNames,
+      authToolNames
     );
     const authToolDefs = createMcpAuthToolDefinitions(
       context.mcpStatus,
@@ -2122,13 +2118,13 @@ Use it when the user references past discussions or you need context.`);
       {
         providerSafeNames: providerSafeAuthToolNames,
         authToolNames,
-      },
+      }
     );
     authToolCount = authToolDefs.length;
     if (authToolCount > 0) {
       customTools.push(...authToolDefs);
       logger.info(
-        `Registered ${authToolCount} MCP auth tool(s): ${authToolDefs.map((t) => t.name).join(", ")}`,
+        `Registered ${authToolCount} MCP auth tool(s): ${authToolDefs.map((t) => t.name).join(", ")}`
       );
     }
     emitJourneyEvent({
@@ -2169,7 +2165,7 @@ Use it when the user references past discussions or you need context.`);
       .map((entry) => `${entry.name} x${entry.count}`)
       .join(", ");
     throw new Error(
-      `Duplicate provider tool names after projection: ${summary}`,
+      `Duplicate provider tool names after projection: ${summary}`
     );
   }
 
@@ -2182,7 +2178,7 @@ Use it when the user references past discussions or you need context.`);
       logger.info(`Registered provider "${reg.name}" from plugin`);
     } catch (err) {
       logger.error(
-        `Failed to register provider "${reg.name}": ${err instanceof Error ? err.message : String(err)}`,
+        `Failed to register provider "${reg.name}": ${err instanceof Error ? err.message : String(err)}`
       );
     }
   }
@@ -2195,7 +2191,7 @@ Use it when the user references past discussions or you need context.`);
 
   const turnTimeZone = resolveTurnTimeZone(
     isRecord(platformMetadata) ? platformMetadata.timeZone : undefined,
-    rawOptions.timeZone,
+    rawOptions.timeZone
   );
 
   const turnNow = new Date();
@@ -2208,13 +2204,13 @@ Use it when the user references past discussions or you need context.`);
         context.agentInstructions,
         finalInstructionsUpdated,
         turnNow,
-        turnTimeZone,
+        turnTimeZone
       ),
   });
   await resourceLoader.reload();
 
   logger.info(
-    `Starting OpenClaw session: provider=${provider}, model=${modelId}, tools=${tools.length}, customTools=${customTools.length}`,
+    `Starting OpenClaw session: provider=${provider}, model=${modelId}, tools=${tools.length}, customTools=${customTools.length}`
   );
 
   // Heartbeat timer to keep connection alive during long API calls
@@ -2257,9 +2253,9 @@ Use it when the user references past discussions or you need context.`);
         wrapToolsWithPluginToolHooks(
           customTools,
           loadedPlugins,
-          pluginHookContext,
+          pluginHookContext
         ),
-        turnController,
+        turnController
       ),
       sessionManager,
       settingsManager,
@@ -2322,7 +2318,7 @@ Use it when the user references past discussions or you need context.`);
 
     const runPromptTurn = async (
       promptText: string,
-      options?: { images?: ImageContent[]; silent?: boolean },
+      options?: { images?: ImageContent[]; silent?: boolean }
     ): Promise<void> => {
       const currentSession = session;
       if (!currentSession) {
@@ -2477,14 +2473,14 @@ Use it when the user references past discussions or you need context.`);
         }
         if (!event.isError) {
           for (const candidate of extractTrustedTemporalCandidates(
-            event.result,
+            event.result
           )) {
             currentTurnTrustedTemporalCandidates.add(candidate);
           }
           for (const evidence of extractTrustedTemporalEvidence(event.result)) {
             currentTurnTrustedTemporalEvidence.set(
               `${evidence.candidate}\u0000${evidence.label}`,
-              evidence,
+              evidence
             );
           }
         }
@@ -2496,7 +2492,7 @@ Use it when the user references past discussions or you need context.`);
         });
         inFlightToolUse.add(executionEventPromise);
         executionEventPromise.finally(() =>
-          inFlightToolUse.delete(executionEventPromise),
+          inFlightToolUse.delete(executionEventPromise)
         );
         const promise = onProgress({
           type: "custom_event",
@@ -2508,7 +2504,7 @@ Use it when the user references past discussions or you need context.`);
         }).catch((err) => {
           logger.warn(
             `Failed to emit tool_use custom event for ${event.toolName}:`,
-            err,
+            err
           );
         });
         inFlightToolUse.add(promise);
@@ -2549,7 +2545,7 @@ Use it when the user references past discussions or you need context.`);
       const seconds = Math.floor(elapsedTime / 1000);
 
       logger.warn(
-        `⏳ Still running after ${seconds}s - no response from API yet`,
+        `⏳ Still running after ${seconds}s - no response from API yet`
       );
 
       await onProgress({
@@ -2577,13 +2573,13 @@ Use it when the user references past discussions or you need context.`);
           consecutiveHeartbeatFailures += 1;
           logger.error(
             `Failed to send heartbeat (${consecutiveHeartbeatFailures}/${MAX_CONSECUTIVE_HEARTBEAT_FAILURES}):`,
-            err,
+            err
           );
           if (
             consecutiveHeartbeatFailures >= MAX_CONSECUTIVE_HEARTBEAT_FAILURES
           ) {
             logger.error(
-              "Gateway unresponsive after consecutive heartbeat failures, aborting session",
+              "Gateway unresponsive after consecutive heartbeat failures, aborting session"
             );
             if (heartbeatTimer) {
               clearInterval(heartbeatTimer);
@@ -2604,7 +2600,7 @@ Use it when the user references past discussions or you need context.`);
     // Session reset: run unconditional memory flush, delete session file, and return early
     if ((platformMetadata as any)?.sessionReset === true) {
       logger.info(
-        "Session reset requested — running unconditional memory flush",
+        "Session reset requested — running unconditional memory flush"
       );
 
       const flushPrompt = `${memoryFlushConfig.systemPrompt}\n\n${memoryFlushConfig.prompt}`;
@@ -2613,7 +2609,7 @@ Use it when the user references past discussions or you need context.`);
         logger.info("Memory flush completed for session reset");
       } catch (error) {
         logger.warn(
-          `Memory flush failed during session reset: ${error instanceof Error ? error.message : String(error)}`,
+          `Memory flush failed during session reset: ${error instanceof Error ? error.message : String(error)}`
         );
       }
 
@@ -2635,7 +2631,7 @@ Use it when the user references past discussions or you need context.`);
         const gatewayUrl = process.env.DISPATCHER_URL;
         const workerToken = resolveGatewayWorkerToken(
           runJobToken,
-          process.env.WORKER_TOKEN ?? "",
+          process.env.WORKER_TOKEN ?? ""
         );
         if (gatewayUrl && workerToken) {
           await clearSnapshots({ gatewayUrl, workerToken });
@@ -2762,7 +2758,7 @@ Use it when the user references past discussions or you need context.`);
           };
         }
         return { success: true, outputChars };
-      },
+      }
     );
 
     const sessionError = modelRunResult.success ? null : modelRunResult.error;
@@ -2781,7 +2777,7 @@ Use it when the user references past discussions or you need context.`);
       const errorWithHint = maybeBuildAuthHintMessage(
         visibleSessionError,
         rawProvider,
-        modelId,
+        modelId
       );
       await executionReporter.record({
         type: "agent.failed",
@@ -2821,10 +2817,10 @@ Use it when the user references past discussions or you need context.`);
         finalText,
         now: turnNow,
         trustedTemporalCandidates: Array.from(
-          currentTurnTrustedTemporalCandidates,
+          currentTurnTrustedTemporalCandidates
         ),
         trustedTemporalEvidence: Array.from(
-          currentTurnTrustedTemporalEvidence.values(),
+          currentTurnTrustedTemporalEvidence.values()
         ),
       });
     } catch (error) {
@@ -2847,11 +2843,11 @@ Use it when the user references past discussions or you need context.`);
     }
     if (dateGuardDecision.status === "corrected") {
       logger.warn(
-        `Date output guard corrected final answer: corrections=${dateGuardDecision.corrections.length}`,
+        `Date output guard corrected final answer: corrections=${dateGuardDecision.corrections.length}`
       );
     } else if (dateGuardDecision.status === "blocked") {
       logger.warn(
-        `Date output guard blocked final answer: reason=${dateGuardDecision.reason}`,
+        `Date output guard blocked final answer: reason=${dateGuardDecision.reason}`
       );
     }
     const completionClaimDecision = checkCompletionClaim({
@@ -2864,7 +2860,7 @@ Use it when the user references past discussions or you need context.`);
       : completionClaimDecision.safeText;
     if (!completionClaimDecision.allowed) {
       logger.warn(
-        `Completion claim guard blocked final answer: reason=${completionClaimDecision.reason}; requiredTools=${completionClaimDecision.requiredTools.join(",")}`,
+        `Completion claim guard blocked final answer: reason=${completionClaimDecision.reason}; requiredTools=${completionClaimDecision.requiredTools.join(",")}`
       );
     }
 
@@ -2915,7 +2911,7 @@ Use it when the user references past discussions or you need context.`);
     const errorWithHint = maybeBuildAuthHintMessage(
       visibleErrorMsg,
       provider,
-      modelId,
+      modelId
     );
     await executionReporter.record({
       type: "agent.failed",

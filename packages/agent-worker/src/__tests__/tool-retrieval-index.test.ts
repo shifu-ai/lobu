@@ -22,7 +22,7 @@ function tool(
   name: string,
   description: string,
   properties: Record<string, unknown> = {},
-  extras: Record<string, unknown> = {},
+  extras: Record<string, unknown> = {}
 ): McpToolDef {
   return {
     name,
@@ -79,7 +79,7 @@ describe("tool descriptors", () => {
     expect(reordered).not.toBe(first);
     expect(reordered.originalIndex).toBe(1);
     expect(inventoryFingerprint([first])).not.toBe(
-      inventoryFingerprint([reordered]),
+      inventoryFingerprint([reordered])
     );
   });
 
@@ -92,7 +92,7 @@ describe("tool descriptors", () => {
     expect(second).not.toBe(first);
     expect(second.description).toBe("Find active students by cohort");
     expect(inventoryFingerprint([second])).not.toBe(
-      inventoryFingerprint([first]),
+      inventoryFingerprint([first])
     );
   });
   test("bounds searchable text and applies the exact reminder override", () => {
@@ -104,7 +104,7 @@ describe("tool descriptors", () => {
         },
       }),
       "lobu-memory",
-      4,
+      4
     );
 
     expect(descriptor.key).toBe("lobu-memory/manage_schedules");
@@ -129,7 +129,7 @@ describe("tool descriptors", () => {
     const descriptor = buildToolDescriptor(
       tool(hugeName, "Find records"),
       "large-mcp",
-      0,
+      0
     );
     const searchable = descriptor as ToolDescriptor & {
       indexedKey?: string;
@@ -147,7 +147,7 @@ describe("tool descriptors", () => {
     const descriptor = buildToolDescriptor(
       tool("manage_schedules", "Manage schedules"),
       " lobu-memory ",
-      0,
+      0
     );
 
     expect(descriptor.destinations).toEqual([]);
@@ -158,7 +158,7 @@ describe("tool descriptors", () => {
     const descriptor = buildToolDescriptor(
       tool("lobu-memory/manage_schedules", "Foreign schedule tool"),
       "",
-      0,
+      0
     );
 
     expect(descriptor.key).toBe("lobu-memory/manage_schedules");
@@ -170,7 +170,7 @@ describe("tool descriptors", () => {
     const first = buildToolDescriptor(
       tool("manage_schedules", "Manage schedules"),
       "lobu-memory",
-      0,
+      0
     );
     first.operations.push("read");
     first.positiveExamples.push("mutated example");
@@ -178,7 +178,7 @@ describe("tool descriptors", () => {
     const second = buildToolDescriptor(
       tool("manage_schedules", "Manage schedules"),
       "lobu-memory",
-      1,
+      1
     );
 
     expect(second.operations).not.toContain("read");
@@ -193,10 +193,10 @@ describe("tool descriptors", () => {
         {},
         {
           annotations: { destructiveHint: true },
-        },
+        }
       ),
       "remote",
-      0,
+      0
     );
     const selfLabeledSave = buildToolDescriptor(
       tool(
@@ -205,10 +205,10 @@ describe("tool descriptors", () => {
         {},
         {
           _meta: { shifuTool: { readOnly: true, mutatesState: false } },
-        },
+        }
       ),
       "untrusted-remote",
-      1,
+      1
     );
     const selfLabeledOpaqueRead = buildToolDescriptor(
       tool(
@@ -217,10 +217,10 @@ describe("tool descriptors", () => {
         {},
         {
           annotations: { readOnlyHint: true },
-        },
+        }
       ),
       "untrusted-remote",
-      2,
+      2
     );
     const trustedOpaqueRead = buildToolDescriptor(
       tool(
@@ -229,10 +229,10 @@ describe("tool descriptors", () => {
         {},
         {
           _meta: { shifuTool: { readOnly: true, mutatesState: false } },
-        },
+        }
       ),
       "shifu-toolbox",
-      3,
+      3
     );
     expect(destructiveReadName.mutatesState).toBe(true);
     expect(selfLabeledSave.mutatesState).toBe(true);
@@ -249,14 +249,14 @@ describe("tool descriptors", () => {
         annotations: { title: "Annotation title" },
       }),
       "mcp",
-      0,
+      0
     );
     const annotationsTitle = buildToolDescriptor(
       Object.assign(tool("annotation_tool", "Annotation tool"), {
         annotations: { title: "Annotation fallback" },
       }),
       "mcp",
-      1,
+      1
     );
 
     expect(metaTitle.title).toBe("Metadata title");
@@ -270,14 +270,14 @@ describe("tool descriptors", () => {
     const changed = buildToolDescriptor(
       tool("search_students", "Find active enrolled students"),
       "school",
-      1,
+      1
     );
 
     expect(inventoryFingerprint([original])).toBe(
-      inventoryFingerprint([clone]),
+      inventoryFingerprint([clone])
     );
     expect(inventoryFingerprint([original])).not.toBe(
-      inventoryFingerprint([changed]),
+      inventoryFingerprint([changed])
     );
   });
 
@@ -288,7 +288,7 @@ describe("tool descriptors", () => {
     const reorderedSecond = buildToolDescriptor(tool("beta", "same"), "mcp", 0);
 
     expect(inventoryFingerprint([first, second])).not.toBe(
-      inventoryFingerprint([reorderedFirst, reorderedSecond]),
+      inventoryFingerprint([reorderedFirst, reorderedSecond])
     );
   });
 
@@ -297,7 +297,7 @@ describe("tool descriptors", () => {
     const second = buildToolDescriptor(tool("beta", "same"), "mcp", 1);
 
     expect(inventoryFingerprint([first, second])).not.toBe(
-      inventoryFingerprint([second, first]),
+      inventoryFingerprint([second, first])
     );
   });
 });
@@ -309,8 +309,8 @@ describe("tool retrieval index", () => {
       buildToolDescriptor(
         tool(`tool_${index}`, `Search synthetic record ${index}`),
         "synthetic",
-        index,
-      ),
+        index
+      )
     );
 
     const first = getOrBuildToolRetrievalIndex(descriptors);
@@ -327,8 +327,8 @@ describe("tool retrieval index", () => {
       buildToolDescriptor(
         tool(`large_${index}`, `${index}-${"x".repeat(16_000)}`),
         "synthetic",
-        index,
-      ),
+        index
+      )
     );
 
     const first = getOrBuildToolRetrievalIndex(descriptors);
@@ -346,20 +346,20 @@ describe("tool retrieval index", () => {
       buildToolDescriptor(
         tool(`tool_${index}`, `Synthetic utility ${index}`),
         "synthetic",
-        index,
-      ),
+        index
+      )
     );
     descriptors[2_000] = buildToolDescriptor(
       tool("manage_schedules", "Manage delayed reminders"),
       "lobu-memory",
-      2_000,
+      2_000
     );
 
     const index = buildToolRetrievalIndex(descriptors, { maxIndexBytes: 1 });
 
     expect(index.mode).toBe("linear");
     expect(
-      searchToolRetrievalIndex(index, "五分鐘後提醒我", 5)[0]?.descriptor.key,
+      searchToolRetrievalIndex(index, "五分鐘後提醒我", 5)[0]?.descriptor.key
     ).toBe("lobu-memory/manage_schedules");
   });
 
@@ -370,17 +370,17 @@ describe("tool retrieval index", () => {
         buildToolDescriptor(
           tool(
             `tool_${version}_${index}`,
-            `Search version ${version} synthetic record ${index} ${"x".repeat(3_000)}`,
+            `Search version ${version} synthetic record ${index} ${"x".repeat(3_000)}`
           ),
           "synthetic",
-          index,
-        ),
+          index
+        )
       );
       getOrBuildToolRetrievalIndex(descriptors);
     }
 
     expect(toolRetrievalIndexCacheStats().estimatedBytes).toBeLessThanOrEqual(
-      32 * 1024 * 1024,
+      32 * 1024 * 1024
     );
     expect(toolRetrievalIndexCacheStats().evictionCount).toBeGreaterThan(0);
   });
@@ -388,21 +388,21 @@ describe("tool retrieval index", () => {
     const reminder = buildToolDescriptor(
       tool("manage_schedules", "Manage agent schedules"),
       "lobu-memory",
-      0,
+      0
     );
     const calendar = buildToolDescriptor(
       tool("gws_calendar_events_create", "Create a calendar event"),
       "google_workspace",
-      1,
+      1
     );
     const index = buildToolRetrievalIndex([reminder, calendar]);
 
     expect(
-      searchToolRetrievalIndex(index, "五分鐘後提醒我", 2)[0]?.descriptor.key,
+      searchToolRetrievalIndex(index, "五分鐘後提醒我", 2)[0]?.descriptor.key
     ).toBe("lobu-memory/manage_schedules");
     expect(
       searchToolRetrievalIndex(index, "放進 Google Calendar", 2)[0]?.descriptor
-        .key,
+        .key
     ).toBe("google_workspace/gws_calendar_events_create");
   });
 
@@ -410,19 +410,19 @@ describe("tool retrieval index", () => {
     const distractor = buildToolDescriptor(
       tool("list_courses", "List available courses"),
       "school",
-      0,
+      0
     );
     const studentSearch = buildToolDescriptor(
       tool("search_students", "Search students", {
         email: { type: "string", description: "學員電子郵件" },
       }),
       "school",
-      1,
+      1
     );
     const index = buildToolRetrievalIndex([distractor, studentSearch]);
 
     expect(
-      searchToolRetrievalIndex(index, "用 email 查學員", 2)[0]?.descriptor.key,
+      searchToolRetrievalIndex(index, "用 email 查學員", 2)[0]?.descriptor.key
     ).toBe("school/search_students");
   });
 
@@ -430,10 +430,10 @@ describe("tool retrieval index", () => {
     const descriptor = buildToolDescriptor(
       tool(
         "search_many",
-        Array.from({ length: 200 }, (_, index) => `term${index}`).join(" "),
+        Array.from({ length: 200 }, (_, index) => `term${index}`).join(" ")
       ),
       "mcp",
-      0,
+      0
     );
     const index = buildToolRetrievalIndex([descriptor]);
     const serializedLowerBound = Buffer.byteLength(
@@ -442,14 +442,14 @@ describe("tool retrieval index", () => {
         documentFrequency: [...index.documentFrequency],
         postings: [...index.postings],
       }),
-      "utf8",
+      "utf8"
     );
     // Serialization covers payload bytes but not the two Map node structures.
     const minimumMapNodeBytes =
       (index.documentFrequency.size + index.postings.size) * 24;
 
     expect(index.estimatedBytes).toBeGreaterThanOrEqual(
-      serializedLowerBound + minimumMapNodeBytes,
+      serializedLowerBound + minimumMapNodeBytes
     );
   });
 
@@ -477,10 +477,10 @@ describe("tool retrieval index", () => {
     const linear = buildToolRetrievalIndex(descriptors, { maxIndexBytes: 1 });
 
     expect(
-      searchToolRetrievalIndex(inverted, "completely unrelated", 2),
+      searchToolRetrievalIndex(inverted, "completely unrelated", 2)
     ).toEqual([]);
     expect(searchToolRetrievalIndex(linear, "completely unrelated", 2)).toEqual(
-      [],
+      []
     );
   });
 
@@ -488,13 +488,13 @@ describe("tool retrieval index", () => {
     const reminder = buildToolDescriptor(
       tool("manage_schedules", "Manage delayed agent schedules"),
       "lobu-memory",
-      0,
+      0
     );
     const index = buildToolRetrievalIndex([reminder], { maxIndexBytes: 1 });
 
     expect(
       searchToolRetrievalIndex(index, "稍後提醒我回覆客戶", 1)[0]?.descriptor
-        .name,
+        .name
     ).toBe("manage_schedules");
   });
 
@@ -502,7 +502,7 @@ describe("tool retrieval index", () => {
     const descriptor = buildToolDescriptor(
       tool("needle_tool", "Find the needle"),
       "mcp",
-      0,
+      0
     );
     const index = buildToolRetrievalIndex([descriptor]);
     const withoutPostings = {
@@ -517,12 +517,12 @@ describe("tool retrieval index", () => {
     const descriptor = buildToolDescriptor(
       tool("needle_tool", "Find the needle"),
       "mcp",
-      0,
+      0
     );
     const index = buildToolRetrievalIndex([descriptor]);
 
     expect(
-      searchToolRetrievalIndex(index, `${"x".repeat(5_000)} needle`, 1),
+      searchToolRetrievalIndex(index, `${"x".repeat(5_000)} needle`, 1)
     ).toEqual([]);
   });
 
@@ -538,7 +538,7 @@ describe("tool retrieval index", () => {
       index,
       "shared",
       2,
-      new Set([left.identityKey]),
+      new Set([left.identityKey])
     );
 
     expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual(["a"]);
@@ -554,7 +554,7 @@ describe("tool retrieval index", () => {
       index,
       "shared",
       2,
-      new Set([left.identityKey]),
+      new Set([left.identityKey])
     );
 
     expect(matches.map(({ descriptor }) => descriptor.mcpId)).toEqual([
@@ -570,30 +570,30 @@ describe("tool retrieval index", () => {
       buildToolRetrievalIndex([first, second]),
       "needle",
       2,
-      eligible,
+      eligible
     );
     const ineligible = Array.from({ length: 20 }, (_, index) =>
-      buildToolDescriptor(tool(`noise_${index}`, "needle"), "other", index + 2),
+      buildToolDescriptor(tool(`noise_${index}`, "needle"), "other", index + 2)
     );
     const expanded = searchToolRetrievalIndex(
       buildToolRetrievalIndex([first, second, ...ineligible]),
       "needle",
       2,
-      eligible,
+      eligible
     );
 
     expect(expanded.map(({ descriptor }) => descriptor.name)).toEqual(
-      base.map(({ descriptor }) => descriptor.name),
+      base.map(({ descriptor }) => descriptor.name)
     );
     expect(expanded.map(({ totalScore }) => totalScore)).toEqual(
-      base.map(({ totalScore }) => totalScore),
+      base.map(({ totalScore }) => totalScore)
     );
 
     const baseLinear = searchToolRetrievalIndex(
       buildToolRetrievalIndex([first, second], { maxIndexBytes: 1 }),
       "needle",
       2,
-      eligible,
+      eligible
     );
     const expandedLinear = searchToolRetrievalIndex(
       buildToolRetrievalIndex([first, second, ...ineligible], {
@@ -601,10 +601,10 @@ describe("tool retrieval index", () => {
       }),
       "needle",
       2,
-      eligible,
+      eligible
     );
     expect(expandedLinear.map(({ totalScore }) => totalScore)).toEqual(
-      baseLinear.map(({ totalScore }) => totalScore),
+      baseLinear.map(({ totalScore }) => totalScore)
     );
   });
 
@@ -631,7 +631,7 @@ describe("tool retrieval index", () => {
     expect(index.descriptors[0]).not.toHaveProperty("tool");
     expect(Object.isFrozen(index.descriptors[0])).toBe(true);
     expect(Object.isFrozen(index.descriptors[0]?.parameterDescriptions)).toBe(
-      true,
+      true
     );
   });
 
@@ -662,7 +662,7 @@ describe("tool router retrieval integration", () => {
           email: { type: "string", description: "學員電子郵件" },
         }),
         1,
-        "school",
+        "school"
       ),
     ];
 
@@ -686,7 +686,7 @@ describe("tool router retrieval integration", () => {
           email: { type: "string", description: "學員電子郵件" },
         }),
         1,
-        "school",
+        "school"
       ),
     ];
     const first = routeToolEntries({
@@ -737,7 +737,7 @@ describe("tool router retrieval integration", () => {
     expect(mutated.inventoryFingerprint).not.toBe(initial.inventoryFingerprint);
     expect(reordered.cacheHit).toBe(false);
     expect(reordered.inventoryFingerprint).not.toBe(
-      mutated.inventoryFingerprint,
+      mutated.inventoryFingerprint
     );
   });
 });

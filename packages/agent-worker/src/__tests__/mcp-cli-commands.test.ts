@@ -209,7 +209,7 @@ describe("buildMcpServerHandler", () => {
     });
 
     expect((await handler(["plan_automation"], { stdin: "{}" })).exitCode).toBe(
-      0,
+      0
     );
     expect(identities).toEqual([
       {
@@ -251,14 +251,14 @@ describe("buildMcpServerHandler", () => {
     let capturedDigest: string | null = null;
     globalThis.fetch = mock(async (_input, init) => {
       capturedDigest = new Headers(init?.headers).get(
-        "x-lobu-mcp-expected-config-digest",
+        "x-lobu-mcp-expected-config-digest"
       );
       return Response.json(
         {
           error: "MCP configuration identity changed after discovery",
           diagnosticCode: "MCP_CONFIG_IDENTITY_MISMATCH",
         },
-        { status: 409 },
+        { status: 409 }
       );
     }) as unknown as typeof fetch;
     const handler = buildMcpServerHandler("shifu-toolbox", ref, gw);
@@ -288,7 +288,7 @@ describe("buildMcpServerHandler", () => {
     expect(deniedHelp.stdout).not.toContain("search_memory");
     expect((await handler(["search_memory", "--schema"], {})).exitCode).toBe(2);
     expect((await handler(["search_memory"], { stdin: "{}" })).exitCode).toBe(
-      2,
+      2
     );
     expect(calls).toBe(0);
 
@@ -296,7 +296,7 @@ describe("buildMcpServerHandler", () => {
     expect((await handler(["--help"], {})).stdout).toContain("search_memory");
     expect((await handler(["search_memory", "--schema"], {})).exitCode).toBe(0);
     expect((await handler(["search_memory"], { stdin: "{}" })).exitCode).toBe(
-      0,
+      0
     );
     expect(calls).toBe(1);
   });
@@ -347,7 +347,7 @@ describe("buildMcpServerHandler", () => {
     // The help renderer truncates descriptions to 80 chars, so only the
     // start of the note survives — that's enough to prove it was applied.
     expect(result.stdout).toContain(
-      "Update a Notion page. IMPORTANT: This tool CANNOT delete",
+      "Update a Notion page. IMPORTANT: This tool CANNOT delete"
     );
   });
 
@@ -559,7 +559,7 @@ describe("summariseAuthStart / summariseAuthCheck", () => {
         verification_url: "https://example.com/verify",
         interaction_posted: true,
       }),
-      "lobu",
+      "lobu"
     );
     const parsed = JSON.parse(out);
     expect(parsed.status).toBe("login_started");
@@ -571,7 +571,7 @@ describe("summariseAuthStart / summariseAuthCheck", () => {
   test("summariseAuthStart passes through already_authenticated", () => {
     const out = summariseAuthStart(
       JSON.stringify({ status: "already_authenticated" }),
-      "lobu",
+      "lobu"
     );
     expect(JSON.parse(out).status).toBe("already_authenticated");
   });
@@ -593,7 +593,7 @@ describe("summariseAuthStart / summariseAuthCheck", () => {
     const out = summariseAuthCheck(
       { status: "authenticated", authenticated: true },
       "lobu",
-      "raw",
+      "raw"
     );
     expect(JSON.parse(out)).toEqual({
       status: "authenticated",
