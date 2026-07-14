@@ -11,7 +11,6 @@ import { createHash } from "node:crypto";
 import type { AgentSettings, StoredConnection } from "@lobu/core";
 import { type Context, Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
-import { getDb } from "../db/client.js";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
 import { GrantStore } from "../gateway/permissions/grant-store.js";

@@ -140,16 +140,18 @@ async function readConnectionFromDb(connectionId: string): Promise<any | null> {
   };
 }
 
-let installed = false;
+let authMockInstalled = false;
+let routeMocksInstalled = false;
 
 /**
- * Idempotent: the module mocks are installed once per process, bound to the
- * shared stashes above. Call at the top of every test file that imports
- * `../agent-routes.js` (directly or transitively), BEFORE that import runs.
+ * Install the shared auth mock independently from the rest of the route
+ * harness. Suites that can evaluate the real auth dependency before
+ * `agent-routes` is imported call this at module setup time, so Bun's module
+ * cache never captures the production middleware for this test process.
  */
-export function installRouteTestMocks(): void {
-  if (installed) return;
-  installed = true;
+export function installRouteAuthTestMock(): void {
+  if (authMockInstalled) return;
+  authMockInstalled = true;
 
   // Resolves to src/auth/middleware — the specifier agent-routes.ts imports
   // as `../auth/middleware`.
@@ -170,6 +172,17 @@ export function installRouteTestMocks(): void {
     // passthrough so importing files that destructure it still get a function.
     requireAuth: async (_c: any, next: any) => next(),
   }));
+}
+
+/**
+ * Idempotent: the module mocks are installed once per process, bound to the
+ * shared stashes above. Call at the top of every test file that imports
+ * `../agent-routes.js` (directly or transitively), BEFORE that import runs.
+ */
+export function installRouteTestMocks(): void {
+  installRouteAuthTestMock();
+  if (routeMocksInstalled) return;
+  routeMocksInstalled = true;
 
   // Resolves to src/lobu/gateway — imported by agent-routes.ts as `./gateway`.
   mock.module('../../gateway', () => ({

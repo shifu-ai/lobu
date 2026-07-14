@@ -7,6 +7,10 @@ import {
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import { orgContext } from "../stores/org-context.js";
+import { installRouteAuthTestMock } from "./helpers/route-test-mocks.js";
+
+// Workspace initialization reaches agent-routes through auth notifications.
+installRouteAuthTestMock();
 
 const ORG_ID = "org-provisioning";
 
