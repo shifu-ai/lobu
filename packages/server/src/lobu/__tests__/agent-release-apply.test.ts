@@ -79,6 +79,62 @@ beforeEach(async () => {
 });
 
 describe("signed managed agent release apply", () => {
+	test("rejects legacy broad provisioning after a managed release is applied", async () => {
+		const app = await buildApp();
+		const release = await putApply(app, latestSignedApplyRequest());
+		expect(release.status).toBe(200);
+
+		const legacy = await app.request("/api/provisioning/agents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				agentId: AGENT_ID,
+				name: "Irene Agent",
+				ownerUserId: "irene",
+				settings: { userMd: "stale onboarding prompt" },
+			}),
+		});
+
+		expect(legacy.status).toBe(409);
+		await expect(legacy.json()).resolves.toEqual({
+			error: "agent_settings_managed_by_release",
+			error_description:
+				"Agent release-owned settings must be changed through managed release apply",
+		});
+		const rows = await (await db())`
+			SELECT user_md
+			FROM agents
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+		expect(rows[0]?.user_md).toBe("release user");
+	});
+
+	test("serializes legacy provisioning against managed release apply without post-release overwrite", async () => {
+		const app = await buildApp();
+		const [release, legacy] = await Promise.all([
+			putApply(app, latestSignedApplyRequest()),
+			app.request("/api/provisioning/agents", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					agentId: AGENT_ID,
+					name: "Irene Agent",
+					ownerUserId: "irene",
+					settings: { userMd: "racing stale onboarding prompt" },
+				}),
+			}),
+		]);
+
+		expect(release.status).toBe(200);
+		expect([200, 409]).toContain(legacy.status);
+		const rows = await (await db())`
+			SELECT user_md
+			FROM agents
+			WHERE organization_id = ${ORG_ID} AND id = ${AGENT_ID}
+		`;
+		expect(rows[0]?.user_md).toBe("release user");
+	});
+
 	test("accepts the current Toolbox policy envelope and returns attempt-bound signed post-apply evidence", async () => {
 		const app = await buildApp();
 		const request = latestSignedApplyRequest();

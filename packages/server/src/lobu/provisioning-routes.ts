@@ -26,6 +26,10 @@ import {
 	createAgentReleaseService,
 } from "./agent-release-service.js";
 import {
+	AgentSettingsManagedByReleaseError,
+	saveLegacyProvisionedAgentSettings,
+} from "./legacy-agent-settings-service.js";
+import {
 	validateExpectedGrantPatterns,
 	verifyRuntimeGrantPatterns,
 } from "./runtime-grant-verifier.js";
@@ -377,10 +381,21 @@ export function createProvisioningRoutes(
 			createdAt: existing?.createdAt ?? Date.now(),
 			lastUsedAt: existing?.lastUsedAt,
 		});
-		await configStore.saveSettings(agentId, {
-			...settings,
-			updatedAt: Date.now(),
-		});
+		try {
+			await saveLegacyProvisionedAgentSettings(
+				organizationId,
+				agentId,
+				settings,
+			);
+		} catch (error) {
+			if (error instanceof AgentSettingsManagedByReleaseError) {
+				return c.json(
+					{ error: error.code, error_description: error.message },
+					409,
+				);
+			}
+			throw error;
+		}
 		await syncProvisioningAgentUsers({
 			organizationId,
 			agentId,

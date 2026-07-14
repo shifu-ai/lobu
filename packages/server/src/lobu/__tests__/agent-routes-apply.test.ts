@@ -155,6 +155,27 @@ async function seedAgent(orgId: string, agentId: string): Promise<void> {
   `;
 }
 
+async function seedAppliedManagedRelease(orgId: string, agentId: string): Promise<void> {
+  const { getDb } = await import('../../db/client.js');
+  const sql = getDb();
+  const digest = `sha256:${'a'.repeat(64)}`;
+  await sql`
+    INSERT INTO agent_release_applies (
+      organization_id, agent_id, environment,
+      desired_release_id, desired_release_sequence, desired_feed_sequence,
+      applied_release_id, applied_release_sequence, applied_feed_sequence,
+      applied_channel, applied_feed_digest, manifest_digest, status,
+      revision_ref, settings_hash
+    ) VALUES (
+      ${orgId}, ${agentId}, 'production',
+      'agent-2026.07.14.1', 1, 1,
+      'agent-2026.07.14.1', 1, 1,
+      'stable', ${digest}, ${digest}, 'applied',
+      ${`lobu:${agentId}:agent-release:1`}, ${digest}
+    )
+  `;
+}
+
 describe('POST /agents — idempotent same-org create', () => {
   beforeEach(async () => {
     await resetTestDatabase();
@@ -274,6 +295,96 @@ describe('POST /agents — idempotent same-org create', () => {
       ORDER BY organization_id
     `;
     expect(rows).toHaveLength(2);
+  });
+});
+
+describe('PATCH /:agentId/config — managed release fence', () => {
+  beforeEach(async () => {
+    await resetTestDatabase();
+    resetApplyRouteStores();
+    await seedOrg(ORG_A);
+    resetApplyAuth();
+  });
+
+  test('allows managed settings during bootstrap before the first applied release', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'managed-bootstrap-patch';
+    await seedAgent(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ userMd: 'bootstrap user prompt' }),
+    });
+
+    expect(response.status).toBe(200);
+    const { getDb } = await import('../../db/client.js');
+    const rows = await getDb()`
+      SELECT user_md
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows[0]?.user_md).toBe('bootstrap user prompt');
+  });
+
+  test.each([
+    ['identityMd', 'stale identity'],
+    ['soulMd', 'stale soul'],
+    ['userMd', 'stale user'],
+    ['modelSelection', { mode: 'pinned', pinnedModel: 'openai/stale' }],
+    ['toolsConfig', { strictMode: false }],
+  ])('rejects release-owned %s after a managed release receipt exists', async (key, value) => {
+    const app = await importAgentRoutes();
+    const agentId = `managed-${String(key).toLowerCase()}`;
+    await seedAgent(ORG_A, agentId);
+    await seedAppliedManagedRelease(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ [key]: value }),
+    });
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: 'agent_settings_managed_by_release',
+      error_description:
+        'Agent release-owned settings must be changed through managed release apply',
+    });
+  });
+
+  test('allows a non-managed patch without replaying stale release-owned settings', async () => {
+    const app = await importAgentRoutes();
+    const agentId = 'managed-non-owned-patch';
+    await seedAgent(ORG_A, agentId);
+    const { getDb } = await import('../../db/client.js');
+    const sql = getDb();
+    await sql`
+      UPDATE agents
+      SET user_md = 'release user',
+          mcp_servers = ${sql.json({ existing: { url: 'https://old.example' } })}
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    await seedAppliedManagedRelease(ORG_A, agentId);
+
+    const response = await app.request(`/${agentId}/config`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        mcpServers: { current: { url: 'https://current.example' } },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const rows = await sql`
+      SELECT user_md, mcp_servers
+      FROM agents
+      WHERE organization_id = ${ORG_A} AND id = ${agentId}
+    `;
+    expect(rows[0]?.user_md).toBe('release user');
+    expect(rows[0]?.mcp_servers).toEqual({
+      current: { url: 'https://current.example' },
+    });
   });
 });
 
