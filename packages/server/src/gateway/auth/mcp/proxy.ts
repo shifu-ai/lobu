@@ -1157,7 +1157,7 @@ export class McpProxy {
 			personalReminderDeliveryIntent?: true;
       approvalReplayAuthorization?: {
         revalidate(): Promise<boolean>;
-        onAuthorized?(): Promise<void>;
+        onExecutionCompleted?(): Promise<void>;
       };
     },
   ): Promise<{
@@ -1349,7 +1349,7 @@ export class McpProxy {
 
     try {
       let lastResponseStatus: number | undefined;
-      const authorizeReplayEgress = async () => {
+      const revalidateReplayEgress = async () => {
         if (!options?.approvalReplayAuthorization) {
           return !(
             options?.approvalReplay && options.releaseState?.status === "active"
@@ -1358,10 +1358,20 @@ export class McpProxy {
         if (!(await options.approvalReplayAuthorization.revalidate().catch(() => false))) {
           return false;
         }
-        await options.approvalReplayAuthorization.onAuthorized?.();
         return true;
       };
-      if (!(await authorizeReplayEgress())) {
+      const commitReplayGrantAfterExecution = async () => {
+        const authorization = options?.approvalReplayAuthorization;
+        if (!authorization?.onExecutionCompleted) return;
+        if (!(await revalidateReplayEgress())) return;
+        await authorization.onExecutionCompleted().catch((error) => {
+          logger.warn(
+            { agentId, mcpId, toolName, error: String(error) },
+            "Tool executed but approval grant could not be committed",
+          );
+        });
+      };
+      if (!(await revalidateReplayEgress())) {
         return {
           content: [{ type: "text", text: "Approval authorization changed before execution." }],
           isError: true,
@@ -1370,7 +1380,7 @@ export class McpProxy {
       }
       if (!this.getSession(sessionKey)) {
         await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
-        if (!(await authorizeReplayEgress())) {
+        if (!(await revalidateReplayEgress())) {
           return {
             content: [{ type: "text", text: "Approval authorization changed before execution." }],
             isError: true,
@@ -1399,7 +1409,7 @@ export class McpProxy {
           /* noop */
         });
         await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
-        if (!(await authorizeReplayEgress())) {
+        if (!(await revalidateReplayEgress())) {
           return {
             content: [{ type: "text", text: "Approval authorization changed before retry." }],
             isError: true,
@@ -1486,6 +1496,7 @@ export class McpProxy {
         };
       }
       const result = json.result || json;
+      await commitReplayGrantAfterExecution();
       this.serverHealth.recordSuccess(healthKey);
       emitToolCallCompleted(
         result.isError ? "failed" : "ok",

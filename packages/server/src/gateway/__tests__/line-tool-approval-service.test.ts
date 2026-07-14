@@ -636,9 +636,9 @@ describe("createToolApprovalService", () => {
         lineUserId: "line-user-1",
         agentId: "shifu-u-1",
       });
-      expect(result).toMatchObject({
-        status: "executed",
-        result: { isError: true, diagnosticCode: "approval_inventory_stale" },
+      expect(result).toEqual({
+        status: "stale",
+        diagnosticCode: "approval_inventory_stale",
       });
       expect(grant).not.toHaveBeenCalled();
       expect(upstreamFetch).not.toHaveBeenCalled();

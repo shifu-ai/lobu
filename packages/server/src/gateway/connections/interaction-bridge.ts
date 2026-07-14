@@ -38,6 +38,7 @@ type ExecuteToolDirectFn = (
 ) => Promise<{
   content: Array<{ type: string; text: string }>;
   isError: boolean;
+  diagnosticCode?: string;
 }>;
 
 /**
@@ -939,7 +940,7 @@ export function registerActionHandlers(
                         );
                     return result.valid;
                   },
-                  onAuthorized: grantStore
+                  onExecutionCompleted: grantStore
                     ? async () => {
                         if (grantStored) return;
                         await grantStore.grant(
@@ -978,6 +979,17 @@ export function registerActionHandlers(
                 execute
               )
             : await execute();
+
+          if (result.diagnosticCode === "approval_inventory_stale") {
+            await postTarget.post(
+              "This approval expired because the available tools changed. Please try again.",
+            );
+            logger.warn(
+              { requestId, mcpId: pending.mcpId, toolName: pending.toolName },
+              "Tool approval became stale before execution",
+            );
+            return;
+          }
 
           const resultText = result.content.map((c) => c.text).join("\n");
           await postTarget.post(

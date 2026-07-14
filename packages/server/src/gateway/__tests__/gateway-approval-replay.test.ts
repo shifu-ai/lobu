@@ -49,9 +49,12 @@ function makeApp(
               diagnosticCode: "approval_inventory_stale",
             };
           }
-          await authorization.onAuthorized?.();
         }
-        return executeToolDirect(...args);
+        const result = await executeToolDirect(...args);
+        if (authorization && await authorization.revalidate()) {
+          await authorization.onExecutionCompleted?.();
+        }
+        return result;
       },
       revalidatePendingToolEligibility: mock(async () => true),
     }),
@@ -272,7 +275,10 @@ describe("CLI gateway pending-tool approval replay", () => {
       makeApp(execute, grant, undefined, [true, true, false]),
       "cli-egress-revoke",
     );
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: "approval_inventory_stale",
+    });
     expect(grant).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });

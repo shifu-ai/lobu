@@ -443,7 +443,7 @@ export function createGatewayApp(
                         organizationId,
                         { mcpProxy: approveMcpProxy },
                       )).valid,
-                      onAuthorized: approveGrantStore
+                      onExecutionCompleted: approveGrantStore
                         ? async () => {
                             if (grantStored) return;
                             await approveGrantStore.grant(
@@ -473,6 +473,9 @@ export function createGatewayApp(
                     pending.toolName,
                     pending.args
                   );
+              if (result.diagnosticCode === "approval_inventory_stale") {
+                return { success: false, error: "approval_inventory_stale" };
+              }
               return { success: true, result } as any;
             }
             return { success: true };

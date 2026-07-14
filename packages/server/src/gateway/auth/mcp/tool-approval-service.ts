@@ -83,7 +83,7 @@ interface McpProxyDirectExecution {
       personalReminderDeliveryIntent?: true;
       approvalReplayAuthorization?: {
         revalidate(): Promise<boolean>;
-        onAuthorized?(): Promise<void>;
+        onExecutionCompleted?(): Promise<void>;
       };
     },
   ): Promise<{
@@ -336,7 +336,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
                   organizationId!,
                   deps,
                 )).valid,
-                onAuthorized: input.action === "approve_all"
+                onExecutionCompleted: input.action === "approve_all"
                   ? async () => {
                       if (grantStored) return;
                       await deps.grantStore.grant(
@@ -376,6 +376,9 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       const result = organizationId
         ? await orgContext.run({ organizationId }, execute)
         : await execute();
+      if (result.diagnosticCode === "approval_inventory_stale") {
+        return { status: "stale", diagnosticCode: "approval_inventory_stale" };
+      }
       return { status: "executed", result };
     },
 

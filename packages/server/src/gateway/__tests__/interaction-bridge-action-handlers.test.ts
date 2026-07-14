@@ -60,15 +60,18 @@ function setup(
           diagnosticCode: "approval_inventory_stale",
         };
       }
-      await authorization.onAuthorized?.();
     }
     if (executeToolResult instanceof Error) throw executeToolResult;
-    return (
+    const result = (
       executeToolResult ?? {
         content: [{ type: "text", text: "ok" }],
         isError: false,
       }
     );
+    if (authorization && await authorization.revalidate()) {
+      await authorization.onExecutionCompleted?.();
+    }
+    return result;
   });
   const post = mock(async () => undefined);
   const thread = { post };
@@ -326,6 +329,12 @@ describe("registerActionHandlers — tool approval", () => {
     });
     expect(h.executeToolDirect).toHaveBeenCalledTimes(1);
     expect(h.grantStore.grant).not.toHaveBeenCalled();
+    expect(h.post).toHaveBeenCalledWith(
+      "This approval expired because the available tools changed. Please try again.",
+    );
+    expect(h.post).not.toHaveBeenCalledWith(
+      expect.stringContaining("Tool error:"),
+    );
   });
 
   test("active interaction continuation without a release binding fails closed", async () => {
