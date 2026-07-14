@@ -751,6 +751,15 @@ export class CoreServices {
       publicGatewayUrl: this.config.mcp.publicGatewayUrl,
       agentSettingsStore: this.agentSettingsStore,
       guardrailRegistry: this.guardrailRegistry,
+      globalToolPolicyResolver: () => ({
+        allowedTools: typeof this.config.agentDefaults.allowedTools === "string"
+          ? [this.config.agentDefaults.allowedTools]
+          : this.config.agentDefaults.allowedTools,
+        disallowedTools:
+          typeof this.config.agentDefaults.disallowedTools === "string"
+            ? [this.config.agentDefaults.disallowedTools]
+            : this.config.agentDefaults.disallowedTools,
+      }),
     });
     this.mcpProxy.onToolBlocked = async (
       requestId,

@@ -132,6 +132,34 @@ describe("createToolApprovalService", () => {
       allowedTools: ["manage_*"],
       strictMode: true,
     })).toBe(false);
+    expect(isToolNameAllowedByToolsConfig("manage_schedules", {
+      deniedTools: [" manage_schedules "],
+    })).toBe(false);
+    expect(isToolNameAllowedByToolsConfig(
+      "manage_schedules",
+      { allowedTools: ["manage_schedules"] },
+      { disallowedTools: [" manage_* "] },
+    )).toBe(false);
+    expect(isToolNameAllowedByToolsConfig(
+      "manage_schedules",
+      { strictMode: true },
+      { allowedTools: [" manage_* "] },
+    )).toBe(true);
+    const currentGlobalPolicy: {
+      allowedTools?: string[];
+      disallowedTools?: string[];
+    } = {};
+    expect(isToolNameAllowedByToolsConfig(
+      "manage_schedules",
+      undefined,
+      currentGlobalPolicy,
+    )).toBe(true);
+    currentGlobalPolicy.disallowedTools = [" manage_schedules "];
+    expect(isToolNameAllowedByToolsConfig(
+      "manage_schedules",
+      undefined,
+      currentGlobalPolicy,
+    )).toBe(false);
   });
 
   test.each([

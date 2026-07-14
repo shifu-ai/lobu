@@ -13,18 +13,6 @@ import {
 import type { Context } from "hono";
 import { Hono } from "hono";
 
-export function isToolNameAllowedByToolsConfig(
-  toolName: string,
-  toolsConfig: import("@lobu/core").ToolsConfig | undefined,
-): boolean {
-  const matches = (pattern: string) => {
-    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-    return new RegExp(`^${escaped.replaceAll("*", ".*")}$`, "i").test(toolName);
-  };
-  if ((toolsConfig?.deniedTools ?? []).some(matches)) return false;
-  return toolsConfig?.strictMode !== true ||
-    (toolsConfig.allowedTools ?? []).some(matches);
-}
 import { getOrgId, orgContext } from "../../../lobu/stores/org-context.js";
 import { resolveAgentGuardrails } from "../../guardrails/aggregator.js";
 import { recordGuardrailTrip } from "../../guardrails/audit.js";
@@ -61,6 +49,32 @@ import {
 } from "./pending-tool-store.js";
 import { McpServerHealth } from "./server-health.js";
 import type { CachedMcpServer, McpTool, McpToolCache } from "./tool-cache.js";
+
+export function isToolNameAllowedByToolsConfig(
+  toolName: string,
+  toolsConfig: import("@lobu/core").ToolsConfig | undefined,
+  globalPolicy: {
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  } = {},
+): boolean {
+  const matches = (rawPattern: string) => {
+    const pattern = rawPattern.trim();
+    if (!pattern) return false;
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`^${escaped.replaceAll("*", ".*")}$`, "i").test(toolName);
+  };
+  const denied = [
+    ...(toolsConfig?.deniedTools ?? []),
+    ...(globalPolicy.disallowedTools ?? []),
+  ];
+  if (denied.some(matches)) return false;
+  const allowed = [
+    ...(toolsConfig?.allowedTools ?? []),
+    ...(globalPolicy.allowedTools ?? []),
+  ];
+  return toolsConfig?.strictMode !== true || allowed.some(matches);
+}
 
 const logger = createLogger("mcp-proxy");
 const PERSONAL_REMINDER_DELIVERY_CONTRACT = "personal_reminder_delivery.v1";
@@ -788,7 +802,11 @@ export class McpProxy {
   async revalidatePendingToolEligibility(
     pending: import("./pending-tool-store.js").PendingToolInvocation,
   ): Promise<boolean> {
-    if (!this.agentSettingsStore || !this.guardrailRegistry) return false;
+    if (
+      !this.agentSettingsStore ||
+      !this.guardrailRegistry ||
+      !this.globalToolPolicyResolver
+    ) return false;
     let settings;
     try {
       settings = await this.agentSettingsStore.getSettings(pending.agentId);
@@ -796,9 +814,16 @@ export class McpProxy {
       return false;
     }
     if (!settings) return false;
+    let globalToolPolicy;
+    try {
+      globalToolPolicy = this.globalToolPolicyResolver();
+    } catch {
+      return false;
+    }
     if (!isToolNameAllowedByToolsConfig(
       pending.toolName,
       settings.toolsConfig,
+      globalToolPolicy,
     )) return false;
     if (await this.runPreToolGuardrails(
       pending.agentId,
@@ -866,6 +891,10 @@ export class McpProxy {
   private readonly publicGatewayUrl?: string;
   private readonly agentSettingsStore?: AgentSettingsStore;
   private readonly guardrailRegistry?: GuardrailRegistry;
+  private readonly globalToolPolicyResolver?: () => {
+    allowedTools?: string[];
+    disallowedTools?: string[];
+  };
   private readonly serverHealth = new McpServerHealth();
 
   /** Callback invoked when a tool call is blocked for approval. */
@@ -916,6 +945,11 @@ export class McpProxy {
       agentSettingsStore?: AgentSettingsStore;
       /** Shared registry of guardrails; pre-tool stage entries are queried. */
       guardrailRegistry?: GuardrailRegistry;
+      /** Current process-wide tool policy; read again when approval resumes. */
+      globalToolPolicyResolver?: () => {
+        allowedTools?: string[];
+        disallowedTools?: string[];
+      };
     },
   ) {
     this.secretStore = options.secretStore;
@@ -924,6 +958,7 @@ export class McpProxy {
     this.publicGatewayUrl = options.publicGatewayUrl;
     this.agentSettingsStore = options.agentSettingsStore;
     this.guardrailRegistry = options.guardrailRegistry;
+    this.globalToolPolicyResolver = options.globalToolPolicyResolver;
     this.app = new Hono();
     this.setupRoutes();
     logger.debug("MCP proxy initialized");
