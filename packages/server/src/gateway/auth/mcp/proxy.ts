@@ -1155,6 +1155,10 @@ export class McpProxy {
 			conversationId?: string;
 			directAuthToken?: string;
 			personalReminderDeliveryIntent?: true;
+      approvalReplayAuthorization?: {
+        revalidate(): Promise<boolean>;
+        onAuthorized?(): Promise<void>;
+      };
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
@@ -1345,8 +1349,34 @@ export class McpProxy {
 
     try {
       let lastResponseStatus: number | undefined;
+      const authorizeReplayEgress = async () => {
+        if (!options?.approvalReplayAuthorization) {
+          return !(
+            options?.approvalReplay && options.releaseState?.status === "active"
+          );
+        }
+        if (!(await options.approvalReplayAuthorization.revalidate().catch(() => false))) {
+          return false;
+        }
+        await options.approvalReplayAuthorization.onAuthorized?.();
+        return true;
+      };
+      if (!(await authorizeReplayEgress())) {
+        return {
+          content: [{ type: "text", text: "Approval authorization changed before execution." }],
+          isError: true,
+          diagnosticCode: "approval_inventory_stale",
+        };
+      }
       if (!this.getSession(sessionKey)) {
         await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
+        if (!(await authorizeReplayEgress())) {
+          return {
+            content: [{ type: "text", text: "Approval authorization changed before execution." }],
+            isError: true,
+            diagnosticCode: "approval_inventory_stale",
+          };
+        }
       }
 
       let response = await this.sendUpstreamRequest(
@@ -1369,6 +1399,13 @@ export class McpProxy {
           /* noop */
         });
         await this.reinitializeSession(httpServer, agentId, mcpId, scopeKey, directAuthToken);
+        if (!(await authorizeReplayEgress())) {
+          return {
+            content: [{ type: "text", text: "Approval authorization changed before retry." }],
+            isError: true,
+            diagnosticCode: "approval_inventory_stale",
+          };
+        }
         response = await this.sendUpstreamRequest(
           httpServer,
           agentId,

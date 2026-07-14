@@ -50,7 +50,18 @@ function setup(
   const grantStore = {
     grant: mock(async () => undefined),
   };
-  const executeToolDirect = mock(async () => {
+  const executeToolDirect = mock(async (...callArgs: any[]) => {
+    const authorization = callArgs[5]?.approvalReplayAuthorization;
+    if (authorization) {
+      if (!(await authorization.revalidate())) {
+        return {
+          content: [{ type: "text", text: "stale" }],
+          isError: true,
+          diagnosticCode: "approval_inventory_stale",
+        };
+      }
+      await authorization.onAuthorized?.();
+    }
     if (executeToolResult instanceof Error) throw executeToolResult;
     return (
       executeToolResult ?? {
@@ -271,6 +282,50 @@ describe("registerActionHandlers — tool approval", () => {
     });
     expect(h.grantStore.grant).not.toHaveBeenCalled();
     expect(h.executeToolDirect).not.toHaveBeenCalled();
+  });
+
+  test("egress revocation after both interaction validations leaves no grant", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-egress",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      capabilityIds: [],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    await storePendingTool("req-egress-revoke", {
+      ...PENDING,
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "legacy",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: PENDING.mcpId,
+          toolName: PENDING.toolName,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    }, 60);
+    const h = setup({
+      organizationId: "org-1",
+      continuationResults: [true, true, false],
+    });
+    await h.handler({
+      actionId: "tool:req-egress-revoke:always",
+      thread: h.thread,
+    });
+    expect(h.executeToolDirect).toHaveBeenCalledTimes(1);
+    expect(h.grantStore.grant).not.toHaveBeenCalled();
   });
 
   test("active interaction continuation without a release binding fails closed", async () => {

@@ -888,8 +888,11 @@ export function registerActionHandlers(
 
       // Approved — store grant, execute, post result
       const expiresAt = resolveGrantExpiresAt(decision);
+      const requiresEgressAuthorization = Boolean(
+        pending.releaseBinding || pending.releaseState?.status === "active",
+      );
 
-      if (grantStore) {
+      if (grantStore && !requiresEgressAuthorization) {
         try {
           await grantStore.grant(
             pending.agentId,
@@ -919,7 +922,39 @@ export function registerActionHandlers(
       // Execute the pending tool call
       if (executeToolDirect) {
         try {
-          const options = buildPendingToolExecutionOptions(pending);
+          const baseOptions = buildPendingToolExecutionOptions(pending);
+          let grantStored = false;
+          const options = baseOptions && requiresEgressAuthorization
+            ? {
+                ...baseOptions,
+                approvalReplayAuthorization: {
+                  revalidate: async () => {
+                    if (!connection.organizationId) return false;
+                    const result = continuationValidator
+                      ? await continuationValidator(pending, connection.organizationId)
+                      : await validatePendingToolContinuation(
+                          pending,
+                          connection.organizationId,
+                          { revalidateEligibility: revalidatePendingToolEligibility },
+                        );
+                    return result.valid;
+                  },
+                  onAuthorized: grantStore
+                    ? async () => {
+                        if (grantStored) return;
+                        await grantStore.grant(
+                          pending.agentId,
+                          pattern,
+                          expiresAt,
+                          undefined,
+                          connection.organizationId,
+                        );
+                        grantStored = true;
+                      }
+                    : undefined,
+                },
+              }
+            : baseOptions;
           const execute = () =>
             options
               ? executeToolDirect(

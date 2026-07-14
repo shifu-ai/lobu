@@ -108,6 +108,10 @@ export interface PendingToolExecutionOptions {
 	originalRunIdentity?: NonNullable<PendingToolInvocation["originalRunIdentity"]>;
 	conversationId?: string;
 	personalReminderDeliveryIntent?: true;
+  approvalReplayAuthorization?: {
+    revalidate(): Promise<boolean>;
+    onAuthorized?(): Promise<void>;
+  };
 }
 
 /**

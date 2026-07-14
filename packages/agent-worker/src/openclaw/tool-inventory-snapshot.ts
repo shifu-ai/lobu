@@ -234,7 +234,7 @@ export function snapshotToolsByMcp(
     Buffer.byteLength(serialized, "utf8") * SERIALIZED_MEMORY_MULTIPLIER;
   if (estimatedBytes > MAX_SNAPSHOT_BYTES) return snapshot;
 
-  if (cached) {
+  if (cached && snapshotCache.get(cacheKey) === cached) {
     snapshotCache.delete(cacheKey);
     snapshotCacheBytes -= cached.estimatedBytes;
     releaseToolRouterCacheEntry(CACHE_NAMESPACE, cacheKey);

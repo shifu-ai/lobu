@@ -70,15 +70,62 @@ function isSensitiveKey(key: string) {
   );
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint <= 0x1f || codePoint === 0x7f) return true;
+  }
+  return false;
+}
+
 function sanitizeFields(fields: Record<string, unknown> = {}) {
   const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (
-      key === "release_agent_id" &&
+      (key === "release_agent_id" || key === "release_id") &&
       typeof value === "string" &&
-      /^shifu-u-[a-zA-Z0-9_-]{1,80}$/.test(value)
+      /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value)
     ) {
       sanitized[key] = value;
+      continue;
+    }
+    if (key === "release_agent_id" || key === "release_id") continue;
+    if (key === "release_environment") {
+      if (
+        value === "staging" ||
+        value === "production" ||
+        value === "unknown"
+      ) {
+        sanitized[key] = value;
+      }
+      continue;
+    }
+    if (key === "release_snapshot_expires_at") {
+      if (typeof value === "string" && value.length === 24) {
+        const parsed = Date.parse(value);
+        if (
+          Number.isFinite(parsed) &&
+          new Date(parsed).toISOString() === value
+        ) {
+          sanitized[key] = value;
+        }
+      }
+      continue;
+    }
+    if (key === "release_snapshot_digest") {
+      if (typeof value === "string" && /^sha256:[0-9a-f]{9,64}$/.test(value)) {
+        sanitized[key] = value.slice(0, 16);
+      }
+      continue;
+    }
+    if (key === "execution_intent") {
+      if (
+        typeof value === "string" &&
+        value.length <= 80 &&
+        !hasControlCharacter(value)
+      ) {
+        sanitized[key] = value;
+      }
       continue;
     }
     if (key === "body" || isSensitiveKey(key)) continue;

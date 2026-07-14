@@ -80,7 +80,11 @@ interface McpProxyDirectExecution {
 			approvalReplay?: true;
 			originalRunIdentity?: { runId: number; deploymentName: string };
 			conversationId?: string;
-			personalReminderDeliveryIntent?: true;
+      personalReminderDeliveryIntent?: true;
+      approvalReplayAuthorization?: {
+        revalidate(): Promise<boolean>;
+        onAuthorized?(): Promise<void>;
+      };
     },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
@@ -308,7 +312,10 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
         return { status: "denied" };
       }
 
-      if (input.action === "approve_all") {
+      const requiresEgressAuthorization = Boolean(
+        pending.releaseBinding || pending.releaseState?.status === "active",
+      );
+      if (input.action === "approve_all" && !requiresEgressAuthorization) {
         await deps.grantStore.grant(
           pending.agentId,
           GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
@@ -319,7 +326,36 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       }
 
       const execute = () => {
-        const options = buildPendingToolExecutionOptions(pending);
+        const baseOptions = buildPendingToolExecutionOptions(pending);
+        let grantStored = false;
+        const approvalReplayAuthorization =
+          requiresEgressAuthorization
+            ? {
+                revalidate: async () => (await validatePendingToolContinuation(
+                  pending,
+                  organizationId!,
+                  deps,
+                )).valid,
+                onAuthorized: input.action === "approve_all"
+                  ? async () => {
+                      if (grantStored) return;
+                      await deps.grantStore.grant(
+                        pending.agentId,
+                        GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
+                        null,
+                        undefined,
+                        organizationId,
+                      );
+                      grantStored = true;
+                    }
+                  : undefined,
+              }
+            : undefined;
+        const options = baseOptions
+          ? { ...baseOptions, ...(approvalReplayAuthorization
+              ? { approvalReplayAuthorization }
+              : {}) }
+          : undefined;
         return options
           ? deps.mcpProxy.executeToolDirect(
               pending.agentId,

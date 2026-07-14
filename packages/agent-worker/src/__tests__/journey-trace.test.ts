@@ -1,7 +1,10 @@
 import { describe, expect, mock, test } from "bun:test";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
 import { buildEffectiveToolInventory } from "../openclaw/effective-tool-inventory";
-import { buildToolRouterJourneyEventInput } from "../openclaw/session-runner";
+import {
+  buildToolRouterJourneyEventInput,
+  initializeExternalTurnToolRouting,
+} from "../openclaw/session-runner";
 import {
   emitJourneyEvent,
   journeyEvent,
@@ -368,6 +371,8 @@ describe("worker journey trace", () => {
       releaseSnapshotExpiresAt: "2099-01-01T00:00:00.000Z",
       releaseSnapshotExpired: false,
       executionIntent: "personal_reminder:create:explicit",
+      executionClarificationRequired: false,
+      routerStageCorrelationStatus: "not_available_at_router_stage" as const,
     };
     const safe = journeyEvent(
       buildToolRouterJourneyEventInput({
@@ -384,7 +389,11 @@ describe("worker journey trace", () => {
       release_snapshot_digest: "sha256:aaaaaaaaa",
       release_snapshot_expired: false,
       execution_intent: "personal_reminder:create:explicit",
-      reminder_correlation_id: "turn-release-1",
+      execution_clarification_required: false,
+      reminder_correlation_status: "not_available_at_router_stage",
+      schedule_id_status: "not_available_at_router_stage",
+      wake_run_id_status: "not_available_at_router_stage",
+      line_delivery_correlation_status: "not_available_at_router_stage",
     });
     const unsafe = journeyEvent(
       buildToolRouterJourneyEventInput({
@@ -394,5 +403,55 @@ describe("worker journey trace", () => {
       })
     );
     expect(unsafe.release_agent_id).toBeUndefined();
+    const hostile = journeyEvent({
+      event: "lobu.worker.tool_router_decision",
+      trace,
+      status: "ok",
+      fields: {
+        release_id: `release\n${"x".repeat(10_000)}`,
+        release_agent_id: `agent\u0000${"x".repeat(10_000)}`,
+        release_snapshot_expires_at: `${"9".repeat(10_000)}`,
+        release_snapshot_digest: `sha256:${"a".repeat(10_000)}`,
+        execution_intent: `personal\n${"x".repeat(10_000)}`,
+      },
+    });
+    expect(hostile.release_id).toBeUndefined();
+    expect(hostile.release_agent_id).toBeUndefined();
+    expect(hostile.release_snapshot_expires_at).toBeUndefined();
+    expect(hostile.release_snapshot_digest).toBeUndefined();
+    expect(hostile.execution_intent).toBeUndefined();
+  });
+
+  test.each([
+    ["legacy", "unknown", "agent-legacy-1"],
+    ["inactive", "production", "agent-inactive-1"],
+  ])("%s external turn emits bounded provenance and unavailable delivery refs", (_state, environment, agentId) => {
+    let emitted: Record<string, unknown> | undefined;
+    initializeExternalTurnToolRouting(
+      {
+        toolsByMcp: {},
+        message: "你好",
+        budget: 1,
+        releaseTrace: { environment, agentId },
+        trace: {
+          traceId: "tr_release_nonactive_1",
+          journeyId: "line_text_agent_turn",
+          actor: "worker",
+          traceSource: "incoming",
+        },
+      },
+      {
+        emitEvent: (input) => {
+          emitted = journeyEvent(input);
+        },
+      }
+    );
+    expect(emitted).toMatchObject({
+      release_environment: environment,
+      release_agent_id: agentId,
+      reminder_correlation_status: "not_available_at_router_stage",
+      execution_clarification_required: false,
+    });
+    expect(emitted?.release_id).toBeUndefined();
   });
 });

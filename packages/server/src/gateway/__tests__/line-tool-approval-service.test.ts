@@ -564,6 +564,89 @@ describe("createToolApprovalService", () => {
     expect(executeToolDirect).not.toHaveBeenCalled();
   });
 
+  test("egress revocation after both consumer validations leaves no grant and sends no upstream request", async () => {
+    const stableAuthorizationDigest = STABLE_SEMANTIC_DIGEST;
+    await seedLinePending("ta-egress-toctou", {
+      mcpId: "ordinary_mcp",
+      toolName: "create_issue",
+      releaseState: { status: "active", claim: SEMANTIC_CLAIM },
+      releaseBinding: {
+        routerMode: "shadow",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: SEMANTIC_CLAIM.releaseId,
+        releaseSequence: SEMANTIC_CLAIM.releaseSequence,
+        snapshotDigest: SEMANTIC_CLAIM.snapshotDigest,
+        authorizationExpiresAt: SEMANTIC_CLAIM.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: "ordinary_mcp",
+          toolName: "create_issue",
+          connectionId: LINE_PENDING.connectionId,
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    });
+    const originalFetch = globalThis.fetch;
+    const upstreamFetch = mock(async () => Response.json({}));
+    globalThis.fetch = upstreamFetch as typeof fetch;
+    try {
+      const proxy = new McpProxy(
+        {
+          getHttpServer: async () => ({
+            id: "ordinary_mcp",
+            upstreamUrl: "https://ordinary.test/mcp",
+          }),
+          getAllHttpServers: async () => new Map(),
+        },
+        {
+          secretStore: {
+            get: async () => null,
+            put: async () => "secret://test" as const,
+            delete: async () => undefined,
+            list: async () => [],
+          },
+        },
+      );
+      const grant = mock(async () => undefined);
+      const eligibility = [true, true, false];
+      const service = createToolApprovalService({
+        grantStore: { grant, hasGrant: mock(async () => false), revoke: mock(async () => undefined) },
+        mcpProxy: proxy,
+        userAgentsStore: { ownsAgent: mock(async () => true) },
+        organizationId: "org-1",
+        resolveReleaseSnapshot: mock(async () => ({
+          schemaVersion: 1 as const,
+          environment: "production" as const,
+          toolboxUserId: SEMANTIC_CLAIM.toolboxUserId,
+          agentId: SEMANTIC_CLAIM.agentId,
+          capabilities: [...SEMANTIC_CLAIM.capabilityIds],
+          appliedReleaseId: SEMANTIC_CLAIM.releaseId,
+          appliedReleaseSequence: SEMANTIC_CLAIM.releaseSequence,
+          snapshotDigest: SEMANTIC_CLAIM.snapshotDigest,
+          expiresAt: SEMANTIC_CLAIM.expiresAt,
+        })),
+        readReleaseState: mock(async () => ({ status: "active" as const, claim: SEMANTIC_CLAIM })),
+        revalidateEligibility: mock(async () => eligibility.shift() ?? false),
+      });
+      const result = await service.submit({
+        action: "approve_all",
+        approvalId: "ta-egress-toctou",
+        toolboxUserId: "toolbox-user-1",
+        lineUserId: "line-user-1",
+        agentId: "shifu-u-1",
+      });
+      expect(result).toMatchObject({
+        status: "executed",
+        result: { isError: true, diagnosticCode: "approval_inventory_stale" },
+      });
+      expect(grant).not.toHaveBeenCalled();
+      expect(upstreamFetch).not.toHaveBeenCalled();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("rejects semantic approve_all after an expired original carrier is freshly renewed", async () => {
     const releaseState = {
       status: "active" as const,

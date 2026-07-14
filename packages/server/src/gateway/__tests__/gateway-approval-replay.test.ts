@@ -19,6 +19,7 @@ function makeApp(
   executeToolDirect: ReturnType<typeof mock>,
   grant = mock(async () => undefined),
   caller = { userId: "user-1", organizationId: "org-1" },
+  continuationResults?: boolean[],
 ) {
   const empty = () => undefined;
   const coreServices = {
@@ -38,7 +39,20 @@ function makeApp(
     getImageGenerationService: empty,
     getGrantStore: () => ({ grant }),
     getMcpProxy: () => ({
-      executeToolDirect,
+      executeToolDirect: async (...args: any[]) => {
+        const authorization = args[5]?.approvalReplayAuthorization;
+        if (authorization) {
+          if (!(await authorization.revalidate())) {
+            return {
+              content: [{ type: "text", text: "stale" }],
+              isError: true,
+              diagnosticCode: "approval_inventory_stale",
+            };
+          }
+          await authorization.onAuthorized?.();
+        }
+        return executeToolDirect(...args);
+      },
       revalidatePendingToolEligibility: mock(async () => true),
     }),
     getExternalAuthClient: empty,
@@ -67,6 +81,15 @@ function makeApp(
             exp: Date.now() + 60_000,
           }
         : null,
+    ...(continuationResults
+      ? {
+          approvalContinuationValidator: mock(async () =>
+            continuationResults.shift()
+              ? ({ valid: true } as const)
+              : ({ valid: false, diagnosticCode: "approval_inventory_stale" } as const)
+          ),
+        }
+      : {}),
   });
 }
 
@@ -203,6 +226,53 @@ describe("CLI gateway pending-tool approval replay", () => {
     const response = await approve(makeApp(execute, grant), "cli-missing-binding");
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: "approval_inventory_stale" });
+    expect(grant).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test("CLI egress revocation after two validations leaves no grant or upstream execution", async () => {
+    const claim = {
+      environment: "production" as const,
+      toolboxUserId: "user-1",
+      agentId: "agent-1",
+      releaseId: "release-egress",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      capabilityIds: [],
+    };
+    const stableAuthorizationDigest = stableReleaseAuthorizationDigest(claim);
+    await storePendingTool("cli-egress-revoke", {
+      mcpId: "github",
+      toolName: "create_issue",
+      args: {},
+      agentId: "agent-1",
+      userId: "user-1",
+      organizationId: "org-1",
+      releaseState: { status: "active", claim },
+      releaseBinding: {
+        routerMode: "legacy",
+        effectiveInventoryFingerprint: "b".repeat(64),
+        releaseId: claim.releaseId,
+        releaseSequence: claim.releaseSequence,
+        snapshotDigest: claim.snapshotDigest,
+        authorizationExpiresAt: claim.expiresAt,
+        stableAuthorizationDigest,
+        eligibilityBindingDigest: stableToolEligibilityDigest({
+          mcpId: "github",
+          toolName: "create_issue",
+          effectiveInventoryFingerprint: "b".repeat(64),
+          stableAuthorizationDigest,
+        }),
+      },
+    }, 60);
+    const execute = mock(async () => ({ content: [], isError: false }));
+    const grant = mock(async () => undefined);
+    const response = await approve(
+      makeApp(execute, grant, undefined, [true, true, false]),
+      "cli-egress-revoke",
+    );
+    expect(response.status).toBe(200);
     expect(grant).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
   });

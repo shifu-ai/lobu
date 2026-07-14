@@ -207,6 +207,22 @@ function boundedRouterCount(value: number): number {
   return Math.floor(boundedRouterNumber(value));
 }
 
+function safeRouterIdentifier(value: string | undefined): string | undefined {
+  return value &&
+    value.length <= 200 &&
+    /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value)
+    ? value
+    : undefined;
+}
+
+function safeRouterExpiry(value: string | undefined): string | undefined {
+  if (!value || value.length !== 24) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+    ? value
+    : undefined;
+}
+
 export function buildToolRouterClarificationInstruction(
   trace: DynamicToolSelectionTrace
 ): string | null {
@@ -243,18 +259,31 @@ export function buildToolRouterJourneyEventInput(params: {
       effective_release_reason: selectionTrace.effectiveReleaseReason
         ? boundedRouterString(selectionTrace.effectiveReleaseReason, 80)
         : undefined,
-      release_environment: selectionTrace.releaseEnvironment,
-      release_agent_id: selectionTrace.releaseAgentId,
-      release_id: selectionTrace.releaseId,
+      release_environment: ["staging", "production", "unknown"].includes(
+        selectionTrace.releaseEnvironment ?? ""
+      )
+        ? selectionTrace.releaseEnvironment
+        : undefined,
+      release_agent_id: safeRouterIdentifier(selectionTrace.releaseAgentId),
+      release_id: safeRouterIdentifier(selectionTrace.releaseId),
       release_sequence: selectionTrace.releaseSequence,
-      release_snapshot_digest: selectionTrace.releaseSnapshotDigest?.slice(
-        0,
-        16
+      release_snapshot_digest: /^sha256:[0-9a-f]{64}$/.test(
+        selectionTrace.releaseSnapshotDigest ?? ""
+      )
+        ? selectionTrace.releaseSnapshotDigest!.slice(0, 16)
+        : undefined,
+      release_snapshot_expires_at: safeRouterExpiry(
+        selectionTrace.releaseSnapshotExpiresAt
       ),
-      release_snapshot_expires_at: selectionTrace.releaseSnapshotExpiresAt,
       release_snapshot_expired: selectionTrace.releaseSnapshotExpired,
       execution_intent: selectionTrace.executionIntent,
-      reminder_correlation_id: params.trace.turnId,
+      execution_clarification_required:
+        selectionTrace.executionClarificationRequired,
+      reminder_correlation_status: selectionTrace.routerStageCorrelationStatus,
+      schedule_id_status: selectionTrace.routerStageCorrelationStatus,
+      wake_run_id_status: selectionTrace.routerStageCorrelationStatus,
+      line_delivery_correlation_status:
+        selectionTrace.routerStageCorrelationStatus,
       cache_hit: selectionTrace.cacheHit,
       tool_count: boundedRouterCount(selectionTrace.totalTools),
       eligible_tool_count: boundedRouterCount(selectionTrace.eligibleToolCount),
@@ -425,6 +454,14 @@ export function initializeExternalTurnToolRouting(
     effectiveAllowedToolCount?: number;
     effectiveBlockedToolCount?: number;
     effectiveBlockedReasons?: string[];
+    releaseTrace?: {
+      environment: string;
+      agentId: string;
+      releaseId?: string;
+      releaseSequence?: number;
+      snapshotDigest?: string;
+      expiresAt?: string;
+    };
   },
   dependencies: Partial<ExternalTurnToolRoutingDependencies> = {}
 ): ExternalTurnToolRouting {
@@ -441,6 +478,7 @@ export function initializeExternalTurnToolRouting(
     effectiveAllowedToolCount,
     effectiveBlockedToolCount,
     effectiveBlockedReasons,
+    releaseTrace,
     ...rawSelectionParams
   } = params;
   const evictionCountBefore = toolRouterRetainedMemoryStats().evictions;
@@ -471,19 +509,22 @@ export function initializeExternalTurnToolRouting(
       effectiveReleaseReason,
       configuredRouterMode,
       routerGateReason,
-      releaseEnvironment: params.cacheContext?.environment,
-      releaseAgentId: params.cacheContext?.agentId,
-      releaseId: params.cacheContext?.releaseId,
-      releaseSequence: params.cacheContext?.releaseSequence,
-      releaseSnapshotDigest: params.cacheContext?.snapshotDigest,
-      releaseSnapshotExpiresAt: params.cacheContext?.snapshotExpiresAt,
-      releaseSnapshotExpired: params.cacheContext
-        ? Date.parse(params.cacheContext.snapshotExpiresAt) <= Date.now()
+      releaseEnvironment: releaseTrace?.environment,
+      releaseAgentId: releaseTrace?.agentId,
+      releaseId: releaseTrace?.releaseId,
+      releaseSequence: releaseTrace?.releaseSequence,
+      releaseSnapshotDigest: releaseTrace?.snapshotDigest,
+      releaseSnapshotExpiresAt: releaseTrace?.expiresAt,
+      releaseSnapshotExpired: releaseTrace?.expiresAt
+        ? Date.parse(releaseTrace.expiresAt) <= Date.now()
         : undefined,
       executionIntent: (() => {
         const intent = deriveTurnExecutionIntent(params.message);
         return `${intent.destination}:${intent.operation ?? "none"}:${intent.confidence}`;
       })(),
+      executionClarificationRequired: deriveTurnExecutionIntent(params.message)
+        .requiresClarification,
+      routerStageCorrelationStatus: "not_available_at_router_stage",
       effectiveAllowedToolCount,
       effectiveBlockedToolCount,
       effectiveBlockedReasons,
@@ -1893,6 +1934,23 @@ export async function runAISession(
         ...new Set(effectiveTools.blocked.map((entry) => entry.reason)),
       ],
       cacheContext: toolRouterCacheContext,
+      releaseTrace:
+        context.releaseState?.status === "active"
+          ? {
+              environment: context.releaseState.claim.environment,
+              agentId: context.releaseState.claim.agentId,
+              releaseId: context.releaseState.claim.releaseId,
+              releaseSequence: context.releaseState.claim.releaseSequence,
+              snapshotDigest: context.releaseState.claim.snapshotDigest,
+              expiresAt: context.releaseState.claim.expiresAt,
+            }
+          : {
+              environment:
+                context.releaseState?.status === "enrolled_inactive"
+                  ? context.releaseState.environment
+                  : "unknown",
+              agentId: agentId || context.agentId || "unknown",
+            },
       trace: shifuTrace,
     },
     runAISessionDependencies

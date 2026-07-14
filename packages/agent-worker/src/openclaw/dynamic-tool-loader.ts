@@ -79,6 +79,8 @@ export interface DynamicToolSelectionTrace {
   releaseSnapshotExpiresAt?: string;
   releaseSnapshotExpired?: boolean;
   executionIntent?: string;
+  executionClarificationRequired?: boolean;
+  routerStageCorrelationStatus?: "not_available_at_router_stage";
   effectiveAllowedToolCount?: number;
   effectiveBlockedToolCount?: number;
   effectiveBlockedReasons?: string[];

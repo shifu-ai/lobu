@@ -117,6 +117,9 @@ describe("runtime capability snapshot transport", () => {
     ["wrong user", { toolboxUserId: "other" }],
     ["wrong agent", { agentId: "other" }],
     ["expired", { expiresAt: new Date(Date.now() - 1_000).toISOString() }],
+    ["release id with control characters", { appliedReleaseId: "release\n3" }],
+    ["oversized release id", { appliedReleaseId: `r${"x".repeat(200)}` }],
+    ["non-canonical expiry", { expiresAt: "2099-01-01T00:00:00Z" }],
   ])("fails closed for %s", async (_name, overrides) => {
     const value = envelope(overrides);
     if ("extra" in overrides) {

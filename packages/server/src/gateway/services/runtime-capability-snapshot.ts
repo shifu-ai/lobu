@@ -164,11 +164,13 @@ export function validateRuntimeCapabilitySnapshot(
     record.toolboxUserId !== request.toolboxUserId ||
     record.agentId !== request.agentId ||
 		typeof record.appliedReleaseId !== "string" ||
-		!record.appliedReleaseId ||
+		!safeReleaseId(record.appliedReleaseId) ||
 		!Number.isInteger(record.appliedReleaseSequence) ||
 		(record.appliedReleaseSequence as number) <= 0 ||
 		typeof record.expiresAt !== "string" ||
+		record.expiresAt.length !== 24 ||
 		!Number.isFinite(Date.parse(record.expiresAt)) ||
+    new Date(Date.parse(record.expiresAt)).toISOString() !== record.expiresAt ||
     Date.parse(record.expiresAt) <= now.getTime() ||
 		Date.parse(record.expiresAt) > now.getTime() + 60_000 ||
 		typeof record.snapshotDigest !== "string" ||
@@ -188,4 +190,8 @@ export function validateRuntimeCapabilitySnapshot(
 	if (snapshotDigest !== expected)
 		throw new Error("runtime capability snapshot digest mismatch");
   return record as unknown as RuntimeCapabilitySnapshot;
+}
+
+function safeReleaseId(value: string): boolean {
+  return value.length <= 200 && /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value);
 }

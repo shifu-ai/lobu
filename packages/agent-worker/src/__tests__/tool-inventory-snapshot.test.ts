@@ -329,6 +329,30 @@ describe("external-turn immutable tool inventory snapshots", () => {
     expect(expiredAgain).not.toBe(expired);
   });
 
+  test("expiry reaccess removes snapshot accounting exactly once", async () => {
+    clearToolInventorySnapshotCacheForTests();
+    const source = { school: [tool("search_students", "Find students")] };
+    const context = {
+      environment: "production",
+      agentId: "shifu-u-1",
+      releaseId: "release-expiring",
+      releaseSequence: 1,
+      snapshotDigest: `sha256:${"a".repeat(64)}`,
+      snapshotExpiresAt: new Date(Date.now() + 25).toISOString(),
+      effectiveInventoryFingerprint: "b".repeat(64),
+      effectivePolicyFingerprint: "c".repeat(64),
+      grantProjectionFingerprint: "d".repeat(64),
+    };
+    snapshotToolsByMcp(source, { cacheContext: context });
+    expect(toolInventorySnapshotCacheStats().estimatedBytes).toBeGreaterThan(0);
+    await Bun.sleep(35);
+    snapshotToolsByMcp(structuredClone(source), { cacheContext: context });
+    expect(toolInventorySnapshotCacheStats()).toMatchObject({
+      entries: 0,
+      estimatedBytes: 0,
+    });
+  });
+
   test("reuses production initialization caches while applying authorization per turn", () => {
     clearToolInventorySnapshotCacheForTests();
     clearToolRetrievalIndexCacheForTests();
