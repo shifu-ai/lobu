@@ -2,7 +2,14 @@ import type { McpToolDef } from "@lobu/core";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type { ToolContentResult } from "../shared/tool-implementations";
-import { catalogEntryForTool, type ToolCatalogEntry } from "./tool-catalog";
+import {
+  catalogEntryForTool,
+  isReservedAutomationToolName,
+  isTrustedShifuCalendarResolver,
+  isTrustedShifuToolMetadataSource,
+  type McpCatalogProvenanceById,
+  type ToolCatalogEntry,
+} from "./tool-catalog";
 import { getOrBuildToolDescriptor, toolIdentityKey } from "./tool-descriptor";
 import {
   getOrBuildToolRetrievalIndex,
@@ -44,6 +51,8 @@ export interface BuildRuntimeToolCatalogParams {
   providerVisibleTools?: Record<string, McpToolDef[]>;
   allowedToolNames?: Iterable<string>;
   clarificationBlockedToolKeys?: Iterable<string>;
+  mcpProvenanceById?: McpCatalogProvenanceById;
+  trustedShifuToolboxOrigins?: ReadonlySet<string>;
 }
 
 export interface SearchRuntimeToolCatalogParams {
@@ -215,9 +224,31 @@ export function buildRuntimeToolCatalog(
   let originalIndex = 0;
   for (const [mcpId, tools] of Object.entries(params.allTools)) {
     for (const tool of tools) {
-      const entry = catalogEntryForTool(tool, originalIndex, mcpId);
+      const entry = catalogEntryForTool(tool, originalIndex, mcpId, {
+        provenance: params.mcpProvenanceById?.[mcpId],
+        trustedOrigins: params.trustedShifuToolboxOrigins,
+      });
       originalIndex++;
       if (!entry.name) continue;
+      if (
+        isReservedAutomationToolName(entry.name) &&
+        !isTrustedShifuToolMetadataSource({
+          mcpId,
+          provenance: params.mcpProvenanceById?.[mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
+      )
+        continue;
+      if (
+        entry.name === "resolve_calendar_date" &&
+        !isTrustedShifuCalendarResolver({
+          tool,
+          mcpId,
+          provenance: params.mcpProvenanceById?.[mcpId],
+          trustedOrigins: params.trustedShifuToolboxOrigins,
+        })
+      )
+        continue;
       const directVisibleThisTurn = selectedToolKeys.has(
         catalogToolKey(mcpId, entry.name),
       );

@@ -42,6 +42,10 @@ import { classifyToolCallFailure } from './tool-call-classifier';
 import { buildMcpConnectUrl } from '../gateway/auth/mcp/connect-link-url';
 import { emitAgentObsEvent } from '@lobu/core';
 import { parseShifuTraceHeaders } from '../observability/trace-context';
+import {
+  AgentSettingsManagedByReleaseError,
+  patchLegacyAgentSettings,
+} from './legacy-agent-settings-service';
 
 const routes = new Hono<{ Bindings: Env }>();
 const toolboxMcpRoutes = new Hono<{ Bindings: Env }>();
@@ -2111,6 +2115,29 @@ routes.patch('/:agentId/config', async (c) => {
   const { authProfiles, ...settingsUpdates } = updates as {
     authProfiles?: AuthProfile[];
   } & Record<string, unknown>;
+
+  if (authProfiles !== undefined && Object.keys(settingsUpdates).length > 0) {
+    return c.json(
+      {
+        error: 'agent_settings_auth_profiles_split_required',
+        error_description:
+          'Agent settings and authProfiles must be updated in separate requests',
+      },
+      409
+    );
+  }
+
+  const organizationId = c.get('organizationId');
+  if (!organizationId) return c.json({ error: 'Organization required' }, 401);
+  try {
+    await patchLegacyAgentSettings(organizationId, agentId, settingsUpdates);
+  } catch (error) {
+    if (error instanceof AgentSettingsManagedByReleaseError) {
+      return c.json({ error: error.code, error_description: error.message }, 409);
+    }
+    throw error;
+  }
+
   if (Array.isArray(authProfiles)) {
     const user = c.get('user');
     if (!user?.id) {
@@ -2137,7 +2164,6 @@ routes.patch('/:agentId/config', async (c) => {
     }
   }
 
-  await configStore.updateSettings(agentId, settingsUpdates);
   return c.json({ success: true });
 });
 

@@ -17,6 +17,20 @@
  * no cross-talk.
  */
 import { mock } from 'bun:test';
+import {
+  agentExistsInOrganization as importedAgentExistsInOrganization,
+  createPostgresAgentConfigStore as importedCreatePostgresAgentConfigStore,
+  createPostgresAgentConnectionStore as importedCreatePostgresAgentConnectionStore,
+  touchAgentLastUsed as importedTouchAgentLastUsed,
+} from '../../stores/postgres-stores.js';
+
+// Bun rewrites ESM live bindings when mock.module replaces a dependency.
+// Copy the real exports before any mock is installed so the hybrid delegate
+// retains an unmocked implementation.
+const realAgentExistsInOrganization = importedAgentExistsInOrganization;
+const createRealPostgresAgentConfigStore = importedCreatePostgresAgentConfigStore;
+const createRealPostgresAgentConnectionStore = importedCreatePostgresAgentConnectionStore;
+const realTouchAgentLastUsed = importedTouchAgentLastUsed;
 
 export interface AuthStash {
   user: { id: string; name: string; email: string; emailVerified: boolean } | null;
@@ -56,7 +70,22 @@ export const fakeRouteSettings = new Map<string, any>();
 export const fakeRouteConnections = new Map<string, any>();
 export const routeStoreStash = {
   failSaveConnection: false,
+  useRealStores: false,
 };
+
+export function useRealRouteStores(): void {
+  routeStoreStash.useRealStores = true;
+}
+
+function switchingStore(fakeStore: any, realStore: any): any {
+  return new Proxy(fakeStore, {
+    get(_target, property) {
+      const store = routeStoreStash.useRealStores ? realStore : fakeStore;
+      const value = store[property];
+      return typeof value === 'function' ? value.bind(store) : value;
+    },
+  });
+}
 
 async function readAgentMetadataFromDb(agentId: string): Promise<any | null> {
   const organizationId = authStash.organizationId;
@@ -140,16 +169,18 @@ async function readConnectionFromDb(connectionId: string): Promise<any | null> {
   };
 }
 
-let installed = false;
+let authMockInstalled = false;
+let routeMocksInstalled = false;
 
 /**
- * Idempotent: the module mocks are installed once per process, bound to the
- * shared stashes above. Call at the top of every test file that imports
- * `../agent-routes.js` (directly or transitively), BEFORE that import runs.
+ * Install the shared auth mock independently from the rest of the route
+ * harness. Suites that can evaluate the real auth dependency before
+ * `agent-routes` is imported call this at module setup time, so Bun's module
+ * cache never captures the production middleware for this test process.
  */
-export function installRouteTestMocks(): void {
-  if (installed) return;
-  installed = true;
+export function installRouteAuthTestMock(): void {
+  if (authMockInstalled) return;
+  authMockInstalled = true;
 
   // Resolves to src/auth/middleware — the specifier agent-routes.ts imports
   // as `../auth/middleware`.
@@ -170,6 +201,18 @@ export function installRouteTestMocks(): void {
     // passthrough so importing files that destructure it still get a function.
     requireAuth: async (_c: any, next: any) => next(),
   }));
+}
+
+/**
+ * Idempotent: the module mocks are installed once per process, bound to the
+ * shared stashes above. Call at the top of every test file that imports
+ * `../agent-routes.js` (directly or transitively), BEFORE that import runs.
+ */
+export function installRouteTestMocks(): void {
+  routeStoreStash.useRealStores = false;
+  installRouteAuthTestMock();
+  if (routeMocksInstalled) return;
+  routeMocksInstalled = true;
 
   // Resolves to src/lobu/gateway — imported by agent-routes.ts as `./gateway`.
   mock.module('../../gateway', () => ({
@@ -188,10 +231,16 @@ export function installRouteTestMocks(): void {
   mock.module('../../stores/postgres-stores', () => ({
     AGENT_ID_PATTERN: /^[a-z][a-z0-9-]{2,59}$/,
     isValidAgentId: (agentId: string) => /^[a-z][a-z0-9-]{2,59}$/.test(agentId),
-    agentExistsInOrganization: async (_organizationId: string, agentId: string) =>
-      fakeRouteAgents.has(agentId),
-    touchAgentLastUsed: async () => {},
-    createPostgresAgentConfigStore: () => ({
+    agentExistsInOrganization: async (organizationId: string, agentId: string) =>
+      routeStoreStash.useRealStores
+        ? realAgentExistsInOrganization(organizationId, agentId)
+        : fakeRouteAgents.has(agentId),
+    touchAgentLastUsed: async (...args: Parameters<typeof realTouchAgentLastUsed>) => {
+      if (routeStoreStash.useRealStores) {
+        await realTouchAgentLastUsed(...args);
+      }
+    },
+    createPostgresAgentConfigStore: () => switchingStore({
       getMetadata: async (agentId: string) =>
         fakeRouteAgents.get(agentId) ?? (await readAgentMetadataFromDb(agentId)),
       saveMetadata: async (agentId: string, metadata: any) => {
@@ -253,8 +302,8 @@ export function installRouteTestMocks(): void {
       deleteMetadata: async (agentId: string) => {
         fakeRouteAgents.delete(agentId);
       },
-    }),
-    createPostgresAgentConnectionStore: () => ({
+    }, createRealPostgresAgentConfigStore()),
+    createPostgresAgentConnectionStore: () => switchingStore({
       getConnection: async (connectionId: string) => {
         const connection =
           fakeRouteConnections.get(connectionId) ?? (await readConnectionFromDb(connectionId));
@@ -317,6 +366,6 @@ export function installRouteTestMocks(): void {
       deleteConnection: async (connectionId: string) => {
         fakeRouteConnections.delete(connectionId);
       },
-    }),
+    }, createRealPostgresAgentConnectionStore()),
   }));
 }

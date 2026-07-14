@@ -15,7 +15,10 @@
  */
 import type { McpStatus, McpToolDef } from "@lobu/core";
 import { createLogger } from "@lobu/core";
-import type { GatewayParams } from "../shared/tool-implementations";
+import type {
+  ExpectedMcpConfigIdentity,
+  GatewayParams,
+} from "../shared/tool-implementations";
 import {
   callMcpTool,
   checkMcpLogin,
@@ -65,6 +68,12 @@ export interface McpRuntimeState {
 
 export interface McpRuntimeRef {
   current: McpRuntimeState;
+  /** Revalidate tool visibility immediately before help/schema/call surfaces. */
+  isToolInvocationAllowed?: (
+    mcpId: string,
+    tool: McpToolDef,
+    state: McpRuntimeState
+  ) => boolean;
   /** Re-fetch session context and return a fresh snapshot, or `null` on failure. */
   refresh?: () => Promise<McpRuntimeState | null>;
 }
@@ -128,9 +137,14 @@ function capToolStdout(
 
 function renderHelp(
   mcpId: string,
-  state: McpRuntimeState
+  ref: McpRuntimeRef
 ): { stdout: string; exitCode: number } {
-  const tools = state.mcpTools[mcpId] ?? [];
+  const state = ref.current;
+  const tools = (state.mcpTools[mcpId] ?? []).filter(
+    (tool) =>
+      !ref.isToolInvocationAllowed ||
+      ref.isToolInvocationAllowed(mcpId, tool, state)
+  );
   const status = state.mcpStatus.find((s) => s.id === mcpId);
   const contextPrefix = state.mcpContext[mcpId];
   const lines: string[] = [];
@@ -170,9 +184,32 @@ function renderHelp(
 function findTool(
   mcpId: string,
   toolName: string,
+  ref: McpRuntimeRef,
   state: McpRuntimeState
 ): McpToolDef | undefined {
-  return state.mcpTools[mcpId]?.find((t) => t.name === toolName);
+  const tool = state.mcpTools[mcpId]?.find(
+    (candidate) => candidate.name === toolName
+  );
+  if (!tool) return undefined;
+  return !ref.isToolInvocationAllowed ||
+    ref.isToolInvocationAllowed(mcpId, tool, state)
+    ? tool
+    : undefined;
+}
+
+function expectedMcpIdentityFor(
+  mcpId: string,
+  state: McpRuntimeState
+): ExpectedMcpConfigIdentity | undefined {
+  const status = state.mcpStatus.find((candidate) => candidate.id === mcpId);
+  if (!status?.upstreamOrigin || !status.configSource || !status.configDigest) {
+    return undefined;
+  }
+  return {
+    upstreamOrigin: status.upstreamOrigin,
+    configSource: status.configSource,
+    configDigest: status.configDigest,
+  };
 }
 
 function blockedToolResult(
@@ -223,10 +260,9 @@ export function buildMcpServerHandler(
 ): McpCliCommand["execute"] {
   return async (args, ctx) => {
     const subcommand = args[0];
-    const state = ref.current;
 
     if (!subcommand || subcommand === "--help" || subcommand === "-h") {
-      const { stdout, exitCode } = renderHelp(mcpId, state);
+      const { stdout, exitCode } = renderHelp(mcpId, ref);
       return { stdout, stderr: "", exitCode };
     }
 
@@ -236,7 +272,8 @@ export function buildMcpServerHandler(
 
     // <tool> --schema
     if (args[1] === "--schema") {
-      const tool = findTool(mcpId, subcommand, state);
+      const state = ref.current;
+      const tool = findTool(mcpId, subcommand, ref, state);
       if (!tool) {
         return {
           stdout: "",
@@ -253,7 +290,8 @@ export function buildMcpServerHandler(
     }
 
     // <tool> [json]
-    const tool = findTool(mcpId, subcommand, state);
+    const state = ref.current;
+    const tool = findTool(mcpId, subcommand, ref, state);
     if (!tool) {
       return {
         stdout: "",
@@ -279,7 +317,16 @@ export function buildMcpServerHandler(
     }
 
     try {
-      const result = await deps.callTool(gw, mcpId, subcommand, parsed.payload);
+      const expectedMcpIdentity = expectedMcpIdentityFor(mcpId, state);
+      const result = await deps.callTool(
+        gw,
+        mcpId,
+        subcommand,
+        parsed.payload,
+        {
+          ...(expectedMcpIdentity ? { expectedMcpIdentity } : {}),
+        }
+      );
       const text = result.content
         .filter((c) => c.type === "text")
         .map((c) => c.text)

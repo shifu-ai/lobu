@@ -163,7 +163,7 @@ export async function createTestAgent(options: {
   ownerUserId?: string;
 }): Promise<TestAgent> {
   const sql = getTestDb();
-  const agentId = options.agentId ?? `agent-${generateSecureToken(8).toLowerCase()}`;
+  const agentId = options.agentId ?? `agent-${generateSecureToken(8).toLowerCase().replace(/_/g, '-')}`;
   const name = options.name ?? `Test Agent ${agentId.slice(-4)}`;
   const ownerUserId = options.ownerUserId ?? `user_${generateSecureToken(8)}`;
 

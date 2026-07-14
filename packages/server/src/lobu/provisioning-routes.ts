@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import type { AgentSettings, StoredConnection } from "@lobu/core";
 import { type Context, Hono } from "hono";
-import { getDb } from "../db/client.js";
+import { bodyLimit } from "hono/body-limit";
 import type { McpConfigService } from "../gateway/auth/mcp/config-service.js";
 import { startAuthCodeFlow } from "../gateway/auth/mcp/oauth-flow.js";
 import { GrantStore } from "../gateway/permissions/grant-store.js";
@@ -21,6 +21,14 @@ import {
 import type { WritableSecretStore } from "../gateway/secrets/index.js";
 import type { Env } from "../index";
 import {
+	AgentReleaseError,
+	createAgentReleaseService,
+} from "./agent-release-service.js";
+import {
+	AgentSettingsManagedByReleaseError,
+	provisionLegacyAgent,
+} from "./legacy-agent-settings-service.js";
+import {
 	validateExpectedGrantPatterns,
 	verifyRuntimeGrantPatterns,
 } from "./runtime-grant-verifier.js";
@@ -29,9 +37,11 @@ import {
 	createPostgresAgentConfigStore,
 	createPostgresAgentConnectionStore,
 } from "./stores/postgres-stores";
+import { parseStrictJsonBytes, StrictJsonError } from "./strict-json-parser.js";
 
 const SHIFU_USER_AGENT_ID_PATTERN = /^shifu-u-[a-z0-9-]+$/;
 const OAUTH_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
+const MAX_AGENT_RELEASE_BODY_BYTES = 1024 * 1024;
 const SHIFU_UI_MANAGED_MCP_IDS = new Set([
 	"google_workspace",
 	"notion",
@@ -58,6 +68,15 @@ interface ProvisioningRoutesOptions {
 	mcpConfigService?: McpConfigService;
 	secretStore?: WritableSecretStore;
 	publicGatewayUrl?: string;
+	agentReleaseTrustedPublicKeysJson?: string;
+	agentReleaseEvidenceSigningPrivateKeysJson?: string;
+	agentReleaseEnvironment?: string;
+	legacyProvisioningHooks?: {
+		afterAgentLock?: () => Promise<void>;
+	};
+	agentReleaseTransactionHooks?: {
+		afterAgentLock?: () => Promise<void>;
+	};
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -172,46 +191,6 @@ function deterministicToolboxOwnerEmail(
 	return `toolbox-owner-${digest}@toolbox.local`;
 }
 
-async function ensureToolboxOwnerMembership(
-	organizationId: string,
-	ownerUserId: string,
-): Promise<{ ensured: true; role: string }> {
-	const sql = getDb();
-	await sql`
-		INSERT INTO "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
-		VALUES (
-			${ownerUserId},
-			${ownerUserId},
-			${deterministicToolboxOwnerEmail(organizationId, ownerUserId)},
-			true,
-			NOW(),
-			NOW()
-		)
-		ON CONFLICT (id) DO NOTHING
-	`;
-	await sql`
-		INSERT INTO "member" (id, "organizationId", "userId", role, "createdAt")
-		VALUES (
-			${deterministicMembershipId(organizationId, ownerUserId)},
-			${organizationId},
-			${ownerUserId},
-			'member',
-			NOW()
-		)
-		ON CONFLICT ("organizationId", "userId") DO NOTHING
-	`;
-
-	const rows = await sql<{ role: string }>`
-		SELECT role
-		FROM "member"
-		WHERE "organizationId" = ${organizationId}
-		  AND "userId" = ${ownerUserId}
-		LIMIT 1
-	`;
-
-	return { ensured: true, role: String(rows[0]?.role ?? "member") };
-}
-
 function redirectUri(publicGatewayUrl: string): string {
 	return `${publicGatewayUrl.replace(/\/+$/, "")}/mcp/oauth/callback`;
 }
@@ -238,31 +217,6 @@ async function ensureUsableOAuthCredential(
 	return refreshed;
 }
 
-async function syncProvisioningAgentUsers(params: {
-	organizationId: string;
-	agentId: string;
-	ownerUserId: string;
-	patUserId: string;
-}): Promise<void> {
-	const sql = getDb();
-	await sql.begin(async (tx) => {
-		await tx`
-			DELETE FROM agent_users
-			WHERE organization_id = ${params.organizationId}
-			  AND agent_id = ${params.agentId}
-			  AND platform = 'toolbox'
-			  AND user_id <> ${params.ownerUserId}
-		`;
-		await tx`
-			INSERT INTO agent_users (organization_id, agent_id, platform, user_id, created_at)
-			VALUES
-				(${params.organizationId}, ${params.agentId}, 'toolbox', ${params.ownerUserId}, NOW()),
-				(${params.organizationId}, ${params.agentId}, 'external', ${params.patUserId}, NOW())
-			ON CONFLICT (organization_id, agent_id, platform, user_id) DO NOTHING
-		`;
-	});
-}
-
 async function syncProvisioningGrants(
 	agentId: string,
 	settings: Omit<AgentSettings, "updatedAt">,
@@ -280,6 +234,17 @@ export function createProvisioningRoutes(
 	options: ProvisioningRoutesOptions = {},
 ): Hono<{ Bindings: Env }> {
 	const provisioningRoutes = new Hono<{ Bindings: Env }>();
+	const agentReleaseService = createAgentReleaseService({
+		trustedPublicKeysJson:
+			options.agentReleaseTrustedPublicKeysJson ??
+			process.env.AGENT_RELEASE_TRUSTED_PUBLIC_KEYS_JSON,
+		evidenceSigningPrivateKeysJson:
+			options.agentReleaseEvidenceSigningPrivateKeysJson ??
+			process.env.AGENT_RELEASE_EVIDENCE_SIGNING_PRIVATE_KEYS_JSON,
+		expectedEnvironment:
+			options.agentReleaseEnvironment ?? process.env.AGENT_RELEASE_ENVIRONMENT,
+		transactionHooks: options.agentReleaseTransactionHooks,
+	});
 
 	provisioningRoutes.post("/agents", async (c) => {
 		const denied = requireAdminPat(c);
@@ -341,43 +306,43 @@ export function createProvisioningRoutes(
 			);
 		}
 
-		const existing = await configStore.getMetadata(agentId);
-		const created = !existing;
-		const membership = await ensureToolboxOwnerMembership(
-			organizationId,
-			ownerUserId,
-		);
-		await configStore.saveMetadata(agentId, {
-			agentId,
-			name,
-			description,
-			owner: { platform: "toolbox", userId: ownerUserId },
-			organizationId,
-			isWorkspaceAgent: false,
-			createdAt: existing?.createdAt ?? Date.now(),
-			lastUsedAt: existing?.lastUsedAt,
-		});
-		await configStore.saveSettings(agentId, {
-			...settings,
-			updatedAt: Date.now(),
-		});
-		await syncProvisioningAgentUsers({
-			organizationId,
-			agentId,
-			ownerUserId,
-			patUserId: user.id,
-		});
+		let provisioned: Awaited<ReturnType<typeof provisionLegacyAgent>>;
+		try {
+			provisioned = await provisionLegacyAgent({
+				organizationId,
+				agentId,
+				name,
+				description,
+				ownerUserId,
+				patUserId: user.id,
+				membershipId: deterministicMembershipId(organizationId, ownerUserId),
+				ownerEmail: deterministicToolboxOwnerEmail(
+					organizationId,
+					ownerUserId,
+				),
+				settings,
+				transactionHooks: options.legacyProvisioningHooks,
+			});
+		} catch (error) {
+			if (error instanceof AgentSettingsManagedByReleaseError) {
+				return c.json(
+					{ error: error.code, error_description: error.message },
+					409,
+				);
+			}
+			throw error;
+		}
 		await syncProvisioningGrants(agentId, settings, organizationId);
 
 		return c.json(
 			{
 				ok: true,
 				agentId,
-				created,
-				membership,
+				created: provisioned.created,
+				membership: provisioned.membership,
 				revisionRef: `lobu:${agentId}`,
 			},
-			created ? 201 : 200,
+			provisioned.created ? 201 : 200,
 		);
 	});
 
@@ -397,6 +362,100 @@ export function createProvisioningRoutes(
 			agentId,
 			settings,
 		});
+	});
+
+	provisioningRoutes.put(
+		"/agents/:agentId/managed-settings",
+		bodyLimit({
+			maxSize: MAX_AGENT_RELEASE_BODY_BYTES,
+			onError: (c) =>
+				c.json(
+					{
+						error: "agent_release_body_too_large",
+						error_description: "Agent release body exceeds one MiB",
+					},
+					413,
+				),
+		}),
+		async (c) => {
+			const denied = requireAdminPat(c);
+			if (denied) return denied;
+
+			const organizationId = c.get("organizationId") as string | null;
+			if (!organizationId)
+				return c.json({ error: "Authentication required" }, 401);
+			const agentId = c.req.param("agentId")?.trim() ?? "";
+			const agentIdError = validateShifuAgentId(agentId);
+			if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+			let command: unknown;
+			try {
+				command = parseStrictJsonBytes(
+					new Uint8Array(await c.req.arrayBuffer()),
+				);
+			} catch (error) {
+				if (error instanceof StrictJsonError) {
+					return c.json(
+						{
+							error:
+								error.code === "duplicate_json_member"
+									? "agent_release_duplicate_json_member"
+									: "invalid_json",
+							error_description: error.message,
+						},
+						400,
+					);
+				}
+				throw error;
+			}
+
+			try {
+				const result = await agentReleaseService.apply({
+					organizationId,
+					agentId,
+					command,
+				});
+				return c.json(result, 200);
+			} catch (error) {
+				if (error instanceof AgentReleaseError) {
+					return c.json(
+						{ error: error.code, error_description: error.message },
+						error.status,
+					);
+				}
+				throw error;
+			}
+		},
+	);
+
+	provisioningRoutes.get("/agents/:agentId/managed-settings", async (c) => {
+		const denied = requireAdminPat(c);
+		if (denied) return denied;
+
+		const organizationId = c.get("organizationId") as string | null;
+		if (!organizationId)
+			return c.json({ error: "Authentication required" }, 401);
+		const agentId = c.req.param("agentId")?.trim() ?? "";
+		const agentIdError = validateShifuAgentId(agentId);
+		if (agentIdError) return c.json({ error: agentIdError }, 400);
+
+		try {
+			const evidence = await agentReleaseService.getEvidence({
+				organizationId,
+				agentId,
+			});
+			if (!evidence)
+				return c.json({ error: "agent_release_evidence_not_found" }, 404);
+			return c.json(evidence, 200);
+		} catch (error) {
+			if (error instanceof AgentReleaseError) {
+				return c.json(
+					{ error: error.code, error_description: error.message },
+					error.status,
+				);
+			}
+			throw error;
+		}
 	});
 
 	provisioningRoutes.post(
@@ -637,7 +696,8 @@ export function createProvisioningRoutes(
 			if (!userId) return c.json({ error: "userId is required" }, 400);
 
 			const organizationId = c.get("organizationId") as string | null;
-			if (!organizationId) return c.json({ error: "Authentication required" }, 401);
+			if (!organizationId)
+				return c.json({ error: "Authentication required" }, 401);
 
 			if (!(await isOwnedByToolboxUser(agentId, userId))) {
 				return c.json({ error: "agent_owner_mismatch" }, 404);
@@ -667,13 +727,15 @@ export function createProvisioningRoutes(
 					lobuConnectionRef: null,
 				});
 			}
-			if (!(await ensureUsableOAuthCredential(
-				options.secretStore,
-				agentId,
-				userId,
-				mcpId,
-				credential,
-			))) {
+			if (
+				!(await ensureUsableOAuthCredential(
+					options.secretStore,
+					agentId,
+					userId,
+					mcpId,
+					credential,
+				))
+			) {
 				return c.json({
 					ok: true,
 					agentId,

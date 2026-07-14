@@ -19,6 +19,11 @@
  */
 
 import { afterEach, describe, expect, mock, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { RESERVED_AUTOMATION_TOOL_NAMES } from "@lobu/core";
 import { Agent, type AgentTool } from "@mariozechner/pi-agent-core";
 import type {
   AssistantMessage,
@@ -28,23 +33,19 @@ import type {
 import { Type } from "@sinclair/typebox";
 import { createMcpToolDefinitions } from "../openclaw/custom-tools";
 import { selectMcpToolsByMcpForTurn } from "../openclaw/dynamic-tool-loader";
+import { OpenClawProgressProcessor } from "../openclaw/processor";
 import {
   emitWorkerToolsRegisteredObsEvent,
   initializeExternalTurnToolRouting,
   runAISession,
 } from "../openclaw/session-runner";
-import { OpenClawProgressProcessor } from "../openclaw/processor";
+import type { GatewayParams } from "../shared/tool-implementations";
 import {
   askUserQuestion,
   callMcpTool,
   getChannelHistory,
   uploadUserFile,
 } from "../shared/tool-implementations";
-import type { GatewayParams } from "../shared/tool-implementations";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const originalFetch = globalThis.fetch;
 const originalObsEnv = {
@@ -79,7 +80,7 @@ const ROUTER_LOOP_MODEL: Model<"openai-completions"> = {
 
 function routerLoopMessage(
   content: AssistantMessage["content"],
-  stopReason: AssistantMessage["stopReason"]
+  stopReason: AssistantMessage["stopReason"],
 ): AssistantMessage {
   return {
     role: "assistant",
@@ -180,7 +181,7 @@ describe("callMcpTool", () => {
           content: [{ type: "text", text: "the answer" }],
           isError: false,
         });
-      }
+      },
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "lobu", "search_memory", {
@@ -192,12 +193,46 @@ describe("callMcpTool", () => {
     expect(capturedAuth).toBe("Bearer tok-abc");
   });
 
+  test.each(
+    RESERVED_AUTOMATION_TOOL_NAMES,
+  )("binds the discovery config identity to fake gateway call for %s", async (toolName) => {
+    let capturedHeaders = new Headers();
+    globalThis.fetch = mock(async (_input, init) => {
+      capturedHeaders = new Headers(init?.headers);
+      return Response.json({ content: [{ type: "text", text: "ok" }] });
+    }) as unknown as typeof fetch;
+
+    await callMcpTool(
+      gw,
+      "shifu-toolbox",
+      toolName,
+      {},
+      {
+        expectedMcpIdentity: {
+          upstreamOrigin: "https://mcp.shifu-ai.org",
+          configSource: "agent",
+          configDigest: "digest-123",
+        },
+      },
+    );
+
+    expect(capturedHeaders.get("x-lobu-mcp-expected-origin")).toBe(
+      "https://mcp.shifu-ai.org",
+    );
+    expect(capturedHeaders.get("x-lobu-mcp-expected-config-source")).toBe(
+      "agent",
+    );
+    expect(capturedHeaders.get("x-lobu-mcp-expected-config-digest")).toBe(
+      "digest-123",
+    );
+  });
+
   test("isError=true from proxy: wrapped in Error prefix", async () => {
     globalThis.fetch = mock(async () =>
       Response.json({
         content: [{ type: "text", text: "not allowed" }],
         isError: true,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "gh", "delete_repo", {
@@ -216,7 +251,7 @@ describe("callMcpTool", () => {
           { type: "text", text: "vision tool failed" },
         ],
         isError: true,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "vision", "read_image", {});
@@ -230,8 +265,8 @@ describe("callMcpTool", () => {
     globalThis.fetch = mock(async () =>
       Response.json(
         { error: "Tool approval required", content: [], isError: true },
-        { status: 403 }
-      )
+        { status: 403 },
+      ),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "gh", "create_issue", {});
@@ -244,7 +279,7 @@ describe("callMcpTool", () => {
       Response.json({
         content: [],
         isError: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "lobu", "noop_tool", {});
@@ -256,8 +291,8 @@ describe("callMcpTool", () => {
     globalThis.fetch = mock(async () =>
       Response.json(
         { content: [], isError: true, error: "Upstream timed out" },
-        { status: 502 }
-      )
+        { status: 502 },
+      ),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "sentry", "resolve_issue", {});
@@ -279,8 +314,8 @@ describe("callMcpTool", () => {
     globalThis.fetch = mock(async () =>
       Response.json(
         { error: "MCP server 'ghost' not found", content: [], isError: true },
-        { status: 404 }
-      )
+        { status: 404 },
+      ),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "ghost", "missing_tool", {});
@@ -296,7 +331,7 @@ describe("callMcpTool", () => {
           { type: "text", text: "line two" },
         ],
         isError: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "lobu", "multi_content", {});
@@ -314,7 +349,7 @@ describe("callMcpTool", () => {
           { type: "text", text: "line two" },
         ],
         isError: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "lobu", "multi_content", {});
@@ -329,7 +364,7 @@ describe("callMcpTool", () => {
       Response.json({
         content: [{ type: "image", mimeType: "image/png", data: "YWJjZA==" }],
         isError: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "vision", "read_image", {});
@@ -348,7 +383,7 @@ describe("callMcpTool", () => {
           { type: "text", text: "after" },
         ],
         isError: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "lobu", "mixed_content", {});
@@ -373,7 +408,7 @@ describe("callMcpTool", () => {
           { type: "image", mimeType: "image/jpeg", data: "ZGF0YQ==" },
         ],
         isError: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "lobu", "mixed_content", {});
@@ -392,7 +427,7 @@ describe("callMcpTool", () => {
         Response.json({
           content: [{ type: "text", text: "X".repeat(120_000) }],
           isError: false,
-        })
+        }),
       ) as unknown as typeof fetch;
 
       const result = await callMcpTool(localGw, "docs", "read_big_doc", {});
@@ -416,7 +451,7 @@ describe("callMcpTool", () => {
           content: [{ type: "text", text: "ok" }],
           isError: false,
         });
-      }
+      },
     ) as unknown as typeof fetch;
 
     await callMcpTool(gw, "lobu", "search_memory", { q: "hello" });
@@ -433,7 +468,7 @@ describe("callMcpTool", () => {
           content: [{ type: "text", text: "ok" }],
           isError: false,
         });
-      }
+      },
     ) as unknown as typeof fetch;
 
     await callMcpTool(gw, "lobu", "search_memory", {});
@@ -449,7 +484,7 @@ describe("callMcpTool", () => {
 describe("askUserQuestion edge cases", () => {
   test("gateway HTTP error surfaced as error text", async () => {
     globalThis.fetch = mock(async () =>
-      Response.json({ error: "channel not found" }, { status: 404 })
+      Response.json({ error: "channel not found" }, { status: 404 }),
     ) as unknown as typeof fetch;
 
     const result = await askUserQuestion(gw, {
@@ -466,7 +501,7 @@ describe("askUserQuestion edge cases", () => {
       async (_input: RequestInfo | URL, init?: RequestInit) => {
         body = JSON.parse(String(init?.body ?? "{}"));
         return Response.json({ id: "q-1" });
-      }
+      },
     ) as unknown as typeof fetch;
 
     await askUserQuestion(gw, {
@@ -489,7 +524,7 @@ describe("uploadUserFile edge cases", () => {
     writeFileSync(filePath, "content");
 
     globalThis.fetch = mock(
-      async () => new Response("Forbidden", { status: 403 })
+      async () => new Response("Forbidden", { status: 403 }),
     ) as unknown as typeof fetch;
 
     try {
@@ -510,7 +545,7 @@ describe("uploadUserFile edge cases", () => {
     try {
       const result = await uploadUserFile(gw, { file_path: tempDir });
       expect(extractText(result as any)).toContain(
-        "not found or is not a file"
+        "not found or is not a file",
       );
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -542,7 +577,7 @@ describe("getChannelHistory edge cases", () => {
         messages: [],
         nextCursor: null,
         hasMore: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await getChannelHistory(gw, { limit: 10 });
@@ -562,7 +597,7 @@ describe("getChannelHistory edge cases", () => {
         ],
         nextCursor: null,
         hasMore: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await getChannelHistory(gw, {});
@@ -584,7 +619,7 @@ describe("getChannelHistory edge cases", () => {
         ],
         nextCursor: null,
         hasMore: false,
-      })
+      }),
     ) as unknown as typeof fetch;
 
     const result = await getChannelHistory(gw, { limit: 1 });
@@ -594,7 +629,7 @@ describe("getChannelHistory edge cases", () => {
 
   test("gateway HTTP error surfaced as error text", async () => {
     globalThis.fetch = mock(async () =>
-      Response.json({ error: "channel forbidden" }, { status: 403 })
+      Response.json({ error: "channel forbidden" }, { status: 403 }),
     ) as unknown as typeof fetch;
 
     const result = await getChannelHistory(gw, { limit: 5 });
@@ -619,8 +654,8 @@ describe("callMcpTool: approval-blocked response from gateway", () => {
           ],
           isError: true,
         },
-        { status: 403 }
-      )
+        { status: 403 },
+      ),
     ) as unknown as typeof fetch;
 
     const result = await callMcpTool(gw, "gh", "delete_branch", {
@@ -646,7 +681,7 @@ describe("worker MCP tool registration observability", () => {
       () =>
         new Promise<Response>((resolve) => {
           settleFetch = () => resolve(new Response("{}", { status: 202 }));
-        })
+        }),
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
@@ -668,7 +703,7 @@ describe("worker MCP tool registration observability", () => {
         authToolCount: 0,
         pluginToolCount: 0,
         mcpIds: ["lobu"],
-      })
+      }),
     ).then(() => {
       eventSettled = true;
     });
@@ -719,7 +754,7 @@ describe("worker MCP tool registration observability", () => {
           actor: "worker",
           traceSource: "incoming",
         },
-      }
+      },
     );
 
     await emitWorkerToolsRegisteredObsEvent({
@@ -817,7 +852,7 @@ describe("external-turn tool router lifecycle", () => {
           traceSource: "incoming",
         },
       },
-      { emitEvent: () => undefined }
+      { emitEvent: () => undefined },
     );
     expect(routing.clarificationInstruction).not.toContain(malicious);
     expect(routing.clarificationInstruction).toContain("mail/send_email");
@@ -850,6 +885,7 @@ describe("external-turn tool router lifecycle", () => {
           "lobu-memory/manage_schedules",
           "google_workspace/gws_calendar_events_create",
         ],
+        routerMode: "semantic",
         trace: {
           traceId: "tr_routerambiguity1234",
           journeyId: "line_text_agent_turn",
@@ -857,14 +893,14 @@ describe("external-turn tool router lifecycle", () => {
           traceSource: "incoming",
         },
       },
-      { emitEvent: () => undefined }
+      { emitEvent: () => undefined },
     );
     const selection = routing.selection;
 
     expect(selection.trace.clarificationRequired).toBe(true);
     expect(selection.trace.blockedToolNames).toHaveLength(2);
     expect(routing.clarificationInstruction).toContain(
-      selection.trace.clarificationQuestion ?? ""
+      selection.trace.clarificationQuestion ?? "",
     );
     for (const providerVisibleTools of [{}, selection.selectedTools]) {
       const catalog = routing.buildRuntimeCatalog({ providerVisibleTools });
@@ -894,7 +930,7 @@ describe("external-turn tool router lifecycle", () => {
           traceSource: "incoming",
         },
       },
-      { emitEvent: () => undefined }
+      { emitEvent: () => undefined },
     );
     expect(unambiguous.clarificationInstruction).toBeNull();
   });
@@ -930,7 +966,7 @@ describe("external-turn tool router lifecycle", () => {
           let value = 10;
           return () => value++;
         })(),
-      }
+      },
     );
 
     const cliCatalog = routing.buildRuntimeCatalog({
@@ -940,7 +976,7 @@ describe("external-turn tool router lifecycle", () => {
       providerVisibleTools: routing.selection.selectedTools,
     });
     expect(cliCatalog.map((entry) => entry.key)).toEqual(
-      toolsCatalog.map((entry) => entry.key)
+      toolsCatalog.map((entry) => entry.key),
     );
 
     let streamCalls = 0;
@@ -951,12 +987,12 @@ describe("external-turn tool router lifecycle", () => {
           return routerLoopStream(
             routerLoopMessage(
               [{ type: "toolCall", id: "call-1", name: "noop", arguments: {} }],
-              "toolUse"
-            )
+              "toolUse",
+            ),
           ) as never;
         }
         return routerLoopStream(
-          routerLoopMessage([{ type: "text", text: "done" }], "stop")
+          routerLoopMessage([{ type: "text", text: "done" }], "stop"),
         ) as never;
       }) as never,
     });
@@ -976,8 +1012,8 @@ describe("external-turn tool router lifecycle", () => {
     expect(streamCalls).toBe(2);
     expect(
       agent.state.messages.filter(
-        (message) => (message as { role: string }).role === "toolResult"
-      )
+        (message) => (message as { role: string }).role === "toolResult",
+      ),
     ).toHaveLength(1);
     expect(selectCalls).toHaveLength(1);
     expect(selectCalls[0]).toMatchObject({
@@ -1022,7 +1058,7 @@ describe("external-turn tool router lifecycle", () => {
       {
         emitEvent: (event) =>
           emitted.push(event as { fields?: Record<string, unknown> }),
-      }
+      },
     );
 
     const selectedReminder = routing.selection.selectedTools["lobu-memory"][0];
@@ -1033,25 +1069,25 @@ describe("external-turn tool router lifecycle", () => {
     expect(Object.isFrozen(routing.selection)).toBe(true);
     expect(Object.isFrozen(routing.selection.selectedTools)).toBe(true);
     expect(
-      Object.isFrozen(routing.selection.selectedTools["lobu-memory"])
+      Object.isFrozen(routing.selection.selectedTools["lobu-memory"]),
     ).toBe(true);
     expect(Object.isFrozen(selectedReminder)).toBe(true);
     expect(Object.isFrozen(selectedReminder.inputSchema)).toBe(true);
     expect(Object.isFrozen(selectedReminder.inputSchema.properties)).toBe(true);
     expect(
-      Object.isFrozen(selectedReminder.inputSchema.properties.message)
+      Object.isFrozen(selectedReminder.inputSchema.properties.message),
     ).toBe(true);
     expect(Object.isFrozen(routing.selection.trace)).toBe(true);
     expect(Object.isFrozen(routing.selection.trace.blockedToolNames)).toBe(
-      true
+      true,
     );
     expect(Object.isFrozen(routing.selection.trace.candidates)).toBe(true);
     expect(Object.isFrozen(routing.selection.trace.candidates[0])).toBe(true);
     expect(
-      Object.isFrozen(routing.selection.trace.candidates[0]?.scoreBreakdown)
+      Object.isFrozen(routing.selection.trace.candidates[0]?.scoreBreakdown),
     ).toBe(true);
     expect(() =>
-      (routing.selection.selectedTools["lobu-memory"] as unknown[]).splice(0)
+      (routing.selection.selectedTools["lobu-memory"] as unknown[]).splice(0),
     ).toThrow();
 
     reminderTool.name = "mutated_after_routing";
@@ -1082,7 +1118,7 @@ describe("external-turn tool router lifecycle", () => {
   for (const mcpExposure of ["cli", "tools"] as const) {
     test(`runAISession selects and emits once through a ${mcpExposure} provider continuation`, async () => {
       const workspaceDir = mkdtempSync(
-        join(tmpdir(), `lobu-router-run-${mcpExposure}-`)
+        join(tmpdir(), `lobu-router-run-${mcpExposure}-`),
       );
       const selectCalls: unknown[] = [];
       const emitted: unknown[] = [];
@@ -1178,7 +1214,7 @@ describe("external-turn tool router lifecycle", () => {
                     providerIterations += 1;
                     const finalMessage = routerLoopMessage(
                       [{ type: "text", text: "done" }],
-                      "stop"
+                      "stop",
                     );
                     messages.push(finalMessage);
                     emit({ type: "message_end", message: finalMessage });
@@ -1199,8 +1235,8 @@ describe("external-turn tool router lifecycle", () => {
         expect(providerIterations).toBe(2);
         expect(
           messages.filter(
-            (message) => (message as { role?: string }).role === "toolResult"
-          )
+            (message) => (message as { role?: string }).role === "toolResult",
+          ),
         ).toHaveLength(1);
         expect(selectCalls).toHaveLength(1);
         expect(emitted).toHaveLength(1);

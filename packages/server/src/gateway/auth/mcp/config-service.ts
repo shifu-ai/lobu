@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import {
+  createLogger,
   type McpOAuthConfig,
   type McpToolFilter,
-  createLogger,
   verifyWorkerToken,
 } from "@lobu/core";
 import type { ProviderConfigResolver } from "../../services/provider-config-resolver.js";
@@ -22,9 +23,12 @@ interface McpInput {
 interface HttpMcpServerConfig {
   id: string;
   upstreamUrl: string;
+  transport?: "sse" | "streamable-http";
   oauth?: McpOAuthConfig;
   inputs?: McpInput[];
   headers?: Record<string, string>;
+  credentialScopeHash?: string;
+  credentialBindingId?: string;
   toolFilter?: McpToolFilter;
   /**
    * Credential scope for OAuth flows.
@@ -42,6 +46,7 @@ interface HttpMcpServerConfig {
    * direct-auth header so Lobu promotes it to admin scope.
    */
   internal?: boolean;
+  configSource: "global" | "agent" | "derived";
 }
 
 interface WorkerMcpConfig {
@@ -53,11 +58,105 @@ interface McpStatus {
   name: string;
   requiresAuth: boolean;
   requiresInput: boolean;
+  upstreamOrigin: string;
+  configSource: "global" | "agent" | "derived";
+  configDigest: string;
 }
 
 interface LoadedConfig {
   rawServers: Record<string, any>;
   httpServers: Map<string, HttpMcpServerConfig>;
+}
+
+function resolveCanonicalUpstreamOrigin(upstreamUrl: string): string {
+  try {
+    const parsed = new URL(upstreamUrl);
+    return parsed.protocol === "https:" || parsed.protocol === "http:"
+      ? parsed.origin
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+export function computeMcpConfigDigest(config: {
+  id: string;
+  upstreamUrl: string;
+  transport?: "sse" | "streamable-http";
+  oauth?: McpOAuthConfig;
+  inputs?: unknown[];
+  headers?: Record<string, string>;
+  credentialScopeHash?: string;
+  credentialBindingId?: string;
+  toolFilter?: McpToolFilter;
+  authScope?: "user" | "channel";
+  internal?: boolean;
+  configSource: "global" | "agent" | "derived";
+}): string {
+  const canonicalUrl = (() => {
+    try {
+      const url = new URL(config.upstreamUrl);
+      url.hash = "";
+      return url.toString();
+    } catch {
+      return config.upstreamUrl;
+    }
+  })();
+  const hashedHeaders = Object.fromEntries(
+    Object.entries(config.headers ?? {})
+      .map(([name, value]) => [
+        name.trim().toLowerCase(),
+        createHash("sha256").update(value).digest("hex"),
+      ])
+      .sort(([left], [right]) => left.localeCompare(right)),
+  );
+  const oauth = config.oauth
+    ? {
+        ...config.oauth,
+        scopes: [...(config.oauth.scopes ?? [])].sort(),
+        clientSecret: config.oauth.clientSecret
+          ? createHash("sha256").update(config.oauth.clientSecret).digest("hex")
+          : undefined,
+      }
+    : null;
+  const stableJson = (value: unknown): string => {
+    const normalize = (entry: unknown): unknown => {
+      if (Array.isArray(entry)) return entry.map(normalize);
+      if (entry && typeof entry === "object") {
+        return Object.fromEntries(
+          Object.entries(entry as Record<string, unknown>)
+            .filter(([, child]) => child !== undefined)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([key, child]) => [key, normalize(child)]),
+        );
+      }
+      return entry;
+    };
+    return JSON.stringify(normalize(value));
+  };
+  return createHash("sha256")
+    .update(
+      stableJson({
+        id: config.id,
+        upstreamUrl: canonicalUrl,
+        transport: config.transport ?? "streamable-http",
+        headers: hashedHeaders,
+        credentialScopeHash: config.credentialScopeHash ?? null,
+        credentialBindingId: config.credentialBindingId ?? null,
+        oauth,
+        inputs: config.inputs ?? null,
+        toolFilter: config.toolFilter
+          ? {
+              include: [...(config.toolFilter.include ?? [])].sort(),
+              exclude: [...(config.toolFilter.exclude ?? [])].sort(),
+            }
+          : null,
+        authScope: config.authScope ?? "user",
+        internal: config.internal === true,
+        configSource: config.configSource,
+      }),
+    )
+    .digest("hex");
 }
 
 interface LobuMemoryConfigOptions {
@@ -106,7 +205,7 @@ export class McpConfigService {
     }
 
     logger.info(
-      `Registered ${Object.keys(servers).length} global MCP(s): ${Object.keys(servers).join(", ")}`
+      `Registered ${Object.keys(servers).length} global MCP(s): ${Object.keys(servers).join(", ")}`,
     );
   }
 
@@ -178,7 +277,7 @@ export class McpConfigService {
         cloned.type = "sse";
         cloned.headers = mergeHeaders(cloned.headers, workerToken, id);
         logger.info(
-          `Including global MCP ${id} with URL=${cloned.url} and X-Mcp-Id header`
+          `Including global MCP ${id} with URL=${cloned.url} and X-Mcp-Id header`,
         );
       }
 
@@ -188,9 +287,8 @@ export class McpConfigService {
     // Merge per-agent MCPs from live agent settings. Per-agent settings are
     // authoritative: they override global fallback entries, and `enabled:false`
     // disables a same-id global default for this agent.
-    const agentSettingsMcpServers = await this.getEffectiveAgentMcpServers(
-      effectiveAgentId
-    );
+    const agentSettingsMcpServers =
+      await this.getEffectiveAgentMcpServers(effectiveAgentId);
     for (const [id, serverConfig] of Object.entries(agentSettingsMcpServers)) {
       const cloned = cloneConfig(serverConfig);
 
@@ -221,7 +319,7 @@ export class McpConfigService {
 
     if (Object.keys(agentSettingsMcpServers).length > 0) {
       logger.info(
-        `Merged ${Object.keys(agentSettingsMcpServers).length} per-agent MCPs from settings for agent ${effectiveAgentId}`
+        `Merged ${Object.keys(agentSettingsMcpServers).length} per-agent MCPs from settings for agent ${effectiveAgentId}`,
       );
     }
 
@@ -236,7 +334,7 @@ export class McpConfigService {
           hasCommand: !!cfg.command,
           perAgent: cfg.perAgent || false,
         })),
-      }
+      },
     );
 
     return workerConfig;
@@ -260,6 +358,9 @@ export class McpConfigService {
         name: id,
         requiresAuth,
         requiresInput,
+        upstreamOrigin: resolveCanonicalUpstreamOrigin(httpServer.upstreamUrl),
+        configSource: httpServer.configSource,
+        configDigest: computeMcpConfigDigest(httpServer),
       });
     }
 
@@ -271,7 +372,7 @@ export class McpConfigService {
    */
   async getHttpServer(
     id: string,
-    agentId?: string
+    agentId?: string,
   ): Promise<HttpMcpServerConfig | undefined> {
     const httpServers = await this.getAllHttpServers(agentId);
     return httpServers.get(id);
@@ -281,7 +382,7 @@ export class McpConfigService {
    * Get all HTTP proxy metadata for all MCP servers.
    */
   async getAllHttpServers(
-    agentId?: string
+    agentId?: string,
   ): Promise<Map<string, HttpMcpServerConfig>> {
     const config = await this.loadConfig();
     const merged = new Map(config.httpServers);
@@ -330,7 +431,7 @@ export class McpConfigService {
   }
 
   private async getEffectiveAgentMcpServers(
-    agentId: string
+    agentId: string,
   ): Promise<Record<string, any>> {
     const servers = await this.getAgentMcpServers(agentId);
     const derived = await this.deriveLobuMemoryServer(agentId);
@@ -340,7 +441,11 @@ export class McpConfigService {
       // transient derive failure (DB blip, slug not yet resolvable, etc.) —
       // otherwise a recoverable error silently disables memory tools.
       const existing = servers["lobu-memory"];
-      if (existing && typeof existing === "object" && existing.internal === true) {
+      if (
+        existing &&
+        typeof existing === "object" &&
+        existing.internal === true
+      ) {
         const withoutLobuMemory = { ...servers };
         delete withoutLobuMemory["lobu-memory"];
         return withoutLobuMemory;
@@ -368,14 +473,13 @@ export class McpConfigService {
   }
 
   private async getAgentMcpServers(
-    agentId: string
+    agentId: string,
   ): Promise<Record<string, any>> {
     let servers: Record<string, any> = {};
 
     if (this.agentSettingsStore) {
       try {
-        const settings =
-          await this.agentSettingsStore.getSettings(agentId);
+        const settings = await this.agentSettingsStore.getSettings(agentId);
         // SECURITY: `internal: true` is a privileged, gateway-derived flag — it
         // bypasses the SSRF guard and stamps the memory-direct-auth header
         // (see toHttpServerConfig / mcp proxy). It must NEVER be honored from
@@ -402,7 +506,7 @@ export class McpConfigService {
   }
 
   private async resolveLobuMemoryServer(
-    agentId: string
+    agentId: string,
   ): Promise<Record<string, any> | null> {
     const baseUrl = this.lobuMemory?.publicBaseUrl?.trim();
     const resolveOrgSlug = this.lobuMemory?.resolveOrgSlug;
@@ -424,7 +528,7 @@ export class McpConfigService {
   }
 
   private async deriveLobuMemoryServer(
-    agentId: string
+    agentId: string,
   ): Promise<Record<string, any> | null> {
     const resolveOrgSlug = this.lobuMemory?.resolveOrgSlug;
     if (!resolveOrgSlug) {
@@ -438,11 +542,11 @@ export class McpConfigService {
       }
       const publicBaseUrl = (this.lobuMemory?.publicBaseUrl || "").replace(
         /\/+$/,
-        ""
+        "",
       );
       if (!publicBaseUrl) {
         logger.warn(
-          `Cannot derive lobu-memory MCP for ${agentId}: public base URL is not configured`
+          `Cannot derive lobu-memory MCP for ${agentId}: public base URL is not configured`,
         );
         return null;
       }
@@ -517,7 +621,7 @@ function parseOAuthConfig(raw: any): McpOAuthConfig | undefined {
  * stored agent/user settings.
  */
 export function stripInternalFlag(
-  servers: Record<string, any>
+  servers: Record<string, any>,
 ): Record<string, any> {
   const out: Record<string, any> = {};
   for (const [id, server] of Object.entries(servers)) {
@@ -552,13 +656,14 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
       httpServers.set(id, {
         id,
         upstreamUrl: resolveMcpEnvRefs(cloned.url),
+        transport: cloned.type === "sse" ? "sse" : "streamable-http",
         oauth: parseOAuthConfig(cloned),
         inputs: Array.isArray(cloned.inputs)
           ? cloned.inputs.filter(
               (input: any) =>
                 input &&
                 typeof input === "object" &&
-                input.type === "promptString"
+                input.type === "promptString",
             )
           : undefined,
         headers:
@@ -571,6 +676,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
         // the per-agent derived lobu-memory entry, which does not flow through
         // normalizeConfig. Never trust a stored `internal` flag here.
         internal: false,
+        configSource: "global",
       });
     }
   }
@@ -580,7 +686,7 @@ function normalizeConfig(config: { mcpServers: Record<string, any> }) {
 
 function toHttpServerConfig(
   id: string,
-  serverConfig: any
+  serverConfig: any,
 ): HttpMcpServerConfig | null {
   if (!serverConfig || typeof serverConfig !== "object") {
     return null;
@@ -598,11 +704,12 @@ function toHttpServerConfig(
   return {
     id,
     upstreamUrl: resolveMcpEnvRefs(cloned.url),
+    transport: cloned.type === "sse" ? "sse" : "streamable-http",
     oauth: parseOAuthConfig(cloned),
     inputs: Array.isArray(cloned.inputs)
       ? cloned.inputs.filter(
           (input: any) =>
-            input && typeof input === "object" && input.type === "promptString"
+            input && typeof input === "object" && input.type === "promptString",
         )
       : undefined,
     headers:
@@ -612,6 +719,7 @@ function toHttpServerConfig(
     toolFilter: parseMcpToolFilter(cloned),
     authScope: parseAuthScope(cloned),
     internal: cloned.internal === true,
+    configSource: cloned.internal === true ? "derived" : "agent",
   };
 }
 
@@ -635,12 +743,12 @@ function parseMcpToolFilter(raw: any): McpToolFilter | undefined {
   const filter: McpToolFilter = {};
   if (Array.isArray(value.include)) {
     filter.include = value.include.filter(
-      (pattern: unknown): pattern is string => typeof pattern === "string"
+      (pattern: unknown): pattern is string => typeof pattern === "string",
     );
   }
   if (Array.isArray(value.exclude)) {
     filter.exclude = value.exclude.filter(
-      (pattern: unknown): pattern is string => typeof pattern === "string"
+      (pattern: unknown): pattern is string => typeof pattern === "string",
     );
   }
 
@@ -691,7 +799,7 @@ function isHttpUrl(candidate: string): boolean {
 function mergeHeaders(
   existingHeaders: unknown,
   workerToken: string,
-  mcpId: string
+  mcpId: string,
 ): Record<string, string> {
   const normalized: Record<string, string> = {};
 

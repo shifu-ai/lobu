@@ -2,6 +2,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
   buildCurrentDateContext,
   buildLobuSystemPrompt,
+  resolveTurnTimeZone,
   runModelWithObs,
   replaceBasePromptIdentity,
 } from "../openclaw/worker";
@@ -97,7 +98,11 @@ describe("replaceBasePromptIdentity", () => {
     expect(out.startsWith(identity)).toBe(true);
     expect(out).not.toContain("expert coding assistant");
     expect(out).toContain("Available tools:");
-    expect(out).toContain("Current time / 現在時間: 2026-07-09 10:50:00");
+    expect(out).toContain(
+      "Current timestamp / 現在時間: 2026-07-09T10:50:00+08:00"
+    );
+    expect(out).toContain("Timezone / 時區 (IANA): Asia/Taipei");
+    expect(out).toContain("ISO date / 日期: 2026-07-09");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
     expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
     expect(out).toContain("Previous week / 上週: 2026-06-29 (星期一)");
@@ -114,11 +119,53 @@ describe("replaceBasePromptIdentity", () => {
   test("builds deterministic Taipei date context instead of relying on model weekday guesses", () => {
     const out = buildCurrentDateContext(new Date("2026-07-09T02:50:00.000Z"));
 
-    expect(out).toContain("Timezone: Asia/Taipei (UTC+08:00)");
-    expect(out).toContain("Current time / 現在時間: 2026-07-09 10:50:00");
+    expect(out).toContain("Timezone / 時區 (IANA): Asia/Taipei");
+    expect(out).toContain(
+      "Current timestamp / 現在時間: 2026-07-09T10:50:00+08:00"
+    );
+    expect(out).toContain("ISO date / 日期: 2026-07-09");
     expect(out).toContain("Today / 今天: 2026-07-09 (星期四)");
     expect(out).toContain("Yesterday / 昨天: 2026-07-08 (星期三)");
     expect(out).toContain("Tomorrow / 明天: 2026-07-10 (星期五)");
+    expect(out).toContain("call that resolver for relative dates and weekdays");
+  });
+
+  test("renders a numeric DST offset for an explicit IANA timezone", () => {
+    const out = buildCurrentDateContext(
+      new Date("2026-07-13T22:15:00.000Z"),
+      "America/New_York"
+    );
+
+    expect(out).toContain("Timezone / 時區 (IANA): America/New_York");
+    expect(out).toContain(
+      "Current timestamp / 現在時間: 2026-07-13T18:15:00-04:00"
+    );
+    expect(out).toContain("ISO date / 日期: 2026-07-13");
+  });
+
+  test("rejects invalid timezone input and explicitly falls back to Taipei", () => {
+    const out = buildCurrentDateContext(
+      new Date("2026-07-13T10:15:00.000Z"),
+      "Mars/Olympus"
+    );
+
+    expect(out).toContain("Timezone / 時區 (IANA): Asia/Taipei");
+    expect(out).toContain(
+      "Invalid timezone rejected; fail-closed fallback: Asia/Taipei"
+    );
+    expect(out).toContain(
+      "Current timestamp / 現在時間: 2026-07-13T18:15:00+08:00"
+    );
+  });
+
+  test("uses the first valid timezone from platform, agent config, then Taipei", () => {
+    expect(resolveTurnTimeZone("America/New_York", "Asia/Tokyo")).toBe(
+      "America/New_York"
+    );
+    expect(resolveTurnTimeZone("Mars/Olympus", "Asia/Tokyo")).toBe(
+      "Asia/Tokyo"
+    );
+    expect(resolveTurnTimeZone("Mars/Olympus", "Moon/Sea")).toBe("Asia/Taipei");
   });
 });
 

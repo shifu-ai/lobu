@@ -1,11 +1,11 @@
-import { getPendingTool, takePendingTool } from "./pending-tool-store.js";
+import { orgContext } from "../../../lobu/stores/org-context.js";
+import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
 import {
   GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
   type GrantStore,
 } from "../../permissions/grant-store.js";
-import { orgContext } from "../../../lobu/stores/org-context.js";
 import type { UserAgentsStore } from "../user-agents-store.js";
-import type { TrustedCourseToolScope } from "../../orchestration/course-tool-policy.js";
+import { getPendingTool, takePendingTool } from "./pending-tool-store.js";
 
 export { GLOBAL_TOOL_AUTO_APPROVAL_PATTERN };
 
@@ -53,7 +53,15 @@ interface McpProxyDirectExecution {
     mcpId: string,
     toolName: string,
     args: Record<string, unknown>,
-    options?: { courseToolScope?: TrustedCourseToolScope }
+    options?: {
+      courseToolScope?: TrustedCourseToolScope;
+      expectedMcpIdentity?: {
+        upstreamOrigin: string;
+        configSource: "global" | "agent" | "derived";
+        configDigest: string;
+      };
+      channelId?: string;
+    },
   ): Promise<{
     content: Array<{ type: string; text: string }>;
     isError: boolean;
@@ -70,7 +78,7 @@ export interface ToolApprovalServiceDeps {
 
 function organizationIdFor(
   input: { organizationId?: string },
-  fallback?: string
+  fallback?: string,
 ): string | undefined {
   return input.organizationId ?? fallback;
 }
@@ -86,13 +94,13 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       "toolbox",
       input.toolboxUserId,
       input.agentId,
-      organizationIdFor(input, deps.organizationId)
+      organizationIdFor(input, deps.organizationId),
     );
   };
 
   return {
     async submit(
-      input: ToolApprovalSubmitInput
+      input: ToolApprovalSubmitInput,
     ): Promise<ToolApprovalSubmitResult> {
       const candidate = await getPendingTool(input.approvalId);
       if (!candidate) {
@@ -125,7 +133,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
           specificPattern,
           null,
           true,
-          organizationId
+          organizationId,
         );
         return { status: "denied" };
       }
@@ -136,20 +144,37 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
           GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
           null,
           undefined,
-          organizationId
+          organizationId,
         );
       }
 
-      const execute = () => pending.courseToolScope
-        ? deps.mcpProxy.executeToolDirect(
-          pending.agentId,
-          pending.userId,
-          pending.mcpId,
-          pending.toolName,
-          pending.args,
-          { courseToolScope: pending.courseToolScope }
-        )
-        : deps.mcpProxy.executeToolDirect(pending.agentId, pending.userId, pending.mcpId, pending.toolName, pending.args);
+      const execute = () => {
+        const options = {
+          ...(pending.courseToolScope
+            ? { courseToolScope: pending.courseToolScope }
+            : {}),
+          ...(pending.expectedMcpIdentity
+            ? { expectedMcpIdentity: pending.expectedMcpIdentity }
+            : {}),
+          ...(pending.channelId ? { channelId: pending.channelId } : {}),
+        };
+        return Object.keys(options).length > 0
+          ? deps.mcpProxy.executeToolDirect(
+              pending.agentId,
+              pending.userId,
+              pending.mcpId,
+              pending.toolName,
+              pending.args,
+              options,
+            )
+          : deps.mcpProxy.executeToolDirect(
+              pending.agentId,
+              pending.userId,
+              pending.mcpId,
+              pending.toolName,
+              pending.args,
+            );
+      };
       const result = organizationId
         ? await orgContext.run({ organizationId }, execute)
         : await execute();
@@ -157,7 +182,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
     },
 
     async revokeGlobal(
-      input: ToolApprovalRevokeGlobalInput
+      input: ToolApprovalRevokeGlobalInput,
     ): Promise<{ status: "revoked" } | { status: "forbidden" }> {
       if (!(await ownsToolboxAgent(input))) {
         return { status: "forbidden" };
@@ -166,13 +191,13 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       await deps.grantStore.revoke(
         input.agentId,
         GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
-        organizationIdFor(input, deps.organizationId)
+        organizationIdFor(input, deps.organizationId),
       );
       return { status: "revoked" };
     },
 
     async getGlobalStatus(
-      input: ToolApprovalGlobalStatusInput
+      input: ToolApprovalGlobalStatusInput,
     ): Promise<{ enabled: boolean } | { status: "forbidden" }> {
       if (!(await ownsToolboxAgent(input))) {
         return { status: "forbidden" };
@@ -181,7 +206,7 @@ export function createToolApprovalService(deps: ToolApprovalServiceDeps) {
       const enabled = await deps.grantStore.hasGrant(
         input.agentId,
         GLOBAL_TOOL_AUTO_APPROVAL_PATTERN,
-        organizationIdFor(input, deps.organizationId)
+        organizationIdFor(input, deps.organizationId),
       );
       return { enabled };
     },

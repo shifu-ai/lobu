@@ -7,6 +7,14 @@ import {
 	resetTestDatabase,
 } from "../../gateway/__tests__/helpers/db-setup.js";
 import { orgContext } from "../stores/org-context.js";
+import {
+	installRouteAuthTestMock,
+	useRealRouteStores,
+} from "./helpers/route-test-mocks.js";
+
+// Workspace initialization reaches agent-routes through auth notifications.
+installRouteAuthTestMock();
+useRealRouteStores();
 
 const ORG_ID = "org-provisioning";
 
@@ -117,8 +125,34 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 		);
 	}
 
+	function getStableCredentialBindingId(credential: {
+		bindingId?: string;
+		refreshToken?: string;
+		clientId: string;
+		tokenUrl: string;
+		resource?: string;
+		tokenEndpointAuthMethod?: string;
+	}) {
+		return (
+			credential.bindingId ??
+			createHash("sha256")
+				.update(
+					JSON.stringify({
+						refreshToken: credential.refreshToken ?? null,
+						clientId: credential.clientId,
+						tokenUrl: credential.tokenUrl,
+						resource: credential.resource ?? null,
+						tokenEndpointAuthMethod:
+							credential.tokenEndpointAuthMethod ?? null,
+					}),
+				)
+				.digest("hex")
+		);
+	}
+
 	return {
 		createDeviceAuthRoutes: () => new Hono(),
+		getStableCredentialBindingId,
 		deleteCredential: async (
 			secretStore: ReturnType<typeof createMemorySecretStore>,
 			agentId: string,
@@ -158,6 +192,7 @@ mock.module("../../gateway/routes/internal/device-auth.js", () => {
 			const token = await response.json();
 			const refreshed = {
 				...credential,
+				bindingId: getStableCredentialBindingId(credential),
 				accessToken: String(token.access_token ?? ""),
 				refreshToken: token.refresh_token
 					? String(token.refresh_token)

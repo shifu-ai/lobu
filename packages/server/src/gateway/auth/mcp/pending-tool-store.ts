@@ -23,6 +23,40 @@ export interface PendingToolInvocation {
   originMessageId?: string;
   processedMessageIds?: string[];
   courseToolScope?: TrustedCourseToolScope;
+  expectedMcpIdentity?: {
+    upstreamOrigin: string;
+    configSource: "global" | "agent" | "derived";
+    configDigest: string;
+  };
+}
+
+export interface PendingToolExecutionOptions {
+  courseToolScope?: TrustedCourseToolScope;
+  expectedMcpIdentity?: NonNullable<
+    PendingToolInvocation["expectedMcpIdentity"]
+  >;
+  channelId?: string;
+}
+
+/**
+ * Preserve the security context captured at discovery time when an approved
+ * invocation is replayed. Omit absent fields instead of writing undefined over
+ * an execution path's existing scope, and omit the options argument entirely
+ * for legacy pending rows that carry no scoped context.
+ */
+export function buildPendingToolExecutionOptions(
+  pending: PendingToolInvocation
+): PendingToolExecutionOptions | undefined {
+  const options: PendingToolExecutionOptions = {
+    ...(pending.courseToolScope
+      ? { courseToolScope: pending.courseToolScope }
+      : {}),
+    ...(pending.expectedMcpIdentity
+      ? { expectedMcpIdentity: pending.expectedMcpIdentity }
+      : {}),
+    ...(pending.channelId ? { channelId: pending.channelId } : {}),
+  };
+  return Object.keys(options).length > 0 ? options : undefined;
 }
 
 export async function storePendingTool(

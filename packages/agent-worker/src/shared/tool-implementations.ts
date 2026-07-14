@@ -39,6 +39,12 @@ export interface ToolContentResult {
   content: Array<ToolTextContent | ToolImageContent>;
 }
 
+export interface ExpectedMcpConfigIdentity {
+  upstreamOrigin?: string;
+  configSource?: "global" | "agent" | "derived";
+  configDigest?: string;
+}
+
 export type TextResult = ToolContentResult;
 
 function textResult(text: string): ToolContentResult {
@@ -1346,7 +1352,10 @@ export async function callMcpTool(
   mcpId: string,
   toolName: string,
   args: Record<string, unknown>,
-  options: { shifuTrace?: WorkerShifuTraceContext } = {}
+  options: {
+    shifuTrace?: WorkerShifuTraceContext;
+    expectedMcpIdentity?: ExpectedMcpConfigIdentity;
+  } = {}
 ): Promise<ToolContentResult> {
   return withErrorHandling(`${mcpId}/${toolName}`, async () => {
     const normalizeResultText = (text: string) =>
@@ -1375,6 +1384,18 @@ export async function callMcpTool(
       // RAG assertions. Other tools keep the formatted-markdown output the
       // agent has been seeing. External MCP servers ignore the header.
       if (wantsJson) headers["x-mcp-format"] = "json";
+      const expectedIdentity = options.expectedMcpIdentity;
+      if (
+        expectedIdentity?.upstreamOrigin &&
+        expectedIdentity.configSource &&
+        expectedIdentity.configDigest
+      ) {
+        headers["x-lobu-mcp-expected-origin"] = expectedIdentity.upstreamOrigin;
+        headers["x-lobu-mcp-expected-config-source"] =
+          expectedIdentity.configSource;
+        headers["x-lobu-mcp-expected-config-digest"] =
+          expectedIdentity.configDigest;
+      }
       response = await fetch(
         `${gw.gatewayUrl}/mcp/${mcpId}/tools/${toolName}`,
         {

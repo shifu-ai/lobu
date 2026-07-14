@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { getRuntimeInfo, resolveRuntimeEnvironment } from '../runtime-info';
+import {
+  getRuntimeInfo,
+  resolveRuntimeEnvironment,
+  RUNTIME_CARRIER_CAPABILITIES,
+} from '../runtime-info';
 
 describe('resolveRuntimeEnvironment', () => {
   it('prefers ENVIRONMENT over NODE_ENV', () => {
@@ -14,17 +18,43 @@ describe('resolveRuntimeEnvironment', () => {
 });
 
 describe('getRuntimeInfo', () => {
+  it('matches the Toolbox signed runtime-carrier capability contract', () => {
+    expect(RUNTIME_CARRIER_CAPABILITIES).toEqual([
+      'lobu-runtime:member-schedule-direct-auth.v1',
+      'lobu-runtime:automation-tool-catalog.v1',
+      'lobu-runtime:turn.release_context.v1',
+    ]);
+  });
+
   it('returns revision and build metadata from env', () => {
     expect(
       getRuntimeInfo({
         NODE_ENV: 'production',
         APP_GIT_SHA: 'abc123',
         APP_BUILD_TIME: '2026-04-12T23:00:00Z',
+        SHIFU_MEMBER_AGENT_DIRECT_AUTH: '1',
       })
     ).toMatchObject({
       environment: 'production',
       revision: 'abc123',
       build_time: '2026-04-12T23:00:00Z',
+      carrier_capabilities: [
+        'lobu-runtime:member-schedule-direct-auth.v1',
+        'lobu-runtime:automation-tool-catalog.v1',
+        'lobu-runtime:turn.release_context.v1',
+      ],
     });
+  });
+
+  it('only advertises member schedule direct auth when the runtime flag is enabled', () => {
+    expect(
+      getRuntimeInfo({ SHIFU_MEMBER_AGENT_DIRECT_AUTH: '1' }).carrier_capabilities
+    ).toContain('lobu-runtime:member-schedule-direct-auth.v1');
+    expect(
+      getRuntimeInfo({ SHIFU_MEMBER_AGENT_DIRECT_AUTH: '0' }).carrier_capabilities
+    ).not.toContain('lobu-runtime:member-schedule-direct-auth.v1');
+    expect(getRuntimeInfo({}).carrier_capabilities).not.toContain(
+      'lobu-runtime:member-schedule-direct-auth.v1'
+    );
   });
 });

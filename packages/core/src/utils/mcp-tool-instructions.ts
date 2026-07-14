@@ -16,4 +16,10 @@ export interface McpStatus {
   requiresInput: boolean;
   authenticated: boolean;
   configured: boolean;
+  /** Canonical origin resolved by the gateway from the effective MCP config. */
+  upstreamOrigin?: string;
+  /** Gateway-owned provenance for the effective MCP config. */
+  configSource?: "global" | "agent" | "derived";
+  /** Digest of the effective discovery config; bound to subsequent calls. */
+  configDigest?: string;
 }

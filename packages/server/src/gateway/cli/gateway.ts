@@ -6,7 +6,10 @@ import { apiReference } from "@scalar/hono-api-reference";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import type { AgentMetadata } from "../auth/agent-metadata-store.js";
-import { takePendingTool } from "../auth/mcp/pending-tool-store.js";
+import {
+  buildPendingToolExecutionOptions,
+  takePendingTool,
+} from "../auth/mcp/pending-tool-store.js";
 import { setEnvResolver } from "../auth/mcp/string-substitution.js";
 import { createToolApprovalService } from "../auth/mcp/tool-approval-service.js";
 import { OAuthClient } from "../auth/oauth/client.js";
@@ -347,16 +350,23 @@ export function createGatewayApp(
             decision in expiresMap ? expiresMap[decision]! : null
           );
           if (approveMcpProxy) {
-            const result = pending.courseToolScope
+            const options = buildPendingToolExecutionOptions(pending);
+            const result = options
               ? await approveMcpProxy.executeToolDirect(
-              pending.agentId,
-              pending.userId,
-              pending.mcpId,
-              pending.toolName,
-              pending.args,
-              { courseToolScope: pending.courseToolScope }
-            )
-              : await approveMcpProxy.executeToolDirect(pending.agentId, pending.userId, pending.mcpId, pending.toolName, pending.args);
+                  pending.agentId,
+                  pending.userId,
+                  pending.mcpId,
+                  pending.toolName,
+                  pending.args,
+                  options
+                )
+              : await approveMcpProxy.executeToolDirect(
+                  pending.agentId,
+                  pending.userId,
+                  pending.mcpId,
+                  pending.toolName,
+                  pending.args
+                );
             return { success: true, result } as any;
           }
           return { success: true };

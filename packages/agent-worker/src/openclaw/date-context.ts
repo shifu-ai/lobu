@@ -26,9 +26,41 @@ export type RelativeWeekCalendar = {
 export type RelativeWeekReference = keyof RelativeWeekCalendar;
 export type RelativeDayReference = "yesterday" | "today" | "tomorrow";
 
-function getTaipeiDateParts(now: Date): DateParts {
+function resolveIanaTimeZone(value: unknown): {
+  timeZone: string;
+  invalidInput: boolean;
+} {
+  if (value === undefined || value === null) {
+    return { timeZone: TAIPEI_TIME_ZONE, invalidInput: false };
+  }
+  if (typeof value !== "string" || !value.trim() || value.length > 100) {
+    return { timeZone: TAIPEI_TIME_ZONE, invalidInput: true };
+  }
+  try {
+    const timeZone = new Intl.DateTimeFormat("en", {
+      timeZone: value.trim(),
+    }).resolvedOptions().timeZone;
+    return { timeZone, invalidInput: false };
+  } catch {
+    return { timeZone: TAIPEI_TIME_ZONE, invalidInput: true };
+  }
+}
+
+export function resolveTurnTimeZone(
+  platformTimeZone: unknown,
+  agentTimeZone: unknown
+): string {
+  for (const candidate of [platformTimeZone, agentTimeZone]) {
+    if (candidate === undefined || candidate === null) continue;
+    const resolved = resolveIanaTimeZone(candidate);
+    if (!resolved.invalidInput) return resolved.timeZone;
+  }
+  return TAIPEI_TIME_ZONE;
+}
+
+function getZonedDateParts(now: Date, timeZone: string): DateParts {
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -36,7 +68,7 @@ function getTaipeiDateParts(now: Date): DateParts {
 
   const valueFor = (type: string) => {
     const value = parts.find((part) => part.type === type)?.value;
-    if (!value) throw new Error(`Missing ${type} from Taipei date formatter`);
+    if (!value) throw new Error(`Missing ${type} from date formatter`);
     return Number(value);
   };
 
@@ -79,9 +111,9 @@ function formatDatedWeekday(parts: DateParts): string {
   return `${formatCalendarDate(parts)} (${weekdayLabel(parts)})`;
 }
 
-function formatTaipeiTime(now: Date): string {
+function formatZonedTime(now: Date, timeZone: string): string {
   return new Intl.DateTimeFormat("en-CA", {
-    timeZone: TAIPEI_TIME_ZONE,
+    timeZone,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -94,6 +126,28 @@ function formatTaipeiTime(now: Date): string {
     .replace(", ", " ");
 }
 
+function formatZonedTimestamp(now: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+    timeZoneName: "longOffset",
+  }).formatToParts(now);
+  const valueFor = (type: string) => {
+    const value = parts.find((part) => part.type === type)?.value;
+    if (!value) throw new Error(`Missing ${type} from timestamp formatter`);
+    return value;
+  };
+  const rawOffset = valueFor("timeZoneName");
+  const offset = rawOffset === "GMT" ? "+00:00" : rawOffset.replace("GMT", "");
+  return `${valueFor("year")}-${valueFor("month")}-${valueFor("day")}T${valueFor("hour")}:${valueFor("minute")}:${valueFor("second")}${offset}`;
+}
+
 function buildSevenDaysFrom(start: CalendarDate): CalendarDate[] {
   return Array.from({ length: 7 }, (_, offset) =>
     addCalendarDays(start, offset)
@@ -101,7 +155,14 @@ function buildSevenDaysFrom(start: CalendarDate): CalendarDate[] {
 }
 
 export function buildRelativeWeekCalendar(now: Date): RelativeWeekCalendar {
-  const today = getTaipeiDateParts(now);
+  return buildRelativeWeekCalendarForZone(now, TAIPEI_TIME_ZONE);
+}
+
+function buildRelativeWeekCalendarForZone(
+  now: Date,
+  timeZone: string
+): RelativeWeekCalendar {
+  const today = getZonedDateParts(now, timeZone);
   const weekdayIndex = calendarDateAsUtc(today).getUTCDay();
   const daysSinceMonday = (weekdayIndex + 6) % 7;
   const currentMonday = addCalendarDays(today, -daysSinceMonday);
@@ -135,26 +196,39 @@ export function resolveRelativeDay(
   now: Date
 ): CalendarDate {
   const offset = { yesterday: -1, today: 0, tomorrow: 1 }[reference];
-  return addCalendarDays(getTaipeiDateParts(now), offset);
+  return addCalendarDays(getZonedDateParts(now, TAIPEI_TIME_ZONE), offset);
 }
 
 function formatWeek(dates: CalendarDate[]): string {
   return dates.map(formatDatedWeekday).join(", ");
 }
 
-export function buildCurrentDateContext(now: Date = new Date()): string {
+export function buildCurrentDateContext(
+  now: Date = new Date(),
+  requestedTimeZone?: unknown
+): string {
   try {
-    const today = getTaipeiDateParts(now);
+    const { timeZone, invalidInput } = resolveIanaTimeZone(requestedTimeZone);
+    const today = getZonedDateParts(now, timeZone);
     const yesterday = addCalendarDays(today, -1);
     const tomorrow = addCalendarDays(today, 1);
-    const currentTime = formatTaipeiTime(now);
-    const weeks = buildRelativeWeekCalendar(now);
+    const currentTime = formatZonedTime(now, timeZone);
+    const currentTimestamp = formatZonedTimestamp(now, timeZone);
+    const weeks = buildRelativeWeekCalendarForZone(now, timeZone);
 
     return [
       "## Current Date Context",
       "",
-      "- Timezone: Asia/Taipei (UTC+08:00)",
+      ...(timeZone === TAIPEI_TIME_ZONE
+        ? ["- Timezone: Asia/Taipei (UTC+08:00)"]
+        : []),
+      `- Timezone / 時區 (IANA): ${timeZone}`,
+      ...(invalidInput
+        ? ["- Invalid timezone rejected; fail-closed fallback: Asia/Taipei"]
+        : []),
       `- Current time / 現在時間: ${currentTime}`,
+      `- Current timestamp / 現在時間: ${currentTimestamp}`,
+      `- ISO date / 日期: ${formatCalendarDate(today)}`,
       `- Today / 今天: ${formatDatedWeekday(today)}`,
       `- Yesterday / 昨天: ${formatDatedWeekday(yesterday)}`,
       `- Tomorrow / 明天: ${formatDatedWeekday(tomorrow)}`,
@@ -164,6 +238,7 @@ export function buildCurrentDateContext(now: Date = new Date()): string {
       "- Current Date Context overrides relative dates in old conversation history.",
       "- Old today/yesterday/tomorrow/this week references describe the old message time, not this turn.",
       "- Never guess a weekday. Use the deterministic date/weekday pairs above.",
+      "- Use this clock metadata as the source of the current year, date, and timezone. Do not guess. When deterministic calendar resolver instructions are present, call that resolver for relative dates and weekdays.",
       "- For dates outside this table, use trusted tool data or deterministic computation; otherwise say you cannot confirm.",
       "- For a next occurrence, choose the earliest candidate at or after the current Taipei time; without trusted candidates or an explicit recurrence, do not guess.",
     ].join("\n");
